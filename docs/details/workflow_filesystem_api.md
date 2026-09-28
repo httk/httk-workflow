@@ -1474,6 +1474,28 @@ excluded from every payload digest. An implementation MUST report the declared
 and the observed document side by side and MUST NOT merge them; a document that
 cannot be read is reported as absent, with the reading tool's damage flag set.
 
+`.httk-job/tree/` is the second reserved name: the job-tree metadata the manager
+and operator tools own, which travels with the payload like the rest of
+`.httk-job/`. A runner MUST NOT write there.
+
+- `tree/spawns/<attempt-id>.json` records the children one committed outcome
+  spawned, as `{"format": "httk-workflow-spawns", "format_version": 1,
+  "children": [{"job_id", "job_key", "label", "placement", "spawn_id"}]}` copied
+  from that outcome's `spawn.json`. While the parent is `committing`, the manager
+  publishes it (temporary file, atomic rename, and in the storage-durable
+  profile the file and every directory it created synchronized) **before**
+  moving the first child into place, so no registered child is missing from its
+  parent's records. A replayed commit MUST find an existing fragment
+  byte-identical and otherwise stop with a corruption error. A reader takes the
+  union of all fragments, de-duplicated by `job_id`, and trusts an entry only
+  when the named child is live at the recorded placement and its own `job.json`
+  names this parent's `job_id` and, when the entry records one (a hand-written
+  `spawn.json` may omit it), the entry's `spawn_id`.
+- `tree/detached.json` marks a child an operator made independent of its parent
+  (`{"format": "httk-workflow-detached", "format_version": 1, "detached_at",
+  "operator"}`). It is permanent, requires no state transition, and leaves the
+  `parent` member of `job.json` in place as provenance.
+
 Separating them matters in persistent mode: a late process from an old attempt
 can only publish beneath its own attempt-control name. Its outcome cannot
 replace or impersonate the new attempt's outcome.
@@ -2003,6 +2025,34 @@ sealed, nonschedulable bundle that can be moved out. Import places and validates
 the complete bundle first, appends an import frame, then renames the embedded
 marker into the target workspace's state tree. The extra transfer metadata exists
 only while the job is detached or retained for transfer provenance.
+
+### Job trees move together
+
+A spawned child is **bound** to its parent while it is not detached (see
+`.httk-job/tree/detached.json`) and its parent has a live, non-`transferring`
+marker at the placement its `job.json` records. A transfer implementation MUST
+NOT move a bound child on its own, and MUST NOT move a parent while it has bound
+children unless those children leave with it as one tree:
+
+- the tree of a selected job is the job plus, recursively, every bound child its
+  spawn records confirm; it is selected whole regardless of any state or
+  placement filter that selected the root;
+- every member other than the root MUST be `paused` or terminal and none may be
+  referenced by an unresolved join, so that no manager can claim a member
+  between the eligibility check and its fence; otherwise the whole tree stays;
+- the root is fenced first and the members top-down. A member whose parent failed
+  to fence stays behind with it. Because each member's parent is already
+  `transferring` when the member is fenced, the member is no longer bound at that
+  moment, and a member left behind by a partial failure is free to follow later;
+- the destination placement of a multi-member tree MUST equal its source
+  placement, because every child records its parent's placement immutably.
+
+A parent without spawn records (one that spawned before they existed) cannot
+list its children. Such children are still bound while the parent is live, but
+the parent can leave without them. The tree metadata is excluded from digests
+and seals like the rest of `.httk-job/`, so tampering can only separate a tree,
+never corrupt one. A peer implementing an older profile moves the files intact but
+does not enforce the rule.
 
 For moving whole projects, a self-contained workspace is preferable: controlled
 detach and attach carry its state tree, journals, and all arbitrary placements

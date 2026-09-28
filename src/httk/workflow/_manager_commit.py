@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gc as _gc
+from ._job_tree import record_spawns
 from ._util import read_json, require_int, require_string
 from .errors import FormatError, TransactionError, UnsupportedExtensionError
 from .models import (
@@ -468,6 +469,19 @@ def register_children(
     if expected_digests is None and state.has("child_digests"):
         raise FormatError("committing child_digests must be an object")
     expected_digests = {} if expected_digests is None else expected_digests
+    if not all(isinstance(raw, Mapping) for raw in entries):
+        raise FormatError("spawn child must be an object")
+    # The parent's durable record of its children precedes every child it names,
+    # so a child can never exist without its parent knowing it (tree transfers
+    # rely on this); a replay must find the record byte-identical.
+    if not state.attempt_id:
+        raise FormatError("a committing frame that registers children must name its attempt")
+    record_spawns(
+        manager.workspace.payload_path(marker.placement, marker.job_key),
+        state.attempt_id,
+        entries,
+        durable=manager.workspace.durable,
+    )
     for raw in entries:
         if not isinstance(raw, Mapping):
             raise FormatError("spawn child must be an object")

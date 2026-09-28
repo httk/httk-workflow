@@ -894,6 +894,7 @@ class Workspace:
         destination_remote: str | None = None,
         destination_placement: str | PurePosixPath | None = None,
         transfer_id: str | None = None,
+        with_tree: bool = False,
     ) -> Path:
         """Seal one quiescent job as a detached transfer bundle.
 
@@ -904,6 +905,9 @@ class Workspace:
         :param destination_remote: Name the destination remote, when applicable.
         :param destination_placement: Choose the destination placement.
         :param transfer_id: Reuse a transfer identity when resuming a publication.
+        :param with_tree: Seal a job whose bound children the caller transfers with it; the
+            caller must then fence every member, root first, as :func:`~httk.workflow.transfers.offer_transfers`
+            does with the candidates :func:`~httk.workflow.transfers.select_transfer_jobs` returns.
         :return: The sealed transfer bundle path.
         """
 
@@ -918,6 +922,37 @@ class Workspace:
             destination_remote=destination_remote,
             destination_placement=destination_placement,
             transfer_id=transfer_id,
+            with_tree=with_tree,
+        )
+
+    def detach_from_parent(self, job_id: str, *, operator: str | None = None) -> bool:
+        """Make one spawned child independent of its parent, permanently.
+
+        A detached child no longer travels with its parent's tree, may be
+        transferred on its own, and reads no parent through ``Attempt.parent``.
+        It stays in any join that references it. The detachment is a file in the
+        payload's reserved tree metadata, not a state transition, so it applies
+        to a job in any state except ``transferring``, sealed or not.
+
+        :param job_id: Identify the child job.
+        :param operator: Record who detached it.
+        :return: Whether this call detached it (``False`` when it already was).
+        :raises ValueError: If the job is missing, has no parent, or is transferring.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+        """
+
+        from ._job_tree import mark_detached
+
+        self._require_unsealed()
+        marker = self.find_marker_by_id(job_id)
+        if marker is None:
+            raise ValueError(f"no job {job_id} in this workspace")
+        if marker.kind == "transferring":
+            raise ValueError(f"job {marker.job_key} is transferring and cannot be detached")
+        if self.load_job(marker).parent is None:
+            raise ValueError(f"job {marker.job_key} has no parent to detach from")
+        return mark_detached(
+            self.payload_path(marker.placement, marker.job_key), operator=operator, durable=self.durable
         )
 
     def import_bundle(self, bundle: str | os.PathLike[str]) -> dict[str, object]:

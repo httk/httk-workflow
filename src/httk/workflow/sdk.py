@@ -43,6 +43,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, Self, cast, overload
 
+from ._job_tree import is_detached
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
 from .errors import FormatError
 from .models import (
@@ -685,7 +686,8 @@ class Attempt:
     def parent(self) -> ParentJob | None:
         """The job that spawned this one, when it is reachable in this workspace.
 
-        ``None`` when this job has no parent, or when no parent payload is found
+        ``None`` when this job has no parent or was detached from it with
+        ``httk job detach``, or when no parent payload is found
         at the recorded placement in this workspace: a child transferred away from
         its parent, or a parent transferred or removed. A parent and child
         transferred together still find each other when both keep their
@@ -704,7 +706,8 @@ class Attempt:
         """Resolve this job's ``parent`` member against the workspace root."""
 
         raw = self.job.parent
-        if raw is None:
+        # An operator-detached child is independent: it no longer has a parent to read.
+        if raw is None or is_detached(self.payload):
             return None
         job_key, placement = raw.get("job_key"), raw.get("placement")
         # Children written before spawns recorded the parent's placement cannot be located.

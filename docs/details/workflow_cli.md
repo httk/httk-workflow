@@ -183,6 +183,7 @@ its job or store runner target.
 | `job delete [--force] JOB...` | remove selected job payloads and state markers (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal [--keys REFS] JOB...` | seal the payloads of selected quiescent jobs | `--workspace`, `--keys` overrides the `seal.keys` setting |
 | `job unseal [--force] JOB...` | remove the seals of selected jobs, refused while the workspace is sealed | `--workspace`, `--force` skips the confirmation |
+| `job detach [OPTIONS] JOB...` | make spawned jobs independent of their parents, permanently | `--workspace`, optional `--operator` (recorded; default identity when omitted) |
 | `job list [OPTIONS]` | list jobs as a cheap table (remote: over the adapter) | `--workspace`, `--kind`, `--placement` (prefix), `--limit`, `--after`, `--tag-contains`, `--counts`, `--json`, `--adapter-timeout` |
 | `job show [OPTIONS] JOB...` | describe jobs from their state (remote: over the adapter) | `--workspace`, `--no-children`, `--json`, `--adapter-timeout` |
 | `job log [OPTIONS] JOB...` | print transition histories (remote: over the adapter) | `--workspace`, `--limit`, `--json`, `--adapter-timeout` |
@@ -194,6 +195,15 @@ When giving more than one `JOB_ID`, name the workspace explicitly.
 `job show` gains a `sealed` line — `yes` with the signer roles, or `no` — and,
 in `--json`, a `sealed` boolean plus `seal_roles`. `job seal` and `job unseal`
 are the per-job half of {doc}`../sealing`; a job must be quiescent to be sealed.
+
+`job detach` makes a spawned job independent of its parent: it no longer moves
+with its parent's tree, it can be transferred on its own, and `Attempt.parent`
+reads `None` for it. It stays in any join that references it. Detaching is a
+file in the payload rather than a state transition, so it works on a job in any
+state except `transferring`, sealed or not, and it cannot be undone. Each job
+prints `detached` or `already detached`; a job with no parent is refused.
+For a spawned job, `job show` adds a `detached` line — `yes` or `no`, with the
+parent's key — and `--json` always carries a `detached` boolean.
 
 An operator `pause` request against `claimed`, `running`, or `committing` is
 deferred: the manager records it and pauses the job at the next attempt
@@ -613,6 +623,17 @@ that is unavailable produces one immediate warning in non-strict mode.
 For remote → remote, repeated `--job` values constrain the source offer before
 the relay pulls anything; omitting them keeps the skip-tolerant terminal-state
 sweep.
+
+A spawned child moves with its parent. Selecting a job selects its whole tree —
+the job and every child it spawned that is still in the workspace and not
+detached, recursively — whatever `--state` and `--placement` say, and the
+children that come along are named on standard error. Every child must be
+`paused` or finished, and none may be in an unresolved join; otherwise the tree
+stays where it is (a sweep skips it with a warning, an explicit `--job` is
+refused). A child named on its own is refused, naming its parent: transfer the
+parent, or first make the child independent with `httk job detach`.
+`--destination-placement` is refused for a selection containing such a tree,
+because its children record their parent's placement.
 
 Bundles carry sources only for workflows that declare `[workflow.build]`;
 compiled artifacts are machine-local and are never transferred. After importing

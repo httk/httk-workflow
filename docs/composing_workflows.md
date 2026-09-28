@@ -192,11 +192,15 @@ Reading in place gives up the guarantees a copy has, so it comes with rules:
 - **The parent needs a persistent workdir.** An isolated workdir is a fresh
   directory per attempt that the child cannot name, so `parent.workdir` is
   `None` for such a parent.
-- **The child stays with its parent.** `a.parent` is `None` when the parent is
-  not found at its recorded placement in the child's workspace, which is what a
-  child transferred on its own, or one whose parent was removed or transferred,
-  sees. Do not remove or transfer a parent while children that read it in place
-  are still running.
+- **The child stays with its parent.** A transfer moves a parent together with
+  its spawned children and refuses to move a child on its own (see
+  {doc}`remotes`), so the pair normally stays together; an operator can detach a
+  child with `httk job detach`, and a detached child's `a.parent` is `None`.
+  `a.parent` is also `None` whenever the parent is not in the child's
+  workspace: after it was removed, or in the rarer cases the rule cannot cover
+  (a parent from before tree records existed, a tree split by an interrupted
+  transfer, or a transfer through an older *httk-workflow*). Do not remove a
+  parent while children that read it in place are still running.
 
 ## Failure semantics
 

@@ -18,6 +18,7 @@ from httk.workflow import (
     TaskManager,
     Workspace,
 )
+from httk.workflow._job_tree import mark_detached
 from httk.workflow.models import Marker
 from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
 
@@ -1184,6 +1185,12 @@ def test_parent_is_found_after_parent_and_child_moved_to_another_workspace(tmp_p
     attempt, parent_payload = _child_of(tmp_path, parent_workspace=str(uuid.uuid4()))
     parent = attempt.parent
     assert parent is not None and parent.payload == parent_payload
+
+
+def test_parent_is_none_once_the_child_is_detached(tmp_path: Path) -> None:
+    attempt, _parent_payload = _child_of(tmp_path)
+    mark_detached(attempt.payload, operator=None, durable=False)
+    assert attempt.parent is None
 
 
 def test_parent_has_no_workdir_when_the_parent_uses_isolated_workdirs(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
@@ -502,6 +502,9 @@ def _environment_advisory(
                 )
         selected_candidates = loaded
     for candidate in selected_candidates:
+        if candidate.tree_blocked:
+            # Not an environment gap: the job does not leave, and the selection says why.
+            continue
         if candidate.problem is not None:
             problems.append(f"{candidate.job_id}: {candidate.problem}")
             continue
@@ -529,6 +532,85 @@ def _environment_advisory(
         raise ValueError(f"strict environment precheck blocked transfer: {message}")
     if not quiet:
         print(f"warning: {message}", file=sys.stderr)
+
+
+def _require_whole_trees(candidates: Sequence[TransferCandidate]) -> None:
+    """Refuse an explicit selection that would split a job tree.
+
+    Only explicitly requested jobs can be blocked (a closure member never is:
+    its whole tree is blocked through its root instead), so every blocked
+    candidate is a requested job that cannot leave as asked.
+    """
+
+    blocked = [candidate for candidate in candidates if candidate.tree_blocked]
+    if blocked:
+        details = "; ".join(f"{candidate.job_id}: {candidate.problem}" for candidate in blocked)
+        raise ValueError(f"requested transfer jobs cannot leave as selected: {details}")
+
+
+def _refuse_tree_placement(candidates: Sequence[TransferCandidate], destination_placement: str | None) -> None:
+    """Refuse to re-place a selection that moves a job tree."""
+
+    if not destination_placement:
+        return
+    members = [candidate for candidate in candidates if candidate.tree_root is not None]
+    roots = sorted({candidate.job_key for candidate in members if candidate.tree_root == candidate.job_id}) or sorted(
+        {candidate.job_key for candidate in members}
+    )
+    if roots:
+        raise ValueError(
+            f"--destination-placement cannot re-place a job tree ({', '.join(roots)}): its children record "
+            "their parent's placement; transfer the tree without it"
+        )
+
+
+def _announce_tree_members(candidates: Sequence[TransferCandidate], jobs: Sequence[str], *, quiet: bool) -> None:
+    """Tell the operator which unrequested jobs move because their tree does."""
+
+    if quiet:
+        return
+    requested = set(jobs)
+    keys = {candidate.job_id: candidate.job_key for candidate in candidates}
+    for candidate in candidates:
+        root = candidate.tree_root
+        if root is not None and root != candidate.job_id and candidate.job_id not in requested:
+            print(f"{candidate.job_key}: moves with its tree root {keys.get(root, root)}", file=sys.stderr)
+
+
+def _seal_trees[T](
+    candidates: Sequence[TransferCandidate],
+    seal: Callable[[TransferCandidate], T],
+    *,
+    quiet: bool,
+) -> list[T]:
+    """Seal *candidates* in selection order: every tree root before its members.
+
+    A root or independent job that cannot be sealed stops the transfer, as any
+    explicit selection does. A member can then only fail through a concurrent
+    operator action; the fenced part of its tree still moves, and the member
+    and its own descendants stay behind to follow in a later transfer.
+    """
+
+    sealed: list[T] = []
+    stayed: set[str] = set()
+    for candidate in candidates:
+        if candidate.tree_parent is not None and candidate.tree_parent in stayed:
+            stayed.add(candidate.job_id)
+            if not quiet:
+                print(f"warning: {candidate.job_key} stays behind with its parent", file=sys.stderr)
+            continue
+        try:
+            sealed.append(seal(candidate))
+        except ValueError as exc:
+            if candidate.tree_parent is None:
+                raise
+            stayed.add(candidate.job_id)
+            if not quiet:
+                print(
+                    f"warning: {candidate.job_key} stays behind: {exc}; it can follow in a later transfer",
+                    file=sys.stderr,
+                )
+    return sealed
 
 
 def _resolve_transfer_jobs(workspace: Workspace, cwd: Path, selectors: Sequence[str]) -> list[str]:
@@ -631,6 +713,8 @@ def _send_jobs_to_remote(
 
     destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
     waiting_parent_map = _waiting_parent_map(source)
+    # One expanded selection drives the whole leg: the requested jobs plus the
+    # bound descendants that travel with them, roots first.
     precheck_candidates = select_transfer_jobs(
         source,
         destination_workspace_id=destination_workspace_id,
@@ -641,6 +725,8 @@ def _send_jobs_to_remote(
         known_markers=known_markers,
         waiting_parent_map=waiting_parent_map,
     )
+    _require_whole_trees(precheck_candidates)
+    _refuse_tree_placement(precheck_candidates, destination_placement)
     if destination_settings is not None:
         _environment_advisory(
             source,
@@ -650,8 +736,8 @@ def _send_jobs_to_remote(
             candidates=precheck_candidates,
             quiet=quiet,
         )
+    _announce_tree_members(precheck_candidates, jobs, quiet=quiet)
     source.recover_transfers()
-    remote_bundles: list[str] = []
     ledger_paths = list((source.control / "transfers").glob("*.json"))
     ledgers_by_job: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
     for path in ledger_paths:
@@ -662,8 +748,9 @@ def _send_jobs_to_remote(
     }
     if known_markers is not None:
         known_by_id.update({marker.job_id: marker for marker in known_markers})
-    for job_id in jobs:
-        candidates: list[tuple[Path, dict[str, object]]] = []
+
+    def seal_and_push(job_id: str, *, with_tree: bool) -> str | None:
+        resumable: list[tuple[Path, dict[str, object]]] = []
         for ledger_path, ledger in ledgers_by_job.get(job_id, []):
             if ledger.get("job_id") != job_id or ledger.get("status") != "sealed":
                 continue
@@ -674,19 +761,19 @@ def _send_jobs_to_remote(
                     f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} has no destination_remote"
                 )
             if ledger.get("destination_remote") == target.name:
-                candidates.append((ledger_path, ledger))
-        if len(candidates) > 1:
-            ledger_path = candidates[0][0]
+                resumable.append((ledger_path, ledger))
+        if len(resumable) > 1:
+            ledger_path = resumable[0][0]
             raise ValueError(
                 f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} is ambiguous; "
                 "retire it or fetch the job from the destination"
             )
-        if not candidates and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
-            continue
-        transfer_id = str(candidates[0][1]["transfer_id"]) if candidates else str(uuid.uuid4())
-        if candidates and destination_placement:
+        if not resumable and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
+            return None
+        transfer_id = str(resumable[0][1]["transfer_id"]) if resumable else str(uuid.uuid4())
+        if resumable and destination_placement:
             requested = str(destination_placement).strip("/")
-            if candidates[0][1].get("destination_placement") != requested:
+            if resumable[0][1].get("destination_placement") != requested:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
         bundle = source.detach(
             job_id,
@@ -696,6 +783,7 @@ def _send_jobs_to_remote(
             destination_remote=target.name,
             destination_placement=destination_placement,
             transfer_id=transfer_id,
+            with_tree=with_tree,
         )
         incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{transfer_id}"
         push = run_adapter(
@@ -704,8 +792,18 @@ def _send_jobs_to_remote(
             {"source": str(bundle), "destination": incoming},
             timeout=timeout,
         )
-        remote_bundle = str(push.get("path", incoming))
-        remote_bundles.append(remote_bundle)
+        return str(push.get("path", incoming))
+
+    selected = {candidate.job_id for candidate in precheck_candidates}
+    # A requested job the selection left out is ineligible or already gone; trying
+    # it first states why before anything else has moved.
+    pushed = [seal_and_push(job_id, with_tree=False) for job_id in jobs if job_id not in selected]
+    pushed += _seal_trees(
+        precheck_candidates,
+        lambda candidate: seal_and_push(candidate.job_id, with_tree=candidate.tree_root is not None),
+        quiet=quiet,
+    )
+    remote_bundles = [bundle for bundle in pushed if bundle is not None]
     acknowledgements = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
     acknowledge_transfers(source, acknowledgements)
     return acknowledgements
@@ -925,16 +1023,37 @@ def _remote_offer(
 
 
 def _require_offers_for_jobs(offers: Sequence[Mapping[str, object]], jobs: Sequence[str]) -> None:
+    """Refuse an explicit offer that names jobs nobody asked for.
+
+    A requested tree root legitimately brings its bound descendants, which the
+    offer marks with that root's ``tree_root``; any other unrequested job is
+    unexpected.
+    """
+
     if not jobs:
         return
     requested = set(jobs)
-    offered = {str(offer.get("job_id")) for offer in offers}
-    unexpected = sorted(offered - requested)
+    unexpected = sorted(
+        str(offer.get("job_id"))
+        for offer in offers
+        if str(offer.get("job_id")) not in requested and offer.get("tree_root") not in requested
+    )
     if unexpected:
         details = []
         if unexpected:
             details.append(f"unexpected: {', '.join(unexpected)}")
         raise ValueError(f"remote offer did not exactly match requested jobs ({'; '.join(details)})")
+
+
+def _announce_offered_members(offers: Sequence[Mapping[str, object]], jobs: Sequence[str], *, quiet: bool) -> None:
+    """Tell the operator which offered jobs came along with a requested tree root."""
+
+    if quiet or not jobs:
+        return
+    requested = set(jobs)
+    for offer in offers:
+        if str(offer.get("job_id")) not in requested and offer.get("tree_root") in requested:
+            print(f"{offer.get('job_key')}: moves with its tree root {offer.get('tree_root')}", file=sys.stderr)
 
 
 def _remote_retire(
@@ -1005,6 +1124,7 @@ def _fetch_jobs_from_remote(
         quiet=quiet,
     )
     _require_offers_for_jobs(offers, jobs)
+    _announce_offered_members(offers, jobs, quiet=quiet)
     staging_root = local.control / "transfers" / "incoming"
     staged: list[Path] = []
     pulled_paths: list[str] = []
@@ -1046,21 +1166,33 @@ def _transfer_local_to_local(
     strict_environment: bool = False,
     quiet: bool = False,
     known_markers: Sequence[Marker] | None = None,
+    destination_placement: str | None = None,
 ) -> list[dict[str, object]]:
-    """Move explicit jobs from one local workspace into another, directly."""
+    """Move explicit jobs from one local workspace into another, directly.
+
+    Every requested job brings the bound descendants of its job tree; a bound
+    child requested without its parent is refused.
+    """
 
     if not jobs:
         raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
     waiting_parent_map = _waiting_parent_map(source)
-    candidates = select_transfer_jobs(
-        source,
-        destination_workspace_id=destination.workspace_id,
-        states=(*QUIESCENT_KINDS, "transferring"),
-        job_ids=jobs,
-        include_transferring=True,
-        known_markers=known_markers,
-        waiting_parent_map=waiting_parent_map,
-    )
+
+    def select(states: Sequence[str], *, include_transferring: bool) -> list[TransferCandidate]:
+        candidates = select_transfer_jobs(
+            source,
+            destination_workspace_id=destination.workspace_id,
+            states=states,
+            job_ids=jobs,
+            include_transferring=include_transferring,
+            known_markers=known_markers,
+            waiting_parent_map=waiting_parent_map,
+        )
+        _require_whole_trees(candidates)
+        _refuse_tree_placement(candidates, destination_placement)
+        return candidates
+
+    candidates = select((*QUIESCENT_KINDS, "transferring"), include_transferring=True)
     _environment_advisory(
         source,
         jobs,
@@ -1071,30 +1203,39 @@ def _transfer_local_to_local(
     )
     source.recover_transfers()
     if any(candidate.marker is not None and candidate.marker.kind == "transferring" for candidate in candidates):
-        candidates = select_transfer_jobs(
-            source,
-            destination_workspace_id=destination.workspace_id,
-            states=QUIESCENT_KINDS,
-            job_ids=jobs,
-            waiting_parent_map=waiting_parent_map,
-        )
-    bundles: list[Path] = []
+        candidates = select(tuple(QUIESCENT_KINDS), include_transferring=False)
+    _announce_tree_members(candidates, jobs, quiet=quiet)
     known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
-    selected = {candidate.job_id: candidate for candidate in candidates}
+    selected = {candidate.job_id for candidate in candidates}
+    bundles: list[Path] = []
     for job_id in jobs:
-        resumable = [selected[job_id]] if job_id in selected else []
-        if not resumable and source.find_marker_by_id(job_id) is None:
+        if job_id in selected or source.find_marker_by_id(job_id) is None:
             continue
-        bundle = resumable[0].bundle if resumable else None
-        if bundle is None:
-            bundle = source.detach(
+        # A requested live job the selection left out is ineligible; detaching it
+        # states why, before anything else has moved.
+        bundles.append(
+            source.detach(
                 job_id,
-                marker=known_by_id.get(job_id) or (resumable[0].marker if resumable else None),
+                marker=known_by_id.get(job_id),
                 waiting_parent_map=waiting_parent_map,
                 destination_workspace_id=destination.workspace_id,
                 transfer_id=str(uuid.uuid4()),
             )
-        bundles.append(bundle)
+        )
+
+    def seal(candidate: TransferCandidate) -> Path:
+        if candidate.bundle is not None:
+            return candidate.bundle
+        return source.detach(
+            candidate.job_id,
+            marker=known_by_id.get(candidate.job_id) or candidate.marker,
+            waiting_parent_map=waiting_parent_map,
+            destination_workspace_id=destination.workspace_id,
+            transfer_id=str(uuid.uuid4()),
+            with_tree=candidate.tree_root is not None,
+        )
+
+    bundles += _seal_trees(candidates, seal, quiet=quiet)
     acknowledgements = import_bundles(destination, bundles)
     if not quiet:
         for acknowledgement in acknowledgements:
@@ -1148,6 +1289,7 @@ def _transfer_remote_to_remote(
         quiet=quiet,
     )
     _require_offers_for_jobs(offers, jobs)
+    _announce_offered_members(offers, jobs, quiet=quiet)
     remote_bundles: list[str] = []
     with tempfile.TemporaryDirectory(prefix="httk-relay-") as relay:
         for offer in offers:
@@ -1294,6 +1436,7 @@ def run_transfer_verb_result(
             strict_environment=arguments.strict_environment,
             quiet=quiet,
             known_markers=known_markers,
+            destination_placement=getattr(arguments, "destination_placement", None),
         )
         return {"moved": acknowledgements, **_skipped_report(arguments.jobs, acknowledgements)}
     destination_target = resolve_remote(destination_binding.remote, project=context.cwd)

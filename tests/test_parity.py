@@ -280,7 +280,9 @@ def _artifacts(workspace: Workspace) -> dict[str, str]:
         for directory in ("run", "data", ".httk-job"):
             base = payload / directory
             for path in sorted(base.rglob("*")) if base.is_dir() else ():
-                if path.is_file() and ".httk-runner" not in path.parts:
+                # The manager, not the SDK, writes the tree records, named by attempt id.
+                manager_owned = path.relative_to(payload).parts[:2] == (".httk-job", "tree")
+                if path.is_file() and ".httk-runner" not in path.parts and not manager_owned:
                     result[f"{tag}/{path.relative_to(payload).as_posix()}"] = path.read_text(encoding="utf-8")
     return result
 

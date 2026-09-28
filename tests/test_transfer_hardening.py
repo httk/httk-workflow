@@ -447,6 +447,7 @@ def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(
         destination_remote: str | None = None,
         destination_placement: str | PurePosixPath | None = None,
         transfer_id: str | None = None,
+        with_tree: bool = False,
     ) -> Path:
         if job_id == second_id:
             raise ValueError("job became active")
@@ -459,6 +460,7 @@ def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(
             destination_remote=destination_remote,
             destination_placement=destination_placement,
             transfer_id=transfer_id,
+            with_tree=with_tree,
         )
 
     monkeypatch.setattr(transfers_module, "detach_job", fail_second)

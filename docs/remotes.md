@@ -96,6 +96,29 @@ $ httk workflow remote add --template local local-tree
 $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 ```
 
+### Job trees travel together
+
+A child job spawned by another job travels with its parent. Transferring the
+parent moves its whole tree of spawned descendants, root first, with their
+placements kept, even when a `--state` or `--placement` filter would have
+matched only the parent. A child cannot be transferred on its own while its
+parent is still in the workspace, because a child may read its parent's files
+in place (see {doc}`composing_workflows`). Make one independent first when it
+really should leave alone:
+
+```console
+$ httk job detach CHILD
+$ httk workflow transfer --job CHILD default kappa:runs
+```
+
+A tree leaves only when nothing in it can start while it is moving: every
+member except the root must be paused or finished, and no member may still be
+waited on by a gather. A fetch of finished work therefore brings a campaign
+back whole once it is done, and skips it, with a warning naming the blocking
+jobs, while some child is still running. To move a tree that is still in flight,
+pause its unfinished children first. `--destination-placement` is refused for a
+tree, because the children record where their parent is.
+
 ### A mounted filesystem with a separate executor
 
 Use the `mount` template when the remote filesystem is available locally as a

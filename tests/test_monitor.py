@@ -360,6 +360,8 @@ def test_known_marker_detach_skips_full_marker_scan(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(workspace, "open_journal_writer", nullcontext)
     monkeypatch.setattr(workspace, "transition", lambda *_args, **_kwargs: marker)
     monkeypatch.setattr(transfers, "_seal_transferring", lambda *_args: tmp_path / "bundle")
+    # The fabricated marker has no payload; the tree guard only probes recorded placements.
+    monkeypatch.setattr(transfers, "_require_tree_boundary", lambda *_args, **_kwargs: None)
 
     assert (
         transfers.detach_job(

@@ -25,6 +25,7 @@ from httk.core.identity import (
     verify_document,
 )
 
+from .._job_tree import is_detached
 from .._logging import LOG_LEVELS, configure_logging
 from .._util import read_json, utc_now
 from ..adapters import (
@@ -1611,6 +1612,38 @@ def handle_job_unseal(arguments: argparse.Namespace, context: CLIContext) -> int
     return 1 if failed else 0
 
 
+def _parent_key(workspace: Workspace, marker: Marker) -> str | None:
+    """Return the recorded parent job key of a spawned job, if it has one."""
+
+    try:
+        parent = workspace.load_job(marker).parent
+    except (WorkflowError, OSError):
+        return None
+    return None if parent is None else str(parent.get("job_key") or parent.get("job_id"))
+
+
+def handle_job_detach(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Make spawned jobs independent of their parents, permanently."""
+
+    workspace = Workspace(_local_root(arguments, context, action="detach jobs in it"), durable=_durable(arguments))
+    if arguments.operator is not None:
+        operator: str | None = resolve_operator_identity(arguments.operator).label
+    else:
+        configured = configured_operator_identity()
+        operator = None if configured is None else configured.label
+    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    failed = False
+    for marker in markers:
+        try:
+            detached = workspace.detach_from_parent(marker.job_id, operator=operator)
+        except ValueError as exc:
+            failed = True
+            print(f"{marker.job_id}: {exc}", file=sys.stderr)
+            continue
+        print(f"{marker.job_id}\t{'detached' if detached else 'already detached'}")
+    return 1 if failed else 0
+
+
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe jobs completely from their authoritative state."""
 
@@ -1642,6 +1675,8 @@ def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
                 report = describe_job(workspace, marker, include_children=not arguments.no_children)
                 sealed = is_job_sealed(workspace, marker.job_key)
                 report["sealed"] = sealed
+                parent = _parent_key(workspace, marker)
+                report["detached"] = is_detached(workspace.payload_path(marker.placement, marker.job_key))
                 roles = _seal_roles(workspace, marker.job_key) if sealed else ""
                 if sealed:
                     report["seal_roles"] = roles.split(",")
@@ -1650,6 +1685,8 @@ def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
                     print(f"{job}:")
                     print(render_job(report))
                     print(f"sealed: yes ({roles})" if sealed else "sealed: no")
+                    if parent is not None:
+                        print(f"detached: {'yes' if report['detached'] else 'no'} (parent {parent})")
         except _ERRORS as exc:
             failed = True
             print(f"{job}: {exc}", file=sys.stderr)
@@ -2030,6 +2067,24 @@ def build_job_parser(
     )
     _add_job_selector(unseal)
     unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")
+
+    detach = _leaf(
+        group,
+        "detach",
+        summary="make spawned jobs independent of their parents",
+        description=(
+            "Make spawned jobs independent of their parents, permanently: a detached job no longer "
+            "moves with its parent's tree, may be transferred on its own, and reads no parent"
+        ),
+        handler=handle_job_detach,
+    )
+    _add_job_selector(detach)
+    detach.add_argument(
+        "--operator",
+        metavar="IDENTITY",
+        help='configured identity short name or a literal "Name <email>" (default: the configured identity)',
+    )
+    add_durability_arguments(detach)
 
     show = _leaf(
         group,

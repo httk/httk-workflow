@@ -7,7 +7,7 @@ import shutil
 import stat
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -15,6 +15,7 @@ from httk.core.digests import sha256_file, tree_digest
 from httk.core.identity import identity_seed, sign_document, verify_document
 
 from . import _transfer_receipts as receipts
+from ._job_tree import bound_parent, descendant_ids, tree_children
 from ._util import fsync_directory, fsync_tree, read_json, utc_now, write_json_atomic
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .journal import SEGMENT_HEADER, encode_record_ref, iter_record_chain, parse_record_ref
@@ -22,6 +23,7 @@ from .models import (
     CORE_PROFILE,
     QUIESCENT_KINDS,
     STATE_KINDS,
+    TERMINAL_KINDS,
     JobDefinition,
     Marker,
     canonical_uuid,
@@ -88,6 +90,11 @@ class TransferCandidate:
     :param job: Readable immutable job definition, when available.
     :param manifest: Validated sealed-bundle manifest, when available.
     :param problem: Readability problem, if the candidate cannot be validated.
+    :param tree_root: The job id of the tree root this candidate travels with,
+        when it is a member of a multi-job tree (the root names itself).
+    :param tree_parent: The job id of this member's parent within its tree.
+    :param tree_blocked: Whether the tree rules keep this candidate from leaving now;
+        :attr:`problem` says why.
     """
 
     job_id: str
@@ -99,6 +106,9 @@ class TransferCandidate:
     job: JobDefinition | None
     manifest: Mapping[str, Any] | None = None
     problem: str | None = None
+    tree_root: str | None = None
+    tree_parent: str | None = None
+    tree_blocked: bool = False
 
 
 def _excluded_from_bundle(name: str) -> bool:
@@ -373,6 +383,29 @@ def _unresolved_join_reference(
     return marker.job_id in parents
 
 
+def _require_tree_boundary(workspace: Workspace, marker: Marker, *, with_tree: bool) -> None:
+    """Refuse to fence a job that would split its tree."""
+
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    try:
+        job = JobDefinition.from_path(payload / "job.json")
+    except (WorkflowError, OSError) as exc:
+        raise ValueError(f"job definition cannot be read to check its tree: {exc}") from exc
+    parent = bound_parent(workspace, payload, job)
+    if parent is not None:
+        raise ValueError(
+            f"job travels with its parent {parent.job_key}: transfer the parent, "
+            "or make it independent with 'httk job detach'"
+        )
+    if not with_tree:
+        try:
+            children = tree_children(workspace, payload, job)
+        except (WorkflowError, OSError) as exc:
+            raise ValueError(f"its spawn records cannot be read: {exc}") from exc
+        if children:
+            raise ValueError(f"job has {len(children)} child job(s) that travel with it: transfer it as a tree")
+
+
 def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path:
     payload = workspace.payload_path(marker.placement, marker.job_key)
     transfer_dir = payload / TRANSFER_DIRECTORY
@@ -439,8 +472,14 @@ def detach_job(
     destination_remote: str | None = None,
     destination_placement: str | PurePosixPath | None = None,
     transfer_id: str | None = None,
+    with_tree: bool = False,
 ) -> Path:
     """Fence and seal one job, leaving no schedulable source marker.
+
+    A spawned child that is still bound to its live parent never leaves on its
+    own, and a parent leaves with its bound children only as a tree: the caller
+    fences the root first (*with_tree*) and then each member, whose parent is by
+    then transferring and so no longer binds it.
 
     :param workspace: Provide the source workspace.
     :param job_id: Identify the job to detach.
@@ -450,8 +489,11 @@ def detach_job(
     :param destination_remote: Preserve the destination's remote identifier.
     :param destination_placement: Override the destination placement.
     :param transfer_id: Reuse a transfer id when resuming sealing.
+    :param with_tree: Fence a job whose bound children the caller transfers with it (the
+        root or an intermediate member of a selected tree); the caller must fence every member.
     :return: The sealed source bundle path.
-    :raises ValueError: If the job is missing, active, joined, or already transferring incompatibly.
+    :raises ValueError: If the job is missing, active, joined, bound to its parent, a parent
+        transferred without its tree, or already transferring incompatibly.
     """
 
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
@@ -480,6 +522,7 @@ def detach_job(
         raise ValueError(f"job is not quiescent and cannot transfer: {marker.kind}")
     if _unresolved_join_reference(workspace, marker, waiting_parent_map):
         raise ValueError("job participates in an unresolved join and cannot transfer")
+    _require_tree_boundary(workspace, marker, with_tree=with_tree)
     target_placement = normalize_placement(destination_placement or marker.placement)
     prior_state = workspace.read_state(marker)
     _finish_incoming_receipt(workspace, marker, prior_state)
@@ -1128,10 +1171,14 @@ def _ledgers(workspace: Workspace) -> list[dict[str, Any]]:
     return [read_json(path) for path in sorted(directory.glob("*.json"))] if directory.is_dir() else []
 
 
-def _offer_record(ledger: Mapping[str, Any], bundle: Path) -> dict[str, object]:
-    """Describe one sealed bundle the way ``tasks offer`` reports it."""
+def _offer_record(ledger: Mapping[str, Any], bundle: Path, tree_root: str | None = None) -> dict[str, object]:
+    """Describe one sealed bundle the way ``tasks offer`` reports it.
 
-    return {
+    A member of a job tree also names its tree root, so the fetching side can
+    tell a closure member it did not request from an unexpected offer.
+    """
+
+    record: dict[str, object] = {
         "transfer_id": str(ledger["transfer_id"]),
         "job_id": str(ledger["job_id"]),
         "job_key": str(ledger["job_key"]),
@@ -1141,6 +1188,9 @@ def _offer_record(ledger: Mapping[str, Any], bundle: Path) -> dict[str, object]:
         "payload_sha256": str(ledger["payload_sha256"]),
         "bundle_path": str(bundle),
     }
+    if tree_root is not None:
+        record["tree_root"] = tree_root
+    return record
 
 
 def select_transfer_jobs(
@@ -1179,7 +1229,11 @@ def select_transfer_jobs(
     if unusable:
         raise ValueError(f"only a quiescent job can be offered, so {', '.join(unusable)} cannot be")
     prefix = None if placement is None else normalize_placement(placement).parts
-    selected_ids = None if job_ids is None else set(job_ids)
+    marker_source = list(workspace.scan_markers(kinds) if known_markers is None else known_markers)
+    root_of: dict[str, str] = {}
+    selected_ids = None
+    if job_ids is not None:
+        selected_ids, root_of = _with_descendants(workspace, set(job_ids), marker_source)
     candidates: list[TransferCandidate] = []
     offered_jobs: set[str] = set()
     parent_map = waiting_parent_map if waiting_parent_map is not None else _waiting_parent_map(workspace)
@@ -1249,7 +1303,6 @@ def select_transfer_jobs(
             )
         )
         offered_jobs.add(str(ledger["job_id"]))
-    marker_source = workspace.scan_markers(kinds) if known_markers is None else known_markers
     for marker in marker_source:
         if selected_ids is not None and marker.job_id not in selected_ids:
             continue
@@ -1287,7 +1340,186 @@ def select_transfer_jobs(
             )
         )
         offered_jobs.add(marker.job_id)
-    return sorted(candidates, key=lambda item: (item.source_placement.as_posix(), item.job_key))
+    return _rooted(_with_trees(workspace, candidates, parent_map), root_of)
+
+
+def _with_descendants(
+    workspace: Workspace, job_ids: set[str], markers: Sequence[Marker]
+) -> tuple[set[str], dict[str, str]]:
+    """Widen explicit job ids to their whole trees, in whatever state each member is.
+
+    A selected root reaches its members through the spawn records in its payload,
+    live or already sealed, so re-running an interrupted tree transfer picks up
+    every member the interruption left behind: sealed ones through their ledgers,
+    live ones through their markers. Roots are located among *markers*, the ones
+    the selection scans anyway, so widening adds no workspace scan.
+
+    :param workspace: The source workspace.
+    :param job_ids: The explicitly requested job ids.
+    :param markers: The live markers the selection scanned.
+    :return: The widened ids, and each added descendant's requested root.
+    """
+
+    widened = set(job_ids)
+    root_of: dict[str, str] = {}
+    live = {marker.job_id: marker for marker in markers if marker.job_id in job_ids}
+    sealed = {
+        str(ledger.get("job_id")): ledger
+        for ledger in _ledgers(workspace)
+        if ledger.get("status") == "sealed" and str(ledger.get("job_id")) in job_ids
+    }
+    for job_id in sorted(job_ids):
+        bundle = sealed.get(job_id, {}).get("bundle")
+        if isinstance(bundle, str):
+            payload = Path(bundle)
+        elif job_id in live:
+            payload = workspace.payload_path(live[job_id].placement, live[job_id].job_key)
+        else:
+            continue
+        try:
+            descendants = descendant_ids(workspace, payload, JobDefinition.from_path(payload / "job.json"))
+        except (WorkflowError, OSError):
+            continue
+        for descendant in descendants - job_ids:
+            root_of.setdefault(descendant, job_id)
+        widened |= descendants
+    return widened, root_of
+
+
+def _rooted(candidates: list[TransferCandidate], root_of: Mapping[str, str]) -> list[TransferCandidate]:
+    """Name the requested root every widened-in candidate travels with.
+
+    A member an interrupted transfer left behind is sealed, or live but no longer
+    bound (its parent is already transferring), so the tree pass cannot see its
+    root; the widening that selected it can, and the offer carries that root.
+    """
+
+    if not root_of:
+        return candidates
+    rooted: list[TransferCandidate] = []
+    for candidate in candidates:
+        root = root_of.get(candidate.tree_root or candidate.job_id)
+        rooted.append(candidate if root is None else replace(candidate, tree_root=root))
+    return rooted
+
+
+# A tree member other than its root must be one no manager can claim, so that
+# nothing in the tree can start between the eligibility check and its fence.
+_TREE_MEMBER_KINDS = TERMINAL_KINDS | {"paused"}
+
+
+def _with_trees(
+    workspace: Workspace,
+    candidates: Sequence[TransferCandidate],
+    waiting_parent_map: Mapping[str, set[str]],
+) -> list[TransferCandidate]:
+    """Group live candidates into whole trees, root first, and block split trees.
+
+    A live candidate bound to its parent never leaves alone: it comes back as a
+    member of its parent's tree when that parent is selected too, and is blocked
+    otherwise. A selected parent brings every bound descendant, whatever the
+    selection filters say, provided each is paused or terminal and outside any
+    unresolved join; otherwise the whole tree is blocked.
+    """
+
+    ordered = sorted(candidates, key=lambda item: (item.source_placement.as_posix(), item.job_key))
+    live = {
+        item.job_id
+        for item in ordered
+        if item.marker is not None and item.marker.kind != "transferring" and item.job is not None and not item.problem
+    }
+    # First decide every tree, so a member is emitted exactly once: inside its
+    # root's tree, never also as a blocked candidate of its own.
+    parents: dict[str, Marker] = {}
+    trees: dict[str, tuple[list[TransferCandidate], list[str]]] = {}
+    for candidate in ordered:
+        if candidate.job_id not in live:
+            continue
+        assert candidate.marker is not None and candidate.job is not None
+        payload = workspace.payload_path(candidate.marker.placement, candidate.marker.job_key)
+        parent = bound_parent(workspace, payload, candidate.job)
+        if parent is not None:
+            parents[candidate.job_id] = parent
+            continue
+        try:
+            trees[candidate.job_id] = _tree_members(workspace, candidate, waiting_parent_map)
+        except (WorkflowError, OSError) as exc:
+            trees[candidate.job_id] = ([], [f"its spawn records cannot be read ({exc})"])
+    included = {member.job_id for members, blockers in trees.values() if not blockers for member in members}
+    blocked_parents = {job_id for job_id, (_members, blockers) in trees.items() if blockers}
+    result: list[TransferCandidate] = []
+    for candidate in ordered:
+        if candidate.job_id not in live:
+            result.append(candidate)
+        elif candidate.job_id in included:
+            continue
+        elif candidate.job_id in parents:
+            parent = parents[candidate.job_id]
+            if parent.job_id in blocked_parents:
+                problem = f"travels with its parent {parent.job_key}, whose tree cannot leave yet"
+            elif parent.job_id in live:
+                # The parent leaves but does not list it: it spawned before tree records existed.
+                problem = (
+                    f"travels with its parent {parent.job_key}, which has no record of it: transfer it once "
+                    "the parent has left, or make it independent with 'httk job detach'"
+                )
+            else:
+                problem = (
+                    f"travels with its parent {parent.job_key}: transfer the parent, "
+                    "or make it independent with 'httk job detach'"
+                )
+            result.append(replace(candidate, problem=problem, tree_blocked=True))
+        else:
+            members, blockers = trees[candidate.job_id]
+            if blockers:
+                reason = f"its tree cannot leave yet: {'; '.join(blockers)} (wait for them to end, or pause them)"
+                result.append(replace(candidate, problem=reason, tree_blocked=True))
+            elif members:
+                result.append(replace(candidate, tree_root=candidate.job_id))
+                result.extend(members)
+            else:
+                result.append(candidate)
+    return result
+
+
+def _tree_members(
+    workspace: Workspace,
+    root: TransferCandidate,
+    waiting_parent_map: Mapping[str, set[str]],
+) -> tuple[list[TransferCandidate], list[str]]:
+    """Return the bound descendants of *root*, top-down, and what blocks them."""
+
+    assert root.marker is not None and root.job is not None
+    members: list[TransferCandidate] = []
+    blockers: list[str] = []
+    seen = {root.job_id}
+    queue: list[tuple[Marker, JobDefinition]] = [(root.marker, root.job)]
+    while queue:
+        parent_marker, parent_job = queue.pop(0)
+        parent_payload = workspace.payload_path(parent_marker.placement, parent_marker.job_key)
+        for child_marker, child_job in tree_children(workspace, parent_payload, parent_job):
+            if child_marker.job_id in seen:
+                continue
+            seen.add(child_marker.job_id)
+            if child_marker.kind not in _TREE_MEMBER_KINDS:
+                blockers.append(f"{child_marker.job_key} is {child_marker.kind}")
+            elif _unresolved_join_reference(workspace, child_marker, waiting_parent_map):
+                blockers.append(f"{child_marker.job_key} is in an unresolved join")
+            members.append(
+                TransferCandidate(
+                    child_marker.job_id,
+                    child_marker.job_key,
+                    child_marker.kind,
+                    child_marker.placement,
+                    None,
+                    child_marker,
+                    child_job,
+                    tree_root=root.job_id,
+                    tree_parent=parent_job.id,
+                )
+            )
+            queue.append((child_marker, child_job))
+    return members, blockers
 
 
 def _offer_selection_errors(
@@ -1436,11 +1668,26 @@ def offer_transfers(
         if errors:
             details = "; ".join(f"{job_id}: {reason}" for job_id, reason in sorted(errors.items()))
             raise ValueError(f"requested transfer jobs are not all eligible: {details}")
+    stranded: set[str] = set()
     for candidate in candidates:
         if candidate.bundle is not None:
             if candidate.manifest is None:
                 raise FormatError(candidate.problem or f"sealed transfer manifest is unreadable: {candidate.bundle}")
-            offers[str(candidate.manifest["transfer_id"])] = _offer_record(candidate.manifest, candidate.bundle)
+            offers[str(candidate.manifest["transfer_id"])] = _offer_record(
+                candidate.manifest, candidate.bundle, candidate.tree_root
+            )
+            continue
+        if candidate.tree_blocked:
+            _LOGGER.warning(
+                "not offering %s: %s",
+                candidate.job_key,
+                candidate.problem,
+                extra={"event": "transfer_offer_skipped", "job_key": candidate.job_key},
+            )
+            continue
+        if candidate.tree_parent in stranded:
+            # Its parent stayed behind, so it stays too, still bound to it.
+            stranded.add(candidate.job_id)
             continue
         try:
             assert candidate.marker is not None
@@ -1450,8 +1697,10 @@ def offer_transfers(
                 marker=candidate.marker,
                 waiting_parent_map=waiting_parent_map,
                 destination_workspace_id=destination_id,
+                with_tree=candidate.tree_root is not None,
             )
         except ValueError as exc:
+            stranded.add(candidate.job_id)
             if requested_ids is not None:
                 sealing_errors.append(f"{candidate.job_id}: {exc}")
                 continue
@@ -1463,7 +1712,7 @@ def offer_transfers(
             )
             continue
         manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-        offers[str(manifest["transfer_id"])] = _offer_record(manifest, bundle)
+        offers[str(manifest["transfer_id"])] = _offer_record(manifest, bundle, candidate.tree_root)
     if sealing_errors:
         details = "; ".join(sealing_errors)
         raise ValueError(

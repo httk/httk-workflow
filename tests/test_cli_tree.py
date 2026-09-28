@@ -42,7 +42,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "unseal",
     ),
     "runner": ("publish", "describe"),
-    "job": ("new", "submit", "request", "delete", "seal", "unseal", "list", "show", "log", "why", "debug"),
+    "job": ("new", "submit", "request", "delete", "seal", "unseal", "detach", "list", "show", "log", "why", "debug"),
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("show", "set", "unset", "import-v1"),
