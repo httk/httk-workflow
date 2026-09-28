@@ -114,6 +114,10 @@ def _parser() -> argparse.ArgumentParser:
     job_input = commands.add_parser("parameter")
     job_input.add_argument("name")
     job_input.add_argument("--default")
+    parameter_items = commands.add_parser("parameter-items")
+    parameter_items.add_argument("name")
+    parameter_items.add_argument("--default")
+    parameter_items.add_argument("-0", "--null", action="store_true")
     stage_input = commands.add_parser("stage-input")
     stage_input.add_argument("name")
     stage_input.add_argument("destination")
@@ -365,6 +369,29 @@ def _print(value: object) -> None:
     """Print one JSON value the way a shell wants to read it."""
 
     print(value if isinstance(value, str) else json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def _print_items(name: str, value: object, *, null: bool) -> None:
+    """Print the elements of one array parameter, one per line or NUL-terminated.
+
+    A string element is printed raw and any other element as compact JSON, as
+    :func:`_print` prints a whole value. Only an array has elements: an object
+    or a scalar is refused rather than guessed at. An element the chosen
+    separator cannot carry — a newline in line mode, a NUL in either mode — is
+    refused too, so a reader never silently sees more or fewer elements.
+    """
+
+    if not isinstance(value, list):
+        raise _Refused(f"parameter {name!r} is not a JSON array, so it has no items; read it with parameter instead")
+    separator = "\0" if null else "\n"
+    texts: list[str] = []
+    for index, item in enumerate(cast(list[object], value)):
+        text = item if isinstance(item, str) else json.dumps(item, sort_keys=True, separators=(",", ":"))
+        if "\0" in text or separator in text:
+            spelled = "a NUL" if "\0" in text else "a newline; use --null for NUL-separated items"
+            raise _Refused(f"item {index} of parameter {name!r} contains {spelled}")
+        texts.append(text)
+    sys.stdout.write("".join(text + separator for text in texts))
 
 
 def _value(text: str) -> object:
@@ -727,6 +754,16 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
                 _print(attempt.parameter(arguments.name, _value(arguments.default)))
         except KeyError as exc:
             raise _Absent(str(exc.args[0])) from exc
+    elif command == "parameter-items":
+        attempt = _attempt()
+        try:
+            if arguments.default is None:
+                value = attempt.parameter(arguments.name)
+            else:
+                value = attempt.parameter(arguments.name, _value(arguments.default))
+        except KeyError as exc:
+            raise _Absent(str(exc.args[0])) from exc
+        _print_items(arguments.name, value, null=arguments.null)
     elif command == "stage-input":
         attempt = _attempt()
         try:

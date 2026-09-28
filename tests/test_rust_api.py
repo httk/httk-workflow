@@ -402,6 +402,33 @@ def test_a_handler_that_returns_an_error_leaves_a_breadcrumb_and_no_outcome(tmp_
     assert breadcrumb["message"] == "explode exited with status 3"
 
 
+def test_a_host_error_propagated_with_question_mark_aborts_with_its_text(tmp_path: Path) -> None:
+    """``?`` on a failing ``std::io`` or parse call aborts with status 1 and the error's own text."""
+
+    binary = _write_runner(
+        tmp_path,
+        "tests.rust",
+        {
+            "read": 'let text = std::fs::read_to_string("missing.txt")?; attempt.runlog_note(&text)?; Ok(())',
+            "parse": 'let count: i64 = "four".parse()?; attempt.runlog_note(&count.to_string())?; Ok(())',
+        },
+    )
+
+    attempt = _attempt(tmp_path, step="read")
+    completed = attempt.run(binary)
+    assert completed.returncode == 1
+    assert not (attempt.control / "outcome.ready").exists()
+    breadcrumb = attempt.breadcrumb()
+    assert breadcrumb["step"] == "read"
+    assert breadcrumb["exception"] == "RustError"
+    assert breadcrumb["message"] == "I/O error: No such file or directory (os error 2)"
+
+    attempt = _attempt(tmp_path / "parse", step="parse")
+    completed = attempt.run(binary)
+    assert completed.returncode == 1
+    assert attempt.breadcrumb()["message"] == "invalid integer: invalid digit found in string"
+
+
 def test_stage_input_copies_a_payload_file_or_answers_false(tmp_path: Path) -> None:
     body = (
         'println!("{:?}", attempt.stage_input("poscar", "POSCAR", Some("files/POSCAR"))); '

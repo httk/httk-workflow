@@ -203,6 +203,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | Call | What it returns |
 | --- | --- |
 | `httk_workflow_parameter NAME [DEFAULT]` | one member of the job's opaque `parameters` object |
+| `httk_workflow_parameter_items [-0\|--null] NAME [DEFAULT]` | the elements of one JSON-array parameter, one per line (NUL-terminated with `-0`); strings raw, other elements as compact JSON |
 | `httk_workflow_setting NAME [DEFAULT]` | one application setting: job parameter, `HTTK_*`, workspace setting, then the call default |
 | `httk_workflow_environment NAME [DEFAULT]` | one declared workflow environment value: job override, declared setting `HTTK_*`, workspace setting, declaration default, then the call default |
 | `httk_workflow_stage_input NAME DESTINATION [DEFAULT]` | copies the payload file parameter NAME names (DEFAULT is the payload-relative fallback, e.g. `files/POSCAR`) to DESTINATION in the workdir; 1 when the payload has no such file |
@@ -217,6 +218,38 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
 
 A step starts in its workdir, so ordinary relative paths are workdir paths.
+
+`httk_workflow_parameter` prints a string raw and any other value as compact
+JSON, so an array parameter such as `values = [1, 4, 9]` reads back as the one
+line `[1,4,9]`, which plain Bash cannot take apart. `httk_workflow_parameter_items`
+prints its elements instead, one per line, in the same spelling (a string element
+raw, anything else — a number, a nested array or object — as compact JSON), ready
+for `mapfile`:
+
+```bash
+mapfile -t values < <(httk_workflow_parameter_items values)
+wait $!    # a process substitution hides its exit status; wait recovers it for set -e
+for value in "${values[@]}"; do
+    ...
+done
+```
+
+A missing parameter without a default exits 1, as `httk_workflow_parameter` does;
+DEFAULT is parsed like a `--parameter` value, so `'[1, 4, 9]'` is an array. A
+value that is not an array — including an object — is refused with exit 2 rather
+than guessed at: an object has no one obvious line spelling (keys only?
+`key=value`, when keys may contain `=`?), so read an object parameter's members
+through a JSON tool such as `jq` or declare an array parameter instead. An empty
+array prints nothing. In line mode an element containing a newline is refused
+(exit 2), so the reader never sees one element as two; `-0`/`--null` terminates
+each element with a NUL instead and carries newlines intact:
+
+```bash
+mapfile -d '' -t labels < <(httk_workflow_parameter_items --null labels)
+wait $!
+```
+
+An element containing a NUL cannot be carried by either spelling and is refused.
 
 `httk_workflow_environment` only reads names declared by the workflow and
 returns exit status 1 for an undeclared or unresolved name without a default.

@@ -65,6 +65,10 @@ pub const ABSENT: i32 = 1;
 /// The call was refused (bad usage, a protocol violation, a corrupt context).
 pub const REFUSED: i32 = 2;
 
+/// The exit status of a handler aborted by a host error propagated with `?`
+/// (an I/O or parse failure), the status an uncaught Python exception exits with.
+pub const HOST_FAILURE: i32 = 1;
+
 const PYTHON_VAR: &str = "HTTK_WORKFLOW_PYTHON";
 const BRIDGE_MODULE: &str = "httk.workflow._shell_bridge";
 const RUNNER_WORKFLOW_VAR: &str = "HTTK_WORKFLOW_RUNNER_WORKFLOW";
@@ -114,7 +118,13 @@ impl std::error::Error for BridgeError {
 /// breadcrumb text; without one the breadcrumb reads
 /// `"<step> exited with status <code>"`, exactly as the C SDK phrases it. A
 /// [`BridgeError`] propagated with `?` becomes a `StepError` with code
-/// [`REFUSED`] (`2`).
+/// [`REFUSED`] (`2`). A [`std::io::Error`], [`std::fmt::Error`],
+/// [`std::num::ParseIntError`], [`std::num::ParseFloatError`],
+/// [`std::str::Utf8Error`], or [`std::string::FromUtf8Error`] propagated with
+/// `?` becomes one with code [`HOST_FAILURE`] (`1`) and a message such as
+/// `"I/O error: No such file or directory (os error 2)"`. For any other error
+/// type, or to name the file that failed, map it with
+/// [`StepError::with_message`].
 #[derive(Debug)]
 pub struct StepError {
     code: i32,
@@ -163,6 +173,32 @@ impl From<BridgeError> for StepError {
             message: Some(error.to_string()),
         }
     }
+}
+
+/// Implement `From<$error> for StepError` for std errors a handler meets in
+/// ordinary host work, so `?` aborts the attempt with [`HOST_FAILURE`] (`1`,
+/// the status an uncaught Python exception exits with) and a breadcrumb that
+/// names the kind of failure and carries the error's own text.
+macro_rules! host_error_conversions {
+    ($($error:ty => $kind:literal),+ $(,)?) => {$(
+        impl From<$error> for StepError {
+            fn from(error: $error) -> Self {
+                StepError {
+                    code: HOST_FAILURE,
+                    message: Some(format!(concat!($kind, ": {}"), error)),
+                }
+            }
+        }
+    )+};
+}
+
+host_error_conversions! {
+    std::io::Error => "I/O error",
+    std::fmt::Error => "formatting error",
+    std::num::ParseIntError => "invalid integer",
+    std::num::ParseFloatError => "invalid number",
+    std::str::Utf8Error => "invalid UTF-8",
+    std::string::FromUtf8Error => "invalid UTF-8",
 }
 
 /// One declared step: its name and the handler that implements it.
@@ -762,6 +798,23 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    #[test]
+    fn host_errors_propagate_with_their_text() {
+        fn read() -> Result<String, StepError> {
+            Ok(std::fs::read_to_string("/nonexistent/httk-workflow/input.txt")?)
+        }
+        let error = read().unwrap_err();
+        assert_eq!(error.code(), HOST_FAILURE);
+        assert!(error.to_string().starts_with("I/O error: "), "{error}");
+
+        fn parse() -> Result<i64, StepError> {
+            Ok("four".parse::<i64>()?)
+        }
+        let error = parse().unwrap_err();
+        assert_eq!(error.code(), HOST_FAILURE);
+        assert_eq!(error.to_string(), "invalid integer: invalid digit found in string");
     }
 
     #[test]

@@ -249,6 +249,21 @@ httk_workflow_parameter() {
     fi
 }
 
+# The elements of one JSON-array parameter, one per line (-0/--null: each
+# NUL-terminated), strings raw and anything else as compact JSON:
+#     mapfile -t values < <(httk_workflow_parameter_items values)
+httk_workflow_parameter_items() {
+    local null=()
+    case "${1:-}" in
+        -0 | --null) null=(--null); shift ;;
+    esac
+    if [ "$#" -ge 2 ]; then
+        _httk_workflow_bridge parameter-items "$1" --default "$2" ${null[@]:+"${null[@]}"}
+    else
+        _httk_workflow_bridge parameter-items "$1" ${null[@]:+"${null[@]}"}
+    fi
+}
+
 httk_workflow_setting() {
     if [ "$#" -ge 2 ]; then
         _httk_workflow_bridge setting "$1" --default "$2"

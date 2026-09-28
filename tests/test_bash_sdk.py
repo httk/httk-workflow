@@ -512,6 +512,86 @@ record refused httk_workflow_stage_input encut ENCUT""",
     assert not (fixture.workdir / "INCAR").exists()
 
 
+def test_parameter_items_iterates_an_array_parameter(tmp_path: Path) -> None:
+    fixture = _fixture(
+        tmp_path,
+        step="only",
+        parameters={
+            "values": [1, 4.5, "Si O", True, None, [2, 3], {"b": 1, "a": 2}],
+            "empty": [],
+            "lines": ["one\ntwo", "three"],
+            "nul": ["a\u0000b"],
+            "encut": 520,
+            "settings": {"a": 1},
+        },
+    )
+    source = _runner(
+        "only",
+        body="""record() {
+    local name=$1
+    shift
+    local code=0
+    "$@" >/dev/null 2>&1 || code=$?
+    printf '%s=%s\\n' "$name" "$code" >>codes.txt
+}
+step_only() { :; }
+mapfile -t values < <(httk_workflow_parameter_items values)
+wait $!
+printf '<%s>\\n' "${values[@]}" >values.txt
+mapfile -t empty < <(httk_workflow_parameter_items empty)
+wait $!
+printf '%s\\n' "${#empty[@]}" >empty.txt
+mapfile -d '' -t lines < <(httk_workflow_parameter_items --null lines)
+wait $!
+printf '<%s>\\n' "${lines[@]}" >lines.txt
+mapfile -t defaulted < <(httk_workflow_parameter_items nothing '[7, "x"]')
+wait $!
+printf '<%s>\\n' "${defaulted[@]}" >defaulted.txt
+record absent httk_workflow_parameter_items nothing
+record scalar httk_workflow_parameter_items encut
+record object httk_workflow_parameter_items settings
+record scalar_default httk_workflow_parameter_items nothing 5
+record newline httk_workflow_parameter_items lines
+record newline_null httk_workflow_parameter_items -0 lines
+record nul httk_workflow_parameter_items --null nul""",
+        main="",
+    )
+
+    completed = fixture.run(source)
+    assert completed.returncode == 0, completed.stderr
+
+    def read(name: str) -> str:
+        return (fixture.workdir / name).read_text(encoding="utf-8")
+
+    assert read("values.txt") == '<1>\n<4.5>\n<Si O>\n<true>\n<null>\n<[2,3]>\n<{"a":2,"b":1}>\n'
+    assert read("empty.txt") == "0\n"
+    assert read("lines.txt") == "<one\ntwo>\n<three>\n"
+    assert read("defaulted.txt") == "<7>\n<x>\n"
+    assert dict(line.split("=") for line in read("codes.txt").splitlines()) == {
+        "absent": "1",
+        "scalar": "2",
+        "object": "2",
+        "scalar_default": "2",
+        "newline": "2",
+        "newline_null": "0",
+        "nul": "2",
+    }
+
+    # A refusal says why on stderr.
+    diagnosed = fixture.run(
+        _runner("only", body="step_only() { :; }\nhttk_workflow_parameter_items lines", main=""),
+        name="diagnosed.sh",
+    )
+    assert diagnosed.returncode == 2
+    assert "item 0 of parameter 'lines' contains a newline; use --null" in diagnosed.stderr
+    diagnosed = fixture.run(
+        _runner("only", body="step_only() { :; }\nhttk_workflow_parameter_items settings", main=""),
+        name="object.sh",
+    )
+    assert diagnosed.returncode == 2
+    assert "parameter 'settings' is not a JSON array" in diagnosed.stderr
+
+
 def test_a_corrupt_attempt_context_is_refused_with_two(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="only")
     fixture.environment["HTTK_WORKFLOW_CONTEXT"] = "{}"

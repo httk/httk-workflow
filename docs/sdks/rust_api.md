@@ -117,6 +117,30 @@ exit status and takes the default breadcrumb message `"<step> exited with status
 code `2` (`REFUSED`) — never `1`, which is the `ABSENT` convention for an
 ordinary answer — so a handler can `?` its way out of an unexpected bridge failure.
 
+Ordinary host failures propagate the same way. `StepError` implements `From` for
+`std::io::Error`, `std::fmt::Error`, `std::num::ParseIntError`,
+`std::num::ParseFloatError`, `std::str::Utf8Error`, and
+`std::string::FromUtf8Error`, so `?` works directly on a file operation or a
+parse. Such an error aborts with code `1` (`httk_workflow::HOST_FAILURE`, the
+status an uncaught Python exception exits with) and a breadcrumb message that
+names the kind of failure and carries the error's own text:
+
+```rust
+fn collect(attempt: &Attempt) -> Result<(), StepError> {
+    // A missing file aborts with "I/O error: No such file or directory (os error 2)".
+    let energy: f64 = std::fs::read_to_string("energy.txt")?.trim().parse()?;
+    attempt.state_set("energy", &energy.to_string())?;
+    attempt.succeed()?;
+    Ok(())
+}
+```
+
+A `std::io::Error` does not know which path failed; when the breadcrumb should
+name it, or for an error type without a conversion, map it explicitly with
+`map_err(|error| StepError::with_message(1, format!("cannot read energy.txt: {error}")))`.
+The conversions are the std-only set a handler routinely meets; there is no
+blanket `From<E: Error>`, which would collide with the reflexive `From<StepError>` since `StepError` is itself an `Error`.
+
 `HTTK_WORKFLOW_DESCRIBE=1` and a `--describe` argument each make `Runner::main`
 print the runner description and exit `0` before any step runs. The description is
 produced natively, byte-for-byte what a Python, Bash, C, or Fortran runner prints
@@ -236,6 +260,10 @@ and Fortran SDKs':
 | `httk_workflow::OK` (`0`) | the call succeeded |
 | `httk_workflow::ABSENT` (`1`) | the answer is legitimately absent: an unset state key, a missing parameter without a default, a child that was not observed |
 | `httk_workflow::REFUSED` (`2`) | the call is refused: bad usage, a protocol violation, a corrupt attempt context — also the exit status when `HTTK_WORKFLOW_PYTHON` is unset |
+
+`httk_workflow::HOST_FAILURE` (`1`) is not a bridge status: it is the exit
+status of a handler aborted by a host error propagated with `?` (see
+[Registration and dispatch](#registration-and-dispatch)).
 
 The read return type folds `OK`/`ABSENT` into `Ok(Some)`/`Ok(None)` and `REFUSED`
 into `Err(BridgeError::Refused)`, so a read is an ordinary `match` and never a
