@@ -515,12 +515,12 @@ instead:
 
 | Status | Meaning |
 | --- | --- |
-| `22` | `httk_workflow_run` and `httk_vasp_run`: the program exited nonzero |
+| `22` | `httk_workflow_run`, and a code's run function such as *httk-workflow-vasp*'s `httk_vasp_run`: the program exited nonzero |
 | `124` | the program timed out and its process group was terminated |
 | `125` | a checker or a diagnostic stopped the program; also what the manager's launcher reports for a runner it could not start at all |
-| `20` | `httk_vasp_run` and `httk_vasp_diagnose`: a structured diagnostic stop |
-| `21` | `httk_vasp_run`: the calculation completed without converging |
-| `3` | `httk_vasp_remedy_plan`: the reviewed policy has no safe remaining action |
+| `20` | *httk-workflow-vasp*'s `httk_vasp_run` and `httk_vasp_diagnose`: a structured diagnostic stop |
+| `21` | *httk-workflow-vasp*'s `httk_vasp_run`: the calculation completed without converging |
+| `3` | *httk-workflow-vasp*'s `httk_vasp_remedy_plan`: the reviewed policy has no safe remaining action |
 
 ## Supervised commands
 
@@ -549,10 +549,12 @@ timestamped line to stderr, which the manager retains too. `httk_calc`,
 *httk* v1 conveniences: templates use `string.Template` and an explicit JSON
 values object, never `eval`.
 
-## VASP functions
+## Code Bash APIs
 
-The `httk_vasp_*` surface corresponds directly to functions in
-`httk.workflow.codes.vasp`:
+A simulation code's Bash API ships with its code-support distribution, not with
+*httk-workflow*; see {doc}`../code_support`. *httk-workflow-vasp*'s
+`httk_vasp_*` surface, for example, corresponds directly to functions in
+`httk.codes.vasp`:
 
 - `prepare`, `prepare_kpoints`, `prepare_potcar`, `get_tag`, `set_tag`, and
   `nbands`;

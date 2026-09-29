@@ -40,6 +40,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
 - {doc}`sdks/index` — the same authoring surface in eight more languages
 - {doc}`vasp_runners` — the ready-made VASP workflows of workflows-vasp, for campaigns that write none
+- {doc}`code_support` — supporting a simulation code with an `httk-workflow-<code>` distribution
 - {doc}`workflow_packages` — authoring directory packages and their manifest
 - {doc}`workflow_uris` — sharing and referencing workflows in Git repositories by URI
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
@@ -110,6 +111,7 @@ workflow_protocol_api
 runtime_helpers
 sdks/index
 vasp_runners
+code_support
 workflow_packages
 workflow_uris
 declarations

@@ -191,8 +191,9 @@ call:
 The functions that run a program report the classified outcome of *that program*
 instead: `22` for a nonzero exit, `124` for a timeout whose process group was
 terminated, `125` when a checker or diagnostic stopped it — which is also what
-the manager's launcher reports for a runner it could not start at all. The VASP
-functions add `20`, `21`, and `3`; see {doc}`bash_api`.
+the manager's launcher reports for a runner it could not start at all. A code's Bash
+API may add its own, as *httk-workflow-vasp*'s VASP functions add `20`, `21`,
+and `3`; see {doc}`bash_api`.
 
 `httk_workflow_main` owns the exit status of a Bash runner, which is why the
 outcome functions return rather than exit. `Runner.main` owns it in Python, and

@@ -24,13 +24,13 @@ Exit codes are uniform across every subcommand:
     the call is refused — bad usage, a protocol violation, or a corrupt attempt
     context.
 
-The supervised-command and VASP subcommands additionally report the classified
-outcome of the program they ran: ``run`` returns ``124`` on timeout, ``125`` when
-a checker or diagnostic stopped it, and ``22`` on any other nonzero exit;
-``vasp-run`` returns ``20``, ``21``, ``22``, or ``124``; ``vasp-diagnose``
-returns ``20`` when it found something; and ``vasp-remedy-plan`` returns ``3``
-when the reviewed policy has no remaining safe action. ``125`` is also what
-``httk.workflow._launcher`` reports for a runner it could not start at all.
+The supervised-command subcommand additionally reports the classified outcome
+of the program it ran: ``run`` returns ``124`` on timeout, ``125`` when a checker
+or diagnostic stopped it, and ``22`` on any other nonzero exit. ``125`` is also
+what ``httk.workflow._launcher`` reports for a runner it could not start at all.
+The ``<code>-*`` subcommands of each installed code-support package (see
+:mod:`httk.workflow.codes`) are mounted beside these and define their own
+outcome codes.
 """
 
 import argparse
@@ -40,11 +40,13 @@ import os
 import shlex
 import sys
 from collections.abc import Mapping, Sequence
+from functools import cache
 from pathlib import Path
+from types import ModuleType
 from typing import Literal, cast
 
 from ._util import read_json, write_json_atomic
-from .codes.vasp import _bridge as _vasp_bridge
+from .codes import BRIDGE_ABSENT, installed_codes
 from .errors import FormatError
 from .models import validate_resources
 from .runtime import _read_environment
@@ -65,7 +67,7 @@ from .runtime_utils import (
 from .sdk import RUNNER_ERROR_FORMAT, Attempt, ChildSpec, Runner, RunnerRef
 from .supervision import CheckerSpec, ProcessSupervisor
 
-ABSENT = 1
+ABSENT = BRIDGE_ABSENT
 REFUSED = 2
 
 RUNNER_WORKFLOW_VARIABLE = "HTTK_WORKFLOW_RUNNER_WORKFLOW"
@@ -84,9 +86,20 @@ _CHILD_FIELDS = (
     "data_generation",
 )
 _JOIN_CONDITIONS = ("all_succeeded", "all_terminal", "any_succeeded", "any_terminal", "at_least")
-# The per-code command sets of httk.workflow.codes, by subcommand prefix; a new
-# code registers its bridge module here.
-_CODE_BRIDGES = {"vasp-": _vasp_bridge}
+
+
+@cache
+def _code_bridges() -> dict[str, ModuleType]:
+    """Return the bridge module of every installed code, by subcommand prefix."""
+
+    bridges: dict[str, ModuleType] = {}
+    for code in installed_codes():
+        try:
+            bridges[f"{code.name}-"] = code.resolve_bridge()
+        except Exception as exc:
+            # One broken code package must not take every other bridge call down.
+            print(f"httk-workflow: code {code.name!r} bridge {code.bridge!r} is unavailable: {exc}", file=sys.stderr)
+    return bridges
 
 
 # The fields `parent FIELD` reads; anything else is a usage error, not an absence.
@@ -262,8 +275,11 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--remove-source", action="store_true")
         item.add_argument("paths", nargs="+")
 
-    for bridge in _CODE_BRIDGES.values():
-        bridge.add_commands(commands)
+    for prefix, bridge in _code_bridges().items():
+        try:
+            bridge.add_commands(commands)
+        except Exception as exc:
+            print(f"httk-workflow: code {prefix[:-1]!r} bridge commands are unavailable: {exc}", file=sys.stderr)
     return parser
 
 
@@ -918,7 +934,7 @@ _UTILITY_COMMANDS = frozenset({"run", "calc", "template", "compress", "decompres
 
 def _command(arguments: argparse.Namespace) -> int:
     command = str(arguments.command)
-    for prefix, bridge in _CODE_BRIDGES.items():
+    for prefix, bridge in _code_bridges().items():
         if command.startswith(prefix):
             return bridge.run_command(arguments)
     if command in _UTILITY_COMMANDS:
@@ -968,9 +984,9 @@ def _batch(parser: argparse.ArgumentParser, text: str) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _parser()
-    arguments = parser.parse_args(argv)
     try:
+        parser = _parser()
+        arguments = parser.parse_args(argv)
         if arguments.command == "batch":
             return _batch(parser, sys.stdin.read())
         return _command(arguments)

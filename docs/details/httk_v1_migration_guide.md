@@ -202,7 +202,9 @@ differs — starting from a copy of it.
 ```
 
 The native Bash equivalent sources paths supplied by the manager and publishes
-structured outcomes:
+structured outcomes. Its `httk_vasp_*` functions come from the separate
+*httk-workflow-vasp* distribution (`pip install httk-workflow-vasp`), whose Bash
+API the manager exports as `HTTK_WORKFLOW_VASP_BASH_API` (see {doc}`/code_support`):
 
 ```bash
 #!/usr/bin/env bash

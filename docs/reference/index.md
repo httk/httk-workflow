@@ -16,8 +16,9 @@ in its `__all__` — rather than every source object. The three layers are:
   `httk.workflow.supervision`, `httk.workflow.transfers`,
   `httk.workflow.manifests`, `httk.workflow.hygiene`, `httk.workflow.adapters`,
   `httk.workflow.adapter_protocol`, `httk.workflow.configuration`, and
-  `httk.workflow.projects`, plus the domain and compatibility consumers
-  `httk.workflow.codes.vasp` and the `httk.workflow.compat` registry and
+  `httk.workflow.projects`, plus the `httk.workflow.codes` toolkit for
+  simulation-code support distributions (such as *httk-workflow-vasp*, whose
+  `httk.codes.vasp` is documented there) and the `httk.workflow.compat` registry and
   consumers (`httk.workflow.compat.cwl`, `httk.workflow.compat.pwd`,
   `httk.workflow.compat.jobflow`, and `httk.workflow.compat.v1` with its
   `httk.workflow.compat.v1.realization`). The registration modules are

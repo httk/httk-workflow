@@ -104,8 +104,10 @@ local clone. Module CI does not set it yet, so these tests skip there.
   [`docs/workflow_filesystem_api.md`](docs/workflow_filesystem_api.md).
 - **Runs ready-made VASP workflows** from
   [workflows-vasp](https://github.com/httk/workflows-vasp) by git URI, so an
-  ordinary relaxation or single point needs no runner written at all, and ships
-  the VASP helper API they build on — see [`docs/vasp_runners.md`](docs/vasp_runners.md).
+  ordinary relaxation or single point needs no runner written at all — see
+  [`docs/vasp_runners.md`](docs/vasp_runners.md). The VASP helper API they
+  build on is the separate *httk-workflow-vasp* distribution; any code plugs
+  in the same way ([`docs/code_support.md`](docs/code_support.md)).
 - **Runs workflows written elsewhere.** Python Workflow Definition and CWL
   documents become ordinary jobs; see
   [`docs/workflow_compat.md`](docs/workflow_compat.md).

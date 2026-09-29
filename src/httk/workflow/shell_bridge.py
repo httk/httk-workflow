@@ -17,8 +17,9 @@ Exit codes are uniform across every subcommand: ``0`` when the call succeeded,
 ``1`` when the answer is legitimately absent — an unset state key, a missing
 input with no default, a null child field — and ``2`` when the call is refused,
 which covers bad usage, a protocol violation, and a corrupt attempt context.
-The supervised-command and VASP subcommands additionally report the classified
-outcome of the program they ran.
+The supervised-command subcommand and the ``<code>-*`` subcommands of each
+installed code-support package (see :mod:`httk.workflow.codes`) additionally
+report the classified outcome of the program they ran.
 """
 
 from ._shell_bridge import (

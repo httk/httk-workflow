@@ -245,8 +245,9 @@ workdirs.
 value, or `fallback` (default `""`) when it is unset or empty.
 
 Booleans are Fortran `logical`: `httk_workflow_remove`'s `missing_ok` is an
-optional `logical`, marshalled to the C `int` flag. As in C, the `httk_vasp_*`
-surface of the Bash SDK has no dedicated wrappers; reach a `vasp-*` verb through
+optional `logical`, marshalled to the C `int` flag. As in C, a code's Bash API,
+such as *httk-workflow-vasp*'s `httk_vasp_*`, has no dedicated wrappers; reach a
+`<code>-*` verb such as `vasp-*` through
 `httk_workflow_invoke`, which is why the example below runs the configured
 command through `httk_workflow_run` and classifies its result.
 

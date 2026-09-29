@@ -202,9 +202,9 @@ rules above, and `httk_copy_file` reports `HTTK_WORKFLOW_OK` or
 not a regular file or names the same file as the destination; a copy refused
 mid-way may leave a partial destination, as `shutil.copyfile` does.
 
-The `httk_vasp_*` surface of the Bash SDK has no dedicated C wrappers; a C runner
-that needs a VASP subcommand reaches it through `httk_workflow_invoke` with the
-same `vasp-*` verb, which is why the example below runs the configured command
+A code's Bash API, such as *httk-workflow-vasp*'s `httk_vasp_*`, has no dedicated
+C wrappers; a C runner that needs such a subcommand reaches it through
+`httk_workflow_invoke` with the same `<code>-*` verb (`vasp-*`), which is why the example below runs the configured command
 through `httk_workflow_run` and classifies its result.
 
 ## Exit codes

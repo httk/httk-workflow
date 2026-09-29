@@ -967,7 +967,6 @@ EOF
 _MANAGED_RUNNER = """#!/usr/bin/env bash
 set -euo pipefail
 source "$HTTK_WORKFLOW_BASH_API"
-source "$HTTK_WORKFLOW_VASP_BASH_API"
 httk_workflow_runner tests.bash.managed start collect
 
 step_start() {
@@ -1096,35 +1095,3 @@ sys.stdout.flush()
     assert interleaved.getvalue().decode().splitlines() == [
         item for i in range(20) for item in (f"out-{i}", f"err-{i}")
     ]
-
-
-def _bridge(cwd: Path, *arguments: str, stdin: str | None = None) -> "subprocess.CompletedProcess[str]":
-    environment = {name: value for name, value in os.environ.items() if not name.startswith("HTTK_WORKFLOW_")}
-    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
-    return subprocess.run(
-        [sys.executable, "-m", "httk.workflow._shell_bridge", *arguments],
-        cwd=cwd,
-        env=environment,
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def test_code_bridge_commands_keep_the_absent_and_refused_exit_codes(tmp_path: Path) -> None:
-    (tmp_path / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
-    (tmp_path / "POSCAR").write_text("Si\n1.0\n1 0 0\n0 1 0\n0 0 1\nSi\n1\nDirect\n0 0 0\n", encoding="utf-8")
-    refusal = "httk-workflow: vasp-rattle-poscar needs --seed or --entropy"
-
-    absent = _bridge(tmp_path, "vasp-get-tag", "NSW")
-    assert (absent.returncode, absent.stdout, absent.stderr) == (1, "", "")
-    refused = _bridge(tmp_path, "vasp-rattle-poscar")
-    assert refused.returncode == 2 and refused.stderr.startswith(refusal), refused.stderr
-
-    batch_absent = _bridge(tmp_path, "batch", stdin="vasp-get-tag ENCUT\nvasp-get-tag NSW\n")
-    assert (batch_absent.returncode, batch_absent.stdout) == (1, "520\n")
-    assert batch_absent.stderr == "httk-workflow: batch line 2 failed: vasp-get-tag NSW\n"
-    batch_refused = _bridge(tmp_path, "batch", stdin="vasp-rattle-poscar\n")
-    assert batch_refused.returncode == 2
-    assert batch_refused.stderr.startswith(refusal) and "batch line 1 failed" in batch_refused.stderr

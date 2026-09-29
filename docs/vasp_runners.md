@@ -4,8 +4,11 @@
 
 The ready-made VASP workflows live in the
 [workflows-vasp](https://github.com/httk/workflows-vasp) repository, one
-workflow package per subdirectory. *httk-workflow* does not bundle them; it
-ships the VASP helper API they are built on, listed at the end of this page.
+workflow package per subdirectory. *httk-workflow* does not bundle them, nor the
+VASP helper API they are built on: that lives in the separate
+*httk-workflow-vasp* distribution (`pip install httk-workflow-vasp`), which
+provides `httk.codes.vasp` and the Bash VASP API. See {doc}`code_support` for
+how a code-support distribution plugs into *httk-workflow*.
 
 | URI | Short name | What it does |
 | --- | --- | --- |
@@ -50,8 +53,8 @@ See {doc}`sdks/sdk_parity` for the resolution table. The workflows default to
 ## Writing a VASP runner in Python
 
 A Python VASP runner is an ordinary {py:class}`~httk.workflow.Runner` whose
-steps spell out their work on the {py:mod}`httk.workflow.codes.vasp` primitives, the
-same functions the Bash VASP API wraps. The workflows-vasp runners
+steps spell out their work on the `httk.codes.vasp` primitives of
+*httk-workflow-vasp*, the same functions its Bash VASP API wraps. The workflows-vasp runners
 (`vasp-relax/run`, `vasp-static/run`, `vasp-relax-static/run`) are the worked
 examples: copy one and edit it. Each step reads its job parameters directly with
 `a.parameter(...)`, `a.setting(...)` and `a.state`, the way the Bash runner
@@ -59,17 +62,17 @@ reads `httk_workflow_parameter`:
 
 - `prepare` copies the payload POSCAR (failing `vasp.input_missing` when it is
   absent), INCAR and POTCAR into the workdir, builds a
-  {py:class}`~httk.workflow.codes.vasp.VaspPreparationOptions` from the job
-  parameters and calls {py:func}`~httk.workflow.codes.vasp.prepare_vasp_inputs`.
+  `VaspPreparationOptions` from the job
+  parameters and calls `prepare_vasp_inputs`.
 - `run` resolves the `vasp.command` setting, calls
-  {py:func}`~httk.workflow.codes.vasp.clean_vasp_outputs` and
-  {py:func}`~httk.workflow.codes.vasp.run_vasp`, and advances on a completed run with
+  `clean_vasp_outputs` and
+  `run_vasp`, and advances on a completed run with
   the `classification` and the energy from
-  {py:func}`~httk.workflow.codes.vasp.last_oszicar_energy`. Otherwise it plans a remedy
-  with {py:func}`~httk.workflow.codes.vasp.plan_vasp_remedy`, fails `vasp.failed`
+  `last_oszicar_energy`. Otherwise it plans a remedy
+  with `plan_vasp_remedy`, fails `vasp.failed`
   when the ladder or the remedy budget is exhausted, and else applies it with
-  {py:func}`~httk.workflow.codes.vasp.apply_vasp_remedy`, optionally rattles the POSCAR
-  ({py:func}`~httk.workflow.codes.vasp.rattle_poscar`), counts `remedies`, and retries.
+  `apply_vasp_remedy`, optionally rattles the POSCAR
+  (`rattle_poscar`), counts `remedies`, and retries.
 - `publish` puts the collected files into transactional data, or only notes
   them when the persistent workdir is the result, and succeeds.
 
@@ -100,19 +103,11 @@ a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
 
 A relax-then-static runner (`vasp-relax-static/run`) adds a `promote` step that
 archives the relaxation, turns its CONTCAR into the next POSCAR with
-{py:func}`~httk.workflow.codes.vasp.contcar_to_poscar`, and re-derives the inputs
-with the static tags; the Bash counterpart is the Bash VASP API below.
-
-## What stays in httk-workflow
-
-- {py:mod}`httk.workflow.codes.vasp`: the dependency-free helpers the runners import —
-  input preparation (`prepare_vasp_inputs`, k-point grids, POTCAR assembly),
-  diagnostics, the reviewed remedy ladder (`plan_vasp_remedy`,
-  {py:func}`~httk.workflow.codes.vasp.register_remedy_policy`), supervised execution
-  (`run_vasp`), and the result collectors in `httk.workflow.codes.vasp.collect`. See
-  {doc}`runtime_helpers`.
-- The Bash VASP API: a Bash runner sources `$HTTK_WORKFLOW_VASP_BASH_API` after
-  `$HTTK_WORKFLOW_BASH_API`; see {doc}`sdks/bash_api`.
+`contcar_to_poscar`, and re-derives the inputs
+with the static tags; the Bash counterpart uses the Bash VASP API, which a Bash
+runner sources as `$HTTK_WORKFLOW_VASP_BASH_API` after `$HTTK_WORKFLOW_BASH_API`.
+That variable is exported only when *httk-workflow-vasp* is installed, so guard
+it first with `: "${HTTK_WORKFLOW_VASP_BASH_API:?install httk-workflow-vasp}"`.
 
 A group whose practice differs copies a workflow package from the repository
 and edits it, or keeps the workflows and registers its own remedy policy.

@@ -244,8 +244,9 @@ another registered workflow (an id or alias, a git URI, a runner file, or a
 package directory) as a child and returns its job key; `args` carries the
 `call` options (`--file NAME=PATH`, `--input NAME=PATH`, `--parameter K=V`, …). `Attempt::gather` takes a `Gather` options struct with `when`,
 `count`, `on_impossible`, and `priority` fields, each `Option`, defaulting to the
-bridge's own default (`Gather::default()`). As in C, the `httk_vasp_*` surface of
-the Bash SDK has no dedicated methods; reach a `vasp-*` verb through
+bridge's own default (`Gather::default()`). As in C, a code's Bash API, such as
+*httk-workflow-vasp*'s `httk_vasp_*`, has no dedicated methods; reach a `<code>-*`
+verb such as `vasp-*` through
 `Attempt::invoke`, which is why the example below runs the configured command
 through `Attempt::run` and classifies its result. The `--details` and `--priority`
 options of `fail` are likewise reachable through `Attempt::invoke`.

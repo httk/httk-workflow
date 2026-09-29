@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from .compat import LanguageRequest
 
 from ._util import interpreter_first_path, validate_inputs
+from .codes import code_environment
 from .errors import FormatError, WorkflowError
 from .models import (
     ATTEMPTS_DIRECTORY,
@@ -819,7 +820,7 @@ def _describe(
     environment["HTTK_WORKFLOW_BASH_API"] = str(Path(__file__).with_name("languages") / "bash" / "httk-workflow.sh")
     environment["HTTK_WORKFLOW_LANGUAGES_DIR"] = str(Path(__file__).with_name("languages"))
     environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("languages") / "perl")
-    environment["HTTK_WORKFLOW_VASP_BASH_API"] = str(Path(__file__).with_name("codes") / "vasp" / "httk-vasp.sh")
+    environment.update(code_environment())
     # Describing is a pure read of the program, so no attempt context of a
     # surrounding job may leak into it: a runner scaffolding jobs is itself running
     # inside one.
@@ -1394,8 +1395,8 @@ def new_job(
     the payload; *parameters* is the job's opaque implementation mapping.
 
     *data_mode* defaults to the workflow's declared mode, or ``none`` when
-    unspecified. Packaged VASP workflows default to ``none``: their persistent
-    workdir holds the results. Pass ``transactional`` to copy their curated
+    unspecified. Workflows with a persistent workdir typically default to
+    ``none``: the workdir holds the results. Pass ``transactional`` to copy their curated
     outputs into ``data/`` as well. *publish* ``workspace`` publishes the runner
     file into the workspace runner store and pins its digest; ``installed``
     references a packaged runner through the reserved ``pkg:`` form instead and

@@ -1589,7 +1589,7 @@ that needs one MUST treat its absence as a missing dependency of that library
 rather than as a protocol violation. The ones this implementation exports are:
 
 ```text
-HTTK_WORKFLOW_VASP_BASH_API=<absolute packaged VASP Bash library>
+HTTK_WORKFLOW_<CODE>_BASH_API=<absolute Bash API of each installed code, e.g. HTTK_WORKFLOW_VASP_BASH_API>
 HTTK_WORKFLOW_PERL_API=<absolute packaged Perl SDK directory>
 HTTK_WORKFLOW_LANGUAGES_DIR=<absolute installed httk/workflow/languages directory>
 HTTK_WORKFLOW_RUNNER_ARTIFACTS=<absolute registered build-artifacts directory>
@@ -2351,7 +2351,10 @@ Codes emitted by this manager itself are reserved. Those currently in use are:
 - `runner_unavailable` — a runner outside the payload could not be resolved,
   opened, or entered at all;
 - `runner_mismatch` — the bytes of such a runner did not match the
-  `runner.sha256` the job pinned.
+  `runner.sha256` the job pinned;
+- `code_support_unavailable` — the Bash API of an installed simulation-code
+  support package could not be found, so the attempt environment could not be
+  built.
 
 A runner library that dispatches steps on a runner's behalf publishes ordinary
 runner failures, so its codes are reserved too. Those of the runner libraries

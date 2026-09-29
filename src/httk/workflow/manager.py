@@ -34,6 +34,7 @@ from ._util import (
     utc_now,
     write_json_atomic,
 )
+from .codes import code_environment
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -1635,7 +1636,7 @@ class TaskManager:
             # journal that will reference it.
             "durable": self.workspace.durable,
             # The workspace application settings, snapshotted at claim time, so a
-            # runner resolves a.setting("vasp.command") without the operator
+            # runner resolves a.setting("code.command") without the operator
             # re-exporting it for every job. This is the workspace layer of the
             # parameters → environment → workspace → default resolution.
             "settings": settings,
@@ -1672,9 +1673,9 @@ class TaskManager:
                 "HTTK_WORKFLOW_BASH_API": str(Path(__file__).with_name("languages") / "bash" / "httk-workflow.sh"),
                 "HTTK_WORKFLOW_LANGUAGES_DIR": str(Path(__file__).with_name("languages")),
                 "HTTK_WORKFLOW_PERL_API": str(Path(__file__).with_name("languages") / "perl"),
-                "HTTK_WORKFLOW_VASP_BASH_API": str(Path(__file__).with_name("codes") / "vasp" / "httk-vasp.sh"),
             }
         )
+        environment.update(code_environment())
         if job.data_mode == "transactional":
             environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
         declared_environment = job.environment.get("declared", {})

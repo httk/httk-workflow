@@ -10,8 +10,9 @@ wrong no other test would notice:
   ``transfer``;
 * the per-user remote definitions and identity keys moved from the data home to
   the configuration home;
-* ``WorkflowWorkspace`` became ``Workspace``, and the packaged VASP workflows
-  left the distribution for https://github.com/httk/workflows-vasp;
+* ``WorkflowWorkspace`` became ``Workspace``, the packaged VASP workflows
+  left the distribution for https://github.com/httk/workflows-vasp, and the
+  VASP helpers ``httk.workflow.codes.vasp`` for *httk-workflow-vasp*;
 * the workflow-system realizations moved from ``httk.workflow.languages`` into
   ``httk.workflow.compat`` (the httk-v1 one merged into ``compat.v1``), and the
   manifest key ``[workflow.runner] language`` became ``format``;
@@ -196,28 +197,25 @@ def test_the_workflow_workspace_alias_is_gone() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the vasp package
+# the VASP support
 # ---------------------------------------------------------------------------
 
 
-def test_the_vasp_helpers_live_only_in_the_vasp_package() -> None:
+def test_the_vasp_helpers_left_the_distribution() -> None:
+    """They live in *httk-workflow-vasp* as ``httk.codes.vasp``; only the toolkit stays."""
+
     import importlib
 
-    from httk.workflow.codes import vasp
+    from httk.workflow import codes
 
-    # The helpers moved under httk.workflow.codes with no alias left behind.
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("httk.workflow.vasp")
-
-    for name in ("prepare_vasp_inputs", "read_poscar_header", "run_vasp"):
-        assert callable(getattr(vasp, name))
-        # They were subtracted from the package root.
-        assert not hasattr(httk.workflow, name), f"httk.workflow still re-exports vasp.{name}"
-    assert vasp.__doc__ is not None and vasp.__doc__.startswith("Small, dependency-free VASP runner helpers")
+    for module in ("httk.workflow.vasp", "httk.workflow.codes.vasp"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module)
+    assert callable(codes.installed_codes)
 
 
 def test_the_packaged_vasp_workflows_are_gone() -> None:
-    """They live in https://github.com/httk/workflows-vasp; only the helpers stay."""
+    """They live in https://github.com/httk/workflows-vasp."""
 
     import importlib
 

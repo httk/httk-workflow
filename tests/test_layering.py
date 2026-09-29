@@ -2,9 +2,10 @@
 
 *httk-workflow* has one common execution implementation — the Attempt layer, the
 manager, and the modules that own the filesystem protocol — and several
-consumers that publish through it: the VASP domain package and the
-:mod:`httk.workflow.compat` consumers (the ``v1`` engine and the CWL, PWD, and
-jobflow realizations). The binding rule is
+consumers that publish through it: the :mod:`httk.workflow.compat` consumers
+(the ``v1`` engine and the CWL, PWD, and jobflow realizations). Simulation-code
+support lives outside the distribution and is reached only through the
+``httk.core`` code registry. The binding rule is
 directional. A consumer may use the common execution API (the root package and
 :mod:`httk.workflow.protocol`); the common execution API must never learn which
 language or scientific domain uses it, and one consumer must never reach into
@@ -41,7 +42,6 @@ COMMON_LAYER = (
 #: The consumer packages. None may import another. The registry root
 #: :mod:`httk.workflow.compat` is common, not a consumer.
 CONSUMER_ENGINES = (
-    "httk.workflow.codes.vasp",
     "httk.workflow.compat.v1",
     "httk.workflow.compat.cwl",
     "httk.workflow.compat.pwd",
@@ -172,9 +172,7 @@ def test_the_v1_reader_does_not_load_the_v1_realization() -> None:
 def _consumer_modules() -> list[Path]:
     """Return every consumer module whose imports the rule constrains."""
 
-    paths: list[Path] = sorted((WORKFLOW / "codes").rglob("*.py"))
-    paths.extend(sorted(path for path in (WORKFLOW / "compat").rglob("*.py") if path.parent != WORKFLOW / "compat"))
-    return paths
+    return sorted(path for path in (WORKFLOW / "compat").rglob("*.py") if path.parent != WORKFLOW / "compat")
 
 
 def _consumer_owner(module: str) -> str | None:
@@ -221,14 +219,15 @@ def test_the_manager_never_falls_back_to_a_whole_workspace_lookup() -> None:
     assert offending == [], f"manager.py reaches for a whole-workspace lookup: {sorted(set(offending))}"
 
 
-def test_scaffold_holds_no_vasp_knowledge() -> None:
-    """The generic scaffold registers no domain: a domain self-registers instead.
+def test_generic_modules_hold_no_vasp_knowledge() -> None:
+    """The generic scaffold, manager, and shell bridge name no simulation code.
 
-    Workflows reach the generic scaffold only through its provider registry, so
-    the module carries no hardcoded VASP workflow table, no VASP runner, workflow
-    or workflow identifier, and no import of the science that owns them. What a
-    provider supplies at import is data; the scaffold never names the domain, and
-    it registers nothing itself.
+    Workflows reach the generic scaffold only through its provider registry, and
+    code support reaches the manager and the shell bridge only through the
+    ``httk.core`` code registry, so none of them carries a hardcoded VASP workflow
+    table, runner, bridge, or Bash API path. The scaffold keeps only the POSCAR
+    file-naming conventions of its structure discovery, so it is checked by
+    token; the manager and the bridge must not mention VASP at all.
     """
 
     source = (WORKFLOW / "scaffold.py").read_text(encoding="utf-8")
@@ -236,13 +235,16 @@ def test_scaffold_holds_no_vasp_knowledge() -> None:
         "_PACKAGED",
         "PACKAGED_TEMPLATES",
         "httk.vasp",
-        "vasp-relax",
-        "vasp_relax",
-        "vasp-static",
-        "vasp_static",
+        "httk.codes",
+        "vasp-",
+        "vasp_",
+        "VASP_",
         "WorkflowProvider(",
     ):
         assert token not in source, f"scaffold must not name the VASP domain: {token!r}"
-    for imported in _imported_modules(WORKFLOW / "scaffold.py"):
-        assert not _names("httk.workflow.codes.vasp", imported)
-        assert not any(_names(engine, imported) for engine in CONSUMER_ENGINES)
+    for name in ("manager.py", "_shell_bridge.py"):
+        assert "vasp" not in (WORKFLOW / name).read_text(encoding="utf-8").lower(), f"{name} names VASP"
+    for name in ("scaffold.py", "manager.py", "_shell_bridge.py"):
+        for imported in _imported_modules(WORKFLOW / name):
+            assert not _names("httk.codes", imported), f"{name} imports {imported}"
+            assert not any(_names(engine, imported) for engine in CONSUMER_ENGINES), f"{name} imports {imported}"

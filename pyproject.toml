@@ -103,9 +103,8 @@ namespaces = true
 [tool.setuptools.package-data]
 "httk.workflow" = [
   "py.typed",
-  # The Bash authoring SDK and the per-code Bash APIs (see docs/sdks/bash_api).
+  # The Bash authoring SDK (see docs/sdks/bash_api).
   "languages/bash/*.sh",
-  "codes/vasp/*.sh",
   # The C authoring SDK ships beside the Bash library as one .h/.c
   # pair, designed to be vendored or compiled directly beside a runner.
   "languages/c/*.h",
