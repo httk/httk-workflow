@@ -1,5 +1,14 @@
-"""Crash-recoverable detached job transfer."""
+"""Crash-recoverable detached job transfer, and ejecting and adopting jobs.
 
+A detached bundle normally names the one workspace it is addressed to, and the
+source retires it only on that destination's acknowledgement. An *ejected* job
+is the same bundle addressed to no workspace (``destination_workspace_id`` is
+null): :func:`eject_job` moves it out of its workspace to a free-standing job
+directory and retires the source at once, and :func:`adopt_job` imports such a
+directory into any workspace and then removes it.
+"""
+
+import errno
 import hashlib
 import logging
 import os
@@ -24,6 +33,7 @@ from .models import (
     QUIESCENT_KINDS,
     STATE_KINDS,
     TERMINAL_KINDS,
+    TRANSFER_DIRECTORY,
     JobDefinition,
     Marker,
     canonical_uuid,
@@ -48,8 +58,10 @@ __all__ = [
     "TRANSFER_RUNNERS",
     "TransferCandidate",
     "acknowledge_transfer",
+    "adopt_job",
     "detach_job",
     "discard_staged_bundle",
+    "eject_job",
     "import_bundle",
     "offer_transfers",
     "recover_transfers",
@@ -58,7 +70,6 @@ __all__ = [
     "validate_bundle",
 ]
 
-TRANSFER_DIRECTORY = ".httk-transfer"
 TRANSFER_MANIFEST = "manifest.json"
 TRANSFER_RUNNERS = "runners"
 
@@ -377,7 +388,11 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
     transfer_dir = payload / TRANSFER_DIRECTORY
     transfer_dir.mkdir(exist_ok=True)
     transfer_id = canonical_uuid(state.get("transfer_id"), "transfer_id")
-    destination_workspace_id = canonical_uuid(state.get("destination_workspace_id"), "destination_workspace_id")
+    destination_workspace_id = (
+        None
+        if state.get("destination_workspace_id") is None
+        else canonical_uuid(state.get("destination_workspace_id"), "destination_workspace_id")
+    )
     prior = state.get("prior_state")
     if not isinstance(prior, Mapping):
         raise FormatError("transferring state has no prior_state object")
@@ -421,8 +436,13 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
     elif not embedded.is_file():
         raise WorkspaceCorruptionError("transfer marker exists in neither state tree nor sealed bundle")
     ledger = {**manifest, "status": "sealed", "bundle": str(payload), "updated_at": utc_now()}
+    if "eject_to" in state:
+        # Where an ejection moves the bundle is source bookkeeping, not part of
+        # the travelling manifest: the directory may be moved on again freely.
+        ledger["eject_to"] = str(state["eject_to"])
     write_json_atomic(_ledger_path(workspace, transfer_id), ledger, durable=workspace.durable)
-    receipts.sealed(workspace, destination_workspace_id, transfer_id)
+    if destination_workspace_id is not None:
+        receipts.sealed(workspace, destination_workspace_id, transfer_id)
     return payload
 
 
@@ -461,7 +481,40 @@ def detach_job(
         transferred without its tree, or already transferring incompatibly.
     """
 
-    destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
+    return _detach_job(
+        workspace,
+        job_id,
+        marker=marker,
+        waiting_parent_map=waiting_parent_map,
+        destination_workspace_id=canonical_uuid(destination_workspace_id, "destination_workspace_id"),
+        destination_remote=destination_remote,
+        destination_placement=destination_placement,
+        transfer_id=transfer_id,
+        with_tree=with_tree,
+    )
+
+
+def _detach_job(
+    workspace: Workspace,
+    job_id: str,
+    *,
+    marker: Marker | None = None,
+    waiting_parent_map: Mapping[str, set[str]] | None = None,
+    destination_workspace_id: str | None,
+    destination_remote: str | None = None,
+    destination_placement: str | PurePosixPath | None = None,
+    transfer_id: str | None = None,
+    with_tree: bool = False,
+    eject_to: Path | None = None,
+) -> Path:
+    """Fence and seal one job as :func:`detach_job` does, or as an ejection.
+
+    A null *destination_workspace_id* seals a bundle addressed to no workspace,
+    which carries no replay sequence; *eject_to* then records where
+    :func:`eject_job` moves it, so an interrupted ejection can be resumed.
+    """
+
+    destination_id = destination_workspace_id
     identifier = str(uuid.uuid4()) if transfer_id is None else canonical_uuid(transfer_id, "transfer_id")
     existing = _ledger_path(workspace, identifier)
     if existing.is_file():
@@ -491,26 +544,32 @@ def detach_job(
     target_placement = normalize_placement(destination_placement or marker.placement)
     prior_state = workspace.read_state(marker)
     _finish_incoming_receipt(workspace, marker, prior_state)
-    identifier, sequence, epoch = receipts.reserve(workspace, destination_id, job_id, identifier)
+    fields: dict[str, object] = {"transfer_id": identifier}
+    if destination_id is not None:
+        # Sequenced replay protection is kept per destination peer. An ejected
+        # bundle has no peer; its adopter keeps an individual receipt instead.
+        identifier, sequence, epoch = receipts.reserve(workspace, destination_id, job_id, identifier)
+        fields = {"transfer_id": identifier, "transfer_sequence": sequence, "transfer_epoch": epoch}
+    elif eject_to is not None:
+        fields["eject_to"] = str(eject_to)
     writer = workspace.open_journal_writer()
     try:
         with writer:
-            receipts.fencing(workspace, destination_id, identifier)
+            if destination_id is not None:
+                receipts.fencing(workspace, destination_id, identifier)
             transferring = workspace.transition(
                 writer,
                 marker,
                 "transferring",
                 {
-                    "transfer_id": identifier,
-                    "transfer_sequence": sequence,
-                    "transfer_epoch": epoch,
+                    **fields,
                     "source_workspace_id": workspace.workspace_id,
                     "destination_workspace_id": destination_id,
                     "destination_remote": destination_remote,
                     "destination_placement": target_placement.as_posix(),
                     "prior_kind": marker.kind,
                     "prior_state": prior_state,
-                    "reason": "detached_transfer",
+                    "reason": "ejected" if destination_id is None else "detached_transfer",
                 },
                 # A sealed job may be transferred: its seal travels inside the payload,
                 # so the marker move is not a mutation the enforcement guard should refuse.
@@ -545,7 +604,8 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
         raise FormatError("unsupported detached transfer manifest")
     canonical_uuid(manifest.get("transfer_id"), "transfer_id")
     canonical_uuid(manifest.get("source_workspace_id"), "source_workspace_id")
-    canonical_uuid(manifest.get("destination_workspace_id"), "destination_workspace_id")
+    if manifest.get("destination_workspace_id") is not None:
+        canonical_uuid(manifest.get("destination_workspace_id"), "destination_workspace_id")
     canonical_uuid(manifest.get("job_id"), "job_id")
     normalize_placement(str(manifest.get("destination_placement")))
     marker_name = manifest.get("sealed_marker")
@@ -701,7 +761,11 @@ def _import_one(
 
 
 def _import_bundle(
-    workspace: Workspace, bundle: str | os.PathLike[str], *, known_marker: object = _UNKNOWN_MARKER
+    workspace: Workspace,
+    bundle: str | os.PathLike[str],
+    *,
+    known_marker: object = _UNKNOWN_MARKER,
+    placement: PurePosixPath | None = None,
 ) -> dict[str, object]:
     """Idempotently import a sealed bundle and publish its prior state.
 
@@ -711,6 +775,7 @@ def _import_bundle(
     :param workspace: Provide the destination workspace.
     :param bundle: Locate the sealed source bundle.
     :param known_marker: Reuse a previously resolved destination marker.
+    :param placement: Place the job here instead of at the manifest's destination placement.
     :return: The destination acknowledgement.
     :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation.
     :raises ValueError: If the bundle names another destination workspace.
@@ -726,7 +791,7 @@ def _import_bundle(
         if existing_ack.get("payload_sha256") != digest:
             raise WorkspaceCorruptionError("transfer acknowledgement digest mismatch")
         return existing_ack
-    if manifest["destination_workspace_id"] != workspace.workspace_id:
+    if manifest["destination_workspace_id"] not in (None, workspace.workspace_id):
         raise ValueError("bundle names a different destination workspace")
     # Signing the acknowledgement is refused for an ambiguous operator
     # identity (2+ configured identities and no default). Resolve it now,
@@ -767,7 +832,8 @@ def _import_bundle(
             _remove_tree(transfer_dir)
         write_json_atomic(acknowledgement_path, duplicate_ack, durable=workspace.durable)
         return duplicate_ack
-    placement = normalize_placement(str(manifest["destination_placement"]))
+    if placement is None:
+        placement = normalize_placement(str(manifest["destination_placement"]))
     target = workspace.payload_path(placement, str(manifest["job_key"]))
     if target.exists():
         if validate_bundle(target).get("payload_sha256") != digest:
@@ -956,6 +1022,7 @@ def _retire_sealed_bundle(
     transfer_id: str,
     *,
     provenance: Mapping[str, object],
+    moved_out: bool = False,
 ) -> Path:
     """Atomically retire a sealed source, then reclaim its redundant history.
 
@@ -963,24 +1030,30 @@ def _retire_sealed_bundle(
     Only then may deletion begin: interrupted deletion leaves a retired source,
     never a partially live bundle. Repeating retirement finishes cleanup. The
     returned path identifies the retired bundle even after its bytes are gone.
+    An ejected bundle (*moved_out*) has already left the workspace as the job
+    itself, so no retired copy is kept.
     """
 
     ledger_path = _ledger_path(workspace, transfer_id)
     if not ledger_path.exists():
         return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
     ledger = read_json(ledger_path)
-    receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
+    if ledger.get("destination_workspace_id") is not None:
+        receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
     if ledger.get("status") != "retired":
         bundle = Path(str(ledger["bundle"]))
         retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
-        if retired.exists():
+        if moved_out:
+            if bundle.exists():
+                raise WorkspaceCorruptionError(f"ejected bundle is still inside the workspace: {bundle}")
+        elif retired.exists():
             if bundle.exists():
                 raise WorkspaceCorruptionError("both active and retired source bundles exist")
         else:
             validate_bundle(bundle)
             retired.parent.mkdir(parents=True, exist_ok=True)
             os.rename(bundle, retired)
-        if workspace.durable:
+        if workspace.durable and not moved_out:
             # Persist both sides of the rename and the newly created parents
             # before a ledger can durably declare the source retired.
             for directory in (bundle.parent, retired.parent, retired.parent.parent):
@@ -1089,7 +1162,7 @@ def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
     for ledger in _ledgers(workspace):
         if ledger.get("status") == "retired":
             _retire_sealed_bundle(workspace, str(ledger["transfer_id"]), provenance={})
-        else:
+        elif ledger.get("destination_workspace_id") is not None:
             receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
     for marker in list(workspace.scan_markers(("transferring",))):
         state = workspace.read_state(marker)
@@ -1108,6 +1181,8 @@ def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
                 durable=workspace.durable,
             )
         results.append({"transfer_id": manifest["transfer_id"], "status": "sealed", "bundle": str(bundle)})
+    for ejected in _finish_pending_ejections(workspace):
+        results.append({"transfer_id": ejected["transfer_id"], "status": "ejected", "bundle": ejected["eject_to"]})
     unique = {(str(item["transfer_id"]), str(item["status"])): item for item in results}
     return list(unique.values())
 
@@ -1752,3 +1827,257 @@ def discard_staged_bundle(workspace: Workspace, staging: Path) -> None:
         _remove_tree(consumed)
     os.rename(staging, consumed)
     _remove_tree(consumed)
+
+
+# ---------------------------------------------------------------------------
+# Ejecting jobs to free-standing directories, and adopting them back
+# ---------------------------------------------------------------------------
+
+
+def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job_key: str) -> Path:
+    """Resolve where one job is ejected to, the way ``mv`` resolves its target.
+
+    An existing directory receives the job as ``<directory>/<job_key>``; any
+    other path names the new job directory itself, whose parent must exist.
+    The result is never inside a workspace, where the directory would read as
+    that workspace's own sealed bundle.
+    """
+
+    path = Path(target).expanduser()
+    if path.is_dir():
+        path = path / job_key
+    path = path.parent.resolve() / path.name
+    if path.exists() or path.is_symlink():
+        raise FileExistsError(f"eject destination already exists: {path}")
+    if not path.parent.is_dir():
+        raise ValueError(f"eject destination parent is not a directory: {path.parent}")
+    enclosing = Workspace.discover(path.parent)
+    if enclosing is not None:
+        relation = "this" if enclosing.resolve() == workspace.root.resolve() else "a"
+        raise ValueError(
+            f"eject destination {path} is inside {relation} workspace ({enclosing}); "
+            "eject to a directory outside every workspace, then adopt it where it should go"
+        )
+    return path
+
+
+def _holds_bundle(path: Path, transfer_id: str, payload_sha256: str) -> bool:
+    """Report whether *path* is an intact copy of exactly this ejected bundle."""
+
+    try:
+        manifest = validate_bundle(path)
+    except (FormatError, OSError):
+        return False
+    return manifest.get("transfer_id") == transfer_id and manifest.get("payload_sha256") == payload_sha256
+
+
+def _move_bundle_out(workspace: Workspace, bundle: Path, target: Path, transfer_id: str, digest: str) -> None:
+    """Move a sealed bundle to *target*, by rename or by verified copy.
+
+    Within one filesystem the move is a single rename. Across filesystems the
+    bundle is copied to a hidden sibling of *target*, verified, and renamed into
+    place before the workspace copy is removed, so an interruption leaves either
+    the bundle in the workspace or a complete copy at *target*, never neither.
+    """
+
+    try:
+        os.rename(bundle, target)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    else:
+        if workspace.durable:
+            fsync_directory(target.parent)
+            fsync_directory(bundle.parent)
+        return
+    staging = target.parent / f".{target.name}.eject-{transfer_id}"
+    if staging.exists():
+        _remove_tree(staging)
+    shutil.copytree(bundle, staging, symlinks=True)
+    if not _holds_bundle(staging, transfer_id, digest):
+        _remove_tree(staging)
+        raise FormatError(f"copied ejected bundle does not verify: {staging}")
+    if workspace.durable:
+        fsync_tree(staging)
+    os.rename(staging, target)
+    if workspace.durable:
+        fsync_directory(target.parent)
+    _remove_tree(bundle)
+
+
+def _finish_ejection(workspace: Workspace, ledger: Mapping[str, Any]) -> Path:
+    """Move one sealed, unaddressed bundle to its recorded target and retire it.
+
+    Every step is resumable from the ledger alone: the bundle is still in the
+    workspace and is moved, or a complete copy is already at the target and the
+    leftover workspace copy is dropped, or the bundle has left and only the
+    retirement remains.
+    """
+
+    transfer_id = str(ledger["transfer_id"])
+    digest = str(ledger["payload_sha256"])
+    bundle = Path(str(ledger["bundle"]))
+    target = Path(str(ledger["eject_to"]))
+    if bundle.exists():
+        if _holds_bundle(target, transfer_id, digest):
+            _remove_tree(bundle)
+        elif target.exists() or target.is_symlink():
+            raise FileExistsError(
+                f"eject destination {target} was taken by something else; the job stays sealed in its "
+                "workspace until that path is moved away and the ejection is resumed "
+                "(`httk job eject` again, or any command that recovers transfers)"
+            )
+        else:
+            _move_bundle_out(workspace, bundle, target, transfer_id, digest)
+    # A bundle is removed from the workspace only once a verified copy is at the
+    # target, so a bundle that is gone has left; the directory may since have
+    # been moved on or adopted, which is no concern of this workspace.
+    _retire_sealed_bundle(workspace, transfer_id, provenance={"ejected_to": str(target)}, moved_out=True)
+    return target
+
+
+def _finish_pending_ejections(workspace: Workspace) -> list[dict[str, Any]]:
+    """Resume every ejection an earlier process sealed but did not finish.
+
+    :param workspace: The workspace the jobs are leaving.
+    :return: The ledgers of the ejections this call finished.
+    """
+
+    for marker in list(workspace.scan_markers(("transferring",))):
+        state = workspace.read_state(marker)
+        if "eject_to" in state:
+            _seal_transferring(workspace, marker, state)
+    finished = []
+    for ledger in _ledgers(workspace):
+        if ledger.get("status") != "sealed" or "eject_to" not in ledger:
+            continue
+        try:
+            _finish_ejection(workspace, ledger)
+        except (WorkflowError, OSError) as exc:
+            # One stuck ejection (say, a destination taken meanwhile) must not
+            # block every other job from leaving; it stays sealed and resumable.
+            _LOGGER.warning(
+                "cannot finish ejecting job %s: %s",
+                ledger.get("job_key"),
+                exc,
+                extra={"event": "eject_pending", "transfer_id": ledger.get("transfer_id")},
+            )
+            continue
+        finished.append(ledger)
+    return finished
+
+
+@receipts.serialized
+def eject_job(
+    workspace: Workspace,
+    job_id: str,
+    target: str | os.PathLike[str],
+    *,
+    marker: Marker | None = None,
+) -> Path:
+    """Move one quiescent job out of its workspace to a free-standing job directory.
+
+    The job is fenced and sealed as a detached bundle addressed to no workspace,
+    moved to *target*, and retired from the source, which keeps no copy. The
+    directory is the whole job: its payload, seal, tree metadata, prior state,
+    and any shared runner it pins. Any ejection an interrupted earlier call left
+    unfinished is completed first.
+
+    :param workspace: The workspace the job leaves.
+    :param job_id: The job to eject.
+    :param target: The new job directory, or an existing directory to eject into.
+    :param marker: The already resolved job marker, when available.
+    :return: The free-standing job directory.
+    :raises ValueError: If the job cannot leave its workspace on its own or the target is unusable.
+    :raises FileExistsError: If the target job directory already exists.
+    :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+    """
+
+    _finish_pending_ejections(workspace)
+    if marker is None:
+        marker = workspace.find_marker_by_id(job_id)
+        if marker is None:
+            raise ValueError(f"no job {job_id} in this workspace")
+    destination = _eject_destination(workspace, target, marker.job_key)
+    transfer_id = str(uuid.uuid4())
+    _detach_job(
+        workspace, job_id, marker=marker, destination_workspace_id=None, transfer_id=transfer_id, eject_to=destination
+    )
+    return _finish_ejection(workspace, read_json(_ledger_path(workspace, transfer_id)))
+
+
+def _adopted_through(workspace: Workspace, job_id: str, transfer_id: str) -> bool:
+    """Report whether this workspace's live copy of a job arrived by *transfer_id*.
+
+    The import frame that starts the job's history here names the transfer it
+    came by; later frames do not repeat it, so the history is walked to its
+    start. An unreadable history answers no, which keeps a directory in place.
+    """
+
+    marker = workspace.find_marker_by_id(job_id)
+    if marker is None:
+        return False
+    first: Mapping[str, Any] | None = None
+    for _reference, frame in iter_record_chain(workspace.control, marker.record_ref, deadline_seconds=0):
+        if frame is None:
+            return False
+        first = frame
+    provenance = None if first is None else first.get("transfer")
+    return isinstance(provenance, Mapping) and provenance.get("transfer_id") == transfer_id
+
+
+@receipts.serialized
+def adopt_job(
+    workspace: Workspace,
+    directory: str | os.PathLike[str],
+    *,
+    placement: str | PurePosixPath | None = None,
+) -> Marker:
+    """Move one free-standing job directory into a workspace.
+
+    The directory must be an ejected job (a bundle addressed to no workspace).
+    It is verified, imported exactly as a transfer is, restored to the state it
+    was ejected in, and removed only once the workspace holds the job. A copy of
+    a directory whose job has already passed through this workspace is refused
+    and left in place rather than resurrecting a stale job.
+
+    :param workspace: The workspace the job joins.
+    :param directory: The free-standing job directory.
+    :param placement: Place the job here instead of where it was ejected from.
+    :return: The adopted job's marker.
+    :raises ValueError: If the directory is inside the workspace, addressed to a workspace, or stale.
+    :raises FileExistsError: If the workspace already holds this job or its payload path.
+    :raises httk.workflow.errors.FormatError: If the directory does not verify.
+    """
+
+    workspace._require_unsealed()
+    source = Path(directory).expanduser().resolve()
+    root = workspace.root.resolve()
+    if source == root or root in source.parents:
+        raise ValueError(f"{source} is already inside the workspace")
+    manifest = validate_bundle(source)
+    if manifest.get("destination_workspace_id") is not None:
+        raise ValueError(
+            f"{source} is a transfer bundle addressed to workspace {manifest['destination_workspace_id']}; "
+            "move it with `httk workflow transfer` instead"
+        )
+    job_id = str(manifest["job_id"])
+    transfer_id = str(manifest["transfer_id"])
+    if _ack_path(workspace, transfer_id).is_file():
+        # This workspace imported the directory before: either that adoption was
+        # interrupted before removing it, or this is a copy and the job moved on.
+        if not _adopted_through(workspace, job_id, transfer_id):
+            raise ValueError(
+                f"{source} was already adopted into this workspace once and its job has since moved on; "
+                "it is a stale copy and was left in place"
+            )
+    else:
+        target_placement = normalize_placement(placement or str(manifest["destination_placement"]))
+        _import_bundle(workspace, source, placement=target_placement)
+    adopted = workspace.find_marker_by_id(job_id)
+    if adopted is None:
+        raise WorkspaceCorruptionError(f"adopted job {manifest['job_key']} has no marker; {source} was left in place")
+    _remove_tree(source)
+    if workspace.durable:
+        fsync_directory(source.parent)
+    return adopted

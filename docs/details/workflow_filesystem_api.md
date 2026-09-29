@@ -2035,6 +2035,21 @@ the complete bundle first, appends an import frame, then renames the embedded
 marker into the target workspace's state tree. The extra transfer metadata exists
 only while the job is detached or retained for transfer provenance.
 
+An *ejected* job is such a bundle addressed to no workspace: its manifest has a
+null `destination_workspace_id` and no transfer sequence. The source records the
+chosen target path in its transfer ledger, moves the bundle there (one rename,
+or across filesystems a copy to a hidden sibling that is verified and renamed
+into place before the source copy is removed), and retires the source without an
+acknowledgement, keeping no retired copy. Recovery resumes from the ledger: a
+bundle still in the workspace is moved; a verified copy at the target means only
+the workspace copy remains to be removed; neither is payload loss. Any workspace
+may *adopt* the directory: it imports it exactly as an addressed bundle, keeps
+the individual acknowledgement as its replay receipt, and removes the directory
+only after the imported marker names this transfer. A second directory with the
+same transfer id whose job has since left is refused as stale. The transfer
+envelope `.httk-transfer/` is excluded from payload digests and job seals alike,
+so a sealed job verifies while ejected and after adoption.
+
 ### Job trees move together
 
 A spawned child is **bound** to its parent while it is not detached (see

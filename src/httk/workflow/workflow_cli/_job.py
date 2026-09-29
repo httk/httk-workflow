@@ -1644,6 +1644,44 @@ def handle_job_detach(arguments: argparse.Namespace, context: CLIContext) -> int
     return 1 if failed else 0
 
 
+def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move quiescent jobs out of a workspace to free-standing job directories."""
+
+    workspace = Workspace(_local_root(arguments, context, action="eject jobs from it"), durable=_durable(arguments))
+    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    destination = Path(arguments.destination).expanduser()
+    if len(markers) > 1 and not destination.is_dir():
+        print(f"error: ejecting {len(markers)} jobs needs an existing directory, not {destination}", file=sys.stderr)
+        return 1
+    failed = False
+    for marker in markers:
+        try:
+            directory = workspace.eject(marker.job_id, destination)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{marker.job_id}: {exc}", file=sys.stderr)
+            continue
+        print(f"{marker.job_id}\tejected\t{directory}")
+    return 1 if failed else 0
+
+
+def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move free-standing (ejected) job directories into a workspace."""
+
+    workspace = Workspace(_local_root(arguments, context, action="adopt jobs into it"), durable=_durable(arguments))
+    failed = False
+    for directory in arguments.directories:
+        try:
+            marker = workspace.adopt(directory, placement=arguments.placement)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{directory}: {exc}", file=sys.stderr)
+            continue
+        payload = workspace.payload_path(marker.placement, marker.job_key)
+        print(f"{marker.job_id}\tadopted\t{marker.kind}\t{payload}")
+    return 1 if failed else 0
+
+
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe jobs completely from their authoritative state."""
 
@@ -2086,6 +2124,41 @@ def build_job_parser(
         help='configured identity short name or a literal "Name <email>" (default: the configured identity)',
     )
     add_durability_arguments(detach)
+
+    eject = _leaf(
+        group,
+        "eject",
+        summary="move jobs out of a workspace to free-standing directories",
+        description=(
+            "Move quiescent jobs out of the workspace, each to a free-standing job directory that carries "
+            "its payload, seal, state, and pinned runner: `eject JOB... DEST`. Like mv, an existing "
+            "directory DEST receives each job as DEST/<job-key>; otherwise DEST names the one new job "
+            "directory. The workspace keeps no copy; `job adopt` brings a directory back into any workspace"
+        ),
+        handler=handle_job_eject,
+    )
+    _add_job_selector(eject)
+    eject.add_argument("destination", metavar="DEST", help="the new job directory, or a directory to eject into")
+    add_durability_arguments(eject)
+
+    adopt = _leaf(
+        group,
+        "adopt",
+        summary="move free-standing job directories into a workspace",
+        description=(
+            "Move free-standing job directories made by `job eject` into the workspace, restoring each "
+            "job to the state it was ejected in; a directory is removed only once the workspace holds its job"
+        ),
+        handler=handle_job_adopt,
+    )
+    _add_workspace_option(adopt, help_text="the workspace to adopt into")
+    adopt.add_argument("directories", metavar="DIR", nargs="+", help="a free-standing job directory")
+    adopt.add_argument(
+        "--placement",
+        metavar="PLACEMENT",
+        help="where the jobs land (default: the placement they were ejected from)",
+    )
+    add_durability_arguments(adopt)
 
     show = _leaf(
         group,

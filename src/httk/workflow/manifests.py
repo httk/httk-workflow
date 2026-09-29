@@ -28,6 +28,7 @@ from ._util import json_bytes, retry_delay, timestamp_seconds, utc_now
 from .models import (
     QUIESCENT_KINDS,
     STATE_KINDS,
+    TRANSFER_DIRECTORY,
     is_payload_private,
 )
 from .projects import (
@@ -58,12 +59,19 @@ def payload_file_records(root: Path) -> list[dict[str, object]]:
     """Return the deterministic records of one job payload, minus runner scratch.
 
     A payload's runner-private entries — attempt control, logs, and job state —
-    are excluded from every seal record exactly as they are from a payload
-    digest, so publishing an outcome never changes a sealed payload's records.
+    and the transfer envelope of a detached or ejected job are excluded from
+    every seal record exactly as they are from a transfer payload digest, so
+    publishing an outcome, or moving the job out of its workspace and back,
+    never changes a sealed payload's records.
     """
 
     base = Path(root)
-    return file_records(base, skip=lambda entry: entry.parent == base and is_payload_private(entry.name))
+    return file_records(
+        base,
+        skip=lambda entry: (
+            entry.parent == base and (is_payload_private(entry.name) or entry.name == TRANSFER_DIRECTORY)
+        ),
+    )
 
 
 @dataclass(frozen=True)

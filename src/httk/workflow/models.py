@@ -60,6 +60,10 @@ QUIESCENT_KINDS = frozenset({"submitted", "ready", "waiting", "paused", "failed"
 ATTEMPTS_DIRECTORY = "attempts"
 LOGS_DIRECTORY = "logs"
 JOB_STATE_DIRECTORY = ".httk-job"
+# The envelope a detached or ejected job carries while it is out of every
+# workspace: its manifest, its marker, and any shared runner it pins. It
+# describes the bundle rather than the job, so no payload digest or seal covers it.
+TRANSFER_DIRECTORY = ".httk-transfer"
 WORKSPACE_DIRECTORY = ".httk-workspace"
 # Workspace policy: the tunables the specification calls "configured", stored
 # once in format.json so that two implementations attaching the same workspace

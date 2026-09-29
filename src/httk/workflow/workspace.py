@@ -955,6 +955,30 @@ class Workspace:
             self.payload_path(marker.placement, marker.job_key), operator=operator, durable=self.durable
         )
 
+    def eject(self, job_id: str, target: str | os.PathLike[str]) -> Path:
+        """Move one quiescent job out of this workspace to a free-standing job directory.
+
+        :param job_id: Identify the job to eject.
+        :param target: The new job directory, or an existing directory to eject into.
+        :return: The free-standing job directory.
+        """
+
+        from .transfers import eject_job
+
+        return eject_job(self, job_id, target)
+
+    def adopt(self, directory: str | os.PathLike[str], *, placement: str | PurePosixPath | None = None) -> Marker:
+        """Move one free-standing (ejected) job directory into this workspace.
+
+        :param directory: The free-standing job directory.
+        :param placement: Place the job here instead of where it was ejected from.
+        :return: The adopted job's marker.
+        """
+
+        from .transfers import adopt_job
+
+        return adopt_job(self, directory, placement=placement)
+
     def import_bundle(self, bundle: str | os.PathLike[str]) -> dict[str, object]:
         """Import a validated detached transfer bundle.
 

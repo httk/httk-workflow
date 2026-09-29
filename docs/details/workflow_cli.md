@@ -23,7 +23,7 @@ in.
 httk workspace          init | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock | seal | unseal
 httk workflow runner     publish | describe
 httk workflow build      [--workspace WORKSPACE] TARGET...
-httk job                 new | submit | request | delete | seal | unseal | list | show | log | why | debug
+httk job                 new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug
 httk workflow list       [--json]
 httk workflow describe   TARGET [--json]
 httk workflow install    URI... [--json]
@@ -209,6 +209,8 @@ any other package and builds it.
 | `job seal [--keys REFS] JOB...` | seal the payloads of selected quiescent jobs | `--workspace`, `--keys` overrides the `seal.keys` setting |
 | `job unseal [--force] JOB...` | remove the seals of selected jobs, refused while the workspace is sealed | `--workspace`, `--force` skips the confirmation |
 | `job detach [OPTIONS] JOB...` | make spawned jobs independent of their parents, permanently | `--workspace`, optional `--operator` (recorded; default identity when omitted) |
+| `job eject [OPTIONS] JOB... DEST` | move quiescent jobs out of the workspace to free-standing job directories | `--workspace`; like `mv`, an existing `DEST` directory receives each job as `DEST/<job-key>` |
+| `job adopt [OPTIONS] DIR...` | move free-standing job directories into the workspace | `--workspace`, `--placement` (default: where each job was ejected from) |
 | `job list [OPTIONS]` | list jobs as a cheap table (remote: over the adapter) | `--workspace`, `--kind`, `--placement` (prefix), `--limit`, `--after`, `--tag-contains`, `--counts`, `--json`, `--adapter-timeout` |
 | `job show [OPTIONS] JOB...` | describe jobs from their state (remote: over the adapter) | `--workspace`, `--no-children`, `--json`, `--adapter-timeout` |
 | `job log [OPTIONS] JOB...` | print transition histories (remote: over the adapter) | `--workspace`, `--limit`, `--json`, `--adapter-timeout` |
@@ -229,6 +231,25 @@ state except `transferring`, sealed or not, and it cannot be undone. Each job
 prints `detached` or `already detached`; a job with no parent is refused.
 For a spawned job, `job show` adds a `detached` line — `yes` or `no`, with the
 parent's key — and `--json` always carries a `detached` boolean.
+
+`job eject` and `job adopt` move a job out of a workspace and into one without
+either workspace knowing the other, so neither needs to be registered (reach an
+unregistered workspace with `httk -C DIR`). `job eject` accepts a quiescent job
+that can leave on its own — not one bound to its live parent, one with bound
+children, or one in an unresolved join — and refuses a destination inside any
+workspace. The job directory it leaves behind is the whole job: payload, seal,
+tree metadata, the state it was in, and any shared workspace runner it pins; the
+workspace keeps no copy. `httk workflow seal verify DIR` verifies a sealed one in
+place. Each job prints `JOB_ID ejected PATH`. `job adopt` verifies a directory,
+restores the job to the state it was ejected in, installs a runner it carries,
+and removes the directory only once the workspace holds the job; it prints
+`JOB_ID adopted STATE PAYLOAD`. It refuses a directory made by a transfer to a
+named workspace (use `httk workflow transfer`), and a copy of a directory whose
+job already passed through this workspace, which it leaves in place. Both are
+crash-safe: an interrupted `job eject` is finished by the next `job eject` or
+transfer recovery in that workspace, and an interrupted `job adopt` by adopting
+the same directory again. Neither works in a sealed workspace or project; a
+sealed job keeps its seal.
 
 An operator `pause` request against `claimed`, `running`, or `committing` is
 deferred: the manager records it and pauses the job at the next attempt
