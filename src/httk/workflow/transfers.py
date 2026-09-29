@@ -287,50 +287,16 @@ def _manifest_runners(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
     return result
 
 
-def _bundled_seal(workspace: Workspace, marker: Marker, transfer_dir: Path) -> dict[str, str] | None:
-    """Copy a detached job's seal into its bundle so the seal travels with it.
+def _payload_seal_sha256(payload: Path) -> str | None:
+    """Return the digest of the seal a payload carries, or ``None`` when unsealed.
 
-    A sealed payload must arrive at the destination still sealed by exactly the
-    same signed document, so the seal is carried verbatim beside the manifest
-    rather than re-signed. An unsealed job contributes nothing.
+    The seal lives inside the payload's ``.httk-job/``, which the payload digest
+    excludes, so the manifest pins it separately: a bundle must arrive exactly as
+    sealed, or exactly as unsealed, as it left.
     """
 
-    seal_source = job_seal_path(workspace, marker.job_key)
-    if not seal_source.is_file():
-        return None
-    embedded = transfer_dir / "seal.json"
-    embedded.write_bytes(seal_source.read_bytes())
-    return {"path": "seal.json", "sha256": sha256_file(embedded)}
-
-
-def _install_bundled_seal(workspace: Workspace, transfer_dir: Path, manifest: Mapping[str, Any]) -> None:
-    """Restore a bundle's carried seal at the destination, refusing a conflict.
-
-    The seal is copied byte for byte — never re-serialized — so its digest, and
-    therefore any enclosing workspace or project seal that pins it, is preserved.
-    A destination that already holds an identical seal is left untouched; one
-    holding a different seal is corruption rather than something to overwrite.
-    """
-
-    entry = manifest.get("seal")
-    if entry is None:
-        return
-    if not isinstance(entry, Mapping):
-        raise FormatError("transfer manifest seal must be an object")
-    carried = transfer_dir / str(entry["path"])
-    if not carried.is_file():
-        raise FormatError("transfer bundle does not carry the seal it declares")
-    destination = job_seal_path(workspace, str(manifest["job_key"]))
-    if destination.is_file():
-        if sha256_file(destination) == str(entry["sha256"]):
-            return
-        raise WorkspaceCorruptionError(
-            f"destination job seal for {manifest['job_key']} differs from the transferred seal"
-        )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = destination.parent / f".seal.{uuid.uuid4()}.tmp"
-    staging.write_bytes(carried.read_bytes())
-    os.replace(staging, destination)
+    path = job_seal_path(payload)
+    return sha256_file(path) if path.is_file() else None
 
 
 def _ledger_path(workspace: Workspace, transfer_id: str) -> Path:
@@ -417,7 +383,6 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         raise FormatError("transferring state has no prior_state object")
     prior_kind = str(state.get("prior_kind"))
     runners = _bundled_runners(workspace, payload, transfer_dir)
-    seal = _bundled_seal(workspace, marker, transfer_dir)
     manifest = {
         "format": TRANSFER_FORMAT,
         "format_version": TRANSFER_FORMAT_VERSION,
@@ -432,7 +397,7 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         "destination_placement": str(state["destination_placement"]),
         "payload_sha256": _payload_digest(payload),
         "runners": runners,
-        "seal": seal,
+        "seal_sha256": _payload_seal_sha256(payload),
         "prior_kind": prior_kind,
         "prior_state": dict(prior),
         "priority": marker.priority,
@@ -547,9 +512,8 @@ def detach_job(
                     "prior_state": prior_state,
                     "reason": "detached_transfer",
                 },
-                # A sealed job may be transferred: its seal travels in the bundle and
-                # is restored at the destination, so the marker move is not a mutation
-                # the enforcement guard should refuse.
+                # A sealed job may be transferred: its seal travels inside the payload,
+                # so the marker move is not a mutation the enforcement guard should refuse.
                 allow_sealed=True,
             )
     except BaseException:
@@ -597,15 +561,8 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
             raise FormatError(f"transfer bundle does not carry the runner it declares: {entry['path']}")
         if _runner_digest(carried) != entry["sha256"]:
             raise FormatError(f"bundled runner digest mismatch: {entry['path']}")
-    seal_entry = manifest.get("seal")
-    if seal_entry is not None:
-        if not isinstance(seal_entry, Mapping):
-            raise FormatError("transfer manifest seal must be an object")
-        carried_seal = payload / TRANSFER_DIRECTORY / str(seal_entry.get("path"))
-        if not carried_seal.is_file():
-            raise FormatError("transfer bundle does not carry the seal it declares")
-        if sha256_file(carried_seal) != seal_entry.get("sha256"):
-            raise FormatError("bundled seal digest mismatch")
+    if _payload_seal_sha256(payload) != manifest.get("seal_sha256"):
+        raise FormatError("detached transfer payload seal does not match the manifest")
     return manifest
 
 
@@ -636,8 +593,6 @@ def _finish_incoming_receipt(workspace: Workspace, marker: Marker, state: Mappin
         return
     transfer_dir = workspace.payload_path(marker.placement, marker.job_key) / TRANSFER_DIRECTORY
     if transfer_dir.exists():
-        manifest = read_json(transfer_dir / TRANSFER_MANIFEST)
-        _install_bundled_seal(workspace, transfer_dir, manifest)
         _remove_tree(transfer_dir)
     if not receipts.received(workspace, provenance):
         receipts.remember(workspace, provenance)
@@ -809,7 +764,6 @@ def _import_bundle(
         )
         transfer_dir = workspace.payload_path(duplicate.placement, duplicate.job_key) / TRANSFER_DIRECTORY
         if transfer_dir.exists():
-            _install_bundled_seal(workspace, transfer_dir, manifest)
             _remove_tree(transfer_dir)
         write_json_atomic(acknowledgement_path, duplicate_ack, durable=workspace.durable)
         return duplicate_ack
@@ -827,6 +781,8 @@ def _import_bundle(
             shutil.copytree(source, staging, symlinks=True)
         if _payload_digest(staging) != digest:
             raise FormatError("copied transfer payload digest mismatch")
+        if _payload_seal_sha256(staging) != manifest.get("seal_sha256"):
+            raise FormatError("copied transfer payload seal mismatch")
         target.parent.mkdir(parents=True, exist_ok=True)
         workspace._publish_path(staging, target)
     if workspace.durable:
@@ -902,7 +858,6 @@ def _import_bundle(
         imported_record,
         durable=workspace.durable,
     )
-    _install_bundled_seal(workspace, transfer_dir, manifest)
     _remove_tree(transfer_dir)
     # The acknowledgement is what retires a sealed source, so it carries the
     # optional identity signature of whoever imported the bundle: the source can
@@ -1030,8 +985,6 @@ def _retire_sealed_bundle(
             # before a ledger can durably declare the source retired.
             for directory in (bundle.parent, retired.parent, retired.parent.parent):
                 fsync_directory(directory)
-        # The seal travelled to the destination with the bundle.
-        job_seal_path(workspace, str(ledger["job_key"])).unlink(missing_ok=True)
         ledger.update(
             {
                 "status": "retired",

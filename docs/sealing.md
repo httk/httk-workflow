@@ -19,11 +19,15 @@ Each level records the level below it, so a project seal transitively pins whole
 payloads without re-hashing them:
 
 - A **job seal** records the file hashes of one payload — and each file's owner
-  execute bit, so a runner cannot be quietly made (un)runnable. It lives at
-  `.httk-workspace/seals/jobs/<job_key>.json`. It covers the payload's own files,
-  **not** the payload-private scratch directories `attempts/`, `logs/`, and
-  `.httk-job/`: those are working state a job legitimately rewrites, so they are
-  excluded and may change without breaking the seal.
+  execute bit, so a runner cannot be quietly made (un)runnable. It lives inside
+  the job's own directory, at `<payload>/.httk-job/seal.json`, so it goes
+  wherever the job directory goes, and it names only the job (its id and key),
+  never the workspace or placement that held it. It covers the payload's own
+  files, **not** the payload-private scratch directories `attempts/`, `logs/`,
+  and `.httk-job/`: those are working state a job legitimately rewrites, so
+  they are excluded and may change without breaking the seal (and the seal
+  never covers itself). `httk workflow seal verify <payload>` checks a job
+  directory on its own, whether or not it sits inside a workspace.
 - A **workspace seal** records, for every job, the digest of that job's seal. It
   lives at `.httk-workspace/seal.json`. Every job must be sealed before the
   workspace can be.
@@ -98,9 +102,9 @@ What still works unchanged: every read-only command (`status`, `show`, `log`,
 `why`, `seal verify`), `gc` and `fsck`, `unlock`, **`workflow postprocess`** —
 it writes outside the payload (see below), so a sealed job can be postprocessed;
 its output is excluded from the job seal and, when it lives inside the project
-tree, from the project seal too — and **transfers**: the seal travels with the
-payload, so a job sealed here stays sealed, and verifiable, on the machine it
-moves to.
+tree, from the project seal too — and **transfers**: the seal travels inside the
+payload, and the transfer manifest pins its digest, so a job sealed here arrives
+exactly as sealed, and verifiable, on the machine it moves to.
 
 ## Sealing and unsealing in order
 

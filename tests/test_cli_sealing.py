@@ -105,8 +105,8 @@ def test_job_seal_writes_a_seal_and_reports_its_roles(tmp_path: Path, capsys) ->
     assert "identity" in out
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
-    assert is_job_sealed(workspace, marker.job_key)
-    assert job_seal_path(workspace, marker.job_key).is_file()
+    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    assert job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).is_file()
 
 
 def test_job_seal_refuses_a_non_quiescent_job(tmp_path: Path, capsys) -> None:
@@ -135,10 +135,10 @@ def test_job_unseal_declined_then_forced(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
     assert command(["job", "unseal", job_id], _context(project_root)) == 1
     assert "not removed" in capsys.readouterr().out
-    assert is_job_sealed(workspace, marker.job_key)
+    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
 
     assert command(["job", "unseal", "--force", job_id], _context(project_root)) == 0
-    assert not is_job_sealed(workspace, marker.job_key)
+    assert not is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
 
 
 def test_workspace_seal_refuses_unsealed_jobs_then_forces(tmp_path: Path, capsys) -> None:
@@ -205,7 +205,7 @@ def test_confirm_non_tty_refuses_without_force(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     assert command(["job", "unseal", job_id], _context(project_root)) == 1
     assert "requires --force" in capsys.readouterr().err
-    assert is_job_sealed(workspace, marker.job_key)
+    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
 
 
 def test_job_show_and_workspace_status_report_sealed(tmp_path: Path, capsys) -> None:

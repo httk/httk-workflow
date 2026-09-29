@@ -213,7 +213,9 @@ def _remove_jobs(workspace: "Workspace", markers: "Sequence[Marker]", *, force: 
             tuple(RemovalOutcome(marker.job_key, marker.kind, False, workspace_reason) for marker in selected)
         )
 
-    sealed = tuple(marker for marker in selected if is_job_sealed(workspace, marker.job_key))
+    sealed = tuple(
+        marker for marker in selected if is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    )
     if sealed:
         first_sealed = sealed[0]
         sealed_reason = f"job {first_sealed.job_key} is sealed; unseal it first"

@@ -1561,10 +1561,10 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     return _print_removal_report(remove_jobs(workspace, markers, force=bool(arguments.force)))
 
 
-def _seal_roles(workspace: Workspace, job_key: str) -> str:
+def _seal_roles(workspace: Workspace, marker: Marker) -> str:
     """Return the comma-joined signer roles recorded in one job's seal."""
 
-    seal = read_seal(job_seal_path(workspace, job_key))
+    seal = read_seal(job_seal_path(workspace.payload_path(marker.placement, marker.job_key)))
     return ",".join(str(signature.get("role")) for signature in seal.signatures)
 
 
@@ -1587,7 +1587,7 @@ def handle_job_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
             failed = True
             print(f"{marker.job_id}: {exc}", file=sys.stderr)
             continue
-        print(f"{marker.job_id}\tsealed\t{_seal_roles(workspace, marker.job_key)}")
+        print(f"{marker.job_id}\tsealed\t{_seal_roles(workspace, marker)}")
     if resolved.missing_roles:
         print(f"warning: no key resolved for seal role(s): {', '.join(resolved.missing_roles)}", file=sys.stderr)
     return 1 if failed else 0
@@ -1673,11 +1673,12 @@ def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
             markers = resolver.resolve_one(job)
             for marker in markers:
                 report = describe_job(workspace, marker, include_children=not arguments.no_children)
-                sealed = is_job_sealed(workspace, marker.job_key)
+                payload = workspace.payload_path(marker.placement, marker.job_key)
+                sealed = is_job_sealed(payload)
                 report["sealed"] = sealed
                 parent = _parent_key(workspace, marker)
-                report["detached"] = is_detached(workspace.payload_path(marker.placement, marker.job_key))
-                roles = _seal_roles(workspace, marker.job_key) if sealed else ""
+                report["detached"] = is_detached(payload)
+                roles = _seal_roles(workspace, marker) if sealed else ""
                 if sealed:
                     report["seal_roles"] = roles.split(",")
                 reports.append(report)

@@ -446,14 +446,14 @@ class Workspace:
 
         return self._policy.visibility_deadline_seconds
 
-    def _require_unsealed(self, job_key: str | None = None) -> None:
+    def _require_unsealed(self, marker: Marker | None = None) -> None:
         """Refuse a mutation when the workspace, its project, or a job is sealed.
 
         Seals are enforced at the write funnels rather than at attach, so a
         sealed tree stays fully readable and every maintenance operation keeps
         working; only the operations that would change sealed bytes are refused.
 
-        :param job_key: When given, also refuse if that job carries a seal.
+        :param marker: When given, also refuse if that marker's job carries a seal.
         :raises httk.workflow.errors.SealedError: If a covering level is sealed.
         """
 
@@ -465,8 +465,8 @@ class Workspace:
         project = discover_project(self.root)
         if project is not None and is_project_sealed(project):
             raise SealedError(f"project at {project} is sealed; unseal it first")
-        if job_key is not None and is_job_sealed(self, job_key):
-            raise SealedError(f"job {job_key} is sealed; unseal it first")
+        if marker is not None and is_job_sealed(self.payload_path(marker.placement, marker.job_key)):
+            raise SealedError(f"job {marker.job_key} is sealed; unseal it first")
 
     def set_policy(self, changes: Mapping[str, object]) -> WorkspacePolicy:
         """Validate *changes*, merge them into the stored policy, and publish it.
@@ -1535,7 +1535,7 @@ class Workspace:
 
         # allow_sealed bypasses only the job-level seal (the transfer paths carry
         # the seal with the payload); a sealed workspace or project always refuses.
-        self._require_unsealed(None if allow_sealed else marker.job_key)
+        self._require_unsealed(None if allow_sealed else marker)
         next_priority = marker.priority if priority is None else priority
         generation = marker.generation + 1
         if generation > (1 << 64) - 1:

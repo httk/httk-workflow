@@ -1,7 +1,10 @@
 """Write, read, sign, and verify seal documents for jobs, workspaces, and projects.
 
 A *seal* is a signed statement about what a level of the workflow tree contained
-at one moment. A job seal records the files of one payload; a workspace seal
+at one moment. A job seal records the files of one payload and lives inside it,
+in the payload-private ``.httk-job/seal.json``, so it travels with the job
+directory wherever the directory goes and names nothing about the workspace
+that held it when it was made; a workspace seal
 records, for every job, the digest of that job's seal; a project seal records the
 project's loose files and, for every workspace nested below it, the digest of
 that workspace's seal. Each level therefore binds the level below it, so a
@@ -43,7 +46,7 @@ from httk.core.project.sealing import (
 
 from .errors import FormatError, SealedError, SealError
 from .manifests import payload_file_records
-from .models import WORKSPACE_DIRECTORY, Marker
+from .models import JOB_STATE_DIRECTORY, WORKSPACE_DIRECTORY, JobDefinition, Marker
 from .projects import PROJECT_DIRECTORY, discover_project
 from .workspace import Workspace
 
@@ -63,7 +66,6 @@ __all__ = [
     "is_project_sealed",
     "is_workspace_sealed",
     "job_seal_path",
-    "job_seal_path_at",
     "project_seal_path",
     "read_seal",
     "resolve_seal_keys",
@@ -84,26 +86,18 @@ _LOGGER = logging.getLogger(__name__)
 # -- locations ---------------------------------------------------------------
 
 
-def job_seal_path_at(root: str | os.PathLike[str], job_key: str) -> Path:
-    """Return where one job's seal lives, from a workspace root path alone.
+def job_seal_path(payload: str | os.PathLike[str]) -> Path:
+    """Return where one job's seal lives: inside its own payload.
 
-    :param root: The workspace root directory.
-    :param job_key: The job key whose seal path to build.
+    The seal sits in the payload-private ``.httk-job/`` directory, which every
+    payload digest and seal record excludes, so the seal never covers itself
+    and moves with the payload directory.
+
+    :param payload: The job payload directory.
     :return: The job seal path.
     """
 
-    return Path(root) / WORKSPACE_DIRECTORY / "seals" / "jobs" / f"{job_key}.json"
-
-
-def job_seal_path(workspace: Workspace, job_key: str) -> Path:
-    """Return where one job's seal lives.
-
-    :param workspace: The workspace holding the job.
-    :param job_key: The job key whose seal path to build.
-    :return: The job seal path.
-    """
-
-    return job_seal_path_at(workspace.root, job_key)
+    return Path(payload) / JOB_STATE_DIRECTORY / "seal.json"
 
 
 def workspace_seal_path(workspace: Workspace) -> Path:
@@ -126,15 +120,14 @@ def project_seal_path(project_root: str | os.PathLike[str]) -> Path:
     return Path(project_root) / PROJECT_DIRECTORY / "seal.json"
 
 
-def is_job_sealed(workspace: Workspace, job_key: str) -> bool:
-    """Return whether one job carries a seal.
+def is_job_sealed(payload: str | os.PathLike[str]) -> bool:
+    """Return whether one job payload carries a seal.
 
-    :param workspace: The workspace holding the job.
-    :param job_key: The job key to check.
+    :param payload: The job payload directory.
     :return: Whether the job seal file exists.
     """
 
-    return job_seal_path(workspace, job_key).is_file()
+    return job_seal_path(payload).is_file()
 
 
 def is_workspace_sealed(workspace: Workspace) -> bool:
@@ -172,13 +165,10 @@ def default_workspace_keys(workspace: Workspace, refs: Sequence[str] | None = No
     return resolve_seal_keys(refs, project_root=workspace.root)
 
 
-def _job_subject(workspace: Workspace, marker: Marker) -> dict[str, object]:
-    return {
-        "workspace_id": workspace.workspace_id,
-        "job_id": marker.job_id,
-        "job_key": marker.job_key,
-        "placement": marker.placement.as_posix(),
-    }
+def _job_subject(marker: Marker) -> dict[str, object]:
+    # Only the job's own identity: a seal names no workspace or placement, so a
+    # job directory stays truthfully sealed wherever it is moved.
+    return {"job_id": marker.job_id, "job_key": marker.job_key}
 
 
 def seal_job(workspace: Workspace, marker: Marker, *, keys: SealKeys | None = None) -> Path:
@@ -194,14 +184,14 @@ def seal_job(workspace: Workspace, marker: Marker, *, keys: SealKeys | None = No
 
     payload = workspace.payload_path(marker.placement, marker.job_key)
     records = payload_file_records(payload)
-    path = job_seal_path(workspace, marker.job_key)
+    path = job_seal_path(payload)
     if path.is_file():
         existing = read_seal(path)
         if list(existing.records) == records:
             return path
         raise SealedError(f"job {marker.job_key} is already sealed with different contents; unseal it first")
     resolved = keys if keys is not None else default_workspace_keys(workspace)
-    body = build_seal_body("job", _job_subject(workspace, marker), records)
+    body = build_seal_body("job", _job_subject(marker), records)
     return write_seal(path, body, resolved.keys)
 
 
@@ -215,7 +205,7 @@ def unseal_job(workspace: Workspace, marker: Marker) -> None:
 
     if is_workspace_sealed(workspace):
         raise SealedError("cannot unseal a job while its workspace is sealed; unseal the workspace first")
-    job_seal_path(workspace, marker.job_key).unlink(missing_ok=True)
+    job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).unlink(missing_ok=True)
 
 
 # -- workspace seals ---------------------------------------------------------
@@ -234,7 +224,11 @@ def unsealed_jobs(workspace: Workspace) -> list[Marker]:
     :return: The markers of unsealed jobs, ordered by job key.
     """
 
-    return [marker for marker in _workspace_job_markers(workspace) if not is_job_sealed(workspace, marker.job_key)]
+    return [
+        marker
+        for marker in _workspace_job_markers(workspace)
+        if not is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    ]
 
 
 def seal_workspace(workspace: Workspace, *, keys: SealKeys | None = None) -> Path:
@@ -252,7 +246,8 @@ def seal_workspace(workspace: Workspace, *, keys: SealKeys | None = None) -> Pat
         raise SealError(f"cannot seal the workspace while these jobs are unsealed: {listing}")
     records: list[dict[str, object]] = []
     for marker in _workspace_job_markers(workspace):
-        digest = hashlib.sha256(job_seal_path(workspace, marker.job_key).read_bytes()).hexdigest()
+        seal_path = job_seal_path(workspace.payload_path(marker.placement, marker.job_key))
+        digest = hashlib.sha256(seal_path.read_bytes()).hexdigest()
         records.append(
             {
                 "job_id": marker.job_id,
@@ -289,46 +284,37 @@ def _combine(base: SealVerification, discrepancies: Sequence[Discrepancy]) -> Se
     return replace(base, valid=False, verdict=INVALID, reason=reason, discrepancies=tuple(discrepancies))
 
 
-def _verify_job(
-    workspace: Workspace,
-    job_key: str,
-    placement: PurePosixPath,
-    *,
-    trusted_keys: Iterable[str],
-    expected_roles: Iterable[str],
-) -> SealVerification:
-    """Verify one job seal's signature and re-walk its payload."""
-
-    path = job_seal_path(workspace, job_key)
-    if not path.is_file():
-        return SealVerification(
-            False, INVALID, f"job seal is absent: {path}", (), tuple(expected_roles), (Discrepancy(job_key, "missing"),)
-        )
-    base = verify_seal(path, trusted_keys=trusted_keys, expected_roles=expected_roles)
-    seal = read_seal(path)
-    actual = payload_file_records(workspace.payload_path(placement, job_key))
-    return _combine(base, diff_records(list(seal.records), actual))
-
-
 def verify_job_seal(
-    workspace: Workspace,
-    marker: Marker,
+    payload: str | os.PathLike[str],
     *,
     trusted_keys: Iterable[str] = (),
     expected_roles: Iterable[str] = (),
 ) -> SealVerification:
     """Verify a job seal's signature and that it still describes the payload.
 
-    :param workspace: The workspace holding the job.
-    :param marker: The marker locating the job.
+    Verification needs only the payload directory, so it works the same for a
+    job inside a workspace and for a free-standing job directory.
+
+    :param payload: The job payload directory.
     :param trusted_keys: Trust anchors to classify the signers against.
     :param expected_roles: Signing roles the seal is expected to carry.
     :return: The verdict, including any payload discrepancies.
     """
 
-    return _verify_job(
-        workspace, marker.job_key, marker.placement, trusted_keys=trusted_keys, expected_roles=expected_roles
-    )
+    payload = Path(payload)
+    path = job_seal_path(payload)
+    if not path.is_file():
+        return SealVerification(
+            False,
+            INVALID,
+            f"job seal is absent: {path}",
+            (),
+            tuple(expected_roles),
+            (Discrepancy(payload.name, "missing"),),
+        )
+    base = verify_seal(path, trusted_keys=trusted_keys, expected_roles=expected_roles)
+    seal = read_seal(path)
+    return _combine(base, diff_records(list(seal.records), payload_file_records(payload)))
 
 
 def verify_workspace_seal(
@@ -358,7 +344,8 @@ def verify_workspace_seal(
         elif job_key not in recorded:
             discrepancies.append(Discrepancy(job_key, "unsealed"))
         else:
-            path = job_seal_path(workspace, job_key)
+            placement = PurePosixPath(str(recorded[job_key]["placement"]))
+            path = job_seal_path(workspace.payload_path(placement, job_key))
             if not path.is_file():
                 discrepancies.append(Discrepancy(job_key, "missing"))
             elif hashlib.sha256(path.read_bytes()).hexdigest() != recorded[job_key]["seal_sha256"]:
@@ -375,9 +362,9 @@ def verify_tree(
     """Verify the seal at *path* and, when deep, every seal it references.
 
     *path* is a project root (holds ``httk_project/``), a workspace root (holds
-    ``.httk-workspace/``), or a job payload directory (anything else, whose
-    workspace is discovered upward). Discrepancies are never raised; only
-    missing or malformed seal files are.
+    ``.httk-workspace/``), or a job payload directory (holds ``job.json``),
+    which need not be inside any workspace. Discrepancies are never raised;
+    only missing or malformed seal files are.
 
     :param path: The project root, workspace root, or job payload to verify.
     :param trusted_keys: Trust anchors to classify signers against.
@@ -404,18 +391,15 @@ def verify_tree(
             for record in seal.records:
                 job_key = str(record["job_key"])
                 placement = PurePosixPath(str(record["placement"]))
-                job = _verify_job(workspace, job_key, placement, trusted_keys=trusted_keys, expected_roles=())
+                job = verify_job_seal(workspace.payload_path(placement, job_key), trusted_keys=trusted_keys)
                 entries.append(job.as_entry("job", job_key))
+    elif (location / "job.json").is_file():
+        # A job seal lives in its payload, so a job verifies from its own
+        # directory alone, inside a workspace or free-standing.
+        definition = JobDefinition.from_path(location / "job.json")
+        verification = verify_job_seal(location, trusted_keys=trusted_keys)
+        entries.append(verification.as_entry("job", definition.job_key))
     else:
-        workspace_root = Workspace.discover(location)
-        if workspace_root is None:
-            raise FormatError(f"{location} is not a project, workspace, or job payload")
-        workspace = Workspace(workspace_root)
-        markers = workspace.find_markers(location.name)
-        if not markers:
-            raise FormatError(f"no job marker names the payload at {location}")
-        marker = markers[0]
-        verification = verify_job_seal(workspace, marker, trusted_keys=trusted_keys)
-        entries.append(verification.as_entry("job", marker.job_key))
+        raise FormatError(f"{location} is not a project, workspace, or job payload")
     ok = bool(entries) and all(bool(entry["valid"]) for entry in entries)
     return SealReport(tuple(entries), ok)

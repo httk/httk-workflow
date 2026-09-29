@@ -247,15 +247,15 @@ def test_postprocess_of_a_sealed_job_works_and_leaves_the_seal_valid(tmp_path: P
     marker = workspace.find_marker_by_id(record.job_id)
     assert marker is not None
     seal_job(workspace, marker)
-    seal_before = job_seal_path(workspace, marker.job_key).read_bytes()
+    seal_before = job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).read_bytes()
 
     result = run_postprocess_script(provider, "report", record)
 
     assert result.returncode == 0
     # Output is outside the payload, so the seal is untouched and still verifies.
     assert not result.output_dir.is_relative_to(record.payload)
-    assert job_seal_path(workspace, marker.job_key).read_bytes() == seal_before
-    assert verify_job_seal(workspace, marker).valid
+    assert job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).read_bytes() == seal_before
+    assert verify_job_seal(workspace.payload_path(marker.placement, marker.job_key)).valid
 
 
 def test_postprocess_directory_setting_overrides_the_root(tmp_path: Path) -> None:

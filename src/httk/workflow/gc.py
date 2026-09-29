@@ -723,8 +723,11 @@ class _Collection:
         if any(marker.kind == "committing" for marker in self.markers()):
             self._skip("removed_jobs", "a marker is currently committing")
             return
-        from .seals import is_job_sealed
+        from .seals import is_workspace_sealed
 
+        # A job seal lives in its payload and vanished with it; a sealed workspace
+        # still pins the job, so its marker stays as evidence of the missing payload.
+        workspace_sealed = is_workspace_sealed(self.workspace)
         for marker, _payload in candidates:
             parent_keys = parents.get(marker.job_id)
             if parent_keys:
@@ -735,9 +738,9 @@ class _Collection:
                     f"kept child {marker.job_key}: referenced by non-terminal parent(s) {parent_text}",
                 )
                 continue
-            if is_job_sealed(self.workspace, marker.job_key):
+            if workspace_sealed:
                 self._account_candidate("removed_jobs", marker.path, size=self._entry_size(marker.path))
-                self._skip("removed_jobs", f"kept sealed job {marker.job_key}: unseal it first")
+                self._skip("removed_jobs", f"kept job {marker.job_key} of a sealed workspace: unseal it first")
                 continue
             removed = self._collect("removed_jobs", marker.path, size=self._entry_size(marker.path))
             if removed:

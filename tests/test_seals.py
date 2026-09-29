@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,7 +112,7 @@ def test_body_digest_is_deterministic_and_self_describing(tmp_path: Path) -> Non
     payload = env.workspace.payload_path(marker.placement, marker.job_key)
     assert payload_file_records(payload) == payload_file_records(payload)
     seal_job(env.workspace, marker)
-    seal = read_seal(job_seal_path(env.workspace, marker.job_key))
+    seal = read_seal(job_seal_path(env.workspace.payload_path(marker.placement, marker.job_key)))
     assert hashlib.sha256(_DOMAIN + seal.body_bytes).hexdigest() == seal.body_sha256
     assert isinstance(seal, Seal) and seal.kind == "job"
 
@@ -207,7 +208,8 @@ def test_job_seal_detects_mismatch_extra_and_missing(tmp_path: Path) -> None:
     (payload / "files" / "runner").write_text("changed\n", encoding="utf-8")
     (payload / "added.txt").write_text("added\n", encoding="utf-8")
     kinds = {
-        (discrepancy.path, discrepancy.kind) for discrepancy in verify_job_seal(env.workspace, marker).discrepancies
+        (discrepancy.path, discrepancy.kind)
+        for discrepancy in verify_job_seal(env.workspace.payload_path(marker.placement, marker.job_key)).discrepancies
     }
     assert ("files/runner", "mismatch") in kinds
     assert ("added.txt", "extra") in kinds
@@ -216,7 +218,12 @@ def test_job_seal_detects_mismatch_extra_and_missing(tmp_path: Path) -> None:
     seal_job(other.workspace, other.markers[0])
     op = other.workspace.payload_path(other.markers[0].placement, other.markers[0].job_key)
     (op / "files" / "runner").unlink()
-    missing = {d.kind for d in verify_job_seal(other.workspace, other.markers[0]).discrepancies}
+    missing = {
+        d.kind
+        for d in verify_job_seal(
+            other.workspace.payload_path(other.markers[0].placement, other.markers[0].job_key)
+        ).discrepancies
+    }
     assert "missing" in missing
 
 
@@ -226,7 +233,10 @@ def test_job_seal_detects_an_executable_bit_flip(tmp_path: Path) -> None:
     seal_job(env.workspace, marker)
     runner = env.workspace.payload_path(marker.placement, marker.job_key) / "files" / "runner"
     runner.chmod(runner.stat().st_mode | 0o100)
-    kinds = {(d.path, d.kind) for d in verify_job_seal(env.workspace, marker).discrepancies}
+    kinds = {
+        (d.path, d.kind)
+        for d in verify_job_seal(env.workspace.payload_path(marker.placement, marker.job_key)).discrepancies
+    }
     assert ("files/runner", "mismatch") in kinds
 
 
@@ -302,6 +312,32 @@ def test_verify_tree_from_a_job_payload(tmp_path: Path) -> None:
     assert [entry["level"] for entry in report.entries] == ["job"]
 
 
+def test_job_seal_lives_in_its_payload_and_names_only_the_job(tmp_path: Path) -> None:
+    env = _setup(tmp_path)
+    marker = env.markers[0]
+    payload = env.workspace.payload_path(marker.placement, marker.job_key)
+    path = seal_job(env.workspace, marker)
+    assert path == payload / ".httk-job" / "seal.json" == job_seal_path(payload)
+    assert is_job_sealed(payload)
+    assert read_seal(path).subject == {"job_id": marker.job_id, "job_key": marker.job_key}
+
+
+def test_a_job_directory_moved_out_of_its_workspace_still_verifies(tmp_path: Path) -> None:
+    env = _setup(tmp_path)
+    marker = env.markers[0]
+    seal_job(env.workspace, marker)
+    loose = tmp_path / "elsewhere" / marker.job_key
+    loose.parent.mkdir()
+    shutil.copytree(env.workspace.payload_path(marker.placement, marker.job_key), loose)
+    trust = _project_trust(env.project)
+    assert verify_job_seal(loose, trusted_keys=trust).verdict == VALID_TRUSTED
+    report = verify_tree(loose, trusted_keys=trust)
+    assert report.ok
+    assert [(entry["level"], entry["subject"]) for entry in report.entries] == [("job", marker.job_key)]
+    (loose / "files" / "runner").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    assert not verify_tree(loose, trusted_keys=trust).ok
+
+
 # -- unseal ordering ---------------------------------------------------------
 
 
@@ -320,7 +356,7 @@ def test_unseal_refuses_out_of_order(tmp_path: Path) -> None:
     unseal_workspace(env.workspace)
     assert not is_workspace_sealed(env.workspace)
     unseal_job(env.workspace, marker)
-    assert not is_job_sealed(env.workspace, marker.job_key)
+    assert not is_job_sealed(env.workspace.payload_path(marker.placement, marker.job_key))
 
 
 def test_identity_public_key_is_a_signer(tmp_path: Path) -> None:

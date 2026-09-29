@@ -144,7 +144,7 @@ class WorkspaceMemberHandler:
         for record in seal.records:
             job_key = str(record["job_key"])
             placement = PurePosixPath(str(record["placement"]))
-            job = seals._verify_job(workspace, job_key, placement, trusted_keys=trusted_keys, expected_roles=())
+            job = seals.verify_job_seal(workspace.payload_path(placement, job_key), trusted_keys=trusted_keys)
             entries.append(_entry("job", job_key, job))
         return tuple(entries)
 

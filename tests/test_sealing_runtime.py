@@ -19,7 +19,7 @@ from httk.core.project.sealing import seal_project
 
 from conftest import configure_identity
 from httk.workflow import TaskManager, Workspace, _manager_commit
-from httk.workflow.errors import SealedError
+from httk.workflow.errors import FormatError, SealedError
 from httk.workflow.journal import JournalWriter
 from httk.workflow.projects import initialize_project
 from httk.workflow.removal import remove_jobs
@@ -102,8 +102,8 @@ def test_manager_seals_a_succeeded_job(tmp_path: Path) -> None:
         manager.run_until_idle(timeout=60.0)
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
-    assert is_job_sealed(workspace, marker.job_key)
-    assert verify_job_seal(workspace, marker).valid
+    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    assert verify_job_seal(workspace.payload_path(marker.placement, marker.job_key)).valid
 
 
 def test_manager_does_not_seal_when_disabled(tmp_path: Path) -> None:
@@ -116,7 +116,7 @@ def test_manager_does_not_seal_when_disabled(tmp_path: Path) -> None:
         manager.run_until_idle(timeout=60.0)
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
-    assert not is_job_sealed(workspace, marker.job_key)
+    assert not is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
 
 
 def test_manager_keeps_a_job_succeeded_when_sealing_cannot_sign(tmp_path: Path, caplog) -> None:
@@ -133,7 +133,7 @@ def test_manager_keeps_a_job_succeeded_when_sealing_cannot_sign(tmp_path: Path, 
         manager.run_until_idle(timeout=60.0)
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
-    assert not is_job_sealed(workspace, marker.job_key)
+    assert not is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
     assert any(getattr(record, "event", None) == "job_seal_failed" for record in caplog.records)
 
 
@@ -147,7 +147,7 @@ def test_reseal_is_idempotent_and_recreated_after_a_lost_seal(tmp_path: Path) ->
     marker = workspace.submit(payload, "jobs")
 
     seal_job(workspace, marker)
-    path = job_seal_path(workspace, marker.job_key)
+    path = job_seal_path(workspace.payload_path(marker.placement, marker.job_key))
     first = path.read_bytes()
     # Re-sealing while the seal is present returns the same document byte for byte.
     seal_job(workspace, marker)
@@ -156,10 +156,10 @@ def test_reseal_is_idempotent_and_recreated_after_a_lost_seal(tmp_path: Path) ->
     # Simulate a crash between the succeed transition and the seal: the seal is
     # gone, and the commit-side helper recreates a valid seal of the same payload.
     path.unlink()
-    assert not is_job_sealed(workspace, marker.job_key)
+    assert not is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
     _manager_commit._auto_seal_succeeded(SimpleNamespace(workspace=workspace), marker)
-    assert is_job_sealed(workspace, marker.job_key)
-    verification = verify_job_seal(workspace, marker)
+    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    verification = verify_job_seal(workspace.payload_path(marker.placement, marker.job_key))
     assert verification.valid
     assert verification.discrepancies == ()
 
@@ -246,18 +246,20 @@ def test_sealed_project_refuses_new_workspace(tmp_path: Path) -> None:
 # -- garbage collection protects sealed jobs and the seal store --------------
 
 
-def test_gc_keeps_a_sealed_job_and_the_seal_store(tmp_path: Path) -> None:
+def test_gc_keeps_a_vanished_job_of_a_sealed_workspace(tmp_path: Path) -> None:
     configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
     marker = workspace.submit(_payload(tmp_path / "source")[0], "jobs")
     seal_job(workspace, marker)
-    # Removing the payload would ordinarily make the job a removed-jobs candidate.
+    seal_workspace(workspace)
+    # Removing the payload takes its job seal with it and would ordinarily make
+    # the job a removed-jobs candidate; the workspace seal still pins it.
     shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
     report = workspace.collect_garbage()
     assert report.category("removed_jobs").removed == 0
     assert marker.path.is_file()
-    assert is_job_sealed(workspace, marker.job_key)
-    assert (workspace.control / "seals").is_dir()
+    kinds = {(d.path, d.kind) for d in verify_workspace_seal(workspace).discrepancies}
+    assert kinds == {(marker.job_key, "missing")}
 
 
 # -- a seal travels with a detached transfer ---------------------------------
@@ -273,37 +275,47 @@ def test_a_seal_survives_a_detached_transfer_round_trip(tmp_path: Path) -> None:
     marker = source.submit(_payload(tmp_path / "src-payload")[0], "jobs")
     seal_job(source, marker)
 
+    seal_bytes = job_seal_path(source.payload_path(marker.placement, marker.job_key)).read_bytes()
     bundle = source.detach(marker.job_id, destination_workspace_id=destination.workspace_id)
-    assert (bundle / TRANSFER_DIRECTORY / "seal.json").is_file()
+    # The seal travels inside the payload, not beside the transfer manifest.
+    assert job_seal_path(bundle).read_bytes() == seal_bytes
+    assert not (bundle / TRANSFER_DIRECTORY / "seal.json").exists()
 
     acknowledgement = destination.import_bundle(bundle)
     imported = destination.find_marker_by_id(marker.job_id)
     assert imported is not None
-    assert is_job_sealed(destination, imported.job_key)
-    assert verify_job_seal(destination, imported).valid
+    destination_payload = destination.payload_path(imported.placement, imported.job_key)
+    assert job_seal_path(destination_payload).read_bytes() == seal_bytes
+    assert verify_job_seal(destination_payload).valid
 
-    # Retiring the source drops its now-orphaned seal; the destination keeps its own.
-    assert is_job_sealed(source, marker.job_key)
     source.acknowledge_transfer(acknowledgement)
-    assert not is_job_sealed(source, marker.job_key)
-    assert is_job_sealed(destination, imported.job_key)
+    assert not source.payload_path(marker.placement, marker.job_key).exists()
+    assert is_job_sealed(destination_payload)
 
 
-def test_a_tampered_bundled_seal_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("change", ["tamper", "drop", "add"])
+def test_a_seal_changed_in_transit_is_refused(tmp_path: Path, change: str) -> None:
     configure_identity()
     source, destination = _pair(tmp_path)
     marker = source.submit(_payload(tmp_path / "src-payload")[0], "jobs")
-    seal_job(source, marker)
+    if change != "add":
+        seal_job(source, marker)
     bundle = source.detach(marker.job_id, destination_workspace_id=destination.workspace_id)
 
-    seal_in_bundle = bundle / TRANSFER_DIRECTORY / "seal.json"
-    seal_in_bundle.write_text(seal_in_bundle.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    seal_in_bundle = job_seal_path(bundle)
+    if change == "tamper":
+        seal_in_bundle.write_text(seal_in_bundle.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    elif change == "drop":
+        seal_in_bundle.unlink()
+    else:
+        seal_in_bundle.parent.mkdir(exist_ok=True)
+        seal_in_bundle.write_text("{}", encoding="utf-8")
 
-    with pytest.raises(Exception, match="seal digest mismatch"):
+    with pytest.raises(FormatError, match="seal does not match"):
         validate_bundle(bundle)
-    with pytest.raises(Exception, match="seal digest mismatch"):
+    with pytest.raises(FormatError, match="seal does not match"):
         destination.import_bundle(bundle)
-    # The manifest still declares the transfer; only the seal bytes were altered.
+    # The manifest still declares the transfer; only the seal was altered.
     assert (bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST).is_file()
 
 
