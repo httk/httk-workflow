@@ -25,7 +25,7 @@ from httk.core.identity import (
     verify_document,
 )
 
-from .._job_tree import is_detached
+from .._job_tree import bound_parent, is_detached
 from .._logging import LOG_LEVELS, configure_logging
 from .._util import read_json, utc_now
 from ..adapters import (
@@ -62,6 +62,7 @@ from ..models import (
     QUIESCENT_KINDS,
     STATE_KINDS,
     TERMINAL_KINDS,
+    JobDefinition,
     Marker,
     canonical_uuid,
     ensure_step_known,
@@ -86,6 +87,7 @@ from ..seals import (
     seal_job,
     unseal_job,
 )
+from ..transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST
 from ..workspace import Workspace
 from ._common import (
     _ERRORS,
@@ -1653,14 +1655,44 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
     if len(markers) > 1 and not destination.is_dir():
         print(f"error: ejecting {len(markers)} jobs needs an existing directory, not {destination}", file=sys.stderr)
         return 1
-    failed = False
+    selected = {marker.job_id for marker in markers}
+    # A selected job bound to a selected parent leaves inside that parent's directory.
+    deferred: list[Marker] = []
     for marker in markers:
+        payload = workspace.payload_path(marker.placement, marker.job_key)
+        try:
+            parent = bound_parent(workspace, payload, JobDefinition.from_path(payload / "job.json"))
+        except (WorkflowError, OSError):
+            parent = None
+        if parent is not None and parent.job_id in selected:
+            deferred.append(marker)
+    failed = False
+    carried: set[str] = set()
+    for marker in markers:
+        if marker in deferred:
+            continue
         try:
             directory = workspace.eject(marker.job_id, destination)
         except _ERRORS as exc:
             failed = True
             print(f"{marker.job_id}: {exc}", file=sys.stderr)
             continue
+        manifest = read_json(directory / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+        carried.update(str(entry["job_id"]) for entry in manifest.get("eject_tree") or [])
+        print(f"{marker.job_id}\tejected\t{directory}")
+    for marker in deferred:
+        if marker.job_id in carried:
+            print(f"{marker.job_id}\tejected with its parent")
+            continue
+        # Its parent did not take it along (it has no record of it, or failed).
+        try:
+            directory = workspace.eject(marker.job_id, destination)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{marker.job_id}: {exc}", file=sys.stderr)
+            continue
+        manifest = read_json(directory / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+        carried.update(str(entry["job_id"]) for entry in manifest.get("eject_tree") or [])
         print(f"{marker.job_id}\tejected\t{directory}")
     return 1 if failed else 0
 
@@ -2133,7 +2165,8 @@ def build_job_parser(
             "Move quiescent jobs out of the workspace, each to a free-standing job directory that carries "
             "its payload, seal, state, and pinned runner: `eject JOB... DEST`. Like mv, an existing "
             "directory DEST receives each job as DEST/<job-key>; otherwise DEST names the one new job "
-            "directory. The workspace keeps no copy; `job adopt` brings a directory back into any workspace"
+            "directory. A job's bound children travel with it inside its directory, and must be paused or "
+            "terminal. The workspace keeps no copy; `job adopt` brings a directory back into any workspace"
         ),
         handler=handle_job_eject,
     )

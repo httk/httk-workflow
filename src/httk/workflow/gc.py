@@ -828,14 +828,31 @@ class _Collection:
 
         Every publication creates its staging entry and renames it away inside
         one operation, so an entry still sitting in a staging directory a day
-        later belongs to a process that died and can never be resumed.
+        later belongs to a process that died and can never be resumed. The one
+        exception is a moving adoption's staging entry with its intent record:
+        the job's directory is gone, so that entry is kept for recovery.
         """
+
+        from .transfers import _adoption_intent_path, _staging_path
 
         cutoff = self.now - TMP_MAXIMUM_AGE_SECONDS
         for staging in (self.control / "tmp", self.control / "requests" / "tmp"):
             for entry in _iterdir(staging):
-                if self._aged(entry, cutoff):
-                    self._collect("tmp_entries", entry)
+                if not self._aged(entry, cutoff):
+                    continue
+                transfer_id = entry.name.removeprefix("import.")
+                if (
+                    entry.name != transfer_id
+                    and _staging_path(self.workspace, transfer_id) == entry
+                    and _adoption_intent_path(self.workspace, transfer_id).is_file()
+                ):
+                    # A moving adoption's staging entry may be the job's only copy.
+                    self._skip(
+                        "tmp_entries",
+                        f"kept staged adoption {transfer_id}: finish it with `httk job adopt` or transfer recovery",
+                    )
+                    continue
+                self._collect("tmp_entries", entry)
 
     def collect_retired_requests(self) -> None:
         """Collect month-old request leftovers: claimed by the dead, and retired.

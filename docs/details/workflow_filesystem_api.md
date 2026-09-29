@@ -2043,12 +2043,27 @@ into place before the source copy is removed), and retires the source without an
 acknowledgement, keeping no retired copy. Recovery resumes from the ledger: a
 bundle still in the workspace is moved; a verified copy at the target means only
 the workspace copy remains to be removed; neither is payload loss. Any workspace
-may *adopt* the directory: it imports it exactly as an addressed bundle, keeps
-the individual acknowledgement as its replay receipt, and removes the directory
-only after the imported marker names this transfer. A second directory with the
-same transfer id whose job has since left is refused as stale. The transfer
+may *adopt* the directory: it moves it into its staging area (one rename, or
+across filesystems a copy verified before the directory is removed), imports it
+exactly as an addressed bundle, and keeps the individual acknowledgement as its
+replay receipt. An adoption intent record, written before the move, lets
+recovery publish a job whose directory is already gone. A second directory with
+the same transfer id whose job has since left is refused as stale. The transfer
 envelope `.httk-transfer/` is excluded from payload digests and job seals alike,
 so a sealed job verifies while ejected and after adoption.
+
+A tree root ejects with its bound descendants, which must all be paused or
+terminal. Its manifest lists them top-down in `eject_tree`, each with the
+transfer id reserved for it; each member is sealed as an ejected bundle of its
+own whose manifest names the root's transfer in `eject_root`, and is moved into
+the root's envelope at `.httk-transfer/tree/<placement>/<job_key>/` before the
+root itself leaves. Adoption checks every member first, refuses a member
+directory adopted on its own, then imports every member at its recorded
+placement, and then the root; a tree keeps its placements, because each child's
+record of its parent's placement is immutable. Whether a job already arrived is
+decided by its live import frame naming the transfer, not by the acknowledgement,
+which garbage collection expires. An ejection's ledger is never retired by name:
+until the ejection finishes, its bundle is the job itself.
 
 ### Job trees move together
 

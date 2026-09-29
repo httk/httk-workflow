@@ -210,7 +210,7 @@ any other package and builds it.
 | `job unseal [--force] JOB...` | remove the seals of selected jobs, refused while the workspace is sealed | `--workspace`, `--force` skips the confirmation |
 | `job detach [OPTIONS] JOB...` | make spawned jobs independent of their parents, permanently | `--workspace`, optional `--operator` (recorded; default identity when omitted) |
 | `job eject [OPTIONS] JOB... DEST` | move quiescent jobs out of the workspace to free-standing job directories | `--workspace`; like `mv`, an existing `DEST` directory receives each job as `DEST/<job-key>` |
-| `job adopt [OPTIONS] DIR...` | move free-standing job directories into the workspace | `--workspace`, `--placement` (default: where each job was ejected from) |
+| `job adopt [OPTIONS] DIR...` | move free-standing job directories into the workspace | `--workspace`, `--placement` (default: where each job was ejected from; refused for a job tree) |
 | `job list [OPTIONS]` | list jobs as a cheap table (remote: over the adapter) | `--workspace`, `--kind`, `--placement` (prefix), `--limit`, `--after`, `--tag-contains`, `--counts`, `--json`, `--adapter-timeout` |
 | `job show [OPTIONS] JOB...` | describe jobs from their state (remote: over the adapter) | `--workspace`, `--no-children`, `--json`, `--adapter-timeout` |
 | `job log [OPTIONS] JOB...` | print transition histories (remote: over the adapter) | `--workspace`, `--limit`, `--json`, `--adapter-timeout` |
@@ -235,15 +235,24 @@ parent's key — and `--json` always carries a `detached` boolean.
 `job eject` and `job adopt` move a job out of a workspace and into one without
 either workspace knowing the other, so neither needs to be registered (reach an
 unregistered workspace with `httk -C DIR`). `job eject` accepts a quiescent job
-that can leave on its own — not one bound to its live parent, one with bound
-children, or one in an unresolved join — and refuses a destination inside any
-workspace. The job directory it leaves behind is the whole job: payload, seal,
-tree metadata, the state it was in, and any shared workspace runner it pins; the
-workspace keeps no copy. `httk workflow seal verify DIR` verifies a sealed one in
-place. Each job prints `JOB_ID ejected PATH`. `job adopt` verifies a directory,
-restores the job to the state it was ejected in, installs a runner it carries,
-and removes the directory only once the workspace holds the job; it prints
-`JOB_ID adopted STATE PAYLOAD`. It refuses a directory made by a transfer to a
+that is not bound to its live parent or in an unresolved join, and refuses a
+destination inside any workspace. The job directory it leaves behind is the
+whole job: payload, seal, tree metadata, the state it was in, and any shared
+workspace runner it pins; the workspace keeps no copy. A job with bound children
+leaves as the root of its tree: every bound descendant, each of which must be
+paused or terminal, travels inside the same directory under
+`.httk-transfer/tree/<placement>/<job_key>/`. `httk workflow seal verify DIR`
+verifies a sealed one in place. Each job prints `JOB_ID ejected PATH`, and a
+selected descendant that left inside its root's directory prints
+`JOB_ID ejected with its parent`. `job adopt` verifies a directory, moves it in
+(a rename on one filesystem; across filesystems a copy that is verified before
+the directory is removed), restores the job to the state it was ejected in, and
+installs a runner it carries; it prints `JOB_ID adopted STATE PAYLOAD`. A tree
+comes back whole, each member at the placement it left from, so `--placement` is
+refused for it, and a member's directory nested inside it cannot be adopted on
+its own; every member is checked before anything is imported. A job whose
+ejection is still in progress is not retired by `httk workflow transfer retire`.
+It refuses a directory made by a transfer to a
 named workspace (use `httk workflow transfer`), and a copy of a directory whose
 job already passed through this workspace, which it leaves in place. Both are
 crash-safe: an interrupted `job eject` is finished by the next `job eject` or
