@@ -71,7 +71,7 @@ The `NAME:WORKSPACE` spelling is a binding, not a filesystem path. Transfer a
 job into that workspace and run its manager there:
 
 ```console
-$ httk workflow transfer --job JOB default kappa:runs
+$ httk job transfer --job JOB default kappa:runs
 $ httk workflow run --workspace kappa:runs --count 4
 ```
 
@@ -82,7 +82,7 @@ and `environment.prelude`, exactly as if the command had been run on the
 login node. Fetch finished jobs back with the reverse transfer:
 
 ```console
-$ httk workflow transfer kappa:runs default
+$ httk job transfer kappa:runs default
 ```
 
 Names listed in `machine_names` are self-addressing: `login:runs` is treated as
@@ -108,7 +108,7 @@ really should leave alone:
 
 ```console
 $ httk job detach CHILD
-$ httk workflow transfer --job CHILD default kappa:runs
+$ httk job transfer --job CHILD default kappa:runs
 ```
 
 A tree leaves only when nothing in it can start while it is moving: every
@@ -162,7 +162,7 @@ command about it goes through the executor (`sigma:runs`), exactly as with an
 
 ```console
 $ httk workspace init --name runs sigma:/proj/x/users/me/httk/runs
-$ httk workflow transfer --job JOB default sigma:runs
+$ httk job transfer --job JOB default sigma:runs
 $ httk workflow run --workspace sigma:runs --count 4
 $ httk workspace status sigma:runs
 ```

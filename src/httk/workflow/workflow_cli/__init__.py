@@ -308,7 +308,6 @@ def build_parser(
     build_config_parser(groups)
     build_remote_parser(groups)
     build_launcher_parser(groups)
-    build_transfer_parser(groups)
     build_campaign_parser(groups)
     build_monitor_parser(groups)
     return parser
@@ -322,8 +321,6 @@ def dispatch(parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIC
     """
 
     raw_argv = list(argv)
-    if raw_argv == ["transfer"]:
-        raw_argv.append("--help")
     if len(raw_argv) > 1 and raw_argv[0] == "transfer" and raw_argv[1] in _TRANSFER_PROTOCOL:
         try:
             return _dispatch_transfer_protocol(raw_argv[1:], context)

@@ -18,8 +18,8 @@ from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import _campaign, command
 
 #: Every group of the canonical tree, with the subcommands its help must name.
-#: ``run`` and ``transfer`` are deliberately absent: they are single verbs
-#: rather than groups, so they are checked on their own below.
+#: ``run`` is deliberately absent: it is a single verb rather than a group, so
+#: it is checked on its own below. ``transfer`` is a leaf of the ``job`` group.
 GROUPS: dict[str, tuple[str, ...]] = {
     "workspace": (
         "init",
@@ -42,7 +42,21 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "unseal",
     ),
     "runner": ("publish", "describe"),
-    "job": ("new", "submit", "request", "delete", "seal", "unseal", "detach", "list", "show", "log", "why", "debug"),
+    "job": (
+        "new",
+        "submit",
+        "request",
+        "delete",
+        "seal",
+        "unseal",
+        "detach",
+        "list",
+        "show",
+        "log",
+        "why",
+        "debug",
+        "transfer",
+    ),
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("show", "set", "unset", "import-v1"),
@@ -81,8 +95,9 @@ def test_the_tree_itself_answers_help_and_names_every_group(tmp_path: Path, caps
     printed = capsys.readouterr().out
     for group in GROUPS:
         assert group in printed
-    # The single-verb commands are leaves, but the tree still names them.
-    assert "run" in printed and "transfer" in printed
+    # The single-verb ``run`` command is a leaf, but the tree still names it.
+    # ``transfer`` is a leaf of ``job`` and is checked in that group's help.
+    assert "run" in printed
     # A bare invocation is somebody exploring, not somebody making a mistake.
     assert command([], _context(tmp_path)) == 0
     assert "usage:" in capsys.readouterr().out
@@ -130,8 +145,9 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
         assert group not in printed
 
     # transfer is a verb, not a group: its help shows the SRC/DST usage rather
-    # than a subcommand listing (receive/offer/retire are hidden protocol).
-    assert command(["transfer", "--help"], _context(tmp_path)) == 0
+    # than a subcommand listing (receive/offer/retire are hidden protocol,
+    # and stay under ``workflow`` rather than ``job``).
+    assert command(["job", "transfer", "--help"], _context(tmp_path)) == 0
     assert "SRC DST" in capsys.readouterr().out
 
 
@@ -312,14 +328,14 @@ def test_campaign_start_managers_returns_nonzero_for_a_failed_partition(tmp_path
 
 
 def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
-    """`transfer SRC DST` replaced the old send/fetch manager-submission subcommands."""
+    """`job transfer SRC DST` replaced the old send/fetch manager-submission subcommands."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    parsed = parser.parse_args(["transfer", "--job", "J", "a", "b"])
+    parsed = parser.parse_args(["job", "transfer", "--job", "J", "a", "b"])
     assert parsed.handler is workflow_cli.handle_transfer
     assert (parsed.source, parsed.destination, parsed.jobs) == ("a", "b", ["J"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["transfer", "send", "c", "J"])
+        parser.parse_args(["job", "transfer", "send", "c", "J"])
 
 
 # ---------------------------------------------------------------------------

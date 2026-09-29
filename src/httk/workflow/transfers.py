@@ -2489,7 +2489,7 @@ def adopt_job(
     if manifest.get("destination_workspace_id") is not None:
         raise ValueError(
             f"{source} is a transfer bundle addressed to workspace {manifest['destination_workspace_id']}; "
-            "move it with `httk workflow transfer` instead"
+            "move it with `httk job transfer` instead"
         )
     if manifest.get("eject_root") is not None:
         raise ValueError(f"{source} is a member of an ejected job tree; adopt the tree's root directory instead")

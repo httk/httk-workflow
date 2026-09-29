@@ -809,6 +809,38 @@ def _send_jobs_to_remote(
     return acknowledgements
 
 
+def _transfer_endpoint(value: str, context: CLIContext) -> WorkspaceBinding:
+    """Resolve one ``job transfer`` endpoint: a registered name, else a directory.
+
+    A registered workspace name is tried first, exactly as workspace resolution
+    ordinarily works. When it does not resolve, *value* is tried as a workspace
+    directory — one whose root directly contains ``.httk-workspace/`` (no
+    upward discovery) — so an unregistered workspace can be addressed without
+    registering it. A registered name always wins over a same-named directory;
+    ``./NAME`` addresses the directory unambiguously.
+
+    :param value: The command-line SRC or DST argument.
+    :param context: Current CLI invocation, used to resolve a relative path.
+    :return: The resolved workspace binding.
+    :raises httk.workflow.errors.ResolutionMiss: If *value* is neither a
+        registered name nor a workspace directory.
+    """
+
+    try:
+        return resolve_workspace(value, project=context.cwd)
+    except ResolutionMiss as exc:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = Path(context.cwd) / path
+        if (path / WORKSPACE_DIRECTORY).is_dir():
+            resolved = str(path.resolve())
+            return WorkspaceBinding(resolved, LOCAL_REMOTE, resolved)
+        raise ResolutionMiss(
+            f"{value!r} is neither a registered workspace name nor a workspace directory "
+            f"(no {WORKSPACE_DIRECTORY}/ in {path})"
+        ) from exc
+
+
 def _protocol_workspace(value: str, context: CLIContext) -> Workspace:
     """Resolve a protocol workspace name, with narrow legacy path support."""
 
@@ -1332,13 +1364,15 @@ def _transfer_remote_to_remote(
 
 
 def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move jobs between two registered workspaces, or run a protocol command.
+    """Move jobs between two workspaces, named or by directory.
 
-    ``transfer SRC DST`` is the canonical verb. It resolves both names and moves
-    work whichever way they point: local→remote seals and imports on the remote,
-    remote→local fetches finished jobs home, local→local imports directly, and
-    remote→remote relays through this client. The hidden ``receive``, ``offer``,
-    and ``retire`` spellings are the frozen protocol one machine runs on another.
+    ``job transfer SRC DST`` is the canonical verb. Each of SRC and DST is tried
+    first as a registered workspace name, then as a workspace directory, and it
+    moves work whichever way they point: local→remote seals and imports on the
+    remote, remote→local fetches finished jobs home, local→local imports
+    directly, and remote→remote relays through this client. The hidden
+    ``receive``, ``offer``, and ``retire`` spellings are the frozen protocol one
+    machine runs on another, and remain under ``httk workflow transfer``.
     """
 
     return _run_transfer_verb(arguments, context)
@@ -1361,8 +1395,8 @@ def run_transfer_verb_result(
 ) -> Mapping[str, object]:
     """Run the parsed transfer verb and return its report without formatting."""
 
-    source_binding = resolve_workspace(arguments.source, project=context.cwd)
-    destination_binding = resolve_workspace(arguments.destination, project=context.cwd)
+    source_binding = _transfer_endpoint(arguments.source, context)
+    destination_binding = _transfer_endpoint(arguments.destination, context)
     source_local = source_binding.remote == LOCAL_REMOTE
     destination_local = destination_binding.remote == LOCAL_REMOTE
     timeout = arguments.adapter_timeout
@@ -1526,21 +1560,31 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
 def build_transfer_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
-    """Declare the ``transfer`` verb: move jobs between two registered workspaces."""
+    """Declare the ``transfer`` verb: move jobs between two workspace names or directories."""
 
     transfer = _leaf(
         subparsers,
         "transfer",
-        summary="move jobs between two registered workspaces",
+        summary="move jobs between two registered workspace names or workspace directories",
         description=(
-            "Move jobs between two registered workspaces: `transfer [OPTIONS] SRC DST`. It works whichever way the "
-            "workspaces point — local to remote, remote to local, local to local, or remote to remote "
-            "(relayed through this client). The hidden receive/offer/retire spellings are protocol."
+            "Move jobs between two workspaces: `transfer [OPTIONS] SRC DST`. Each of SRC and DST is tried "
+            "first as a registered workspace name, and then as a workspace directory (one containing "
+            ".httk-workspace/); a registered name always wins over a same-named directory, so `./NAME` "
+            "addresses the directory unambiguously. It works whichever way the workspaces point — local to "
+            "remote, remote to local, local to local, or remote to remote (relayed through this client). The "
+            "hidden receive/offer/retire spellings remain protocol, under `httk workflow transfer`, for "
+            "remote peers to invoke by exact name."
         ),
         handler=handle_transfer,
     )
-    transfer.add_argument("source", metavar="SRC", help="the registered workspace the jobs leave")
-    transfer.add_argument("destination", metavar="DST", help="the registered workspace the jobs arrive in")
+    transfer.add_argument(
+        "source", metavar="SRC", help="the workspace the jobs leave: a registered name, or a workspace directory"
+    )
+    transfer.add_argument(
+        "destination",
+        metavar="DST",
+        help="the workspace the jobs arrive in: a registered name, or a workspace directory",
+    )
     transfer.add_argument(
         "--job",
         action="append",

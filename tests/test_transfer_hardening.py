@@ -102,7 +102,10 @@ def test_remote_transfer_requires_canonical_job_ids_before_forwarding(tmp_path: 
     monkeypatch.setattr(transfer_cli, "resolve_workspace", lambda name, project: bindings[name])
     for selector in ("silicon", "jobs/"):
         assert (
-            command(["transfer", "--job", selector, "cluster:source", "destination"], CLIContext("httk", tmp_path)) == 2
+            command(
+                ["job", "transfer", "--job", selector, "cluster:source", "destination"], CLIContext("httk", tmp_path)
+            )
+            == 2
         )
         assert "remote source requires canonical job ids" in capsys.readouterr().err
 
@@ -586,7 +589,7 @@ def test_local_transfer_command_reminds_after_importing_a_build_declaring_runner
     source_name = register_ws(context, source.root, "transfer-source")
     destination_name = register_ws(context, destination.root, "transfer-destination")
 
-    assert command(["transfer", "--job", job.job_id, source_name, destination_name], context) == 0
+    assert command(["job", "transfer", "--job", job.job_id, source_name, destination_name], context) == 0
     output = capsys.readouterr().err
     assert "workflow compiled.transfer.command declares a build" in output
     assert "httk workflow build --workspace transfer-destination --store" in output

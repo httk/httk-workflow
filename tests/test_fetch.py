@@ -226,7 +226,7 @@ def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
-    argv = ["transfer", "--json", *arguments, "cluster:station", "home"]
+    argv = ["job", "transfer", "--json", *arguments, "cluster:station", "home"]
     assert command(argv, pair.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -691,7 +691,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
         return real_import(self, bundles)
 
     monkeypatch.setattr(transfer_cli, "import_bundles", interrupt)
-    argv = ["transfer", "--json", "cluster:station", "home"]
+    argv = ["job", "transfer", "--json", "cluster:station", "home"]
     assert command(argv, pair.context) == 2
     assert interrupted
 
@@ -799,7 +799,9 @@ def _relay_pair(root: Path) -> tuple[CLIContext, Path, Path, Path, str, str]:
 
 def test_remote_to_remote_by_id_relays_exactly_one_job(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     context, source_root, destination_root, _local_root, selected, other = _relay_pair(tmp_path / "relay")
-    assert command(["transfer", "--job", selected, "--json", "kappa:source", "arrhenius:destination"], context) == 0
+    assert (
+        command(["job", "transfer", "--job", selected, "--json", "kappa:source", "arrhenius:destination"], context) == 0
+    )
     report = json.loads(capsys.readouterr().out)
     assert [entry["job_id"] for entry in report["moved"]] == [selected]
     assert Workspace(destination_root).find_marker_by_id(selected) is not None

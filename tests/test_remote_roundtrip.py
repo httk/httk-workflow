@@ -115,14 +115,14 @@ def _payload_of(workspace: Workspace, job_id: str) -> Path:
 
 
 def _send(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["transfer", "--job", campaign.job_id, "--json", "home", "cluster:station"]
+    argv = ["job", "transfer", "--job", campaign.job_id, "--json", "home", "cluster:station"]
     assert command(argv, campaign.context) == 0
     report = json.loads(capsys.readouterr().out)
     assert [str(entry["job_id"]) for entry in report["moved"]] == [campaign.job_id]
 
 
 def _fetch(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    argv = ["transfer", "--json", "cluster:station", "home"]
+    argv = ["job", "transfer", "--json", "cluster:station", "home"]
     assert command(argv, campaign.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -238,7 +238,7 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "transfer offer")
 
-    argv = ["transfer", "--json", "cluster:station", "home"]
+    argv = ["job", "transfer", "--json", "cluster:station", "home"]
     assert command(argv, campaign.context) == 2
     captured = capsys.readouterr()
     assert "remote offer did not return a transfer offer document" in captured.err

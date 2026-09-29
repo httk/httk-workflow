@@ -53,7 +53,7 @@ def _payload(root: Path) -> tuple[Path, str]:
 
 def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
-    for group in ("workspace", "runner", "job", "manager", "config", "remote", "transfer"):
+    for group in ("workspace", "runner", "job", "manager", "config", "remote"):
         assert command([group, "--help"], context) == 0
     assert command(["v1", "collect", "--help"], context) == 0
     assert "usage:" in capsys.readouterr().out
@@ -257,7 +257,7 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     context = CLIContext("httk", source_root)
     register_ws(context, source_root, "home")
     register_ws(context, destination_root, "station", remote="cluster")
-    assert command(["transfer", "--job", job_id, "home", "cluster:station"], context) == 0
+    assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
     imported = Workspace(destination_root).find_marker_by_id(job_id)
     assert imported is not None and imported.kind == "submitted"
     assert Workspace(source_root).find_marker_by_id(job_id) is None
@@ -294,7 +294,7 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     monkeypatch.setattr(workflow_common, "run_adapter", interrupt_import)
     # A resumed transfer: an interrupted send, retyped, must pick up where it
     # stopped rather than start a second copy.
-    arguments = ["transfer", "--job", job_id, "home", "cluster:station"]
+    arguments = ["job", "transfer", "--job", job_id, "home", "cluster:station"]
     assert command(arguments, context) == 2
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     monkeypatch.setattr(transfer_cli, "run_adapter", real_run_adapter)

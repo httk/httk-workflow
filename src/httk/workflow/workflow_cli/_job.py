@@ -106,7 +106,7 @@ from ._common import (
     confirm,
     remote_workspace_output,
 )
-from ._transfer import _protocol_workspace
+from ._transfer import _protocol_workspace, build_transfer_parser
 
 # ---------------------------------------------------------------------------
 # runner
@@ -2192,6 +2192,8 @@ def build_job_parser(
         help="where the jobs land (default: the placement they were ejected from)",
     )
     add_durability_arguments(adopt)
+
+    build_transfer_parser(group)
 
     show = _leaf(
         group,

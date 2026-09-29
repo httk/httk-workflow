@@ -142,7 +142,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
         if binding.remote != LOCAL_REMOTE:
             raise ValueError(
                 f"campaign partition {partition!r} is the remote workspace {config.partitions[partition]!r} on "
-                f"{binding.remote!r}; fetch it home with `httk workflow transfer` before collecting the campaign"
+                f"{binding.remote!r}; fetch it home with `httk job transfer` before collecting the campaign"
             )
         assert binding.path is not None
         return Workspace(binding.path, mutable=False)

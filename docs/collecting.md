@@ -274,7 +274,7 @@ $ httk workflow collect --workspace workflow-workspace | head -1
 ```
 
 Jobs that ran on a remote are collected the same way once they are
-home: `httk workflow transfer REMOTE:NAME default` imports them into the local
+home: `httk job transfer REMOTE:NAME default` imports them into the local
 default workspace in the terminal state they stopped in, and the collect that
 follows cannot tell them from jobs that ran locally. See
 {doc}`workflow_cli`.

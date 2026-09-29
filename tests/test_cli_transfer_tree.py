@@ -112,7 +112,7 @@ def test_transferring_a_parent_moves_its_whole_tree(
     source, destination, context = local_pair
     parent, children = _tree(source, tmp_path / "runner")
 
-    assert command(["transfer", "--json", "--job", parent.job_id, "source", "destination"], context) == 0
+    assert command(["job", "transfer", "--json", "--job", parent.job_id, "source", "destination"], context) == 0
     captured = capsys.readouterr()
     report = json.loads(captured.out)
     everyone = {parent.job_id, *(child.job_id for child in children)}
@@ -134,7 +134,7 @@ def test_a_bound_child_alone_is_refused_until_it_is_detached(
     parent, children = _tree(source, tmp_path / "runner")
     child = children[0]
 
-    assert command(["transfer", "--job", child.job_id, "source", "destination"], context) != 0
+    assert command(["job", "transfer", "--job", child.job_id, "source", "destination"], context) != 0
     error = capsys.readouterr().err
     assert f"travels with its parent {parent.job_key}" in error and "httk job detach" in error
     assert _ids(destination) == set()
@@ -156,11 +156,11 @@ def test_a_bound_child_alone_is_refused_until_it_is_detached(
     assert command(["job", "show", "--workspace", "source", parent.job_id], context) == 0
     assert "detached:" not in capsys.readouterr().out
 
-    assert command(["transfer", "--job", child.job_id, "source", "destination"], context) == 0
+    assert command(["job", "transfer", "--job", child.job_id, "source", "destination"], context) == 0
     capsys.readouterr()
     assert _ids(destination) == {child.job_id}
     # The parent now brings only the child still bound to it.
-    assert command(["transfer", "--job", parent.job_id, "source", "destination"], context) == 0
+    assert command(["job", "transfer", "--job", parent.job_id, "source", "destination"], context) == 0
     capsys.readouterr()
     assert _ids(source) == set()
 
@@ -183,7 +183,7 @@ def test_destination_placement_is_refused_for_a_tree(
     source, destination, context = local_pair
     parent, _children = _tree(source, tmp_path / "runner")
 
-    argv = ["transfer", "--job", parent.job_id, "--destination-placement", "elsewhere", "source", "destination"]
+    argv = ["job", "transfer", "--job", parent.job_id, "--destination-placement", "elsewhere", "source", "destination"]
     assert command(argv, context) != 0
     assert "--destination-placement cannot re-place a job tree" in capsys.readouterr().err
     assert _ids(destination) == set() and {marker.kind for marker in source.scan_markers()} == {"succeeded"}
@@ -251,11 +251,11 @@ def test_fetching_a_parent_from_a_remote_brings_its_tree(
     child = children[0]
 
     # A child named alone is refused by the offering side, naming its parent.
-    assert command(["transfer", "--job", child.job_id, "cluster:station", "home"], context) != 0
+    assert command(["job", "transfer", "--job", child.job_id, "cluster:station", "home"], context) != 0
     assert f"travels with its parent {parent.job_key}" in capsys.readouterr().err
     assert _ids(local) == set()
 
-    assert command(["transfer", "--json", "--job", parent.job_id, "cluster:station", "home"], context) == 0
+    assert command(["job", "transfer", "--json", "--job", parent.job_id, "cluster:station", "home"], context) == 0
     captured = capsys.readouterr()
     report = json.loads(captured.out)
     everyone = {parent.job_id, *(member.job_id for member in children)}
@@ -271,14 +271,23 @@ def test_pushing_a_parent_to_a_remote_brings_its_tree(
     local, remote, context = remote_pair
     parent, children = _tree(local, tmp_path / "runner")
 
-    assert command(["transfer", "--job", children[0].job_id, "home", "cluster:station"], context) != 0
+    assert command(["job", "transfer", "--job", children[0].job_id, "home", "cluster:station"], context) != 0
     assert f"travels with its parent {parent.job_key}" in capsys.readouterr().err
-    argv = ["transfer", "--job", parent.job_id, "--destination-placement", "elsewhere", "home", "cluster:station"]
+    argv = [
+        "job",
+        "transfer",
+        "--job",
+        parent.job_id,
+        "--destination-placement",
+        "elsewhere",
+        "home",
+        "cluster:station",
+    ]
     assert command(argv, context) != 0
     assert "--destination-placement cannot re-place a job tree" in capsys.readouterr().err
     assert _ids(remote) == set()
 
-    assert command(["transfer", "--json", "--job", parent.job_id, "home", "cluster:station"], context) == 0
+    assert command(["job", "transfer", "--json", "--job", parent.job_id, "home", "cluster:station"], context) == 0
     report = json.loads(capsys.readouterr().out)
     everyone = {parent.job_id, *(member.job_id for member in children)}
     assert {entry["job_id"] for entry in report["moved"]} == everyone
@@ -321,5 +330,5 @@ def test_a_three_level_tree_moves_whole_on_the_command_line(
     everyone = _ids(source)
     assert len(everyone) == 5
 
-    assert command(["transfer", "--json", "--job", parent.job_id, "source", "destination"], context) == 0
+    assert command(["job", "transfer", "--json", "--job", parent.job_id, "source", "destination"], context) == 0
     assert _ids(source) == set() and _ids(destination) == everyone

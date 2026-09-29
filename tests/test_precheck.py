@@ -438,7 +438,7 @@ def test_local_transfer_warns_and_strict_mode_moves_nothing(tmp_path: Path, caps
 
     assert (
         command(
-            ["transfer", "--job", marker.job_id, "--strict-environment", source_name, destination_name],
+            ["job", "transfer", "--job", marker.job_id, "--strict-environment", source_name, destination_name],
             context,
         )
         == 2
@@ -447,7 +447,7 @@ def test_local_transfer_warns_and_strict_mode_moves_nothing(tmp_path: Path, caps
     assert source.find_marker_by_id(marker.job_id) is not None
     assert destination.find_marker_by_id(marker.job_id) is None
 
-    assert command(["transfer", "--job", marker.job_id, source_name, destination_name], context) == 0
+    assert command(["job", "transfer", "--job", marker.job_id, source_name, destination_name], context) == 0
     warning = capsys.readouterr().err
     assert "destination environment unresolved" in warning
     assert destination.find_marker_by_id(marker.job_id) is not None
@@ -475,7 +475,7 @@ def test_transfer_does_not_use_the_client_environment_for_destination_resolution
 
     assert (
         command(
-            ["transfer", "--job", marker.job_id, "--strict-environment", source_name, destination_name],
+            ["job", "transfer", "--job", marker.job_id, "--strict-environment", source_name, destination_name],
             context,
         )
         == 2
@@ -787,7 +787,7 @@ def test_full_local_to_remote_unreachable_notice_is_printed_once(tmp_path: Path,
     monkeypatch.setattr(transfer_cli, "_remote_workspace_settings", unavailable)
     monkeypatch.setattr(transfer_cli, "_send_jobs_to_remote", lambda *args, **kwargs: [])
 
-    assert command(["transfer", "--job", marker.job_id, "home", "cluster:station"], context) == 0
+    assert command(["job", "transfer", "--job", marker.job_id, "home", "cluster:station"], context) == 0
     assert capsys.readouterr().err.count("could not be prechecked remotely") == 1
 
 

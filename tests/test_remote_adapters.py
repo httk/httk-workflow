@@ -737,7 +737,7 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     register_ws(context, source_root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
-    assert command(["transfer", "--job", job_id, "home", "cluster:station"], context) == 0
+    assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)

@@ -265,7 +265,7 @@ did.
 **A nonzero `returncode` is still `ok: true`.** The operation succeeded — it ran
 the command and is reporting the outcome. `ok: false` means the adapter could not
 run it at all. Callers check `returncode` themselves; every remote command in
-`httk workflow transfer …` does exactly that and raises on the value.
+`httk job transfer …` does exactly that and raises on the value.
 
 If `argv[0]` is the literal `httk`, an adapter is expected to honour the remote's
 `httk_command` setting by replacing that one element with the parsed vector; see
@@ -276,7 +276,7 @@ If `argv[0]` is the literal `httk`, an adapter is expected to honour the remote'
 Byte-for-byte the same contract as `invoke`, except that `cwd` is ignored. It
 exists as a separate operation so that a health probe can be given a different
 implementation, a different timeout, or different credentials from arbitrary
-command execution. `httk workflow transfer REMOTE:NAME default` uses it to check
+command execution. `httk job transfer REMOTE:NAME default` uses it to check
 that the far side is a compatible workspace before anything moves.
 
 ```json

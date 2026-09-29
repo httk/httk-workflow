@@ -139,7 +139,7 @@ def test_the_transfer_group_is_the_former_remote_group(tmp_path: Path) -> None:
     """The former send/fetch/offer/retire/status verbs are one ``transfer`` verb now."""
 
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    parsed = parser.parse_args(["transfer", "--job", "J", "source", "destination"])
+    parsed = parser.parse_args(["job", "transfer", "--job", "J", "source", "destination"])
     assert parsed.handler is cli.handle_transfer
     # The superseded per-verb handlers are removed, not merely hidden.
     for name in ("handle_transfer_send", "handle_transfer_fetch", "handle_transfer_operation"):
@@ -153,18 +153,20 @@ def test_the_transfer_commands_name_a_remote(tmp_path: Path) -> None:
     """The transfer verb captures its source and destination after its options."""
 
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    parsed = parser.parse_args(["transfer", "--json", "src", "dst"])
+    parsed = parser.parse_args(["job", "transfer", "--json", "src", "dst"])
     assert (parsed.source, parsed.destination, parsed.json) == ("src", "dst", True)
     # The superseded ``--computer`` option is gone.
     with pytest.raises(SystemExit):
-        parser.parse_args(["transfer", "--computer", "cluster"])
+        parser.parse_args(["job", "transfer", "--computer", "cluster"])
 
 
 def test_neither_removed_alias_is_advertised_or_parses(tmp_path: Path, capsys) -> None:
     assert command(["--help"], CLIContext("httk", tmp_path)) == 0
     printed = capsys.readouterr().out
-    assert "remote" in printed and "transfer" in printed
+    assert "remote" in printed
     assert "computer" not in printed and "tasks" not in printed
+    assert command(["job", "--help"], CLIContext("httk", tmp_path)) == 0
+    assert "transfer" in capsys.readouterr().out
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
     for group in ("computer", "tasks", "internal"):
         with pytest.raises(SystemExit):
