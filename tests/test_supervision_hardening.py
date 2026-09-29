@@ -338,3 +338,12 @@ def test_report_json_is_still_the_versioned_process_report(tmp_path: Path) -> No
     assert value["stdout_path"] is None
     assert value["dropped_diagnostics"] == 0
     assert report.stdout == b"hello\n"
+
+
+def test_captures_truncate_unless_appending(tmp_path: Path) -> None:
+    out = tmp_path / "program.out"
+    for text in ("first", "second"):
+        ProcessSupervisor().run([sys.executable, "-c", f"print({text!r})"], stdout_path=out, stderr_path=out)
+    assert out.read_text(encoding="utf-8") == "second\n"
+    ProcessSupervisor().run([sys.executable, "-c", "print('third')"], stdout_path=out, append=True)
+    assert out.read_text(encoding="utf-8") == "second\nthird\n"

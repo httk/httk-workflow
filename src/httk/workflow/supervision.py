@@ -137,6 +137,12 @@ class Diagnostic:
 class FollowSource:
     """Describe a file to follow while the child process is running.
 
+    A followed file is read from offset ``0``, including content that existed
+    before the run started, and the supervisor never truncates it. A code that
+    follows or parses a file it does not capture (VASP's ``OUTCAR``, for
+    example) must remove or rotate it before the run, or the previous run's
+    content is replayed into the monitors.
+
     :param path: Locate the file to follow.
     :param name: Identify the source in emitted events.
     :param inactivity_timeout: Stop when no data arrives for this interval.
@@ -504,7 +510,8 @@ class ProcessSupervisor:
 
     :param monitors: Supply in-process event monitors.
     :param checkers: Supply executable checker specifications.
-    :param follow: Supply files to follow during the run.
+    :param follow: Supply files to follow during the run. Each is read from its
+        start, including content left by an earlier run; see :class:`FollowSource`.
     """
 
     def __init__(
@@ -528,6 +535,7 @@ class ProcessSupervisor:
         termination_grace: float = 10.0,
         stdout_path: str | os.PathLike[str] | None = None,
         stderr_path: str | os.PathLike[str] | None = None,
+        append: bool = False,
         stdout_sink: IO[bytes] | None = None,
         stderr_sink: IO[bytes] | None = None,
         tick_interval: float = DEFAULT_TICK_INTERVAL,
@@ -545,6 +553,10 @@ class ProcessSupervisor:
         :param termination_grace: Wait this long after requesting termination.
         :param stdout_path: Write stdout to this authoritative file.
         :param stderr_path: Write stderr to this authoritative file.
+        :param append: Append to ``stdout_path`` and ``stderr_path`` instead of
+            truncating them first. Truncation is the default, so a retry in a
+            persistent workdir never inherits the previous run's output; files the
+            command writes itself and the ``follow`` sources are not truncated.
         :param stdout_sink: Forward stdout chunks to this sink as they arrive.
         :param stderr_sink: Forward stderr chunks to this sink as they arrive.
         :param tick_interval: Set the interval between tick events.
@@ -736,6 +748,12 @@ class ProcessSupervisor:
                     previous_handlers[signum] = signal.getsignal(signum)
                     signal.signal(signum, forward)
             dispatch(SourceEvent("start", "process", timestamp=started_at))
+            if not append:
+                # Truncate first, then open both in append mode, so a stdout and
+                # stderr naming the same file interleave instead of overwriting.
+                for output_path in (stdout_path, stderr_path):
+                    if output_path is not None:
+                        Path(output_path).write_bytes(b"")
             if stdout_path is not None:
                 output_handles[0] = Path(stdout_path).open("ab")  # noqa: SIM115 - handle escapes to the reader thread
             if stderr_path is not None:

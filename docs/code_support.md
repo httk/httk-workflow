@@ -121,3 +121,32 @@ from httk.workflow.codes import installed_codes
 
 print([code.name for code in installed_codes()])
 ```
+
+## Conventions every code package follows
+
+- **Captures truncate.** {py:meth}`~httk.workflow.supervision.ProcessSupervisor.run`
+  truncates `stdout_path` and `stderr_path` before a run unless `append=True`,
+  so a retry in a persistent workdir never inherits the previous run's crash
+  text. Followed files are not truncated and are read from their start: a file
+  a code follows or parses but does not capture (VASP's `OUTCAR`, for example)
+  must be removed or rotated by the code before the run.
+- **Energies are converged energies.** A code's parsed energy attribute is its
+  converged energy, `None` when the last SCF cycle or iteration did not
+  converge; `<code>-energy` is absent otherwise, and the collectors gate on the
+  same value. Classical molecular dynamics codes (GROMACS, LAMMPS) are the
+  documented exception: they report energies regardless, and convergence
+  applies only to minimizations.
+- **Classification order is a choice.** Most codes exit `0` on
+  non-convergence, so "nonconverged" is decided after "process failure"; a code
+  that exits nonzero on non-convergence (CP2K) must check non-convergence
+  first. Choose the order deliberately for each code.
+
+## Available code distributions
+
+- *httk-workflow-vasp* — VASP (`httk.codes.vasp`)
+- *httk-workflow-qe* — Quantum ESPRESSO (`httk.codes.qe`)
+- *httk-workflow-abinit* — ABINIT (`httk.codes.abinit`)
+- *httk-workflow-cp2k* — CP2K (`httk.codes.cp2k`)
+- *httk-workflow-gromacs* — GROMACS (`httk.codes.gromacs`)
+- *httk-workflow-lammps* — LAMMPS (`httk.codes.lammps`)
+- *httk-workflow-orca* — ORCA (`httk.codes.orca`)

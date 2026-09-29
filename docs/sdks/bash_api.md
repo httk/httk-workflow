@@ -531,7 +531,8 @@ report it writes is authoritative. Without explicit `--stdout` or `--stderr`,
 the program's output is forwarded live, in arrival order, to the inherited
 stdout or stderr while only bounded tails are retained in the report. Explicit
 output paths remain authoritative instead of being duplicated to the inherited
-streams.
+streams. An explicit output file is truncated when the run starts, so a retry in a
+persistent workdir never inherits the previous run's output.
 
 A checker spec has format `httk-workflow-checker-spec`, format version 2, an
 `argv` string array, and optional `required` and `sources` fields. Each source
