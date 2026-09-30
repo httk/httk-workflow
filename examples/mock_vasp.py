@@ -27,7 +27,6 @@ _OUTCAR = (
     "   NELM   =     60;   NELMIN=  2; NELMDL= -5\n"
     "   NSW    =     99    number of steps for IOM\n"
     "   maximum number of plane-waves:    1234\n"
-    " General timing and accounting information for this job:\n"
     "   FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)\n"
     "   free  energy   TOTEN  =        -9.20000000 eV\n"
     "   energy  without entropy=       -9.20000000  energy(sigma->0) =       -9.20000000\n"
@@ -43,6 +42,7 @@ _OUTCAR = (
     "   FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)\n"
     "   free  energy   TOTEN  =       -10.50000000 eV\n"
     "   energy  without entropy=      -10.50000000  energy(sigma->0) =      -10.50000000\n"
+    " General timing and accounting informations for this job:\n"
 )
 _OSZICAR = (
     "       N       E                     dE             d eps       ncg     rms\n"
