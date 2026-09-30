@@ -263,8 +263,10 @@ def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, 
             ledger_keys=keys,
         )
     # Collect succeeds: the output is store-minted, and the ledger holds nothing.
+    # The records family has two backings (DataRecord, TotalEnergyRecord), and a
+    # minted number is logical_id * 2 + backing index, so the first DataRecord is 2.
     assert "storage_error" not in reports[0]
-    assert cast(Any, reports[0]["stored"])["entries"] == ["httk.probe-1-1"]
+    assert cast(Any, reports[0]["stored"])["entries"] == ["httk.probe-1-2"]
     assert list(_ledger_records(ledger)) == []
     assert any("unstable identity" in message for message in caplog.messages)
 

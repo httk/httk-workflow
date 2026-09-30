@@ -1,16 +1,18 @@
 """The recognized-calculation walker: collect_tree, claims and content_digest."""
 
 import bz2
+import datetime
 import gzip
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Annotated, Any, ClassVar, cast
 
 import pytest
 from httk.core.register import codes
 from httk.core.register.codes import register_collector
-from httk.core.storage import content_id
+from httk.core.storage import IdentitySkip, Indexed, StorageInfo, Unique, content_id
 
 from conftest import TestProfile as _TestProfile
 from httk.workflow import (
@@ -83,6 +85,9 @@ def collect(record):
         import httk.core
 
         result["initial_structure"] = httk.core.load(workdir / "POSCAR", precision=1e-3)
+    if (workdir / "MOMENT").exists():
+        moment = float((workdir / "MOMENT").read_text(encoding="utf-8"))
+        result["moment"] = DataRecord.from_value("https://example.test/defs/moment", "moment", moment)
     if (workdir / "CONTCAR").exists():
         import httk.core
 
@@ -90,6 +95,7 @@ def collect(record):
     return result
 """
 
+_TOTAL_ENERGY = "https://schemas.httk.org/defs/v0.1/properties/core/total_energy"
 _POSCAR = "Si\n1.0\n5 0 0\n0 5 0\n0 0 5\nSi\n1\nDirect\n0 0 0\n"
 
 
@@ -432,7 +438,7 @@ def test_store_collected_stores_the_input_the_run_names(tmp_path: Path) -> None:
 
 def test_a_recollected_changed_calculation_is_a_revision(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
-    from httk.core import DataRecord
+    from httk.core import TotalEnergyRecord
     from httk.core.crypto import ed25519_generate_seed
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
@@ -464,11 +470,11 @@ def test_a_recollected_changed_calculation_is_a_revision(tmp_path: Path) -> None
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
         searcher = store.searcher(only_latest=True)
-        variable = searcher.variable(DataRecord)
+        variable = searcher.variable(TotalEnergyRecord)
         searcher.add(variable.id == record_id)
         latest = next(iter(searcher.results(entry=variable))).entry
-        assert latest.value == -3.0
-        assert [revision.value for revision in store.history(latest)] == [-1.5, -3.0]
+        assert latest.total_energy == -3.0
+        assert [revision.total_energy for revision in store.history(latest)] == [-1.5, -3.0]
 
     # Reverting to an earlier revision's content is an idempotent no-op replace in
     # the store: no row is written, so the sweep does not report a revision (and the
@@ -478,15 +484,15 @@ def test_a_recollected_changed_calculation_is_a_revision(tmp_path: Path) -> None
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
         searcher = store.searcher(only_latest=True)
-        variable = searcher.variable(DataRecord)
+        variable = searcher.variable(TotalEnergyRecord)
         searcher.add(variable.id == record_id)
         latest = next(iter(searcher.results(entry=variable))).entry
-        assert [revision.value for revision in store.history(latest)] == [-1.5, -3.0]
+        assert [revision.total_energy for revision in store.history(latest)] == [-1.5, -3.0]
 
 
 def test_a_changed_job_never_revises_an_entry_it_shares_through_an_alias(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
-    from httk.core import DataRecord
+    from httk.core import TotalEnergyRecord
     from httk.core.crypto import ed25519_generate_seed
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
@@ -517,10 +523,10 @@ def test_a_changed_job_never_revises_an_entry_it_shares_through_an_alias(tmp_pat
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
         searcher = store.searcher(only_latest=True)
-        variable = searcher.variable(DataRecord)
+        variable = searcher.variable(TotalEnergyRecord)
         searcher.add(variable.id == record_id)
         latest = next(iter(searcher.results(entry=variable))).entry
-        assert latest.value == -1.5
+        assert latest.total_energy == -1.5
         assert len(store.history(latest)) == 1
 
 
@@ -602,6 +608,202 @@ def test_only_tree_sweep_lines_name_a_directory(tmp_path: Path) -> None:
     assert "directory" not in _collected_mapping(next(collect(workspace)))
 
 
+_MOMENT = """
+[workflow.outputs.moment]
+role = "moment"
+entry_type = "records"
+"""
+
+
+def _energy_store(tmp_path: Path, **files: str) -> tuple[Path, list[dict[str, object]]]:
+    """Collect one fixture calculation into a new store and return the store and its reports."""
+
+    package = _collector(tmp_path / "pkg", extra=_MOMENT)
+    _calculation(tmp_path / "tree" / "calc", **files)
+    items = list(collect_tree(tmp_path / "tree", collectors=(package,)))
+    path = tmp_path / "store.sqlite"
+    return path, store_collected(items, str(path), id_base="httk.probe")
+
+
+def test_a_total_energy_is_stored_as_a_typed_record(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    pytest.importorskip("httk.atomistic")
+    from httk.atomistic.entries.structures import StructureEntry  # pyright: ignore[reportMissingImports]
+    from httk.core import DataRecord, Run, TotalEnergyRecord
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    path, (report,) = _energy_store(tmp_path, POSCAR=_POSCAR, MOMENT="2.5")
+
+    assert "storage_error" not in report
+    stored = cast(dict[str, Any], report["stored"])
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        searcher = store.searcher()
+        energies = list(searcher.results(entry=searcher.variable(TotalEnergyRecord)))
+        searcher = store.searcher()
+        variable = searcher.variable(DataRecord)
+        generic = [row.entry for row in searcher.results(entry=variable)]
+        searcher = store.searcher()
+        run_variable = searcher.variable(Run)
+        searcher.add(run_variable.id == stored["run"])
+        run = next(iter(searcher.results(run=run_variable))).run
+        structure = store.fetch_entry(StructureEntry, content_id(_load_poscar(tmp_path)), eager=True)
+    (energy,) = [row.entry for row in energies]
+    assert energy.total_energy == -1.5
+    # Only the custom, unmapped definition stays a generic record.
+    assert [(record.definition_id, record.value) for record in generic] == [("https://example.test/defs/moment", 2.5)]
+    assert [(edge.label, edge.entry_id) for edge in energy.product_of] == [("initial_structure", structure.id)]
+    outputs = {edge.label: edge.entry_id for edge in run.outputs}
+    assert outputs["total_energy"] == energy.id and outputs["moment"] == generic[0].id
+    assert energy.id in stored["entries"]
+
+
+def _load_poscar(tmp_path: Path) -> object:
+    import httk.core
+
+    return httk.core.load(str(tmp_path / "tree" / "calc" / "POSCAR"), precision=1e-3)
+
+
+def test_an_unregistered_record_dataclass_is_a_storage_error(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from dataclasses import dataclass, replace
+
+    @dataclass(frozen=True)
+    class LooseRecord:
+        value: float
+        id: str | None = None
+
+        @property
+        def type(self) -> str:
+            return "records"
+
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "calc")
+    (item,) = collect_tree(tmp_path / "tree", collectors=(package,))
+    item = replace(item, outputs={"total_energy": LooseRecord(1.0)})
+
+    (report,) = store_collected([item], str(tmp_path / "store.sqlite"), id_base="httk.probe")
+
+    assert "LooseRecord is not a registered record of the 'records' entry family" in str(report["storage_error"])
+    assert report.get("stored") is None
+
+
+def test_a_store_that_predates_typed_records_is_refused_with_the_rebuild_advice(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import DataRecord, DataRecordEntry, Run, RunEntry
+    from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow.storing import _storage_layout
+
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "calc")
+    items = list(collect_tree(tmp_path / "tree", collectors=(package,)))
+
+    # A store declared before typed records: its records family holds DataRecord only.
+    old = tmp_path / "old.sqlite"
+    with SqliteStore(
+        old, entry_records={DataRecordEntry: (DataRecord,), RunEntry: (Run,)}, entry_ids=EntryIdScheme("x", "1")
+    ):
+        pass
+    with pytest.raises(ValueError, match="predates typed records.*keeping the id ledger"):
+        store_collected(items, str(old), id_base="httk.probe")
+
+    # A store with the typed backing that still holds a generic total energy is refused once too.
+    mixed = tmp_path / "mixed.sqlite"
+    layout, _failures = _storage_layout(items)
+    with SqliteStore(mixed, entry_records=layout, entry_ids=EntryIdScheme("x", "1")) as store:
+        store.save(DataRecord.from_value(_TOTAL_ENERGY, "_httk_total_energy", -1.0))
+    with pytest.raises(ValueError, match="predates typed records"):
+        store_collected(items, str(mixed), id_base="httk.probe")
+
+
+def test_a_value_the_typed_record_refuses_fails_only_its_job(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from dataclasses import replace
+
+    from httk.core import DataRecord
+
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "bad", "bad")
+    _calculation(tmp_path / "tree" / "good", "good")
+    bad, good = collect_tree(tmp_path / "tree", collectors=(package,))
+    listed = DataRecord.from_value(_TOTAL_ENERGY, "_httk_total_energy", [-1.0, -2.0])
+    bad = replace(bad, outputs={"total_energy": listed})
+
+    bad_report, good_report = store_collected([bad, good], str(tmp_path / "store.sqlite"), id_base="httk.probe")
+
+    assert str(bad_report["storage_error"]).startswith("cannot store role 'total_energy': ")
+    assert "storage_error" not in good_report and good_report["stored"] is not None
+
+
+def test_a_store_lacking_only_an_appended_core_record_is_not_told_to_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core.register import entries, register_entry_record
+
+    from httk.workflow import storing
+
+    path, (report,) = _energy_store(tmp_path)
+    assert "storage_error" not in report
+
+    # A later core record appended to the pinned order is an additive change, not a rebuild.
+    monkeypatch.setattr(entries, "_entry_records", dict(entries._entry_records))
+    register_entry_record(
+        name="test-appended-record",
+        family="records",
+        record=f"{__name__}:AppendedRecord",
+        definition_id="https://schemas.httk.org/defs/v0.1/entrytypes/records",
+    )
+    monkeypatch.setattr(storing, "_CORE_RECORDS_ORDER", (*storing._CORE_RECORDS_ORDER, "test-appended-record"))
+    items = list(collect_tree(tmp_path / "tree", collectors=(tmp_path / "pkg",)))
+
+    with pytest.raises(ValueError, match="different set of entry types") as refusal:
+        store_collected(items, str(path), id_base="httk.probe")
+    assert "predates typed records" not in str(refusal.value)
+
+
+def test_a_typed_record_that_cannot_carry_collected_values_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    from httk.core import TotalEnergyRecord
+
+    from httk.workflow.storing import _typed_record_classes
+
+    class TwoProperties:
+        __httk_property_definitions__: ClassVar[dict[str, object]] = {"a": object(), "b": object()}
+
+        @classmethod
+        def from_data_record(cls, record: object) -> object:
+            return record
+
+    with caplog.at_level(logging.WARNING, logger="httk.workflow.storing"):
+        typed = _typed_record_classes((TotalEnergyRecord, TwoProperties))
+
+    assert list(typed.values()) == [TotalEnergyRecord]
+    assert "typed record" in caplog.text and "TwoProperties" in caplog.text
+
+
+def test_the_collected_store_serves_the_total_energy(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    pytest.importorskip("starlette")
+    serve = pytest.importorskip("httk.serve.optimade")
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+    from starlette.testclient import TestClient
+
+    path, (report,) = _energy_store(tmp_path, MOMENT="2.5")
+    assert "storage_error" not in report
+
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        app = serve.create_asgi_app(serve.adapter_from_store(store), baseurl="http://testserver")
+        with TestClient(app, base_url="http://testserver") as client:
+            info = client.get("/v1/info/_httk_records")
+            assert info.status_code == 200, info.text
+            assert info.json()["data"]["properties"]["_httk_total_energy"]["$id"] == _TOTAL_ENERGY
+            filtered = client.get("/v1/_httk_records", params={"filter": "_httk_total_energy < 0"})
+            assert filtered.status_code == 200, filtered.text
+            assert [row["attributes"]["_httk_total_energy"] for row in filtered.json()["data"]] == [-1.5]
+
+
 def test_claims_scale_to_wide_trees(tmp_path: Path, test_profile: _TestProfile) -> None:
     empty, calculations = test_profile.scale(normal=(200, 5), extended=(5000, 50))
     package = _collector(tmp_path / "pkg")
@@ -614,3 +816,22 @@ def test_claims_scale_to_wide_trees(tmp_path: Path, test_profile: _TestProfile) 
     outcomes = [item for item in claims(tree, collectors=(package,)) if item.kind == "claimed"]
 
     assert len(outcomes) == calculations
+
+
+@dataclass(frozen=True)
+class AppendedRecord:
+    """A test-registered record appended to the ``records`` family."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(
+        storage_name="test_appended_record", identity_name="test_appended_record"
+    )
+
+    note: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        """Return the entry type."""
+        return "records"

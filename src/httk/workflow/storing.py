@@ -16,7 +16,7 @@ from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from httk.core import Run, RunEdge
+from httk.core import DataRecord, Run, RunEdge
 from httk.core.storage import content_id, resolve_storage_record
 
 from .collecting import CollectedJob
@@ -26,6 +26,17 @@ __all__ = ["store_collected"]
 
 _LOGGER = logging.getLogger(__name__)
 _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
+#: The pinned order of the core records of the ``records`` family, as registry
+#: names: the generic ``DataRecord`` first, then the typed core records. A record's
+#: position in its family decides the numbers of the ids the store mints, so this
+#: order is fixed when a store is created, and every core record is declared then.
+#: Other registered records of the family follow in name order. A later additive
+#: upgrade may only append to this order, never insert or reorder.
+_CORE_RECORDS_ORDER = ("core-data-record", "core-total-energy")
+_REBUILD_TYPED = (
+    "{target} predates typed records: its values are stored as generic DataRecord rows. Rebuild it: delete "
+    "{target} and collect again, keeping the id ledger beside it, so record and run ids are preserved."
+)
 
 
 def _edge_counts(run: Run) -> dict[str, int]:
@@ -289,8 +300,13 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
                 ):
                     failures[index] = message
             continue
+        names = known_entry_records(family_name)
+        if family_name == "records":
+            names = [name for name in _CORE_RECORDS_ORDER if name in names] + [
+                name for name in names if name not in _CORE_RECORDS_ORDER
+            ]
         try:
-            records = tuple(resolve_entry_record(name) for name in known_entry_records(family_name))
+            records = tuple(resolve_entry_record(name) for name in names)
         except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
             message = f"cannot store entry type {entry_type!r}: {exc}"
             for index, item in enumerate(items):
@@ -306,6 +322,69 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
     for family, records in configurations.values():
         layout[family] = records
     return layout, failures
+
+
+def _typed_record_classes(records: Sequence[type]) -> dict[str, type]:
+    """Map each property IRI a typed record of the ``records`` family carries to that class.
+
+    A typed record declares exactly one property in ``__httk_property_definitions__``
+    and builds itself from a generic record through ``from_data_record``.
+    """
+
+    typed: dict[str, type] = {}
+    for record in records:
+        definitions = getattr(record, "__httk_property_definitions__", None)
+        if record is DataRecord or not definitions:
+            continue
+        if not callable(getattr(record, "from_data_record", None)) or len(definitions) != 1:
+            # Its values would silently stay generic and unserved; the class owner must fix it.
+            _LOGGER.warning(
+                "typed record %s is not used for collected values: it needs a from_data_record classmethod "
+                "and exactly one property definition",
+                record.__qualname__,
+                extra={"context": "workflow"},
+            )
+            continue
+        (definition,) = definitions.values()
+        typed.setdefault(definition.definition_id, record)
+    return typed
+
+
+def _typed(value: object, typed: Mapping[str, type]) -> object:
+    """Return a generic data record as the typed record class carrying its definition, if any."""
+
+    if isinstance(value, DataRecord) and value.definition_id in typed:
+        return cast(Any, typed[value.definition_id]).from_data_record(value)
+    return value
+
+
+def _predates_typed_records(diff: object) -> bool:
+    """Report whether a layout refusal is a ``records`` family declared before typed records existed.
+
+    That is a stored ``records`` family without ``core-total-energy``, the first typed
+    record: its generic total energies cannot move to the typed backing under their
+    ids. A store that has it and only lacks records appended later is not this case.
+    """
+
+    try:
+        stored = json.loads(cast(Any, diff)["declaration"]["entry_declaration"]["expected"])
+        families = {family["family"]: family for family in stored["families"]}
+        names = {record["record"] for record in families["records"]["records"]}
+    except (KeyError, TypeError, ValueError):
+        return False
+    return "core-total-energy" not in names
+
+
+def _stored_generic_typed(store: Any, typed: Mapping[str, type]) -> bool:
+    """Report whether the store holds generic data records for a definition that is now typed."""
+
+    for definition_id in typed:
+        searcher = store.searcher()
+        variable = searcher.variable(DataRecord)
+        searcher.add(variable.definition_id == definition_id)
+        if searcher.results(entry=variable).first() is not None:
+            return True
+    return False
 
 
 def _latest_stored_entry(store: Any, value: object, entry_id: str) -> Any:
@@ -528,6 +607,13 @@ def store_collected(
     revision to its lineage. Views that cannot carry an explicit id, such as
     structures, are store-minted and deduplicated by content.
 
+    A generic ``DataRecord`` whose property definition a typed record of the
+    ``records`` family carries (``TotalEnergyRecord`` for the core total energy)
+    is stored as that typed record, so its value is served and filterable; any
+    other definition stays a generic record, stored but not served as a value.
+    A dataclass entry that is not a registered record of its family is a
+    storage error rather than a row in an unserved table.
+
     Each report is the job's collected summary plus ``"stored"`` (the stored
     entry ids and run id, or ``None`` when nothing was stored, with
     ``"skipped"`` saying why), ``"storage_error"`` when the job could not be
@@ -545,7 +631,7 @@ def store_collected(
     :param bare_runs: Store the runs of jobs whose workflows have nothing to collect.
     :return: One report mapping per collected job.
     :raises ValueError: If *httk-store* is unavailable, or the store at *path*
-        was created for a different set of entry types.
+        was created for a different set of entry types or predates typed records.
     """
 
     try:
@@ -587,12 +673,39 @@ def store_collected(
                 SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
             )
         except StorageLayoutUpgradeRequiredError as exc:
+            if _predates_typed_records(exc.diff):
+                raise ValueError(_REBUILD_TYPED.format(target=target)) from exc
             needs = ", ".join(requested) or "no entry types"
             raise ValueError(
                 f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
                 f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
                 "Collect into a new store file."
             ) from exc
+        records_family = next(
+            (records for family, records in layout.items() if family is type_to_family.get("records")), ()
+        )
+        typed = _typed_record_classes(records_family)
+        if _stored_generic_typed(store, typed):
+            raise ValueError(_REBUILD_TYPED.format(target=target))
+        # A dataclass entry is stored only as a record of its family; anything else
+        # would land in a private table no provider serves.
+        members = {record for records in layout.values() for record in records}
+        for index, item in enumerate(items):
+            for role, value in (*item.outputs.items(), *item.inputs.items()):
+                if index in failures:
+                    break
+                try:
+                    stored_as = _typed(value, typed)
+                except (TypeError, ValueError) as exc:
+                    # A value the typed record refuses (a list-valued total energy) fails this job only.
+                    failures[index] = f"cannot store role {role!r}: {exc}"
+                    break
+                if is_dataclass(stored_as) and type(stored_as) not in members:
+                    failures[index] = (
+                        f"cannot store role {role!r}: {type(stored_as).__name__} is not a registered record of the "
+                        f"{getattr(stored_as, 'type', None)!r} entry family; register it with "
+                        "httk.core.register.register_entry_record, or return a registered record"
+                    )
         stored_output_ids: dict[int, list[str]] = {}
         deferred_outputs: dict[int, list[tuple[str, Any]]] = {}
         remap: dict[str, str] = {}
@@ -609,7 +722,12 @@ def store_collected(
             """Store one output, recording its minted id under ``original_key`` and any prior id.
 
             Return whether the save replaced an earlier revision stored under the same ledger id.
+            A generic data record whose definition a typed record carries is stored as that
+            typed record; ``original_key`` stays the generic record's content id, which is
+            what run and ``product_of`` edges name, while ledger and alias lookups see the
+            typed content.
             """
+            value = _typed(value, typed)
             original_id = getattr(value, "id", None)
             chosen = (
                 _ledger_entry_id(

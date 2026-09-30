@@ -47,7 +47,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import metadata
 from itertools import islice
@@ -1625,7 +1625,10 @@ def _attach_product_of(
     run: httk.core.Run,
     provider: object | None,
 ) -> dict[str, object]:
-    """Write each ``product_of`` curation into its data-record output as a ``product_of`` edge.
+    """Write each ``product_of`` curation into its record output as a ``product_of`` edge.
+
+    Any dataclass entry with a ``product_of`` field takes the edge: a generic data record or a
+    typed record such as :class:`~httk.core.TotalEnergyRecord`.
 
     The edge is record content (a :class:`~httk.core.storage.StrongLink`), so it is attached
     before the run's output edges are derived from the outputs' content ids. The source is the
@@ -1634,13 +1637,18 @@ def _attach_product_of(
     that is the output itself (identical content) is skipped, since there is nothing to link. The edge
     holds the source's pre-store identifier; ``--into`` rewrites it to the store-minted id.
     """
-    from httk.core import DataRecord, RunEdge
+    from httk.core import RunEdge
 
     input_edges = {edge.label: edge for edge in run.inputs}
     for role, curation in _provider_output_roles(provider).items():
         source_role = curation.get("product_of")
         value = outputs.get(role)
-        if not isinstance(source_role, str) or not isinstance(value, DataRecord):
+        if (
+            not isinstance(source_role, str)
+            or not is_dataclass(value)
+            or isinstance(value, type)
+            or not any(item.name == "product_of" for item in fields(value))
+        ):
             continue
         source_edge = input_edges.get(source_role)
         if source_edge is None and source_role in outputs:
@@ -1649,14 +1657,14 @@ def _attach_product_of(
             # loudly at `--into` ("unresolved provenance reference"). Order-aware chains
             # of record-of-record products are the upgrade path if that ever matters.
             source_edge = _entry_edge(identity, source_role, outputs[source_role], roles[source_role])
-        if source_edge is None or any(edge.label == source_role for edge in value.product_of):
+        if source_edge is None or any(edge.label == source_role for edge in cast(Any, value).product_of):
             continue
         own = _entry_edge(identity, role, value, roles[role])
         if (source_edge.entry_type, source_edge.entry_id) == (own.entry_type, own.entry_id):
             # The output is its own source (the step reproduced it unchanged): nothing to link.
             continue
         edge = RunEdge(source_role, source_edge.entry_type, source_edge.entry_id)
-        outputs[role] = replace(value, product_of=(*value.product_of, edge))
+        outputs[role] = replace(value, product_of=(*cast(Any, value).product_of, edge))
     return outputs
 
 

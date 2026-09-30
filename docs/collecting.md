@@ -509,7 +509,13 @@ items = list(collect_tree("calculations", collectors=["my-collector"]))
 reports = store_collected(items, "results.sqlite", id_base="mydb")
 ```
 
-`store_collected` stores each calculation's inputs like its outputs. Structures
+`store_collected` stores each calculation's inputs like its outputs. A
+`DataRecord` whose definition a typed record carries is stored as that typed
+record (the core total energy becomes a `TotalEnergyRecord`, served and
+filterable as `_httk_total_energy`); other definitions stay generic records,
+stored but with their values not served. A store created before typed records
+is refused with advice to rebuild it: delete it and collect again, keeping the
+id ledger, so record and run ids are preserved. Structures
 are deduplicated by content and keep the id the store minted for them; records,
 runs and files get ledger ids, which a tree sweep signs with the project or
 operator identity key (`tree_ledger_keys`). Re-collecting only adds: a
