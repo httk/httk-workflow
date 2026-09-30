@@ -7,7 +7,7 @@ import sys
 from httk.workflow.collecting import _CollectEnvironmentError
 from httk.workflow.compat.v1 import collect_finished_tree
 
-from ._collect import _collected_mapping, _store_collected
+from ..storing import _collected_mapping, store_collected
 from ._common import CLIContext, _group, _leaf
 
 
@@ -30,7 +30,7 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
             if arguments.into is not None:
                 # --into retains the root sweep for its provenance storage pass.
                 items = list(collected_items)
-                reports = _store_collected(
+                reports = store_collected(
                     items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series
                 )
                 for item, report in zip(items, reports):

@@ -1,26 +1,30 @@
-"""The collect command."""
+"""The top-level ``httk collect`` command: workspaces and recognized calculations."""
 
 import argparse
-import contextlib
 import json
-import re
-from collections.abc import Mapping, Sequence
-from dataclasses import fields, is_dataclass, replace
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any, cast
 
-from httk.core import Run, RunEdge
 from httk.core.cli import CLIContext
-from httk.core.storage import content_id, resolve_storage_record
 
+from ..calculations import DirectoryClaim, claims, collect_tree
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
-from ..errors import SealError
-from ..id_keys import UnstableIdentityError, ledger_key
-from ..seals import default_workspace_keys
+from ..errors import ResolutionMiss, SealError
+from ..seals import default_workspace_keys, tree_ledger_keys
+from ..storing import _collected_mapping, store_collected
 from ..workspace import Workspace
 from ._common import _LOGGER, _leaf, _local_root
 
-_CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
+CLAIM_FORMAT = "httk-collect-claim"
+CLAIM_FORMAT_VERSION = 1
+#: Options that only apply to one kind of collect target, with their flags.
+_TREE_ONLY = (("dry_run", "--dry-run"), ("prefer", "--prefer"), ("exclude", "--exclude"), ("collector", "--collector"))
+_WORKSPACE_ONLY = (
+    ("state", "--state"),
+    ("placement", "--placement"),
+    ("raw", "--raw"),
+    ("allow_job_collector", "--allow-job-collector"),
+)
 
 
 def _positive_int(value: str) -> int:
@@ -32,214 +36,15 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
-def _edge_counts(run: Run) -> dict[str, int]:
-    return {side: len(getattr(run, side)) for side in ("inputs", "artifacts", "outputs")}
-
-
-def _stored_entry_id(store: Any, entry_type: str, entry_id: str) -> str | None:
-    """Resolve a stored public id or content-id through the destination store."""
-
-    family = next(
-        (candidate for candidate in store.entry_records if getattr(candidate, "type", None) == entry_type),
-        None,
-    )
-    if family is None:
-        return None
-
-    # ``fetch_entry`` is content-id based.  Public ids are queried through the
-    # backing records instead, so an already stored entry id is preserved as-is
-    # rather than being mistaken for a content id.
-    for record_type in store.entry_records[family]:
-        searcher = store.searcher()
-        variable = searcher.variable(record_type)
-        searcher.add(variable.id == entry_id)
-        row = searcher.results(entry=variable).first()
-        if row is None:
-            continue
-        fetched = row.entry
-        if isinstance(getattr(fetched, "id", None), str):
-            return entry_id
-
-    fetched = store.fetch_entry(family, entry_id, eager=True)
-    fetched_id = getattr(fetched, "id", None)
-    return fetched_id if isinstance(fetched_id, str) else None
-
-
-def _resolve_entry_id(store: Any, remap: dict[str, str], entry_type: str, entry_id: str) -> str:
-    replacement = remap.get(entry_id)
-    if replacement is not None:
-        return replacement
-    resolved = _stored_entry_id(store, entry_type, entry_id)
-    if resolved is not None:
-        return resolved
-    if _CONTENT_ID_RE.fullmatch(entry_id) is not None:
-        raise ValueError(f"unresolved provenance reference {entry_type}/{entry_id}")
-    # Provenance edges may intentionally point outside this store.  Preserve
-    # those loose served-entry references instead of requiring a local row.
-    return entry_id
-
-
-def _rewrite_product_of(value: Any, store: Any, remap: dict[str, str]) -> Any:
-    """Rewrite a data record's ``product_of`` edges to ids minted by the destination store."""
-    edges = tuple(
-        RunEdge(edge.label, edge.entry_type, _resolve_entry_id(store, remap, edge.entry_type, edge.entry_id))
-        for edge in value.product_of
-    )
-    return value if edges == tuple(value.product_of) else replace(value, product_of=edges)
-
-
-def _rewrite_run_edges(run: Run, store: Any, remap: dict[str, str]) -> Run:
-    """Rewrite content-id references to ids minted by the destination store."""
-
-    def _rewrite_edges(source_edges: tuple[RunEdge, ...]) -> tuple[RunEdge, ...]:
-        rewritten: list[RunEdge] = []
-        for edge in source_edges:
-            rewritten.append(
-                RunEdge(edge.label, edge.entry_type, _resolve_entry_id(store, remap, edge.entry_type, edge.entry_id))
-            )
-        return tuple(rewritten)
-
-    return replace(
-        run,
-        inputs=_rewrite_edges(run.inputs),
-        artifacts=_rewrite_edges(run.artifacts),
-        outputs=_rewrite_edges(run.outputs),
-    )
-
-
-def _children_first(items: Sequence[CollectedJob]) -> list[int]:
-    """Order a sweep so every job comes after the children it spawned in it."""
-
-    by_source = {item.run.source_id: index for index, item in enumerate(items) if item.run.source_id is not None}
-    ordered: list[int] = []
-    placed: set[int] = set()
-
-    def place(index: int, visiting: set[int]) -> None:
-        if index in placed or index in visiting:
-            return
-        visiting.add(index)
-        for _label, source in items[index].child_runs:
-            child = by_source.get(source)
-            if child is not None:
-                place(child, visiting)
-        placed.add(index)
-        ordered.append(index)
-
-    for index in range(len(items)):
-        place(index, set())
-    return ordered
-
-
-def _latest_stored_run(store: Any, source_id: str) -> Run | None:
-    """Return the latest stored revision of the run of one job, by its source id."""
-
-    family = next((candidate for candidate in store.entry_records if getattr(candidate, "type", None) == "runs"), None)
-    if family is None:
-        return None
-    for record_type in store.entry_records[family]:
-        searcher = store.searcher(only_latest=True)
-        variable = searcher.variable(record_type)
-        searcher.add(variable.source_id == source_id)
-        row = searcher.results(entry=variable).first()
-        if row is not None and isinstance(getattr(row.entry, "id", None), str):
-            return cast(Run, row.entry)
-    return None
-
-
-def _with_child_runs(
-    run: Run,
-    item: CollectedJob,
-    store: Any,
-    run_ids_by_source: Mapping[str, str],
-    in_sweep: set[str],
-    stored_cache: dict[str, str | None],
-) -> Run:
-    """Add a ``has_artifact`` edge from *run* to the run of each child *item* spawned.
-
-    A child counts when its run was stored earlier in this sweep, or, when it is
-    not part of this sweep at all, by an earlier one; a child of this sweep that
-    was not stored now (degraded, skipped, or failed) is left out rather than
-    linked to a stale run, as is a child never collected. The spawn label names
-    the edge, or the child's run source id when the label would repeat one
-    already on the artifact side.
-    """
-
-    if not item.child_runs:
-        return run
-    labels = {edge.label for edge in run.artifacts}
-    edges = list(run.artifacts)
-    for label, source in item.child_runs:
-        child_run = run_ids_by_source.get(source)
-        if child_run is None and source not in in_sweep:
-            if source not in stored_cache:
-                stored = _latest_stored_run(store, source)
-                stored_cache[source] = None if stored is None else stored.id
-            child_run = stored_cache[source]
-        if child_run is None:
-            continue
-        name = label if label not in labels else source
-        if name in labels:
-            continue
-        labels.add(name)
-        edges.append(RunEdge(name, "runs", child_run))
-    return replace(run, artifacts=tuple(edges))
-
-
-def _collected_mapping(item: CollectedJob) -> dict[str, object]:
-    outputs = item.outputs
-
-    def _output_id(value: object) -> str:
-        entry_id = getattr(value, "id", None)
-        if isinstance(entry_id, str):
-            return entry_id
-        try:
-            return content_id(value)
-        except (TypeError, ValueError):
-            return ""
-
-    mapping: dict[str, object] = {
-        "format": "httk-workflow-collected",
-        "format_version": 2,
-        "job_id": item.record.job_id,
-        "job_key": item.record.job_key,
-        "workflow": item.workflow_id,
-        "outputs": {
-            role: {"type": getattr(value, "type", ""), "id": _output_id(value)} for role, value in outputs.items()
-        },
-        "unfulfilled": list(item.unfulfilled),
-        "missing_collector": item.missing_collector,
-        "run": {
-            "workflow_declaration_uri": item.run.workflow_declaration_uri,
-            "workflow_definition_uri": item.run.workflow_definition_uri,
-            "edges": _edge_counts(item.run),
-        },
-        "products": [
-            {
-                "source_type": product.source_type,
-                "source_id": product.source_id,
-                "target_type": product.target_type,
-                "target_id": product.target_id,
-                "label": product.label,
-                "workflow_declaration_uri": product.workflow_declaration_uri,
-            }
-            for product in item.products
-        ],
-    }
-    if item.products_unlinked:
-        mapping["products_unlinked"] = list(item.products_unlinked)
-    if item.collector_exit_status is not None:
-        mapping["collector_exit_status"] = item.collector_exit_status
-    if item.identity_stable is not None:
-        mapping["identity_stable"] = item.identity_stable
-    if item.run_only:
-        mapping["run_only"] = True
-    if item.child_runs:
-        mapping["children"] = [{"label": label, "run_source_id": source} for label, source in item.child_runs]
-    return mapping
-
-
 def _emit_collect_summary(
-    *, collected: int, degraded: int, unfulfilled_roles: int, storage_errors: int, skipped_unreadable: int
+    *,
+    collected: int,
+    degraded: int,
+    unfulfilled_roles: int,
+    storage_errors: int,
+    skipped_unreadable: int,
+    unclaimed: int | None = None,
+    revised: int | None = None,
 ) -> int:
     """Print the trailing collect-summary line and return the sweep exit code.
 
@@ -252,523 +57,30 @@ def _emit_collect_summary(
     :param unfulfilled_roles: Count the declared output roles left unfulfilled.
     :param storage_errors: Count the jobs a ``--into`` store could not persist.
     :param skipped_unreadable: Count the jobs dropped for an unreadable payload.
+    :param unclaimed: Count the directories a collector declined, for a tree sweep.
+    :param revised: Count the jobs whose stored entries gained a revision, with ``--into``.
     :return: ``0`` on a fully clean sweep, ``1`` otherwise.
     """
 
-    print(
-        json.dumps(
-            {
-                "format": "httk-workflow-collect-summary",
-                "format_version": 2,
-                "collected": collected,
-                "degraded": degraded,
-                "unfulfilled_roles": unfulfilled_roles,
-                "storage_errors": storage_errors,
-                "skipped_unreadable": skipped_unreadable,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
+    summary: dict[str, object] = {
+        "format": "httk-workflow-collect-summary",
+        "format_version": 2,
+        "collected": collected,
+        "degraded": degraded,
+        "unfulfilled_roles": unfulfilled_roles,
+        "storage_errors": storage_errors,
+        "skipped_unreadable": skipped_unreadable,
+    }
+    if unclaimed is not None:
+        summary["unclaimed"] = unclaimed
+    if revised is not None:
+        summary["revised"] = revised
+    print(json.dumps(summary, sort_keys=True, separators=(",", ":")))
     return 0 if degraded == 0 and storage_errors == 0 and skipped_unreadable == 0 else 1
 
 
-def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
-    """Resolve the lazy core entry registry for the values this sweep stores."""
-
-    from httk.core.register import known_entry_families, known_entry_records, resolve_entry_family, resolve_entry_record
-
-    required_types = {"records", "runs"}
-    failures: dict[int, str] = {}
-    for index, item in enumerate(items):
-        for value in item.outputs.values():
-            entry_type = getattr(value, "type", None)
-            if not isinstance(entry_type, str):
-                failures[index] = "cannot store an output without a string entry type"
-                continue
-            required_types.add(entry_type)
-        for edge in (*item.run.inputs, *item.run.artifacts, *item.run.outputs):
-            required_types.add(edge.entry_type)
-        for value in item.outputs.values():
-            for edge in getattr(value, "product_of", ()):
-                required_types.add(edge.entry_type)
-        for product in item.products:
-            required_types.add(product.source_type)
-            required_types.add(product.target_type)
-
-    configurations: dict[str, tuple[type, tuple[type, ...]]] = {}
-    for entry_type in required_types:
-        family_name: str | None = None
-        import_failures: list[BaseException] = []
-        for candidate in known_entry_families():
-            try:
-                family = resolve_entry_family(candidate)
-            except (ImportError, ModuleNotFoundError) as exc:
-                import_failures.append(exc)
-                continue
-            if getattr(family, "type", None) == entry_type:
-                family_name = candidate
-                break
-        if family_name is None:
-            detail = f": {import_failures[-1]}" if import_failures else ""
-            message = f"cannot store entry type {entry_type!r}: no registered entry family{detail}"
-            for index, item in enumerate(items):
-                if any(getattr(value, "type", None) == entry_type for value in item.outputs.values()):
-                    failures[index] = message
-            continue
-        try:
-            records = tuple(resolve_entry_record(name) for name in known_entry_records(family_name))
-        except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
-            message = f"cannot store entry type {entry_type!r}: {exc}"
-            for index, item in enumerate(items):
-                if any(getattr(value, "type", None) == entry_type for value in item.outputs.values()):
-                    failures[index] = message
-            continue
-        configurations[entry_type] = (resolve_entry_family(family_name), records)
-
-    layout: dict[type, tuple[type, ...]] = {}
-    for family, records in configurations.values():
-        layout[family] = records
-    return layout, failures
-
-
-def _id_settable(value: object) -> bool:
-    """Report whether an output value can be handed an explicit entry id.
-
-    Only a dataclass carrying its own ``id`` field — a record like ``DataRecord``
-    or ``Run`` that is its own storage record — can be given a ledger id through
-    :func:`dataclasses.replace`. A view over a record whose backing dataclass has
-    no ``id`` field (a structure view) cannot, so the store mints its id instead.
-
-    :param value: The collected output value.
-    :return: Whether an explicit id can be threaded onto it.
-    """
-
-    return is_dataclass(value) and any(field.name == "id" for field in fields(value))
-
-
-def _open_id_ledger(
-    ledger_path: str, keys: Sequence[tuple[str, bytes]], id_base: str, id_series: str, items: list[CollectedJob]
-) -> Any:
-    """Create or open the sweep's id ledger, deriving its per-family bases.
-
-    Each family gets a distinct base ``<id_base>.<family>`` (the store's
-    ``type_in_base`` convention), so ids are ``<id_base>.<family>-<series>-<n>``
-    and never collide across families — the ledger enforces id uniqueness
-    globally, not per family, so one shared base would brick a second sweep.
-
-    :param ledger_path: Where the ledger database lives.
-    :param keys: The signing keys used to seal the ledger.
-    :param id_base: The entry-id namespace base minted ids carry.
-    :param id_series: The entry-id series minted ids carry.
-    :param items: The collected sweep, read for the families to configure.
-    :return: The open, locked ledger, or ``None`` when nothing in the sweep can
-        be allocated through it (no id-settable output).
-    """
-
-    from httk.store import IdLedger  # pyright: ignore[reportMissingImports]
-
-    values = [value for item in items if item.missing_collector is None for value in (*item.outputs.values(), item.run)]
-    families = sorted(
-        {str(getattr(value, "type", "")) for value in values if getattr(value, "type", None) and _id_settable(value)}
-    )
-    if not families:
-        _LOGGER.info("no id-settable entries in this sweep; not creating an id ledger at %s", ledger_path)
-        return None
-    location = Path(ledger_path).expanduser()
-    location.parent.mkdir(parents=True, exist_ok=True)
-    if location.exists():
-        return IdLedger.open(location, keys=keys)
-    _LOGGER.warning(
-        "creating id ledger %s: entry ids for this store are now allocated through it and stay stable across "
-        "rebuilds. Keep this file with the store (commit it alongside it) — deleting it re-mints every id.",
-        location,
-    )
-    bases = {family: f"{id_base}.{family}" for family in families}
-    return IdLedger.create(location, bases=bases, series=id_series, keys=keys)
-
-
-def _stored_ledger_id(store: Any, type_to_family: dict[str, type], entry_type: str, identity: str) -> str | None:
-    """Return the public id an entry-type row already stored under one content id.
-
-    This is how a *later* sweep aliases onto content an *earlier* sweep stored in
-    the same store (the ledger maps keys, not content, so a brand-new key for
-    already-stored content is invisible to it otherwise).
-
-    :param store: The destination store.
-    :param type_to_family: Entry type to its registered family class.
-    :param entry_type: The value's entry type.
-    :param identity: The content id to look up.
-    :return: The stored public id, or ``None`` when the content is not present.
-    """
-
-    family = type_to_family.get(entry_type)
-    if family is None:
-        return None
-    try:
-        existing = store.fetch_entry(family, identity, eager=False)
-    except Exception:
-        # The content is not stored (the normal miss), or the family is not
-        # content-addressable; either way there is no id to alias onto.
-        return None
-    stored = getattr(existing, "id", None)
-    return stored if isinstance(stored, str) else None
-
-
-def _ledger_entry_id(
-    ledger: Any,
-    store: Any,
-    type_to_family: dict[str, type],
-    item: CollectedJob,
-    role: str | None,
-    value: object,
-    original_id: object,
-    content_to_ledger: dict[str, str],
-    warned_unstable: set[str],
-) -> str | None:
-    """Return the ledger id to save an output under, or ``None`` to let the store mint.
-
-    An output already carrying a real (non-content) public id is never
-    overwritten; a value that cannot carry an explicit id is minted by the store;
-    an unstable-identity job warns once and is minted; content already allocated
-    a ledger id this sweep is aliased onto that id, and anything else mints a
-    fresh id keyed by the job coordinate.
-
-    :param ledger: The open id ledger.
-    :param store: The destination store, consulted for already-stored content.
-    :param type_to_family: Entry type to its registered family class.
-    :param item: The collected job the output belongs to.
-    :param role: The declared output role, or ``None`` for the job's run.
-    :param value: The output value.
-    :param original_id: The value's own ``id`` before storing, if any.
-    :param content_to_ledger: The sweep's content-id to ledger-id map, updated in place.
-    :param warned_unstable: Job coordinates already warned about, updated in place.
-    :return: The ledger id to inject, or ``None`` to fall back to store minting.
-    """
-
-    from httk.store import IdLedgerError  # pyright: ignore[reportMissingImports]
-
-    if isinstance(original_id, str) and _CONTENT_ID_RE.fullmatch(original_id) is None:
-        # The value already carries a user-assigned id (conforming or not); never
-        # overwrite it.  Only a content-id-shaped placeholder (64 lowercase hex)
-        # is treated as "no id yet" and gets allocated one here.
-        # ponytail: a user id that is itself exactly 64 lowercase hex is misread as a content id and overwritten; carry an explicit "has real id" flag if that collision must be ruled out.
-        return None
-    if not _id_settable(value):
-        return None
-    try:
-        key = ledger_key(item, role=role)
-    except UnstableIdentityError:
-        coordinate = f"{item.record.workspace_id}:{item.record.job_id}"
-        if coordinate not in warned_unstable:
-            warned_unstable.add(coordinate)
-            _LOGGER.warning(
-                "job %s has an unstable identity (a v1 tree with no manifest); its entry ids are store-minted "
-                "and will NOT be stable across rebuilds.",
-                coordinate,
-            )
-        return None
-    identity = content_id(value)
-    prior = ledger.lookup(key)
-    if prior is not None:
-        # A later job with identical content must alias onto this id, not mint.
-        content_to_ledger.setdefault(identity, prior)
-        return prior
-    entry_type = str(getattr(value, "type", ""))
-    # Alias onto an id this content already holds: allocated earlier this sweep,
-    # or stored by an earlier sweep into this same store.  This is the residual
-    # dedup case the plan calls out; resolving it here (before the save) aliases
-    # cleanly and never writes a bogus assignment the append-only ledger cannot
-    # take back.
-    allocated = content_to_ledger.get(identity) or _stored_ledger_id(store, type_to_family, entry_type, identity)
-    try:
-        if allocated is not None:
-            ledger.alias(key, allocated)
-            content_to_ledger[identity] = allocated
-            return allocated
-        entry_id = ledger.assign(key, entry_type)
-    except IdLedgerError as exc:
-        if allocated is not None:
-            # The content is stored under an id outside the ledger (mixed
-            # ledger/no-ledger use of one store); reuse it so the store stays
-            # consistent, without a ledger record.
-            _LOGGER.warning("reusing store id %s for %s (not ledger-managed): %s", allocated, key, exc)
-            return allocated
-        _LOGGER.warning("id ledger could not allocate for %s: %s; falling back to store minting.", key, exc)
-        return None
-    content_to_ledger[identity] = entry_id
-    return entry_id
-
-
-def _store_collected(
-    items: list[CollectedJob],
-    path: str,
-    *,
-    id_base: str,
-    id_series: str,
-    ledger_path: str | None = None,
-    ledger_keys: Sequence[tuple[str, bytes]] = (),
-    bare_runs: bool = True,
-) -> list[dict[str, object]]:
-    """Save one bounded collected sweep into a file-backed SQLite store.
-
-    Every job's run is stored, including the run of a job whose workflow has
-    nothing to collect (a *bare* run) unless *bare_runs* is off, so parent and
-    child jobs alike leave provenance naming their workflow declarations. A
-    parent's run gains one ``has_artifact`` edge to the run of each child it
-    spawned that is stored in this sweep or already in the store; children are
-    stored first so their run ids exist when the parent's run is written.
-
-    :param items: The collected jobs to store.
-    :param path: The SQLite store file path.
-    :param id_base: The entry-id namespace base.
-    :param id_series: The entry-id campaign series.
-    :param ledger_path: An id-ledger database to allocate stable ids
-        through, or ``None`` to let the store mint ids directly.
-    :param ledger_keys: The signing keys each appended segment is signed with.
-    :param bare_runs: Store the runs of jobs whose workflows have nothing to collect.
-    :return: One report mapping per collected job.
-    """
-
-    try:
-        from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
-        from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
-        from httk.store.backend.sql import StorageLayoutUpgradeRequiredError  # pyright: ignore[reportMissingImports]
-    except ImportError as exc:
-        raise ValueError("--into requires httk-store with its database dependencies") from exc
-
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    layout, failures = _storage_layout(items)
-    requested = sorted(
-        {
-            str(getattr(value, "type", ""))
-            for item in items
-            for value in item.outputs.values()
-            if getattr(value, "type", None)
-        }
-    )
-    reports = [_collected_mapping(item) for item in items]
-    with contextlib.ExitStack() as stack:
-        ledger = (
-            _open_id_ledger(ledger_path, ledger_keys, id_base, id_series, items) if ledger_path is not None else None
-        )
-        if ledger is not None:
-            stack.enter_context(ledger)
-        content_to_ledger: dict[str, str] = {}
-        warned_unstable: set[str] = set()
-        type_to_family: dict[str, type] = {
-            str(getattr(family, "type", "")): family for family in layout if getattr(family, "type", None)
-        }
-        try:
-            store = stack.enter_context(
-                SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
-            )
-        except StorageLayoutUpgradeRequiredError as exc:
-            needs = ", ".join(requested) or "no entry types"
-            raise ValueError(
-                f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
-                f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
-                "Collect into a new store file."
-            ) from exc
-        stored_output_ids: dict[int, list[str]] = {}
-        deferred_outputs: dict[int, list[tuple[str, Any]]] = {}
-        remap: dict[str, str] = {}
-
-        def _save_output(
-            item: CollectedJob,
-            role: str,
-            value: Any,
-            *,
-            original_key: str,
-            pending_remap: dict[str, str],
-            entry_ids: list[str],
-        ) -> None:
-            """Store one output, recording its minted id under ``original_key`` and any prior id."""
-            original_id = getattr(value, "id", None)
-            chosen = (
-                _ledger_entry_id(
-                    ledger,
-                    store,
-                    type_to_family,
-                    item,
-                    role,
-                    value,
-                    original_id,
-                    content_to_ledger,
-                    warned_unstable,
-                )
-                if ledger is not None
-                else None
-            )
-            # Only an id-settable dataclass reaches a non-None id, so
-            # this replace never lands on the view-fallback branch.
-            saved = replace(cast(Any, value), id=chosen) if chosen is not None else value
-            sid = store.save(saved)
-            try:
-                fetched = store.fetch(type(saved), sid)
-            except (SchemaError, TypeError) as exc:
-                # Structure-family collectors may return a view over
-                # a storable record; fetch the record backing that
-                # view when the view class itself is not a dataclass.
-                try:
-                    record_type = resolve_storage_record(saved)
-                except (SchemaError, TypeError):
-                    raise exc
-                fetched = store.fetch(record_type, sid)
-            fetched_id = getattr(fetched, "id", None)
-            if not isinstance(fetched_id, str):
-                raise ValueError(f"stored output {type(value).__name__} has no string entry id")
-            # A ledger-chosen id always matches what the store stores
-            # under it: the pre-check in _ledger_entry_id aliases onto
-            # already-stored content rather than minting a colliding id,
-            # so the store never deduplicates onto a different id here.
-            entry_ids.append(fetched_id)
-            pending_remap[original_key] = fetched_id
-            if isinstance(original_id, str) and original_id != fetched_id:
-                pending_remap[original_id] = fetched_id
-
-        # Pass one stores every output and builds a sweep-wide map.  The map is
-        # published only after each job transaction commits, so rolled-back
-        # outputs cannot be referenced by a later job.  Data records carrying
-        # ``product_of`` edges wait for pass two: the edge is record content and
-        # must hold the store-minted id of the entry it describes.
-        for index, item in enumerate(items):
-            report = reports[index]
-            if item.run_only and not bare_runs:
-                report["stored"] = None
-                report["skipped"] = "run-only"
-                continue
-            if item.missing_collector is not None:
-                # A degraded job produced no outputs: store nothing, and never a
-                # bare Run, so the store cannot fill with empty provenance.
-                report["stored"] = None
-                report["skipped"] = "degraded"
-                continue
-            error = failures.get(index)
-            if error is not None:
-                report["storage_error"] = error
-                continue
-            try:
-                with store.transaction():
-                    pending_remap: dict[str, str] = {}
-                    entry_ids: list[str] = []
-                    for role, value in item.outputs.items():
-                        if getattr(value, "product_of", ()):
-                            deferred_outputs.setdefault(index, []).append((role, value))
-                            continue
-                        _save_output(
-                            item,
-                            role,
-                            value,
-                            original_key=content_id(value),
-                            pending_remap=pending_remap,
-                            entry_ids=entry_ids,
-                        )
-                remap.update(pending_remap)
-                stored_output_ids[index] = entry_ids
-            except Exception as exc:
-                report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
-        # Pass two resolves all run and product references after every output
-        # in the sweep has contributed to the shared remap. Children go first, so
-        # a parent's run can name the runs of the children it spawned.
-        run_ids_by_source: dict[str, str] = {}
-        in_sweep = {item.run.source_id for item in items if item.run.source_id is not None}
-        stored_cache: dict[str, str | None] = {}
-        for index in _children_first(items):
-            item = items[index]
-            report = reports[index]
-            if index not in stored_output_ids:
-                continue
-            entry_ids = stored_output_ids[index]
-            try:
-                with store.transaction():
-                    pending_remap = {}
-                    for role, value in deferred_outputs.get(index, ()):
-                        # The run's output edge names the record by its pre-rewrite
-                        # content id, so that is the key the remap must carry.
-                        rewritten = _rewrite_product_of(value, store, remap)
-                        _save_output(
-                            item,
-                            role,
-                            rewritten,
-                            original_key=content_id(value),
-                            pending_remap=pending_remap,
-                            entry_ids=entry_ids,
-                        )
-                    # Resolve against the committed map plus this job's pending ids, but
-                    # publish the pending ids only after the transaction commits (as in
-                    # pass one), so a rolled-back record is never referenced by a later job.
-                    job_remap = {**remap, **pending_remap}
-                    rewritten_run = _with_child_runs(
-                        _rewrite_run_edges(item.run, store, job_remap),
-                        item,
-                        store,
-                        run_ids_by_source,
-                        in_sweep,
-                        stored_cache,
-                    )
-                    rewritten_products = tuple(
-                        replace(
-                            product,
-                            source_id=_resolve_entry_id(store, job_remap, product.source_type, product.source_id),
-                            target_id=_resolve_entry_id(store, job_remap, product.target_type, product.target_id),
-                        )
-                        for product in item.products
-                    )
-                    # The run is the provenance hub every relationship points
-                    # at, so it takes a ledger id too, keyed by the bare job
-                    # coordinate.  The edges were already rewritten above; the
-                    # run's own id is orthogonal to them.
-                    # A job collected before is revised, never duplicated: its run
-                    # may have changed since (a parent whose children have since
-                    # been collected gains their edges), and the new revision
-                    # extends the same lineage under the same entry id.
-                    predecessor = (
-                        None if rewritten_run.source_id is None else _latest_stored_run(store, rewritten_run.source_id)
-                    )
-                    if predecessor is not None:
-                        rewritten_run = replace(rewritten_run, id=predecessor.id)
-                        if content_id(predecessor) == content_id(rewritten_run):
-                            run_sid = store.save(rewritten_run)
-                        else:
-                            run_sid = store.replace(predecessor, rewritten_run)
-                    else:
-                        run_chosen = (
-                            _ledger_entry_id(
-                                ledger,
-                                store,
-                                type_to_family,
-                                item,
-                                None,
-                                rewritten_run,
-                                getattr(rewritten_run, "id", None),
-                                content_to_ledger,
-                                warned_unstable,
-                            )
-                            if ledger is not None
-                            else None
-                        )
-                        if run_chosen is not None:
-                            rewritten_run = replace(rewritten_run, id=run_chosen)
-                        run_sid = store.save(rewritten_run)
-                    fetched_run = store.fetch(type(rewritten_run), run_sid)
-                    run_id = getattr(fetched_run, "id", None)
-                    if not isinstance(run_id, str):
-                        raise ValueError("stored run has no string entry id")
-                    for product in rewritten_products:
-                        store.save(product)
-                remap.update(pending_remap)
-                if item.run.source_id is not None:
-                    run_ids_by_source[item.run.source_id] = run_id
-                report["stored"] = {"entries": entry_ids, "run": run_id}
-            except Exception as exc:
-                report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
-    return reports
-
-
 def _ledger_settings(
-    arguments: argparse.Namespace, workspace: Workspace
+    arguments: argparse.Namespace, resolve_keys: Callable[[], Sequence[tuple[str, bytes]]]
 ) -> tuple[str | None, Sequence[tuple[str, bytes]]]:
     """Resolve the id-ledger path and signing keys for a ``--into`` sweep.
 
@@ -778,7 +90,8 @@ def _ledger_settings(
     no ledger with a loud warning rather than failing the collect.
 
     :param arguments: The parsed collect arguments.
-    :param workspace: The workspace the sweep collects from.
+    :param resolve_keys: Resolve the signing keys; it raises
+        :class:`~httk.workflow.errors.SealError` or returns none when no key is available.
     :return: The ledger path (or ``None`` when disabled) and the signing keys.
     """
 
@@ -789,7 +102,7 @@ def _ledger_settings(
         )
         return None, ()
     try:
-        resolved = default_workspace_keys(workspace)
+        keys = resolve_keys()
     except SealError as exc:
         _LOGGER.warning(
             "no signing key is available to seal an id ledger (%s); entry ids for %s are store-minted and will "
@@ -797,6 +110,8 @@ def _ledger_settings(
             exc,
             arguments.into,
         )
+        return None, ()
+    if not keys:
         return None, ()
     if not arguments.id_ledger:
         default_path = Path(f"{arguments.into}.ids.sqlite")
@@ -807,15 +122,78 @@ def _ledger_settings(
                 f"ledger {legacy_path} does. Creating a fresh ledger here would re-mint every id from 1. "
                 "Migrate the old ledger to sqlite, or pass --id-ledger PATH / --no-id-ledger explicitly."
             )
-    return arguments.id_ledger or f"{arguments.into}.ids.sqlite", resolved.keys
+    return arguments.id_ledger or f"{arguments.into}.ids.sqlite", keys
+
+
+def _collect_target(arguments: argparse.Namespace, context: CLIContext) -> tuple[bool, Path]:
+    """Resolve what ``httk collect`` collects: ``(is_tree, path)``.
+
+    No PATH resolves a workspace as every workspace command does. A PATH that is
+    not a directory is a registered workspace name. A directory is collected as
+    the workspace it is the root of, refused when it lies inside a workspace,
+    and otherwise walked as a calculation tree.
+    """
+
+    if arguments.path is None:
+        return False, _local_root(arguments, context, action="collect from")
+    if arguments.workspace is not None:
+        raise ValueError("give either PATH or --workspace, not both")
+    candidate = Path(arguments.path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path(context.cwd) / candidate
+    if not candidate.is_dir():
+        arguments.workspace = arguments.path
+        try:
+            return False, _local_root(arguments, context, action="collect from")
+        except ResolutionMiss:
+            raise ValueError(f"PATH is neither a directory nor a registered workspace name: {arguments.path}") from None
+    candidate = candidate.resolve()
+    enclosing = Workspace.discover(candidate)
+    if enclosing is None:
+        return True, candidate
+    if enclosing == candidate:
+        return False, candidate
+    raise ValueError(
+        f"{arguments.path} is inside workspace {enclosing}; collect {enclosing} (use --placement to narrow)"
+    )
+
+
+def _claim_mapping(claim: DirectoryClaim) -> dict[str, object]:
+    return {
+        "format": CLAIM_FORMAT,
+        "format_version": CLAIM_FORMAT_VERSION,
+        "directory": claim.directory,
+        "kind": claim.kind,
+        "collector": claim.collector,
+        "priority": claim.priority,
+        "identity": claim.identity,
+        "reason": claim.reason,
+        "also_matched": list(claim.also_matched),
+        "duplicate_of": claim.duplicate_of,
+    }
 
 
 def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Stream collected workflow summaries, or raw job records."""
+    """Stream collected summaries of a workspace or a calculation tree, or raw job records."""
 
-    workspace = Workspace(_local_root(arguments, context, action="collect from"), mutable=False)
+    tree, root = _collect_target(arguments, context)
+    refused = _WORKSPACE_ONLY if tree else _TREE_ONLY
+    for name, flag in refused:
+        if getattr(arguments, name):
+            raise ValueError(f"{flag} only applies to {'a workspace' if tree else 'a calculation tree'}")
     if arguments.into is not None and arguments.raw:
         raise ValueError("--into cannot be combined with --raw")
+    if arguments.dry_run:
+        dry_run_refused = (
+            ("into", "--into"),
+            ("fail_fast", "--fail-fast"),
+            ("degraded", "--degraded"),
+            ("batch_size", "--batch-size"),
+            ("no_bare_runs", "--no-bare-runs"),
+        )
+        for name, flag in dry_run_refused:
+            if getattr(arguments, name) not in (None, False):
+                raise ValueError(f"--dry-run cannot be combined with {flag}")
     if arguments.into is not None and arguments.id_base is None:
         raise ValueError("--id-base is required with --into")
     if arguments.into is None and arguments.no_bare_runs:
@@ -823,41 +201,69 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     skipped = 0
+    unclaimed = 0
 
     def _skip(_job_key: str) -> None:
         nonlocal skipped
         skipped += 1
 
-    if arguments.raw:
-        records = job_records(
+    def _unclaimed(_claim: DirectoryClaim) -> None:
+        nonlocal unclaimed
+        unclaimed += 1
+
+    if tree:
+        options = {
+            "collectors": arguments.collector or (),
+            "prefer": arguments.prefer or (),
+            "exclude": arguments.exclude or (),
+        }
+        if arguments.dry_run:
+            for claim in claims(root, **options):
+                print(json.dumps(_claim_mapping(claim), sort_keys=True, separators=(",", ":")))
+            return 0
+        collected_items: Iterable[CollectedJob] = collect_tree(
+            root, fail_fast=arguments.fail_fast, on_unclaimed=_unclaimed, **options
+        )
+
+        def resolve_keys() -> Sequence[tuple[str, bytes]]:
+            return tree_ledger_keys(root)
+
+    else:
+        workspace = Workspace(root, mutable=False)
+        if arguments.raw:
+            records = job_records(
+                workspace,
+                states=arguments.state or DEFAULT_COLLECT_STATES,
+                placement=arguments.placement,
+                on_skipped=_skip,
+            )
+            collected = 0
+            for record in records:
+                print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
+                collected += 1
+            return _emit_collect_summary(
+                collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
+            )
+        collected_items = collect(
             workspace,
             states=arguments.state or DEFAULT_COLLECT_STATES,
             placement=arguments.placement,
+            allow_job_collector=arguments.allow_job_collector,
             on_skipped=_skip,
+            fail_fast=arguments.fail_fast,
+            batch_size=64 if arguments.batch_size is None else arguments.batch_size,
         )
-        collected = 0
-        for record in records:
-            print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
-            collected += 1
-        return _emit_collect_summary(
-            collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
-        )
-    collected = degraded = unfulfilled_roles = storage_errors = 0
-    collected_items = collect(
-        workspace,
-        states=arguments.state or DEFAULT_COLLECT_STATES,
-        placement=arguments.placement,
-        allow_job_collector=arguments.allow_job_collector,
-        on_skipped=_skip,
-        fail_fast=arguments.fail_fast,
-        batch_size=arguments.batch_size,
-    )
+
+        def resolve_keys() -> Sequence[tuple[str, bytes]]:
+            return default_workspace_keys(workspace).keys
+
+    collected = degraded = unfulfilled_roles = storage_errors = revised = 0
     if arguments.into is not None:
         # --into resolves cross-job provenance in a second storage pass, so it
         # deliberately retains the sweep; ordinary reporting does not.
         items = list(collected_items)
-        ledger_path, ledger_keys = _ledger_settings(arguments, workspace)
-        reports = _store_collected(
+        ledger_path, ledger_keys = _ledger_settings(arguments, resolve_keys)
+        reports = store_collected(
             items,
             arguments.into,
             id_base=arguments.id_base,
@@ -871,6 +277,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             collected += item.missing_collector is None
             unfulfilled_roles += len(item.unfulfilled)
             storage_errors += report.get("storage_error") is not None
+            revised += bool(report.get("revised"))
             if not arguments.degraded or item.missing_collector is not None:
                 print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     else:
@@ -886,16 +293,40 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         unfulfilled_roles=unfulfilled_roles,
         storage_errors=storage_errors,
         skipped_unreadable=skipped,
+        unclaimed=unclaimed if tree else None,
+        revised=revised if arguments.into is not None else None,
     )
 
 
-def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+def build_collect_parser(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]", *, program: str | None = None
+) -> None:
+    """Declare the top-level ``collect`` command.
+
+    :param subparsers: The subparser action the command is added to.
+    :param program: The program name its usage shows, when it is mounted standalone.
+    """
+
     parser = _leaf(
         subparsers,
         "collect",
-        summary="stream collected workflow summaries",
-        description="Collect finished jobs from one execution workspace",
+        summary="collect workspaces and recognized calculations into records",
+        description=(
+            "Collect finished jobs from an execution workspace, or walk a directory tree and collect the "
+            "finished calculations that registered or given collectors recognize"
+        ),
         handler=handle_collect,
+    )
+    if program is not None:
+        parser.prog = program
+    parser.add_argument(
+        "path",
+        nargs="?",
+        metavar="PATH",
+        help=(
+            "a workspace root, a registered workspace name, or a directory tree of calculations "
+            "(default: the enclosing workspace, this project's workspace, or the per-user default)"
+        ),
     )
     parser.add_argument(
         "--workspace",
@@ -929,7 +360,6 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
     parser.add_argument(
         "--batch-size",
         type=_positive_int,
-        default=64,
         metavar="N",
         help="records retained and executable requests grouped at once (default: 64; ignored with --fail-fast)",
     )
@@ -963,4 +393,27 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         "--id-ledger",
         metavar="PATH",
         help="id-ledger database location (default: <into>.ids.sqlite; on by default with --into)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="for a calculation tree, print how each directory would be claimed instead of collecting",
+    )
+    parser.add_argument(
+        "--prefer",
+        action="append",
+        metavar="NAME",
+        help="the collector that wins a tie at the highest priority (repeatable, first named first)",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        metavar="PATTERN",
+        help="skip tree directories whose root-relative POSIX path matches this glob (repeatable)",
+    )
+    parser.add_argument(
+        "--collector",
+        action="append",
+        metavar="DIR",
+        help="also use the collector package in this directory; it replaces a registered one of its name (repeatable)",
     )

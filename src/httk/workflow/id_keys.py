@@ -1,4 +1,4 @@
-"""Stable ledger source keys from workflow collect coordinates.
+"""Stable ledger source keys from collect coordinates.
 
 The httk-store id ledger (``httk.store.IdLedger``) maps a stable, opaque
 **source key** to a permanent entry id, so a database rebuilt from the same

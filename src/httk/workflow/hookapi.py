@@ -1,6 +1,7 @@
 """Small standard-library helpers for executable workflow hooks."""
 
 import json
+import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -10,6 +11,47 @@ COLLECT_STREAM_FORMAT = "httk-workflow-collect-stream"
 COLLECT_STREAM_VERSION = 2
 INSTANTIATE_FORMAT = "httk-workflow-instantiate"
 INSTANTIATE_VERSION = 3
+
+__all__ = [
+    "COLLECT_STREAM_FORMAT",
+    "COLLECT_STREAM_VERSION",
+    "INSTANTIATE_FORMAT",
+    "INSTANTIATE_VERSION",
+    "Claim",
+    "InstantiateRequest",
+    "Unclaimed",
+    "collect_main",
+    "instantiate_main",
+]
+
+
+@dataclass(frozen=True)
+class Claim:
+    """A recognize hook's claim on a calculation directory.
+
+    :param identity: The collector-chosen identity of the calculation: a non-empty
+        URL-safe string without ``:`` (for example a SHA-256 hex digest), stable
+        for the same calculation wherever its directory is.
+    :raises ValueError: If *identity* is empty or not URL-safe.
+    """
+
+    identity: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, str) or re.fullmatch(r"[A-Za-z0-9._~-]+", self.identity) is None:
+            raise ValueError(
+                f"a claim identity must be a nonempty URL-safe string without ':' or '/': {self.identity!r}"
+            )
+
+
+@dataclass(frozen=True)
+class Unclaimed:
+    """A recognize hook's refusal of a directory that belongs to its code but cannot be collected.
+
+    :param reason: Why, shown to the user (for example ``"several pw.x outputs"``).
+    """
+
+    reason: str
 
 
 @dataclass(frozen=True)

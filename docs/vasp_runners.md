@@ -33,7 +33,7 @@ httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" default
 httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 httk workflow run
-httk workflow collect
+httk collect
 httk workflow uninstall vasp.relax
 ```
 

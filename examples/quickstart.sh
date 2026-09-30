@@ -77,10 +77,10 @@ httk_workflow run
 
 # 5. What happened, and store entries, runs, and products when httk-store is installed.
 if python3 -c 'import httk.store.backend.sql' >/dev/null 2>&1; then
-    httk_workflow collect --into results.sqlite --id-base httk.quickstart
+    httk_cmd collect --into results.sqlite --id-base httk.quickstart
 else
     echo 'httk-store is not installed; skipping results.sqlite storage' >&2
-    httk_workflow collect
+    httk_cmd collect
 fi
 
 # 6. Make a plot from the workdir OUTCAR.

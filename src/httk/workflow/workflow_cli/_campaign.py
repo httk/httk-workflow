@@ -118,7 +118,8 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
 
     from ..collecting import CollectedJob, job_records
     from ..collecting import collect as collect_jobs
-    from ._collect import _collected_mapping, _emit_collect_summary, _store_collected
+    from ..storing import _collected_mapping, store_collected
+    from ._collect import _emit_collect_summary
 
     if arguments.into is not None and arguments.raw:
         raise ValueError("--into cannot be combined with --raw")
@@ -176,7 +177,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
                     batch_size=arguments.batch_size,
                 )
             )
-        reports = _store_collected(
+        reports = store_collected(
             items,
             arguments.into,
             id_base=arguments.id_base,

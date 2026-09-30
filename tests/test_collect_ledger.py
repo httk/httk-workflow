@@ -3,7 +3,7 @@
 The ledger keys a permanent entry id to each producing job coordinate, so a
 store rebuilt from the same jobs keeps its ids no matter what order the sweep
 visits them in. These tests drive the workflow helper (:func:`ledger_key`) and
-the collect hook (:func:`_store_collected`) that allocates through the ledger,
+the collect hook (:func:`store_collected`) that allocates through the ledger,
 each asserting something that fails without the machinery it exercises.
 """
 
@@ -91,7 +91,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
     pytest.importorskip("httk.store")
     from httk.core import DataRecordEntry
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -101,7 +101,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
     c, ec = _record_item(record, "C", "https://x", "c", 3)
 
     ledger = tmp_path / "shared.ids.sqlite"
-    first_reports = _store_collected(
+    first_reports = store_collected(
         [a, b, c],
         str(tmp_path / "one.sqlite"),
         id_base="httk.probe",
@@ -111,7 +111,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
     )
     # Second sweep: FRESH store, jobs visited in a different order, reusing the
     # ledger.  Without the ledger the store would renumber by visit order.
-    second_reports = _store_collected(
+    second_reports = store_collected(
         [c, a, b],
         str(tmp_path / "two.sqlite"),
         id_base="httk.probe",
@@ -170,7 +170,7 @@ def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
     from httk.core import DataRecordEntry
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -181,7 +181,7 @@ def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
     assert content_id(entry) == content_id(entry_b)
 
     ledger = tmp_path / "dedup.ids.sqlite"
-    reports = _store_collected(
+    reports = store_collected(
         [a, b],
         str(tmp_path / "s.sqlite"),
         id_base="httk.probe",
@@ -215,7 +215,7 @@ def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
 def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -225,7 +225,7 @@ def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
     item = _synthetic_item(record, "pre", {"out": preassigned}, run)
 
     ledger = tmp_path / "skip.ids.sqlite"
-    reports = _store_collected(
+    reports = store_collected(
         [item],
         str(tmp_path / "s.sqlite"),
         id_base="httk.probe",
@@ -244,7 +244,7 @@ def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
 def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, caplog) -> None:
     pytest.importorskip("httk.store")
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -254,7 +254,7 @@ def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, 
 
     ledger = tmp_path / "v1.ids.sqlite"
     with caplog.at_level("WARNING"):
-        reports = _store_collected(
+        reports = store_collected(
             [item],
             str(tmp_path / "s.sqlite"),
             id_base="httk.probe",
@@ -370,7 +370,7 @@ def test_reopen_after_multi_family_sweep_does_not_brick(tmp_path: Path) -> None:
     # would both mint <base>-<series>-1 and the ledger's global id-uniqueness
     # would reject the reopen; family-distinct bases keep them apart.
     pytest.importorskip("httk.store")
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -378,7 +378,7 @@ def test_reopen_after_multi_family_sweep_does_not_brick(tmp_path: Path) -> None:
     item, _entry = _record_item(record, "A", "https://x", "a", 1)
     ledger = tmp_path / "multi.ids.sqlite"
 
-    first = _store_collected(
+    first = store_collected(
         [item],
         str(tmp_path / "one.sqlite"),
         id_base="httk.probe",
@@ -387,7 +387,7 @@ def test_reopen_after_multi_family_sweep_does_not_brick(tmp_path: Path) -> None:
         ledger_keys=keys,
     )
     # The bricking scenario: a second sweep must reopen the ledger cleanly.
-    second = _store_collected(
+    second = store_collected(
         [item],
         str(tmp_path / "two.sqlite"),
         id_base="httk.probe",
@@ -408,7 +408,7 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
     from httk.core import DataRecordEntry
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -418,7 +418,7 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
     assert content_id(entry) == content_id(entry_b)
     ledger = tmp_path / "cross.ids.sqlite"
 
-    _store_collected(
+    store_collected(
         [a],
         str(tmp_path / "one.sqlite"),
         id_base="httk.probe",
@@ -426,7 +426,7 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
         ledger_path=str(ledger),
         ledger_keys=keys,
     )
-    reports = _store_collected(
+    reports = store_collected(
         [a, b],
         str(tmp_path / "two.sqlite"),
         id_base="httk.probe",
@@ -455,7 +455,7 @@ def test_ledger_leaves_a_non_conforming_user_id_untouched(tmp_path: Path) -> Non
     # (e.g. "mydb:foo") must NOT be mistaken for "no id yet" and overwritten.
     pytest.importorskip("httk.store")
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -465,7 +465,7 @@ def test_ledger_leaves_a_non_conforming_user_id_untouched(tmp_path: Path) -> Non
     item = _synthetic_item(record, "nc", {"out": preassigned}, run)
 
     ledger = tmp_path / "nc.ids.sqlite"
-    reports = _store_collected(
+    reports = store_collected(
         [item],
         str(tmp_path / "s.sqlite"),
         id_base="httk.probe",

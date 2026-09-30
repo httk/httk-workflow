@@ -341,7 +341,12 @@ def _called_rows(
                 called = workflow_provider(reference)
             if called is None:
                 raise ValueError(f"called workflow {reference!r} is not known on this machine")
-            if called.directory is None or called.language is not None or called.runner_package is not None:
+            if (
+                called.directory is None
+                or called.language is not None
+                or called.runner_package is not None
+                or not called.runnable
+            ):
                 # Only a directory package runs from a build; anything else is ready as it is.
                 rows.append({**row, "workflow": called.workflow_id, "package": None, "status": "nothing-to-build"})
                 rows.extend(_called_rows(workspace, called, seen, stdout_to_stderr=stdout_to_stderr))

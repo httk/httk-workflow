@@ -5,8 +5,8 @@
 Collecting is the read-only counterpart of running work. The low-level
 `job_records()` iterator reads each stopped job into a `JobRecord`, preserving
 where the files are, what produced them, and what happened on the way. The
-framework-level `collect()` iterator dispatches each record through its
-registered workflow collector and yields a `CollectedJob` with role-keyed
+framework-level `collect()` iterator dispatches each record through the
+collector its registered workflow provides and yields a `CollectedJob` with role-keyed
 outputs, provenance, products, and any unfulfilled roles. A job that could not
 be collected at all is a *degraded* `CollectedJob`: `missing_collector` explains
 why, `outputs` is empty, and `unfulfilled` names **every** declared output role,
@@ -36,8 +36,8 @@ its historical curation, not today's. A data-record output whose role is
 record itself (a `StrongLink`, same `(label, entry_type, entry_id)` scheme as
 run edges, so it is record content and searchable as
 `record.links.product_of == structure`); every curation is also emitted as a
-`ProductLink`. The workflow collect hook is the workflow-owned substep of
-collecting. If no provider or pinned manifest is reachable, no products are
+`ProductLink`. The collect hook a workflow package provides is the
+workflow-owned substep of collecting. If no provider or pinned manifest is reachable, no products are
 emitted. Because `product_of` is record content, every `DataRecord` content id
 and the record layout changed when it was introduced: a store created before
 that and holding data records must be rebuilt (`--into` a new file) rather
@@ -171,10 +171,15 @@ placement, exactly as `httk job list --placement` does.
 ## From the command line
 
 ```console
-httk workflow collect --workspace WORKSPACE
-httk workflow collect --workspace WORKSPACE --state succeeded --state failed
-httk workflow collect --workspace WORKSPACE --placement project/campaign --raw
+httk collect --workspace WORKSPACE
+httk collect --workspace WORKSPACE --state succeeded --state failed
+httk collect --workspace WORKSPACE --placement project/campaign --raw
 ```
+
+`httk collect` also takes a PATH: a workspace root or a registered workspace
+name collects that workspace, and any other directory is walked as a tree of
+finished calculations (see [Recognized calculations](#recognized-calculations)
+below).
 
 The workspace is attached read-only. The default `collect` command prints one
 `CollectedJob` summary per line. `--raw` prints one `JobRecord` per line, while
@@ -191,6 +196,10 @@ trailing JSONL summary line:
  "collected":N,"degraded":N,"unfulfilled_roles":N,
  "storage_errors":N,"skipped_unreadable":N}
 ```
+
+A calculation-tree sweep adds `"unclaimed":N`, the directories a collector
+declined, and a sweep with `--into` adds `"revised":N`, the jobs whose stored
+entries gained a revision.
 
 `collected` counts the jobs collected without degradation; `degraded` counts the
 degraded ones; `unfulfilled_roles` sums the declared roles left unfulfilled
@@ -240,7 +249,10 @@ one never collected; one stored by an earlier sweep is linked.
 Each job has one run entry. When a job is collected again and its run has
 changed, for example a parent whose children have been collected since, the new
 run is stored as a revision of the same entry (same entry id, one lineage)
-rather than as a second entry; unchanged runs deduplicate.
+rather than as a second entry; unchanged runs deduplicate. With an id ledger the
+same holds for the job's records: a record whose content changed since the
+last sweep keeps its ledger id and gains a revision. Each report line then
+carries `"revised": true`.
 
 `--id-base` is required with `--into` and names the dot-separated namespace used
 for minted entry ids; `--id-series` selects the campaign series and defaults to
@@ -276,7 +288,7 @@ path, the entry types this sweep needs, and the layout difference, and ends
 `Collect into a new store file.`
 
 ```console
-$ httk workflow collect --workspace workflow-workspace | head -1
+$ httk collect --workspace workflow-workspace | head -1
 {"children":{},"data_generation":null,"data_path":null,"declarations":{},"failure":null,
  "format":"httk-workflow-collect","format_version":2,
  "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},
@@ -391,3 +403,116 @@ collection when that memory cost is not acceptable.
 
 For the distinction between declared entry-typed inputs and opaque implementation
 parameters, see {doc}`workflow_packages` and {doc}`declarations`.
+
+## Recognized calculations
+
+A tree of finished simulation-code calculations that were not run through a
+workspace — a directory of VASP runs, Quantum ESPRESSO outputs, and so on — is
+collected by walking it:
+
+```console
+httk collect calculations/ --dry-run
+httk collect calculations/ --into results.sqlite --id-base mydb
+```
+
+Each directory is offered to the *recognized-calculation collectors*: the ones
+code packages register (see {doc}`code_support`) and any given with
+`--collector DIR`. A collector is a workflow package with a
+`[workflow.recognize]` table, a `recognize.py` hook and a `collect.py` hook, and
+no runner: it is collected, never run.
+
+```toml
+[workflow]
+name = "mycode.calculation"
+description = "a finished mycode run"
+
+[workflow.recognize]
+file = "recognize.py"
+priority = 10
+requires = ["INPUT", "*.out"]
+
+[workflow.inputs.structure]
+role = "initial_structure"
+entry_type = "structures"
+
+[workflow.outputs.total_energy]
+role = "total_energy"
+entry_type = "records"
+ref = "https://schemas.httk.org/defs/v0.1/properties/core/total_energy"
+product_of = "initial_structure"
+
+[workflow.collect]
+file = "collect.py"
+```
+
+```python
+# recognize.py
+from httk.workflow.calculations import content_digest
+from httk.workflow.hookapi import Claim, Unclaimed
+
+
+def recognize(directory):
+    outputs = list(directory.glob("*.out"))
+    if len(outputs) > 1:
+        return Unclaimed("several outputs")
+    return Claim(content_digest(directory, ["INPUT"]))
+```
+
+The `collect.py` hook is an ordinary collect hook: `record.result_file(name)`
+locates the calculation's files, compressed copies (`OUTCAR.gz`) included. It
+returns declared output roles, and may also return declared input roles (here
+the structure the calculation started from), which become the run's input
+edges.
+
+**Recognition.** `requires` lists cheap markers, exact basenames or `*.ext`
+globs, matched case-insensitively against the directory's files with any
+compression suffix stripped. Content lookup is exact, though: `content_digest`,
+`record.result_file` and `existing_file` find files by their exact names (only
+the compression suffix may vary). Only a collector whose markers all match has its
+`recognize(directory)` hook called. The hook returns a `Claim`, `Unclaimed`
+(the directory is this code's but cannot be collected; it is reported with the
+reason and counted as unclaimed), or `None` (not this code's). A hook that
+raises declines the directory, except that an `ImportError` (a missing
+dependency) stops the sweep. When several collectors claim a directory, the
+highest `priority` wins, and the others are reported as also matching; a tie at
+the highest priority is an error unless `--prefer NAME` (repeatable) names one
+of them.
+
+**Identity.** The claim's identity is chosen by the collector from the
+calculation's content, typically `content_digest` over its input files, so the
+stored run is `<collector name>:<identity>` wherever the directory is.
+`content_digest` digests decompressed contents, and an absent file differs from
+an empty one. A rerun in place with unchanged inputs is therefore the same
+calculation, and collecting it again stores a revision; a calculation whose
+inputs changed (`cp CONTCAR POSCAR` and rerun) is a new calculation.
+
+**Duplicates and collisions.** Within one sweep, two directories claiming the
+same identity with identical marker files are copies: the second is skipped.
+With different marker files they are a collision and the sweep stops, naming
+both directories; `--exclude PATTERN` (a root-relative glob, repeatable) skips
+one of them. `--dry-run` prints how every directory would be claimed, as
+`httk-collect-claim` lines, without collecting anything. Directories starting
+with `.` and symlinked directories are not visited, and a nested workspace is
+collected as a workspace and not walked.
+
+The same is available from Python:
+
+```python
+from httk.workflow import claims, collect_tree, store_collected
+
+for claim in claims("calculations", collectors=["my-collector"]):
+    print(claim.directory, claim.kind, claim.collector)
+
+items = list(collect_tree("calculations", collectors=["my-collector"]))
+reports = store_collected(items, "results.sqlite", id_base="mydb")
+```
+
+`store_collected` stores each calculation's inputs like its outputs. Structures
+are deduplicated by content and keep the id the store minted for them; records,
+runs and files get ledger ids, which a tree sweep signs with the project or
+operator identity key (`tree_ledger_keys`). Re-collecting only adds: a
+calculation directory deleted since the last sweep is not retracted from the
+store; rebuild the store to drop it. Likewise, when a calculation returns to
+the exact content of an older revision, re-collecting it writes nothing and the
+newer revision stays the latest; rebuild the store in that case too.
+

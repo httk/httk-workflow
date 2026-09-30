@@ -47,7 +47,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cache
 from importlib import metadata
 from itertools import islice
@@ -55,6 +55,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
+from httk.core.datastream.compression import known_compressions, split_compression_suffix
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.storage import content_id
 
@@ -107,6 +108,7 @@ __all__ = [
     "collect",
     "collect_kinds",
     "declarations_of",
+    "existing_file",
     "job_records",
     "module_distribution",
     "record_of",
@@ -150,7 +152,7 @@ def _core():
 
 @dataclass(frozen=True)
 class CollectedJob:
-    """Represent one job after workflow collecting and provenance assembly.
+    """Represent one job after collecting and provenance assembly.
 
     Edge ids of not-yet-stored outputs are content ids; ``--into`` rewrites
     them to the store-minted ids.
@@ -170,14 +172,19 @@ class CollectedJob:
         because the observed provenance held no matching input or output edge.
     :param collector_exit_status: Report a nonzero executable-collector exit
         status observed after complete responses, or leave it unset.
-    :param identity_stable: Report whether a v1-harvested job's identity is
-        manifest-backed, or leave it unset for live collection.
+    :param identity_stable: Report whether the job's identity survives moving
+        its files: ``True`` for a recognized calculation (its identity is derived
+        from content), ``False`` for a v1 task harvested without a manifest,
+        and unset for live collection.
     :param run_only: Report that the job's workflow has nothing to collect (no
         collector and no declared outputs): the collection is complete and its
         only product is the job's run.
     :param child_runs: Name the child jobs this job spawned, as ``(label,
         run source id)`` pairs read from its spawn records, so a store can link
         this job's run to theirs.
+    :param inputs: Map declared input roles to entries a recognized-calculation
+        collector read from its directory; empty for workspace jobs, whose
+        inputs are staged entries named by their run.
     """
 
     workflow_id: str
@@ -192,6 +199,7 @@ class CollectedJob:
     identity_stable: bool | None = None
     run_only: bool = False
     child_runs: tuple[tuple[str, str], ...] = ()
+    inputs: Mapping[str, object] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +535,38 @@ def _failure_of(state: Mapping[str, Any]) -> tuple[Failure | None, bool]:
         return Failure("protocol_error", f"the recorded failure object is unusable: {exc}", details=dict(raw)), True
 
 
+def existing_file(path: Path) -> Path | None:
+    """Find a file or its compressed copy.
+
+    *path* itself is returned when it is a file. Otherwise its compressed
+    variant, *path* plus a registered compression suffix (``OUTCAR.gz`` for
+    ``OUTCAR``), is returned, trying the suffixes in the codec registry's order.
+    The name is matched exactly; only the compression suffix is case-insensitive.
+
+    :param path: The uncompressed file path to look for.
+    :return: The existing file, or ``None`` when neither it nor a compressed copy exists.
+    """
+
+    if path.is_file():
+        return path
+    try:
+        names = [entry.name for entry in os.scandir(path.parent) if entry.name.startswith(path.name)]
+    except OSError:
+        return None
+    order = known_compressions()
+    found: tuple[int, Path] | None = None
+    for name in names:
+        inner, codec = split_compression_suffix(name)
+        candidate = path.parent / name
+        if codec is None or inner != path.name or not candidate.is_file():
+            continue
+        key = codec.name.lower()
+        rank = order.index(key) if key in order else len(order)
+        if found is None or rank < found[0]:
+            found = (rank, candidate)
+    return None if found is None else found[1]
+
+
 @dataclass(frozen=True)
 class JobRecord:
     """Everything a data layer needs about one job that stopped.
@@ -648,6 +688,8 @@ class JobRecord:
         ``published`` (default ``name``) below ``data_prefix``; any other job is
         read from its persistent workdir, at ``name``. A transactional job without
         committed data fails rather than falling back to unpublished workdir files.
+        When the exact file is absent, a compressed copy (``name`` plus a
+        registered compression suffix, tried in registry order) is returned.
 
         :param name: The file's path relative to the workdir.
         :param data_prefix: The directory below the job's data the runner published under.
@@ -666,16 +708,18 @@ class JobRecord:
                     f"{identity}: expected published data file {relative!r}, but the job has no published data"
                 )
             path = data / relative
-            if not path.is_file():
+            found = existing_file(path)
+            if found is None:
                 raise ValueError(f"{identity}: expected published data file {path}")
-            return path
+            return found
         workdir = self.workdir
         if workdir is None:
             raise ValueError(f"{identity}: expected workdir file {name!r}, but the job has no workdir")
         path = workdir / name
-        if not path.is_file():
+        found = existing_file(path)
+        if found is None:
             raise ValueError(f"{identity}: expected workdir file {path}")
-        return path
+        return found
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this record."""
@@ -991,6 +1035,13 @@ def _job_workflow_document(record: JobRecord, provider: object | None) -> Mappin
 
 def _output_roles(document: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
     raw = document.get("outputs")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return {}
+    return {item["name"]: item for item in raw if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
+
+
+def _input_roles(document: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    raw = document.get("inputs")
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return {}
     return {item["name"]: item for item in raw if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
@@ -1579,7 +1630,8 @@ def _attach_product_of(
     The edge is record content (a :class:`~httk.core.storage.StrongLink`), so it is attached
     before the run's output edges are derived from the outputs' content ids. The source is the
     run input or sibling output the curation names; a source absent from the observed provenance
-    leaves the record untouched and is reported through ``products_unlinked`` as before. The edge
+    leaves the record untouched and is reported through ``products_unlinked`` as before; a source
+    that is the output itself (identical content) is skipped, since there is nothing to link. The edge
     holds the source's pre-store identifier; ``--into`` rewrites it to the store-minted id.
     """
     from httk.core import DataRecord, RunEdge
@@ -1599,6 +1651,10 @@ def _attach_product_of(
             source_edge = _entry_edge(identity, source_role, outputs[source_role], roles[source_role])
         if source_edge is None or any(edge.label == source_role for edge in value.product_of):
             continue
+        own = _entry_edge(identity, role, value, roles[role])
+        if (source_edge.entry_type, source_edge.entry_id) == (own.entry_type, own.entry_id):
+            # The output is its own source (the step reproduced it unchanged): nothing to link.
+            continue
         edge = RunEdge(source_role, source_edge.entry_type, source_edge.entry_id)
         outputs[role] = replace(value, product_of=(*value.product_of, edge))
     return outputs
@@ -1610,16 +1666,30 @@ def _assemble_collected(
     provider: object | None,
     run: httk.core.Run,
     outputs: Mapping[str, object],
+    inputs: Mapping[str, object] | None = None,
 ) -> CollectedJob:
-    """Validate outputs and overlay their edges onto one collected run."""
+    """Validate outputs and overlay their edges onto one collected run.
+
+    A recognized calculation also hands over the *inputs* its collector read;
+    they become the run's input edges before ``product_of`` curations resolve.
+    """
 
     workflow_id = record.job.get("workflow")
     workflow_id = workflow_id if isinstance(workflow_id, str) else ""
-    roles = _output_roles(_job_workflow_document(record, provider))
+    document = _job_workflow_document(record, provider)
+    roles = _output_roles(document)
     unknown = [role for role in outputs if role not in roles]
     if unknown:
         raise ValueError(f"{identity}: unknown output role {unknown[0]!r}")
     unfulfilled = tuple(role for role in roles if role not in outputs)
+    inputs = dict(inputs or {})
+    if inputs:
+        input_roles = _input_roles(document)
+        for role in inputs:
+            if role not in input_roles:
+                raise ValueError(f"{identity}: unknown input role {role!r}")
+        read = tuple(_entry_edge(identity, role, value, input_roles[role]) for role, value in inputs.items())
+        run = replace(run, inputs=(*run.inputs, *read))
     core = _core()
     outputs = _attach_product_of(identity, dict(outputs), roles, run, provider)
     owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
@@ -1647,6 +1717,14 @@ def _assemble_collected(
             # through ``unfulfilled``, so do not double-count it here.
             continue
         source_edge = input_edges.get(source_role) or owned_edges.get(source_role)
+        if source_edge is not None and (source_edge.entry_type, source_edge.entry_id) == (
+            output_edge.entry_type,
+            output_edge.entry_id,
+        ):
+            # A step that reproduced its source unchanged (a relaxation already at its
+            # minimum) makes the output its own source: there is nothing to link, and
+            # the source edge exists, so this is not reported as unlinked either.
+            continue
         if source_edge is not None:
             products.append(
                 core.ProductLink(
@@ -1668,6 +1746,7 @@ def _assemble_collected(
         tuple(products),
         record,
         products_unlinked=tuple(products_unlinked),
+        inputs=inputs,
     )
 
 

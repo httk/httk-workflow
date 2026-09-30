@@ -4,7 +4,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from httk.workflow.collecting import JobRecord
+from httk.workflow.collecting import JobRecord, existing_file
 
 JOB_ID = "12345678-1234-4234-8234-123456789abc"
 
@@ -56,6 +56,24 @@ def test_published_name_replaces_the_workdir_name_only_in_data(tmp_path: Path, p
     workdir = _touch(tmp_path, "run", "OUTCAR")
     assert _record(tmp_path).result_file("OUTCAR", data_prefix=prefix, published="static/OUTCAR") == published
     assert _record(tmp_path, data=False).result_file("OUTCAR", data_prefix=prefix, published="static/OUTCAR") == workdir
+
+
+def test_compressed_results_are_found_in_registry_order(tmp_path: Path) -> None:
+    workdir = _touch(tmp_path, "run", "OUTCAR.bz2")
+    assert _record(tmp_path, data=False).result_file("OUTCAR") == workdir
+    # gzip precedes bzip2 in the codec registry, and the exact name precedes both.
+    gz = _touch(tmp_path, "data", "vasp", "OUTCAR.gz")
+    _touch(tmp_path, "data", "vasp", "OUTCAR.bz2")
+    assert _record(tmp_path).result_file("OUTCAR", data_prefix="vasp") == gz
+    exact = _touch(tmp_path, "data", "vasp", "OUTCAR")
+    assert _record(tmp_path).result_file("OUTCAR", data_prefix="vasp") == exact
+    # An unrelated suffix is not a compressed copy, and the error names the uncompressed path.
+    _touch(tmp_path, "run", "CONTCAR.orig")
+    with pytest.raises(ValueError, match=r"expected workdir file .*run/CONTCAR$"):
+        _record(tmp_path, data=False).result_file("CONTCAR")
+    # The same lookup is public for code packages.
+    assert existing_file(tmp_path / "run" / "OUTCAR") == workdir
+    assert existing_file(tmp_path / "run" / "CONTCAR") is None
 
 
 @pytest.mark.parametrize("data", [True, False])

@@ -121,7 +121,7 @@ def test_collect_into_remaps_a_structure_view_content_id(tmp_path: Path) -> None
     from httk.core import RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -144,7 +144,7 @@ def test_collect_into_remaps_a_structure_view_content_id(tmp_path: Path) -> None
             source_id="ws:structure",
         ),
     )
-    reports = _store_collected([item], str(tmp_path / "structure.sqlite"), id_base="httk.probe", id_series="1")
+    reports = store_collected([item], str(tmp_path / "structure.sqlite"), id_base="httk.probe", id_series="1")
     assert "storage_error" not in reports[0]
 
     with Backend.sqlite(tmp_path / "structure.sqlite") as database:
@@ -162,7 +162,7 @@ def test_collect_into_remaps_cross_job_edges_and_products(tmp_path: Path) -> Non
     from httk.core import DataRecord, DataRecordEntry, ProductLink, RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -196,7 +196,7 @@ def test_collect_into_remaps_cross_job_edges_and_products(tmp_path: Path) -> Non
         ),
     )
     path = tmp_path / "cross-job.sqlite"
-    reports = _store_collected([first_item, second_item], str(path), id_base="httk.probe", id_series="1")
+    reports = store_collected([first_item, second_item], str(path), id_base="httk.probe", id_series="1")
 
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
@@ -221,7 +221,7 @@ def test_collect_into_resolves_cross_job_edges_from_an_earlier_invocation(tmp_pa
     from httk.core import DataRecord, DataRecordEntry, RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -246,8 +246,8 @@ def test_collect_into_resolves_cross_job_edges_from_an_earlier_invocation(tmp_pa
         ),
     )
     path = tmp_path / "earlier.sqlite"
-    _store_collected([first_item], str(path), id_base="httk.probe", id_series="1")
-    reports = _store_collected([second_item], str(path), id_base="httk.probe", id_series="1")
+    store_collected([first_item], str(path), id_base="httk.probe", id_series="1")
+    reports = store_collected([second_item], str(path), id_base="httk.probe", id_series="1")
 
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
@@ -262,7 +262,7 @@ def test_collect_into_preserves_an_existing_public_id_reference(tmp_path: Path) 
     from httk.core import DataRecord, DataRecordEntry, RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -287,8 +287,8 @@ def test_collect_into_preserves_an_existing_public_id_reference(tmp_path: Path) 
         ),
     )
     path = tmp_path / "public-id.sqlite"
-    _store_collected([first_item], str(path), id_base="httk.probe", id_series="1")
-    reports = _store_collected([second_item], str(path), id_base="httk.probe", id_series="1")
+    store_collected([first_item], str(path), id_base="httk.probe", id_series="1")
+    reports = store_collected([second_item], str(path), id_base="httk.probe", id_series="1")
 
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
@@ -303,7 +303,7 @@ def test_collect_into_preserves_a_loose_external_reference(tmp_path: Path) -> No
     from httk.core import DataRecord, RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -319,7 +319,7 @@ def test_collect_into_preserves_a_loose_external_reference(tmp_path: Path) -> No
         ),
     )
     path = tmp_path / "external-reference.sqlite"
-    reports = _store_collected([item], str(path), id_base="httk.probe", id_series="1")
+    reports = store_collected([item], str(path), id_base="httk.probe", id_series="1")
 
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
@@ -333,7 +333,7 @@ def test_collect_into_leaves_outputs_when_a_provenance_reference_is_unknown(tmp_
     from httk.core import DataRecord, DataRecordEntry, RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -357,7 +357,7 @@ def test_collect_into_leaves_outputs_when_a_provenance_reference_is_unknown(tmp_
         Run(outputs=(RunEdge("good", "records", content_id(good)),), source_id="ws:good"),
     )
     path = tmp_path / "unresolved.sqlite"
-    reports = _store_collected([bad_item, good_item], str(path), id_base="httk.probe", id_series="1")
+    reports = store_collected([bad_item, good_item], str(path), id_base="httk.probe", id_series="1")
 
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
@@ -455,7 +455,7 @@ def test_collect_into_stores_product_of_edges_with_minted_ids_and_they_join(tmp_
     from httk.core import DataRecord, DataRecordEntry, RunEdge
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import store_collected
 
     workspace, _ = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -480,7 +480,7 @@ def test_collect_into_stores_product_of_edges_with_minted_ids_and_they_join(tmp_
         ),
     )
     path = tmp_path / "product-of.sqlite"
-    reports = _store_collected([item], str(path), id_base="httk.probe", id_series="1")
+    reports = store_collected([item], str(path), id_base="httk.probe", id_series="1")
     assert "storage_error" not in reports[0], reports[0]
     with Backend.sqlite(path) as database:
         store = SqlStore(database)

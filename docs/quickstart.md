@@ -54,7 +54,7 @@ $ httk workspace init --name default .
 $ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
 $ httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
-$ httk workflow collect --into results.sqlite --id-base httk.quickstart
+$ httk collect --into results.sqlite --id-base httk.quickstart
 $ httk workflow postprocess --script relaxation-plot
 ```
 

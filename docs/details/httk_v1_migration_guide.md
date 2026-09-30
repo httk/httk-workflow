@@ -819,7 +819,7 @@ Submit a one-shot job or a structure campaign:
 httk job new --workspace WS --workflow-dir ./silicon-relax \
   --input-from structure structures/*.cif --parameter encut=520
 httk workflow run --workspace WS --pool vasp
-httk workflow collect --workspace WS
+httk collect --workspace WS
 ```
 
 At preparation, the package is snapshotted and each job gets its own rendered

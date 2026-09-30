@@ -41,7 +41,7 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
     :return: A drift warning, or ``None`` when nothing can be compared or they agree.
     """
 
-    if workflow.directory is None or workflow.language is not None:
+    if workflow.directory is None or workflow.language is not None or not workflow.runnable:
         return None
     try:
         if workflow.command is not None:
@@ -168,6 +168,15 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
         "outputs": _output_document(workflow),
         "postprocess": {name: dict(script) for name, script in workflow.postprocess_scripts.items()},
         "declaration": _declaration_document(workflow),
+        "recognize": (
+            None
+            if workflow.recognize is None
+            else {
+                "file": workflow.recognize.file,
+                "priority": workflow.recognize.priority,
+                "requires": list(workflow.recognize.requires),
+            }
+        ),
         "hooks": {
             "instantiate": {
                 "present": workflow.instantiate or workflow.instantiate_file is not None,
@@ -234,6 +243,12 @@ def _render_text(description: Mapping[str, object]) -> str:
         ]
     )
     lines = [line for line in lines if line]
+    recognize = description.get("recognize")
+    if isinstance(recognize, Mapping):
+        lines.append(
+            f"recognize: collector only, never run (file={recognize['file']}, "
+            f"priority={recognize['priority']}, requires={_value(recognize['requires'])})"
+        )
     steps = description["steps"]
     assert isinstance(steps, list)
     for step in steps:

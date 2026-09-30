@@ -99,6 +99,8 @@ def _check(workspace: Workspace, reference: str, seen: set[str]) -> str | None:
     if provider is None:
         install = f"httk workflow install '{reference}'" if reference.startswith("git+") else "install or register it"
         return f"not known on this machine; {install}"
+    if not provider.runnable:
+        return f"{provider.workflow_id} recognizes calculations and cannot be run"
     directory = provider.directory
     # Only a directory package runs from the workspace runner store, where a
     # compiled one needs a build; a language document or a packaged runner file

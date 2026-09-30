@@ -99,6 +99,7 @@ __all__ = [
     "BuildSpec",
     "InstantiateContext",
     "JobItem",
+    "RecognizeSpec",
     "ResolvedWorkflow",
     "ScaffoldedJob",
     "WorkflowProvider",
@@ -136,6 +137,21 @@ _MAXIMUM_TAG_LENGTH = 48
 type DataMode = Literal["none", "transactional"]
 type WorkdirMode = Literal["persistent", "isolated"]
 type PublishMode = Literal["workspace", "installed"]
+
+
+@dataclass(frozen=True)
+class RecognizeSpec:
+    """The ``[workflow.recognize]`` declaration of a recognized-calculation collector.
+
+    :param file: Name the package's recognize hook, a ``.py`` member.
+    :param priority: Order this collector among those whose markers match; higher is tried first.
+    :param requires: Give the cheap markers a directory must contain before the hook is called:
+        exact basenames or ``*.ext`` globs.
+    """
+
+    file: str
+    priority: int
+    requires: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -186,6 +202,7 @@ class WorkflowProvider:
     :param name: Give the short name of a workflow whose id is a git URI.
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
     :param calls: Declare the workflows a job of it may call, alias to workflow reference.
+    :param recognize: Declare a recognized-calculation collector, a package that is collected but never run.
     """
 
     workflow_id: str
@@ -223,6 +240,7 @@ class WorkflowProvider:
     name: str | None = None
     requires: tuple[str, ...] = ()
     calls: Mapping[str, str] | None = None
+    recognize: RecognizeSpec | None = None
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -254,7 +272,13 @@ class WorkflowProvider:
             if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
                 raise ValueError(f"workflow directory entry must be a relative member: {self.entry!r}")
         inputs = validate_inputs(self.inputs)
-        if any(destination is None for destination in inputs.values()) and not self.instantiate:
+        if self.recognize is not None and (self.language is not None or self.directory is None):
+            raise ValueError("a recognize workflow must be a directory package without a language")
+        if (
+            self.recognize is None
+            and any(destination is None for destination in inputs.values())
+            and not self.instantiate
+        ):
             raise ValueError(f"workflow {self.workflow_id!r} has hook-consumed inputs and requires an instantiate hook")
         if self.alias is not None and (
             not isinstance(self.alias, str) or re.fullmatch(r"[a-z0-9._-]+", self.alias) is None
@@ -286,6 +310,12 @@ class WorkflowProvider:
         """The git URI identifying the workflow definition, when the id is one."""
 
         return self.workflow_id if self.workflow_id.startswith("git+") else None
+
+    @property
+    def runnable(self) -> bool:
+        """Whether jobs can be created from the package; a recognize collector is never run."""
+
+        return self.recognize is None
 
 
 #: Every registered workflow, keyed by name in registration order. The scaffold
@@ -529,6 +559,7 @@ class ResolvedWorkflow:
     :param name: Give the short name of a workflow whose id is a git URI.
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
     :param calls: Declare the workflows a job of it may call, alias to workflow reference.
+    :param recognize: Preserve the recognize declaration of a collector-only package.
     """
 
     source: Path
@@ -569,6 +600,7 @@ class ResolvedWorkflow:
     name: str | None = None
     requires: tuple[str, ...] = ()
     calls: Mapping[str, str] | None = None
+    recognize: RecognizeSpec | None = None
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -614,6 +646,12 @@ class ResolvedWorkflow:
         """The git URI identifying the workflow definition, when the id is one."""
 
         return self.workflow_id if self.workflow_id.startswith("git+") else None
+
+    @property
+    def runnable(self) -> bool:
+        """Whether jobs can be created from the workflow; a recognize collector is never run."""
+
+        return self.recognize is None
 
     @property
     def store_name(self) -> str:
@@ -792,6 +830,8 @@ def describe_package_runner(
 
     root = Path(directory).expanduser().resolve()
     provider = parse_workflow_manifest(root)
+    if not provider.runnable:
+        raise ValueError(f"{provider.workflow_id} recognizes calculations and has no runner to describe")
     if provider.command is None:
         return describe_runner(root / provider.entry)
     artifacts_path = None if artifacts is None else Path(artifacts).expanduser().resolve()
@@ -1047,6 +1087,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         name=provider.name,
         requires=provider.requires,
         calls=provider.calls,
+        recognize=provider.recognize,
         _input_metadata=provider._input_metadata,
     )
 
@@ -1195,6 +1236,7 @@ def resolve_workflow(
                 declaration_file=provider.declaration_file,
                 requires=provider.requires,
                 calls=provider.calls,
+                recognize=provider.recognize,
                 _input_metadata=provider._input_metadata,
             )
         elif path.exists():
@@ -1582,6 +1624,8 @@ def _prepare(
     """
 
     resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode, format=format)
+    if not resolved.runnable:
+        raise ValueError(f"{resolved.workflow_id} recognizes calculations and cannot be run")
     if resolved.language is not None:
         from . import compat
 

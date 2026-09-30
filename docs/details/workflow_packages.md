@@ -933,8 +933,8 @@ httk job new --workspace WS --workflow-dir ./my-workflow \\
     --parameter kpoint_density=30.0 \\
     --placement project/screening
 httk workflow run --workspace WS
-httk workflow collect --workspace WS
-httk workflow collect --workspace WS --into results.sqlite --id-base httk.workflow
+httk collect --workspace WS
+httk collect --workspace WS --into results.sqlite --id-base httk.workflow
 ```
 
 `httk workflow describe TARGET [--json]` reports a registered id or alias,

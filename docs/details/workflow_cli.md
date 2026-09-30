@@ -13,13 +13,15 @@ httk workflow --help
 
 `httk workflow …` remains the spelling for workflow execution and project
 commands. Workspace and job management are top-level command trees:
-`httk workspace …` and `httk job …`. Each group answers `--help`, each command
+`httk workspace …` and `httk job …`, and collecting results is the top-level
+`httk collect`. Each group answers `--help`, each command
 answers `--help`, and a mistyped action is reported by the group it was mistyped
 in.
 
 ## The complete tree
 
 ```text
+httk collect             [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workspace          init | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock | seal | unseal
 httk workflow runner     publish | describe
 httk workflow build      [--workspace WORKSPACE] TARGET...
@@ -30,7 +32,6 @@ httk workflow install    URI... [--json]
 httk workflow uninstall  SELECTOR... [--json]
 httk workflow seal       verify [PATH] [--json] [--trusted-key KEY] [--shallow]
 httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
-httk workflow collect
 httk workflow postprocess
 httk workflow run        [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
 httk workflow manager    run
@@ -363,11 +364,30 @@ The hidden `receive`/`offer`/`retire` protocol spellings a remote peer invokes
 on this workspace remain under `httk workflow transfer`, unchanged — see "The
 protocol spellings, and what is gone" below.
 
-### `collect` — the finished jobs, as summaries
+### `httk collect` — workspaces and calculation trees
 
-| Command | What it does | Notable options |
-| --- | --- | --- |
-| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH` |
+`collect` is a top-level command, `httk collect [PATH]`; it is no longer a
+`workflow` subcommand. What it collects depends on PATH:
+
+| PATH | What is collected |
+| --- | --- |
+| omitted | the workspace resolved as every workspace command resolves it (`--workspace`, the enclosing workspace, the project default) |
+| not a directory | the registered workspace of that name |
+| a workspace root | that workspace |
+| a directory inside a workspace | refused: collect the workspace root, narrowing with `--placement` |
+| any other directory | the calculation tree below it, through the recognized-calculation collectors |
+
+| Options | Apply to |
+| --- | --- |
+| `--state`, `--placement`, `--raw`, `--allow-job-collector` | a workspace only |
+| `--dry-run`, `--prefer NAME`, `--exclude PATTERN`, `--collector DIR` | a calculation tree only |
+| `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
+
+An option given for the other kind of target is refused. A workspace nested in a
+calculation tree is collected as a workspace with the default states and is not
+walked. `--dry-run` prints one `httk-collect-claim` line per claimed, declined
+or workspace directory and collects nothing; it cannot be combined with
+`--into`. See {doc}`/collecting` for recognized calculations.
 
 With `--into`, a sealed id ledger keeps entry ids stable across rebuilds. It is
 on by default at `<into>.ids.sqlite`; `--id-ledger PATH` relocates it and
@@ -380,10 +400,12 @@ cannot be combined with `--raw`.
 
 Every form except the pure-array `--json` ends with one
 `httk-workflow-collect-summary` line counting `collected`, `degraded`,
-`unfulfilled_roles`, `storage_errors`, and `skipped_unreadable`. The command
+`unfulfilled_roles`, `storage_errors`, and `skipped_unreadable`, plus
+`unclaimed` for a calculation tree and `revised` with `--into`. The command
 exits nonzero when any job was degraded, failed to store, or was skipped for an
-unreadable `job.json`; unfulfilled roles alone keep the exit at `0`. See
-{doc}`/collecting` for the triage members and `--into` partial-state semantics.
+unreadable `job.json`; unfulfilled roles and unclaimed directories alone keep
+the exit at `0`. See {doc}`/collecting` for the triage members and `--into`
+partial-state semantics.
 
 ### postprocess — run a curated script
 
@@ -918,7 +940,7 @@ should deduplicate by `job_id`. Remote `job show`, `job log`, and `job why`
 accept canonical lowercase job UUIDs only; keys and prefixes must be resolved
 locally first.
 
-`httk workflow collect --workspace WORKSPACE` streams one `CollectedJob` summary per finished
+`httk collect --workspace WORKSPACE` streams one `CollectedJob` summary per finished
 job as JSON lines by default. Use `--raw` to stream `JobRecord` records for a
 data layer; see {doc}`/collecting`.
 
@@ -1511,7 +1533,7 @@ and `failed`; `--placement` restricts the fetch to one subtree; `--adapter-timeo
 bounds every adapter operation the fetch runs. With `--job`, any quiescent state
 is eligible unless an explicit `--state` filters it. A fetched job arrives as an
 ordinary job of the local default workspace, in its offered state and at the
-placement it had on the remote, so `httk workflow collect` then reports terminal
+placement it had on the remote, so `httk collect` then reports terminal
 results exactly like jobs that ran at home.
 
 Under the fetch leg run the two far-side protocol commands, invoked over the

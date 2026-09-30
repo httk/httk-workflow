@@ -71,6 +71,7 @@ __all__ = [
     "resolve_seal_keys",
     "seal_job",
     "seal_workspace",
+    "tree_ledger_keys",
     "unseal_job",
     "unseal_workspace",
     "unsealed_jobs",
@@ -163,6 +164,30 @@ def default_workspace_keys(workspace: Workspace, refs: Sequence[str] | None = No
         setting = workspace.read_settings().get("seal.keys", "project,identity")
         refs = [item.strip() for item in str(setting).split(",") if item.strip()]
     return resolve_seal_keys(refs, project_root=workspace.root)
+
+
+def tree_ledger_keys(root: str | os.PathLike[str]) -> tuple[SealKey, ...]:
+    """Resolve the id-ledger signing keys for collecting a calculation tree.
+
+    A tree has no workspace settings, so the default ``seal.keys`` refs of a
+    workspace (``project,identity``) are used, with the ``project`` ref
+    discovered from *root*. When no key resolves, the sweep runs without a
+    ledger: this logs a warning and returns no keys.
+
+    :param root: The swept tree.
+    :return: The resolved signing keys, or ``()`` when none is available.
+    """
+
+    try:
+        return resolve_seal_keys(("project", "identity"), project_root=root).keys
+    except SealError as exc:
+        _LOGGER.warning(
+            "no signing key is available to seal an id ledger (%s); entry ids collected from %s are store-minted "
+            "and will NOT be stable across rebuilds. Configure seal.keys, or pass --no-id-ledger to silence this.",
+            exc,
+            root,
+        )
+        return ()
 
 
 def _job_subject(marker: Marker) -> dict[str, object]:

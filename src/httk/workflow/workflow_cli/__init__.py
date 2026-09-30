@@ -36,7 +36,7 @@ from ._campaign import (
     handle_campaign_start_managers,
     handle_campaign_submit,
 )
-from ._collect import build_collect_parser, handle_collect
+from ._collect import build_collect_parser
 from ._common import (
     _ERRORS,
     _TRANSFER_PROTOCOL,
@@ -174,7 +174,6 @@ __all__ = [
     "add_workspace_status_arguments",
     "build_build_parser",
     "build_campaign_parser",
-    "build_collect_parser",
     "build_config_parser",
     "build_describe_parser",
     "build_install_parser",
@@ -193,6 +192,7 @@ __all__ = [
     "build_transfer_parser",
     "build_v1_parser",
     "build_workspace_parser",
+    "collect_command",
     "command",
     "dispatch",
     "ensure_identity_key",
@@ -202,7 +202,6 @@ __all__ = [
     "handle_campaign_show",
     "handle_campaign_start_managers",
     "handle_campaign_submit",
-    "handle_collect",
     "handle_config_import_v1",
     "handle_config_set",
     "handle_config_show",
@@ -298,7 +297,8 @@ def build_parser(
     build_list_parser(groups)
     build_install_parser(groups)
     build_seal_parser(groups)
-    build_collect_parser(groups)
+    if include_workspace_job:
+        build_collect_parser(groups, program=f"{context.program} collect")
     build_build_parser(groups)
     build_postprocess_parser(groups)
     build_precheck_parser(groups)
@@ -370,3 +370,9 @@ def job_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``job`` command."""
 
     return command(["job", *argv], context)
+
+
+def collect_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``collect`` command."""
+
+    return command(["collect", *argv], context)

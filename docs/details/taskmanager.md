@@ -74,7 +74,7 @@ runs --count 4 --detach` there, and that command uses the owning workspace's
 launcher. The result is the same as running on the cluster, or addressing the
 same machine through a configured `machine_names` alias. Transfer jobs to the
 workspace as needed and use `transfer kappa:runs default` after they stop, then
-`httk workflow collect` locally.
+`httk collect` locally.
 
 ## Workspace policy
 
@@ -814,7 +814,7 @@ whichever manager is running and is read from the manifest each manager
 publishes, so a manager that is not running is reported as absent rather than
 assumed.
 
-Reading *results* rather than status is collecting: `httk workflow collect
+Reading *results* rather than status is collecting: `httk collect
 WORKSPACE` streams `CollectedJob` summaries, while `--raw` exposes the
 `JobRecord` stream for a data layer; see {doc}`/collecting`.
 

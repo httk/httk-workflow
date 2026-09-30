@@ -31,7 +31,7 @@ from .models import (
     validate_resources,
     validate_runner_command,
 )
-from .scaffold import DataMode, WorkdirMode, WorkflowProvider, payload_relative, register_workflow
+from .scaffold import DataMode, RecognizeSpec, WorkdirMode, WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
 _LOGGER = logging.getLogger(__name__)
@@ -115,6 +115,29 @@ def _member(directory: Path, value: object, path: str, *, python: bool = False) 
         if directory.joinpath(*relative.parts[:index]).is_symlink():
             raise _error(directory, f"{path} must not traverse a symlink: {value!r}")
     return relative.as_posix()
+
+
+def _recognize_spec(root: Path, value: object) -> RecognizeSpec:
+    """Validate ``[workflow.recognize]`` of a recognized-calculation collector."""
+
+    table = _table(value, "[workflow.recognize]", root)
+    _unknown(table, {"file", "priority", "requires"}, "[workflow.recognize]", root)
+    file = _member(root, table.get("file"), "[workflow.recognize].file", python=True)
+    priority = table.get("priority")
+    if not isinstance(priority, int) or isinstance(priority, bool):
+        raise _error(root, "[workflow.recognize].priority must be an integer")
+    requires = table.get("requires")
+    if not isinstance(requires, list) or not requires:
+        raise _error(root, "[workflow.recognize].requires must be a nonempty list of strings")
+    for marker in requires:
+        if not isinstance(marker, str) or not (
+            re.fullmatch(r"\*\.[A-Za-z0-9_]+", marker) or (marker and "/" not in marker and "*" not in marker)
+        ):
+            raise _error(
+                root,
+                f"[workflow.recognize].requires entries must be a basename or a '*.ext' glob: {marker!r}",
+            )
+    return RecognizeSpec(file, priority, tuple(requires))
 
 
 def _collect_member(directory: Path, value: object, path: str) -> tuple[str, bool]:
@@ -624,6 +647,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             "build",
             "instantiate",
             "collect",
+            "recognize",
             "postprocess",
             "inputs",
             "parameters",
@@ -666,12 +690,26 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         # An installed git package is identified by its URI; the manifest name is its short name.
         short_name, workflow_id = workflow_id, _uri
 
-    runner = _table(workflow.get("runner"), "[workflow.runner]", root)
+    recognize: RecognizeSpec | None = None
+    if "recognize" in workflow:
+        if "runner" in workflow:
+            raise _error(root, "a package either runs or recognizes, not both")
+        recognize = _recognize_spec(root, workflow["recognize"])
+        if "collect" not in workflow:
+            raise _error(root, "a [workflow.recognize] package must have [workflow.collect]")
+        if not workflow.get("outputs"):
+            raise _error(root, "a [workflow.recognize] package must declare at least one [workflow.outputs]")
+    runner = {} if recognize is not None else _table(workflow.get("runner"), "[workflow.runner]", root)
     language_name = _optional_string(runner, "format", "[workflow.runner]", root)
     lang = None
     document_member: str | None = None
     runner_options: dict[str, object] = {}
-    if language_name is not None:
+    entry = "run"
+    command: tuple[str, ...] | None = None
+    steps: tuple[str, ...] = ()
+    initial_step = "start"
+    # A recognize package has no runner, so neither runner branch applies to it.
+    if recognize is None and language_name is not None:
         try:
             lang = compat.language(language_name)
         except ValueError as exc:
@@ -712,7 +750,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         command = None
         steps = lang.steps
         initial_step = lang.initial_step
-    else:
+    elif recognize is None:
         _unknown(
             runner,
             {"entry", "command", "initial_step", "steps", "data_mode", "workdir_mode"},
@@ -810,7 +848,12 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             instantiate_exec = instantiate_file
     if lang is not None:
         instantiate_file = None
-    if lang is None and any(destination is None for destination in inputs.values()) and instantiate_file is None:
+    if (
+        recognize is None
+        and lang is None
+        and any(destination is None for destination in inputs.values())
+        and instantiate_file is None
+    ):
         raise _error(root, "hook-consumed workflow inputs require [workflow.instantiate]")
 
     collect_file: str | None = None
@@ -933,6 +976,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         declaration_file=None,
         requires=requires,
         calls=calls,
+        recognize=recognize,
         _input_metadata=input_metadata,
         collector=(
             f"{lang.collect.__module__}:{lang.collect.__qualname__}"

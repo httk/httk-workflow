@@ -72,7 +72,7 @@ document describing what the workflow consumes and produces (see
 when that is a commit-pinned git URI (see {doc}`workflow_uris`), and to `None`
 otherwise. A git workflow without a `declaration_uri` therefore has a
 definition URI but no declaration URI. The v1 reader records the declaration
-URI of its package, if any, and no definition URI. `httk workflow collect` reports both in each run summary.
+URI of its package, if any, and no definition URI. `httk collect` reports both in each run summary.
 
 The end-to-end handoff is:
 

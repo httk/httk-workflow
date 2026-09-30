@@ -167,8 +167,7 @@ def test_a_parent_collected_before_its_children_is_revised_not_duplicated(
 ) -> None:
     from httk.core.crypto import ed25519_generate_seed
 
-    from httk.workflow import collect
-    from httk.workflow.workflow_cli._collect import _store_collected
+    from httk.workflow import collect, store_collected
 
     workspace, job = tree
     items = list(collect(workspace))
@@ -178,12 +177,12 @@ def test_a_parent_collected_before_its_children_is_revised_not_duplicated(
     if ledger:
         options |= {"ledger_path": str(tmp_path / "ids.sqlite"), "ledger_keys": [("test", ed25519_generate_seed())]}
 
-    first = _store_collected([parent], str(store), **options)
+    first = store_collected([parent], str(store), **options)
     assert not any("storage_error" in report for report in first)
     (alone,) = _runs(store)
     assert alone.artifacts == ()
 
-    second = _store_collected(items, str(store), **options)
+    second = store_collected(items, str(store), **options)
     assert not any("storage_error" in report for report in second)
     source = f"{workspace.workspace_id}:{job.job_id}"
     revisions = [run for run in _runs(store) if run.source_id == source]
