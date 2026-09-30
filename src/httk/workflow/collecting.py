@@ -89,6 +89,13 @@ from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class _Missing:
+    """The sentinel telling a missing parameter default from a default of ``None``."""
+
+
+_MISSING = _Missing()
+
 __all__ = [
     "COLLECTABLE_KINDS",
     "COLLECT_FORMAT",
@@ -611,6 +618,64 @@ class JobRecord:
         """Whether part of this job's recorded history could not be read."""
 
         return bool(self.provenance.get("gaps", False))
+
+    def parameter(self, name: str, default: object = _MISSING) -> object:
+        """Return one member of the job's ``parameters`` object.
+
+        The collect-side counterpart of :meth:`httk.workflow.sdk.Attempt.parameter`:
+        without a *default*, a missing parameter is a :exc:`KeyError`.
+
+        :param name: The parameter name to look up.
+        :param default: The value to return when the parameter is absent.
+        :return: The parameter value or the supplied default.
+        :raises KeyError: If the parameter is absent and no default was supplied.
+        """
+
+        parameters = self.job.get("parameters")
+        if not isinstance(parameters, Mapping):
+            parameters = {}
+        if name in parameters:
+            return parameters[name]
+        if isinstance(default, _Missing):
+            available = ", ".join(sorted(parameters)) or "none"
+            raise KeyError(f"job parameter {name!r} is not defined; defined parameters: {available}")
+        return default
+
+    def result_file(self, name: str, *, data_prefix: str = "", published: str | None = None) -> Path:
+        """Locate one result file of this job.
+
+        A job with transactional data is read from its committed data, at
+        ``published`` (default ``name``) below ``data_prefix``; any other job is
+        read from its persistent workdir, at ``name``. A transactional job without
+        committed data fails rather than falling back to unpublished workdir files.
+
+        :param name: The file's path relative to the workdir.
+        :param data_prefix: The directory below the job's data the runner published under.
+        :param published: The file's path below ``data_prefix``, when the runner
+            published it under another name than it has in the workdir.
+        :return: The absolute path of the existing file.
+        :raises ValueError: If the job has no such file.
+        """
+
+        identity = f"{self.workspace_id}:{self.job_id}"
+        data = self.data
+        if data is not None:
+            relative = str(PurePosixPath(data_prefix, published or name))
+            if self.data_generation is None:
+                raise ValueError(
+                    f"{identity}: expected published data file {relative!r}, but the job has no published data"
+                )
+            path = data / relative
+            if not path.is_file():
+                raise ValueError(f"{identity}: expected published data file {path}")
+            return path
+        workdir = self.workdir
+        if workdir is None:
+            raise ValueError(f"{identity}: expected workdir file {name!r}, but the job has no workdir")
+        path = workdir / name
+        if not path.is_file():
+            raise ValueError(f"{identity}: expected workdir file {path}")
+        return path
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this record."""

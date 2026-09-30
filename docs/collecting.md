@@ -108,6 +108,25 @@ record must hold so it survives moving the workspace, while the properties
 `record.payload`, `record.workdir`, and `record.data` resolve them into absolute
 `Path` objects against the workspace the record came from.
 
+A collect hook reads job parameters and locates its result files through the
+record. `record.parameter(name, default)` returns one member of the job's
+`parameters` (a `KeyError` without a default, like `Attempt.parameter`).
+`record.result_file(name, data_prefix=..., published=...)` returns the existing
+file: below the committed data for a job with transactional data (at `published`,
+default `name`, below `data_prefix`), otherwise in the persistent workdir, and a
+`ValueError` when it is not there. A transactional job never falls back to the workdir.
+
+```python
+from httk.codes.vasp.collect import read_total_energy
+
+
+def collect(record):
+    prefix = record.parameter("data_prefix", "vasp") or ""
+    return {"total_energy": read_total_energy(record.result_file("OUTCAR", data_prefix=prefix))}
+```
+
+The reading helper comes from the code package, here *httk-workflow-vasp*.
+
 One activation of `provenance.activations` carries `activation_id`,
 `activation_ordinal`, the `step` it ran, the `reason` it started, and its
 `attempts`. One attempt carries `attempt_id`, `ordinal`, the `manager_id` and

@@ -140,6 +140,12 @@ print([code.name for code in installed_codes()])
   non-convergence, so "nonconverged" is decided after "process failure"; a code
   that exits nonzero on non-convergence (CP2K) must check non-convergence
   first. Choose the order deliberately for each code.
+- **Collect layout belongs to the workflow package.** A code package ships
+  reading helpers in `httk.codes.<code>.collect` (for example
+  `read_total_energy(path)`), never one collector per workflow; a workflow's
+  `collect.py` names the files its outputs come from, located with
+  `record.result_file` and `record.parameter`, so a copied workflow that keeps
+  more results adds lines to its own hook.
 
 ## Available code distributions
 
