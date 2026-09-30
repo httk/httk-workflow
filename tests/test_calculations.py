@@ -588,6 +588,20 @@ def test_an_unchanged_relaxation_is_not_its_own_product(tmp_path: Path) -> None:
     assert {edge.label: edge.entry_id for edge in run.outputs}["relaxed_structure"] == source.entry_id
 
 
+def test_only_tree_sweep_lines_name_a_directory(tmp_path: Path) -> None:
+    from httk.workflow import collect
+    from httk.workflow.storing import _collected_mapping
+    from test_collect_fallback import _finished
+
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "deep" / "calc")
+    (item,) = collect_tree(tmp_path / "tree", collectors=(package,))
+    assert _collected_mapping(item)["directory"] == "deep/calc"
+
+    workspace, _ = _finished(tmp_path / "workspace")
+    assert "directory" not in _collected_mapping(next(collect(workspace)))
+
+
 def test_claims_scale_to_wide_trees(tmp_path: Path, test_profile: _TestProfile) -> None:
     empty, calculations = test_profile.scale(normal=(200, 5), extended=(5000, 50))
     package = _collector(tmp_path / "pkg")

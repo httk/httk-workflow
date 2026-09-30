@@ -387,7 +387,8 @@ An option given for the other kind of target is refused. A workspace nested in a
 calculation tree is collected as a workspace with the default states and is not
 walked. `--dry-run` prints one `httk-collect-claim` line per claimed, declined
 or workspace directory and collects nothing; it cannot be combined with
-`--into`. See {doc}`/collecting` for recognized calculations.
+`--into`. A calculation's summary line names its `"directory"` relative to the
+swept root. See {doc}`/collecting` for recognized calculations.
 
 With `--into`, a sealed id ledger keeps entry ids stable across rebuilds. It is
 on by default at `<into>.ids.sqlite`; `--id-ledger PATH` relocates it and

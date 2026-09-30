@@ -231,6 +231,15 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
         mapping["run_only"] = True
     if item.child_runs:
         mapping["children"] = [{"label": label, "run_source_id": source} for label, source in item.child_runs]
+    # A recognized calculation's stand-in record is coordinated by its collector
+    # (``workspace_id`` is the collector's name, which is also its workflow); name
+    # its directory, relative to the swept root, since its id is only a digest.
+    if (
+        item.identity_stable is True
+        and item.record.workspace_id == item.workflow_id
+        and item.record.workdir_path is not None
+    ):
+        mapping["directory"] = item.record.workdir_path.as_posix()
     return mapping
 
 

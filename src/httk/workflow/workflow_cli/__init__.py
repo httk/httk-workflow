@@ -313,19 +313,25 @@ def build_parser(
     return parser
 
 
-def dispatch(parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIContext) -> int:
+def dispatch(
+    parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIContext, *, prog: str | None = None
+) -> int:
     """Parse *argv* with *parser* and run the command it names.
 
     A parser with no command named prints its own help, so every level of the
     tree answers a bare invocation the way an operator exploring it expects.
+    Errors are prefixed with *prog*, or the parser's own program name, so a
+    standalone top-level command reports under its own name.
     """
+
+    prog = prog or parser.prog
 
     raw_argv = list(argv)
     if len(raw_argv) > 1 and raw_argv[0] == "transfer" and raw_argv[1] in _TRANSFER_PROTOCOL:
         try:
             return _dispatch_transfer_protocol(raw_argv[1:], context)
         except _ERRORS as exc:
-            print(f"{parser.prog}: {exc}", file=sys.stderr)
+            print(f"{prog}: {exc}", file=sys.stderr)
             return 2
     # ``argparse`` does not intermingle an optional workspace positional with
     # the protocol's ``<path> --by-path KEY [VALUE]`` tail. Keep the frozen
@@ -344,14 +350,17 @@ def dispatch(parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIC
     try:
         return handler(arguments, context)
     except _ERRORS as exc:
-        print(f"{parser.prog}: {exc}", file=sys.stderr)
+        print(f"{prog}: {exc}", file=sys.stderr)
         return 2
 
 
-def command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the internal super-dispatcher for every workflow command group."""
+def command(argv: Sequence[str], context: CLIContext, *, prog: str | None = None) -> int:
+    """Handle the internal super-dispatcher for every workflow command group.
 
-    return dispatch(build_parser(f"{context.program} workflow", context), argv, context)
+    *prog* names the command errors are reported under (default ``httk workflow``).
+    """
+
+    return dispatch(build_parser(f"{context.program} workflow", context), argv, context, prog=prog)
 
 
 def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
@@ -363,16 +372,16 @@ def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
 def workspace_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``workspace`` command."""
 
-    return command(["workspace", *argv], context)
+    return command(["workspace", *argv], context, prog=f"{context.program} workspace")
 
 
 def job_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``job`` command."""
 
-    return command(["job", *argv], context)
+    return command(["job", *argv], context, prog=f"{context.program} job")
 
 
 def collect_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``collect`` command."""
 
-    return command(["collect", *argv], context)
+    return command(["collect", *argv], context, prog=f"{context.program} collect")

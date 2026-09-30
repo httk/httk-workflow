@@ -491,7 +491,9 @@ same identity with identical marker files are copies: the second is skipped.
 With different marker files they are a collision and the sweep stops, naming
 both directories; `--exclude PATTERN` (a root-relative glob, repeatable) skips
 one of them. `--dry-run` prints how every directory would be claimed, as
-`httk-collect-claim` lines, without collecting anything. Directories starting
+`httk-collect-claim` lines, without collecting anything. When collecting, each
+calculation's summary or report line carries `"directory"`, its path relative
+to the swept root, since its `job_id` is only the identity digest. Directories starting
 with `.` and symlinked directories are not visited, and a nested workspace is
 collected as a workspace and not walked.
 

@@ -9,7 +9,7 @@ from httk.core.register import codes
 
 from conftest import configure_identity, register_ws
 from httk.workflow import Workspace
-from httk.workflow.workflow_cli import command, workflow_command
+from httk.workflow.workflow_cli import collect_command, command, job_command, workflow_command
 from test_calculations import _calculation, _collector
 
 
@@ -33,7 +33,7 @@ def test_a_tree_is_collected_and_stored_with_a_ledger(tmp_path: Path, capsys: py
 
     assert command(["collect", "tree", "--collector", str(package)], context) == 0
     *items, summary = _lines(capsys)
-    assert [item["workflow"] for item in items] == ["tests.calc"]
+    assert [(item["workflow"], item["directory"]) for item in items] == [("tests.calc", "a")]
     assert (summary["collected"], summary["unclaimed"]) == (1, 1) and "revised" not in summary
 
     store = tmp_path / "into.sqlite"
@@ -42,6 +42,7 @@ def test_a_tree_is_collected_and_stored_with_a_ledger(tmp_path: Path, capsys: py
     *reports, summary = _lines(capsys)
     assert (tmp_path / "into.sqlite.ids.sqlite").exists()
     assert reports[0]["revised"] is False and summary["revised"] == 0
+    assert reports[0]["directory"] == "a"
     (tree / "a" / "ENERGY").write_text("-4.0", encoding="utf-8")
     assert command(argv, context) == 0
     *reports, summary = _lines(capsys)
@@ -133,3 +134,15 @@ def test_an_ambiguous_claim_exits_2_naming_prefer(tmp_path: Path, capsys: pytest
 def test_collect_is_no_longer_a_workflow_subcommand(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert workflow_command(["collect", "--help"], CLIContext("httk", tmp_path)) == 2
     assert "invalid choice: 'collect'" in capsys.readouterr().err
+
+
+def test_standalone_commands_report_errors_under_their_own_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "tree").mkdir()
+    context = CLIContext("httk", tmp_path)
+
+    assert collect_command(["tree", "--into", "x.sqlite"], context) == 2
+    assert capsys.readouterr().err.startswith("httk collect: --id-base is required with --into")
+    assert job_command(["list", "--workspace", "no-such-workspace"], context) == 2
+    assert capsys.readouterr().err.startswith("httk job: ")
