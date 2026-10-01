@@ -1,8 +1,8 @@
 # Writing a remote adapter in detail
 
 *For operators and integrators who need to reach a machine the packaged
-`local`, `ssh` and `mount` templates do not cover.* This page is the
-normative reference for the adapter contract: the six
+`local`, `ssh`, `mount` and `mount-daemon` templates do not cover.* This page is the
+normative reference for the adapter contract: its base and optional
 operations and their exact JSON request and result documents, how settings and
 credentials reach an adapter, and the rules an implementation must follow. The
 operator-facing description of the same adapters — what each maintained kind
@@ -13,16 +13,18 @@ A *remote adapter* is a versioned directory with one dispatcher executable.
 Everything *httk-workflow* does on another machine — push a job bundle, run a
 command, or pull results back — is one *operation*, and every
 operation runs the bundle's single `adapter` program. The engine never opens an
-ssh connection itself, never starts a manager through a remote, and never
-parses anything but the one JSON document that program prints.
+ssh connection itself and parses only the JSON result that program prints.
+The optional daemon operation relays a typed request to the destination broker,
+which owns the protected scheduler policy.
 
-## One executable, six operations
+## One executable, base and optional operations
 
 There is one executable per bundle, not one per operation. The operation to run
 is named inside the request JSON (`"operation": …`), so a single program serves
-all six. The operation names are
+the supported operations. The operation names are
 {py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS` and the value of the
-request's `operation` member; a remote adapter does not launch managers.
+request's `operation` member. Generic adapters leave scheduling to the destination
+launcher. The `mount-daemon` adapter relays requests to a protected broker.
 
 ## The bundle
 
@@ -91,7 +93,9 @@ Beside `remote.json` the bundle must contain one executable file named
 {py:data}`httk.workflow.adapters.ADAPTER_EXECUTABLE` (`adapter`); validation
 refuses a bundle whose `adapter` is missing or not runnable.
 
-`kind` is *not* interpreted by the loader. It is read only by
+`kind` is *not* interpreted by the generic bundle loader. The dedicated daemon
+CLI requires `mount-daemon`, whose separate dispatcher requires that exact kind
+on every call. The following describes the general runtime. It is read only by
 {py:mod}`httk.workflow.adapter_protocol` — the packaged implementation the
 maintained templates execute — which dispatches on it and refuses any value
 outside `local`, `ssh` and `mount` rather than running the wrong code in
@@ -105,7 +109,7 @@ that only exist on the far side of a connection: the local `ssh` and `rsync`
 clients are local requirements, but a program used by a workspace launcher is
 not a remote-adapter requirement.
 
-## The six operations
+## The base operations
 
 Every operation runs the same `adapter` executable. It is started as
 
@@ -328,6 +332,39 @@ A local copy onto an existing destination is idempotent when both sides carry th
 identical `.httk-transfer/manifest.json`, and an error otherwise, so a resumed
 transfer does not have to know whether the previous attempt finished.
 
+## Optional `daemon` operation
+
+Protocol version 2 additionally recognizes `daemon`. It is optional: existing
+adapters may refuse it. The maintained `mount-daemon` bundle uses a separate
+`python3 -m httk.workflow._daemon_adapter` dispatcher and refuses generic
+`invoke`, `status`, `push` and `pull` operations. A missing or changed `kind` is
+an error; this dispatcher never falls back to local execution.
+
+Beyond the standard request envelope, `daemon` accepts exactly:
+
+| Member | Meaning |
+| --- | --- |
+| `daemon_request` | complete version-1 command object from {doc}`/workspace_daemon` |
+| `wait_seconds` | optional finite number from 0.05 to 120, default 10 |
+
+The client checks workspace/enrollment IDs against the configured endpoint before
+publication. Responses must match those identities, request ID and canonical
+request digest, allowed operation outcome and any requested handle. Paths,
+commands, argv, cwd, environment and scheduler arguments are not accepted.
+
+A confirmed response returns adapter process exit 0 with `ok: true`, canonical
+response JSON in `stdout`, empty `stderr`, and nested `returncode` 0 for
+`ready`, `submitted`, `status` or `cancel_requested`, or 2 for `refused`, `busy`
+or `uncertain`. This preserves a known negative daemon result across the adapter
+boundary. Failure to obtain a validated response is an adapter error and may
+leave a live request. Callers must retain its ID and fields for retry.
+
+This kind's `configure` merges pending settings, validates the five settings
+listed in {doc}`/remotes` and checks mounted workspace identity. It publishes
+nothing. Its `install` operation rejects nonempty pending settings and sends a
+health request; success means the matching daemon answered `ready`. It does not
+install software or validate compute-node confinement.
+
 ## Settings and credentials
 
 `httk workflow remote configure --set KEY=VALUE NAME` splits every assignment
@@ -335,7 +372,8 @@ in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
   `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
-  `port`, `username`, `vasp_command`, and `vasp_pseudo_library` —
+  `port`, `username`, mount settings, the four `daemon_*` settings documented
+  in {doc}`/remotes`, `vasp_command`, and `vasp_pseudo_library` —
   are written into the flat `settings` object of the shareable, signable
   `remote.json`;
 - **every other key** is a credential. It is written into

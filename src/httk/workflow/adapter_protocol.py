@@ -2,7 +2,7 @@
 
 A remote adapter is a versioned directory with one executable ``adapter``
 program. Every operation -- ``configure``, ``install``, ``invoke``, ``push``,
-``pull`` and ``status`` -- runs that one program, which reads
+``pull``, ``status`` and optional ``daemon`` -- runs that one program, which reads
 one JSON request file, learns which operation to perform from the request's
 ``operation`` member, and prints one JSON result. The ``install`` operation
 keeps its historical protocol spelling but only ever *verifies* that the target
@@ -12,6 +12,9 @@ by executing this module, which selects its behaviour from the ``kind`` recorded
 in the bundle's ``remote.json`` and refuses any other kind rather than running it
 in the wrong place. The ``mount`` kind moves files through a locally mounted view
 of the remote filesystem and runs commands through a configurable executor.
+The restricted ``mount-daemon`` template uses a separate private dispatcher for
+typed mailbox requests. It refuses generic invocation and push/pull operations;
+this module does not dispatch that kind.
 
 This module is the documented surface of that contract. The implementation
 lives in :mod:`httk.workflow.adapter_runtime`, which is what the packaged

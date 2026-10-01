@@ -344,7 +344,7 @@ def build_remote_parser(
     add.add_argument(
         "--template",
         metavar="TEMPLATE",
-        help="local, ssh or mount (default: local)",
+        help="local, ssh, mount or mount-daemon (default: local)",
     )
     add.add_argument(
         "--global",
@@ -432,6 +432,10 @@ def build_remote_parser(
         action="store_true",
         help="skip the confirmation; a remote an unretired transfer still needs is refused either way",
     )
+
+    from ._daemon_remote import build_daemon_remote_parser
+
+    build_daemon_remote_parser(group)
 
 
 # ---------------------------------------------------------------------------

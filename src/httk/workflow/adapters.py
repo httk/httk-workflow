@@ -75,6 +75,7 @@ __all__ = [
 
 ADAPTER_OPERATIONS = (
     "configure",
+    "daemon",
     "install",
     "invoke",
     "push",
@@ -108,6 +109,10 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
     {
         "check_connectivity",
         "check_mount",
+        "daemon_enrollment_id",
+        "daemon_requests",
+        "daemon_responses",
+        "daemon_workspace_id",
         "exec_command",
         "host",
         "httk_command",
@@ -423,7 +428,7 @@ def add_remote(
         # "this machine". Defining one would make a binding to `local` ambiguous,
         # so the name is reserved.
         raise ValueError("the remote name 'local' is reserved for the built-in local remote")
-    if template not in {"local", "ssh", "mount"}:
+    if template not in {"local", "ssh", "mount", "mount-daemon"}:
         raise ValueError(f"unknown maintained remote template: {template}")
     if global_scope:
         destination = remotes_home() / name

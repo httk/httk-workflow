@@ -2,9 +2,9 @@
 
 *For operators who need to reach another machine.* A remote is a bundle that
 combines transport, file movement, and command execution: it can move a job or
-workspace tree, invoke `httk` there, and report status. A remote never schedules
-managers. Scheduling belongs to the launcher selected by the destination
-workspace; see {doc}`launchers` for that side of the workflow.
+workspace tree, invoke `httk` there, and report status. Ordinary remotes leave scheduling to the destination workspace launcher; see
+{doc}`launchers`. The restricted `mount-daemon` variant instead relays typed
+requests to an operator-controlled destination broker.
 
 A remote bundle contains `remote.json` and one executable named `adapter`, with
 optional `credentials.json` for values that should not enter the shareable
@@ -154,7 +154,7 @@ mount point cannot be told apart from a mounted-but-empty one, so run
 `httk workflow remote check sigma` before transfers as the operator's safeguard
 that the filesystem is actually mounted and `httk` answers on the far side.
 
-The mount is for transfers only. Never `httk workspace init` on the mount as a
+For the `mount` adapter, the mount is for transfers only. Never `httk workspace init` on the mount as a
 local workspace, and never run `status`, `collect`, `fsck` or any analysis
 against the mounted tree: the remote machine owns the workspace, so every `httk`
 command about it goes through the executor (`sigma:runs`), exactly as with an
@@ -166,6 +166,75 @@ $ httk job transfer --job JOB default sigma:runs
 $ httk workflow run --workspace sigma:runs --count 4
 $ httk workspace status sigma:runs
 ```
+
+### A mounted filesystem with a confined daemon
+
+Use `mount-daemon` when files are the only channel to the destination. First
+provision and start {doc}`workspace_daemon` on the HPC system. Export its data,
+request and response directories through the restricted transport account;
+keep the policy, trusted installation and private ledger outside that export.
+Configure the client with the mounted paths and identities from that policy:
+
+```console
+$ httk workflow remote add --template mount-daemon confined
+$ httk workflow remote configure confined \
+      --set mount_root=/home/me/mounts/cluster/data \
+      --set daemon_requests=/home/me/mounts/cluster/requests \
+      --set daemon_responses=/home/me/mounts/cluster/responses \
+      --set daemon_workspace_id=12345678-1234-4234-8234-123456789abc \
+      --set daemon_enrollment_id=0123456789abcdef0123456789abcdef
+$ httk workflow remote check confined
+```
+
+These five settings are the entire configuration. The adapter accepts no executor,
+prelude, arbitrary environment or scheduler options. `configure` checks the local
+paths and workspace identity without contacting the daemon. `check` sends a health
+request; it verifies a matching broker response, not compute-node readiness.
+
+Use **absolute mounted workspace paths** for native job transfers. This explicitly
+supports the existing filesystem transfer protocol over a suitable mount: source
+fencing, sealed bundles, verified import, acknowledgement and retirement. It does
+not run the job runner or its prelude on the client. For example:
+
+```console
+$ httk job transfer default /home/me/mounts/cluster/data --job JOB
+$ python -c 'import secrets; print(secrets.token_hex(16))'
+$ httk workflow remote daemon start confined --profile small --request-id REQUEST_ID
+$ httk workflow remote daemon status confined --handle MANAGER_HANDLE
+$ httk workflow remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
+$ httk job transfer /home/me/mounts/cluster/data default --state succeeded
+```
+
+Replace `REQUEST_ID` and `ANOTHER_REQUEST_ID` with separately generated 32-character
+lowercase hexadecimal IDs, and retain them. Start and cancel require an explicit
+ID; health and status generate one unless supplied. Each call prints its ID to
+stderr before dispatch and a validated JSON response to stdout. Reuse **the same
+ID and identical fields** after a timeout. Never retry an uncertain submission
+with a new ID; reconcile it with the operator. Use a fresh ID for each status
+refresh. Run only one caller per request ID at a time.
+
+`health`, `start`, `status` and `cancel` accept `--wait-seconds` from 0.05 to 120
+(default 10). Exit 0 means a positive protocol outcome; `refused`, `busy`,
+`uncertain`, and unacknowledged calls exit 2. `UNKNOWN` is a valid status and does
+not establish completion. Cancellation acknowledgement does not confirm the job
+has terminated. Wait for jobs to finish or quiesce before transferring them back.
+
+Generic `confined:workspace` commands, arbitrary invocation and adapter push/pull
+are refused. Manage workspace configuration at the destination through the
+operator. The old `mount` adapter still uses its separate executor as described
+above; it does not gain confinement from this feature.
+
+The mount must meet the workspace's atomic rename and metadata visibility
+requirements (see {doc}`details/taskmanager`). Root paths must be absolute,
+existing, disjoint and free of symlink components. Local descriptor checks cannot
+prove the server's layout or SSHFS cache coherence. Validate these at the site,
+including that SSHFS does not hide server symlinks by following them. Unsupported
+FUSE or object-backed mounts must not be used. An uninterruptible filesystem call
+may exceed the polling or adapter timeout.
+
+Native transfer retains its existing client trust boundary when parsing workspace
+data; this feature adds no client sandbox. The destination daemon enforces payload
+confinement independently. MPI execution remains disabled.
 
 ## From Python
 
@@ -202,8 +271,8 @@ print(result, workspace_id, root, binding)
 ```
 
 `add_remote` creates a maintained adapter bundle, `resolve_remote` applies
-project-before-global resolution, and `run_adapter` executes one of the six
-adapter operations. `probe_remote_workspace` validates the remote status
+project-before-global resolution, and `run_adapter` executes an
+adapter operation. `probe_remote_workspace` validates the remote status
 document and returns the remote workspace UUID and root. The registry's
 `resolve_workspace` keeps the `NAME:WORKSPACE` binding in one place; a remote
 workspace has no local path until the adapter reports it.
@@ -214,6 +283,8 @@ A custom remote is a versioned bundle with `remote.json`, one executable named
 `adapter`, and optional `credentials.json`. The dispatcher answers six
 operations — `configure`, `install` (the operation behind `remote check`),
 `invoke`, `push`, `pull`, and `status` — with one JSON result per invocation.
+The optional `daemon` operation carries typed mailbox requests for `mount-daemon`;
+that restricted adapter refuses the four generic execution and transfer operations.
 It must implement transport, file movement, and remote command execution while
 leaving manager scheduling to the destination workspace's launcher. The engine
 refuses malformed metadata, a missing or non-executable dispatcher, unavailable

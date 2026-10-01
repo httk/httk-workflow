@@ -717,14 +717,19 @@ unambiguous.
 | `remote import-v1 [OPTIONS] SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
+| `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
+| `remote daemon start REMOTE` | start one approved serial manager | required `--profile`, `--request-id`; `--wait-seconds` |
+| `remote daemon status REMOTE` | inspect a manager | required `--handle`; `--request-id`, `--wait-seconds` |
+| `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
 
 `remote add --template` accepts `local` (same-machine transport), `ssh`
-(rsync plus command execution over SSH), or `mount` (a locally mounted remote
-filesystem for transfers plus a configurable executor for commands). These
-templates describe how to reach a machine; they do not describe how that machine
-starts managers. Configure
-manager launch separately in the target workspace with `manager.launch`, such
-as a packaged `slurm` launcher.
+(rsync plus command execution over SSH), `mount` (a locally mounted remote
+filesystem plus a command executor), or `mount-daemon` (typed file requests to a
+confined destination broker). The first three use the target workspace
+`manager.launch` setting, such as a packaged `slurm` launcher. `mount-daemon`
+selects an operator-defined serial profile through the daemon; it refuses generic
+`REMOTE:NAME` operations. Transfer jobs using absolute mounted workspace paths.
+See {doc}`/remotes` for configuration and request-ID retry rules.
 
 `remote show` never prints a credential *value*: a remote setting stored in
 the manifest-excluded `credentials.json` is reported by name only, so a
@@ -1364,15 +1369,15 @@ with aged segments behind it; `collect` and `job log` report that timeline with
 Remote definitions are versioned directories containing `remote.json` and one
 executable `adapter`. The operation name travels in each versioned JSON request;
 the dispatcher prints one JSON result and sends diagnostics to stderr. Commands
-and remote commands are always argument arrays. The maintained templates implement that
+and remote commands are always argument arrays. The general maintained templates implement that
 protocol through {py:mod}`httk.workflow.adapter_protocol`, which is the public
 name of the packaged implementation. {doc}`adapter_authoring` is the reference
 for writing one of your own: the bundle layout, the exact request and result
 document of the six operations (`configure`, `install`, `invoke`, `push`, `pull`,
-and `status`), and the rules for a custom adapter.
+and `status`), the optional `daemon` operation, and the rules for a custom adapter.
 
-Maintained `local`, `ssh` and `mount` templates are packaged with
-the module. Project definitions shadow global definitions. `REMOTE:NAME` names
+Maintained `local`, `ssh`, `mount` and `mount-daemon` templates are packaged with
+the module. The last uses a separate dispatcher for its restricted file protocol. Project definitions shadow global definitions. `REMOTE:NAME` names
 a workspace on a remote. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
 by reading assignment-only configuration; legacy shell executables are never
 copied or run. Any other `kind` in a `remote.json` is refused rather than
@@ -1429,6 +1434,10 @@ required. All three kinds implement the same six operations:
 `httk_command` overrides how `httk` is spelled on the far side, for example
 `httk_command="/proj/venv/bin/httk"`; without it the plain `httk` on the remote
 `PATH` is used, and locally a `python3 -m httk.core.cli` fallback applies.
+
+`mount-daemon` supports `configure`, `install` (a health request), and the optional
+`daemon` operation. It refuses the generic operations in the table above. Its
+five settings and typed request/result contract are in {doc}`adapter_authoring`.
 
 ### Quoting
 

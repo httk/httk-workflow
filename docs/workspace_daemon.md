@@ -6,9 +6,10 @@ serial profile, and requests status or cancellation by opaque manager handle.
 Requests cannot supply commands, shell fragments, environment variables, paths
 or Slurm arguments.
 
-This first execution milestone supports one node, one Slurm task and one manager
-worker per submission. The remote mount adapter integration and MPI execution
-are not yet implemented. The existing mount adapter and ordinary Slurm launcher
+Serial execution supports one node, one Slurm task and one manager worker per
+submission. The `mount-daemon` adapter supplies typed client controls and uses
+native mounted-path job transfers; see {doc}`remotes`. MPI execution remains
+disabled. The existing mount adapter and ordinary Slurm launcher
 do not acquire these confinement guarantees.
 
 ## Deployment boundary
@@ -151,6 +152,11 @@ raw scheduler output are not exposed. Verify these identities and digest when
 consuming a response. The uploader can interfere with mailbox contents; the
 protected ledger is authoritative.
 
+Use one active caller per request ID. Do not replace a request while the broker
+may still be consuming it: responses are published before request removal. The
+maintained client waits for removal and checks for a response again before
+republishing.
+
 A repeated request ID and unchanged content replays its recorded response.
 Changed content with the same ID is refused. Use a **new request ID** for each
 status refresh. Responses are committed before publication and requests are
@@ -168,7 +174,8 @@ numeric scheduler ID.
 `max_records` limits all durable request records. `max_submissions` limits total
 admitted manager starts over the enrollment's lifetime, including refused or
 uncertain starts. These are cumulative quotas, not active-job counts. Exhaustion
-returns a transient `busy` response. There is no automatic history pruning or
+returns a nonpersisted `busy` response that can be retried with the same request
+ID and identical fields. Capacity may require operator action. There is no automatic history pruning or
 quota reset. Intentional re-enrollment requires preserving/reconciling outstanding
 work, a new enrollment ID and a new private ledger.
 

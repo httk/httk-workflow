@@ -12,7 +12,8 @@ httk workflow list | describe | precheck | collect | postprocess
 httk workflow seal       verify
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
-httk workflow remote     list | add | configure | check | show | remove
+httk workflow remote     list | add | configure | check | show | remove | daemon
+httk workflow remote daemon health | start | status | cancel
 httk workflow transfer receive | offer | retire   (hidden protocol; remote peers invoke it by exact name)
 httk project             init | show | import-v1 | repair | manifest | seal | unseal | verify-seal   (all core-owned; httk-workflow registers the workspace as a project member so these verbs cover it)
 httk init | identity     (core-owned: establish/manage per-user named operator identities)
@@ -36,3 +37,7 @@ owning machine with `--detach`.
 foreground Slurm broker. See {doc}`workspace_daemon` for its protected deployment
 layout, enrollment, serial profiles and current limits. This is a separate path
 from ordinary manager launching.
+
+`httk workflow remote daemon` supplies the four typed client controls for a
+`mount-daemon` remote. Transfer jobs through absolute mounted workspace paths;
+see {doc}`remotes` for configuration, request IDs and retry behavior.
