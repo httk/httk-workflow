@@ -4,14 +4,20 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import cast
 
 _MAX_REQUEST_SIZE = 16 * 1024
-_FORMAT = "httk-workspace-command"
+_REQUEST_FORMAT = "httk-workspace-command"
+_RESPONSE_FORMAT = "httk-workspace-response"
 _FORMAT_VERSION = 1
 _OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"})
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _PROFILE_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
+_REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy"})
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
 
@@ -32,12 +38,15 @@ class Request:
     operation: str
     profile: str | None = None
     handle: str | None = None
+    enrollment_id: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
 
         if type(self.request_id) is not str or _ID_PATTERN.fullmatch(self.request_id) is None:
             raise ValueError("invalid request_id")
+        if type(self.enrollment_id) is not str or _ID_PATTERN.fullmatch(self.enrollment_id) is None:
+            raise ValueError("invalid enrollment_id")
         if type(self.workspace_id) is not str:
             raise ValueError("invalid workspace_id")
         try:
@@ -84,14 +93,51 @@ def _reject_constant(_: str) -> object:
     raise ValueError("nonfinite JSON value")
 
 
+def _decode_object(data: bytes, kind: str) -> dict[str, object]:
+    """Parse one bounded UTF-8 JSON object with strict duplicate handling."""
+
+    if type(data) is not bytes:
+        raise ValueError(f"{kind} must be bytes")
+    if len(data) > _MAX_REQUEST_SIZE:
+        raise ValueError(f"{kind} is too large")
+    if any(data.startswith(bom) for bom in _BOMS):
+        raise ValueError(f"{kind} must be UTF-8 without a BOM")
+    try:
+        text = data.decode("utf-8", errors="strict")
+        value = json.loads(
+            text,
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"invalid {kind} document") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid {kind} document")
+    return value
+
+
+def _encode_fields(fields: dict[str, object], kind: str) -> bytes:
+    """Encode bounded canonical ASCII JSON fields."""
+
+    try:
+        encoded = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        data = encoded.encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError(f"{kind} cannot be encoded") from exc
+    if len(data) > _MAX_REQUEST_SIZE:
+        raise ValueError(f"{kind} is too large")
+    return data
+
+
 def _request_fields(request: Request) -> dict[str, object]:
     """Return the exact wire fields for a validated request."""
 
     fields: dict[str, object] = {
-        "format": _FORMAT,
+        "format": _REQUEST_FORMAT,
         "format_version": _FORMAT_VERSION,
         "request_id": request.request_id,
         "workspace_id": request.workspace_id,
+        "enrollment_id": request.enrollment_id,
         "operation": request.operation,
     }
     if request.operation == "start_manager":
@@ -109,24 +155,8 @@ def decode_request(data: bytes) -> Request:
     :raises ValueError: If the document is malformed or outside the protocol.
     """
 
-    if type(data) is not bytes:
-        raise ValueError("request must be bytes")
-    if len(data) > _MAX_REQUEST_SIZE:
-        raise ValueError("request is too large")
-    if any(data.startswith(bom) for bom in _BOMS):
-        raise ValueError("request must be UTF-8 without a BOM")
-    try:
-        text = data.decode("utf-8", errors="strict")
-        value = json.loads(
-            text,
-            object_pairs_hook=_object_without_duplicates,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise ValueError("invalid request document") from exc
-    if not isinstance(value, dict):
-        raise ValueError("invalid request document")
-    if value.get("format") != _FORMAT:
+    value = _decode_object(data, "request")
+    if value.get("format") != _REQUEST_FORMAT:
         raise ValueError("invalid request format")
     version = value.get("format_version")
     if type(version) is not int or version != _FORMAT_VERSION:
@@ -135,7 +165,7 @@ def decode_request(data: bytes) -> Request:
     operation = value.get("operation")
     if type(operation) is not str or operation not in _OPERATIONS:
         raise ValueError("invalid operation")
-    keys = {"format", "format_version", "request_id", "workspace_id", "operation"}
+    keys = {"format", "format_version", "request_id", "workspace_id", "enrollment_id", "operation"}
     if operation == "start_manager":
         keys.add("profile")
     elif operation in {"manager_status", "cancel_manager"}:
@@ -144,16 +174,24 @@ def decode_request(data: bytes) -> Request:
         raise ValueError("invalid request fields")
     request_id = value["request_id"]
     workspace_id = value["workspace_id"]
+    enrollment_id = value["enrollment_id"]
     profile = value.get("profile")
     handle = value.get("handle")
-    if type(request_id) is not str or type(workspace_id) is not str:
+    if type(request_id) is not str or type(workspace_id) is not str or type(enrollment_id) is not str:
         raise ValueError("invalid request fields")
     if "profile" in value and type(profile) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
         raise ValueError("invalid request fields")
     try:
-        return Request(request_id, workspace_id, operation, profile, handle)
+        return Request(
+            request_id,
+            workspace_id,
+            operation,
+            cast(str | None, profile),
+            cast(str | None, handle),
+            enrollment_id=enrollment_id,
+        )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
 
@@ -168,14 +206,143 @@ def encode_request(request: Request) -> bytes:
 
     if type(request) is not Request:
         raise ValueError("request must be a Request")
+    return _encode_fields(_request_fields(request), "request")
+
+
+@dataclass(frozen=True, slots=True)
+class Response:
+    """An immutable, validated daemon response.
+
+    :param request_id: Identify the corresponding request with 32 lowercase hexadecimal digits.
+    :param workspace_id: Identify the workspace with its canonical UUID.
+    :param enrollment_id: Identify the protected daemon enrollment.
+    :param request_digest: Give the canonical request's lowercase SHA-256 digest.
+    :param outcome: Report one protocol-defined daemon outcome.
+    :param handle: Identify a broker-issued manager handle when applicable.
+    :param scheduler_state: Give a bounded normalized scheduler state.
+    :param reason: Give a bounded normalized reason code.
+    :raises ValueError: If a field is invalid or conflicts with the outcome.
+    """
+
+    request_id: str
+    workspace_id: str
+    enrollment_id: str
+    request_digest: str
+    outcome: str
+    handle: str | None = None
+    scheduler_state: str | None = None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse invalid identifiers and outcome-specific combinations."""
+
+        if type(self.request_id) is not str or _ID_PATTERN.fullmatch(self.request_id) is None:
+            raise ValueError("invalid request_id")
+        if type(self.workspace_id) is not str:
+            raise ValueError("invalid workspace_id")
+        try:
+            if str(uuid.UUID(self.workspace_id)) != self.workspace_id:
+                raise ValueError
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("invalid workspace_id") from exc
+        if type(self.enrollment_id) is not str or _ID_PATTERN.fullmatch(self.enrollment_id) is None:
+            raise ValueError("invalid enrollment_id")
+        if type(self.request_digest) is not str or _DIGEST_PATTERN.fullmatch(self.request_digest) is None:
+            raise ValueError("invalid request_digest")
+        if type(self.outcome) is not str or self.outcome not in _OUTCOMES:
+            raise ValueError("invalid outcome")
+        if self.handle is not None and (type(self.handle) is not str or _ID_PATTERN.fullmatch(self.handle) is None):
+            raise ValueError("invalid handle")
+        if self.scheduler_state is not None and (
+            type(self.scheduler_state) is not str or _SCHEDULER_STATE_PATTERN.fullmatch(self.scheduler_state) is None
+        ):
+            raise ValueError("invalid scheduler_state")
+        if self.reason is not None and (type(self.reason) is not str or _REASON_PATTERN.fullmatch(self.reason) is None):
+            raise ValueError("invalid reason")
+
+        has_handle = self.handle is not None
+        has_state = self.scheduler_state is not None
+        has_reason = self.reason is not None
+        valid = {
+            "ready": not has_handle and not has_state and not has_reason,
+            "submitted": has_handle and not has_state and not has_reason,
+            "status": has_handle and has_state and not has_reason,
+            "cancel_requested": has_handle and not has_state and not has_reason,
+            "uncertain": has_handle and not has_state and has_reason,
+            "refused": not has_state and has_reason,
+            "busy": not has_handle and not has_state and has_reason,
+        }[self.outcome]
+        if not valid:
+            raise ValueError("invalid outcome fields")
+
+
+def _response_fields(response: Response) -> dict[str, object]:
+    """Return the exact wire fields for a validated response."""
+
+    fields: dict[str, object] = {
+        "format": _RESPONSE_FORMAT,
+        "format_version": _FORMAT_VERSION,
+        "request_id": response.request_id,
+        "workspace_id": response.workspace_id,
+        "enrollment_id": response.enrollment_id,
+        "request_digest": response.request_digest,
+        "outcome": response.outcome,
+    }
+    if response.handle is not None:
+        fields["handle"] = response.handle
+    if response.scheduler_state is not None:
+        fields["scheduler_state"] = response.scheduler_state
+    if response.reason is not None:
+        fields["reason"] = response.reason
+    return fields
+
+
+def decode_response(data: bytes) -> Response:
+    """Decode and validate one bounded UTF-8 response document.
+
+    :param data: Supply the raw response bytes.
+    :return: The immutable validated response.
+    :raises ValueError: If the document is malformed or outside the protocol.
+    """
+
+    value = _decode_object(data, "response")
+    if value.get("format") != _RESPONSE_FORMAT:
+        raise ValueError("invalid response format")
+    version = value.get("format_version")
+    if type(version) is not int or version != _FORMAT_VERSION:
+        raise ValueError("unsupported response version")
+    keys = {"format", "format_version", "request_id", "workspace_id", "enrollment_id", "request_digest", "outcome"}
+    optional = {"handle", "scheduler_state", "reason"}
+    if not keys <= set(value) or not set(value) <= keys | optional:
+        raise ValueError("invalid response fields")
+    if any(name in value and value[name] is None for name in optional):
+        raise ValueError("invalid response fields")
     try:
-        encoded = json.dumps(_request_fields(request), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        data = encoded.encode("ascii")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise ValueError("request cannot be encoded") from exc
-    if len(data) > _MAX_REQUEST_SIZE:
-        raise ValueError("request is too large")
-    return data
+        return Response(
+            request_id=value["request_id"],  # type: ignore[arg-type]
+            workspace_id=value["workspace_id"],  # type: ignore[arg-type]
+            enrollment_id=value["enrollment_id"],  # type: ignore[arg-type]
+            request_digest=value["request_digest"],  # type: ignore[arg-type]
+            outcome=value["outcome"],  # type: ignore[arg-type]
+            handle=value.get("handle"),  # type: ignore[arg-type]
+            scheduler_state=value.get("scheduler_state"),  # type: ignore[arg-type]
+            reason=value.get("reason"),  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid response fields") from exc
+
+
+def encode_response(response: Response) -> bytes:
+    """Encode a response in its canonical compact JSON representation.
+
+    :param response: Provide a validated response.
+    :return: Canonical ASCII JSON bytes without a trailing newline.
+    :raises ValueError: If the value is not a ``Response``.
+    """
+
+    if type(response) is not Response:
+        raise ValueError("response must be a Response")
+    return _encode_fields(_response_fields(response), "response")
 
 
 def request_digest(request: Request) -> str:
@@ -189,4 +356,12 @@ def request_digest(request: Request) -> str:
     return hashlib.sha256(encode_request(request)).hexdigest()
 
 
-__all__ = ["Request", "decode_request", "encode_request", "request_digest"]
+__all__ = [
+    "Request",
+    "Response",
+    "decode_request",
+    "decode_response",
+    "encode_request",
+    "encode_response",
+    "request_digest",
+]

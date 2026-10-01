@@ -40,6 +40,68 @@ def test_publish_read_mode_and_temporary_cleanup(tmp_path: Path) -> None:
     assert not [item for item in path.iterdir() if item.name.endswith(".tmp")]
 
 
+def test_replace_replaces_symlink_entry_without_touching_target(tmp_path: Path) -> None:
+    path = _mailbox(tmp_path)
+    name = "9" * 32 + ".json"
+    target = tmp_path / "outside.json"
+    target.write_bytes(b"outside")
+    (path / name).symlink_to(target)
+
+    with MailboxDirectory(path) as mailbox:
+        mailbox.replace(name, b"replacement")
+        assert mailbox.read(name) == b"replacement"
+
+    assert not (path / name).is_symlink()
+    assert target.read_bytes() == b"outside"
+
+
+def test_remove_validates_flat_names_and_unlinks_symlink_entry(tmp_path: Path) -> None:
+    path = _mailbox(tmp_path)
+    name = "a" * 32 + ".json"
+    target = tmp_path / "outside.json"
+    target.write_bytes(b"outside")
+    (path / name).symlink_to(target)
+
+    with MailboxDirectory(path) as mailbox:
+        with pytest.raises(ValueError, match="name"):
+            mailbox.remove("../outside.json")
+        mailbox.remove(name)
+        with pytest.raises(FileNotFoundError):
+            mailbox.remove(name)
+
+    assert not (path / name).exists()
+    assert target.read_bytes() == b"outside"
+
+
+def test_failed_replace_before_rename_preserves_old_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _mailbox(tmp_path)
+    name = "b" * 32 + ".json"
+    old = path / name
+    old.write_bytes(b"old")
+
+    def fail_rename(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected rename failure")
+
+    monkeypatch.setattr(mailbox_module.os, "rename", fail_rename)
+    with MailboxDirectory(path) as mailbox, pytest.raises(OSError):
+        mailbox.replace(name, b"new")
+    assert old.read_bytes() == b"old"
+    assert not [item for item in path.iterdir() if item.name.endswith(".tmp")]
+
+
+def test_replace_enforces_name_and_size_bounds(tmp_path: Path) -> None:
+    path = _mailbox(tmp_path)
+    with MailboxDirectory(path) as mailbox:
+        with pytest.raises(ValueError, match="name"):
+            mailbox.replace("../escape", b"data")
+        with pytest.raises(ValueError, match="bytes"):
+            mailbox.replace("c" * 32 + ".json", bytearray(b"data"))  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="exceeds"):
+            mailbox.replace("c" * 32 + ".json", b"x" * (mailbox_module.MAX_DOCUMENT_BYTES + 1))
+
+
 def test_path_is_absolute_and_symlink_components_are_refused(tmp_path: Path) -> None:
     path = _mailbox(tmp_path)
     link = tmp_path / "link"

@@ -31,3 +31,8 @@ COUNT` options. `--count N` starts multiple managers at the workspace's launch
 site. A local workspace uses its `manager.launch` setting; a remote workspace
 is reached through its adapter, which invokes the same manager command on the
 owning machine with `--detach`.
+
+`httk workspace daemon ABS_WORKSPACE --policy ABS_POLICY` starts the confined
+foreground Slurm broker. See {doc}`workspace_daemon` for its protected deployment
+layout, enrollment, serial profiles and current limits. This is a separate path
+from ordinary manager launching.

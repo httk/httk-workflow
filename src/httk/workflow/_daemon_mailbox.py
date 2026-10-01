@@ -119,6 +119,20 @@ class MailboxDirectory:
         if len(data) > MAX_DOCUMENT_BYTES:
             raise ValueError(f"mailbox document exceeds {MAX_DOCUMENT_BYTES} bytes")
 
+        publication = self._publication_name()
+        self._write_atomic(descriptor, publication, data)
+        return publication
+
+    @staticmethod
+    def _validate_data(data: bytes) -> None:
+        if not isinstance(data, bytes):
+            raise ValueError("mailbox data must be bytes")
+        if len(data) > MAX_DOCUMENT_BYTES:
+            raise ValueError(f"mailbox document exceeds {MAX_DOCUMENT_BYTES} bytes")
+
+    def _write_atomic(self, descriptor: int, publication: str, data: bytes) -> None:
+        """Write and atomically install bytes using a private temporary entry."""
+
         temporary = self._temporary_name()
         temporary_fd = -1
         temporary_created = False
@@ -142,11 +156,9 @@ class MailboxDirectory:
             temporary_fd = -1
             os.close(descriptor_to_close)
 
-            publication = self._publication_name()
             os.rename(temporary, publication, src_dir_fd=descriptor, dst_dir_fd=descriptor)
             renamed = True
             os.fsync(descriptor)
-            return publication
         finally:
             if temporary_fd >= 0:
                 descriptor_to_close = temporary_fd
@@ -158,6 +170,35 @@ class MailboxDirectory:
                         self._remove_temporary(descriptor, temporary)
             elif temporary_created and not renamed:
                 self._remove_temporary(descriptor, temporary)
+
+    def replace(self, name: str, data: bytes) -> None:
+        """Atomically replace one flat publication with bounded bytes.
+
+        :param name: A 32-character lower-case hexadecimal publication name.
+        :param data: Bytes no larger than 16 KiB.
+        :raises ValueError: If the name or data is invalid or exceeds the size limit.
+        :raises OSError: If a filesystem operation fails. An error after rename may
+            leave the replacement visible.
+        """
+
+        descriptor = self._require_open()
+        _validate_name(name)
+        self._validate_data(data)
+        self._write_atomic(descriptor, name, data)
+
+    def remove(self, name: str) -> None:
+        """Remove one flat publication and sync the containing directory.
+
+        :param name: A 32-character lower-case hexadecimal publication name.
+        :raises ValueError: If the name is invalid.
+        :raises OSError: If unlinking or syncing the directory fails. A missing
+            publication propagates ``FileNotFoundError``.
+        """
+
+        descriptor = self._require_open()
+        _validate_name(name)
+        os.unlink(name, dir_fd=descriptor)
+        os.fsync(descriptor)
 
     def read(self, name: str) -> bytes:
         """Read one bounded regular publication by its flat filename.

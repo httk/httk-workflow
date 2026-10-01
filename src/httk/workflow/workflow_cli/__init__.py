@@ -372,6 +372,10 @@ def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
 def workspace_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``workspace`` command."""
 
+    if argv and argv[0] == "daemon":
+        from .._daemon_cli import command as daemon_command
+
+        return daemon_command(argv[1:], program=f"{context.program} workspace daemon")
     return command(["workspace", *argv], context, prog=f"{context.program} workspace")
 
 

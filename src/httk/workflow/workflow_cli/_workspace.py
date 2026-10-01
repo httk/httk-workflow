@@ -920,6 +920,16 @@ def build_workspace_parser(
         prog=program,
     )
 
+    from .._daemon_cli import add_arguments, launch
+
+    daemon = _leaf(
+        group,
+        "daemon",
+        summary="run the confined workspace command daemon",
+        description="Run the confined workspace command daemon with protected operator policy",
+        handler=lambda arguments, _context: launch(arguments),
+    )
+    add_arguments(daemon)
     add_workspace_init_arguments(
         _leaf(
             group,

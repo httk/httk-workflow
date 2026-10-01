@@ -1,0 +1,207 @@
+"""Exercise fixed scheduler operations with real bounded client processes."""
+
+import json
+import os
+import sys
+import threading
+from contextlib import ExitStack
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from httk.workflow._daemon_mailbox import MailboxDirectory
+from httk.workflow._daemon_policy import Policy, Profile
+from httk.workflow._daemon_protocol import Request, decode_response, encode_request
+from httk.workflow._daemon_service import Broker
+from httk.workflow._daemon_slurm import SchedulerError, SlurmGateway, UncertainSubmission, _run
+from httk.workflow._daemon_state import Ledger
+
+_HANDLE = "a" * 32
+
+
+def _client(path: Path, body: str) -> None:
+    path.write_text(f"#!{sys.executable}\nimport json, os, sys, time\n" + body)
+    path.chmod(0o700)
+
+
+@pytest.fixture
+def policy(tmp_path: Path) -> Policy:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in ("data", "requests", "responses", "state"):
+        (tmp_path / name).mkdir()
+    return Policy(
+        workspace=tmp_path / "data",
+        workspace_id="12345678-1234-1234-1234-123456789abc",
+        enrollment_id="b" * 32,
+        requests=tmp_path / "requests",
+        responses=tmp_path / "responses",
+        state=tmp_path / "state",
+        bwrap=Path("/usr/bin/bwrap"),
+        python=Path(sys.executable),
+        sbatch=runtime / "sbatch",
+        squeue=runtime / "squeue",
+        scancel=runtime / "scancel",
+        cluster="cluster",
+        readonly_paths=(runtime, Path(sys.prefix), Path("/usr")),
+        broker_paths=(),
+        profiles=(Profile("cpu", 2, 512, 5, partition="batch", account="science"),),
+    )
+
+
+def test_submission_uses_fixed_script_stdin_and_clean_environment(
+    policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = tmp_path / "call.json"
+    _client(
+        policy.sbatch,
+        f"open({str(record)!r}, 'w').write(json.dumps([sys.argv, dict(os.environ), sys.stdin.read()]))\n"
+        "print('123;cluster')\n",
+    )
+    for name in ("SBATCH_WRAP", "SLURM_CLUSTERS", "PYTHONPATH", "BASH_ENV", "SSH_AUTH_SOCK", "LD_PRELOAD"):
+        monkeypatch.setenv(name, "untrusted")
+    gateway = SlurmGateway(policy, tmp_path / "policy with spaces.json")
+    result = gateway.submit(policy.profile("cpu"), _HANDLE)
+    assert (result.job_id, result.cluster) == ("123", "cluster")
+    argv, environment, script = json.loads(record.read_text())
+    assert "--export=NIL" in argv
+    assert "--chdir=/" in argv
+    assert {"--input=/dev/null", "--output=/dev/null", "--error=/dev/null"} <= set(argv)
+    assert {"--nodes=1", "--ntasks=1", "--cpus-per-task=2", "--mem=512M", "--time=5"} <= set(argv)
+    assert "--job-name=httk-" + _HANDLE in argv
+    assert "--partition=batch" in argv and "--account=science" in argv
+    assert all(not item.endswith(".sbatch") for item in argv)
+    assert environment == {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    assert script.startswith("#!/bin/sh\nexec ")
+    assert " -I -S " in script and "_daemon_bootstrap.py" in script
+    assert "--mode payload --profile cpu --handle " + _HANDLE in script
+    assert "policy with spaces.json'" in script
+    assert "prelude" not in script and "/workspace" not in script
+
+
+@pytest.mark.parametrize("output", ["bad", "123;other", "123;cluster\n124;cluster", "--help", "0", "123;cluster;extra"])
+def test_unconfirmed_submission_is_uncertain(policy: Policy, output: str) -> None:
+    _client(policy.sbatch, f"sys.stdin.read()\nprint({output!r})\n")
+    with pytest.raises(UncertainSubmission):
+        SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+
+
+def test_nonzero_submission_does_not_echo_client_errors(policy: Policy) -> None:
+    _client(policy.sbatch, "sys.stdin.read()\nprint('private-token',file=sys.stderr)\nsys.exit(1)\n")
+    with pytest.raises(UncertainSubmission, match="^submission acceptance is unknown$"):
+        SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+
+
+@pytest.mark.parametrize(
+    "version,valid", [("23.11.5", False), ("23.11.6", True), ("26.05.4", True), ("unknown", False)]
+)
+def test_controller_filter_version_requirement(policy: Policy, version: str, valid: bool) -> None:
+    for client in (policy.sbatch, policy.squeue, policy.scancel):
+        _client(client, f"assert sys.argv[1:]==['--version']\nprint('slurm {version}')\n")
+    gateway = SlurmGateway(policy, Path("/trusted/policy.json"))
+    if valid:
+        gateway.check()
+    else:
+        with pytest.raises(SchedulerError):
+            gateway.check()
+
+
+def test_status_matches_identity_and_absence_is_unknown(policy: Policy) -> None:
+    gateway = SlurmGateway(policy, Path("/trusted/policy.json"))
+    row = f"123|httk-{_HANDLE}|{os.getuid()}|RUNNING"
+    _client(policy.squeue, f"print('CLUSTER: cluster')\nprint({row!r})\n")
+    assert gateway.status("123", "cluster", _HANDLE) == "RUNNING"
+    assert gateway.status("456", "cluster", _HANDLE) == "UNKNOWN"
+    assert gateway.status("123", "cluster", "c" * 32) == "UNKNOWN"
+    _client(policy.squeue, "print('CLUSTER: cluster')\n")
+    assert gateway.status("123", "cluster", _HANDLE) == "UNKNOWN"
+
+
+def test_cancel_sends_identity_filters_to_controller_without_lookup(policy: Policy, tmp_path: Path) -> None:
+    record = tmp_path / "cancel.json"
+    _client(policy.scancel, f"open({str(record)!r},'w').write(json.dumps(sys.argv))\n")
+    SlurmGateway(policy, Path("/trusted/policy.json")).cancel("123", "cluster", _HANDLE)
+    assert json.loads(record.read_text())[1:] == [
+        "--ctld",
+        "--clusters=cluster",
+        f"--name=httk-{_HANDLE}",
+        f"--user={os.getuid()}",
+        "123",
+    ]
+    assert not policy.squeue.exists()
+
+
+def test_combined_output_is_bounded(policy: Policy) -> None:
+    _client(policy.squeue, "sys.stdout.write('a'*800)\nsys.stdout.flush()\nsys.stderr.write('b'*800)\n")
+    with pytest.raises(SchedulerError, match="output exceeded"):
+        _run([str(policy.squeue)], replace(policy, max_output_bytes=1024))
+
+
+@pytest.mark.timing
+def test_client_timeout_kills_process(policy: Policy, tmp_path: Path) -> None:
+    record = tmp_path / "pid"
+    _client(policy.squeue, f"open({str(record)!r},'w').write(str(os.getpid()))\ntime.sleep(10)\n")
+    with pytest.raises(SchedulerError, match="timed out"):
+        _run([str(policy.squeue)], replace(policy, command_timeout=1.0))
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(record.read_text()), 0)
+
+
+def test_protected_slurm_conf_is_the_only_extra_environment(policy: Policy, tmp_path: Path) -> None:
+    _client(policy.squeue, "print(os.environ['SLURM_CONF'])\n")
+    broker_root = tmp_path / "broker"
+    policy = replace(policy, broker_paths=(broker_root,), slurm_conf=broker_root / "slurm.conf")
+    code, output = _run([str(policy.squeue)], policy)
+    assert code == 0 and output.decode().strip() == str(policy.slurm_conf)
+
+
+def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Policy, tmp_path: Path) -> None:
+    submitted_calls = tmp_path / "submitted"
+    cancelled_calls = tmp_path / "cancelled"
+    _client(
+        policy.sbatch,
+        "sys.stdin.read()\n"
+        f"with open({str(submitted_calls)!r}, 'a') as record: record.write('submitted\\n')\n"
+        "print('123;cluster')\n",
+    )
+    start = Request("1" * 32, policy.workspace_id, "start_manager", profile="cpu", enrollment_id=policy.enrollment_id)
+    with ExitStack() as stack:
+        requests = stack.enter_context(MailboxDirectory(policy.requests))
+        responses = stack.enter_context(MailboxDirectory(policy.responses))
+        with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True) as ledger:
+            requests.replace(start.request_id + ".json", encode_request(start))
+            Broker(policy, SlurmGateway(policy, tmp_path / "policy.json"), ledger, requests, responses).run(
+                threading.Event(), once=True
+            )
+            submitted = decode_response(responses.read(start.request_id + ".json"))
+            assert submitted.outcome == "submitted" and submitted.handle is not None
+            assert requests.names() == ()
+        handle = submitted.handle
+        _client(policy.squeue, f"print('123|httk-{handle}|{os.getuid()}|RUNNING')\n")
+        _client(policy.scancel, f"open({str(cancelled_calls)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
+        with Ledger(policy.state, policy.workspace_id, policy.enrollment_id) as ledger:
+            ledger.recover()
+            broker = Broker(policy, SlurmGateway(policy, tmp_path / "policy.json"), ledger, requests, responses)
+            requests.replace(start.request_id + ".json", encode_request(start))
+            status = Request(
+                "2" * 32, policy.workspace_id, "manager_status", handle=handle, enrollment_id=policy.enrollment_id
+            )
+            cancel = Request(
+                "3" * 32, policy.workspace_id, "cancel_manager", handle=handle, enrollment_id=policy.enrollment_id
+            )
+            for request in (status, cancel):
+                requests.replace(request.request_id + ".json", encode_request(request))
+            broker.run(threading.Event(), once=True)
+            assert decode_response(responses.read(start.request_id + ".json")) == submitted
+            assert decode_response(responses.read(status.request_id + ".json")).scheduler_state == "RUNNING"
+            assert decode_response(responses.read(cancel.request_id + ".json")).outcome == "cancel_requested"
+            assert requests.names() == ()
+    assert submitted_calls.read_text() == "submitted\n"
+    assert json.loads(cancelled_calls.read_text()) == [
+        "--ctld",
+        "--clusters=cluster",
+        f"--name=httk-{handle}",
+        f"--user={os.getuid()}",
+        "123",
+    ]

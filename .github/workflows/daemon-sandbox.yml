@@ -1,0 +1,56 @@
+name: Workspace daemon sandbox
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "src/httk/workflow/_daemon_*.py"
+      - "tests/test_daemon_bootstrap.py"
+      - "tests/test_daemon_policy.py"
+      - "tests/test_daemon_sandbox.py"
+      - ".github/workflows/daemon-sandbox.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "src/httk/workflow/_daemon_*.py"
+      - "tests/test_daemon_bootstrap.py"
+      - "tests/test_daemon_policy.py"
+      - "tests/test_daemon_sandbox.py"
+      - ".github/workflows/daemon-sandbox.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Bubblewrap and enable user namespaces on the isolated runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install trusted package and development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Require the daemon policy and sandbox gates
+        env:
+          HTTK_REQUIRE_DAEMON_SANDBOX: "1"
+          HTTK_TEST_PROFILE: extended
+          PYTHONPATH: src
+        run: >-
+          python -m pytest -q -n 0
+          tests/test_daemon_policy.py
+          tests/test_daemon_bootstrap.py
+          tests/test_daemon_sandbox.py

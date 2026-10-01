@@ -61,6 +61,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`collecting` — reading finished jobs back out as records and collected outputs
 - {doc}`remotes` — reaching a machine with a packaged or custom remote adapter
 - {doc}`launchers` — starting managers with a packaged or custom launcher
+- {doc}`workspace_daemon` — a confined serial Slurm broker using a file mailbox
 - {doc}`reference/index` — the generated API reference
 
 **Migration**
@@ -128,6 +129,7 @@ benchmarks
 remotes
 transfer_reclamation
 launchers
+workspace_daemon
 reference/index
 notebooks/examples
 workflow_filesystem_api

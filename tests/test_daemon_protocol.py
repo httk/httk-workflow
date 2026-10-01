@@ -5,11 +5,21 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from httk.workflow._daemon_protocol import Request, decode_request, encode_request, request_digest
+from httk.workflow._daemon_protocol import (
+    Request,
+    Response,
+    decode_request,
+    decode_response,
+    encode_request,
+    encode_response,
+    request_digest,
+)
 
 REQUEST_ID = "0123456789abcdef0123456789abcdef"
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 HANDLE = "abcdef0123456789abcdef0123456789"
+ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
+REQUEST_DIGEST = "a" * 64
 
 
 def _document(operation: str, **fields: object) -> bytes:
@@ -18,6 +28,7 @@ def _document(operation: str, **fields: object) -> bytes:
         "format_version": 1,
         "request_id": REQUEST_ID,
         "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
         "operation": operation,
     }
     value.update(fields)
@@ -36,7 +47,7 @@ def _document(operation: str, **fields: object) -> bytes:
 def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> None:
     request = decode_request(_document(operation, **fields))
 
-    assert request == Request(REQUEST_ID, WORKSPACE_ID, operation, **fields)
+    assert request == Request(REQUEST_ID, WORKSPACE_ID, operation, **fields, enrollment_id=ENROLLMENT_ID)
     encoded = encode_request(request)
     assert encoded.isascii()
     assert not encoded.endswith(b"\n")
@@ -44,7 +55,7 @@ def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> N
 
 
 def test_request_is_frozen_and_retains_only_immutable_strings() -> None:
-    request = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu")
+    request = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
 
     with pytest.raises(FrozenInstanceError):
         request.profile = "other"  # type: ignore[misc]
@@ -63,6 +74,7 @@ def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
         b'{ "profile" : "cpu", "operation":"start_manager",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
+        b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
         b'"format_version":1,"format":"httk-workspace-command" }'
     )
     first = decode_request(ordered)
@@ -74,12 +86,14 @@ def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
 
 
 def test_digest_changes_with_request_identity_and_profile() -> None:
-    base = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu")
-    other_id = Request("f" * 32, WORKSPACE_ID, "start_manager", profile="cpu")
-    other_profile = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="gpu")
+    base = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
+    other_id = Request("f" * 32, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
+    other_profile = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="gpu", enrollment_id=ENROLLMENT_ID)
+    other_enrollment = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id="e" * 32)
 
     assert request_digest(base) != request_digest(other_id)
     assert request_digest(base) != request_digest(other_profile)
+    assert request_digest(base) != request_digest(other_enrollment)
 
 
 @pytest.mark.parametrize(
@@ -91,6 +105,9 @@ def test_digest_changes_with_request_identity_and_profile() -> None:
         {"request_id": "a" * 33},
         {"request_id": "a" * 31 + "\n"},
         {"request_id": None},
+        {"enrollment_id": "A" * 32},
+        {"enrollment_id": "f" * 31},
+        {"enrollment_id": None},
         {"workspace_id": "12345678-1234-1234-1234-123456789ABC"},
         {"workspace_id": "not-a-uuid"},
         {"workspace_id": 5},
@@ -118,6 +135,7 @@ def test_direct_construction_validates_all_fields(kwargs: dict[str, object]) -> 
     fields: dict[str, object] = {
         "request_id": REQUEST_ID,
         "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
         "operation": "health",
     }
     fields.update(kwargs)
@@ -152,6 +170,7 @@ def test_duplicate_keys_reject_escaped_equivalent_names() -> None:
         b'{"format":"httk-workspace-command","format_version":1,'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
+        b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
         b'"operation":"health","\\u006fperation":"cancel_manager"}'
     )
 
@@ -257,3 +276,110 @@ def test_input_size_and_types_are_bounded() -> None:
     for encode_value in encode_values:
         with pytest.raises(ValueError):
             encode_request(encode_value)  # type: ignore[arg-type]
+
+
+def test_request_requires_enrollment_on_wire_and_refuses_unknown_fields() -> None:
+    missing_fields = json.loads(_document("health"))
+    del missing_fields["enrollment_id"]
+    missing = json.dumps(missing_fields).encode()
+    with pytest.raises(ValueError):
+        decode_request(missing)
+    with pytest.raises(TypeError):
+        Request(REQUEST_ID, WORKSPACE_ID, "health")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        decode_request(_document("health", old_schema_field="ignored"))
+
+
+@pytest.mark.parametrize(
+    ("outcome", "fields"),
+    [
+        ("ready", {}),
+        ("submitted", {"handle": HANDLE}),
+        ("status", {"handle": HANDLE, "scheduler_state": "RUNNING"}),
+        ("cancel_requested", {"handle": HANDLE}),
+        ("uncertain", {"handle": HANDLE, "reason": "submission_unknown"}),
+        ("refused", {"reason": "policy_refused"}),
+        ("refused", {"handle": HANDLE, "reason": "policy_refused"}),
+        ("busy", {"reason": "capacity"}),
+    ],
+)
+def test_response_outcomes_round_trip(outcome: str, fields: dict[str, str]) -> None:
+    response = Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, outcome, **fields)
+    encoded = encode_response(response)
+
+    assert encoded.isascii()
+    assert not encoded.endswith(b"\n")
+    assert decode_response(encoded) == response
+
+
+def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
+    response = Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready")
+    encoded = encode_response(response)
+    alternate = (
+        b'{ "outcome":"ready", "request_digest":"' + REQUEST_DIGEST.encode() + b'",'
+        b'"enrollment_id":"' + ENROLLMENT_ID.encode() + b'",'
+        b'"workspace_id":"' + WORKSPACE_ID.encode() + b'",'
+        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":1,'
+        b'"format":"httk-workspace-response" }'
+    )
+    assert decode_response(alternate) == response
+    assert encode_response(decode_response(alternate)) == encoded
+    assert b'"handle"' not in encoded
+    assert b'"scheduler_state"' not in encoded
+    assert b'"reason"' not in encoded
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"request_id": "g" * 32},
+        {"workspace_id": "not-a-uuid"},
+        {"enrollment_id": "g" * 32},
+        {"request_digest": "a" * 63},
+        {"request_digest": "A" * 64},
+        {"outcome": "unknown"},
+        {"handle": "x" * 32},
+        {"scheduler_state": "RUNNING1"},
+        {"scheduler_state": "a"},
+        {"scheduler_state": "A" * 65},
+        {"reason": "Bad"},
+        {"reason": "a" * 65},
+        {"outcome": "submitted", "handle": None},
+        {"outcome": "status", "handle": HANDLE},
+        {"outcome": "status", "handle": HANDLE, "scheduler_state": "RUNNING", "reason": "bad"},
+        {"outcome": "uncertain", "handle": None, "reason": "timeout"},
+        {"outcome": "busy", "reason": None},
+        {"outcome": "ready", "reason": "ok"},
+    ],
+)
+def test_response_constructor_rejects_invalid_fields(kwargs: dict[str, object]) -> None:
+    fields: dict[str, object] = {
+        "request_id": REQUEST_ID,
+        "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
+        "request_digest": REQUEST_DIGEST,
+        "outcome": "ready",
+    }
+    fields.update(kwargs)
+    with pytest.raises(ValueError):
+        Response(**fields)  # type: ignore[arg-type]
+
+
+def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
+    valid = encode_response(Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready"))
+    invalid_documents = (
+        valid.replace(b"httk-workspace-response", b"httk-workspace-command"),
+        valid.replace(b'"format_version":1', b'"format_version":true'),
+        valid[:-1] + b',"old_field":1}',
+        valid[:-1] + b',"handle":null}',
+        valid.replace(b'"request_id":', b'"request_id":"' + REQUEST_ID.encode() + b'","request_id":'),
+        valid.replace(b'"outcome":"ready"', b'"outcome":"ready","outcome":"busy"'),
+        valid.replace(b'"outcome":"ready"', b'"outcome":NaN'),
+        valid.decode().encode("utf-16"),
+        valid + b" " * (16 * 1024),
+        b"\xef\xbb\xbf" + valid,
+        valid.replace(b'"outcome":"ready"', b'"outcome":"busy"'),
+    )
+    for invalid in invalid_documents:
+        with pytest.raises(ValueError):
+            decode_response(invalid)
