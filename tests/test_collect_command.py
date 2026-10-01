@@ -8,7 +8,8 @@ from httk.core.cli import CLIContext
 from httk.core.register import codes
 
 from conftest import configure_identity, register_ws
-from httk.workflow import Workspace
+from httk.workflow import TaskManager, Workspace
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import collect_command, command, job_command, workflow_command
 from test_calculations import _calculation, _collector
 
@@ -80,6 +81,56 @@ def test_a_dry_run_names_consumed_directories(tmp_path: Path, capsys: pytest.Cap
 
     lines = {line["directory"]: line for line in _lines(capsys)}
     assert lines["p"]["consumes"] == ["p/d1", "p/d2"] and lines["p"]["collector"] == "tests.parent"
+
+
+def test_tree_summary_counts_unreadable_jobs_in_nested_workspaces(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    package = _collector(tmp_path / "pkg")
+    tree = tmp_path / "tree"
+    workspace = Workspace.initialize(tree / "ws")
+    source = tmp_path / "job"
+    runner = source / "files" / "run.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        "#!/usr/bin/env python3\n"
+        "from httk.workflow import Runner\n"
+        "run = Runner('tests.collect.skipped')\n"
+        "@run.step\n"
+        "def only(a):\n"
+        "    a.succeed()\n"
+        "raise SystemExit(run.main())\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    payload = prepare_job_payload(
+        source,
+        JobSpec(
+            name="Unreadable after completion",
+            workflow="tests.collect.skipped",
+            runner_path="files/run.py",
+            tag="skipped",
+            initial_step="only",
+            maximum_attempts_per_activation=1,
+        ),
+    )
+    workspace.submit(source, "jobs")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+    marker = workspace.find_marker_by_id(payload.id)
+    assert marker is not None
+    (workspace.payload_path(marker.placement, marker.job_key) / "job.json").write_text("{", encoding="utf-8")
+    _calculation(tree / "calc")
+    context = CLIContext("httk", tmp_path)
+
+    assert command(["collect", str(workspace.root)], context) == 1
+    direct_summary = _lines(capsys)[-1]
+    assert direct_summary["skipped_unreadable"] == 1
+
+    assert command(["collect", str(tree), "--collector", str(package)], context) == 1
+    *items, tree_summary = _lines(capsys)
+    assert [(item["workflow"], item["directory"]) for item in items] == [("tests.calc", "calc")]
+    assert tree_summary["collected"] == 1 and tree_summary["skipped_unreadable"] == 1
 
 
 def test_workspace_paths_dispatch_to_workspace_collection(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -467,6 +467,7 @@ def collect_tree(
     exclude: Iterable[str] = (),
     fail_fast: bool = False,
     on_unclaimed: Callable[[DirectoryClaim], None] | None = None,
+    on_skipped: Callable[[str], None] | None = None,
 ) -> Iterator[CollectedJob]:
     """Collect every recognized calculation below *root*.
 
@@ -517,6 +518,8 @@ def collect_tree(
         directories that are neither visited nor descended.
     :param fail_fast: Raise the first degraded item instead of yielding it.
     :param on_unclaimed: Receive the outcome of every declined directory.
+    :param on_skipped: Receive the job key of every nested workspace job dropped for
+        an unreadable ``job.json``.
     :yields: One collected job per recognized calculation and per workspace job, in walk order.
     :raises ValueError: If *root* is not a directory, a *collectors* package is not a
         loadable recognize package, or *fail_fast* observes a degraded item.
@@ -545,7 +548,7 @@ def collect_tree(
             if outcome.directory in parent.outcome.consumes:
                 parent.reached[outcome.directory] = outcome
         if outcome.kind == "workspace":
-            yield from collect(Workspace(directory, mutable=False), fail_fast=fail_fast)
+            yield from collect(Workspace(directory, mutable=False), fail_fast=fail_fast, on_skipped=on_skipped)
             continue
         if outcome.kind == "unclaimed":
             _LOGGER.warning(

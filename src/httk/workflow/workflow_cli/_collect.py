@@ -225,7 +225,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
                 print(json.dumps(_claim_mapping(claim), sort_keys=True, separators=(",", ":")))
             return 0
         collected_items: Iterable[CollectedJob] = collect_tree(
-            root, fail_fast=arguments.fail_fast, on_unclaimed=_unclaimed, **options
+            root, fail_fast=arguments.fail_fast, on_unclaimed=_unclaimed, on_skipped=_skip, **options
         )
 
         def resolve_keys() -> Sequence[tuple[str, bytes]]:

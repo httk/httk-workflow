@@ -865,6 +865,59 @@ def test_a_store_keeps_its_record_order_when_an_earlier_named_record_appears(
     assert "storage_error" not in report and report["stored"] == first["stored"]
 
 
+def test_a_persisted_record_registered_to_another_family_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core.register import entries
+
+    _register_records(monkeypatch, "test-x-record")
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "calc")
+    items = list(collect_tree(tmp_path / "tree", collectors=(package,)))
+    path = tmp_path / "store.sqlite"
+    assert all("storage_error" not in report for report in store_collected(items, str(path), id_base="httk.probe"))
+
+    reference, _family, definition_id = entries.entry_record_info("test-x-record")
+    entries._entry_records["test-x-record"] = (reference, "runs", definition_id)
+    with pytest.raises(ValueError, match="belongs to registered family 'runs', not 'records'"):
+        store_collected([], str(path), id_base="httk.probe")
+
+
+def test_storage_layout_keeps_persisted_families_for_narrow_and_empty_sweeps(tmp_path: Path) -> None:
+    pytest.importorskip("httk.atomistic")
+    pytest.importorskip("httk.store")
+    from httk.atomistic import StructureEntry
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    package = _collector(tmp_path / "pkg")
+    calculation = _calculation(tmp_path / "tree" / "calc", POSCAR=_POSCAR)
+    (first,) = collect_tree(tmp_path / "tree", collectors=(package,))
+    path = tmp_path / "store.sqlite"
+    (initial_report,) = store_collected([first], str(path), id_base="httk.probe")
+    assert "storage_error" not in initial_report
+
+    original_structure = first.inputs["initial_structure"]
+    (calculation / "POSCAR").unlink()
+    (energy_only,) = collect_tree(tmp_path / "tree", collectors=(package,))
+    (energy_report,) = store_collected([energy_only], str(path), id_base="httk.probe")
+    assert "storage_error" not in energy_report
+
+    assert store_collected([], str(path), id_base="httk.probe") == []
+    _calculation(tmp_path / "tree" / "degraded", "degraded", FAIL="")
+    degraded = next(
+        item
+        for item in collect_tree(tmp_path / "tree", collectors=(package,))
+        if item.record.workdir_path is not None and item.record.workdir_path.name == "degraded"
+    )
+    (degraded_report,) = store_collected([degraded], str(path), id_base="httk.probe")
+    assert degraded.missing_collector is not None and "storage_error" not in degraded_report
+
+    with Backend.sqlite(path) as database:
+        stored = SqlStore(database).fetch_entry(StructureEntry, content_id(original_structure), eager=True)
+    assert stored is not None and stored.id in cast(dict[str, Any], initial_report["stored"])["entries"]
+
+
 def test_the_collected_store_serves_the_total_energy(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("starlette")

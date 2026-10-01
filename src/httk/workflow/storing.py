@@ -286,7 +286,7 @@ def _storage_layout(
             required_types.add(product.source_type)
             required_types.add(product.target_type)
 
-    configurations: dict[str, tuple[type, tuple[type, ...]]] = {}
+    required_families: set[str] = set()
     for entry_type in required_types:
         family_name: str | None = None
         import_failures: list[BaseException] = []
@@ -309,16 +309,30 @@ def _storage_layout(
                 ):
                     failures[index] = message
             continue
+
+        required_families.add(family_name)
+
+    configurations: dict[str, tuple[type, tuple[type, ...]]] = {}
+    for family_name in required_families | set(persisted or ()):
+        try:
+            family = resolve_entry_family(family_name)
+        except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+            if family_name in (persisted or {}):
+                raise
+            continue
         names = known_entry_records(family_name)
         if family_name == "records":
             names = [name for name in _CORE_RECORDS_ORDER if name in names] + [
                 name for name in names if name not in _CORE_RECORDS_ORDER
             ]
-        stored = [] if persisted is None else [name for name in persisted.get(family_name, ()) if name in names]
+        stored = [] if persisted is None else list(persisted.get(family_name, ()))
         names = [*stored, *(name for name in names if name not in stored)]
         try:
             records = tuple(resolve_entry_record(name) for name in names)
         except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
+            if family_name in (persisted or {}):
+                raise
+            entry_type = str(getattr(family, "type", ""))
             message = f"cannot store entry type {entry_type!r}: {exc}"
             for index, item in enumerate(items):
                 if any(
@@ -327,7 +341,7 @@ def _storage_layout(
                 ):
                     failures[index] = message
             continue
-        configurations[entry_type] = (resolve_entry_family(family_name), records)
+        configurations[family_name] = (family, records)
 
     layout: dict[type, tuple[type, ...]] = {}
     for family, records in configurations.values():
@@ -720,7 +734,13 @@ def store_collected(
 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    layout, failures = _storage_layout(items, _persisted_record_order(target))
+    try:
+        layout, failures = _storage_layout(items, _persisted_record_order(target))
+    except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{target} cannot resolve its stored entry layout: {exc}. Restore the missing entry registration and "
+            "package, or collect into a new store file."
+        ) from exc
     requested = sorted(
         {
             str(getattr(value, "type", ""))

@@ -778,8 +778,9 @@ def test_collect_into_a_store_with_a_different_layout_teaches(
     )
     err = capsys.readouterr().err
     assert str(store_path) in err
-    assert "different set of entry types" in err
-    assert "Collect into a new store file" in err
+    assert "test-x-record" in err
+    assert "Restore the missing entry registration and package" in err
+    assert "collect into a new store file" in err
 
 
 def test_collect_into_reports_an_unknown_entry_type_per_job(tmp_path: Path, capsys) -> None:
