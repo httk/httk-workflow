@@ -879,6 +879,135 @@ def test_the_collected_store_serves_the_total_energy(tmp_path: Path) -> None:
             assert [row["attributes"]["_httk_total_energy"] for row in filtered.json()["data"]] == [-1.5]
 
 
+_PARENT_RECOGNIZE = """
+from httk.workflow.calculations import content_digest
+from httk.workflow.hookapi import Claim
+
+
+def recognize(directory):
+    consumes = tuple((directory / "PARENT").read_text(encoding="utf-8").split())
+    return Claim(content_digest(directory, ["PARENT"]), consumes=consumes)
+"""
+
+
+def _parent_tree(tmp_path: Path, consumes: str = "d1 d2", **child_files: str) -> tuple[Path, tuple[Path, Path]]:
+    """A ``p`` calculation consuming ``p/d1`` and ``p/d2``, and an unrelated ``z`` calculation."""
+
+    child = _collector(tmp_path / "child")
+    parent = _collector(
+        tmp_path / "parent", "tests.parent", priority=5, requires=("PARENT",), recognize=_PARENT_RECOGNIZE
+    )
+    tree = tmp_path / "tree"
+    _calculation(tree / "p", "parent input", PARENT=consumes)
+    _calculation(tree / "p" / "d1", "first displacement")
+    _calculation(tree / "p" / "d2", "second displacement", **child_files)
+    _calculation(tree / "z", "unrelated")
+    return tree, (child, parent)
+
+
+def test_a_parent_follows_the_directories_it_consumes_and_names_their_runs(tmp_path: Path) -> None:
+    tree, collectors = _parent_tree(tmp_path)
+
+    items = list(collect_tree(tree, collectors=collectors))
+
+    assert [(item.record.workspace_id, _collected_directory(item)) for item in items] == [
+        ("tests.calc", "p/d1"),
+        ("tests.calc", "p/d2"),
+        ("tests.parent", "p"),
+        ("tests.calc", "z"),
+    ]
+    d1, d2, parent, _z = items
+    assert parent.missing_collector is None
+    assert parent.child_runs == (("d1", d1.run.source_id), ("d2", d2.run.source_id))
+    (claim,) = [claim for claim in claims(tree, collectors=collectors) if claim.directory == "p"]
+    assert claim.consumes == ("p/d1", "p/d2")
+
+
+def _collected_directory(item: Any) -> str:
+    return item.record.workdir_path.as_posix()
+
+
+def test_a_parent_run_links_its_consumed_runs_in_the_store(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import Run
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    tree, collectors = _parent_tree(tmp_path)
+    items = list(collect_tree(tree, collectors=collectors))
+    path = tmp_path / "store.sqlite"
+
+    reports = store_collected(items, str(path), id_base="httk.probe")
+
+    assert all("storage_error" not in report for report in reports)
+    run_ids = [cast(dict[str, Any], report["stored"])["run"] for report in reports]
+    with Backend.sqlite(path) as database:
+        searcher = SqlStore(database).searcher()
+        variable = searcher.variable(Run)
+        searcher.add(variable.id == run_ids[2])
+        parent = next(iter(searcher.results(run=variable))).run
+    # The parent's run names each consumed directory's run as an artifact, by relative path.
+    runs = [edge for edge in parent.artifacts if edge.entry_type == "runs"]
+    assert sorted((edge.label, edge.entry_type, edge.entry_id) for edge in runs) == [
+        ("d1", "runs", run_ids[0]),
+        ("d2", "runs", run_ids[1]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("consumes", "child_files", "exclude", "reason"),
+    [
+        ("d1 d2 d3", {}, (), "p/d3 does not exist"),
+        ("d1 d2", {}, ("p/d2",), "p/d2 was not collected"),
+        ("d1 d2", {"DECLINE": ""}, (), "p/d2 was declined by tests.calc: declined on request"),
+    ],
+)
+def test_a_consumed_directory_that_is_not_collected_degrades_the_parent(
+    tmp_path: Path, consumes: str, child_files: dict[str, str], exclude: tuple[str, ...], reason: str
+) -> None:
+    tree, collectors = _parent_tree(tmp_path, consumes, **child_files)
+
+    (parent,) = [
+        item
+        for item in collect_tree(tree, collectors=collectors, exclude=exclude)
+        if item.record.workspace_id == "tests.parent"
+    ]
+
+    assert parent.missing_collector is not None and reason in parent.missing_collector
+    assert parent.missing_collector.startswith("p: consumed directories not collected: ")
+    assert parent.identity_stable is True
+
+
+def test_a_failed_part_degrades_its_parent_and_a_copied_part_links(tmp_path: Path) -> None:
+    tree, collectors = _parent_tree(tmp_path, FAIL="")
+
+    d1, d2, parent, _z = collect_tree(tree, collectors=collectors)
+
+    assert d2.missing_collector == "p/d2: cannot read the energy"
+    assert parent.missing_collector == (
+        "p: consumed directories not collected: consumed calculation p/d2 failed: p/d2: cannot read the energy"
+    )
+    # Only the collected part is named, so no link points at a run that is not stored.
+    assert parent.child_runs == (("d1", d1.run.source_id),)
+
+    # A consumed copy of an earlier directory is not collected again; it links to that run.
+    copy = tmp_path / "copy"
+    tree, collectors = _parent_tree(copy)
+    for name in ("INPUT", "ENERGY"):
+        (tree / "p" / "d2" / name).write_text((tree / "p" / "d1" / name).read_text())
+    items = list(collect_tree(tree, collectors=collectors))
+    assert [_collected_directory(item) for item in items] == ["p/d1", "p", "z"]
+    assert items[1].child_runs == (("d1", items[0].run.source_id), ("d2", items[0].run.source_id))
+
+
+@pytest.mark.parametrize("consumes", [("../x",), ("/abs",), ("a", "a"), ("a//b",), ("",), ("./a",)])
+def test_claim_consumes_is_validated(consumes: tuple[str, ...]) -> None:
+    from httk.workflow.hookapi import Claim
+
+    with pytest.raises(ValueError, match="consume"):
+        Claim("id", consumes=consumes)
+    assert Claim("id", consumes=("a/b", "c")).consumes == ("a/b", "c")
+
+
 def test_claims_scale_to_wide_trees(tmp_path: Path, test_profile: _TestProfile) -> None:
     empty, calculations = test_profile.scale(normal=(200, 5), extended=(5000, 50))
     package = _collector(tmp_path / "pkg")

@@ -497,6 +497,16 @@ to the swept root, since its `job_id` is only the identity digest. Directories s
 with `.` and symlinked directories are not visited, and a nested workspace is
 collected as a workspace and not walked.
 
+**Multi-directory calculations.** A calculation spread over several
+directories, such as a phonon calculation whose displacements are separate VASP
+runs, is claimed in its top directory with `Claim(identity, consumes=("disp-001",
+...))`. The consumed subdirectories are still collected by their own collectors;
+the claiming calculation is collected after them, and its run links to their runs
+as child runs (`has_artifact` edges of type `runs`, labelled by the relative
+path). A consumed directory that is missing, excluded or not claimed, or whose own
+collection degraded, degrades the claiming calculation: a calculation with a
+failed part is incomplete. The degraded part is still reported on its own line. `--dry-run` lists the consumed directories on the claiming line.
+
 The same is available from Python:
 
 ```python

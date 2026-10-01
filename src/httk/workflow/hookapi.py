@@ -32,16 +32,39 @@ class Claim:
     :param identity: The collector-chosen identity of the calculation: a non-empty
         URL-safe string without ``:`` (for example a SHA-256 hex digest), stable
         for the same calculation wherever its directory is.
-    :raises ValueError: If *identity* is empty or not URL-safe.
+    :param consumes: Name the subdirectories that belong to this calculation, as
+        POSIX paths relative to the claimed directory (for example the
+        displacement runs of a phonon calculation). They are still collected by
+        their own collectors, and this calculation's run links to theirs as child
+        runs; one that is not collected degrades this calculation.
+    :raises ValueError: If *identity* is empty or not URL-safe, or a *consumes*
+        entry is empty, absolute, has an empty or ``..`` segment, or repeats.
     """
 
     identity: str
+    consumes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, str) or re.fullmatch(r"[A-Za-z0-9._~-]+", self.identity) is None:
             raise ValueError(
                 f"a claim identity must be a nonempty URL-safe string without ':' or '/': {self.identity!r}"
             )
+        consumes = tuple(self.consumes) if isinstance(self.consumes, (tuple, list)) else None
+        if consumes is None:
+            raise ValueError(f"claim consumes must be a tuple of relative paths: {self.consumes!r}")
+        for path in consumes:
+            if (
+                not isinstance(path, str)
+                or not path
+                or path.startswith("/")
+                or any(segment in ("", ".", "..") for segment in path.split("/"))
+            ):
+                raise ValueError(
+                    f"a consumed directory must be a relative POSIX path without empty, '.' or '..' segments: {path!r}"
+                )
+        if len(set(consumes)) != len(consumes):
+            raise ValueError(f"claim consumes repeats a directory: {consumes!r}")
+        object.__setattr__(self, "consumes", consumes)
 
 
 @dataclass(frozen=True)

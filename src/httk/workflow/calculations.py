@@ -86,6 +86,8 @@ class DirectoryClaim:
     :param duplicate_of: For a claimed copy of an earlier directory of this sweep
         (same collector, identity and marker content), that directory; it is not
         collected again.
+    :param consumes: The subdirectories the claim names as part of its
+        calculation, relative to the swept root (POSIX).
     """
 
     directory: str
@@ -96,6 +98,7 @@ class DirectoryClaim:
     reason: str | None = None
     also_matched: tuple[str, ...] = ()
     duplicate_of: str | None = None
+    consumes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,7 +228,7 @@ def _recognize(collector: _Collector, directory: Path) -> Claim | Unclaimed | No
         if result is None:
             return None
         if isinstance(result, Claim):
-            return Claim(result.identity)
+            return Claim(result.identity, result.consumes)
         if isinstance(result, Unclaimed):
             return result
         return Unclaimed(f"recognize returned {type(result).__name__}")
@@ -320,6 +323,7 @@ def _sweep(
                 claim.identity,
                 also_matched=also,
                 duplicate_of=duplicate_of,
+                consumes=tuple((relative / path).as_posix() for path in claim.consumes),
             ),
             directory,
             collector,
@@ -401,6 +405,60 @@ def _collect_directory(root: Path, outcome: DirectoryClaim, collector: _Collecto
     return replace(collected, identity_stable=True)
 
 
+@dataclass
+class _Parent:
+    """A collected calculation held back until its consumed subdirectories were walked."""
+
+    outcome: DirectoryClaim
+    collector: _Collector
+    item: CollectedJob
+    reached: dict[str, DirectoryClaim]
+
+
+def _within(directory: str, ancestor: str) -> bool:
+    return ancestor == "." or directory == ancestor or directory.startswith(ancestor + "/")
+
+
+def _linked(base: Path, parent: _Parent, failed: Mapping[str, str]) -> CollectedJob:
+    """Give a held-back calculation its child runs, or degrade it for a consumed directory not collected.
+
+    *failed* maps the source id of every degraded item of the sweep to its reason.
+    """
+
+    links: list[tuple[str, str]] = []
+    missing: list[str] = []
+    prefix = PurePosixPath(parent.outcome.directory)
+    for consumed in parent.outcome.consumes:
+        label = PurePosixPath(consumed).relative_to(prefix).as_posix()
+        reached = parent.reached.get(consumed)
+        if reached is None:
+            path = base.joinpath(*PurePosixPath(consumed).parts)
+            missing.append(
+                f"{consumed} does not exist"
+                if not path.exists() and not path.is_symlink()
+                else f"{consumed} was not collected (excluded, a symlink or dot directory, or recognized by no collector)"
+            )
+        elif reached.kind == "claimed":
+            # A copy deduplicated onto an earlier directory has that directory's
+            # source id (same collector and identity), so the link names its run.
+            source_id = f"{reached.collector}:{reached.identity}"
+            if source_id in failed:
+                # A failed part leaves the calculation incomplete, and its run is not stored.
+                missing.append(f"consumed calculation {consumed} failed: {failed[source_id]}")
+            else:
+                links.append((label, source_id))
+        elif reached.kind == "unclaimed":
+            missing.append(f"{consumed} was declined by {reached.collector}: {reached.reason}")
+        else:
+            missing.append(f"{consumed} is a workspace, not a calculation")
+    item = replace(parent.item, child_runs=(*parent.item.child_runs, *links))
+    if missing and item.missing_collector is None:
+        reason = f"{parent.outcome.directory}: consumed directories not collected: " + "; ".join(missing)
+        degraded = _degraded_job(item.record, parent.collector.provider, item.run, reason)
+        item = replace(degraded, identity_stable=True, child_runs=item.child_runs)
+    return item
+
+
 def collect_tree(
     root: str | os.PathLike[str],
     *,
@@ -434,7 +492,21 @@ def collect_tree(
     the run's input edges and the ``inputs`` of
     :class:`~httk.workflow.collecting.CollectedJob`, and output roles.
     The run's ``source_id`` is ``<collector name>:<identity>``. A collect-hook
-    failure yields a degraded item. A directory a collector declines with
+    failure yields a degraded item.
+
+    A claim that consumes subdirectories (the ``consumes`` of
+    :class:`~httk.workflow.hookapi.Claim`) is a
+    multi-directory calculation. Its subdirectories are walked and collected by
+    their own collectors as usual, and the claiming item is held back until the
+    walk leaves its subtree. It is then yielded, after those children, with
+    one ``(relative path, child source id)`` pair per consumed directory in
+    ``child_runs``, so :func:`~httk.workflow.storing.store_collected` links its
+    run to theirs. A consumed directory that was a deduplicated copy links to the
+    earlier copy's run, which has the same source id. One that is missing, not
+    visited, a workspace, or not claimed, or whose own item degraded ("consumed
+    calculation ... failed: ..."), degrades the claiming item, which then names
+    only the children that were collected. The degraded child is still yielded.
+    Items are otherwise yielded in walk order. A directory a collector declines with
     :class:`~httk.workflow.hookapi.Unclaimed` is logged as a warning and passed
     to *on_unclaimed*.
 
@@ -452,8 +524,26 @@ def collect_tree(
     :raises IdentityCollisionError: If two directories claim one identity with different marker content.
     """
 
+    failed: dict[str, str] = {}
+
+    def emitted(item: CollectedJob) -> CollectedJob:
+        if item.missing_collector is not None and item.run.source_id is not None:
+            failed[item.run.source_id] = item.missing_collector
+        if fail_fast and item.missing_collector is not None:
+            raise ValueError(item.missing_collector)
+        return item
+
     base = Path(root).expanduser().resolve()
+    # Calculations that consume subdirectories, innermost last. The walk is a
+    # depth-first preorder, so a parent's subtree is complete as soon as the walk
+    # reaches a directory outside it; only then is the parent linked and yielded.
+    held: list[_Parent] = []
     for outcome, directory, collector in _sweep(base, collectors, prefer, exclude):
+        while held and not _within(outcome.directory, held[-1].outcome.directory):
+            yield emitted(_linked(base, held.pop(), failed))
+        for parent in held:
+            if outcome.directory in parent.outcome.consumes:
+                parent.reached[outcome.directory] = outcome
         if outcome.kind == "workspace":
             yield from collect(Workspace(directory, mutable=False), fail_fast=fail_fast)
             continue
@@ -467,6 +557,11 @@ def collect_tree(
         if collector is None or outcome.duplicate_of is not None:
             continue
         collected = _collect_directory(base, outcome, collector)
-        if fail_fast and collected.missing_collector is not None:
-            raise ValueError(collected.missing_collector)
-        yield collected
+        if collected.missing_collector is not None and collected.run.source_id is not None:
+            failed[collected.run.source_id] = collected.missing_collector
+        if outcome.consumes:
+            held.append(_Parent(outcome, collector, collected, {}))
+            continue
+        yield emitted(collected)
+    while held:
+        yield emitted(_linked(base, held.pop(), failed))

@@ -67,6 +67,19 @@ def test_a_dry_run_prints_claim_lines_only(tmp_path: Path, capsys: pytest.Captur
     assert lines[0]["format"] == "httk-collect-claim" and lines[0]["format_version"] == 1
     assert lines[0]["collector"] == "tests.calc" and lines[0]["also_matched"] == []
     assert lines[1]["reason"] == "declined on request"
+    assert lines[0]["consumes"] == []
+
+
+def test_a_dry_run_names_consumed_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from test_calculations import _parent_tree
+
+    tree, (child, parent) = _parent_tree(tmp_path)
+    argv = ["collect", str(tree), "--dry-run", "--collector", str(child), "--collector", str(parent)]
+
+    assert command(argv, CLIContext("httk", tmp_path)) == 0
+
+    lines = {line["directory"]: line for line in _lines(capsys)}
+    assert lines["p"]["consumes"] == ["p/d1", "p/d2"] and lines["p"]["collector"] == "tests.parent"
 
 
 def test_workspace_paths_dispatch_to_workspace_collection(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

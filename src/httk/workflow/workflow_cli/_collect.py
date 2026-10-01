@@ -170,6 +170,7 @@ def _claim_mapping(claim: DirectoryClaim) -> dict[str, object]:
         "reason": claim.reason,
         "also_matched": list(claim.also_matched),
         "duplicate_of": claim.duplicate_of,
+        "consumes": list(claim.consumes),
     }
 
 
