@@ -198,6 +198,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--id-base is required with --into")
     if arguments.into is None and arguments.no_bare_runs:
         raise ValueError("--no-bare-runs only applies with --into")
+    if arguments.into is None and arguments.upgrade:
+        raise ValueError("--upgrade only applies with --into")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     skipped = 0
@@ -271,6 +273,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             ledger_path=ledger_path,
             ledger_keys=ledger_keys,
             bare_runs=not arguments.no_bare_runs,
+            upgrade=arguments.upgrade,
         )
         for item, report in zip(items, reports):
             degraded += item.missing_collector is not None
@@ -383,6 +386,14 @@ def build_collect_parser(
         "--no-bare-runs",
         action="store_true",
         help="with --into, store no run for a job whose workflow has nothing to collect (default: store one)",
+    )
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help=(
+            "with --into, apply an additive layout upgrade the store needs (new record kinds or families); "
+            "keep a backup of the store first"
+        ),
     )
     parser.add_argument(
         "--no-id-ledger",

@@ -106,6 +106,8 @@ def test_workspace_paths_dispatch_to_workspace_collection(tmp_path: Path, capsys
         ("tree", ["--dry-run", "--degraded"], "--dry-run cannot be combined with --degraded"),
         ("tree", ["--dry-run", "--batch-size", "64"], "--dry-run cannot be combined with --batch-size"),
         ("tree", ["--dry-run", "--no-bare-runs"], "--dry-run cannot be combined with --no-bare-runs"),
+        ("tree", ["--upgrade"], "--upgrade only applies with --into"),
+        ("ws", ["--upgrade"], "--upgrade only applies with --into"),
     ],
 )
 def test_options_are_refused_for_the_other_kind_of_target(

@@ -254,8 +254,17 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     return mapping
 
 
-def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
-    """Resolve the lazy core entry registry for the values this sweep stores."""
+def _storage_layout(
+    items: list[CollectedJob], persisted: Mapping[str, Sequence[str]] | None = None
+) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
+    """Resolve the lazy core entry registry for the values this sweep stores.
+
+    A family an existing store already declares keeps its *persisted* record
+    order, with newly registered records appended after it, because a record's
+    position is part of the store's id numbering and a reorder is never an
+    additive upgrade. A new family (and a new store) uses the pinned core order
+    for ``records`` and name order otherwise.
+    """
 
     from httk.core.register import known_entry_families, known_entry_records, resolve_entry_family, resolve_entry_record
 
@@ -305,6 +314,8 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
             names = [name for name in _CORE_RECORDS_ORDER if name in names] + [
                 name for name in names if name not in _CORE_RECORDS_ORDER
             ]
+        stored = [] if persisted is None else [name for name in persisted.get(family_name, ()) if name in names]
+        names = [*stored, *(name for name in names if name not in stored)]
         try:
             records = tuple(resolve_entry_record(name) for name in names)
         except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
@@ -358,6 +369,29 @@ def _typed(value: object, typed: Mapping[str, type]) -> object:
     return value
 
 
+def _persisted_record_order(path: Path) -> dict[str, tuple[str, ...]] | None:
+    """Return each family's persisted record order of an existing store, or ``None``.
+
+    It reads the stored ``entry_declaration`` through httk-store's
+    ``read_store_metadata`` without opening the store, so it also works on a store
+    whose declaration upgrade was interrupted. A missing store, or one without a
+    readable declaration, yields ``None``.
+    """
+
+    if not path.is_file():
+        return None
+    from httk.store.backend.sql import Backend  # pyright: ignore[reportMissingImports]
+    from httk.store.backend.sql.layout import read_store_metadata  # pyright: ignore[reportMissingImports]
+
+    with Backend.sqlite(path) as database, database.engine.connect() as connection:
+        metadata = read_store_metadata(connection)
+    try:
+        families = json.loads(cast(Any, metadata)["entry_declaration"])["families"]
+        return {family["family"]: tuple(record["record"] for record in family["records"]) for family in families}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _predates_typed_records(diff: object) -> bool:
     """Report whether a layout refusal is a ``records`` family declared before typed records existed.
 
@@ -375,9 +409,47 @@ def _predates_typed_records(diff: object) -> bool:
     return "core-total-energy" not in names
 
 
+def _layout_additions(diff: object) -> str | None:
+    """Name the record kinds an additive declaration change appends, from the refusal diff."""
+
+    try:
+        entry = cast(Any, diff)["declaration"]["entry_declaration"]
+        stored = {
+            family["family"]: [record["record"] for record in family["records"]]
+            for family in json.loads(entry["expected"])["families"]
+        }
+        target = {
+            family["family"]: [record["record"] for record in family["records"]]
+            for family in json.loads(entry["actual"])["families"]
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+    added = [f"{name}/{record}" for name, records in target.items() for record in records[len(stored.get(name, ())) :]]
+    return "new record kinds: " + ", ".join(added) if added else None
+
+
+def _holds_generic_typed(path: Path, typed: Mapping[str, type]) -> bool:
+    """Report whether an existing store, opened in its persisted layout, holds now-typed generic rows.
+
+    A store that cannot be opened in its persisted layout (an interrupted upgrade)
+    is not inspected here; the check after the open covers it.
+    """
+
+    from httk.store import SqliteStore  # pyright: ignore[reportMissingImports]
+
+    try:
+        current = SqliteStore(path)
+    except Exception:
+        return False
+    with current:
+        return _stored_generic_typed(current, typed)
+
+
 def _stored_generic_typed(store: Any, typed: Mapping[str, type]) -> bool:
     """Report whether the store holds generic data records for a definition that is now typed."""
 
+    if not any(DataRecord in records for records in store.entry_records.values()):
+        return False
     for definition_id in typed:
         searcher = store.searcher()
         variable = searcher.variable(DataRecord)
@@ -584,6 +656,7 @@ def store_collected(
     ledger_path: str | None = None,
     ledger_keys: Sequence[tuple[str, bytes]] = (),
     bare_runs: bool = True,
+    upgrade: bool = False,
 ) -> list[dict[str, object]]:
     """Save one bounded collected sweep into a file-backed SQLite store.
 
@@ -629,9 +702,13 @@ def store_collected(
         through, or ``None`` to let the store mint ids directly.
     :param ledger_keys: The signing keys each appended segment is signed with.
     :param bare_runs: Store the runs of jobs whose workflows have nothing to collect.
+    :param upgrade: Apply an additive layout upgrade the store needs (new record
+        kinds or families, for example a typed record a newer *httk* ships)
+        instead of refusing. Keep a backup of the store first.
     :return: One report mapping per collected job.
     :raises ValueError: If *httk-store* is unavailable, or the store at *path*
-        was created for a different set of entry types or predates typed records.
+        was created for a different set of entry types, predates typed records, or
+        needs an additive upgrade and *upgrade* is false.
     """
 
     try:
@@ -643,7 +720,7 @@ def store_collected(
 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    layout, failures = _storage_layout(items)
+    layout, failures = _storage_layout(items, _persisted_record_order(target))
     requested = sorted(
         {
             str(getattr(value, "type", ""))
@@ -668,23 +745,50 @@ def store_collected(
         type_to_family: dict[str, type] = {
             str(getattr(family, "type", "")): family for family in layout if getattr(family, "type", None)
         }
+        records_family = next(
+            (records for family, records in layout.items() if family is type_to_family.get("records")), ()
+        )
+        typed = _typed_record_classes(records_family)
+
+        def refusal(exc: Any) -> ValueError:
+            """Turn a layout refusal into the collect error its remedy calls for."""
+            if exc.remedy == "upgrade":
+                additions = _layout_additions(exc.diff) or exc.hint or "an additive layout change"
+                return ValueError(
+                    f"{target} needs an additive layout upgrade ({additions}); rerun with --upgrade "
+                    "(upgrade=True), keeping a backup of the store first"
+                )
+            if exc.remedy in ("reopen", "retry"):
+                return ValueError(f"{target}: {exc}")
+            if _predates_typed_records(exc.diff):
+                return ValueError(_REBUILD_TYPED.format(target=target))
+            needs = ", ".join(requested) or "no entry types"
+            return ValueError(
+                f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
+                f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
+                "Collect into a new store file."
+            )
+
         try:
             store = stack.enter_context(
                 SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
             )
         except StorageLayoutUpgradeRequiredError as exc:
-            if _predates_typed_records(exc.diff):
+            if exc.remedy != "upgrade" or not upgrade:
+                if exc.remedy == "upgrade" and _holds_generic_typed(target, typed):
+                    raise ValueError(_REBUILD_TYPED.format(target=target)) from exc
+                raise refusal(exc) from exc
+            # Checked before anything is upgraded: generic rows of a definition that is
+            # now typed cannot move to the typed backing under their ids, so appending
+            # the typed record would leave them stranded. Only a rebuild fixes that.
+            if _holds_generic_typed(target, typed):
                 raise ValueError(_REBUILD_TYPED.format(target=target)) from exc
-            needs = ", ".join(requested) or "no entry types"
-            raise ValueError(
-                f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
-                f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
-                "Collect into a new store file."
-            ) from exc
-        records_family = next(
-            (records for family, records in layout.items() if family is type_to_family.get("records")), ()
-        )
-        typed = _typed_record_classes(records_family)
+            try:
+                store = stack.enter_context(
+                    SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series), upgrade=True)
+                )
+            except StorageLayoutUpgradeRequiredError as again:
+                raise refusal(again) from again
         if _stored_generic_typed(store, typed):
             raise ValueError(_REBUILD_TYPED.format(target=target))
         # A dataclass entry is stored only as a record of its family; anything else

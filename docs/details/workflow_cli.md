@@ -381,7 +381,7 @@ protocol spellings, and what is gone" below.
 | --- | --- |
 | `--state`, `--placement`, `--raw`, `--allow-job-collector` | a workspace only |
 | `--dry-run`, `--prefer NAME`, `--exclude PATTERN`, `--collector DIR` | a calculation tree only |
-| `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
+| `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--upgrade`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
 
 An option given for the other kind of target is refused. A workspace nested in a
 calculation tree is collected as a workspace with the default states and is not
@@ -394,6 +394,12 @@ With `--into`, a sealed id ledger keeps entry ids stable across rebuilds. It is
 on by default at `<into>.ids.sqlite`; `--id-ledger PATH` relocates it and
 `--no-id-ledger` disables it (ids then become unstable across rebuilds). See
 {doc}`/stable_ids`.
+
+`--upgrade` (only with `--into`) lets an existing store take an additive layout
+change: new record kinds appended to a family or new families, for example a
+typed record kind a newer *httk* ships. Without it such a store is refused with
+a message naming `--upgrade`; a change that is not additive still needs a
+rebuild. Keep a backup of the store before upgrading.
 
 `--degraded` prints only the degraded per-job lines; the trailing summary still
 counts the whole sweep, so a filtered listing never hides how many jobs ran. It

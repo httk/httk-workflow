@@ -688,7 +688,7 @@ def test_an_unregistered_record_dataclass_is_a_storage_error(tmp_path: Path) -> 
     assert report.get("stored") is None
 
 
-def test_a_store_that_predates_typed_records_is_refused_with_the_rebuild_advice(tmp_path: Path) -> None:
+def test_a_store_that_predates_typed_records_upgrades_unless_it_holds_generic_values(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecord, DataRecordEntry, Run, RunEntry
     from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
@@ -699,14 +699,30 @@ def test_a_store_that_predates_typed_records_is_refused_with_the_rebuild_advice(
     _calculation(tmp_path / "tree" / "calc")
     items = list(collect_tree(tmp_path / "tree", collectors=(package,)))
 
-    # A store declared before typed records: its records family holds DataRecord only.
-    old = tmp_path / "old.sqlite"
-    with SqliteStore(
-        old, entry_records={DataRecordEntry: (DataRecord,), RunEntry: (Run,)}, entry_ids=EntryIdScheme("x", "1")
+    def old_store(name: str, *values: DataRecord) -> Path:
+        # A store declared before typed records: its records family holds DataRecord only.
+        path = tmp_path / name
+        old = {DataRecordEntry: (DataRecord,), RunEntry: (Run,)}
+        with SqliteStore(path, entry_records=old, entry_ids=EntryIdScheme("x", "1")) as store:
+            for value in values:
+                store.save(value)
+        return path
+
+    # Without generic total energies, appending the typed record is an ordinary additive upgrade.
+    empty = old_store("empty.sqlite", DataRecord.from_value("https://example.test/defs/other", "other", 1))
+    with pytest.raises(
+        ValueError,
+        match=r"needs an additive layout upgrade \(new record kinds: records/core-total-energy\); rerun with --upgrade",
     ):
-        pass
-    with pytest.raises(ValueError, match="predates typed records.*keeping the id ledger"):
-        store_collected(items, str(old), id_base="httk.probe")
+        store_collected(items, str(empty), id_base="httk.probe")
+    (report,) = store_collected(items, str(empty), id_base="httk.probe", upgrade=True)
+    assert "storage_error" not in report and report["stored"] is not None
+
+    # With them, the typed record would strand those rows: rebuild, even with --upgrade.
+    held = old_store("held.sqlite", DataRecord.from_value(_TOTAL_ENERGY, "_httk_total_energy", -1.0))
+    for upgrade in (False, True):
+        with pytest.raises(ValueError, match="predates typed records.*keeping the id ledger"):
+            store_collected(items, str(held), id_base="httk.probe", upgrade=upgrade)
 
     # A store with the typed backing that still holds a generic total energy is refused once too.
     mixed = tmp_path / "mixed.sqlite"
@@ -736,7 +752,7 @@ def test_a_value_the_typed_record_refuses_fails_only_its_job(tmp_path: Path) -> 
     assert "storage_error" not in good_report and good_report["stored"] is not None
 
 
-def test_a_store_lacking_only_an_appended_core_record_is_not_told_to_rebuild(
+def test_a_store_lacking_only_an_appended_core_record_upgrades_with_upgrade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("httk.store")
@@ -756,11 +772,20 @@ def test_a_store_lacking_only_an_appended_core_record_is_not_told_to_rebuild(
         definition_id="https://schemas.httk.org/defs/v0.1/entrytypes/records",
     )
     monkeypatch.setattr(storing, "_CORE_RECORDS_ORDER", (*storing._CORE_RECORDS_ORDER, "test-appended-record"))
+    _calculation(tmp_path / "tree" / "calc2", "second input", "-2.5")
     items = list(collect_tree(tmp_path / "tree", collectors=(tmp_path / "pkg",)))
 
-    with pytest.raises(ValueError, match="different set of entry types") as refusal:
+    with pytest.raises(ValueError, match="new record kinds: records/test-appended-record.*--upgrade") as refusal:
         store_collected(items, str(path), id_base="httk.probe")
     assert "predates typed records" not in str(refusal.value)
+
+    old, new = store_collected(items, str(path), id_base="httk.probe", upgrade=True)
+    assert "storage_error" not in old and "storage_error" not in new
+    # The earlier calculation keeps its ids; the new one gets ids of its own.
+    assert old["stored"] == report["stored"]
+    old_ids = set(cast(dict[str, Any], old["stored"])["entries"])
+    new_ids = set(cast(dict[str, Any], new["stored"])["entries"])
+    assert new_ids and not new_ids & old_ids
 
 
 def test_a_typed_record_that_cannot_carry_collected_values_is_reported(caplog: pytest.LogCaptureFixture) -> None:
@@ -780,6 +805,56 @@ def test_a_typed_record_that_cannot_carry_collected_values_is_reported(caplog: p
 
     assert list(typed.values()) == [TotalEnergyRecord]
     assert "typed record" in caplog.text and "TwoProperties" in caplog.text
+
+
+def _register_records(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    """Register test records of the ``records`` family on a copy of the core registry."""
+
+    from httk.core.register import entries, register_entry_record
+
+    # monkeypatch restores the original registry, however many copies are layered.
+    monkeypatch.setattr(entries, "_entry_records", dict(entries._entry_records))
+    for name in names:
+        register_entry_record(
+            name=name,
+            family="records",
+            record=f"{__name__}:{_TEST_RECORDS[name]}",
+            definition_id="https://schemas.httk.org/defs/v0.1/entrytypes/records",
+        )
+
+
+def test_a_store_keeps_its_record_order_when_an_earlier_named_record_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("httk.store")
+    from httk.store.backend.sql import SqlStore  # pyright: ignore[reportMissingImports]
+
+    _register_records(monkeypatch, "test-x-record")
+    path, (first,) = _energy_store(tmp_path)
+    assert "storage_error" not in first
+
+    # "test-a-record" sorts before the stored "test-x-record"; it must still be appended.
+    _register_records(monkeypatch, "test-a-record")
+    items = list(collect_tree(tmp_path / "tree", collectors=(tmp_path / "pkg",)))
+    with pytest.raises(ValueError, match=r"new record kinds: records/test-a-record\).*--upgrade"):
+        store_collected(items, str(path), id_base="httk.probe")
+
+    # An upgrade interrupted before its restamp resumes on the next --upgrade.
+    class Crash(Exception):
+        pass
+
+    def crash(self: object, name: str, connection: Any) -> None:
+        if name == "restamp-schemas":
+            connection.commit()
+            raise Crash(name)
+
+    monkeypatch.setattr(SqlStore, "_after_upgrade_step", crash)
+    with pytest.raises(Crash):
+        store_collected(items, str(path), id_base="httk.probe", upgrade=True)
+    monkeypatch.setattr(SqlStore, "_after_upgrade_step", lambda self, name, connection: None)
+
+    (report,) = store_collected(items, str(path), id_base="httk.probe", upgrade=True)
+    assert "storage_error" not in report and report["stored"] == first["stored"]
 
 
 def test_the_collected_store_serves_the_total_energy(tmp_path: Path) -> None:
@@ -835,3 +910,40 @@ class AppendedRecord:
     def type(self) -> str:
         """Return the entry type."""
         return "records"
+
+
+@dataclass(frozen=True)
+class XRecord:
+    """A test-registered third-party record of the ``records`` family."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="test_x_record", identity_name="test_x_record")
+
+    note: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        """Return the entry type."""
+        return "records"
+
+
+@dataclass(frozen=True)
+class ARecord:
+    """A test-registered record whose name sorts before ``XRecord``'s."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="test_a_record", identity_name="test_a_record")
+
+    note: str
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        """Return the entry type."""
+        return "records"
+
+
+_TEST_RECORDS = {"test-x-record": "XRecord", "test-a-record": "ARecord"}

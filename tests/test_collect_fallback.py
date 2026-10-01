@@ -726,19 +726,39 @@ def test_collect_into_requires_id_base_and_honors_id_series(tmp_path: Path, caps
     assert report["stored"]["run"].startswith("httk.options-batch7-")
 
 
-def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, capsys) -> None:
+def test_collect_into_a_store_with_a_different_layout_teaches(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
-    from httk.core.register import resolve_entry_family, resolve_entry_record
+    from httk.core.register import entries, register_entry_record, resolve_entry_family, resolve_entry_record
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "collect-mismatch")
     store_path = tmp_path / "results.sqlite"
-    # A store created for an unrelated entry-type layout cannot absorb this sweep.
+    # A store declaring a record kind this installation no longer registers cannot absorb
+    # this sweep: dropping a record kind is not additive. (A store that merely lacks record
+    # kinds or families this sweep needs takes an --upgrade instead.)
+    original = entries._entry_records
+    monkeypatch.setattr(entries, "_entry_records", dict(original))
+    register_entry_record(
+        name="test-x-record",
+        family="records",
+        record="test_calculations:XRecord",
+        definition_id="https://schemas.httk.org/defs/v0.1/entrytypes/records",
+    )
     with Backend.sqlite(store_path) as database:
-        SqlStore(database, entry_records={resolve_entry_family("runs"): (resolve_entry_record("core-run"),)})
+        SqlStore(
+            database,
+            entry_records={
+                resolve_entry_family("records"): tuple(
+                    resolve_entry_record(name) for name in ("core-data-record", "core-total-energy", "test-x-record")
+                )
+            },
+        )
+    monkeypatch.setattr(entries, "_entry_records", original)
 
     assert (
         command(
