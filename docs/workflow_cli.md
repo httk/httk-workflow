@@ -35,9 +35,15 @@ owning machine with `--detach`.
 
 `httk workspace daemon ABS_WORKSPACE --policy ABS_POLICY` starts the confined
 foreground Slurm broker. See {doc}`workspace_daemon` for its protected deployment
-layout, enrollment, serial profiles and current limits. This is a separate path
+layout, enrollment, serial/MPI profiles and current limits. This is a separate path
 from ordinary manager launching.
 
 `httk workflow remote daemon` supplies the four typed client controls for a
 `mount-daemon` remote. Transfer jobs through absolute mounted workspace paths;
 see {doc}`remotes` for configuration, request IDs and retry behavior.
+
+
+Inside a daemon MPI manager, `httk workflow mpi run -- APPLICATION ARG...` launches
+one application across the protected profile's ranks. It streams output and
+returns the application status; see {doc}`workspace_daemon` for shared-memory
+configuration and site acceptance requirements.

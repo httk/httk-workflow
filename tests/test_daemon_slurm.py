@@ -205,3 +205,56 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
         f"--user={os.getuid()}",
         "123",
     ]
+
+
+def _mpi_policy(policy: Policy, tmp_path: Path) -> Policy:
+    from httk.workflow._daemon_policy import MPIProfile, MPISettings
+
+    settings = MPISettings(
+        srun=policy.sbatch.with_name("srun"),
+        control_root=tmp_path / "mpi-control",
+        pmix_roots=(tmp_path / "pmix",),
+    )
+    profile = replace(policy.profiles[0], mpi=MPIProfile(nodes=2, ranks=4))
+    return replace(policy, profiles=(profile,), mpi=settings)
+
+
+def test_mpi_submission_has_fixed_geometry_and_forbids_requeue(policy: Policy, tmp_path: Path) -> None:
+    policy = _mpi_policy(policy, tmp_path)
+    record = tmp_path / "mpi-submit.json"
+    _client(
+        policy.sbatch,
+        f"open({str(record)!r}, 'w').write(json.dumps([sys.argv, sys.stdin.read()]))\nprint('123;cluster')\n",
+    )
+    SlurmGateway(policy, tmp_path / "protected.json").submit(policy.profiles[0], _HANDLE)
+    argv, script = json.loads(record.read_text())
+    assert {"--nodes=2", "--ntasks=4", "--cpus-per-task=2", "--mem=512M", "--no-requeue"} <= set(argv)
+    assert "--mode allocation --profile cpu --handle " + _HANDLE in script
+    assert " -I -S " in script
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_mpi_check_accepts_pmix_listing_on_either_stream(policy: Policy, tmp_path: Path, stream: str) -> None:
+    policy = _mpi_policy(policy, tmp_path)
+    assert policy.mpi is not None
+    for client in (policy.sbatch, policy.squeue, policy.scancel):
+        _client(client, "print('slurm 23.11.6')\n")
+    _client(
+        policy.mpi.srun,
+        "if sys.argv[1:] == ['--version']: print('slurm 23.11.6')\n"
+        f"else: print('MPI plugin types are...\\n    none\\n    pmix', file=sys.{stream})\n",
+    )
+    SlurmGateway(policy, tmp_path / "protected.json").check()
+
+
+def test_mpi_check_rejects_missing_direct_plugin(policy: Policy, tmp_path: Path) -> None:
+    policy = _mpi_policy(policy, tmp_path)
+    assert policy.mpi is not None
+    for client in (policy.sbatch, policy.squeue, policy.scancel):
+        _client(client, "print('slurm 23.11.6')\n")
+    _client(
+        policy.mpi.srun,
+        "print('slurm 23.11.6' if sys.argv[1:] == ['--version'] else 'none\\npmi2')\n",
+    )
+    with pytest.raises(SchedulerError, match="pmix"):
+        SlurmGateway(policy, tmp_path / "protected.json").check()

@@ -37,7 +37,7 @@ class Submission:
     cluster: str
 
 
-def _run(argv: list[str], policy: Policy, *, data: bytes = b"") -> tuple[int, bytes]:
+def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: bool = False) -> tuple[int, bytes]:
     """Run one trusted client with bounded input, output and lifetime."""
 
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
@@ -92,7 +92,7 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"") -> tuple[int, by
                         total += len(chunk)
                         if total > policy.max_output_bytes:
                             raise SchedulerError("scheduler output exceeded its limit")
-                        if key.data == "stdout":
+                        if key.data == "stdout" or combine_output:
                             output.extend(chunk)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -130,7 +130,10 @@ class SlurmGateway:
         :raises SchedulerError: If a client fails or its version is unsupported.
         """
 
-        for executable in (self.policy.sbatch, self.policy.squeue, self.policy.scancel):
+        executables = [self.policy.sbatch, self.policy.squeue, self.policy.scancel]
+        if self.policy.mpi is not None:
+            executables.append(self.policy.mpi.srun)
+        for executable in executables:
             code, output = _run([str(executable), "--version"], self.policy)
             try:
                 match = _VERSION.fullmatch(output.decode("ascii"))
@@ -138,6 +141,10 @@ class SlurmGateway:
                 match = None
             if code != 0 or match is None or tuple(int(part) for part in match.groups()) < (23, 11, 6):
                 raise SchedulerError("Slurm 23.11.6 or newer clients are required")
+        if self.policy.mpi is not None:
+            code, output = _run([str(self.policy.mpi.srun), "--mpi=list"], self.policy, combine_output=True)
+            if code != 0 or re.search(rb"(?m)^\s*pmix\s*$", output) is None:
+                raise SchedulerError("Slurm direct-launch pmix plugin is required")
 
     def _script(self, profile: Profile, handle: str) -> bytes:
         bootstrap = Path(__file__).with_name("_daemon_bootstrap.py")
@@ -149,7 +156,7 @@ class SlurmGateway:
             "--policy",
             str(self.policy_path),
             "--mode",
-            "payload",
+            "allocation" if profile.mpi is not None else "payload",
             "--profile",
             profile.name,
             "--handle",
@@ -172,8 +179,8 @@ class SlurmGateway:
             "--export=NIL",
             f"--clusters={self.policy.cluster}",
             f"--job-name=httk-{handle}",
-            "--nodes=1",
-            "--ntasks=1",
+            f"--nodes={profile.mpi.nodes if profile.mpi is not None else 1}",
+            f"--ntasks={profile.mpi.ranks if profile.mpi is not None else 1}",
             f"--cpus-per-task={profile.cpus}",
             f"--mem={profile.memory_mb}M",
             f"--time={profile.time_minutes}",
@@ -182,6 +189,8 @@ class SlurmGateway:
             "--output=/dev/null",
             "--error=/dev/null",
         ]
+        if profile.mpi is not None:
+            argv.append("--no-requeue")
         if profile.partition is not None:
             argv.append(f"--partition={profile.partition}")
         if profile.account is not None:

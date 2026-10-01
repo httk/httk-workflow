@@ -58,6 +58,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "transfer",
     ),
     "manager": ("run",),
+    "mpi": ("run",),
     "v1": ("collect",),
     "config": ("show", "set", "unset", "import-v1"),
     "remote": ("list", "add", "configure", "check", "import-v1", "show", "remove"),

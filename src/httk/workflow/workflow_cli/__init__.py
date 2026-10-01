@@ -103,6 +103,7 @@ from ._manager import (
     submit_remote_manager_result,
 )
 from ._monitor import build_monitor_parser, handle_monitor
+from ._mpi import build_mpi_parser
 from ._postprocess import build_postprocess_parser, handle_postprocess
 from ._precheck import build_precheck_parser, handle_precheck
 from ._project import (
@@ -310,6 +311,7 @@ def build_parser(
     build_launcher_parser(groups)
     build_campaign_parser(groups)
     build_monitor_parser(groups)
+    build_mpi_parser(groups)
     return parser
 
 

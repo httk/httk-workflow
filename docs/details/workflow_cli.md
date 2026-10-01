@@ -718,7 +718,7 @@ unambiguous.
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
-| `remote daemon start REMOTE` | start one approved serial manager | required `--profile`, `--request-id`; `--wait-seconds` |
+| `remote daemon start REMOTE` | start one approved manager profile | required `--profile`, `--request-id`; `--wait-seconds` |
 | `remote daemon status REMOTE` | inspect a manager | required `--handle`; `--request-id`, `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
 
@@ -727,7 +727,7 @@ unambiguous.
 filesystem plus a command executor), or `mount-daemon` (typed file requests to a
 confined destination broker). The first three use the target workspace
 `manager.launch` setting, such as a packaged `slurm` launcher. `mount-daemon`
-selects an operator-defined serial profile through the daemon; it refuses generic
+selects an operator-defined serial or MPI profile through the daemon; it refuses generic
 `REMOTE:NAME` operations. Transfer jobs using absolute mounted workspace paths.
 See {doc}`/remotes` for configuration and request-ID retry rules.
 
@@ -1591,3 +1591,13 @@ banner or a profile's greeting printed on the far side's stdout makes the fetch
 stop with *remote offer did not return a transfer offer document* before
 anything is pulled or imported. Put such greetings on stderr, or behind a
 non-interactive-shell test, on any host a remote adapter reaches.
+
+
+## `workflow mpi run`
+
+`httk workflow mpi run -- APPLICATION ARG...` executes one application through the
+current daemon MPI allocation. The protected profile fixes nodes, ranks and CPUs;
+there are no caller-supplied Slurm options. The wrapper requires an active daemon
+MPI manager, streams stdout/stderr, uses `/dev/null` for stdin and returns the step
+status. A connection failure produces an uncertain result without resubmission.
+See {doc}`/workspace_daemon` for policy, containment and shared-memory requirements.

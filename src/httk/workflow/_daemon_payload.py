@@ -12,7 +12,8 @@ from .workspace import Workspace
 
 
 def _manager_command(policy: Policy, profile: Profile) -> list[str]:
-    return [
+    mpi = profile.mpi
+    command = [
         str(policy.python),
         "-I",
         "-m",
@@ -29,12 +30,14 @@ def _manager_command(policy: Policy, profile: Profile) -> list[str]:
         "1",
         "--worker-resource",
         "procs",
-        str(profile.cpus),
+        str(profile.cpus * mpi.ranks if mpi is not None else profile.cpus),
         "--worker-resource",
         "mem",
-        str(profile.memory_mb),
-        "--idle",
+        str(profile.memory_mb * mpi.nodes if mpi is not None else profile.memory_mb),
     ]
+    if mpi is not None:
+        command += ["--worker-resource", "nodes", str(mpi.nodes), "--worker-resource", "mpi_ranks", str(mpi.ranks)]
+    return [*command, "--idle"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -52,6 +55,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     policy = load_policy(Path("/daemon-policy.json"))
     profile = policy.profile(arguments.profile)
+    if profile.mpi is not None:
+        os.environ["HTTK_DAEMON_MPI_HANDLE"] = arguments.handle
+        os.environ["HTTK_DAEMON_MPI_PROFILE"] = profile.name
     workspace = Workspace("/workspace")
     if workspace.workspace_id != policy.workspace_id:
         return 2

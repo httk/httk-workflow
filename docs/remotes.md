@@ -234,7 +234,8 @@ may exceed the polling or adapter timeout.
 
 Native transfer retains its existing client trust boundary when parsing workspace
 data; this feature adds no client sandbox. The destination daemon enforces payload
-confinement independently. MPI execution remains disabled.
+confinement independently. MPI profiles require the additional site configuration
+and acceptance described in {doc}`workspace_daemon`.
 
 ## From Python
 
