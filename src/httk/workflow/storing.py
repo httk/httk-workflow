@@ -32,7 +32,7 @@ _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 #: order is fixed when a store is created, and every core record is declared then.
 #: Other registered records of the family follow in name order. A later additive
 #: upgrade may only append to this order, never insert or reorder.
-_CORE_RECORDS_ORDER = ("core-data-record", "core-total-energy")
+_CORE_RECORDS_ORDER = ("core-data-record", "core-total-energy", "core-average-total-energy")
 _REBUILD_TYPED = (
     "{target} predates typed records: its values are stored as generic DataRecord rows. Rebuild it: delete "
     "{target} and collect again, keeping the id ledger beside it, so record and run ids are preserved."

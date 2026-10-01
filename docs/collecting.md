@@ -522,7 +522,9 @@ reports = store_collected(items, "results.sqlite", id_base="mydb")
 `store_collected` stores each calculation's inputs like its outputs. A
 `DataRecord` whose definition a typed record carries is stored as that typed
 record (the core total energy becomes a `TotalEnergyRecord`, served and
-filterable as `_httk_total_energy`); other definitions stay generic records,
+filterable as `_httk_total_energy`, and the core average total energy of a
+molecular-dynamics run becomes an `AverageTotalEnergyRecord`, served as
+`_httk_average_total_energy`); other definitions stay generic records,
 stored but with their values not served. When a newer *httk* ships another typed
 record kind (a further core property, say), an existing store is refused with a
 message naming `--upgrade`: rerun with `--upgrade` (`upgrade=True`) to append

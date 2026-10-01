@@ -85,6 +85,13 @@ def collect(record):
         import httk.core
 
         result["initial_structure"] = httk.core.load(workdir / "POSCAR", precision=1e-3)
+    if (workdir / "AVERAGE").exists():
+        average = float((workdir / "AVERAGE").read_text(encoding="utf-8"))
+        result["average_total_energy"] = DataRecord.from_value(
+            "https://schemas.httk.org/defs/v0.1/properties/core/average_total_energy",
+            "_httk_average_total_energy",
+            average,
+        )
     if (workdir / "MOMENT").exists():
         moment = float((workdir / "MOMENT").read_text(encoding="utf-8"))
         result["moment"] = DataRecord.from_value("https://example.test/defs/moment", "moment", moment)
@@ -712,7 +719,8 @@ def test_a_store_that_predates_typed_records_upgrades_unless_it_holds_generic_va
     empty = old_store("empty.sqlite", DataRecord.from_value("https://example.test/defs/other", "other", 1))
     with pytest.raises(
         ValueError,
-        match=r"needs an additive layout upgrade \(new record kinds: records/core-total-energy\); rerun with --upgrade",
+        match=r"needs an additive layout upgrade \(new record kinds: records/core-total-energy, "
+        r"records/core-average-total-energy\); rerun with --upgrade",
     ):
         store_collected(items, str(empty), id_base="httk.probe")
     (report,) = store_collected(items, str(empty), id_base="httk.probe", upgrade=True)
@@ -1006,6 +1014,85 @@ def test_claim_consumes_is_validated(consumes: tuple[str, ...]) -> None:
     with pytest.raises(ValueError, match="consume"):
         Claim("id", consumes=consumes)
     assert Claim("id", consumes=("a/b", "c")).consumes == ("a/b", "c")
+
+
+_AVERAGE = """
+[workflow.outputs.average_total_energy]
+role = "average_total_energy"
+entry_type = "records"
+"""
+_AVERAGE_IRI = "https://schemas.httk.org/defs/v0.1/properties/core/average_total_energy"
+
+
+def test_an_average_total_energy_is_stored_typed_and_served(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    pytest.importorskip("starlette")
+    serve = pytest.importorskip("httk.serve.optimade")
+    from httk.core import AverageTotalEnergyRecord, DataRecord, TotalEnergyRecord
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+    from starlette.testclient import TestClient
+
+    package = _collector(tmp_path / "pkg", extra=_AVERAGE)
+    _calculation(tmp_path / "tree" / "md", AVERAGE="-12.25")
+    path = tmp_path / "store.sqlite"
+    (report,) = store_collected(
+        list(collect_tree(tmp_path / "tree", collectors=(package,))), str(path), id_base="httk.probe"
+    )
+    assert "storage_error" not in report
+
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        records = {family.name: family.records for family in store.entry_layout}["records"]
+        assert records == (DataRecord, TotalEnergyRecord, AverageTotalEnergyRecord)
+        searcher = store.searcher()
+        (row,) = searcher.results(entry=searcher.variable(AverageTotalEnergyRecord))
+        assert row.entry.average_total_energy == -12.25
+        searcher = store.searcher()
+        assert list(searcher.results(entry=searcher.variable(DataRecord))) == []
+        app = serve.create_asgi_app(serve.adapter_from_store(store), baseurl="http://testserver")
+        with TestClient(app, base_url="http://testserver") as client:
+            info = client.get("/v1/info/_httk_records")
+            assert info.status_code == 200, info.text
+            assert info.json()["data"]["properties"]["_httk_average_total_energy"]["$id"] == _AVERAGE_IRI
+            filtered = client.get("/v1/_httk_records", params={"filter": "_httk_average_total_energy < -12"})
+            assert filtered.status_code == 200, filtered.text
+            assert [row["attributes"]["_httk_average_total_energy"] for row in filtered.json()["data"]] == [-12.25]
+
+
+def test_a_two_record_store_upgrades_to_take_average_energies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core.register import entries
+
+    from httk.workflow import storing
+
+    # A store created before the average total energy existed: two core records.
+    registry, order = entries._entry_records, storing._CORE_RECORDS_ORDER
+    older = {name: value for name, value in registry.items() if name != "core-average-total-energy"}
+    monkeypatch.setattr(entries, "_entry_records", older)
+    monkeypatch.setattr(storing, "_CORE_RECORDS_ORDER", ("core-data-record", "core-total-energy"))
+    package = _collector(tmp_path / "pkg", extra=_AVERAGE)
+    _calculation(tmp_path / "tree" / "static")
+    path = tmp_path / "store.sqlite"
+    (old,) = store_collected(
+        list(collect_tree(tmp_path / "tree", collectors=(package,))), str(path), id_base="httk.probe"
+    )
+    assert "storage_error" not in old
+
+    monkeypatch.setattr(entries, "_entry_records", registry)
+    monkeypatch.setattr(storing, "_CORE_RECORDS_ORDER", order)
+    _calculation(tmp_path / "tree" / "zmd", "molecular dynamics", "-2.0", AVERAGE="-12.25")
+    items = list(collect_tree(tmp_path / "tree", collectors=(package,)))
+    with pytest.raises(ValueError, match=r"new record kinds: records/core-average-total-energy\).*--upgrade"):
+        store_collected(items, str(path), id_base="httk.probe")
+
+    static, md = store_collected(items, str(path), id_base="httk.probe", upgrade=True)
+
+    assert "storage_error" not in static and "storage_error" not in md
+    # The typed total energy and its run keep their ids; the new calculation gets its own.
+    assert static["stored"] == old["stored"]
+    old_ids = set(cast(dict[str, Any], old["stored"])["entries"])
+    new_ids = set(cast(dict[str, Any], md["stored"])["entries"])
+    assert len(new_ids) == 2 and not new_ids & old_ids
 
 
 def test_claims_scale_to_wide_trees(tmp_path: Path, test_profile: _TestProfile) -> None:
