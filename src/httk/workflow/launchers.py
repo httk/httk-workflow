@@ -81,16 +81,14 @@ def _read_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_launcher_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Validate launcher metadata, executable, and local binary requirements.
+def _validate_launcher_metadata(
+    root: Path,
+    metadata: Mapping[str, Any],
+    *,
+    check_binaries: bool = True,
+) -> dict[str, Any]:
+    """Validate already-read launcher metadata and local requirements."""
 
-    :param bundle: The launcher bundle path.
-    :return: The validated metadata document.
-    :raises ValueError: If the bundle is malformed or unavailable locally.
-    """
-
-    root = Path(bundle).expanduser().resolve()
-    metadata = _read_object(_metadata_path(root))
     if metadata.get("format") != LAUNCHER_FORMAT or metadata.get("format_version") != 2:
         raise ValueError(f"{LAUNCHER_METADATA} must use {LAUNCHER_FORMAT} format version 2")
     if metadata.get("launcher_version") != 2:
@@ -111,9 +109,21 @@ def validate_launcher_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     for binary in binaries:
         if not isinstance(binary, str) or not binary:
             raise ValueError("required_binaries entries must be nonempty strings")
-        if shutil.which(binary) is None:
+        if check_binaries and shutil.which(binary) is None:
             raise ValueError(f"required launcher binary is unavailable: {binary}")
-    return metadata
+    return dict(metadata)
+
+
+def validate_launcher_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
+    """Validate launcher metadata, executable, and local binary requirements.
+
+    :param bundle: The launcher bundle path.
+    :return: The validated metadata document.
+    :raises ValueError: If the bundle is malformed or unavailable locally.
+    """
+
+    root = Path(bundle).expanduser().resolve()
+    return _validate_launcher_metadata(root, _read_object(_metadata_path(root)))
 
 
 def valid_launcher_name(name: str) -> str:
@@ -139,6 +149,25 @@ def project_launcher_roots(project: Path) -> tuple[Path, ...]:
     return (project / PROJECT_DIRECTORY / "launchers",)
 
 
+def _locate_launcher(
+    name: str,
+    *,
+    project: str | os.PathLike[str] | None = None,
+) -> LauncherTarget:
+    """Locate a project launcher before a global launcher without reading it."""
+
+    name = valid_launcher_name(name)
+    project_root = discover_project(project)
+    candidates: list[tuple[Path, bool]] = []
+    if project_root is not None:
+        candidates.extend((root / name, True) for root in project_launcher_roots(project_root))
+    candidates.append((launchers_home() / name, False))
+    for bundle, local in candidates:
+        if bundle.is_dir():
+            return LauncherTarget(name, bundle, local)
+    raise ResolutionMiss(f"unknown launcher: {name}")
+
+
 def resolve_launcher(
     name: str,
     *,
@@ -153,17 +182,9 @@ def resolve_launcher(
     :raises ValueError: If the found bundle is invalid.
     """
 
-    name = valid_launcher_name(name)
-    project_root = discover_project(project)
-    candidates: list[tuple[Path, bool]] = []
-    if project_root is not None:
-        candidates.extend((root / name, True) for root in project_launcher_roots(project_root))
-    candidates.append((launchers_home() / name, False))
-    for bundle, local in candidates:
-        if bundle.is_dir():
-            validate_launcher_bundle(bundle)
-            return LauncherTarget(name, bundle, local)
-    raise ResolutionMiss(f"unknown launcher: {name}")
+    target = _locate_launcher(name, project=project)
+    validate_launcher_bundle(target.bundle)
+    return target
 
 
 def list_launchers(project: str | os.PathLike[str] | None = None) -> list[dict[str, object]]:

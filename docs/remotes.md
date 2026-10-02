@@ -173,26 +173,31 @@ Use `mount-daemon` when files are the only channel to the destination. First
 provision and start {doc}`workspace_daemon` on the HPC system. Export its data,
 request and response directories through the restricted transport account;
 keep the policy, trusted installation and private ledger outside that export.
-Configure the client with the mounted paths and identities from that policy:
+Obtain the public endpoint export through a trusted operator handoff, then map
+its workspace and mailbox directories to their local mounted paths:
 
 ```console
 $ httk workflow remote add --template mount-daemon confined
-$ httk workflow remote configure confined \
-      --set mount_root=/home/me/mounts/cluster/data \
-      --set daemon_requests=/home/me/mounts/cluster/requests \
-      --set daemon_responses=/home/me/mounts/cluster/responses \
-      --set daemon_workspace_id=12345678-1234-4234-8234-123456789abc \
-      --set daemon_enrollment_id=0123456789abcdef0123456789abcdef \
-      --set daemon_public_key=ed25519:REPLACE_WITH_DAEMON_PUBLIC_KEY
+$ httk workflow remote daemon configure confined --endpoint endpoint.json \
+      --mount-root /home/me/mounts/cluster/data \
+      --requests /home/me/mounts/cluster/requests \
+      --responses /home/me/mounts/cluster/responses
 $ httk workflow remote check confined
 ```
 
-These six settings are the entire configuration. Obtain the daemon public key
-through a trusted operator handoff. Configure an httk identity whose public key
-is authorized by the daemon; a missing signing key is an error. The adapter accepts no executor,
-prelude, arbitrary environment or scheduler options. `configure` checks the local
-paths and workspace identity without contacting the daemon. `check` sends a health
-request; it verifies a matching broker response, not compute-node readiness.
+The export pins the response-signing public key, destination identities, approved
+configuration digests and maximum request lifetime. It contains no private key.
+Re-import it after the operator approves changed configurations. Configure an httk
+identity whose public key is authorized by the daemon; a missing signing key is
+an error. `configure` checks local paths and workspace identity without publishing
+a request. `check` sends a signed health request; it checks a broker response and
+does not establish compute-node readiness.
+
+Manual `remote configure --set` remains available for the eight endpoint settings:
+`mount_root`, `daemon_requests`, `daemon_responses`, `daemon_workspace_id`,
+`daemon_enrollment_id`, `daemon_public_key`, `daemon_configurations` (a JSON map
+of names to digests), and `daemon_request_max_age`. Arbitrary commands, preludes,
+environment or scheduler overrides are not endpoint settings.
 
 Use **absolute mounted workspace paths** for native job transfers. This explicitly
 supports the existing filesystem transfer protocol over a suitable mount: source
@@ -202,7 +207,7 @@ not run the job runner or its prelude on the client. For example:
 ```console
 $ httk job transfer default /home/me/mounts/cluster/data --job JOB
 $ python -c 'import secrets; print(secrets.token_hex(16))'
-$ httk workflow remote daemon start confined --profile small --request-id REQUEST_ID
+$ httk workflow remote daemon start confined --configuration small --request-id REQUEST_ID
 $ httk workflow remote daemon status confined --handle MANAGER_HANDLE
 $ httk workflow remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
 $ httk job transfer /home/me/mounts/cluster/data default --state succeeded
@@ -217,6 +222,8 @@ with a new ID; reconcile it with the operator. Use a fresh ID for each status
 refresh. The client retains exact signed requests in its local httk data directory
 before publication. Retries reuse their original timestamps and signatures;
 changing the intent, signer or endpoint pin under an existing ID is refused.
+Retain the previous endpoint export when updating a catalog: retries of an old
+configuration need its original digest, while a new configuration needs a new ID.
 Do not delete this local request history to resolve an uncertain operation.
 Run only one caller per request ID at a time. The clock-skew allowance is 130
 minutes; see {doc}`workspace_daemon` for the acceptance window and replay rules.
@@ -242,7 +249,7 @@ may exceed the polling or adapter timeout.
 
 Native transfer retains its existing client trust boundary when parsing workspace
 data; this feature adds no client sandbox. The destination daemon enforces payload
-confinement independently. MPI profiles require the additional site configuration
+confinement independently. MPI configurations require the additional site configuration
 and acceptance described in {doc}`workspace_daemon`.
 
 ## From Python

@@ -16,8 +16,8 @@ from urllib.parse import quote
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, encode_response
 from ._daemon_protocol import request_digest as canonical_request_digest
 
-_SCHEMA_VERSION = 2
-_SCHEMA_ID = "httk-workspace-daemon-ledger-v2"
+_SCHEMA_VERSION = 3
+_SCHEMA_ID = "httk-workspace-daemon-ledger-v3"
 _STATES = frozenset({"received", "submitting", "submitted", "uncertain", "refused", "done"})
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")

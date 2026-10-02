@@ -26,6 +26,7 @@ from httk.workflow.adapters import run_adapter
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
+CONFIGURATION_DIGEST = "b" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +57,15 @@ def _endpoint(tmp_path: Path) -> Endpoint:
     response_seed.write_text("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n", encoding="ascii")
     public_key = identity_public_key(response_seed)
     assert public_key is not None
-    return Endpoint(workspace, requests, responses, WORKSPACE_ID, ENROLLMENT_ID, public_key)
+    return Endpoint(
+        workspace,
+        requests,
+        responses,
+        WORKSPACE_ID,
+        ENROLLMENT_ID,
+        public_key,
+        {"cpu": CONFIGURATION_DIGEST},
+    )
 
 
 def _settings(endpoint: Endpoint) -> dict[str, object]:
@@ -67,6 +76,8 @@ def _settings(endpoint: Endpoint) -> dict[str, object]:
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
         "daemon_public_key": endpoint.daemon_public_key,
+        "daemon_configurations": dict(endpoint.configurations),
+        "daemon_request_max_age": endpoint.request_max_age,
     }
 
 
@@ -169,7 +180,7 @@ def test_configure_rejects_unknown_settings(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     bundle = _bundle(tmp_path, endpoint)
 
-    with pytest.raises(RuntimeError, match="six endpoint settings"):
+    with pytest.raises(RuntimeError, match="eight endpoint settings"):
         run_adapter(bundle, "configure", {"settings": {"exec_command": "touch /tmp/no"}})
 
 
@@ -232,7 +243,14 @@ def test_real_adapter_subprocess_preserves_confirmed_refusal(tmp_path: Path) -> 
     endpoint = _endpoint(tmp_path)
     bundle = _bundle(tmp_path, endpoint)
     request = sign_request(
-        Request("0" * 32, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID),
+        Request(
+            "0" * 32,
+            WORKSPACE_ID,
+            "start_manager",
+            profile="cpu",
+            enrollment_id=ENROLLMENT_ID,
+            configuration_digest=CONFIGURATION_DIGEST,
+        ),
         now=1_000_000,
     )
     thread, errors = _broker(endpoint, "refused", reason="policy_refused")

@@ -1,6 +1,8 @@
 """Foreground daemon broker behavior and ordering tests."""
 
+import argparse
 import base64
+import json
 import logging
 import sqlite3
 import threading
@@ -12,6 +14,7 @@ import pytest
 from httk.core.identity import identity_public_key
 
 from httk.workflow import _daemon_service as service_module
+from httk.workflow._daemon_activation import activation_document
 from httk.workflow._daemon_auth import sign_request, verify_response
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
@@ -113,7 +116,10 @@ def _request(
     enrollment_id: str = ENROLLMENT_ID,
     profile: str | None = None,
     handle: str | None = None,
+    configuration_digest: str | None = None,
 ) -> Request:
+    if operation == "start_manager" and configuration_digest is None:
+        configuration_digest = _policy(tmp_path).configuration_digest(profile) if profile == "cpu" else "0" * 64
     request = Request(
         f"{number:032x}",
         workspace_id,
@@ -121,6 +127,7 @@ def _request(
         profile=profile,
         handle=handle,
         enrollment_id=enrollment_id,
+        configuration_digest=configuration_digest,
     )
     return sign_request(
         request,
@@ -171,6 +178,13 @@ def _read(broker: Broker, request: Request) -> Response:
     return response
 
 
+def _capture_run_error(arguments: argparse.Namespace, errors: list[BaseException]) -> None:
+    try:
+        service_module._run(arguments)
+    except BaseException as exc:
+        errors.append(exc)
+
+
 def test_health_start_status_and_cancel_use_protected_identities(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
     stack, broker, _ = _open(tmp_path, policy)
@@ -206,6 +220,111 @@ def test_health_start_status_and_cancel_use_protected_identities(tmp_path: Path)
         stack.close()
 
 
+def test_completed_old_configuration_replays_but_new_and_received_old_starts_refuse(tmp_path: Path) -> None:
+    old_policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, old_policy)
+    gateway = broker.gateway
+    assert isinstance(gateway, RecordingGateway)
+    try:
+        completed = _request(tmp_path, 1, "start_manager", profile="cpu")
+        _publish(broker, completed)
+        broker.process_once(threading.Event())
+        original_response = _read(broker, completed)
+        assert original_response.outcome == "submitted"
+        assert len(gateway.submissions) == 1
+
+        current_policy = replace(old_policy, profiles=(replace(old_policy.profile("cpu"), cpus=4),))
+        broker.policy = current_policy
+        gateway.policy = current_policy
+        _publish(broker, completed)
+        broker.process_once(threading.Event())
+        assert _read(broker, completed) == original_response
+        assert len(gateway.submissions) == 1
+
+        stale = _request(
+            tmp_path,
+            2,
+            "start_manager",
+            profile="cpu",
+            configuration_digest=old_policy.configuration_digest("cpu"),
+        )
+        _publish(broker, stale)
+        broker.process_once(threading.Event())
+        assert _read(broker, stale).reason == "stale_configuration"
+        assert len(gateway.submissions) == 1
+
+        recovered = _request(
+            tmp_path,
+            3,
+            "start_manager",
+            profile="cpu",
+            configuration_digest=old_policy.configuration_digest("cpu"),
+        )
+        ledger.admit(recovered)
+        _publish(broker, recovered)
+        broker.process_once(threading.Event())
+        assert _read(broker, recovered).reason == "stale_configuration"
+        assert ledger.lookup_request(recovered.request_id).state == "refused"  # type: ignore[union-attr]
+        assert len(gateway.submissions) == 1
+    finally:
+        stack.close()
+
+
+def test_service_rechecks_protected_activation_after_acquiring_ledger_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    for path in (policy.state, policy.requests, policy.responses):
+        path.mkdir()
+    initialize_response_seed(policy.state)
+    with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
+        pass
+    selected = tmp_path / "snapshots/selected.json"
+    replacement = tmp_path / "snapshots/replacement.json"
+    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.state / "active.json").chmod(0o600)
+    checks: list[None] = []
+
+    class Gateway(RecordingGateway):
+        def __init__(self, configured: Policy, _source: Path) -> None:
+            super().__init__(configured)
+
+        def check(self) -> None:
+            checks.append(None)
+
+    monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "SlurmGateway", Gateway)
+    monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    arguments = argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False)
+    loaded = threading.Event()
+    resume = threading.Event()
+    errors: list[BaseException] = []
+
+    def load_selected(_path: Path) -> Policy:
+        loaded.set()
+        assert resume.wait(5)
+        return policy
+
+    monkeypatch.setattr(service_module, "load_policy", load_selected)
+    startup = threading.Thread(target=lambda: _capture_run_error(arguments, errors))
+    startup.start()
+    assert loaded.wait(5)
+    (policy.state / "active.json").write_text(json.dumps(activation_document(replacement, policy)), encoding="utf-8")
+    (policy.state / "active.json").chmod(0o600)
+    resume.set()
+    startup.join(5)
+    assert not startup.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], ValueError)
+    assert "stale or mismatched" in str(errors[0])
+    assert checks == []
+    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.state / "active.json").chmod(0o600)
+    monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
+    service_module._run(arguments)
+    assert checks == [None]
+
+
 def test_refusals_scheduler_failures_conflicts_and_capacity_are_signed(tmp_path: Path) -> None:
     policy = _policy(tmp_path, max_records=3, max_submissions=2)
     stack, broker, ledger = _open(tmp_path, policy)
@@ -215,7 +334,10 @@ def test_refusals_scheduler_failures_conflicts_and_capacity_are_signed(tmp_path:
         invalid = _request(tmp_path, 1, "start_manager", profile="missing")
         _publish(broker, invalid)
         broker.process_once(threading.Event())
-        assert (_read(broker, invalid).outcome, _read(broker, invalid).reason) == ("refused", "invalid_profile")
+        assert (_read(broker, invalid).outcome, _read(broker, invalid).reason) == (
+            "refused",
+            "invalid_configuration",
+        )
 
         gateway.submit_error = True
         uncertain = _request(tmp_path, 2, "start_manager", profile="cpu")

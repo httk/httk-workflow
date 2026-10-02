@@ -577,8 +577,6 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
     ]
     if arguments.check:
         result.append("--check")
-    elif arguments.initialize:
-        result.append("--initialize")
     elif arguments.once:
         result.append("--once")
     return result
@@ -731,7 +729,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", required=True, choices=("broker", "payload", "allocation", "mpi-rank"))
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true")
-    modes.add_argument("--initialize", action="store_true")
     modes.add_argument("--once", action="store_true")
     parser.add_argument("--profile")
     parser.add_argument("--handle")
@@ -760,7 +757,7 @@ def _validate_arguments(arguments: argparse.Namespace, policy: Any) -> Path:
         ):
             raise ValueError("broker mode forbids payload arguments")
     else:
-        if arguments.workspace is not None or arguments.check or arguments.initialize or arguments.once:
+        if arguments.workspace is not None or arguments.check or arguments.once:
             raise ValueError(f"{arguments.mode} mode forbids broker arguments")
         if type(arguments.profile) is not str or _PROFILE.fullmatch(arguments.profile) is None:
             raise ValueError(f"{arguments.mode} mode requires a valid --profile")

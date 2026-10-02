@@ -20,6 +20,7 @@ from httk.workflow._daemon_protocol import Request, Response, request_digest
 REQUEST_ID = "0123456789abcdef0123456789abcdef"
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
+CONFIGURATION_DIGEST = "b" * 64
 
 
 def _seed(tmp_path: Path, byte: int = 1) -> Path:
@@ -64,6 +65,25 @@ def test_request_signature_covers_every_field_and_requires_allowlist(tmp_path: P
     ):
         with pytest.raises(ValueError, match="signature"):
             verify_request(tampered, [public_key])
+
+
+def test_request_signature_covers_configuration_digest(tmp_path: Path) -> None:
+    seed = _seed(tmp_path)
+    request = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
+    signed = sign_request(request, seed_path=seed, now=100)
+    public_key = identity_public_key(seed)
+    assert public_key is not None
+
+    verify_request(signed, [public_key])
+    with pytest.raises(ValueError, match="signature"):
+        verify_request(replace(signed, configuration_digest="c" * 64), [public_key])
 
 
 def test_request_signature_refuses_forged_unlisted_and_noncanonical_encodings(tmp_path: Path) -> None:

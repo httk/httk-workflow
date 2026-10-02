@@ -1,6 +1,7 @@
 """Strict operator policy for the confined workspace daemon."""
 
 import base64
+import hashlib
 import json
 import math
 import os
@@ -170,14 +171,20 @@ class MPIProfile:
 
     :param nodes: Number of allocated nodes.
     :param ranks: Total number of MPI ranks.
+    :param ntasks_per_node: Optional fixed Slurm placement bound.
     """
 
     nodes: int
     ranks: int
+    ntasks_per_node: int | None = None
 
     def __post_init__(self) -> None:
         _integer(self.nodes, "MPI nodes", 1, 4096)
         _integer(self.ranks, "MPI ranks", self.nodes, 65_536)
+        if self.ntasks_per_node is not None:
+            _integer(self.ntasks_per_node, "MPI tasks per node", 1, 65_536)
+            if self.nodes * self.ntasks_per_node < self.ranks:
+                raise ValueError("MPI tasks per node cannot accommodate all ranks")
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +243,9 @@ class Profile:
     :param partition: Optional fixed Slurm partition.
     :param account: Optional fixed Slurm account.
     :param mpi: Optional fixed MPI allocation geometry.
+    :param workers: Concurrent attempts in the single manager.
+    :param prelude: Frozen shell prelude run before the manager.
+    :param manager_command: Optional frozen manager executable.
     """
 
     name: str
@@ -245,6 +255,9 @@ class Profile:
     partition: str | None = None
     account: str | None = None
     mpi: MPIProfile | None = None
+    workers: int = 1
+    prelude: str = ""
+    manager_command: str | None = None
 
     def __post_init__(self) -> None:
         _name(self.name, "profile name", _PROFILE_NAME)
@@ -256,6 +269,15 @@ class Profile:
                 _name(value, field_name, _SLURM_NAME)
         if self.mpi is not None and not isinstance(self.mpi, MPIProfile):
             raise ValueError("mpi must be an MPIProfile")
+        _integer(self.workers, "workers", 1, 1024)
+        if self.mpi is not None and self.workers != 1:
+            raise ValueError("MPI profiles require exactly one manager worker")
+        if type(self.prelude) is not str or "\0" in self.prelude:
+            raise ValueError("prelude must be a string without NUL")
+        if self.manager_command is not None and (
+            type(self.manager_command) is not str or not self.manager_command.strip() or "\0" in self.manager_command
+        ):
+            raise ValueError("manager_command must be a nonempty string without NUL")
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +446,38 @@ class Policy:
                 return profile
         raise ValueError(f"unknown daemon profile: {name!r}")
 
+    def configuration_digest(self, name: str) -> str:
+        """Return the digest of one complete execution configuration.
+
+        :param name: Approved configuration name.
+        :return: Lowercase SHA-256 hexadecimal digest.
+        :raises ValueError: If the configuration is unknown.
+        """
+
+        document = policy_document(self)
+        mpi = document.get("mpi")
+        if isinstance(mpi, dict):
+            mpi = {key: value for key, value in mpi.items() if key != "max_steps"}
+        execution = {
+            "workspace": document["workspace"],
+            "workspace_id": document["workspace_id"],
+            "bwrap": document["bwrap"],
+            "python": document["python"],
+            "bootstrap": str(Path(__file__).with_name("_daemon_bootstrap.py")),
+            "sbatch": document["sbatch"],
+            "squeue": document["squeue"],
+            "scancel": document["scancel"],
+            "cluster": document["cluster"],
+            "slurm_conf": document.get("slurm_conf"),
+            "readonly_paths": document["readonly_paths"],
+            "broker_paths": document["broker_paths"],
+            "configuration_name": name,
+            "configuration": _profile_document(self.profile(name)),
+            "mpi": mpi,
+        }
+        canonical = json.dumps(execution, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        return hashlib.sha256(canonical).hexdigest()
+
 
 def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
@@ -505,6 +559,77 @@ def _json_path(value: object, name: str) -> Path:
     return _path(Path(value), name)
 
 
+def _profile_document(profile: Profile) -> dict[str, object]:
+    result: dict[str, object] = {
+        "cpus": profile.cpus,
+        "memory_mb": profile.memory_mb,
+        "time_minutes": profile.time_minutes,
+        "workers": profile.workers,
+        "prelude": profile.prelude,
+        "manager_command": profile.manager_command,
+    }
+    if profile.partition is not None:
+        result["partition"] = profile.partition
+    if profile.account is not None:
+        result["account"] = profile.account
+    if profile.mpi is not None:
+        result["mpi"] = {
+            "nodes": profile.mpi.nodes,
+            "ranks": profile.mpi.ranks,
+            "ntasks_per_node": profile.mpi.ntasks_per_node,
+        }
+    return result
+
+
+def policy_document(policy: Policy) -> dict[str, object]:
+    """Return the complete canonicalizable runtime policy document.
+
+    :param policy: Validated runtime policy.
+    :return: JSON-compatible policy object with explicit defaults.
+    """
+
+    result: dict[str, object] = {
+        "format": _FORMAT,
+        "format_version": _FORMAT_VERSION,
+        "workspace": str(policy.workspace),
+        "workspace_id": policy.workspace_id,
+        "enrollment_id": policy.enrollment_id,
+        "requests": str(policy.requests),
+        "responses": str(policy.responses),
+        "state": str(policy.state),
+        "bwrap": str(policy.bwrap),
+        "python": str(policy.python),
+        "sbatch": str(policy.sbatch),
+        "squeue": str(policy.squeue),
+        "scancel": str(policy.scancel),
+        "cluster": policy.cluster,
+        "readonly_paths": [str(path) for path in policy.readonly_paths],
+        "broker_paths": [str(path) for path in policy.broker_paths],
+        "profiles": {profile.name: _profile_document(profile) for profile in policy.profiles},
+        "authorized_keys": list(policy.authorized_keys),
+        "max_records": policy.max_records,
+        "max_submissions": policy.max_submissions,
+        "poll_seconds": policy.poll_seconds,
+        "command_timeout": policy.command_timeout,
+        "max_output_bytes": policy.max_output_bytes,
+        "request_max_age": policy.request_max_age,
+    }
+    if policy.slurm_conf is not None:
+        result["slurm_conf"] = str(policy.slurm_conf)
+    if policy.mpi is not None:
+        result["mpi"] = {
+            "srun": str(policy.mpi.srun),
+            "control_root": str(policy.mpi.control_root),
+            "pmix_roots": [str(path) for path in policy.mpi.pmix_roots],
+            "shm_root": str(policy.mpi.shm_root),
+            "devices": [str(path) for path in policy.mpi.devices],
+            "environment": dict(policy.mpi.environment),
+            "max_steps": policy.mpi.max_steps,
+            "termination_grace": policy.mpi.termination_grace,
+        }
+    return result
+
+
 def _decode_policy(data: bytes) -> Policy:
     if type(data) is not bytes or len(data) > MAX_POLICY_BYTES:
         raise ValueError("invalid policy document")
@@ -575,14 +700,20 @@ def _decode_policy(data: bytes) -> Policy:
         if type(profile_name) is not str or not isinstance(raw, dict):
             raise ValueError("invalid profile entry")
         profile_required = {"cpus", "memory_mb", "time_minutes"}
-        profile_optional = {"partition", "account", "mpi"}
+        profile_optional = {"partition", "account", "mpi", "workers", "prelude", "manager_command"}
         if not profile_required <= set(raw) or not set(raw) <= profile_required | profile_optional:
             raise ValueError("profile fields are missing or unknown")
         if "mpi" in raw:
             raw_mpi_profile = raw["mpi"]
-            if not isinstance(raw_mpi_profile, dict) or set(raw_mpi_profile) != {"nodes", "ranks"}:
+            if (
+                not isinstance(raw_mpi_profile, dict)
+                or not {"nodes", "ranks"} <= set(raw_mpi_profile)
+                or not set(raw_mpi_profile) <= {"nodes", "ranks", "ntasks_per_node"}
+            ):
                 raise ValueError("MPI profile fields are missing or unknown")
-            mpi_profile = MPIProfile(raw_mpi_profile["nodes"], raw_mpi_profile["ranks"])
+            mpi_profile = MPIProfile(
+                raw_mpi_profile["nodes"], raw_mpi_profile["ranks"], raw_mpi_profile.get("ntasks_per_node")
+            )
         else:
             mpi_profile = None
         profiles.append(
@@ -594,6 +725,9 @@ def _decode_policy(data: bytes) -> Policy:
                 raw.get("partition"),
                 raw.get("account"),
                 mpi_profile,
+                raw.get("workers", 1),
+                raw.get("prelude", ""),
+                raw.get("manager_command"),
             )
         )
     raw_authorized_keys = value["authorized_keys"]
@@ -687,4 +821,4 @@ def load_policy(path: Path) -> Policy:
     return _load_policy_with_bytes(path)[0]
 
 
-__all__ = ["MPIProfile", "MPISettings", "Policy", "Profile", "load_policy"]
+__all__ = ["MPIProfile", "MPISettings", "Policy", "Profile", "load_policy", "policy_document"]

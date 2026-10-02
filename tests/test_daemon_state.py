@@ -28,6 +28,7 @@ def _request(
         profile=profile,
         handle=handle,
         enrollment_id=ENROLLMENT_ID,
+        configuration_digest="0" * 64 if operation == "start_manager" else None,
     )
 
 
@@ -99,6 +100,7 @@ def test_replay_conflict_and_canonical_persisted_response(tmp_path: Path) -> Non
             "start_manager",
             profile="cpu",
             enrollment_id=ENROLLMENT_ID,
+            configuration_digest="1" * 64,
         )
         with pytest.raises(ConflictError):
             ledger.admit(changed)
@@ -132,14 +134,15 @@ def test_ledger_refuses_signed_responses(tmp_path: Path) -> None:
             ledger.finish(request.request_id, signed)
 
 
-def test_old_unsigned_ledger_version_is_preserved_and_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("old_version", [1, 2])
+def test_old_ledger_versions_are_preserved_and_refused(tmp_path: Path, old_version: int) -> None:
     state = tmp_path / "state"
     state.mkdir()
     with Ledger(state, WORKSPACE_ID, ENROLLMENT_ID, initialize=True):
         pass
     database = state / "ledger.sqlite3"
     connection = sqlite3.connect(database)
-    connection.execute("PRAGMA user_version=1")
+    connection.execute(f"PRAGMA user_version={old_version}")
     connection.commit()
     connection.close()
     old_ledger = database.read_bytes()
@@ -215,6 +218,7 @@ def test_record_and_cumulative_submission_quotas_replay_before_capacity(tmp_path
                     "start_manager",
                     profile="cpu",
                     enrollment_id=ENROLLMENT_ID,
+                    configuration_digest="1" * 64,
                 )
             )
         ledger.admit(health)

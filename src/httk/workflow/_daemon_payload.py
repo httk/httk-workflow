@@ -13,11 +13,13 @@ from .workspace import Workspace
 
 def _manager_command(policy: Policy, profile: Profile) -> list[str]:
     mpi = profile.mpi
+    executable = (
+        [profile.manager_command]
+        if profile.manager_command is not None
+        else [str(policy.python), "-I", "-m", "httk.core.cli"]
+    )
     command = [
-        str(policy.python),
-        "-I",
-        "-m",
-        "httk.core.cli",
+        *executable,
         "workflow",
         "manager",
         "run",
@@ -27,7 +29,7 @@ def _manager_command(policy: Policy, profile: Profile) -> list[str]:
         "--count",
         "1",
         "--workers",
-        "1",
+        str(profile.workers),
         "--worker-resource",
         "procs",
         str(profile.cpus * mpi.ranks if mpi is not None else profile.cpus),
@@ -61,9 +63,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspace = Workspace("/workspace")
     if workspace.workspace_id != policy.workspace_id:
         return 2
-    prelude = workspace.read_settings().get("environment.prelude", "")
-    if not isinstance(prelude, str):
-        return 2
     # These redirections occur after containment, even if workspace paths are symlinks.
     log = workspace.control / f"daemon-manager-{arguments.handle}.log"
     descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
@@ -74,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if descriptor not in (1, 2):
             os.close(descriptor)
     os.chdir(workspace.root)
-    script = "set -e\n" + prelude + "\nexec " + shlex.join(_manager_command(policy, profile)) + "\n"
+    script = "set -e\n" + profile.prelude + "\nexec " + shlex.join(_manager_command(policy, profile)) + "\n"
     os.execve("/bin/bash", ["/bin/bash", "--noprofile", "--norc", "-c", script], dict(os.environ))
 
 

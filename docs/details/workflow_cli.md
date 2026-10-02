@@ -86,6 +86,7 @@ job UUIDs when precise attribution matters.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workspace init [OPTIONS] PATH...` | create or adopt workspaces, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
+| `workspace daemon WORKSPACE --policy POLICY` | run the confined Slurm file-command broker | `--initialize`, `--reload`, `--export-endpoint`, `--check`, `--once` |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |
@@ -717,8 +718,9 @@ unambiguous.
 | `remote import-v1 [OPTIONS] SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
+| `remote daemon configure REMOTE` | import an approved endpoint catalog | required `--endpoint`, `--mount-root`, `--requests`, `--responses` |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
-| `remote daemon start REMOTE` | start one approved manager profile | required `--profile`, `--request-id`; `--wait-seconds` |
+| `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`, `--request-id`; `--wait-seconds` |
 | `remote daemon status REMOTE` | inspect a manager | required `--handle`; `--request-id`, `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
 
@@ -727,7 +729,7 @@ unambiguous.
 filesystem plus a command executor), or `mount-daemon` (typed file requests to a
 confined destination broker). The first three use the target workspace
 `manager.launch` setting, such as a packaged `slurm` launcher. `mount-daemon`
-selects an operator-defined serial or MPI profile through the daemon; it refuses generic
+selects a locally approved serial or MPI launcher configuration through the daemon; it refuses generic
 `REMOTE:NAME` operations. Transfer jobs using absolute mounted workspace paths.
 See {doc}`/remotes` for configuration and request-ID retry rules.
 
@@ -1596,7 +1598,7 @@ non-interactive-shell test, on any host a remote adapter reaches.
 ## `workflow mpi run`
 
 `httk workflow mpi run -- APPLICATION ARG...` executes one application through the
-current daemon MPI allocation. The protected profile fixes nodes, ranks and CPUs;
+current daemon MPI allocation. The approved configuration fixes nodes, ranks and CPUs;
 there are no caller-supplied Slurm options. The wrapper requires an active daemon
 MPI manager, streams stdout/stderr, uses `/dev/null` for stdin and returns the step
 status. A connection failure produces an uncertain result without resubmission.

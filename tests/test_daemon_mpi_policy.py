@@ -3,12 +3,13 @@
 import base64
 import json
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from httk.workflow._daemon_policy import MPIProfile, MPISettings, Policy, Profile, load_policy
+from httk.workflow._daemon_policy import MPIProfile, MPISettings, Policy, Profile, load_policy, policy_document
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
@@ -83,6 +84,24 @@ def test_mpi_policy_decodes_to_frozen_values(tmp_path: Path) -> None:
         policy.mpi.max_steps = 1  # type: ignore[misc]
 
 
+def test_mpi_placement_round_trips_and_changes_configuration_digest(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    profiles = document["profiles"]
+    assert isinstance(profiles, dict) and isinstance(profiles["mpi"], dict)
+    geometry = profiles["mpi"]["mpi"]
+    assert isinstance(geometry, dict)
+    geometry["ntasks_per_node"] = 4
+    policy = load_policy(_write(tmp_path, document))
+    assert policy.profile("mpi").mpi == MPIProfile(nodes=2, ranks=8, ntasks_per_node=4)
+    assert policy.configuration_digest("mpi") != replace(
+        policy,
+        profiles=(policy.profile("serial"), replace(policy.profile("mpi"), mpi=MPIProfile(2, 8, 5))),
+    ).configuration_digest("mpi")
+    serialized = tmp_path / "serialized.json"
+    serialized.write_text(json.dumps(policy_document(policy)), encoding="utf-8")
+    assert load_policy(serialized) == policy
+
+
 def test_serial_policy_keeps_mpi_optional(tmp_path: Path) -> None:
     document = _document(tmp_path)
     document.pop("mpi")
@@ -101,6 +120,17 @@ def test_serial_policy_keeps_mpi_optional(tmp_path: Path) -> None:
 def test_mpi_geometry_is_bounded(nodes: object, ranks: object) -> None:
     with pytest.raises(ValueError):
         MPIProfile(nodes, ranks)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("ntasks_per_node", [0, True, 2])
+def test_mpi_placement_must_be_positive_and_accommodate_ranks(ntasks_per_node: object) -> None:
+    with pytest.raises(ValueError):
+        MPIProfile(2, 8, ntasks_per_node)  # type: ignore[arg-type]
+
+
+def test_mpi_configuration_requires_one_manager_worker() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        Profile("mpi", 2, 1024, 10, mpi=MPIProfile(1, 1), workers=2)
 
 
 def test_mpi_profile_requires_settings(tmp_path: Path) -> None:

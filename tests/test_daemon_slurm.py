@@ -173,7 +173,14 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
         "print('123;cluster')\n",
     )
     start = sign_request(
-        Request("1" * 32, policy.workspace_id, "start_manager", profile="cpu", enrollment_id=policy.enrollment_id),
+        Request(
+            "1" * 32,
+            policy.workspace_id,
+            "start_manager",
+            profile="cpu",
+            enrollment_id=policy.enrollment_id,
+            configuration_digest=policy.configuration_digest("cpu"),
+        ),
         seed_path=client_seed,
     )
     with ExitStack() as stack:
@@ -239,7 +246,7 @@ def _mpi_policy(policy: Policy, tmp_path: Path) -> Policy:
         control_root=tmp_path / "mpi-control",
         pmix_roots=(tmp_path / "pmix",),
     )
-    profile = replace(policy.profiles[0], mpi=MPIProfile(nodes=2, ranks=4))
+    profile = replace(policy.profiles[0], mpi=MPIProfile(nodes=2, ranks=4, ntasks_per_node=2))
     return replace(policy, profiles=(profile,), mpi=settings)
 
 
@@ -252,7 +259,14 @@ def test_mpi_submission_has_fixed_geometry_and_forbids_requeue(policy: Policy, t
     )
     SlurmGateway(policy, tmp_path / "protected.json").submit(policy.profiles[0], _HANDLE)
     argv, script = json.loads(record.read_text())
-    assert {"--nodes=2", "--ntasks=4", "--cpus-per-task=2", "--mem=512M", "--no-requeue"} <= set(argv)
+    assert {
+        "--nodes=2",
+        "--ntasks=4",
+        "--ntasks-per-node=2",
+        "--cpus-per-task=2",
+        "--mem=512M",
+        "--no-requeue",
+    } <= set(argv)
     assert "--mode allocation --profile cpu --handle " + _HANDLE in script
     assert " -I -S " in script
 

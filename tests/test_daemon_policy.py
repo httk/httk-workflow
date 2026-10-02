@@ -3,13 +3,14 @@
 import base64
 import importlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from httk.workflow._daemon_policy import Policy, Profile, load_policy
+from httk.workflow._daemon_policy import Policy, Profile, load_policy, policy_document
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
@@ -69,6 +70,55 @@ def test_policy_loads_exact_fields_and_defaults(tmp_path: Path) -> None:
     assert policy.profile("long-1").partition == "compute.1"
     with pytest.raises(ValueError, match="unknown daemon profile"):
         policy.profile("missing")
+
+
+def test_runtime_policy_document_round_trips_frozen_configuration(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    profiles = document["profiles"]
+    assert isinstance(profiles, dict) and isinstance(profiles["cpu"], dict)
+    profiles["cpu"].update(
+        workers=4,
+        prelude="module load approved\nexport SITE=yes",
+        manager_command="approved-httk",
+    )
+    policy = load_policy(_write(tmp_path, document))
+    serialized = policy_document(policy)
+    round_trip = tmp_path / "round-trip.json"
+    round_trip.write_text(json.dumps(serialized), encoding="utf-8")
+    assert load_policy(round_trip) == policy
+    assert policy.profile("cpu").workers == 4
+    assert policy.profile("cpu").prelude == "module load approved\nexport SITE=yes"
+    assert policy.profile("cpu").manager_command == "approved-httk"
+
+
+def test_configuration_digest_covers_execution_policy_and_ignores_operations(tmp_path: Path) -> None:
+    policy = load_policy(_write(tmp_path, _document(tmp_path)))
+    digest = policy.configuration_digest("cpu")
+    assert len(digest) == 64
+    assert (
+        replace(
+            policy,
+            authorized_keys=("ed25519:" + base64.b64encode(bytes(reversed(range(32)))).decode("ascii"),),
+            max_records=2048,
+            max_submissions=64,
+            poll_seconds=2.0,
+            command_timeout=15.0,
+            max_output_bytes=32768,
+            request_max_age=7200,
+        ).configuration_digest("cpu")
+        == digest
+    )
+    for changed in (
+        replace(policy, workspace_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        replace(policy, bwrap=policy.bwrap.with_name("other-bwrap")),
+        replace(policy, readonly_paths=(policy.readonly_paths[0], tmp_path / "extra-runtime")),
+        replace(policy, profiles=(replace(policy.profile("cpu"), workers=2), *policy.profiles[1:])),
+        replace(policy, profiles=(replace(policy.profile("cpu"), prelude="module load other"), *policy.profiles[1:])),
+        replace(
+            policy, profiles=(replace(policy.profile("cpu"), manager_command="approved-httk"), *policy.profiles[1:])
+        ),
+    ):
+        assert changed.configuration_digest("cpu") != digest
 
 
 @pytest.mark.parametrize("field", ["workspace", "workspace_id", "profiles", "bwrap", "cluster"])
@@ -214,6 +264,28 @@ def test_profile_types_names_and_bounds_are_enforced(tmp_path: Path, field: str,
     cpu = profiles["cpu"]
     assert isinstance(cpu, dict)
     cpu[field] = value
+    with pytest.raises(ValueError):
+        load_policy(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workers", 0),
+        ("workers", True),
+        ("workers", 1025),
+        ("prelude", 1),
+        ("prelude", "bad\0prelude"),
+        ("manager_command", ""),
+        ("manager_command", "  \t"),
+        ("manager_command", "bad\0command"),
+    ],
+)
+def test_compiled_manager_fields_are_strict(tmp_path: Path, field: str, value: object) -> None:
+    document = _document(tmp_path)
+    profiles = document["profiles"]
+    assert isinstance(profiles, dict) and isinstance(profiles["cpu"], dict)
+    profiles["cpu"][field] = value
     with pytest.raises(ValueError):
         load_policy(_write(tmp_path, document))
 

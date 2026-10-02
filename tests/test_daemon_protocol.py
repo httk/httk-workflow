@@ -20,12 +20,13 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 HANDLE = "abcdef0123456789abcdef0123456789"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
 REQUEST_DIGEST = "a" * 64
+CONFIGURATION_DIGEST = "b" * 64
 
 
 def _document(operation: str, **fields: object) -> bytes:
     value: dict[str, object] = {
         "format": "httk-workspace-command",
-        "format_version": 2,
+        "format_version": 3,
         "request_id": REQUEST_ID,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
@@ -43,7 +44,7 @@ def _document(operation: str, **fields: object) -> bytes:
     ("operation", "fields"),
     [
         ("health", {}),
-        ("start_manager", {"profile": "cpu-1"}),
+        ("start_manager", {"configuration": "cpu-1", "configuration_digest": CONFIGURATION_DIGEST}),
         ("manager_status", {"handle": HANDLE}),
         ("cancel_manager", {"handle": HANDLE}),
     ],
@@ -55,9 +56,10 @@ def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> N
         REQUEST_ID,
         WORKSPACE_ID,
         operation,
-        profile=fields.get("profile"),
+        profile=fields.get("configuration"),
         handle=fields.get("handle"),
         enrollment_id=ENROLLMENT_ID,
+        configuration_digest=fields.get("configuration_digest"),
     )
     encoded = encode_request(request)
     assert encoded.isascii()
@@ -66,7 +68,14 @@ def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> N
 
 
 def test_request_is_frozen_and_retains_only_immutable_strings() -> None:
-    request = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
+    request = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
 
     with pytest.raises(FrozenInstanceError):
         request.profile = "other"  # type: ignore[misc]
@@ -80,14 +89,15 @@ def test_request_is_frozen_and_retains_only_immutable_strings() -> None:
 
 
 def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
-    ordered = _document("start_manager", profile="cpu")
+    ordered = _document("start_manager", configuration="cpu", configuration_digest=CONFIGURATION_DIGEST)
     reordered = (
-        b'{ "profile" : "cpu", "operation":"start_manager",'
+        b'{ "configuration" : "cpu", "configuration_digest":"' + CONFIGURATION_DIGEST.encode() + b'",'
+        b'"operation":"start_manager",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
         b'"created_at":0,"expires_at":0,"operator_key":null,"signature":null,'
-        b'"format_version":2,"format":"httk-workspace-command" }'
+        b'"format_version":3,"format":"httk-workspace-command" }'
     )
     first = decode_request(ordered)
     second = decode_request(reordered)
@@ -98,14 +108,51 @@ def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
 
 
 def test_digest_changes_with_request_identity_and_profile() -> None:
-    base = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
-    other_id = Request("f" * 32, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
-    other_profile = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="gpu", enrollment_id=ENROLLMENT_ID)
-    other_enrollment = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id="e" * 32)
+    base = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
+    other_id = Request(
+        "f" * 32,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
+    other_profile = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="gpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
+    other_enrollment = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id="e" * 32,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
+    other_digest = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest="c" * 64,
+    )
 
     assert request_digest(base) != request_digest(other_id)
     assert request_digest(base) != request_digest(other_profile)
     assert request_digest(base) != request_digest(other_enrollment)
+    assert request_digest(base) != request_digest(other_digest)
 
 
 @pytest.mark.parametrize(
@@ -128,6 +175,7 @@ def test_digest_changes_with_request_identity_and_profile() -> None:
         {"operation": []},
         {"operation": "health", "profile": "cpu"},
         {"operation": "health", "handle": HANDLE},
+        {"operation": "health", "configuration_digest": CONFIGURATION_DIGEST},
         {"operation": "start_manager"},
         {"operation": "start_manager", "profile": "CPU"},
         {"operation": "start_manager", "profile": "a" * 65},
@@ -136,10 +184,12 @@ def test_digest_changes_with_request_identity_and_profile() -> None:
         {"operation": "start_manager", "profile": 7},
         {"operation": "start_manager", "profile": []},
         {"operation": "start_manager", "profile": "cpu", "handle": HANDLE},
+        {"operation": "start_manager", "profile": "cpu", "configuration_digest": "A" * 64},
         {"operation": "manager_status"},
         {"operation": "manager_status", "handle": "x" * 32},
         {"operation": "manager_status", "handle": []},
         {"operation": "manager_status", "handle": HANDLE, "profile": "cpu"},
+        {"operation": "manager_status", "handle": HANDLE, "configuration_digest": CONFIGURATION_DIGEST},
         {"operation": "cancel_manager", "handle": None},
     ],
 )
@@ -157,18 +207,30 @@ def test_direct_construction_validates_all_fields(kwargs: dict[str, object]) -> 
     assert len(str(error.value)) < 256
 
 
-@pytest.mark.parametrize("version", ["true", "2.0", "2e0", "1", "null", '"2"'])
-def test_version_must_be_exact_integer_two(version: str) -> None:
-    data = _document("health").replace(b'"format_version": 2', f'"format_version": {version}'.encode())
+@pytest.mark.parametrize("version", ["true", "3.0", "3e0", "2", "null", '"3"'])
+def test_version_must_be_exact_integer_three(version: str) -> None:
+    data = _document("health").replace(b'"format_version": 3', f'"format_version": {version}'.encode())
 
     with pytest.raises(ValueError):
         decode_request(data)
 
 
+def test_start_requires_configuration_digest_when_encoded() -> None:
+    request = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
+
+    with pytest.raises(ValueError, match="configuration_digest"):
+        encode_request(request)
+
+
 def test_profile_length_64_is_valid() -> None:
     profile = "a" + "x" * 63
 
-    assert decode_request(_document("start_manager", profile=profile)).profile == profile
+    assert (
+        decode_request(
+            _document("start_manager", configuration=profile, configuration_digest=CONFIGURATION_DIGEST)
+        ).profile
+        == profile
+    )
 
 
 @pytest.mark.parametrize("request_id", ["a" * 31, "a" * 33, "a" * 31 + "\n"])
@@ -179,7 +241,7 @@ def test_wire_request_id_rejects_wrong_length_or_newline(request_id: str) -> Non
 
 def test_duplicate_keys_reject_escaped_equivalent_names() -> None:
     data = (
-        b'{"format":"httk-workspace-command","format_version":2,'
+        b'{"format":"httk-workspace-command","format_version":3,'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
@@ -222,10 +284,13 @@ def test_non_utf8_or_bom_documents_are_refused(data: bytes) -> None:
         _document("health", cwd="/tmp"),
         _document("health", env={"PATH": "/tmp"}),
         _document("health", extra=None),
-        _document("start_manager", profile=None),
-        _document("start_manager", profile=[]),
-        _document("start_manager", profile=""),
-        _document("start_manager", profile="a" * 65),
+        _document("start_manager", configuration=None, configuration_digest=CONFIGURATION_DIGEST),
+        _document("start_manager", configuration=[], configuration_digest=CONFIGURATION_DIGEST),
+        _document("start_manager", configuration="", configuration_digest=CONFIGURATION_DIGEST),
+        _document("start_manager", configuration="a" * 65, configuration_digest=CONFIGURATION_DIGEST),
+        _document("start_manager", configuration="cpu"),
+        _document("start_manager", configuration="cpu", configuration_digest="A" * 64),
+        _document("start_manager", configuration="cpu", configuration_digest=CONFIGURATION_DIGEST, profile="cpu"),
         _document("manager_status", handle=""),
         _document("manager_status", handle=7),
         _document("unknown", payload="ignored"),
@@ -332,7 +397,7 @@ def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
         b'{ "outcome":"ready", "request_digest":"' + REQUEST_DIGEST.encode() + b'",'
         b'"enrollment_id":"' + ENROLLMENT_ID.encode() + b'",'
         b'"workspace_id":"' + WORKSPACE_ID.encode() + b'",'
-        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":2,'
+        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":3,'
         b'"operator_key":null,"signature":null,'
         b'"format":"httk-workspace-response" }'
     )
@@ -383,7 +448,7 @@ def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
     valid = encode_response(Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready"))
     invalid_documents = (
         valid.replace(b"httk-workspace-response", b"httk-workspace-command"),
-        valid.replace(b'"format_version":2', b'"format_version":true'),
+        valid.replace(b'"format_version":3', b'"format_version":true'),
         valid[:-1] + b',"old_field":1}',
         valid[:-1] + b',"handle":null}',
         valid.replace(b'"request_id":', b'"request_id":"' + REQUEST_ID.encode() + b'","request_id":'),

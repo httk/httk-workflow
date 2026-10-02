@@ -1,6 +1,7 @@
 """Prove the daemon entry bypasses mutable workflow discovery."""
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
-from httk.workflow import _daemon_cli, workflow_cli
+from httk.workflow import _daemon_cli, _daemon_setup, workflow_cli
 
 
 def test_daemon_dispatch_does_not_build_ordinary_parser(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -49,6 +50,8 @@ def test_isolated_handoff_cleans_environment_cwd_and_inherited_descriptors(tmp_p
     untrusted.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("secret")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     trap = tmp_path / "trap"
     (untrusted / "sitecustomize.py").write_text(f"open({str(trap)!r},'w').write('executed')\n")
     (installed / "_daemon_bootstrap.py").write_text(
@@ -64,11 +67,13 @@ def test_isolated_handoff_cleans_environment_cwd_and_inherited_descriptors(tmp_p
 import os
 from httk.workflow import _daemon_cli
 _daemon_cli.__file__ = {str(installed / '_daemon_cli.py')!r}
+from httk.workflow import _daemon_setup
+_daemon_setup.active_policy_path = lambda workspace, policy: __import__('pathlib').Path('/active/runtime.json')
 fd = os.open({str(outside)!r}, os.O_RDONLY)
 os.set_inheritable(fd, True)
 os.environ.update(PYTHONPATH={str(untrusted)!r}, BASH_ENV='untrusted', SSH_AUTH_SOCK='untrusted')
 os.chdir({str(untrusted)!r})
-raise SystemExit(_daemon_cli.command(['/data','--policy','/policy','--once'], program='httk workspace daemon'))
+raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--policy','/policy','--once'], program='httk workspace daemon'))
 """
     result = subprocess.run(
         [sys.executable, "-c", script], cwd="/", capture_output=True, text=True, check=True, timeout=20
@@ -81,4 +86,54 @@ raise SystemExit(_daemon_cli.command(['/data','--policy','/policy','--once'], pr
     assert not trap.exists()
     assert "PYTHONPATH" not in observed["env"] and "BASH_ENV" not in observed["env"]
     assert "SSH_AUTH_SOCK" not in observed["env"]
-    assert observed["argv"][1:] == ["--mode", "broker", "--workspace", "/data", "--policy", "/policy", "--once"]
+    assert observed["argv"][1:] == [
+        "--mode",
+        "broker",
+        "--workspace",
+        str(workspace),
+        "--policy",
+        "/active/runtime.json",
+        "--once",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["initialize", "reload"])
+def test_local_approval_modes_do_not_enter_isolated_bootstrap(
+    mode: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(_daemon_setup, mode, lambda workspace, policy: calls.append((workspace, policy)))
+    monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("local setup must not exec"))
+    assert _daemon_cli.command(["/workspace", "--policy", "/operator.json", f"--{mode}"], program="httk") == 0
+    assert calls == [(Path("/workspace"), Path("/operator.json"))]
+    assert capsys.readouterr().out == ""
+
+
+def test_export_endpoint_prints_one_canonical_public_document(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    document = {
+        "format": "httk-workspace-daemon-endpoint",
+        "format_version": 1,
+        "workspace_id": "workspace",
+        "enrollment_id": "enrollment",
+        "daemon_public_key": "ed25519:key",
+        "configurations": {"large": "b", "small": "a"},
+        "request_max_age": 3600,
+    }
+    monkeypatch.setattr(_daemon_setup, "export_endpoint", lambda _workspace, _policy: document)
+    assert _daemon_cli.command(["/workspace", "--policy", "/operator.json", "--export-endpoint"], program="httk") == 0
+    assert capsys.readouterr().out == json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def test_incompatible_ledger_is_a_clean_local_refusal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def incompatible(_workspace: Path, _policy: Path) -> None:
+        raise sqlite3.DatabaseError("preserve this state and initialize a new enrollment")
+
+    monkeypatch.setattr(_daemon_setup, "reload", incompatible)
+    assert _daemon_cli.command(["/workspace", "--policy", "/operator.json", "--reload"], program="httk") == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "preserve this state" in captured.err

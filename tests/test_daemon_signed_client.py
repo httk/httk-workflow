@@ -21,6 +21,7 @@ from httk.workflow._daemon_protocol import Request, Response, encode_request, en
 REQUEST_ID = "0123456789abcdef0123456789abcdef"
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
+CONFIGURATION_DIGEST = "b" * 64
 
 
 def _seed(path: Path, byte: int) -> Path:
@@ -43,14 +44,29 @@ def endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Endpoint:
     response_seed = _seed(tmp_path / "response.seed", 8)
     public_key = identity_public_key(response_seed)
     assert public_key is not None
-    return Endpoint(workspace, requests, responses, WORKSPACE_ID, ENROLLMENT_ID, public_key)
+    return Endpoint(
+        workspace,
+        requests,
+        responses,
+        WORKSPACE_ID,
+        ENROLLMENT_ID,
+        public_key,
+        {"cpu": CONFIGURATION_DIGEST},
+    )
 
 
 def _intent() -> Request:
-    return Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
+    return Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="cpu",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+    )
 
 
-def _settings(endpoint: Endpoint) -> dict[str, str]:
+def _settings(endpoint: Endpoint) -> dict[str, object]:
     return {
         "mount_root": str(endpoint.workspace),
         "daemon_requests": str(endpoint.requests),
@@ -58,6 +74,8 @@ def _settings(endpoint: Endpoint) -> dict[str, str]:
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
         "daemon_public_key": endpoint.daemon_public_key,
+        "daemon_configurations": dict(endpoint.configurations),
+        "daemon_request_max_age": str(endpoint.request_max_age),
     }
 
 
@@ -67,10 +85,10 @@ def test_prepare_request_reuses_exact_signature_without_resigning(
     calls = 0
     original = client_module.sign_request
 
-    def counted(request: Request) -> Request:
+    def counted(request: Request, *, lifetime: int = 3600) -> Request:
         nonlocal calls
         calls += 1
-        return original(request, now=1_000 + calls * 100)
+        return original(request, now=1_000 + calls * 100, lifetime=lifetime)
 
     monkeypatch.setattr(client_module, "sign_request", counted)
     first = prepare_request(endpoint, _intent())
@@ -93,10 +111,20 @@ def test_prepare_request_retry_is_exact_across_processes(endpoint: Endpoint, tmp
         "from httk.workflow._daemon_client import Endpoint,prepare_request; "
         "from httk.workflow._daemon_protocol import Request,encode_request; "
         "e=Endpoint.from_settings(json.loads(Path(sys.argv[1]).read_text())); "
-        "r=prepare_request(e,Request(sys.argv[2],sys.argv[3],'start_manager',profile='cpu',enrollment_id=sys.argv[4])); "
+        "r=prepare_request(e,Request(sys.argv[2],sys.argv[3],'start_manager',profile='cpu',"
+        "enrollment_id=sys.argv[4],configuration_digest=sys.argv[5])); "
         "sys.stdout.buffer.write(encode_request(r))"
     )
-    command = [sys.executable, "-c", script, str(settings_path), REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID]
+    command = [
+        sys.executable,
+        "-c",
+        script,
+        str(settings_path),
+        REQUEST_ID,
+        WORKSPACE_ID,
+        ENROLLMENT_ID,
+        CONFIGURATION_DIGEST,
+    ]
 
     first = subprocess.run(command, check=True, capture_output=True).stdout
     time.sleep(0.01)
@@ -125,6 +153,35 @@ def test_prepare_request_refuses_changed_intent_endpoint_pin_and_signer(endpoint
     assert saved.operator_key is not None
 
 
+def test_prepare_request_uses_endpoint_max_age_and_catalog_selection(endpoint: Endpoint) -> None:
+    shortened = replace(endpoint, request_max_age=900)
+
+    signed = prepare_request(shortened, _intent())
+
+    assert signed.expires_at - signed.created_at == 900
+
+
+def test_catalog_reload_cannot_retarget_cached_request_id(endpoint: Endpoint) -> None:
+    signed = prepare_request(endpoint, _intent())
+    changed_digest = "c" * 64
+    reloaded = replace(endpoint, configurations={"cpu": changed_digest})
+    changed_intent = replace(_intent(), configuration_digest=changed_digest)
+
+    assert encode_request(prepare_request(reloaded, _intent())) == encode_request(signed)
+    with pytest.raises(ValueError, match="intent conflicts"):
+        prepare_request(reloaded, changed_intent)
+
+    cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / f"{REQUEST_ID}.json"
+    assert json.loads(cache.read_bytes())["request"] == json.loads(encode_request(signed))
+
+
+def test_new_start_requires_approved_configuration(endpoint: Endpoint) -> None:
+    unknown = replace(_intent(), request_id="f" * 32, profile="other")
+
+    with pytest.raises(ValueError, match="not approved"):
+        prepare_request(endpoint, unknown)
+
+
 def test_prepare_request_refuses_partial_and_corrupt_cache(endpoint: Endpoint) -> None:
     prepare_request(endpoint, _intent())
     cache_root = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID
@@ -146,10 +203,10 @@ def test_failed_publication_leaves_no_cache_and_retry_signs_fresh(
     original_sign = client_module.sign_request
     original_link = client_module.os.link
 
-    def counted(request: Request) -> Request:
+    def counted(request: Request, *, lifetime: int = 3600) -> Request:
         nonlocal calls
         calls += 1
-        return original_sign(request, now=3_000 + calls)
+        return original_sign(request, now=3_000 + calls, lifetime=lifetime)
 
     def fail_link(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected publication failure")
@@ -173,8 +230,8 @@ def test_fsync_failure_after_install_reuses_exact_request(endpoint: Endpoint, mo
     original_fsync = client_module.os.fsync
     fsync_calls = 0
 
-    def captured(request: Request) -> Request:
-        result = original_sign(request, now=4_000)
+    def captured(request: Request, *, lifetime: int = 3600) -> Request:
+        result = original_sign(request, now=4_000, lifetime=lifetime)
         signed.append(result)
         return result
 
@@ -203,12 +260,12 @@ def test_concurrent_prepare_has_one_writer_and_no_overwrite(
     calls_lock = threading.Lock()
     original = client_module.sign_request
 
-    def delayed(request: Request) -> Request:
+    def delayed(request: Request, *, lifetime: int = 3600) -> Request:
         nonlocal calls
         with calls_lock:
             calls += 1
         time.sleep(0.05)
-        return original(request, now=2_000)
+        return original(request, now=2_000, lifetime=lifetime)
 
     monkeypatch.setattr(client_module, "sign_request", delayed)
     results: list[Request] = []

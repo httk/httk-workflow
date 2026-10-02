@@ -45,6 +45,8 @@ def _command(policy: Policy, profile: Profile, arguments: argparse.Namespace, re
     ]
     if manager:
         command += [f"--nodelist={arguments.node}", "--output=/dev/null", "--error=/dev/null"]
+    elif getattr(profile.mpi, "ntasks_per_node", None) is not None:
+        command.append(f"--ntasks-per-node={profile.mpi.ntasks_per_node}")
     command += [
         str(policy.python),
         "-I",

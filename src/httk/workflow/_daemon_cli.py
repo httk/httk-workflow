@@ -2,7 +2,9 @@
 
 import argparse
 import errno
+import json
 import os
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,7 +20,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--policy", required=True, type=Path, help="absolute protected operator policy file")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="check the real sandbox and scheduler requirements")
-    mode.add_argument("--initialize", action="store_true", help="initialize a new protected enrollment ledger and exit")
+    mode.add_argument("--initialize", action="store_true", help="approve and initialize a new protected enrollment")
+    mode.add_argument("--reload", action="store_true", help="approve and activate updated local configurations")
+    mode.add_argument("--export-endpoint", action="store_true", help="print the saved public endpoint and catalog")
     mode.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
 
 
@@ -44,6 +48,30 @@ def launch(arguments: argparse.Namespace) -> int:
         if not path.is_absolute() or ".." in path.parts or "\0" in str(path):
             print("httk workspace daemon: explicit absolute local paths are required", file=sys.stderr)
             return 2
+    try:
+        from . import _daemon_setup
+
+        if arguments.initialize:
+            _daemon_setup.initialize(arguments.workspace, arguments.policy)
+            return 0
+        if arguments.reload:
+            _daemon_setup.reload(arguments.workspace, arguments.policy)
+            return 0
+        if arguments.export_endpoint:
+            print(
+                json.dumps(
+                    _daemon_setup.export_endpoint(arguments.workspace, arguments.policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+            )
+            return 0
+        runtime_policy = _daemon_setup.active_policy_path(arguments.workspace, arguments.policy)
+        runtime_workspace = arguments.workspace.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
+        print(f"httk workspace daemon: {exc}", file=sys.stderr)
+        return 2
     bootstrap = Path(__file__).with_name("_daemon_bootstrap.py").resolve()
     executable = sys.executable
     argv = [
@@ -54,11 +82,11 @@ def launch(arguments: argparse.Namespace) -> int:
         "--mode",
         "broker",
         "--workspace",
-        str(arguments.workspace),
+        str(runtime_workspace),
         "--policy",
-        str(arguments.policy),
+        str(runtime_policy),
     ]
-    for flag in ("check", "initialize", "once"):
+    for flag in ("check", "once"):
         if getattr(arguments, flag):
             argv.append("--" + flag)
     try:

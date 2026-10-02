@@ -27,6 +27,7 @@ REQUEST_ID = "0123456789abcdef0123456789abcdef"
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
 HANDLE = "abcdef0123456789abcdef0123456789"
+CONFIGURATION_DIGEST = "b" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +61,15 @@ def _endpoint(tmp_path: Path) -> Endpoint:
     response_seed = _seed(tmp_path / "response.seed", 2)
     public_key = identity_public_key(response_seed)
     assert public_key is not None
-    return Endpoint(workspace, requests, responses, WORKSPACE_ID, ENROLLMENT_ID, public_key)
+    return Endpoint(
+        workspace,
+        requests,
+        responses,
+        WORKSPACE_ID,
+        ENROLLMENT_ID,
+        public_key,
+        {"cpu": CONFIGURATION_DIGEST},
+    )
 
 
 def _settings(endpoint: Endpoint) -> dict[str, object]:
@@ -71,6 +80,8 @@ def _settings(endpoint: Endpoint) -> dict[str, object]:
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
         "daemon_public_key": endpoint.daemon_public_key,
+        "daemon_configurations": dict(endpoint.configurations),
+        "daemon_request_max_age": endpoint.request_max_age,
     }
 
 
@@ -82,6 +93,7 @@ def _request(operation: str = "health", *, profile: str | None = None, handle: s
         profile=profile,
         handle=handle,
         enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST if operation == "start_manager" else None,
     )
 
 
@@ -139,6 +151,51 @@ def test_endpoint_accepts_exact_settings_and_checks_workspace(tmp_path: Path) ->
     decoded.check()
 
 
+def test_endpoint_accepts_canonical_catalog_and_age_strings(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    settings = _settings(endpoint)
+    settings["daemon_configurations"] = json.dumps(
+        {"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    settings["daemon_request_max_age"] = "900"
+
+    decoded = Endpoint.from_settings(settings)
+
+    assert dict(decoded.configurations) == {"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64}
+    assert decoded.request_max_age == 900
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        [],
+        '{"cpu":"' + CONFIGURATION_DIGEST + '","cpu":"' + CONFIGURATION_DIGEST + '"}',
+        '{"cpu": "' + CONFIGURATION_DIGEST + '"}',
+        {"CPU": CONFIGURATION_DIGEST},
+        {"cpu": "B" * 64},
+        {"cpu": True},
+        {1: CONFIGURATION_DIGEST},
+    ],
+)
+def test_endpoint_refuses_malformed_configuration_catalog(tmp_path: Path, catalog: object) -> None:
+    settings = _settings(_endpoint(tmp_path))
+    settings["daemon_configurations"] = catalog
+
+    with pytest.raises(ValueError):
+        Endpoint.from_settings(settings)
+
+
+@pytest.mark.parametrize("maximum", [True, False, 0, 86_401, -1, 1.0, "03600", "1.0", ""])
+def test_endpoint_refuses_invalid_request_max_age(tmp_path: Path, maximum: object) -> None:
+    settings = _settings(_endpoint(tmp_path))
+    settings["daemon_request_max_age"] = maximum
+
+    with pytest.raises(ValueError):
+        Endpoint.from_settings(settings)
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -165,7 +222,7 @@ def test_endpoint_refuses_missing_and_overlapping_roots(tmp_path: Path) -> None:
     overlap = _settings(endpoint)
     overlap["daemon_requests"] = str(endpoint.workspace / "requests")
 
-    with pytest.raises(ValueError, match="six"):
+    with pytest.raises(ValueError, match="eight"):
         Endpoint.from_settings(missing)
     with pytest.raises(ValueError, match="disjoint"):
         Endpoint.from_settings(overlap)
@@ -298,7 +355,14 @@ def test_cached_terminal_response_returns_without_publication_and_is_cleaned(tmp
 def test_existing_conflicting_request_is_never_replaced(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     request = _signed(_request("start_manager", profile="cpu"), tmp_path)
-    conflict = Request(REQUEST_ID, WORKSPACE_ID, "start_manager", profile="other", enrollment_id=ENROLLMENT_ID)
+    conflict = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "start_manager",
+        profile="other",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest="c" * 64,
+    )
     path = endpoint.requests / f"{REQUEST_ID}.json"
     path.write_bytes(encode_request(conflict))
 

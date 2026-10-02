@@ -10,8 +10,9 @@ from contextlib import ExitStack
 from pathlib import Path
 from types import FrameType
 
+from ._daemon_activation import verify_active_snapshot
 from ._daemon_auth import check_request_time, sign_response, verify_request
-from ._daemon_keys import initialize_response_seed, read_response_seed, response_public_key, response_seed_path
+from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_policy import Policy, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
@@ -105,7 +106,9 @@ class Broker:
         try:
             profile = self.policy.profile(request.profile)
         except ValueError:
-            return self._finish_refused(entry, "invalid_profile")
+            return self._finish_refused(entry, "invalid_configuration")
+        if request.configuration_digest != self.policy.configuration_digest(request.profile):
+            return self._finish_refused(entry, "stale_configuration")
 
         try:
             check_request_time(request, max_age=self.policy.request_max_age)
@@ -298,7 +301,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy-source", type=Path, required=True)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true")
-    modes.add_argument("--initialize", action="store_true")
     modes.add_argument("--once", action="store_true")
     return parser
 
@@ -311,26 +313,6 @@ def _run(arguments: argparse.Namespace) -> None:
         raise ValueError("policy source must be an absolute path without '..'")
     policy = load_policy(arguments.policy)
     gateway = SlurmGateway(policy, policy_source)
-    gateway.check()
-    if arguments.check:
-        return
-    if arguments.initialize:
-        try:
-            seed = initialize_response_seed(_STATE_DIRECTORY)
-            with Ledger(
-                _STATE_DIRECTORY,
-                policy.workspace_id,
-                policy.enrollment_id,
-                initialize=True,
-                max_records=policy.max_records,
-                max_submissions=policy.max_submissions,
-            ):
-                print(response_public_key(seed))
-        except FileExistsError as exc:
-            raise ValueError(
-                "daemon state already exists or initialization is partial; preserve protected state and reconcile it"
-            ) from exc
-        return
 
     seed = response_seed_path(_STATE_DIRECTORY)
     try:
@@ -358,6 +340,10 @@ def _run(arguments: argparse.Namespace) -> None:
                     max_submissions=policy.max_submissions,
                 )
             )
+            verify_active_snapshot(_STATE_DIRECTORY, policy_source, policy)
+            gateway.check()
+            if arguments.check:
+                return
             requests = stack.enter_context(MailboxDirectory(_REQUEST_DIRECTORY))
             responses = stack.enter_context(MailboxDirectory(_RESPONSE_DIRECTORY))
             ledger.recover()

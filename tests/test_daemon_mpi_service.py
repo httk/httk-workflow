@@ -123,7 +123,10 @@ def _configuration(
             slurm_conf=tmp_path / "slurm.conf",
         ),
     )
-    profile = cast(Profile, SimpleNamespace(name="parallel", cpus=3, mpi=SimpleNamespace(nodes=2, ranks=4)))
+    profile = cast(
+        Profile,
+        SimpleNamespace(name="parallel", cpus=3, mpi=SimpleNamespace(nodes=2, ranks=4, ntasks_per_node=2)),
+    )
     arguments = argparse.Namespace(
         job_id="123",
         node="node01",
@@ -252,9 +255,16 @@ def test_fixed_commands_clean_environment_listener_order_and_nonzero_streaming(
     }
     assert application["environment"] == manager["environment"]
     assert {"--mpi=none", "--nodes=1", "--ntasks=1", "--cpus-per-task=1", "--nodelist=node01"} <= set(manager_argv)
-    assert {"--mpi=pmix", "--nodes=2", "--ntasks=4", "--cpus-per-task=3", "--request-id", REQUEST_ONE} <= set(
-        application_argv
-    )
+    assert "--ntasks-per-node=2" not in manager_argv
+    assert {
+        "--mpi=pmix",
+        "--nodes=2",
+        "--ntasks=4",
+        "--ntasks-per-node=2",
+        "--cpus-per-task=3",
+        "--request-id",
+        REQUEST_ONE,
+    } <= set(application_argv)
     assert "--jobid=123" in manager_argv and "--jobid=123" in application_argv
     assert "--clusters" not in " ".join(manager_argv + application_argv)
     assert "solver" not in " ".join(application_argv)

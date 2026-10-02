@@ -230,6 +230,18 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     ]
 
 
+def test_bootstrap_has_no_runtime_initialization_route(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    result = _run(
+        tmp_path,
+        policy_path,
+        ["--workspace", str(policy["workspace"]), "--mode", "broker", "--initialize"],
+    )
+    assert result.returncode == 2
+    assert "unrecognized arguments: --initialize" in result.stderr
+    assert not record.exists()
+
+
 def test_payload_excludes_broker_mounts_and_network(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
     result = _run(

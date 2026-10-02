@@ -344,11 +344,12 @@ Beyond the standard request envelope, `daemon` accepts exactly:
 
 | Member | Meaning |
 | --- | --- |
-| `daemon_request` | complete version-1 command object from {doc}`/workspace_daemon` |
+| `daemon_request` | complete signed version-3 command object from {doc}`/workspace_daemon` |
 | `wait_seconds` | optional finite number from 0.05 to 120, default 10 |
 
 The client checks workspace/enrollment IDs against the configured endpoint before
-publication. Responses must match those identities, request ID and canonical
+publication. Requests carry authorized httk identity signatures. Responses must
+verify against the pinned daemon public key and match those identities, request ID and canonical
 request digest, allowed operation outcome and any requested handle. Paths,
 commands, argv, cwd, environment and scheduler arguments are not accepted.
 
@@ -359,7 +360,7 @@ or `uncertain`. This preserves a known negative daemon result across the adapter
 boundary. Failure to obtain a validated response is an adapter error and may
 leave a live request. Callers must retain its ID and fields for retry.
 
-This kind's `configure` merges pending settings, validates the five settings
+This kind's `configure` merges pending settings, validates the eight settings
 listed in {doc}`/remotes` and checks mounted workspace identity. It publishes
 nothing. Its `install` operation rejects nonempty pending settings and sends a
 health request; success means the matching daemon answered `ready`. It does not
@@ -372,7 +373,7 @@ in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
   `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
-  `port`, `username`, mount settings, the four `daemon_*` settings documented
+  `port`, `username`, mount settings, the seven `daemon_*` settings documented
   in {doc}`/remotes`, `vasp_command`, and `vasp_pseudo_library` —
   are written into the flat `settings` object of the shareable, signable
   `remote.json`;

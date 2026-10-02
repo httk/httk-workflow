@@ -13,8 +13,9 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Self, cast
 
 from httk.core.identity import identity_public_key
@@ -33,9 +34,13 @@ _SETTING_NAMES = frozenset(
         "daemon_workspace_id",
         "daemon_enrollment_id",
         "daemon_public_key",
+        "daemon_configurations",
+        "daemon_request_max_age",
     }
 )
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+_CONFIGURATION_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _WORKSPACE_CONTROL = ".httk-workspace"
 _WORKSPACE_FORMAT = "format.json"
 _MAX_WORKSPACE_FORMAT_BYTES = 64 * 1024
@@ -94,6 +99,48 @@ def _canonical_public_key(value: object, name: str) -> str:
         raise ValueError(f"{name} must be a canonical Ed25519 public key") from exc
     if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != encoded:
         raise ValueError(f"{name} must be a canonical Ed25519 public key")
+    return value
+
+
+def _configurations(value: object) -> Mapping[str, str]:
+    """Return an immutable validated approved-configuration catalog."""
+
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(
+                value,
+                object_pairs_hook=_object_without_duplicates,
+                parse_constant=_reject_constant,
+            )
+        except (ValueError, RecursionError) as exc:
+            raise ValueError("daemon_configurations must be a canonical JSON object") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("daemon_configurations must be a canonical JSON object")
+        canonical = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        if value != canonical:
+            raise ValueError("daemon_configurations must be a canonical JSON object")
+        value = decoded
+    if not isinstance(value, Mapping):
+        raise ValueError("daemon_configurations must be an object or canonical JSON object string")
+    result: dict[str, str] = {}
+    for name, digest in value.items():
+        if type(name) is not str or _CONFIGURATION_PATTERN.fullmatch(name) is None:
+            raise ValueError("invalid daemon configuration name")
+        if type(digest) is not str or _DIGEST_PATTERN.fullmatch(digest) is None:
+            raise ValueError(f"invalid daemon configuration digest for {name!r}")
+        result[name] = digest
+    return MappingProxyType(result)
+
+
+def _request_max_age(value: object) -> int:
+    """Return a configured request maximum age from typed or manual settings."""
+
+    if isinstance(value, str):
+        if not value.isascii() or not value.isdigit() or (len(value) > 1 and value.startswith("0")):
+            raise ValueError("daemon_request_max_age must be an integer from 1 through 86400")
+        value = int(value)
+    if type(value) is not int or not 1 <= value <= 86_400:
+        raise ValueError("daemon_request_max_age must be an integer from 1 through 86400")
     return value
 
 
@@ -349,6 +396,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         saved.operation,
         saved.profile,
         saved.handle,
+        saved.configuration_digest,
     ) == (
         intent.request_id,
         intent.workspace_id,
@@ -356,6 +404,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         intent.operation,
         intent.profile,
         intent.handle,
+        intent.configuration_digest,
     )
 
 
@@ -407,7 +456,13 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
             verify_request(saved, [current_key])
             return saved
 
-        signed = sign_request(intent)
+        if intent.operation == "start_manager":
+            approved_digest = endpoint.configurations.get(intent.profile or "")
+            if approved_digest is None:
+                raise ValueError(f"daemon configuration is not approved: {intent.profile!r}")
+            if intent.configuration_digest != approved_digest:
+                raise ValueError("daemon configuration digest does not match the approved endpoint catalog")
+        signed = sign_request(intent, lifetime=min(3600, endpoint.request_max_age))
         current_key = identity_public_key()
         if current_key is None or signed.operator_key != current_key:
             raise ValueError("signed daemon request does not match the local identity")
@@ -425,6 +480,8 @@ class Endpoint:
     :param workspace_id: Canonical UUID of the mounted workspace.
     :param enrollment_id: Protected daemon enrollment identifier.
     :param daemon_public_key: Pinned broker response-signing public key.
+    :param configurations: Approved configuration names and canonical digests.
+    :param request_max_age: Maximum signed request lifetime in seconds.
     """
 
     workspace: Path
@@ -433,6 +490,8 @@ class Endpoint:
     workspace_id: str
     enrollment_id: str
     daemon_public_key: str
+    configurations: Mapping[str, str] = field(default_factory=dict)
+    request_max_age: int = 3600
 
     def __post_init__(self) -> None:
         """Refuse direct construction that bypasses endpoint invariants."""
@@ -446,10 +505,12 @@ class Endpoint:
         if type(self.enrollment_id) is not str or _ID_PATTERN.fullmatch(self.enrollment_id) is None:
             raise ValueError("enrollment_id must be 32 lower-case hexadecimal characters")
         _canonical_public_key(self.daemon_public_key, "daemon_public_key")
+        object.__setattr__(self, "configurations", _configurations(self.configurations))
+        object.__setattr__(self, "request_max_age", _request_max_age(self.request_max_age))
 
     @classmethod
     def from_settings(cls, settings: Mapping[str, object]) -> Self:
-        """Build an endpoint from exactly the six daemon remote settings.
+        """Build an endpoint from exactly the eight daemon remote settings.
 
         :param settings: Adapter settings containing only daemon endpoint fields.
         :return: The validated endpoint value.
@@ -457,7 +518,7 @@ class Endpoint:
         """
 
         if not isinstance(settings, Mapping) or set(settings) != _SETTING_NAMES:
-            raise ValueError("mount-daemon settings must contain exactly the six endpoint settings")
+            raise ValueError("mount-daemon settings must contain exactly the eight endpoint settings")
         workspace = _absolute_path(settings["mount_root"], "mount_root")
         requests = _absolute_path(settings["daemon_requests"], "daemon_requests")
         responses = _absolute_path(settings["daemon_responses"], "daemon_responses")
@@ -469,7 +530,18 @@ class Endpoint:
         if type(enrollment_id) is not str or _ID_PATTERN.fullmatch(enrollment_id) is None:
             raise ValueError("daemon_enrollment_id must be 32 lower-case hexadecimal characters")
         daemon_public_key = _canonical_public_key(settings["daemon_public_key"], "daemon_public_key")
-        return cls(workspace, requests, responses, workspace_id, enrollment_id, daemon_public_key)
+        configurations = _configurations(settings["daemon_configurations"])
+        request_max_age = _request_max_age(settings["daemon_request_max_age"])
+        return cls(
+            workspace,
+            requests,
+            responses,
+            workspace_id,
+            enrollment_id,
+            daemon_public_key,
+            configurations,
+            request_max_age,
+        )
 
     def check(self) -> None:
         """Open all roots without following symlinks and verify workspace identity.

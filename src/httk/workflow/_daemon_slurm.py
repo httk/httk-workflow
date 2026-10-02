@@ -191,6 +191,8 @@ class SlurmGateway:
         ]
         if profile.mpi is not None:
             argv.append("--no-requeue")
+            if profile.mpi.ntasks_per_node is not None:
+                argv.append(f"--ntasks-per-node={profile.mpi.ntasks_per_node}")
         if profile.partition is not None:
             argv.append(f"--partition={profile.partition}")
         if profile.account is not None:

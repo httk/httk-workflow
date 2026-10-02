@@ -1,14 +1,14 @@
 # Confined workspace daemon
 
 `httk workspace daemon` is an opt-in, foreground Slurm broker for a file command
-mailbox. It accepts health checks, starts a manager from an operator-defined
-profile, and requests status or cancellation by opaque manager handle.
+mailbox. It accepts health checks, starts a manager from a locally approved
+named launcher configuration, and requests status or cancellation by opaque manager handle.
 Requests require an authorized httk identity signature. They cannot supply commands, shell fragments, environment variables, paths
 or Slurm arguments.
 
-Serial execution supports one node, one Slurm task and one manager worker per
-submission. The `mount-daemon` adapter supplies typed client controls and uses
-native mounted-path job transfers; see {doc}`remotes`. Protected MPI profiles add
+Serial execution supports one node and one Slurm task per submission, with
+configurable manager workers sharing its capacity. The `mount-daemon` adapter supplies typed client controls and uses
+native mounted-path job transfers; see {doc}`remotes`. Protected MPI configurations add
 direct Slurm PMIx application steps as described below. The existing mount adapter and ordinary Slurm launcher
 do not acquire these confinement guarantees.
 
@@ -33,11 +33,11 @@ transport identity. In particular, a same-UID unrestricted SFTP or SSH account
 could modify private state or trusted code outside the intended export.
 Local file-mode checks cannot verify that server configuration.
 
-The broker enters Bubblewrap before processing workspace content. It sees the
+The broker enters Bubblewrap before listening for command requests. It sees the
 workspace read-only, writable mailbox/state mounts, selected read-only runtime
 and scheduler configuration, and the host network needed by Slurm. Each submitted
 manager enters a separate Bubblewrap sandbox on the compute node **before**
-reading its workspace prelude. That sandbox has writable workspace data, private
+running its approved prelude. That sandbox has writable workspace data, private
 temporary storage, isolated network/PID/IPC/UTS/user namespaces, no capabilities,
 and disabled nested user namespaces. It receives no broker-only mounts.
 
@@ -55,39 +55,38 @@ runtime symlink resolving to `/`.
 
 ## Operator policy and startup
 
-The following illustrates a site-specific policy, not a portable ready-to-run
-configuration. Replace identities and paths with the provisioned values. Python,
-its libraries, Bash and required simulation libraries must be available at their
-original paths through `readonly_paths`; scheduler clients, plugins, configuration
-and authentication sockets may additionally use `broker_paths`. Resolve which
-files your site needs with its administrators. The protected policy and trusted
-installation must also exist at the same paths on compute nodes. Private broker
-state and mailboxes need not exist there.
+Reuse named Slurm launchers as approved manager configurations. Launcher settings
+override workspace settings. Create more than one launcher to offer different
+resources or worker counts; see {doc}`launchers`. Approval reads their settings
+without executing their launcher programs or preludes.
+
+```console
+httk workflow launcher add --template slurm --global small \
+  --set slurm.cpus_per_task=2 --set slurm.mem=4G \
+  --set slurm.time_limit=01:00:00 --set manager.workers=2
+```
+
+On each client, initialize or select an httk identity and hand its public key to
+the destination operator. The private key stays on that client:
+
+```console
+httk init --name "Your Name" --email you@example.org
+python -c 'from httk.core.identity import identity_public_key; print(identity_public_key())'
+```
+
+An example operator policy is:
 
 ```json
 {
   "format": "httk-workspace-daemon-policy",
-  "format_version": 1,
+  "format_version": 2,
   "workspace": "/srv/httk/example/data",
-  "workspace_id": "12345678-1234-4234-8234-123456789abc",
-  "enrollment_id": "0123456789abcdef0123456789abcdef",
-  "requests": "/srv/httk/example/requests",
-  "responses": "/srv/httk/example/responses",
-  "state": "/var/lib/httk/example",
-  "bwrap": "/usr/bin/bwrap",
-  "python": "/opt/httk/bin/python",
-  "sbatch": "/usr/bin/sbatch",
-  "squeue": "/usr/bin/squeue",
-  "scancel": "/usr/bin/scancel",
-  "cluster": "example",
-  "authorized_keys": ["ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY"],
-  "request_max_age": 3600,
   "readonly_paths": ["/usr", "/bin", "/lib", "/lib64", "/opt/httk"],
   "broker_paths": ["/etc/slurm", "/run/munge"],
   "slurm_conf": "/etc/slurm/slurm.conf",
-  "profiles": {
-    "small": {"cpus": 2, "memory_mb": 4096, "time_minutes": 60, "partition": "batch"}
-  },
+  "authorized_keys": ["ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY"],
+  "allowed_launchers": ["small"],
+  "request_max_age": 3600,
   "max_records": 4096,
   "max_submissions": 128,
   "poll_seconds": 1.0,
@@ -96,34 +95,86 @@ state and mailboxes need not exist there.
 }
 ```
 
-The workspace ID must match the existing workspace's
-`.httk-workspace/format.json` identity.
-Generate a fresh unpredictable enrollment ID, for example with
-`python -c 'import secrets; print(secrets.token_hex(16))'`.
-The enrollment ID is a stale-request barrier, not an authentication secret.
-Protect the policy against modification by uploaders and other users.
+The initial operator environment and PATH are trusted. Setup discovers `bwrap`,
+`sbatch`, `squeue` and `scancel` there and saves their absolute paths. Python defaults
+to the running interpreter, preserving its virtual environment. Explicit executable
+paths remain supported. Set `cluster` explicitly or allow discovery from
+`SLURM_CLUSTER_NAME`, `slurm_conf`, or a bounded `scontrol show config` call.
+Runtime libraries and trusted code must remain available through `readonly_paths`;
+scheduler configuration and authentication sockets belong in `broker_paths`.
+
+Initialization derives the workspace identity and creates a fresh enrollment.
+Default mailboxes are siblings named `data.daemon-requests` and
+`data.daemon-responses`. Private state defaults below the httk data directory at
+`workspace-daemons/<workspace-path-hash>`. Override `state` when that directory is
+on a shared filesystem: the ledger needs reliable local locking and durability.
+Override `requests` and `responses` to match the site's exported layout.
+
+Protected immutable runtime snapshots default to a directory beside the operator
+policy, named `<policy-stem>.daemon`; `snapshot_root` overrides it. This directory
+must be visible at the **same path on compute nodes**. Private state and mailboxes
+need not be visible there. The active approval pointer lives in private state.
+Keep state, snapshots, policy and trusted code outside writable exports.
 
 ```console
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --check
 httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --initialize
+httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --check
+httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --export-endpoint > endpoint.json
 httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json
 ```
 
-`--check` enters the real broker sandbox and checks scheduler client requirements;
-it does not submit a job or validate compute-node execution. `--initialize`
-exclusively creates a new enrollment ledger and private response-signing key, then exits. Ordinary startup refuses
-missing or corrupt state. `--once` processes one bounded mailbox scan and exits.
-Otherwise the daemon polls until SIGINT or SIGTERM. Run it under the site's
-service supervisor if restart supervision is needed.
+`--initialize` creates the ledger and private response key, saves approved settings,
+and publishes the active approval last. It does not run a scheduler or sandbox
+preflight. `--check` enters the real broker sandbox and checks scheduler clients;
+it neither submits work nor validates compute-node execution. `--once` processes
+one bounded scan; normal startup polls until SIGINT or SIGTERM. A site service
+supervisor can restart the foreground daemon.
 
-Do not change policy while submissions remain queued or running: compute-node
-bootstrap reloads the protected policy. Treat runtime and policy changes as an
-operator maintenance operation. Keep the old enrollment's state when recovering
-from failures; never remove it merely to clear an uncertain result.
+CPU count, memory and time must be set through the workspace or launcher as
+`slurm.cpus_per_task`, `slurm.mem` and `slurm.time_limit`. Memory accepts positive
+integer MiB or K/M/G/T suffixes; KiB rounds up to MiB. Time accepts the standard
+[Slurm time forms](https://slurm.schedmd.com/sbatch.html); seconds round up to
+minutes. Zero/unlimited requests are rejected. The current limits are 1024 CPUs
+per task, 1,048,576 MiB per node and 10,080 minutes.
+
+Serial configurations use one Slurm task and can set `manager.workers` to run
+several concurrent attempts within that manager's total capacity. Each signed
+start always starts one manager. `manager.count` does not change this. Supported
+scheduler fields additionally include nodes, ntasks, ntasks_per_node, partition,
+account and the explicit MPI selector described below. Other `slurm.*` fields are
+rejected. `environment.prelude` and a single executable `manager.command` are
+frozen during approval and run inside the payload sandbox.
+
+### Changing approved configurations
+
+Stop the daemon, edit the operator policy or launcher/workspace settings, then run:
+
+```console
+httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --reload
+httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --export-endpoint > endpoint.json
+```
+
+Reload refuses while the daemon holds its lifetime ledger lock. Startup checks
+its chosen snapshot against the active approval after acquiring that same lock,
+so a startup racing with reload cannot serve revoked keys or old approvals.
+Workspace edits alone never change approved manager settings. Re-import the
+exported catalog on clients after changing approvals.
+
+Queued and running jobs retain their immutable snapshot, including their prelude
+and resource geometry. New starts must name a currently approved configuration
+and its exact digest. Retaining an old snapshot does not authorize new starts from
+it. Reload preserves the enrollment, ledger, response key and old snapshots;
+changing the scheduler connection or enrollment roots requires a separate,
+reconciled enrollment. Installed binaries and site configuration file contents
+remain operator-maintained external dependencies.
+
+Interrupted initialization preserves partial artifacts and refuses automatic
+replacement. Keep the ledger and keys when diagnosing failures; never remove them
+to clear an uncertain submission.
 
 ## File command protocol
 
-The internal version-2 format requires identity signatures. The maintained client
+The internal version-3 format requires identity signatures. The maintained client
 constructs and signs documents using its configured httk operator identity. An
 unsigned request is never executed. The policy's `authorized_keys` lists allowed
 Ed25519 public keys; removing a key also prevents that key from replaying old
@@ -153,9 +204,9 @@ provide integrity and authorization, not encryption or protection against mailbo
 deletion. Slurm still uses the site's separate authentication, such as its MUNGE
 socket; cluster secrets and daemon private keys are never exposed to payloads.
 
-Old unsigned enrollments are refused by this protocol. Preserve their state and
-reconcile outstanding work with the earlier software before provisioning a new
-enrollment. There is no automatic migration or ledger reset.
+Enrollments using an earlier protocol or ledger layout are refused. Preserve
+their state and reconcile outstanding work with the earlier software before
+provisioning a new enrollment. There is no automatic migration or ledger reset.
 
 Publish complete UTF-8 JSON by writing a temporary file and atomically renaming it
 to `<request_id>.json` in the request directory. Use a fresh random 32-character
@@ -165,7 +216,7 @@ The other operations are:
 
 | Operation | Additional fields |
 | --- | --- |
-| `start_manager` | `profile`: an operator-defined profile name |
+| `start_manager` | `configuration` and `configuration_digest`: the approved name and SHA256 digest |
 | `manager_status` | `handle`: the returned manager handle |
 | `cancel_manager` | `handle`: the returned manager handle |
 
@@ -220,7 +271,7 @@ data. The external step command is always a fixed `srun --mpi=pmix` bootstrap.
 The manager stays network-isolated; only the trusted allocation launcher and MPI
 ranks use host networking. `mpirun` is not used by this path.
 
-Add these fields to an otherwise complete policy, using your site's paths:
+Add MPI site settings to the operator policy, using your site's paths:
 
 ```json
 {
@@ -233,20 +284,32 @@ Add these fields to an otherwise complete policy, using your site's paths:
     "environment": {},
     "max_steps": 128,
     "termination_grace": 10.0
-  },
-  "profiles": {
-    "mpi-small": {
-      "cpus": 2,
-      "memory_mb": 4096,
-      "time_minutes": 60,
-      "mpi": {"nodes": 2, "ranks": 8}
-    }
   }
 }
 ```
 
-`cpus` is CPUs per rank and `memory_mb` is MiB per node for MPI profiles.
-Each MPI invocation uses the profile's entire fixed geometry. The manager
+Approve an existing launcher whose settings include, for example:
+
+```json
+{
+  "slurm.cpus_per_task": 2,
+  "slurm.mem": "4G",
+  "slurm.time_limit": "01:00:00",
+  "slurm.nodes": 2,
+  "slurm.ntasks": 8,
+  "slurm.ntasks_per_node": 4,
+  "slurm.mpi": "pmix",
+  "manager.workers": 1
+}
+```
+
+`slurm.mpi=pmix` selects MPI even with one rank; multiple nodes or tasks also
+select MPI. MPI requires one manager worker. Nodes default to one. If task count
+is omitted, it is nodes times tasks-per-node when placement is specified, and
+one task per node otherwise. Explicit task count takes precedence.
+
+`slurm.cpus_per_task` is CPUs per rank and `slurm.mem` is memory per node.
+Each MPI invocation uses the approved configuration's entire fixed geometry. The manager
 advertises aggregate capacity to workflow matching but runs ordinary commands on
 its single manager CPU. Use the explicit wrapper for distributed applications:
 
@@ -300,7 +363,7 @@ Do not use age-only deletion that can remove live allocation storage.
 
 ### MPI acceptance and failure handling
 
-MPI profiles disable requeue; the bootstrap also refuses a restarted batch job.
+MPI configurations disable requeue; the bootstrap also refuses a restarted batch job.
 Duplicate application IDs never launch again during the allocation. Manager exit,
 client disconnect and service shutdown stop the active step. If local launcher
 termination leaves remote completion uncertain, the service stops accepting work,

@@ -10,7 +10,7 @@ from typing import cast
 _MAX_REQUEST_SIZE = 16 * 1024
 _REQUEST_FORMAT = "httk-workspace-command"
 _RESPONSE_FORMAT = "httk-workspace-response"
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 _OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"})
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -30,6 +30,7 @@ class Request:
     :param operation: Select one supported daemon operation.
     :param profile: Select a configured profile for ``start_manager``.
     :param handle: Identify a broker-issued manager handle.
+    :param configuration_digest: Pin the selected approved configuration.
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
 
@@ -43,6 +44,7 @@ class Request:
     expires_at: int = field(default=0, kw_only=True)
     operator_key: str | None = field(default=None, kw_only=True)
     signature: str | None = field(default=None, kw_only=True)
+    configuration_digest: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
@@ -68,13 +70,17 @@ class Request:
             raise ValueError("invalid operator_key")
         if self.signature is not None and type(self.signature) is not str:
             raise ValueError("invalid signature")
+        if self.configuration_digest is not None and (
+            type(self.configuration_digest) is not str or _DIGEST_PATTERN.fullmatch(self.configuration_digest) is None
+        ):
+            raise ValueError("invalid configuration_digest")
         if self.profile is not None and type(self.profile) is not str:
             raise ValueError("invalid profile")
         if self.handle is not None and type(self.handle) is not str:
             raise ValueError("invalid handle")
 
         if self.operation == "health":
-            if self.profile is not None or self.handle is not None:
+            if self.profile is not None or self.handle is not None or self.configuration_digest is not None:
                 raise ValueError("health forbids operation fields")
         elif self.operation == "start_manager":
             if self.handle is not None or self.profile is None:
@@ -82,7 +88,7 @@ class Request:
             if _PROFILE_PATTERN.fullmatch(self.profile) is None:
                 raise ValueError("invalid profile")
         elif self.operation in {"manager_status", "cancel_manager"}:
-            if self.profile is not None or self.handle is None:
+            if self.profile is not None or self.handle is None or self.configuration_digest is not None:
                 raise ValueError("manager operation requires handle only")
             if _ID_PATTERN.fullmatch(self.handle) is None:
                 raise ValueError("invalid handle")
@@ -157,7 +163,10 @@ def _request_fields(request: Request) -> dict[str, object]:
         "signature": request.signature,
     }
     if request.operation == "start_manager":
-        fields["profile"] = request.profile
+        if request.configuration_digest is None:
+            raise ValueError("start_manager requires configuration_digest on the wire")
+        fields["configuration"] = request.profile
+        fields["configuration_digest"] = request.configuration_digest
     elif request.operation in {"manager_status", "cancel_manager"}:
         fields["handle"] = request.handle
     return fields
@@ -194,7 +203,7 @@ def decode_request(data: bytes) -> Request:
         "signature",
     }
     if operation == "start_manager":
-        keys.add("profile")
+        keys.update({"configuration", "configuration_digest"})
     elif operation in {"manager_status", "cancel_manager"}:
         keys.add("handle")
     if set(value) != keys:
@@ -202,7 +211,8 @@ def decode_request(data: bytes) -> Request:
     request_id = value["request_id"]
     workspace_id = value["workspace_id"]
     enrollment_id = value["enrollment_id"]
-    profile = value.get("profile")
+    profile = value.get("configuration")
+    configuration_digest = value.get("configuration_digest")
     handle = value.get("handle")
     created_at = value["created_at"]
     expires_at = value["expires_at"]
@@ -210,7 +220,9 @@ def decode_request(data: bytes) -> Request:
     signature = value["signature"]
     if type(request_id) is not str or type(workspace_id) is not str or type(enrollment_id) is not str:
         raise ValueError("invalid request fields")
-    if "profile" in value and type(profile) is not str:
+    if "configuration" in value and type(profile) is not str:
+        raise ValueError("invalid request fields")
+    if "configuration_digest" in value and type(configuration_digest) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
         raise ValueError("invalid request fields")
@@ -232,6 +244,7 @@ def decode_request(data: bytes) -> Request:
             expires_at=expires_at,
             operator_key=cast(str | None, operator_key),
             signature=cast(str | None, signature),
+            configuration_digest=cast(str | None, configuration_digest),
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
