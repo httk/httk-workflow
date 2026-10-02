@@ -1,30 +1,29 @@
 # Writing a remote adapter in detail
 
-*For operators and integrators who need to reach a machine the packaged
-`local`, `ssh`, `mount` and `mount-daemon` templates do not cover.* This page is the
-normative reference for the adapter contract: its base and optional
-operations and their exact JSON request and result documents, how settings and
-credentials reach an adapter, and the rules an implementation must follow. The
-operator-facing description of the same adapters — what each maintained kind
-does, and which command-line options drive it — is in
-{doc}`workflow_cli`.
+This page is the normative reference for the remote adapter contract, for
+reaching a machine that the packaged `local`, `ssh`, `mount` and `mount-daemon`
+templates do not cover. It specifies the base and optional operations with
+their JSON request and result documents, how settings and credentials reach an
+adapter, and the rules an implementation must follow. The operator-facing
+description of the maintained adapters, and the command-line options that drive
+them, is in {doc}`workflow_cli`.
 
 A *remote adapter* is a versioned directory with one dispatcher executable.
-Everything *httk-workflow* does on another machine — push a job bundle, run a
-command, or pull results back — is one *operation*, and every
-operation runs the bundle's single `adapter` program. The engine never opens an
-ssh connection itself and parses only the JSON result that program prints.
-The optional daemon operation relays a typed request to the destination broker,
-which owns the protected scheduler policy.
+Everything *httk-workflow* does on another machine (push a job bundle, run a
+command, pull results back) is one *operation*, and every operation runs the
+bundle's single `adapter` program. The engine never opens an ssh connection
+itself and parses only the JSON result that program prints. The optional
+`daemon` operation relays a typed request to the destination broker, which owns
+the protected scheduler policy.
 
-## One executable, base and optional operations
+## One executable for all operations
 
-There is one executable per bundle, not one per operation. The operation to run
-is named inside the request JSON (`"operation": …`), so a single program serves
-the supported operations. The operation names are
-{py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS` and the value of the
-request's `operation` member. Generic adapters leave scheduling to the destination
-launcher. The `mount-daemon` adapter relays requests to a protected broker.
+A bundle has one executable, not one per operation. The request JSON names the
+operation in its `operation` member, so a single program serves every supported
+operation. The operation names are
+{py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS`. Generic adapters leave
+scheduling to the destination launcher; the `mount-daemon` adapter relays
+requests to a protected broker.
 
 ## The bundle
 
@@ -35,33 +34,30 @@ my-cluster/
 └── credentials.json     # written by the CLI, never by you, mode 0600
 ```
 
-Bundles live in one of two places, and a project-local definition shadows a
-global one of the same name:
+Bundles live in one of two places. A project-local definition shadows a global
+one with the same name:
 
 | Scope | Location |
 | --- | --- |
 | project | `PROJECT/httk_project/remotes/NAME/` |
 | global | `$XDG_CONFIG_HOME/httk/remotes/NAME/` |
 
-The metadata file is `remote.json`, below a `remotes/` directory; those are the
-only spellings a bundle is read under.
+A bundle is read only as `remote.json` below a `remotes/` directory.
 
 ### Historical protocol names
 
-The file was renamed; the *format identifiers* inside it and in every request and
-result document were not. `httk-computer-adapter`, `httk-computer-request`, and
-`httk-computer-result` are protocol: an adapter written against an earlier
-release, or a bundle authored elsewhere, must keep validating and keep being
-understood, and renaming an identifier would refuse it for no reason at all.
-Read them as historical spellings of *remote*; every side already agrees on
-them, and nothing new should be added under the older word.
+The metadata file was renamed, but the format identifiers inside it and in every
+request and result document were not. `httk-computer-adapter`,
+`httk-computer-request` and `httk-computer-result` are protocol. An adapter
+written against an earlier release, or a bundle authored elsewhere, must keep
+validating, and renaming an identifier would refuse it for no benefit. Read
+them as historical spellings of *remote*; add nothing new under the older word.
 
 ### `remote.json`
 
-The document is validated by
-{py:func}`httk.workflow.adapters.validate_adapter_bundle` every single time the
-bundle is resolved, added, or run — not once at installation. A bundle that stops
-satisfying it stops being usable, which is the point.
+{py:func}`httk.workflow.adapters.validate_adapter_bundle` validates the document
+every time the bundle is resolved, added or run, not once at installation. A
+bundle that stops satisfying it stops being usable.
 
 ```json
 {
@@ -75,10 +71,6 @@ satisfying it stops being usable, which is the point.
 }
 ```
 
-There is no `operations` member. The bundle carries one executable named
-`adapter`, which validation requires to exist and be executable; the operation
-is selected by the request, not by a per-operation path.
-
 | Member | Required | Meaning |
 | --- | --- | --- |
 | `format` | yes | must be `httk-computer-adapter` (the historical spelling; see above) |
@@ -89,35 +81,43 @@ is selected by the request, not by a per-operation path.
 | `required_binaries` | no | array of program names that must be on `PATH` **of the machine running the adapter**, checked with `shutil.which` at every validation |
 | `kind` | no | free-form; see below |
 
-Beside `remote.json` the bundle must contain one executable file named
-{py:data}`httk.workflow.adapters.ADAPTER_EXECUTABLE` (`adapter`); validation
-refuses a bundle whose `adapter` is missing or not runnable.
+There is no `operations` member. Beside `remote.json` the bundle must contain
+one executable file named
+{py:data}`httk.workflow.adapters.ADAPTER_EXECUTABLE` (`adapter`). Validation
+refuses a bundle whose `adapter` is missing or not executable. The request, not
+a per-operation path, selects the operation.
 
-`kind` is *not* interpreted by the generic bundle loader. The dedicated daemon
-CLI requires `mount-daemon`, whose separate dispatcher requires that exact kind
-on every call. The following describes the general runtime. It is read only by
-{py:mod}`httk.workflow.adapter_protocol` — the packaged implementation the
-maintained templates execute — which dispatches on it and refuses any value
-outside `local`, `ssh` and `mount` rather than running the wrong code in
+#### `kind`
+
+The generic bundle loader does not interpret `kind`. The dedicated daemon CLI
+requires `mount-daemon`, and its separate dispatcher requires that exact kind
+on every call.
+
+In the general runtime, `kind` is read only by
+{py:mod}`httk.workflow.adapter_protocol`, the packaged implementation that the
+maintained templates execute. It dispatches on `kind` and refuses any value
+other than `local`, `ssh` and `mount`, rather than running the wrong code in
 the wrong place. A custom adapter whose `adapter` executes your own program may
-put whatever it likes there; setting a distinctive value is still worth doing,
-because an `adapter` accidentally repointed at the packaged implementation then
-refuses instead of, say, copying a cluster job into the local filesystem.
+put any value there. A distinctive value is still useful: if `adapter` is
+accidentally repointed at the packaged implementation, it then refuses instead
+of, for example, copying a cluster job into the local filesystem.
 
-`required_binaries` is checked locally, at validation time. Do not list binaries
-that only exist on the far side of a connection: the local `ssh` and `rsync`
-clients are local requirements, but a program used by a workspace launcher is
-not a remote-adapter requirement.
+#### `required_binaries`
 
-## The base operations
+`required_binaries` is checked locally at validation time. Do not list binaries
+that exist only on the far side of a connection. The local `ssh` and `rsync`
+clients are local requirements; a program used by a workspace launcher is not a
+remote-adapter requirement.
 
-Every operation runs the same `adapter` executable. It is started as
+## Running an operation
+
+Every operation runs the same `adapter` executable, started as
 
 ```text
 adapter  /tmp/httk-adapter-XXXX.json
 ```
 
-with no shell, no environment contract, and no stdin — one argument, the request
+with no shell, no environment contract and no stdin: one argument, the request
 file. The program must:
 
 1. read the one JSON request file named by `argv[1]`;
@@ -126,8 +126,8 @@ file. The program must:
 4. print **exactly one** JSON result object on stdout;
 5. exit `0`.
 
-Diagnostics belong on stderr, where they are attached to the result as
-`diagnostics` when the call otherwise succeeds.
+Diagnostics go to stderr. When the call otherwise succeeds, they are attached
+to the result as `diagnostics`.
 
 The maintained template is a one-line dispatcher that executes the packaged
 module:
@@ -137,9 +137,9 @@ module:
 exec python3 -m httk.workflow.adapter_runtime "$@"
 ```
 
-Which operation is running is fixed by the request's `operation` member and
-nothing else; the module dispatches on it. A result whose `operation` disagrees
-with the request is rejected by {py:func}`httk.workflow.adapters.run_adapter`.
+The request's `operation` member alone decides which operation runs, and the
+module dispatches on it. {py:func}`httk.workflow.adapters.run_adapter` rejects a
+result whose `operation` disagrees with the request.
 
 ### The request envelope
 
@@ -156,13 +156,13 @@ envelope is always present:
 }
 ```
 
-- `adapter_dir` is the absolute, resolved bundle directory. It is how an adapter
-  finds its own files; nothing else tells it where it lives.
+- `adapter_dir` is the absolute, resolved bundle directory. It is the only way
+  an adapter learns where its own files are.
 - `remote_settings` is the merge described under [Settings and credentials](#settings-and-credentials).
-- Everything else is operation-specific and documented per operation below.
+- All other members are operation-specific and documented per operation below.
 
 The request file is written with `sort_keys=True` and removed as soon as the
-operation returns, whether it succeeded, failed, or timed out.
+operation returns, whether it succeeded, failed or timed out.
 
 ### The result envelope
 
@@ -171,7 +171,7 @@ operation returns, whether it succeeded, failed, or timed out.
 ```
 
 `run_adapter` rejects a result that is not one JSON object, or whose `format`,
-`format_version`, or `operation` disagree with the call it made. A *refusal* is
+`format_version` or `operation` disagree with the call it made. A *refusal* is
 the same envelope with `ok: false` and a human-readable `error`:
 
 ```json
@@ -179,9 +179,11 @@ the same envelope with `ok: false` and a human-readable `error`:
  "format_version": 2, "operation": "configure", "ok": false}
 ```
 
+## The base operations
+
 ### `configure`
 
-Verify that a remote's settings can work, before the command line persists them.
+Checks that a remote's settings can work, before the command line stores them.
 
 Request members beyond the envelope:
 
@@ -189,9 +191,9 @@ Request members beyond the envelope:
 | --- | --- | --- |
 | `settings` | object | the **pending** `--set KEY=VALUE` values, not yet stored anywhere |
 
-Pending settings are passed separately because storage happens only after this
-operation succeeds; an adapter that only looked at `remote_settings` could never
-validate the first configuration of a host. Merge `settings` over
+Pending settings are passed separately because they are stored only after this
+operation succeeds; an adapter that looked only at `remote_settings` could
+never validate a host's first configuration. Merge `settings` over
 `remote_settings` and check the result.
 
 ```json
@@ -206,16 +208,16 @@ validate the first configuration of a host. Merge `settings` over
  "format_version": 2, "operation": "configure", "ok": true}
 ```
 
-The maintained implementation reports `connectivity` as `ok` when a remote `true`
-answered, and `skipped` when there is no `host` or the remote sets
+The maintained implementation reports `connectivity` as `ok` when a remote
+`true` answered, and as `skipped` when there is no `host` or the remote sets
 `check_connectivity=no`.
 
 ### `install`
 
-Verify that the target can run *httk-workflow*. The CLI verb for this
-operation is `httk workflow remote check`; the operation keeps its historical
-protocol spelling `install`, but an adapter never installs software — setting
-httk up on the target is the user's job, done by logging in there.
+Checks that the target can run *httk-workflow*. The CLI verb is
+`httk workflow remote check`; the operation keeps its historical protocol name
+`install`, but an adapter never installs software. Setting httk up on the
+target is the user's job, done by logging in there.
 
 No request members beyond the envelope.
 
@@ -237,16 +239,16 @@ No request members beyond the envelope.
 | `httk_command` | the argument vector that answered, as an array |
 | `httk_version` | its `--version` output, stripped |
 
-Answering "httk-core is installed" is not enough: the maintained implementation
-also runs `httk workspace --help`, because the `workflow` command group
-exists exactly when *this* package is installed beside the core. A target with
-no httk is a refusal carrying the remedy: log in there and make sure *httk₂* is
-installed and reachable from a non-interactive shell, or set `httk_command=` to
-where it lives.
+Finding *httk-core* is not enough. The maintained implementation also runs
+`httk workspace --help`, because the `workflow` command group exists only when
+this package is installed beside the core. A target without httk is a refusal
+that carries the remedy: log in there and make sure *httk₂* is installed and
+reachable from a non-interactive shell, or set `httk_command=` to where it
+lives.
 
 ### `invoke`
 
-Run one argument vector where this adapter's work belongs, and report what it
+Runs one argument vector where this adapter's work belongs and reports what it
 did.
 
 | Member | Type | Meaning |
@@ -266,22 +268,22 @@ did.
  "returncode": 0, "stdout": "{\"format\": \"httk-workflow-status\", ...}\n", "stderr": ""}
 ```
 
-**A nonzero `returncode` is still `ok: true`.** The operation succeeded — it ran
-the command and is reporting the outcome. `ok: false` means the adapter could not
-run it at all. Callers check `returncode` themselves; every remote command in
-`httk job transfer …` does exactly that and raises on the value.
+**A nonzero `returncode` is still `ok: true`.** The operation succeeded: it ran
+the command and reports the outcome. `ok: false` means the adapter could not
+run the command at all. Callers check `returncode` themselves; every remote
+command in `httk job transfer …` does so and raises on a nonzero value.
 
-If `argv[0]` is the literal `httk`, an adapter is expected to honour the remote's
-`httk_command` setting by replacing that one element with the parsed vector; see
+If `argv[0]` is the literal `httk`, the adapter must apply the remote's
+`httk_command` setting; see
 [Spelling `httk` on the target](#spelling-httk-on-the-target).
 
 ### `status`
 
-Byte-for-byte the same contract as `invoke`, except that `cwd` is ignored. It
-exists as a separate operation so that a health probe can be given a different
-implementation, a different timeout, or different credentials from arbitrary
-command execution. `httk job transfer REMOTE:NAME default` uses it to check
-that the far side is a compatible workspace before anything moves.
+The same contract as `invoke`, byte for byte, except that `cwd` is ignored. It
+is a separate operation so that a health probe can have a different
+implementation, timeout or credentials from arbitrary command execution.
+`httk job transfer REMOTE:NAME default` uses it to check that the far side is a
+compatible workspace before anything moves.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
@@ -307,8 +309,8 @@ target.
 | `directory` | boolean, optional | whether the transfer is of a directory's *contents*; inferred from the local side when absent |
 | `files` | array of relative paths, optional | transfer only these, relative to `source`; implies a directory transfer |
 
-`files` entries are refused if absolute or if they contain `..`: a transfer
-manifest must not be able to name anything outside the workspace it came from.
+`files` entries are refused if they are absolute or contain `..`, so a transfer
+manifest cannot name anything outside the workspace it came from.
 
 ```json
 {"destination": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c…",
@@ -323,20 +325,20 @@ manifest must not be able to name anything outside the workspace it came from.
  "path": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c…"}
 ```
 
-`path` is where the data actually landed, and callers use it rather than the
+`path` is where the data actually landed, and callers use it instead of the
 destination they asked for. The maintained implementation reports the requested
-destination for remote transfers and the *resolved absolute* path for local
-copies, which is why the value is authoritative and the request is not.
+destination for remote transfers and the resolved absolute path for local
+copies, so the result value is authoritative and the request value is not.
 
-A local copy onto an existing destination is idempotent when both sides carry the
-identical `.httk-transfer/manifest.json`, and an error otherwise, so a resumed
-transfer does not have to know whether the previous attempt finished.
+A local copy onto an existing destination is idempotent when both sides carry
+the identical `.httk-transfer/manifest.json`, and an error otherwise. A resumed
+transfer therefore does not need to know whether the previous attempt finished.
 
-## Optional `daemon` operation
+## The optional `daemon` operation
 
-Protocol version 2 additionally recognizes `daemon`. It is optional: existing
+Protocol version 2 also recognizes `daemon`. It is optional, and existing
 adapters may refuse it. The maintained `mount-daemon` bundle uses a separate
-`python3 -m httk.workflow._daemon_adapter` dispatcher and refuses generic
+`python3 -m httk.workflow._daemon_adapter` dispatcher and refuses the generic
 `invoke`, `status`, `push` and `pull` operations. A missing or changed `kind` is
 an error; this dispatcher never falls back to local execution.
 
@@ -347,72 +349,78 @@ Beyond the standard request envelope, `daemon` accepts exactly:
 | `daemon_request` | complete signed version-3 command object from {doc}`/details/workspace_daemon` |
 | `wait_seconds` | optional finite number from 0.05 to 120, default 10 |
 
-The client checks workspace/enrollment IDs against the configured endpoint before
-publication. Requests carry authorized httk identity signatures. Responses must
-verify against the pinned daemon public key and match those identities, request ID and canonical
-request digest, allowed operation outcome and any requested handle. Paths,
-commands, argv, cwd, environment and scheduler arguments are not accepted.
+Before publication, the client checks the workspace and enrollment ids against
+the configured endpoint. Requests carry authorized httk identity signatures.
+Responses must verify against the pinned daemon public key and match those
+identities, the request id and canonical request digest, an allowed operation
+outcome, and any requested handle. Paths, commands, argv, cwd, environment and
+scheduler arguments are not accepted.
 
-A confirmed response returns adapter process exit 0 with `ok: true`, canonical
-response JSON in `stdout`, empty `stderr`, and nested `returncode` 0 for
-`ready`, `submitted`, `status` or `cancel_requested`, or 2 for `refused`, `busy`
-or `uncertain`. This preserves a known negative daemon result across the adapter
-boundary. Failure to obtain a validated response is an adapter error and may
-leave a live request. Callers must retain its ID and fields for retry.
+A confirmed response returns adapter process exit 0 with `ok: true`, the
+canonical response JSON in `stdout`, an empty `stderr`, and a nested
+`returncode`: 0 for `ready`, `submitted`, `status` or `cancel_requested`, and 2
+for `refused`, `busy` or `uncertain`. A known negative daemon result thus
+survives the adapter boundary. Failure to obtain a validated response is an
+adapter error and may leave a live request; callers must keep its id and fields
+for retry.
 
-This kind's `configure` merges pending settings, validates the eight settings
-listed in {doc}`/details/remotes` and checks mounted workspace identity. It publishes
-nothing. Its `install` operation rejects nonempty pending settings and sends a
-health request; success means the matching daemon answered `ready`. It does not
-install software or validate compute-node confinement.
+For this kind, `configure` merges pending settings, validates the eight
+settings listed in {doc}`/details/remotes`, and checks mounted workspace
+identity. It publishes nothing. `install` rejects nonempty pending settings and
+sends a health request; success means the matching daemon answered `ready`. It
+does not install software or validate compute-node confinement.
 
 ## Settings and credentials
 
-`httk workflow remote configure --set KEY=VALUE NAME` splits every assignment
-in two, by name:
+`httk workflow remote configure --set KEY=VALUE NAME` sorts every assignment by
+key:
 
-- keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
-  `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
-  `port`, `username`, mount settings, the seven `daemon_*` settings documented
-  in {doc}`/details/remotes`, `vasp_command`, and `vasp_pseudo_library` —
-  are written into the flat `settings` object of the shareable, signable
-  `remote.json`;
-- **every other key** is a credential. It is written into
-  `credentials.json` beside it, with mode `0600`, and project manifests exclude
-  that file.
+- Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
+  (`check_connectivity`, `host`, `httk_command`, `legacy_settings`, `port`,
+  `username`, the mount settings, the seven `daemon_*` settings documented in
+  {doc}`/details/remotes`, `vasp_command` and `vasp_pseudo_library`) are written
+  into the flat `settings` object of the shareable, signable `remote.json`.
+- **Every other key** is a credential. It is written into `credentials.json`
+  beside it, with mode `0600`, and project manifests exclude that file.
 
-{py:func}`httk.workflow.adapters.remote_settings` merges the two back together —
-`remote.json` first, `credentials.json` over it — and that single object is what
-arrives as the request's `remote_settings`. **An adapter never sees the split.**
-It reads one flat settings object and cannot tell, and must not care, which file
-a value came from. `httk workflow remote show NAME` reports which file each
-setting came from, and the *name* only — never the value — of every credential.
+{py:func}`httk.workflow.adapters.remote_settings` merges the two back together,
+`remote.json` first and `credentials.json` over it. That single object arrives
+as the request's `remote_settings`. **An adapter never sees the split:** it
+reads one flat settings object and must not depend on which file a value came
+from. `httk workflow remote show NAME` reports which file each setting came
+from, and shows only the *name* of each credential, never its value.
 
-Two consequences worth stating:
+Two consequences:
 
 - A credential is never a member of `remote.json`, so a signed project manifest
   covering the bundle covers no secret.
-- Adding a persistable key means adding it to `PERSISTABLE_REMOTE_SETTINGS`. A key
-  an adapter invents and the engine does not know about is treated as a secret,
-  which is the safe direction to be wrong in.
+- Adding a persistable key means adding it to `PERSISTABLE_REMOTE_SETTINGS`. A
+  key an adapter invents that the engine does not know is treated as a secret,
+  which is the safe way to be wrong.
 
-Values arriving in `remote_settings` are strings as the operator typed them.
-Validate them: the maintained implementation refuses a non-numeric `port`, a
-`host` or `username` containing whitespace, a non-positive-integer `workers`, and
-any batch directive value containing control characters.
+Values in `remote_settings` are strings as the operator typed them, so validate
+them. The maintained implementation refuses a non-numeric `port`, a `host` or
+`username` containing whitespace, a `workers` value that is not a positive
+integer, and any batch directive value containing control characters.
 
-## No shell, ever
+### Spelling `httk` on the target
 
-**Every subprocess an adapter starts is an argument vector.** No value that came
-from a request or from settings may be interpolated into a string that a shell
-will parse. This is not a style rule; it is the reason a workspace path with a
-space in it, or a hostile job tag, cannot become a command on a cluster login
-node.
+The `httk_command` setting names how `httk` is run on the target. When an
+`invoke` request's `argv[0]` is the literal `httk`, an adapter is expected to
+replace that one element with the parsed `httk_command` vector. The `install`
+result reports the vector that answered as `httk_command`, and its refusal for
+a target without httk suggests setting `httk_command=` to where httk lives.
 
-`ssh` is the one unavoidable exception in the protocol, because it always joins
-the command words it is given and lets a login shell on the far side parse the
-result. The convention for that exception is a *single* helper, used everywhere,
-that quotes element-wise:
+## No shell
+
+**Every subprocess an adapter starts is an argument vector.** No value from a
+request or from settings may be interpolated into a string that a shell will
+parse. This is what prevents a workspace path containing a space, or a hostile
+job tag, from becoming a command on a cluster login node.
+
+`ssh` is the one unavoidable exception, because it always joins the command
+words it is given and lets a login shell on the far side parse the result. The
+convention is a *single* helper, used everywhere, that quotes element-wise:
 
 ```python
 def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
@@ -422,19 +430,18 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
     return f"cd {shlex.quote(cwd)} && {quoted}"
 ```
 
-Every remote command string is built by that helper and by nothing else. A
-manager launcher owns any generated scheduler script and its quoting; see
+Every remote command string is built by that helper and nothing else. A manager
+launcher owns any generated scheduler script and its quoting; see
 {doc}`/details/launchers` for that separate contract.
 
 `rsync` transfers pass `--protect-args`, so even file names travel inside the
-protocol rather than through the remote shell. When an explicit `files` batch is
-transferred, the list goes into a temporary file passed as `--files-from=` — not
-onto the command line.
+protocol rather than through the remote shell. An explicit `files` batch is
+written to a temporary file passed as `--files-from=`, not placed on the command
+line.
 
 ## Exit codes, refusals, and timeouts
 
-There are three distinct ways an operation can end, and they are not
-interchangeable.
+An operation can end in one of these distinct ways:
 
 | Ending | Exit | stdout | What the caller sees |
 | --- | --- | --- | --- |
@@ -443,34 +450,37 @@ interchangeable.
 | crash | nonzero | ignored | `RuntimeError("adapter OP failed (N): <stderr>")` |
 | timeout | — | — | `TimeoutError("adapter OP exceeded N seconds")` |
 
-A **refusal** is a well-formed answer: *I understood the request and will not, or
-cannot, carry it out.* An unreachable host, a target without httk installed, an
-unsupported `kind` — these are refusals, and the reason reaches the operator
-verbatim. A **crash** is for what the adapter could not describe: a malformed
-request, an unreadable bundle, an exception. The maintained implementation exits
-`2` with one stderr line for those and `0` for every refusal.
+A **refusal** is a well-formed answer: the adapter understood the request and
+will not, or cannot, carry it out. An unreachable host, a target without httk
+installed, or an unsupported `kind` are refusals, and the reason reaches the
+operator verbatim. A **crash** is for what the adapter could not describe: a
+malformed request, an unreadable bundle, an exception. The maintained
+implementation exits `2` with one stderr line for a crash and `0` for every
+refusal.
 
-Prefer refusals. An operator reading `cannot reach me@login.example.org:
-Permission denied; set check_connectivity=no to configure the remote anyway` is
-being told what to do next; an operator reading a traceback is not.
+Prefer refusals. A message such as `cannot reach me@login.example.org:
+Permission denied; set check_connectivity=no to configure the remote anyway`
+tells the operator what to do next; a traceback does not.
 
-The timeout is `timeout_seconds` from `remote.json`, overridable per call by
-`--adapter-timeout` on the command line. It is enforced by the *caller*, which
-kills the operation; an adapter that may legitimately take minutes — an `rsync`
-of a large campaign — belongs to a bundle whose `timeout_seconds` says so.
+The timeout is `timeout_seconds` from `remote.json`, overridable per call with
+`--adapter-timeout` on the command line. The caller enforces it by killing the
+operation. An adapter that may legitimately take minutes, such as an `rsync` of
+a large campaign, belongs in a bundle whose `timeout_seconds` allows for it.
 
-For a PBS site, write a custom adapter that implements these six operations and
-uses `qsub` only when a command is explicitly invoked on that site. The manager
-launch policy belongs to the target workspace's launcher, not to the remote
-adapter. See {doc}`/details/launchers` for the compact PBS launcher example,
-including its batch directives, script lifecycle, and partial-submission rules.
+### Scheduler sites
+
+For a PBS site, write a custom adapter that implements the six base operations
+and uses `qsub` only when a command is explicitly invoked on that site. The
+manager launch policy belongs to the target workspace's launcher, not to the
+remote adapter. See {doc}`/details/launcher_authoring` for the compact PBS launcher
+example, including its batch directives, script lifecycle and
+partial-submission rules.
 
 ## Reading the maintained implementation
 
-The definitive worked example is the shipped one.
+The shipped implementation is the definitive worked example.
 {py:mod}`httk.workflow.adapter_protocol` is its public name and carries the
 contract in its docstring; {py:mod}`httk.workflow.adapter_runtime` is the
 implementation the `adapter` dispatcher executes. Both names refer to the same
-objects. Read
-`_shell_command` and `_rsync` there before writing any code
-that composes a command for another machine.
+objects. Read `_shell_command` and `_rsync` there before writing code that
+composes a command for another machine.

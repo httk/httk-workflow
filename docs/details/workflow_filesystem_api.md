@@ -1,94 +1,71 @@
 # Workflow filesystem API in detail
 
-*For implementers of this protocol, and for anyone who needs to know exactly what a
+*For implementers of this protocol, and for anyone who needs to know what a
 workspace on disk means.*
 
 ## Status and scope
 
-This document specifies the filesystem protocol around which the
-*httk-workflow* engine is built. It is the normative on-disk protocol rather
-than Python API documentation. The current `httk.workflow` implementation
-writes and serves the `core-v2` profile. Core-v2 includes transactional data,
-detached transfer, and replay-after-stop semantics; relocation and
-cross-workspace children remain reserved future capabilities and are rejected
-rather than partially executed.
+This is the normative on-disk protocol of the *httk-workflow* engine, not
+Python API documentation. The current `httk.workflow` implementation writes and
+serves the `core-v2` profile described in
+[Conformance profiles](#conformance-profiles). Relocation and cross-workspace
+children remain reserved future capabilities; they are rejected rather than
+partially executed.
 
-`core-v2` defines the current on-disk protocol: every `spawn.json` entry
-carries a mandatory unique `label`; a join summary records typed per-child
-observations which the next activation also reads as `children` in its attempt
-context; `runner` in `job.json` may name a shared runner outside the payload
-through `source` and `sha256`; and a runner-declared failure marked
-`retryable` is retried within the job's existing attempt budgets. Transaction
-publication, sealed job transfer, and recovery after a stopped manager are also
-core semantics.
-
-The protocol is language independent. A workflow step may be a shell script, a
-Python program, a compiled executable, or any other program that can read and
-write files and atomically rename a file or directory.
+The protocol is language independent: a step may be any program that can read
+and write files and atomically rename a file or directory.
 
 The design descends from the `ht.task.*` directories, `ht_steps`,
-`ht.nextstep`, subtasks, and `ht.atomic.*` replay mechanism in *httk* v1. It keeps
-the central property of that design: neither a workflow step nor a task manager
-is ever required to run policy-gated cleanup code. A manager runs always-safe
-cleanup at attach and the full policy-gated collection at clean exit, and its
-owning manager performs best-effort post-commit removal of a locally reaped
-successful attempt control tree. Either may disappear between any two
-instructions. A later task manager must be able to identify the last commit
-point and continue from it.
+`ht.nextstep`, subtasks, and `ht.atomic.*` replay of *httk* v1, and keeps its
+central property: neither a workflow step nor a task manager is ever required
+to run policy-gated cleanup code. A manager runs always-safe cleanup at attach
+and the full policy-gated collection at clean exit, and the owning manager
+removes a locally reaped successful attempt control tree after commit, best
+effort. Either may disappear between any two instructions; a later task
+manager must be able to identify the last commit point and continue from it.
 
 The design target is workspaces larger than the measured local snapshot in
-{doc}`/details/benchmarks`; that target is not a capacity measurement. Metadata inode
-count, directory fan-out, scheduler scan cost, and manual filesystem inspection
-are therefore correctness-level design concerns, not later optimizations.
+{doc}`/details/benchmarks`; that target is not a capacity measurement. Metadata
+inode count, directory fan-out, scheduler scan cost, and manual inspection are
+therefore correctness-level design concerns, not later optimizations.
 
-The protocol covers:
-
-- submission and execution of dynamic, multi-step jobs;
-- safe competition between any number of task managers;
-- automatic and manual continuation;
-- dynamic fan-out into child jobs and later joins;
-- transactional contributions to durable job data;
-- explicit, unexpected, and dependency failures;
-- durable history and discovery of failed jobs.
-
-It does not promise transactional semantics for effects outside the workflow
-filesystem. Sending mail, submitting to a second queue, or changing a remote
-database must be made idempotent in that external system, for example by using
-the httk job and activation IDs as idempotency keys.
+Effects outside the workflow filesystem are not transactional. Sending mail,
+submitting to a second queue, or changing a remote database must be made
+idempotent in that external system, for example with the httk job and
+activation IDs as idempotency keys.
 
 ## Normative language
 
-The words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are used
-in their usual specification sense.
+**MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** have their usual
+specification meaning.
 
 Protocol JSON is UTF-8. Unknown object members MUST be ignored when reading a
 compatible major format version.
 
 ## Design summary
 
-The core representation is deliberately small:
-
 1. A job has one payload directory containing one required metadata file,
-   `job.json`. Its parent path is an arbitrary, user-chosen placement path.
+   `job.json`. Its parent path is an arbitrary, user-chosen placement.
 2. A job has exactly one small marker file in the global `state/` tree.
 3. The marker's location is the sole authority for the job's current state. It
    is atomically renamed between `submitted`, `ready`, `claimed`, `running`,
    `committing`, `waiting`, and terminal state directories.
 4. Transition details and history are packed into shared append-only journal
-   segments. There is no state-record file, event directory, failure file, or
-   revision directory per job.
+   segments. There is no per-job state-record file, event directory, failure
+   file, or revision directory.
 5. An active attempt temporarily adds one small control directory below the
    reserved `attempts/` payload directory. The manager and collector refuse a
    symlinked `attempts/` or control entry; a concurrent replacement by the
-   payload's own owner after that check is outside the threat model. Application
-   execution may use either one persistent `run/` workdir or an isolated
+   payload's own owner after that check is outside the threat model. The
+   application runs in either one persistent `run/` workdir or an isolated
    `run.<attempt-id>/`.
-6. `data/` and replayable transactions are optional. Jobs that opt in receive
+6. `data/` and replayable transactions are optional. Jobs that opt in get
    all-or-none publication at attempt boundaries; jobs such as large VASP runs
-   may instead keep all mutable state directly in persistent `run/`.
+   may instead keep all mutable state in persistent `run/`.
 
-The expected steady-state metadata cost for a job with no retained application
-data is:
+### Per-job metadata cost
+
+Steady-state workflow metadata for a job with no retained application data:
 
 | Object | Per job | Lifetime |
 | --- | ---: | --- |
@@ -104,69 +81,73 @@ data is:
 | Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
 
-**Design arithmetic, not a measurement:** the permanent floor is therefore
-**three inodes**: the payload directory, its
-`job.json`, and the one marker. The floor is reachable in practice and not only
-in theory, because a runner may live outside the payload — `runner.source`
-naming the workspace runner store or an installed search path, pinned by
-`runner.sha256` — so a partitioned campaign whose children all execute the same
-program stores that program once and each child's payload is exactly its
-`job.json`. A payload runner is the alternative, not the requirement, and costs
-whatever its own files cost. A runner that keeps state across the attempts and
-steps of one job adds `.httk-job/`, and a live or retained attempt adds its
-attempt-control directory and workdir.
+By design arithmetic (not measurement), the permanent floor is **three
+inodes**: the payload directory, `job.json`, and the marker. The floor is
+reachable because a runner may live outside the payload: `runner.source` names
+the workspace runner store or an installed search path, pinned by
+`runner.sha256`. A partitioned campaign whose children run the same program
+then stores it once, and each child's payload is just its `job.json`. A payload
+runner costs whatever its files cost. A runner keeping state across attempts
+adds `.httk-job/`; a live or retained attempt adds its attempt-control
+directory and workdir.
 
-Shard and journal directories are shared by many jobs. Application inputs,
-outputs, code, and logs naturally add their own files; the table only counts
-workflow metadata. Arbitrary placements can nevertheless make some placement
-directories unique to one job, and old state kinds can temporarily retain
-empty copies of those paths. That directory overhead is operationally relevant
-even though it is not a permanent per-job protocol object.
+Shard and journal directories are shared by many jobs, and application files
+are not counted. Arbitrary placements can make some placement directories
+unique to one job, and old state kinds can temporarily retain empty copies of
+those paths. That overhead matters operationally even though it is not a
+permanent per-job protocol object.
 
 ## Concepts
 
-A **workflow workspace** is one self-contained filesystem tree with an immutable
-workspace UUID, its jobs, authoritative state markers, and journals.
+**Workflow workspace**
+: One self-contained filesystem tree with an immutable workspace UUID, its
+  jobs, authoritative state markers, and journals.
 
-A **watch root** is an ordinary directory below which a manager discovers
-workflow workspaces. A manager may also receive explicit workspace paths and may
-supervise several workspaces at once.
+**Watch root**
+: An ordinary directory below which a manager discovers workspaces. A manager
+  may also receive explicit workspace paths and may supervise several
+  workspaces at once.
 
-A **job** is the durable unit of scheduling, history, and final success or
-failure.
+**Job**
+: The durable unit of scheduling, history, and final success or failure.
 
-A **job key** is the filesystem component
-`[<tag>--]<job-uuid>`. The UUID is authoritative; the optional tag is for human
-navigation.
+**Job key**
+: The filesystem component `[<tag>--]<job-uuid>`. The UUID is authoritative;
+  the optional tag is for human navigation.
 
-A **placement** is an arbitrary relative parent path below a workspace, for example
-`project-17/0/03a`. A payload at that placement has the path
-`<placement>/<job-key>`.
+**Placement**
+: An arbitrary relative parent path below a workspace, such as
+  `project-17/0/03a`. The payload is at `<placement>/<job-key>`.
 
-A **step** is an application-defined name such as `relax` or `collect`. The set
-of possible step names need not be declared in advance.
+**Step**
+: An application-defined name such as `relax` or `collect`, not declared in
+  advance.
 
-An **activation** is one logical request to execute a step. Advancing from one
-step to another creates a new activation. Deliberately advancing to the same
-textual step name also creates a new activation.
+**Activation**
+: One logical request to execute a step. Advancing to any step, including the
+  same textual name, creates a new activation.
 
-An **attempt** is one physical execution of an activation. Retrying after a
-timeout or abandoned allocation creates a new attempt of the same activation.
+**Attempt**
+: One physical execution of an activation. Retrying after a timeout or
+  abandoned allocation creates a new attempt of the same activation.
 
-A **data generation** identifies the committed contents of an optional job
-`data/` tree. It is absent for jobs that do not use transactional data and
-advances after a successful transaction for jobs that do.
+**Data generation**
+: Identifies the committed contents of an optional job `data/` tree. It is
+  absent for jobs without transactional data and advances after each
+  successful transaction.
 
-An **outcome** is the step's atomically published request to advance, wait,
-succeed, fail, retry, or pause.
+**Outcome**
+: The step's atomically published request to advance, wait, succeed, fail,
+  retry, or pause.
 
-A **child job** is an ordinary job whose immutable definition names a parent.
-Children may themselves create children.
+**Child job**
+: An ordinary job whose immutable definition names a parent. Children may
+  create children.
 
 ## Required filesystem semantics
 
-All correctness-critical paths within one workflow workspace MUST reside on one
-filesystem on which:
+All correctness-critical paths of one workspace MUST reside on one filesystem
+on which:
 
 1. renaming a file within that filesystem is atomic;
 2. renaming a directory within that filesystem is atomic;
@@ -174,17 +155,16 @@ filesystem on which:
    indivisible namespace operation;
 4. a failed rename is reported to the caller.
 
-Atomic rename of the exact current marker is the compare-and-swap operation.
-The protocol never depends on `flock`, advisory locks, PID uniqueness, or an
-exit trap.
+Atomic rename of the exact current marker is the compare-and-swap. The
+protocol never depends on `flock`, advisory locks, PID uniqueness, or an exit
+trap.
 
 The baseline guarantee is **process-interruption safety**. Storage-crash
-durability additionally requires an implementation to synchronize new file
-contents and affected parent directories before publishing their names.
-Implementations claiming storage-crash durability MUST use `fsync` or an
-equivalent operation in the order required by the filesystem.
+durability additionally requires synchronizing new file contents and affected
+parent directories before publishing their names; implementations claiming it
+MUST use `fsync` or an equivalent in the order the filesystem requires.
 
-The following require an explicit executor adapter and validation:
+These require an explicit executor adapter and validation:
 
 - source and destination paths on different mounts;
 - object stores that only emulate rename;
@@ -192,35 +172,49 @@ The following require an explicit executor adapter and validation:
 - network filesystems without coherent atomic rename;
 - filesystems on which a client can indefinitely cache a removed name.
 
-Modification times and wall clocks are evidence for lease expiry, but never
-provide fencing. Correctness comes from moving the one current state marker.
+Modification times and wall clocks are evidence for lease expiry, never
+fencing. Correctness comes from moving the one current state marker.
 
 ## Conformance profiles
 
-The protocol is deliberately phased. A conforming **core** implementation of the
-current profile, **core-v2**, supports:
+A conforming **core** implementation of the current profile, **core-v2**,
+supports:
 
 - one workflow workspace per job and all references within that workspace;
-- submission, validation, claiming, leases, execution, and outcomes;
+- submission, validation, claiming, leases, execution, and outcomes of dynamic
+  multi-step jobs, with safe competition between any number of task managers;
 - persistent and isolated workdirs;
-- retries, joins, failures, cancellation, and operator requests;
-- packed journals, verified marker renames, startup recovery, and garbage
-  collection;
+- retries, dynamic fan-out into child jobs and joins, explicit, unexpected, and
+  dependency failures, cancellation, and operator requests for manual
+  continuation;
+- packed journals with durable history and discovery of failed jobs, verified
+  marker renames, startup recovery, and garbage collection;
 - transactional data publication and replay;
-- sealed detached transfer and replay after a stopped manager.
+- sealed detached transfer, and replay and recovery after a stopped manager.
 
-`format.json` carries an `extensions` array for future protocol additions; it is
-empty in this release, and a workspace declaring an unknown extension refuses
-to attach. Unknown state kinds are never treated as failed or orphaned jobs.
+In core-v2:
 
-Priority is encoded in marker names rather than directory levels, and scheduling
-is best effort rather than a strict global ordering guarantee.
+- every `spawn.json` entry carries a mandatory unique `label`;
+- a join summary records typed per-child observations, which the next
+  activation also reads as `children` in its attempt context;
+- `runner` in `job.json` may name a shared runner outside the payload through
+  `source` and `sha256`;
+- a runner-declared failure marked `retryable` is retried within the job's
+  existing attempt budgets.
+
+`format.json` carries an `extensions` array for future additions. It is empty
+in this release; a workspace declaring an unknown extension refuses to attach.
+Unknown state kinds are never treated as failed or orphaned jobs.
+
+Priority is encoded in marker names, not directory levels. Scheduling is
+therefore best effort: a cold start or incremental scan may temporarily find
+lower-priority work first, and strict global priority is not guaranteed.
 
 ## Workspace layout and arbitrary placement
 
-A workspace is an ordinary directory. Its protocol control data are below
-`WORKSPACE/.httk-workspace/`; job payload directories may be placed at any valid
-relative path outside that reserved directory:
+A workspace is an ordinary directory. Protocol control data live below
+`WORKSPACE/.httk-workspace/`; payloads may be at any valid relative path
+outside it:
 
 ```text
 WORKSPACE/
@@ -267,29 +261,42 @@ WORKSPACE/
                 └── logs/                   # reserved for a future run-log layout; unused in core-v2
 ```
 
-Here the job placement is `project-17/0/03a`. Its authoritative marker has a
-parallel path such as:
+Here the placement is `project-17/0/03a`, and the marker has a parallel path:
 
 ```text
 .httk-workspace/state/ready/project-17/0/03a/
 └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef.p500.g4.<record-ref>
 ```
 
-The protocol assigns no meaning to the placement components. They may represent
-projects, user names, dates, hash shards of any depth, or a mixture. Different
-jobs in one workspace may use completely different placement schemes.
+The layout includes the core-v2 transfer state directories. No empty
+state-kind or placement directory is required.
 
-The layout includes the transfer state directories used by core-v2, and no
-empty state-kind or placement directories are required.
+- `.httk-workspace/batch/` is created by a configured manager launcher such as
+  the packaged Slurm launcher. It is not remote-adapter state and is absent
+  with the built-in process launcher.
+- `.httk-workspace/tmp/` holds unpublished entries. Managers MUST ignore it for
+  scheduling. Garbage collection may remove old entries, but correctness MUST
+  NOT depend on cleanup.
+- `files/`, `data/`, a workdir, and attempt control are created only when
+  required. Empty placeholder directories SHOULD NOT be created.
 
-The `.httk-workspace/batch/` directory is created by a configured manager
-launcher such as the packaged Slurm launcher. It is not remote-adapter state and
-is absent when managers use the built-in process launcher.
+### Placement rules
 
-`files/`, `data/`, a workdir, and attempt control are created only when
-required. Empty placeholder directories SHOULD NOT be created. Empty placement
-directories have no protocol meaning and may be pruned, subject to the
-rename/prune rules below.
+Placement components have no protocol meaning. They may be projects, users,
+dates, hash shards of any depth, or a mixture, and jobs in one workspace may use
+different schemes. There is no configured sharding depth and no priority
+level: a marker's path below its state kind is its placement and nothing else.
+
+Placement components MUST be normalized relative path components. Empty
+components, `.`, `..`, NUL bytes, and `.httk-workspace` are forbidden. Each
+component must fit the filesystem's filename limit. A workspace MAY set policy
+limits on depth and total relative path length; these are operational limits,
+not a sharding scheme.
+
+Empty placement directories have no meaning and may be pruned under the rules
+in “State-marker rename.”
+
+### `format.json`
 
 `format.json` identifies the self-contained workspace:
 
@@ -313,10 +320,9 @@ rename/prune rules below.
 
 ### Workspace policy
 
-Everything this specification calls *configured* is one object in
-`format.json`, because a tunable that lives in each process cannot be agreed
-on by two implementations attaching the same workspace. The `policy` object is
-part of format version 2 and holds exactly these members:
+Everything this specification calls *configured* is the `policy` object of
+`format.json`, so that every implementation attaching a workspace agrees on
+it. It is part of format version 2 and holds exactly these members:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -325,88 +331,52 @@ part of format version 2 and holds exactly these members:
 | `journal_segment_bytes` | integer | `67108864` | The size at which a writer rotates to its next journal segment. |
 | `retention` | object | `{"journal_days": 1.0, "trash_days": 1.0}` | `journal_days` and `trash_days` default to one day; `attempt_control_days` is unset. An explicit `null` or `"keep"` keeps a category forever. |
 
-An implementation MUST refuse a `policy` member it does not know rather than
-ignore it, and MUST read an absent `policy` object, or an absent member of one,
-as the default above; a workspace written before this section existed is
-therefore attached without migration. For retention, an absent
-`attempt_control_days` means keep, while absent `journal_days` and
-`trash_days` mean one day. Values are validated on write:
-`lease_seconds` is at least one second, `visibility_deadline_seconds` is at
-most one day, and `journal_segment_bytes` is at least 4096.
+An implementation MUST refuse an unknown `policy` member, and MUST read an
+absent `policy` object or member as the default above, so older workspaces
+attach without migration. An absent `attempt_control_days` means keep; absent
+`journal_days` and `trash_days` mean one day. Values are validated on write:
+`lease_seconds` ≥ one second, `visibility_deadline_seconds` ≤ one day, and
+`journal_segment_bytes` ≥ 4096.
 
-Policy is administrative rather than protocol state. A change is an ordinary
-read-modify-write of `format.json` through an exclusively created temporary
-file and a rename, so no reader ever sees a torn object, but concurrent policy
-writers are not serialized against each other and the last writer wins. A
-manager reads policy when it attaches; a change reaches already-running
-managers only when they restart.
-
-There is no configured sharding depth and no priority directory level at all:
-priority is encoded in marker names. A marker's path below its state kind is its
-placement and nothing else.
-
-Managers therefore provide best-effort priority scheduling: a cold start and an
-incremental scan may temporarily discover lower-priority work first. Strict
-global priority is not a guarantee of this protocol.
-
-`.httk-workspace/tmp/` contains unpublished entries. Task managers MUST ignore
-it for scheduling. Garbage collection may remove old temporary entries, but
-correctness MUST NOT depend on cleanup.
-
-Placement components MUST be normalized relative path components. Empty
-components, `.`, `..`, NUL bytes, and `.httk-workspace` are forbidden. Each
-component must fit the underlying filesystem's filename limit. A workspace MAY set
-policy limits on depth and total relative path length, but these are operational
-limits rather than a protocol sharding scheme.
+Policy is administrative, not protocol state. A change is a read-modify-write
+of `format.json` through an exclusively created temporary file and a rename, so
+no reader sees a torn object. Concurrent policy writers are not serialized; the
+last writer wins. Managers read policy at attach, so running managers see a
+change only after restart.
 
 ## Workspace ownership
 
 A workspace is single-user. Multi-user shared workspaces are not supported yet;
 the ownership model needs more work before they can be safe.
 
-The kernel ownership chain of a job marker, its payload directory, and that
-payload's `job.json` is the ownership oracle: all three entries must be regular,
-non-symlink entries owned by the manager's uid. A manager claims only such jobs.
-Child jobs belong to the manager's account, and imported jobs belong to the
-account that imports them.
+The ownership oracle is the kernel ownership chain of a job's marker, payload
+directory, and `job.json`: all three must be regular, non-symlink entries owned
+by the manager's uid, and a manager claims only such jobs. Child jobs belong to
+the manager's account; imported jobs belong to the importing account.
 
 ## Managing and combining workspaces
 
-A workspace name is a client and user-interface concept. This filesystem API
-remains path- and `workspace_id`-based: callers provide paths, and the protocol
-identifies the workspace by its immutable ID.
+A workspace name is a client and user-interface concept. This API is path- and
+`workspace_id`-based: callers provide paths, and the protocol identifies a
+workspace by its immutable ID.
 
-A core manager may attach several independent workspaces for operational
-convenience, but jobs and joins remain within their own workspaces. Cross-workspace
-references and coordinated movement are reserved future capabilities.
+A core manager may attach several independent workspaces, but jobs and joins
+stay within their own workspace. Cross-workspace references and coordinated
+movement are reserved future capabilities.
 
-A task manager accepts any combination of:
+### Discovery and resolution
 
-- explicit workspace paths;
-- watch roots below which it discovers directories containing
-  `.httk-workspace/format.json`.
+A task manager accepts any combination of explicit workspace paths and watch
+roots, below which it discovers directories containing
+`.httk-workspace/format.json`.
 
-Commands that omit `--workspace` resolve the closest enclosing workspace by
-walking upward from the current directory. This takes precedence over the
-project's recorded default, the registry default, and the auto-created
-per-user default, in that order. The walk treats a file current path as its
-containing directory and stops only at the filesystem root.
+Commands without `--workspace` use the closest enclosing workspace found by
+walking upward from the current directory (a file path counts as its
+directory; the walk stops only at the filesystem root). This takes precedence
+over, in order, the project's recorded default, the registry default, and the
+auto-created per-user default.
 
-The manager identifies a workspace by `workspace_id`, not its current absolute path.
-The same underlying workspace discovered through two path aliases is attached
-once. Journal references are workspace-relative and include the workspace ID when used
-from another workspace.
-
-If two discovered roots declare the same `workspace_id`, a manager MUST prove that
-they identify the same underlying directory before treating them as aliases.
-Suitable evidence is an equal filesystem object identity obtained from open
-directory handles, device/inode identity where reliable, or an equivalent
-executor facility. Equal `format.json` bytes, UUIDs, or path canonicalization
-alone are insufficient because a copied backup has all three. If equivalence
-cannot be proved, the manager MUST refuse both roots for mutation and report a
-loud duplicate-workspace-ID error; it MUST NOT attach an arbitrary winner.
-
-This permits both common arrangements:
+Both common arrangements work:
 
 ```text
 # One workspace with projects as placement prefixes
@@ -420,36 +390,50 @@ WATCH/project-b/.httk-workspace/format.json
 WATCH/project-b/hash/x9/<job-key>
 ```
 
-A manager may schedule from all attached workspaces in one resource pool. Job and
-child references are `(workspace_id, job_id)` pairs; the job UUID alone is accepted
-only when unambiguous among attached workspaces.
+A manager may schedule all attached workspaces from one resource pool. Job and
+child references are `(workspace_id, job_id)` pairs; a bare job UUID is
+accepted only when unambiguous among attached workspaces.
 
-Discovery stops at a workspace boundary. Attached workspaces MUST NOT overlap unless an
-explicit advanced profile defines ownership of every placement prefix; the
-default manager rejects nested/overlapping workspace roots.
+Discovery stops at a workspace boundary. Attached workspaces MUST NOT overlap
+unless an explicit advanced profile defines ownership of every placement
+prefix; the default manager rejects nested or overlapping roots.
+
+### Workspace identity and duplicate IDs
+
+A manager identifies a workspace by `workspace_id`, not its path, and attaches a
+workspace reached through two path aliases once. Journal references are
+workspace-relative and include the workspace ID when used from another
+workspace.
+
+If two discovered roots declare the same `workspace_id`, a manager MUST prove
+that they are the same directory before treating them as aliases: equal
+filesystem object identity from open directory handles, reliable device/inode
+identity, or an equivalent executor facility. Equal `format.json` bytes, UUIDs,
+or canonical paths are insufficient, because a copied backup has all three.
+Without proof, the manager MUST refuse both roots for mutation and report a
+loud duplicate-workspace-ID error; it MUST NOT attach an arbitrary winner.
 
 ### Dynamic attachment
 
-A complete workspace can be built elsewhere on the same filesystem and atomically
-renamed below a watch root. Its `format.json`, state tree, journals, and
-payloads arrive together. The manager discovers the immutable workspace ID and
-begins scheduling it without restarting.
+A complete workspace can be built elsewhere on the same filesystem and
+atomically renamed below a watch root; its `format.json`, state tree, journals,
+and payloads arrive together. The manager discovers it and starts scheduling
+without restarting.
 
 Filesystem notifications are hints. Managers periodically rescan watch roots so
-a lost notification cannot hide an attached workspace.
+a lost notification cannot hide a workspace.
 
-Renaming an attached workspace within watched paths does not create a new workspace.
-Managers SHOULD hold an open directory handle and update the path associated
-with the same workspace ID. Copying a live workspace is forbidden: it duplicates
-authoritative markers and journal identity. Discovery of such a copy is handled
-by the duplicate-ID refusal above, including when an operator restores a backup
-beside the live workspace.
+Renaming an attached workspace within watched paths does not create a new
+workspace; managers SHOULD hold an open directory handle and update the path
+for the same ID. Copying a live workspace is forbidden, because it duplicates
+authoritative markers and journal identity. A discovered copy, including a
+backup restored beside the live workspace, hits the duplicate-ID refusal above.
 
 ### Dynamic detachment
 
-Detaching one workspace does not stop a manager from serving its other workspaces. A
-detach coordinator obtains acknowledgement from every manager with a live
-heartbeat in that workspace. Each manager:
+Detaching one workspace does not stop a manager serving its others. A detach
+coordinator obtains acknowledgement from every manager with a live heartbeat in
+the workspace. Each manager:
 
 1. stops new claims from that workspace;
 2. completes or releases manager-owned claimed jobs;
@@ -459,21 +443,18 @@ heartbeat in that workspace. Each manager:
 6. acknowledges that the workspace is quiescent for it.
 
 Once all live managers acknowledge and no marker is claimed, running, or
-committing, the workspace directory may be atomically moved out of the watch root.
-A manager MUST NOT interpret disappearance of a workspace as failure of every job
-in it. It marks that workspace unavailable until the same workspace ID is reattached.
+committing, the workspace may be atomically moved out of the watch root. A
+manager MUST NOT treat a vanished workspace as failure of its jobs; it marks
+the workspace unavailable until the same ID is reattached.
 
-A raw move of a workspace containing active attempts is supported only when the
-same supervising managers follow the atomic rename by workspace ID and retain valid
-directory handles. The portable and recommended operation is controlled
-detach, move, then attach.
+A raw move of a workspace with active attempts works only if the same managers
+follow the rename by workspace ID and keep valid directory handles. The
+portable, recommended sequence is controlled detach, move, attach.
 
 ## Job UUIDs, names, and path tags
 
-Job IDs are lowercase canonical UUIDs. Human-readable names do not have to be
-unique and remain in `job.json`.
-
-An optional **tag** may be included in the job key:
+Job IDs are lowercase canonical UUIDs. Human-readable names need not be unique
+and stay in `job.json`. An optional **tag** may prefix the UUID in the job key:
 
 ```text
 silicon-relax--01234567-89ab-cdef-0123-456789abcdef
@@ -489,92 +470,94 @@ The tag:
 - SHOULD be a short slug derived from the job name;
 - need not be unique.
 
-Without a tag, the job key is just the UUID. Parsers identify the final UUID
-rather than trusting the tag. A lookup by tag may return several jobs; UUID
-lookup returns at most one job within a workspace.
+Without a tag, the job key is the UUID. Parsers identify the final UUID rather
+than trusting the tag. A tag lookup may return several jobs; a UUID lookup
+returns at most one per workspace.
 
-The current payload path is:
-
-```text
-<workspace>/<placement>/<job-key>/
-```
-
-The authoritative state marker uses the same placement and job key.
-Consequently, an operator can use ordinary shell completion or `find` to find
-both payload and state:
+The payload is at `<workspace>/<placement>/<job-key>/`, and the state marker
+uses the same placement and job key, so ordinary shell completion or `find`
+locates both:
 
 ```bash
 find . -path './.httk-workspace' -prune -o -type d -name 'silicon-relax--*' -print
 find .httk-workspace/state -type f -name 'silicon-relax--*'
 ```
 
-Renaming a tag by hand is forbidden because the payload and state key must
-agree. A workflow may instead put mutable descriptive labels in application
-data or an external catalog. Avoiding alias files keeps the per-job inode cost
-fixed.
+Renaming a tag by hand is forbidden, because payload and state keys must agree.
+Mutable descriptive labels belong in application data or an external catalog;
+avoiding alias files keeps the per-job inode cost fixed.
 
 ## The authoritative state tree
 
 ### One marker, one source of truth
 
-Every submitted job has exactly one regular marker file somewhere below
-`state/`. There is no second marker inside the job and no advisory state index.
-The marker's directory is the current scheduler state.
+Every submitted job has exactly one regular marker file below `state/`. There is
+no second marker inside the job and no advisory state index; the marker's
+directory is the current scheduler state. The marker is created once at
+submission and afterwards only renamed, so a job consumes one marker inode
+regardless of its steps, retries, failures, or manual continuations.
 
-The sole exception is an explicitly detached transfer bundle: its same marker
-inode is sealed inside `.httk-transfer/`, outside every manager's state tree,
-and the bundle is not schedulable until import republishes that marker.
+The sole exception is an explicitly detached transfer bundle: its marker inode
+is sealed inside `.httk-transfer/`, outside every manager's state tree, and the
+bundle is not schedulable until import republishes that marker.
 
-For example:
+### Marker names
 
 ```text
 .httk-workspace/state/ready/project-17/0/03a/
 └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef.p500.g4.<record-ref>
 ```
 
-The basename has this logical grammar:
+The basename grammar is:
 
 ```text
 <job-key>.p<priority>.g<generation>.<record-ref>
 ```
 
-`generation` is a monotonically increasing unsigned 64-bit state generation,
-encoded in lowercase base 36 without leading zeroes. It is unrelated to the
-data generation. `record-ref` locates the immutable transition record in a
-packed journal. The initial submitted marker uses `g0.init`, because its
-initial information is in `job.json`. Priority is always a zero-padded
-three-digit integer from `000` through `999`.
+- `priority` is always a zero-padded three-digit integer, `000` through `999`.
+- `generation` is a monotonically increasing unsigned 64-bit state generation in
+  lowercase base 36 without leading zeroes, unrelated to the data generation.
+- `record-ref` locates the immutable transition record in a packed journal. The
+  initial submitted marker uses `g0.init`, because its initial information is
+  in `job.json`.
 
 The complete relative marker path is the authoritative current state:
 
 - its state directory gives the state kind;
-- the directories after the state kind give current placement, and nothing
+- the directories after the state kind give current placement and nothing
   else: no priority, shard, or index level is ever inserted between them;
-- its `p<priority>` component gives current priority;
-- its job key gives identity;
-- its generation prevents stale operator actions;
-- its journal reference gives transition details.
+- `p<priority>` gives current priority;
+- the job key gives identity;
+- the generation prevents stale operator actions;
+- the journal reference gives transition details.
 
-A transition MUST rename the exact old marker path to the exact new marker
-path. It MUST NOT create a second marker and later delete the first. Therefore:
+A transition MUST rename the exact old marker path to the exact new one; it MUST
+NOT create a second marker and later delete the first. Therefore:
 
 - two managers racing to claim the same ready marker cannot both win;
 - a crash cannot leave old and new authoritative states;
 - terminal and non-terminal collections are immediately inspectable;
 - no index-repair process is part of ordinary correctness.
 
-Outside the explicitly recoverable `relocating` and `transferring` states, a
-marker without its payload at the mirrored placement is corruption, except for
-the removable kinds `succeeded`, `failed`, `cancelled`, `submitted`, and
-`ready`. These markers are quiescent and unowned by any manager. A terminal
-marker without its payload means that an operator removed the finished job. A
-`submitted` marker has never been claimed; a `ready` marker may be the result of
-a released or retried claim and retain attempt identifiers, but has no current
-manager owner. Garbage collection removes these orphaned markers. A
-claimed, running, committing, cancelling, waiting, or paused marker may still
-carry scheduling or manager-owned attempt state, so its missing payload remains
-corruption and is not collected. A payload directory without a marker is
-unsubmitted temporary/orphan data, not a queued job, unless it is a sealed detached bundle containing
+### Markers without payloads
+
+Outside the recoverable `relocating` and `transferring` states, a marker
+without its payload at the mirrored placement is corruption, except for the
+quiescent, unowned removable kinds:
+
+- a terminal (`succeeded`, `failed`, `cancelled`) marker without payload means
+  an operator removed the finished job;
+- a `submitted` marker was never claimed;
+- a `ready` marker may come from a released or retried claim and retain attempt
+  identifiers, but has no current manager owner.
+
+Garbage collection removes these orphaned markers. A `claimed`, `running`,
+`committing`, `cancelling`, `waiting`, or `paused` marker may still carry
+scheduling or manager-owned attempt state, so its missing payload remains
+corruption and is not collected.
+
+A payload directory without a marker is unsubmitted temporary or orphan data,
+not a queued job, unless it is a sealed detached bundle containing
 `.httk-transfer/manifest.json` and its marker.
 
 ### State-marker rename
@@ -587,130 +570,122 @@ Before a transition, the actor:
 4. attempts to rename the exact old marker to the unique destination;
 5. resolves the observed filesystem state before deciding whether it won.
 
-The return status of `rename` is not itself a transition result. In particular,
-`ENOENT` can mean that the source vanished or that a destination parent was
-pruned, and a network filesystem can execute a rename even when the caller
-receives a failure after retransmission. Every implementation MUST use this
-verified-transition algorithm after a rename error or ambiguous response, and
-MAY use it unconditionally:
+The return status of `rename` is not the transition result. `ENOENT` can mean
+that the source vanished or that a destination parent was pruned, and a network
+filesystem can execute a rename even when the caller sees a failure after
+retransmission. Every implementation MUST use this verified-transition
+algorithm after a rename error or ambiguous response, and MAY use it always:
 
 1. Reopen or refresh the source and destination parent directories rather than
    relying on one cached negative lookup.
 2. If the actor's unique expected destination exists and its basename resolves
-   to the prepared journal record, the actor won. It proceeds even if
-   `rename` reported failure.
-3. Otherwise, if the exact source still exists, the actor recreates any missing
-   destination parents and retries the same rename.
-4. Otherwise, the actor locates and validates the job's current marker. A
-   different valid marker proves that another transition won.
-5. If source, expected destination, and another valid current marker all remain
-   absent after bounded reopen/backoff retries, the workspace is unavailable or
-   corrupt. The actor MUST stop mutation and report that condition; it MUST NOT
-   silently classify the result as a lost race.
+   to the prepared journal record, the actor won, even if `rename` reported
+   failure.
+3. Otherwise, if the exact source still exists, recreate any missing
+   destination parents and retry the same rename.
+4. Otherwise, locate and validate the job's current marker. A different valid
+   marker proves that another transition won.
+5. If source, expected destination, and any other valid current marker all
+   remain absent after bounded reopen/backoff retries, the workspace is
+   unavailable or corrupt. The actor MUST stop mutation and report it; it MUST
+   NOT silently classify the result as a lost race.
 
-Record references are globally unique within a workspace, so the expected
-destination MUST initially be absent. An implementation SHOULD use no-replace
-rename where available. An already present expected destination is success
-only when it names the actor's prepared record; any conflicting entry is
-corruption.
+Record references are unique within a workspace, so the expected destination
+MUST initially be absent. An implementation SHOULD use no-replace rename where
+available. An existing expected destination is success only if it names the
+actor's prepared record; any conflicting entry is corruption.
 
-This algorithm applies to every correctness-critical rename in this
-specification: marker transitions, submission, outcome publication, transaction
-operations, child registration, relocation, and transfer.
+This algorithm applies to every correctness-critical rename: marker
+transitions, submission, outcome publication, transaction operations, child
+registration, relocation, and transfer.
 
-When a loser prepared a journal record but another transition won, its
-unreferenced record stays in the journal. That record is *off-chain* and is
-harmless by construction, because every reconstruction of a job's history
-starts at the authoritative marker and walks `previous_record_ref` backwards.
-An orphan is on nobody's chain — no marker ever referenced it and no frame ever
-named it as its predecessor — so it cannot be observed as a transition, and no
-implementation may reconstruct history by scanning the journal forwards.
-Readers therefore need no special handling of orphan records, and none is
-specified: no tombstone, no supersession record, no compaction requirement.
+### Off-chain journal records
 
-The one operation that legitimately reads the journal *without* a chain to walk
-is marker repair, because there the frame holding the backward link is exactly
-the unreadable one. Repair is bounded instead: it considers only frames of the
-same job at a generation strictly lower than the damaged marker's own, never
-walks forward onto a frame no marker committed, and records the reference of
-the frame it adopted in the repair frame it writes. An orphan always shares its
-generation with the transition that actually won, so a repair that reaches back
-across a lost race MAY adopt the loser's members; the recorded
-`fsck_repair.recovered_record_ref` is what makes that visible and auditable
-afterwards.
+A loser's prepared but unreferenced record stays in the journal. It is
+*off-chain* and harmless: history is always reconstructed by starting at the
+authoritative marker and walking `previous_record_ref` backwards, and no marker
+or frame references the orphan. No implementation may reconstruct history by
+scanning the journal forwards. Orphans need no tombstone, supersession record,
+or compaction.
 
-Empty state-placement parents MAY be removed only with operations that fail
-when a directory is nonempty. A pruner racing a transition either observes the
-new marker and fails to remove the directory, or removes the empty directory
-first and causes the transition to recreate it and retry. Broad recursive
-deletion is forbidden.
+Marker repair is the one operation that reads the journal without a chain to
+walk, because the frame holding the backward link is the unreadable one. It is
+bounded instead: it considers only frames of the same job at a generation
+strictly lower than the damaged marker's, never walks forward onto a frame no
+marker committed, and records the adopted frame's reference in its repair
+frame. An orphan shares its generation with the transition that won, so a
+repair reaching back across a lost race MAY adopt the loser's members; the
+recorded `fsck_repair.recovered_record_ref` keeps that auditable.
 
-A pruner MUST make at most one removal attempt per candidate directory in one
-scan and MUST NOT immediately retry a failed removal. It backs off until a
-later scan. Transition parent-creation/rename retries are also bounded; if
-repeated confirmed prune collisions would exhaust that budget, the manager
-suppresses pruning for the affected subtree or workspace and retries the transition
-before reporting storage failure. Pruning is optional and MUST yield to state
-mutation. Implementations MAY simply disable placement-directory pruning while
-managers are attached.
+### Pruning empty placement directories
 
-The marker file is created once at submission and then only renamed. A normal
-job lifetime therefore consumes one state-marker inode regardless of its number
-of steps, retries, failures, or manual continuations.
+Empty state-placement parents MAY be removed only with operations that fail on
+a nonempty directory. A pruner racing a transition either sees the new marker
+and fails, or removes the empty directory first and makes the transition
+recreate it and retry. Broad recursive deletion is forbidden.
+
+A pruner MUST make at most one removal attempt per candidate directory per scan
+and MUST NOT immediately retry a failed removal; it backs off until a later
+scan. Transition parent-creation and rename retries are also bounded; if
+confirmed prune collisions would exhaust that budget, the manager suppresses
+pruning for the affected subtree or workspace and retries the transition before
+reporting storage failure. Pruning is optional and MUST yield to state
+mutation; implementations MAY disable it while managers are attached.
 
 ## Packed transition journal
 
-Creating one JSON file for every state, event, failure, and output revision
-would be prohibitive at this scale. Transition metadata are instead frames in
-shared append-only journal segments:
+Transition metadata are frames in shared append-only journal segments rather
+than one JSON file per state, event, failure, or revision:
 
 ```text
 journal/<writer-id>/<segment-number>.hwj
 ```
 
-`writer-id` is a fresh random UUID generated for every task-manager **process
-incarnation**. The `manager-id` used in claims and heartbeats is likewise a
-fresh process-incarnation UUID; any stable administrative name is a separate
-`manager_label`. The writer and manager UUIDs MAY be equal but neither may be
-reused by a restarted process. On startup a process MUST create a new writer
-directory and its first segment with exclusive creation. It MUST NOT reopen any
-existing segment for append, even if it believes that segment belonged to a
-previous incarnation of the same manager. A zombie and its replacement
-therefore write different paths and heartbeats.
+### Writers and segments
 
-Each process is the sole writer of its own segments and never appends to
-another writer's segment. Segments rotate at the size
-`policy.journal_segment_bytes` configures, not per job.
-Submission needs no journal file per invocation because the initial marker
-uses `init`.
+`writer-id` is a fresh random UUID per task-manager **process incarnation**.
+The `manager-id` used in claims and heartbeats is likewise a fresh
+per-incarnation UUID; a stable administrative name is a separate
+`manager_label`. Writer and manager UUIDs MAY be equal, but a restarted process
+MUST NOT reuse either. On startup a process MUST create a new writer directory
+and first segment with exclusive creation and MUST NOT reopen any existing
+segment for append, even one it believes was its own. A zombie and its
+replacement thus write different paths and heartbeats.
+
+Each process is the sole writer of its own segments. Segments rotate at
+`policy.journal_segment_bytes`, not per job. Submission writes no journal file,
+because the initial marker uses `init`.
+
+### Frame format
 
 A core journal segment begins with the 12 bytes
-`48 54 54 4b 2d 48 57 4a 2d 56 31 0a` (`HTTK-HWJ-V1` plus newline).
-Segment filenames are lowercase base-36 numbers without leading zeroes. Each
-frame then contains:
+`48 54 54 4b 2d 48 57 4a 2d 56 31 0a` (`HTTK-HWJ-V1` plus newline). Segment
+filenames are lowercase base-36 numbers without leading zeroes. Each frame then
+contains:
 
 1. an eight-byte unsigned big-endian payload length;
 2. exactly that many bytes of one UTF-8 JSON record;
 3. the 32-byte SHA-256 checksum over the eight length bytes and payload;
 4. the same eight-byte big-endian length as a trailer.
 
-The marker's compact `record-ref` identifies writer, segment, byte offset,
-length, and checksum. Format version 2 mandates the canonical filename-safe
-`hwref-v2` encoding:
+### Record references
+
+A marker's `record-ref` identifies writer, segment, byte offset, length, and
+checksum. Format version 2 mandates the filename-safe `hwref-v2` encoding, with
+no alternative, so independent implementations resolve marker names
+identically:
 
 ```text
 w<writer-uuid-hex>-s<segment-base36>-o<offset-base36>-l<length-base36>-h<checksum128-hex>
 ```
 
-The writer UUID is 32 lowercase hexadecimal digits without hyphens. Segment
-numbers are unsigned 32-bit integers; byte offsets and frame lengths are
-unsigned 64-bit integers. Numeric fields use lowercase base 36 without leading
-zeroes except for zero itself.
-`checksum128` is the first 128 bits of the SHA-256 checksum over the encoded
-frame length and payload, rendered as 32 lowercase hexadecimal digits. The
-complete checksum remains in the frame. No alternate encoding is permitted in
-a core workspace, so independent implementations resolve marker names
-identically.
+- The writer UUID is 32 lowercase hexadecimal digits without hyphens.
+- Segment numbers are unsigned 32-bit integers; offsets and lengths are
+  unsigned 64-bit integers. Numeric fields use lowercase base 36 without
+  leading zeroes except for zero itself.
+- `checksum128` is the first 128 bits of the frame's SHA-256 checksum (over the
+  encoded length and payload) as 32 lowercase hexadecimal digits. The full
+  checksum stays in the frame.
 
 The worst-case noninitial marker basename is 213 ASCII bytes:
 
@@ -722,23 +697,23 @@ The worst-case noninitial marker basename is 213 ASCII bytes:
 The 86-byte job key is a 48-byte tag, `--`, and a 36-byte UUID. The reference
 budget is `33` for `w` and the writer UUID, `9` for `-s` and a seven-digit
 base-36 segment number, `15` each for `-o`/offset and `-l`/length, and `34` for
-`-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming workspace MUST
-support at least 213 bytes per filename component and MUST validate this at
+`-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming workspace
+MUST support at least 213 bytes per filename component and MUST validate this at
 initialization. These field limits and the tag limit MUST NOT be enlarged
 within format version 2.
 
-Before a state-marker rename, the writer MUST flush the entire frame and, in
-the storage-durable profile, synchronize the segment. A marker can therefore
-never legally reference a torn tail. An unreferenced partial final frame is
-ignored and may be truncated during journal repair.
+### Durability
 
-This implementation runs the storage-durable profile by default. Durability is
-not only a manager-side property of journals and markers: the runner-side
-artifacts that publish work are synchronized to the same standard, because a
-marker or journal frame that claims a committed outcome is worthless if the
-outcome its storage should hold was never flushed. In the durable profile, each
-of the following is synchronized — its file contents, then the directory entries
-that name it — before the rename that makes it authoritative:
+Before a state-marker rename, the writer MUST flush the entire frame and, in
+the storage-durable profile, synchronize the segment, so a marker never
+legally references a torn tail. An unreferenced partial final frame is ignored
+and may be truncated during journal repair.
+
+This implementation runs the storage-durable profile by default, and it covers
+the runner-side artifacts that publish work too: a frame claiming a committed
+outcome is worthless if the outcome itself was never flushed. Each artifact
+below is synchronized (file contents, then the directory entries naming it)
+before the rename that makes it authoritative:
 
 | Artifact | Synchronized before |
 | --- | --- |
@@ -752,38 +727,35 @@ that name it — before the rename that makes it authoritative:
 | Job state (`.httk-job/state.json`), observed declarations | each atomic replace returns |
 | Sealed replayable workdir batch (`.httk-runner/workdir-ready/`) and its replay into the workdir | the batch is published, then retired as applied |
 
-Two runner-side artifacts keep only process-interruption safety even in the
-durable profile, because per-line synchronization would dominate their cost and
-neither is authoritative workflow state: the append-only run log
-(`logs/runlog.jsonl`) and the runner's captured `logs/stdio.out`. They are
-evidence for an operator, not markers or committed data;
-losing their tail to a power cut costs a diagnostic line, never a lost outcome
-or a half-applied transaction.
-A late fenced process may append to `logs/stdio.out` after a later attempt's
-start marker; the chronicle is evidence, not an ordering authority.
+The append-only run log (`logs/runlog.jsonl`) and the captured
+`logs/stdio.out` keep only process-interruption safety even in the durable
+profile: per-line synchronization would dominate their cost, and they are
+operator evidence, not authoritative state. A power cut can cost their tail,
+never an outcome or a half-applied transaction.
 
-In the non-durable profile every one of these keeps process-interruption safety
-only: a torn write or an interrupted rename is still never observed, but a node
-that loses power may lose any of the above — a journal frame, a marker, a
-published outcome, half of a "committed" transaction, or a registered child. The
-opt-out (`--no-durable`) exists for throwaway and test workspaces where that
-trade buys speed. Without it, a node that loses power can leave a marker naming
-a frame or an outcome its storage never received, which is exactly the damage
-`workspace fsck` below has to repair.
+In the non-durable profile (`--no-durable`, for throwaway and test workspaces)
+every artifact above keeps only process-interruption safety. Torn writes and
+interrupted renames are still never observed, but a power loss may lose a
+journal frame, a marker, a published outcome, half of a "committed"
+transaction, or a registered child, and can leave a marker naming a frame or
+outcome its storage never received. That is the damage
+[`workspace fsck`](#workspace-check-and-marker-repair) repairs.
 
-On a network filesystem, visibility of a marker and visibility of the newly
-extended journal segment may reach different clients at different times. A
-reader that sees a referenced frame as absent, short, or checksum-incomplete
-MUST close and reopen or otherwise refresh the segment and retry with bounded
-backoff. It declares corruption only after the workspace's configured
-visibility deadline — `policy.visibility_deadline_seconds` in `format.json` —
-and it MUST NOT mutate the marker while the referenced frame is temporarily
-unreadable. Damage that no amount of waiting can repair, such as a frame whose
-checksum is present and wrong, is reported at once rather than waited out. The
-same deadline bounds the retries of a verified state-marker rename and of any
-other metadata-visibility probe.
+### Visibility on network filesystems
 
-State frames have the following shape; the `resources` member is optional and is absent until an outcome sets it:
+On a network filesystem, a marker and the extended journal segment may become
+visible to different clients at different times. A reader that sees a
+referenced frame as absent, short, or checksum-incomplete MUST refresh the
+segment (for example close and reopen it) and retry with bounded backoff. It
+declares corruption only after `policy.visibility_deadline_seconds`, and MUST
+NOT mutate the marker while the frame is temporarily unreadable. Damage no wait
+can repair, such as a present but wrong checksum, is reported at once. The same
+deadline bounds the retries of a verified state-marker rename and of any other
+metadata-visibility probe.
+
+### State frames
+
+State frames have this shape; `resources` is absent until an outcome sets it:
 
 ```json
 {
@@ -809,11 +781,17 @@ State frames have the following shape; the `resources` member is optional and is
 }
 ```
 
-`data_generation` is omitted or `null` when `job.json` declares
-`data.mode: "none"`.
+- `data_generation` is omitted or `null` when `job.json` declares
+  `data.mode: "none"`.
+- `resources` is the validated dynamic resource requirement of the current
+  activation. It carries across that activation's attempts; a new activation
+  replaces it with its own selected requirement.
+- `pause_requested` is added by an in-flight operator pause, carried to the
+  next attempt boundary, and consumed when the job enters `paused`; a terminal
+  outcome supersedes it.
 
-A `running` frame also carries the launched process identity in its `process`
-object. The object contains exactly the following protocol members:
+A `running` frame also carries the launched process identity in a `process`
+object with exactly these protocol members:
 
 | Member | Type | Meaning |
 | --- | --- | --- |
@@ -822,48 +800,36 @@ object. The object contains exactly the following protocol members:
 | `hostname` | string | Host on which the launcher runs. |
 | `launched_at` | string | UTC timestamp at which the launcher was created. |
 
-The `process` object is retained through `cancelling` and may remain on the
-terminal `cancelled` frame. It is deliberately not carried into a recovered
-or relaunched attempt.
-
-An in-flight operator pause adds the optional `pause_requested` member to the
-state frame; it is carried to the next attempt boundary, then consumed when the
-job enters `paused`, while a terminal outcome supersedes it.
-
-The optional state-frame `resources` member is the validated dynamic resource
-requirement of the current activation. It is carried across attempts of that
-activation; a new activation replaces it with the requirement selected for the
-new activation.
+`process` is retained through `cancelling` and may remain on the terminal
+`cancelled` frame. It is not carried into a recovered or relaunched attempt.
 
 State frames form a backwards-linked history across writer segments. Failure,
 join, operator, and outcome details are embedded in the applicable state frame
-or in another journal frame referenced by it. They do not create per-job
-metadata files.
+or in a journal frame it references, never in per-job metadata files.
 
-Journal segments are append-only and retained according to history policy.
-They may be compressed only into a random-access archive format that preserves
-record references. A derived SQL database or in-memory map MAY accelerate
-queries, but it is a cache: the state tree and referenced journal frames remain
-authoritative.
+### Retention and derived caches
 
-Three rules make such a cache safe, and they are what this implementation's
-job-id-to-marker index obeys:
+Segments are append-only and retained according to history policy. They may be
+compressed only into a random-access archive format that preserves record
+references. A derived SQL database or in-memory map MAY accelerate queries, but
+it is a cache; the state tree and referenced frames remain authoritative.
 
-1. **A hit is confirmed before it is used.** The cached location is a path; the
-   marker either is there or is not, and a marker another actor moved is
-   detected by the check rather than reported as current state.
-2. **A miss is never an answer.** Absence is reported only after the ladder in
-   [Waiting and joining](#waiting-and-joining) has been walked to its end,
-   including one complete scan. Any other rule would let a job that another
-   manager has just published be reported as nonexistent.
-3. **It is process-local.** This implementation keeps the index in memory, per
-   attached workspace, built lazily from one scan and updated by every rename
-   the same process performs. There is deliberately no on-disk index file: a
-   workspace has many concurrent writers and no protocol-level way to order
-   their updates to a shared derived file, so a durable cache would need a
-   synchronization and repair story that the authoritative state tree already
-   provides for nothing. An implementation that wants a shared derived
-   database MAY build one, under exactly the same three rules.
+Three rules make such a cache safe; this implementation's job-id-to-marker
+index obeys them:
+
+1. **A hit is confirmed before use.** The cached location is a path, and a
+   marker another actor moved is detected by checking it.
+2. **A miss is never an answer.** Absence is reported only after walking the
+   whole ladder in [Waiting and joining](#waiting-and-joining), including one
+   complete scan; otherwise a job another manager just published could be
+   reported as nonexistent.
+3. **It is process-local.** This implementation keeps the index in memory per
+   attached workspace, built lazily from one scan and updated by the process's
+   own renames. There is no on-disk index: many concurrent writers have no
+   protocol-level way to order updates to a shared derived file, so it would
+   need the synchronization and repair the state tree already provides. An
+   implementation MAY build a shared derived database under the same three
+   rules.
 
 ## Job definition and submission
 
@@ -907,56 +873,68 @@ A minimal `job.json` is:
 }
 ```
 
-`job.json` is the only required metadata file in the payload directory and is
-immutable after submission. Small workflow-specific parameters SHOULD be stored
-directly in it instead of one file per parameter.
+`job.json` is the only required metadata file in the payload and is immutable
+after submission. The immutable job digest a manager records is the SHA-256 of
+the stored `job.json` bytes exactly as submitted; nothing renormalizes them, so
+any hash utility reproduces it.
 
-The optional top-level `parameters` member is the place for them: a JSON object with
-string keys and application-defined values, opaque to the protocol and covered by
-the immutable job digest like every other member. An implementation MUST reject a
-`parameters` object whose serialization exceeds 262144 bytes; bulk content belongs in
-the payload or in transactional `data/`. A parent that synthesizes a child job
-varies normally only the child's `initial_step` and its `parameters`.
-The limit is exposed as `MAXIMUM_PARAMETERS_BYTES` by the protocol model.
+Small workflow-specific parameters and inputs SHOULD be embedded in `job.json`
+rather than stored one file each. The optional `files/` directory holds
+submitted code, templates, or immutable inputs that need separate files.
 
-`resources` is a mapping from a resource label to a non-negative integer.
-Labels use `validate_label`; booleans, negative values, and all non-integers are
-invalid. `step_resources` is an optional mapping from validated step names to
-the same kind of resource mapping. Units are opaque integers; for example,
-SLURM-derived `mem` values are megabytes. A ready job's effective requirement
-for step `s` is selected, by the manager, from the state frame's dynamic
-`resources`, then `job.step_resources[s]`, then `job.resources`, then `{}`.
-For manager resources named `procs` or `mem` that a requirement omits, the
-manager assumes the worker's fair share (`capacity // workers`). A manager that
-does not provide a resource a job requires never runs that job.
+### Parameters
 
-The optional top-level `declarations` member carries workflow declarations: a
-JSON object mapping a declaration name to one declaration document. A
-declaration document states what a workflow is — its inputs, its method, its
-outputs — without describing a graph, and is intended to feed provenance.
+The optional top-level `parameters` member is a JSON object with string keys
+and application-defined values, opaque to the protocol and covered by the job
+digest. An implementation MUST reject a `parameters` object whose serialization
+exceeds 262144 bytes (`MAXIMUM_PARAMETERS_BYTES` in the protocol model); bulk
+content belongs in the payload or in transactional `data/`. A parent that
+synthesizes a child job normally varies only its `initial_step` and
+`parameters`.
+
+### Resources
+
+`resources` maps a resource label (validated with `validate_label`) to a
+non-negative integer; booleans, negative values, and non-integers are invalid.
+`step_resources` optionally maps validated step names to the same kind of
+mapping. Units are opaque integers; SLURM-derived `mem` values, for example,
+are megabytes.
+
+The manager selects the effective requirement for step `s` from the first
+present of: the state frame's dynamic `resources`, `job.step_resources[s]`,
+`job.resources`, and `{}`. For manager resources named `procs` or `mem` that a
+requirement omits, it assumes the worker's fair share (`capacity // workers`).
+A manager never runs a job requiring a resource it does not provide.
+
+### Declarations
+
+The optional top-level `declarations` member maps a declaration name to one
+declaration document. A declaration states what a workflow is (its inputs,
+method, and outputs) without describing a graph, and feeds provenance.
 
 The document is carried **verbatim** and is opaque to this protocol. An
 implementation MUST validate that each member is a JSON object and MUST NOT
-interpret, wrap, normalize, or version it any further: versioning and
-self-description live inside the document itself, as the `$id`-style members of
-the property-definition conventions it follows. A declaration name MUST match
-`[A-Za-z0-9_][A-Za-z0-9._-]{0,63}`, because it is also one file basename in the
-payload area below. An implementation MUST reject a `declarations` object whose
-serialization exceeds 262144 bytes, which is the `parameters` allowance again and
-separate from it. Being members of `job.json`, declarations are immutable after
-submission and covered by the immutable job digest like every other member.
-Nothing is inherited: a synthesized child job carries the declarations its parent
-gave it and no others.
+interpret, wrap, normalize, or version it further; versioning and
+self-description live inside the document, as the `$id`-style members of the
+property-definition conventions it follows.
+
+- A declaration name MUST match `[A-Za-z0-9_][A-Za-z0-9._-]{0,63}`, because it
+  is also a file basename (see [Runner job state](#runner-job-state)).
+- An implementation MUST reject a `declarations` object whose serialization
+  exceeds 262144 bytes, an allowance separate from that of `parameters`.
+- Declarations are immutable after submission and covered by the job digest.
+- Nothing is inherited: a synthesized child carries only the declarations its
+  parent gave it.
+
+### Runner
 
 `runner.executor` selects an installed execution adapter and defaults to
-`path` when omitted. The core task manager implements `path`; managers MUST
-leave jobs using an unavailable or disallowed executor unclaimed. This permits
-specialized managers to share a workspace without either one accidentally running
-the other's job profile. Executor-specific immutable fields belong in
-`job.json`, and their submission validation is owned by that executor.
+`path`, which the core manager implements. Managers MUST leave jobs with an
+unavailable or disallowed executor unclaimed, so specialized managers can share
+a workspace without running each other's jobs. Executor-specific immutable
+fields belong in `job.json`, validated at submission by that executor.
 
-`runner.source` selects the root `runner.path` is resolved against and defaults
-to `payload`:
+`runner.source` selects the root of `runner.path` and defaults to `payload`:
 
 | `runner.source` | Root of `runner.path` |
 | --- | --- |
@@ -964,129 +942,130 @@ to `payload`:
 | `workspace` | `<workspace>/.httk-workspace/runners/` |
 | `installed` | one ordered runner search path configured in the manager |
 
-`runner.path` MUST remain beneath its root under every source. `arguments` is an
-argument vector, never a shell command string. A executor may treat the path as a
-executor-specific program while retaining these path-containment rules.
+`runner.path` MUST stay beneath its root under every source. `arguments` is an
+argument vector, never a shell string. An executor may treat the path as an
+executor-specific program under the same containment rules. An `installed`
+path may use the reserved form `pkg:<module>/<resource>`, resolved inside an
+installed Python package; a manager MUST restrict that form to an explicit
+module allowlist, `httk.workflow` by default.
 
-A `payload` runner is already pinned by the immutable job digest, so
-`runner.sha256` MUST be absent for it. Every other source names one file, or one
-tree, shared across jobs by design, so `runner.sha256` is REQUIRED and pins it:
-the digest of a file is over its bytes, and the digest of a tree is the
-canonical tree digest. Sharing one runner file across a large partitioned
-campaign is the purpose of the non-payload sources.
+### Shared runners
 
-A manager MUST verify a shared runner's digest against the bytes it will
-execute — a file through the open descriptor it keeps until launch, a tree in
-place — and executes it in place with the job workdir as cwd; it MUST NOT
-modify the runner or its tree. A digest disagreement fails the job with
-`runner_mismatch`; a runner that cannot be resolved or entered fails it with
-`runner_unavailable`. Both are ordinary continuable failures, never silent
-substitutions. A tree is entered at its top-level `run` file, unless the job
-carries `runner.command`. File verification
-pins the inode through launch; tree verification accepts the TOCTOU window
-between its digest check and execution because the store owner is trusted not
-to overwrite a runner concurrently. For a file runner, `argv[0]` and Python's
-`__file__` identify its `/dev/fd/<N>` descriptor path; siblings are located via
-`HTTK_WORKFLOW_RUNNER_ROOT`.
+A `payload` runner is pinned by the job digest, so `runner.sha256` MUST be
+absent. Every other source names one file or tree shared across jobs (the
+point of these sources, for example in a large partitioned campaign), so
+`runner.sha256` is REQUIRED: the digest of a file's bytes, or the canonical
+tree digest.
 
-A shared tree runner may instead carry `runner.command`, the unexpanded
-argument vector a workflow package declares as `[workflow.runner] command` (a
-package entry other than `run`, such as `run.py`, is recorded as the one-element
-`["{package}/run.py"]`), for
-example `["{artifacts}/relax"]` or `["java", "-cp", "{artifacts}/classes",
-"Relax"]`. It is a nonempty array of strings, covered by the job digest and
-forbidden for a `payload` runner. Its only placeholders are `{package}`, the
-verified tree, and `{artifacts}`, the build registered for this machine. A
-placeholder MUST start its element or directly follow `NAME=` (as in
-`-Dhome={package}`), and the rest of the element is empty or `/PATH`, a
-relative POSIX path whose parts are nonempty and not `.` or `..`. The program
-starts with a placeholder or is a bare name resolved on the attempt `PATH`.
-The manager verifies the tree digest, resolves `{artifacts}` (failing with
-`runner_not_built` when the build is unregistered), expands the vector, checks
-that every placeholder path exists and resolves inside its root and that a
-placeholder program is an executable file (otherwise `runner_unavailable`),
-appends `runner.arguments`, and runs it instead of the tree's `run` file, which
-such a tree does not have. The attempt's runlog event records the expanded
-vector as `runner_command`. A manager that predates `runner.command` ignores
-the member, finds no `run` entry, and fails the job with `runner_unavailable`.
+A manager MUST verify the digest against the bytes it will execute (a file
+through the open descriptor it keeps until launch, a tree in place), executes
+the runner in place with the job workdir as cwd, and MUST NOT modify it. A
+mismatch fails the job with `runner_mismatch`; a runner that cannot be resolved
+or entered fails it with `runner_unavailable`. Both are ordinary continuable
+failures, never silent substitutions.
 
-`runner.command` is part of the immutable, digest-covered `job.json` and is
-trusted exactly like the rest of the job: whoever can submit a job can already
-run their own code through a payload runner. The placeholder rules keep a
-package's references inside its own tree and build rather than sandboxing it.
-A bare program name is whatever the attempt `PATH` resolves, and is not
-restricted to an allowlist. `{artifacts}` exists only for a `workspace` runner,
-the only source with build registrations; an `installed` runner's command can
-use only `{package}`.
+A tree is entered at its top-level `run` file unless the job carries
+`runner.command`. File verification pins the inode through launch; tree
+verification accepts the TOCTOU window between digest check and execution,
+because the store owner is trusted not to overwrite a runner concurrently. For
+a file runner, `argv[0]` and Python's `__file__` are its `/dev/fd/<N>` path;
+siblings are found via `HTTK_WORKFLOW_RUNNER_ROOT`.
 
-An `installed` path may also use the reserved form `pkg:<module>/<resource>`,
-which resolves inside an installed Python package. A manager MUST restrict that
-form to an explicit module allowlist, `httk.workflow` by default.
+### Runner commands
 
-The immutable job digest a manager records is the SHA-256 over the stored
-`job.json` file bytes exactly as submitted. Nothing renormalizes those bytes, so
-any implementation with a hash utility reproduces the digest.
+A shared tree runner may carry `runner.command`, the unexpanded argument
+vector a workflow package declares as `[workflow.runner] command`, such as
+`["{artifacts}/relax"]` or `["java", "-cp", "{artifacts}/classes", "Relax"]`.
+A package entry other than `run`, such as `run.py`, is recorded as
+`["{package}/run.py"]`. It is a nonempty array of strings, covered by the job
+digest and forbidden for a `payload` runner.
 
-`files/` is optional and contains submitted code, templates, or immutable input
-objects that require separate files. Small inputs SHOULD be embedded in
-`job.json`.
+The only placeholders are `{package}` (the verified tree) and `{artifacts}`
+(the build registered for this machine). A placeholder MUST start its element
+or directly follow `NAME=` (as in `-Dhome={package}`); the rest of the element
+is empty or `/PATH`, a relative POSIX path whose parts are nonempty and not `.`
+or `..`. The program starts with a placeholder or is a bare name resolved on
+the attempt `PATH`.
 
-`workdir.mode` is `persistent` or `isolated`:
+The manager:
 
-- `persistent` reuses the declared workdir directory across step activations
-  and attempts. The workflow program owns recovery and cleanup of partial
-  application files.
-- `isolated` creates a new `run.<attempt-id>/` for every attempt. It may be
+1. verifies the tree digest;
+2. resolves `{artifacts}`, failing with `runner_not_built` if the build is
+   unregistered;
+3. expands the vector;
+4. checks that every placeholder path exists and resolves inside its root and
+   that a placeholder program is an executable file, else fails with
+   `runner_unavailable`;
+5. appends `runner.arguments` and runs the result instead of the tree's `run`
+   file, which such a tree lacks.
+
+The attempt's runlog event records the expanded vector as `runner_command`. A
+manager predating `runner.command` ignores it, finds no `run` entry, and fails
+the job with `runner_unavailable`.
+
+`runner.command` is trusted like the rest of the digest-covered `job.json`:
+anyone who can submit a job can already run code through a payload runner. The
+placeholder rules keep a package's references inside its own tree and build;
+they are not a sandbox, and a bare program name is not restricted to an
+allowlist. `{artifacts}` exists only for a `workspace` runner, the only source
+with build registrations; an `installed` runner's command can use only
+`{package}`.
+
+### Workdir and data modes
+
+`workdir.mode` MUST be explicit; there is no default:
+
+- `persistent` reuses the declared workdir across activations and attempts. The
+  workflow program owns recovery and cleanup of partial application files.
+- `isolated` creates a new `run.<attempt-id>/` per attempt, optionally
   initialized from submitted files or transactional `data/`.
 
-The mode MUST be explicit in `job.json`; the protocol has no implicit default.
-
 `data.mode` is `none` or `transactional` and is also explicit. With `none`, the
-job may keep all mutable and final application data in its persistent workdir.
-It never needs to create `data/`, publish a transaction, or increment a data
-generation. With `transactional`, `data/` and the transaction protocol below
-are available in every core-v2 workspace.
+job may keep all mutable and final data in its persistent workdir and never
+creates `data/`, publishes a transaction, or increments a data generation.
+With `transactional`, `data/` and the transaction protocol are available in
+every core-v2 workspace.
 
-`claim` and its `pool` are required; `required_capabilities` may be empty.
-`claim.pool` is the scheduling pool or queue from which the job may be claimed.
-Pool and capability labels use the same conservative component syntax as tags.
-A manager advertises its pools and capabilities and MUST claim a job only when
-both match. This is claim eligibility, not a workflow name; quantitative
-`resources` are separate declarations used by a capable manager when packing
-attempts.
+### Claim eligibility
 
-The optional top-level `requires` member is an array of `NAME>=VERSION`
-strings naming minimum installed distribution versions (only `>=`, a plain
-`N(.N)*` release, each distribution once). A manager MUST leave a ready job
-unclaimed when its own environment does not meet every entry, exactly like a
-missing capability. The member is omitted when empty, and a manager that
-predates it ignores it.
+`claim.pool` is required and names the scheduling pool or queue the job may be
+claimed from; `claim.required_capabilities` may be empty. Pool and capability
+labels use the tag component syntax. A manager advertises its pools and
+capabilities and MUST claim a job only when both match. This is eligibility,
+not a workflow name; quantitative `resources` are separate and used by a
+capable manager when packing attempts.
 
-The optional top-level `calls` member maps an alias (label syntax) to the
-workflow reference a job may call as a sub-workflow: a workflow name, or a
-commit-pinned git URI. It is written when the job's workflow declares
-`[workflow.calls]` (an empty object when it declares none of them but the
-table), and is absent for a job that declares nothing. A manager SHOULD leave a
-ready job unclaimed while any recorded reference does not resolve on its
-machine or names a compiled package not built in the workspace, and a runner
-SDK MUST refuse a call to a workflow the member does not name.
+The pool name `default` is reserved for jobs needing no explicit routing, and a
+manager started without pool configuration MUST advertise it. A trivial
+deployment thus needs no out-of-band pool agreement; sites opt into other
+pools explicitly.
 
-The literal pool name `default` is reserved for jobs requiring no explicit
-routing. A manager started without pool configuration MUST advertise
-`default`. Thus a trivial deployment uses the value shown above without any
-out-of-band pool agreement; sites opt into other pool names deliberately.
+The optional `requires` member is an array of `NAME>=VERSION` strings naming
+minimum installed distribution versions (only `>=`, a plain `N(.N)*` release,
+each distribution once). A manager MUST leave a ready job unclaimed when its
+environment does not meet every entry, as for a missing capability. The member
+is omitted when empty; older managers ignore it.
 
-Retry limits are independent optional safeguards:
+The optional `calls` member maps an alias (label syntax) to the workflow
+reference a job may call as a sub-workflow: a workflow name or a commit-pinned
+git URI. It is written when the workflow declares `[workflow.calls]` (an empty
+object when the table has no entries) and absent otherwise. A manager SHOULD
+leave a ready job unclaimed while any reference does not resolve on its machine
+or names a compiled package not built in the workspace. A runner SDK MUST
+refuse a call to a workflow the member does not name.
 
-- `maximum_attempts_per_activation` limits retries of one logical activation;
+### Retry budgets and priority
+
+Retry limits are independent, optional, and unbounded when omitted:
+
+- `maximum_attempts_per_activation` limits retries of one activation;
 - `maximum_total_attempts` limits physical executions over the whole job;
 - `maximum_activations` limits initial plus advanced activations, including
   advances back to the same textual step.
 
 The counters are durable state-frame values. Before creating an activation or
-attempt, the manager checks the applicable limits. A request that would exceed
-one transitions to failed with `budget_exhausted`; it is not launched. An
-omitted limit is unbounded.
+attempt, the manager checks the limits; a request that would exceed one
+transitions to failed with `budget_exhausted` and is not launched.
 
 Priority is 0 through 999, where 0 is highest. It affects scheduling, not
 correctness.
@@ -1105,47 +1084,48 @@ To submit:
    `.httk-workspace/state/submitted/<placement>/<job-key>.p<priority>.g0.init`.
 
 Step 4 is the **submission commit point**. Before it, the placed payload is an
-unsubmitted orphan and may be completed, retried, or eventually collected.
-After it, a fully populated submitted job exists.
+unsubmitted orphan that may be completed, retried, or collected; after it, a
+fully populated submitted job exists.
 
-A task manager registers the job by validating `job.json`, appending its first
-ready state frame, and renaming the same marker from `submitted` to the
-mirrored path below `state/ready/`. A crash before this rename leaves the job
-visibly submitted; another manager repeats validation.
+Resubmitting an existing job UUID succeeds only if the existing immutable job
+digest is identical and its marker already exists. A different definition
+under the same UUID is an error.
 
-`g0.init` describes the marker submission creates, not every marker that may be
-found in `submitted`. A job can be acted on before any manager registers it —
-`set_priority` and `pause` both apply to `submitted` — and such a request is an
-ordinary verified transition, so it appends a frame and renames the marker to
-`<job-key>.p<new-priority>.g1.<record-ref>` in the same state directory.
-Registration MUST therefore accept both forms of a submitted marker: generation
-0 referencing `init`, whose priority is the one in `job.json`, and a later
-generation referencing a real frame, whose priority is the operator's and may
-differ from `job.json`. The marker is authoritative for priority in both cases;
-only at generation 0 does the `job.json` priority have to agree with it.
+### Registration
 
-If the submitted marker is well formed but `job.json`, its immutable files, or
-their relationship to the marker fails validation, the manager appends a
-`failed` frame with class `protocol_error` and moves that same marker to
-`state/failed/<placement>/`. The frame uses the UUID and job key from the
-validated submitted marker when the document's identity cannot be trusted and
-records bounded validation details. The payload is retained for diagnosis.
-Implementations MUST NOT leave invalid jobs indefinitely in `submitted`.
+A manager registers a job by validating `job.json`, appending its first ready
+state frame, and renaming the same marker from `submitted` to the mirrored path
+below `state/ready/`. A crash before this rename leaves the job submitted, and
+another manager repeats validation.
 
-An entry whose marker name or placement is itself not parseable cannot enter
-the normal job state machine. A workspace repair tool moves it to a shared
+`set_priority` and `pause` also apply to `submitted`, as ordinary verified
+transitions that rename the marker to `<job-key>.p<new-priority>.g1.<record-ref>`
+in the same directory. Registration MUST therefore accept both forms of a
+submitted marker:
+
+- generation 0 referencing `init`, whose priority is the one in `job.json`;
+- a later generation referencing a real frame, whose priority is the
+  operator's and may differ from `job.json`.
+
+The marker is authoritative for priority; only at generation 0 must the
+`job.json` priority agree with it.
+
+If a well-formed submitted marker's `job.json`, immutable files, or their
+relationship to the marker fail validation, the manager appends a `failed`
+frame with class `protocol_error` and moves the same marker to
+`state/failed/<placement>/`. The frame records bounded validation details and,
+when the document's identity cannot be trusted, uses the UUID and job key from
+the marker. The payload is kept for diagnosis. Implementations MUST NOT leave
+invalid jobs indefinitely in `submitted`.
+
+An entry whose marker name or placement cannot be parsed cannot enter the state
+machine. A workspace repair tool moves it to the shared
 `.httk-workspace/quarantine/` area outside `state/`; managers report it loudly
-and never schedule it. Names in quarantine MUST preserve or record the original
+and never schedule it. Quarantine names MUST preserve or record the original
 relative path without permitting collisions or traversal. Quarantine is
-exceptional workspace corruption, not another job state.
-
-Retrying submission with an existing job UUID succeeds only when the existing
-immutable job digest is identical and its marker already exists. A different
-definition under the same UUID is an error.
+exceptional corruption, not a job state.
 
 ## State machine
-
-The state kinds are:
 
 | Kind | Meaning |
 | --- | --- |
@@ -1163,20 +1143,20 @@ The state kinds are:
 | `failed` | Failed until explicit operator continuation. |
 | `cancelled` | Cancelled terminal state. |
 
-**“Terminal” is used in two senses in this document, and they are not the same
-thing.** *Terminal for scheduling* means that no manager will move the marker on
-its own: the three kinds `succeeded`, `failed`, and `cancelled`. That is the
-sense a join condition uses, the sense `state/failed/` is a complete collection
-in, and the sense in which a failure's own frame is the job's last automatic
-one. *Permanent* means that nothing moves the marker again at all, and only
-`succeeded` and `cancelled` are permanent: a `failed` job is terminal for
-scheduling but explicitly revivable by an operator `continue` or
-`override_step`, which is the whole point of tracking broken jobs in the state
-tree. Where this document says “terminal” without qualification it means
-terminal for scheduling. `cancelling` is neither: it is a live state in which a
-fenced attempt is being stopped.
+### Terminal and permanent states
 
-The scheduling cycle is:
+- *Terminal for scheduling* means no manager moves the marker on its own:
+  `succeeded`, `failed`, and `cancelled`. Join conditions, the completeness of
+  `state/failed/`, and "a failure's frame is the job's last automatic one" use
+  this sense.
+- *Permanent* means nothing moves the marker again: only `succeeded` and
+  `cancelled`. A `failed` job can be revived by operator `continue` or
+  `override_step`, which is why broken jobs live in the state tree.
+
+Unqualified, "terminal" means terminal for scheduling. `cancelling` is neither;
+it is a live state in which a fenced attempt is being stopped.
+
+### Transitions
 
 ```text
 the cycle
@@ -1211,7 +1191,7 @@ operator moves that do not change the kind, or only queue the job
   submitted | ready | waiting | paused | failed ─set_priority────> the same kind
 ```
 
-Every transition of the core profile, exhaustively:
+Every core-profile transition:
 
 | From | To | Trigger |
 | --- | --- | --- |
@@ -1241,54 +1221,46 @@ Every transition of the core profile, exhaustively:
 | `claimed`, `running`, `committing` | the same kind | Operator `pause`, recorded as a sticky deferred request until the next attempt boundary. |
 | `submitted`, `ready`, `waiting`, `paused`, `failed` | the same kind | Operator `set_priority`, which renames the marker to a new priority at the next generation. |
 
-Each row is one verified rename of the same marker; no other rename of a marker
-is defined, and the `relocating` and `transferring` states are
-described in their own sections.
+Each row is one verified rename of the same marker; no other marker rename is
+defined. Quiescent states may also pass through `relocating` and return to the
+same logical state at another placement; `relocating` and `transferring` are
+described in [Relocating and transferring jobs](#relocating-and-transferring-jobs).
 
-`advance` may name any next step, including the same textual name. It creates a
-new activation. Retry retains the activation ID and increments the attempt
-ordinal.
-
-Any non-terminal state can be cancelled by an authorized operator. Cancellation
-of `running` first fences the attempt by moving its marker to `cancelling`; a
-late outcome from that attempt can no longer commit. `cancelling` is not a
-terminal state and not a quiescent one: it is the interval in which the fenced
-process is stopped and its exit is verified. See
-[Cancellation](#cancellation).
-
-Quiescent states may also pass through `relocating` and return to the same
-logical state at a different placement.
+`advance` may name any next step, including the same name, and creates a new
+activation. Retry keeps the activation ID and increments the attempt ordinal.
 
 ### Cancellation
 
-Cancelling a job that may have a live process is three ordered steps, and the
-order is the guarantee:
+An authorized operator can cancel any non-terminal state. Cancelling a job that
+may have a live process is three ordered steps, and the order is the guarantee:
 
 1. **Fence first.** The manager renames the exact `running` marker to
-   `cancelling`. From that instant no manager accepts an outcome from that
-   attempt, because the state tree no longer names it as current. Nothing has
-   been signalled yet, so this step cannot be skipped by a race.
-2. **Then stop the process.** The owning manager — or, if it has died, any
-   manager that can see the process — sends `SIGTERM` to the recorded process
-   group, and `SIGKILL` after a configured grace period. The `cancelling` frame
-   names the attempt, its attempt-control directory, and its previous owner, so
-   a recovering manager has everything it needs.
+   `cancelling`. From then on no manager accepts an outcome from that attempt,
+   because the state tree no longer names it as current. Nothing has been
+   signalled yet, so no race can skip this step.
+2. **Then stop the process.** The owning manager, or any manager that can see
+   the process if the owner died, sends `SIGTERM` to the recorded process group
+   and `SIGKILL` after a configured grace period. The `cancelling` frame names
+   the attempt, its attempt-control directory, and its previous owner, which is
+   all a recovering manager needs.
 3. **Only then finish, against evidence.** For a `running` or `cancelling`
    attempt with a valid same-host identity, the marker moves to `cancelled`
-   only once the exit has actually been verified, and the verification is
-   recorded in the `cancellation` member of the terminal frame.
+   only once the exit is verified, recorded in the terminal frame's
+   `cancellation` member.
+
+`cancelling` is neither terminal nor quiescent. An attempt that publishes an
+outcome after being fenced finds its marker in `cancelling`, and the outcome is
+ignored like any other outcome from a fenced attempt.
 
 Cancelling a `committing` job keeps the historical best-effort behavior: the
 manager signals the recorded process group when a valid same-host identity is
-available, then moves directly to `cancelled` with `no_live_attempt`. It does
-not verify process exit, because the outcome is already published and replay
-may be partially applied.
-Known limitation: the recorded process may still be running after this
+available, then moves directly to `cancelled` with `no_live_attempt`, without
+verifying exit, because the outcome is published and replay may be partially
+applied. Known limitation: the process may still be running after this
 terminal transition.
 
-A manager MUST NOT publish `cancelled` for a `running` attempt it has merely
-signalled. The committing behavior above is the documented exception.
-Acceptable evidence is:
+Apart from that exception, a manager MUST NOT publish `cancelled` for a
+`running` attempt it has merely signalled. Acceptable evidence is:
 
 | `cancellation.verified` | Meaning |
 | --- | --- |
@@ -1296,38 +1268,33 @@ Acceptable evidence is:
 | `process_group_absent` | The process was recorded on this host and its process group no longer exists. |
 | `no_live_attempt` | The job was cancelled from a state where no exit verification is performed, including `committing` after outcome publication. |
 
-A cancellation whose process cannot be proven stopped — typically one recorded
-on a different host — MUST leave the marker in `cancelling`, journal why, and
-retry. A missing or malformed `process` member is damage, not evidence that the
-launch gate was never released, and MUST follow the same unverifiable path.
-Staying in `cancelling` is the safe outcome: the attempt remains fenced, so it
-can produce no state, and an operator sees a stalled cancellation rather than a
-terminal state that falsely asserts that nothing is still writing the workdir.
-A site whose batch system can confirm that an allocation has ended MAY treat
-that confirmation as evidence and record it in the same member.
-
-Because the fence is a marker rename, cancellation composes with everything
-else by construction: an attempt that publishes an outcome after being fenced
-finds its marker in `cancelling` rather than `running`, and the outcome is
-ignored exactly like any other outcome from a fenced attempt.
+A cancellation whose process cannot be proven stopped, typically one recorded on
+another host, MUST leave the marker in `cancelling`, journal why, and retry. A
+missing or malformed `process` member is damage, not evidence that the launch
+gate was never released, and MUST take the same path. The attempt stays fenced,
+and an operator sees a stalled cancellation instead of a terminal state falsely
+asserting that nothing still writes the workdir. A site whose batch system can
+confirm that an allocation ended MAY record that confirmation as evidence in
+the same member.
 
 ## Claiming, leases, and fencing
 
+### Claiming a ready job
+
 To claim a ready job, manager `M`:
 
-1. Selects the exact ready marker.
-2. Reads the state frame and stable `job.json`.
-3. Generates attempt and claim IDs.
-4. Appends and synchronizes a `claimed` state frame.
-5. Renames that exact ready marker to the claimed state path whose basename
-   references the new frame.
-6. Applies the verified-transition algorithm and proceeds only if its unique
+1. selects the exact ready marker;
+2. reads the state frame and stable `job.json`;
+3. generates attempt and claim IDs;
+4. appends and synchronizes a `claimed` state frame;
+5. renames that exact ready marker to the claimed state path whose basename
+   references the new frame;
+6. applies the verified-transition algorithm and proceeds only if its unique
    claimed destination is confirmed.
 
-All competing managers rename the same source path to different unique
-destinations. At most one transition can remove that source; each caller uses
-verified-transition resolution rather than the rename return status to learn
-whether it won.
+Competing managers rename the same source to different unique destinations; at
+most one can remove the source, and each learns whether it won through
+verified-transition resolution, not the rename return status.
 
 The claimed frame names:
 
@@ -1339,95 +1306,83 @@ The claimed frame names:
 - resource allocation;
 - preceding record reference.
 
-The manager creates `attempts/<attempt-id>/`, prepares the selected
-persistent or isolated workdir, appends a running frame, and renames the
-claimed marker to running immediately before launching the application. A
-local executor MAY first create a process blocked on a launch gate, durably
-record that process identity in the running frame, and only then release the
-gate to execute the application. If its manager disappears before release, the
-gate MUST cause that process to exit without executing the application. The
-identity is part of the durable running frame, so a missing or malformed
-identity after repair is damage and cannot be used as `no_live_attempt` or as
-proof that the application never ran.
+### Launching an attempt
+
+The manager creates `attempts/<attempt-id>/`, prepares the persistent or
+isolated workdir, appends a running frame, and renames the claimed marker to
+running immediately before launching the application.
+
+A local executor MAY first create a process blocked on a launch gate, durably
+record its identity in the running frame, and only then release the gate. If
+its manager disappears before release, the gate MUST make the process exit
+without executing the application. Because the identity is part of the durable
+running frame, a missing or malformed identity after repair is damage; it
+cannot serve as `no_live_attempt` or as proof that the application never ran.
+
+### Heartbeats and manager logs
 
 Managers update `managers/<manager-id>/heartbeat.json` by atomic replacement.
-The directory contains only `manager.json` and `heartbeat.json`, and remains
-until that manager exits cleanly; a crash leaves it for policy-gated
-`manager_directories` collection. Manager diagnostics are appended to the
-workspace-level `managers.log`, with the manager id on every record.
-The log is rotated when a manager starts or every 1000 records once the file
-exceeds 16 MiB; one backup, `managers.log.1`, is kept. A manager that has not
-yet reopened the file keeps appending to the backup.
+The directory holds only `manager.json` and `heartbeat.json` and is removed when
+the manager exits cleanly; after a crash it awaits policy-gated
+`manager_directories` collection.
+
+Manager diagnostics go to the workspace-level `managers.log`, with the manager
+id on every record. The log is rotated when a manager starts, or every 1000
+records once it exceeds 16 MiB; one backup, `managers.log.1`, is kept. A
+manager that has not yet reopened the file keeps appending to the backup.
+
+A heartbeat is a statement about the manager, not about its scheduling pass. A
+manager MUST NOT let one pass over the state tree hold its heartbeat; it takes
+heartbeat opportunities *between* the state kinds it scans and *within* long
+scans of one kind. A manager whose workspace is too large to serve within one
+lease SHOULD also bound the markers of a kind it processes per pass and resume
+the rest next pass, in a stable order so no marker starves. An implementation
+SHOULD report a pass that consumes a large fraction of its own lease, because
+then a healthy manager starts to look abandoned.
+
+### Recovering abandoned attempts
+
 A recoverer uses the state frame, heartbeat, batch scheduler when available,
 and a configured grace period. It MUST NOT steal a job merely because one
-delayed metadata read appears stale.
+delayed metadata read looks stale.
 
-A heartbeat is a statement about the manager, not about its scheduling pass, so
-a manager MUST NOT let one pass over the state tree hold its heartbeat: it
-takes heartbeat opportunities *between* the state kinds it scans and *within*
-long scans of one kind. A manager whose workspace is too large to serve inside
-one lease SHOULD also bound how many markers of a kind it processes per pass
-and resume the rest on the next pass, in a stable order so that no marker
-starves. An implementation SHOULD report a pass that consumes a large fraction
-of its own lease, because that is the condition under which a healthy manager
-begins to look abandoned.
-
-Once policy determines that an attempt is abandoned, a recoverer appends a new
+Once policy decides that an attempt is abandoned, a recoverer appends a new
 claimed frame and renames the exact old claimed or running marker. That rename
-fences the old attempt. Even if its process later wakes, no task manager accepts
-its outcome because the state tree names a different attempt.
+fences the old attempt: if its process wakes later, no manager accepts its
+outcome, because the state tree names a different attempt. A manager taking
+immediate ownership transitions directly to a new claimed state; one merely
+releasing work transitions back to ready. Both keep the activation ID for a
+retry.
 
-A manager taking immediate ownership transitions directly to a new claimed
-state. A manager merely releasing work transitions back to ready. Both retain
-the activation ID for a retry.
+Fencing cannot stop a partitioned old process from producing external side
+effects or modifying a persistent workdir, and a duplicated attempt still costs
+a second allocation. Lease expiry alone is therefore never sufficient evidence
+to relaunch an attempt, in either workdir mode:
 
-Filesystem fencing cannot prevent a partitioned old process from producing
-external side effects or modifying a persistent workdir, and it does not make
-a duplicated attempt free: two allocations burning for one activation is a real
-cost whichever workdir mode the job uses. Lease expiry alone is therefore never
-sufficient evidence to relaunch an attempt, in either mode.
-
-For a persistent workdir, the default safe policy MUST establish that the
-previous writer can no longer modify the workdir—for example, by
-scheduler-confirmed allocation expiry or cancellation and process-group
-termination—before launching a replacement. A site MAY enable lease-only
-persistent takeover as an explicit unsafe policy.
-
-For an isolated workdir, a replacement corrupts nothing, so the requirement is
-weaker but not absent: a manager MUST have one of
-
-- the recorded process is provably gone on this host,
-- a scheduler confirmation that the allocation has ended, or
-- a heartbeat that has been silent for a configured multiple of the lease —
-  the *takeover grace*, by default twice the lease.
+- For a persistent workdir, the default safe policy MUST establish that the
+  previous writer can no longer modify the workdir (for example by
+  scheduler-confirmed allocation expiry, or cancellation and process-group
+  termination) before launching a replacement. A site MAY enable lease-only
+  persistent takeover as an explicit unsafe policy.
+- For an isolated workdir a replacement corrupts nothing, but a manager MUST
+  still have one of: the recorded process is provably gone on this host; a
+  scheduler confirmation that the allocation ended; or a heartbeat silent for a
+  configured multiple of the lease, the *takeover grace*, by default twice the
+  lease.
 
 A manager SHOULD terminate the old process group or cancel its batch allocation
-before relaunching when it can. The grace exists because an expired lease says
-only that a manager is slow: a manager whose scan of a very large workspace
-overruns one lease is alive and its attempts are running, and taking those over
-at the first expired lease is how one slow node becomes twice the bill.
+before relaunching when it can. The grace exists because an expired lease only
+says a manager is slow: a manager whose scan of a very large workspace overruns
+one lease is alive with running attempts, and taking those over at the first
+expired lease doubles the cost.
 
-Every takeover MUST record its evidence in the new attempt frame — which rule
-admitted it, and the observed heartbeat age — and every use of an explicitly
-unsafe policy MUST be recorded there too.
+Every takeover MUST record its evidence in the new attempt frame (the admitting
+rule and the observed heartbeat age), and every use of an explicitly unsafe
+policy MUST be recorded there too.
 
 ## Attempt control, workdirs, and runner contract
 
-Attempt control is separate from application workdir:
-
-The version-2 attempt-context JSON document includes `payload`, an absolute path to the job
-payload, so SDKs can locate the job-level logs independently of the selected
-workdir.
-
-The manager supplies this document as the value of `HTTK_WORKFLOW_CONTEXT`; it
-does not create a context file. The canonical compact UTF-8 encoding must be
-shorter than 100,000 bytes. A larger context is a `protocol_error` at launch,
-so application settings belong in the bounded settings snapshot rather than
-in bulk files or values.
-
-Workspace settings are non-secret configuration: they are snapshotted into the
-attempt context and exported into the runner environment, so credentials MUST
-NOT be stored there; remote credentials already live elsewhere.
+Attempt control is separate from the application workdir:
 
 ```text
 <workspace>/<placement>/<job-key>/
@@ -1443,8 +1398,21 @@ NOT be stored there; remote credentials already live elsewhere.
 └── run/                         # persistent mode
 ```
 
+In isolated mode the application directory is `run.<attempt-id>/` instead of
+`run/`. The runner's working directory is the application workdir, never the
+attempt-control directory. A late process from an old attempt can therefore
+publish only beneath its own attempt-control name and cannot replace or
+impersonate a newer attempt's outcome, which matters most in persistent mode.
+
+Attempt-control directories are transient metadata. Persistent workdirs are
+application data and MUST NOT be garbage-collected merely because an attempt
+ended; isolated workdirs may be collected under their retention policy. No
+state transition depends on cleanup.
+
+### Run chronicle
+
 `logs/stdio.out` is one append-only chronicle for all attempts. The manager's
-marker lines have these formats, verbatim:
+marker lines are, verbatim:
 
 ```text
 === httk attempt <attempt-id> step <step> ordinal <attempt_ordinal> started <utc-iso>
@@ -1452,102 +1420,91 @@ marker lines have these formats, verbatim:
 === httk attempt <attempt-id> ended <utc-iso> launch-failed <reason>
 ```
 
-Each marker is written as one `os.write` whose bytes begin with `\n` and end
-with `\n`; a preceding empty line is normal. When cutting an attempt's block,
-recognize a marker as a line that starts with `=== httk attempt`. A late fenced
-process may append output after a newer attempt's start marker, so this file is
-evidence rather than an ordering authority. If a manager is lost mid-attempt,
-that attempt may have a start marker without an end marker; a takeover writes
-its own start/end pair.
+Each marker is one `os.write` whose bytes begin and end with `\n`, so a
+preceding empty line is normal. To cut an attempt's block, treat any line
+starting with `=== httk attempt` as a marker. A late fenced process may append
+after a newer attempt's start marker, so the file is evidence, not an ordering
+authority. An attempt whose manager was lost may have a start marker without an
+end marker; a takeover writes its own start/end pair.
 
-In isolated mode the application directory is
-`run.<attempt-id>/` instead of `run/`. The runner's current working directory is
-the selected application workdir, not the attempt control directory.
+### Runner job state
 
-`.httk-job/` is runner-private state that belongs to the job rather than to one
-attempt: it survives retries, step advances, and isolated workdirs, and it travels
-with the payload when the job is transferred. A runner MAY store what it needs
-there, atomically. `.httk-job/`, every `attempts/<attempt-id>/`, and `logs/` are
-excluded from every payload digest — submission, child registration, and detached
-transfer alike — so publishing an outcome and writing job state can never disturb
-an immutability check of the payload.
+`.httk-job/` is runner-private state belonging to the job rather than one
+attempt: it survives retries, step advances, and isolated workdirs, and travels
+with the payload on transfer. A runner MAY store what it needs there,
+atomically. `.httk-job/`, every `attempts/<attempt-id>/`, and `logs/` are
+excluded from every payload digest (submission, child registration, and
+detached transfer), so publishing outcomes and writing job state never disturb
+an immutability check.
 
-`.httk-job/declarations/<declaration-name>.json` is the one reserved name inside
-that area: the *observed* workflow declaration of that name, the runtime-refined
-counterpart of what `job.json` declared. A campaign that discovers its outputs
-only while running writes what it observed there, and the last write of a name
-wins. The document is carried verbatim and is opaque to the protocol exactly as
-in `job.json`, the basename before `.json` is the declaration name and MUST
-therefore satisfy the same syntax, and being below `.httk-job/` the file is
-excluded from every payload digest. An implementation MUST report the declared
-and the observed document side by side and MUST NOT merge them; a document that
-cannot be read is reported as absent, with the reading tool's damage flag set.
+Two names inside `.httk-job/` are reserved:
 
-`.httk-job/tree/` is the second reserved name: the job-tree metadata the manager
-and operator tools own, which travels with the payload like the rest of
-`.httk-job/`. A runner MUST NOT write there.
+- `declarations/<declaration-name>.json` holds the *observed* declaration of
+  that name, the runtime-refined counterpart of what `job.json` declared, for
+  example from a campaign that discovers its outputs while running. The last
+  write wins. It is carried verbatim and opaque, as in `job.json`, and the
+  basename before `.json` MUST satisfy the declaration-name syntax. An
+  implementation MUST report the declared and observed documents side by side
+  and MUST NOT merge them; an unreadable document is reported as absent, with
+  the reading tool's damage flag set.
+- `tree/` holds job-tree metadata owned by the manager and operator tools. A
+  runner MUST NOT write there.
 
-- `tree/spawns/<attempt-id>.json` records the children one committed outcome
-  spawned, as `{"format": "httk-workflow-spawns", "format_version": 1,
-  "children": [{"job_id", "job_key", "label", "placement", "spawn_id"}]}` copied
-  from that outcome's `spawn.json`. While the parent is `committing`, the manager
-  publishes it (temporary file, atomic rename, and in the storage-durable
-  profile the file and every directory it created synchronized) **before**
-  moving the first child into place, so no registered child is missing from its
-  parent's records. A replayed commit MUST find an existing fragment
-  byte-identical and otherwise stop with a corruption error. A reader takes the
-  union of all fragments, de-duplicated by `job_id`, and trusts an entry only
-  when the named child is live at the recorded placement and its own `job.json`
-  names this parent's `job_id` and, when the entry records one (a hand-written
-  `spawn.json` may omit it), the entry's `spawn_id`.
-- `tree/detached.json` marks a child an operator made independent of its parent
-  (`{"format": "httk-workflow-detached", "format_version": 1, "detached_at",
-  "operator"}`). It is permanent, requires no state transition, and leaves the
-  `parent` member of `job.json` in place as provenance.
+`tree/spawns/<attempt-id>.json` records the children one committed outcome
+spawned, as `{"format": "httk-workflow-spawns", "format_version": 1,
+"children": [{"job_id", "job_key", "label", "placement", "spawn_id"}]}` copied
+from that outcome's `spawn.json`. While the parent is `committing`, the manager
+publishes it (temporary file, atomic rename, and in the storage-durable profile
+the file and every directory it created synchronized) **before** moving the
+first child into place, so no registered child is missing from its parent's
+records. A replayed commit MUST find an existing fragment byte-identical and
+otherwise stop with a corruption error. A reader takes the union of all
+fragments, de-duplicated by `job_id`, and trusts an entry only when the child
+is live at the recorded placement and its own `job.json` names this parent's
+`job_id` and, if the entry records one (a hand-written `spawn.json` may omit
+it), the entry's `spawn_id`.
 
-Separating them matters in persistent mode: a late process from an old attempt
-can only publish beneath its own attempt-control name. Its outcome cannot
-replace or impersonate the new attempt's outcome.
+`tree/detached.json` marks a child an operator made independent of its parent
+(`{"format": "httk-workflow-detached", "format_version": 1, "detached_at",
+"operator"}`). It is permanent, requires no state transition, and leaves the
+`parent` member of `job.json` in place as provenance.
 
 ### Persistent workdir
 
-The same declared workdir is used across normal step advances and retries.
-The manager does not clean, copy, snapshot, or transactionally inspect its
-application files.
+The declared workdir is reused across step advances and retries. The manager
+does not clean, copy, snapshot, or transactionally inspect its files. A VASP
+workflow can, for example, keep a very large `WAVECAR` in `run/` across several
+steps and decide itself whether an interrupted calculation can continue;
+`data/` need not exist.
 
-This mode supports, for example, a VASP workflow that retains a very large
-`WAVECAR` in `run/`, modifies it over several steps, and decides for itself
-whether an interrupted calculation can continue. `data/` need not exist.
-
-On retry, the manager first fences and attempts to terminate the old process,
-then invokes the same step activation in the same directory with a new attempt
-context. The workflow code examines the reason and the existing files and may:
+On retry, the manager fences and tries to terminate the old process, then
+invokes the same activation in the same directory with a new attempt context.
+The workflow code examines the reason and existing files and may:
 
 - continue directly;
 - remove known partial outputs and restart;
 - repair inputs and request another retry;
 - declare the job failed.
 
-A planned advance to another step also reuses the directory, but is not a
+A planned advance to another step also reuses the directory but is not a
 restart: the new activation has attempt ordinal 1 and `is_restart: false`.
 
-Persistent mode deliberately gives up workdir isolation. If an old process
-cannot be established incapable of further writes, it may still modify `run/`
-after being fenced from publishing an outcome. The safe default is therefore
-to wait, force scheduler cancellation, or pause for manual action. Only an
-explicitly configured unsafe takeover policy may accept concurrent-writer risk,
-as specified under fencing above.
+Persistent mode gives up workdir isolation: an old process not proven
+incapable of writing may still modify `run/` after being fenced. The safe
+default is to wait, force scheduler cancellation, or pause for manual action;
+only an explicitly configured unsafe takeover policy accepts concurrent-writer
+risk (see [Recovering abandoned attempts](#recovering-abandoned-attempts)).
 
 ### Isolated workdir
 
-Every attempt receives a new `run.<attempt-id>/`. The manager may populate it
+Every attempt gets a new `run.<attempt-id>/`, which the manager may populate
 from submitted files or transactional `data/` by copying, reflinking, or a
 filesystem snapshot. Writes through an isolated workdir MUST NOT mutate
 committed `data/` before a transaction.
 
-Old isolated workdirs may be retained for diagnosis or collected later. A
-manual continuation can import selected files into a new isolated workdir,
-with the choice recorded in history.
+Old isolated workdirs may be kept for diagnosis or collected later. A manual
+continuation can import selected files into a new isolated workdir, with the
+choice recorded in history.
 
 ### Context and restart detection
 
@@ -1569,24 +1526,35 @@ HTTK_WORKFLOW_BASH_API=<absolute packaged workflow Bash library>
 HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 ```
 
-`HTTK_WORKFLOW_DATA_DIR` is additionally set only for transactional-data jobs.
-For a shared runner, `HTTK_WORKFLOW_RUNNER_ROOT` names its file or tree root.
-The JSON document is the source of truth; scalar environment variables are
-language-neutral conveniences.
+`HTTK_WORKFLOW_DATA_DIR` is set only for transactional-data jobs.
+`HTTK_WORKFLOW_RUNNER_ROOT` names a shared runner's file or tree root. The JSON
+document is the source of truth; the scalar variables are language-neutral
+conveniences.
 
-`HTTK_WORKFLOW_DURABLE`, and the `durable` member of the attempt context, carry
-the workspace's durability mode to the runner. A runner that publishes an
-outcome, a transaction, or a child bundle synchronizes it before the rename that
-makes it authoritative exactly when this is `1`. A runner that does not compose
-outcomes on storage itself may ignore it; the packaged Python and Bash SDKs
-honour it automatically, and a context written before the member existed reads
-as `0`.
+The attempt-context document exists only as the value of
+`HTTK_WORKFLOW_CONTEXT`; no context file is created. Its canonical compact
+UTF-8 encoding must be shorter than 100,000 bytes, and a larger context is a
+`protocol_error` at launch, so application settings belong in the bounded
+settings snapshot, not bulk files or values. The version-2 document includes
+`payload`, the absolute payload path, so SDKs can find job-level logs
+independently of the workdir.
 
-A manager MAY export further variables that belong to the runner libraries it
-ships rather than to this protocol. They are SDK or application conveniences: a
-conforming manager that exports none of them is still conforming, and a runner
-that needs one MUST treat its absence as a missing dependency of that library
-rather than as a protocol violation. The ones this implementation exports are:
+Workspace settings are non-secret configuration: they are snapshotted into the
+attempt context and exported into the runner environment, so credentials MUST
+NOT be stored there. Remote credentials already live elsewhere.
+
+`HTTK_WORKFLOW_DURABLE` and the context's `durable` member carry the workspace
+durability mode. A runner that publishes an outcome, transaction, or child
+bundle synchronizes it before the authoritative rename exactly when this is
+`1`. A runner that does not compose outcomes on storage itself may ignore it;
+the packaged Python and Bash SDKs honour it automatically. A context written
+before the member existed reads as `0`.
+
+A manager MAY export further variables belonging to the runner libraries it
+ships. These are SDK conveniences: a manager exporting none is still
+conforming, and a runner needing one MUST treat its absence as a missing
+dependency of that library, not a protocol violation. This implementation
+exports:
 
 ```text
 HTTK_WORKFLOW_<CODE>_BASH_API=<absolute Bash API of each installed code, e.g. HTTK_WORKFLOW_VASP_BASH_API>
@@ -1597,64 +1565,6 @@ HTTK_WORKFLOW_RUNNER_ARTIFACTS=<absolute registered build-artifacts directory>
 
 `HTTK_WORKFLOW_RUNNER_ARTIFACTS` is set only when a workspace package has a
 registered build; a compiled package's `run` entry must find its binaries there.
-
-### Executable workflow-hook wire formats
-
-Directory-package instantiate and collect hooks that are not `.py` use these
-UTF-8 JSON subprocess formats. The package manifest and hook trust rules are
-specified in {doc}`workflow_packages`; these are the wire-format catalogue.
-
-An executable instantiate hook receives one document on stdin, with its current
-working directory set to the staging payload:
-
-```json
-{
-  "format": "httk-workflow-instantiate",
-  "format_version": 3,
-  "workflow": "example.relax",
-  "tag": "silicon",
-  "parameters": {"cutoff": 520},
-  "defaults": {"cutoff": 450, "kpoint_density": 30.0},
-  "inputs": {
-    "structure": {"kind": "file", "path": "files/inputs/structure/POSCAR"},
-    "settings": {"kind": "value", "value": {"kpoints": [4, 4, 4]}}
-  }
-}
-```
-
-Its stdout is one JSON object containing `parameters` and, optionally, `tag`.
-An executable collect hook receives JSONL: the first line is exactly
-
-```json
-{"format": "httk-workflow-collect-stream", "format_version": 2}
-```
-
-and each later line is exactly one request envelope:
-
-```json
-{"record": {"workspace_id": "workspace", "job_id": "job-1", "state": "succeeded", "job": {}}}
-```
-
-The record value is the complete `JobRecord.as_mapping()` mapping; the example
-shows only the envelope shape. The hook writes one ordered response per record,
-using either:
-
-```json
-{"job_id": "job-1", "outputs": {"energy": {"value": 3.14}}}
-```
-
-or:
-
-```json
-{"job_id": "job-1", "error": "could not read the result"}
-```
-
-The Python hook fast paths do not cross this subprocess boundary, but preserve
-the same successful-path hook and assembly semantics. Collector failure handling
-is intentionally different: registered Python collector exceptions abort
-iteration, while executable responses can degrade jobs independently.
-`httk.workflow.hookapi` provides `instantiate_main()` and `collect_main()` for
-Python executables implementing these formats.
 
 An unclean persistent retry context is:
 
@@ -1685,47 +1595,99 @@ An unclean persistent retry context is:
 }
 ```
 
-`attempt_ordinal > 1` and `is_restart` mean that the same activation is being
-retried. `is_unclean_restart` specifically means that the preceding attempt did
-not publish and complete a valid outcome. Reasons include `lease_lost`,
-`timeout`, and `process_failure`. `requested_retry` and an orderly
-`manual_continue` may have `is_unclean_restart: false`.
+`attempt_ordinal > 1` and `is_restart` mean the same activation is being
+retried. `is_unclean_restart` means the preceding attempt did not publish and
+complete a valid outcome; reasons include `lease_lost`, `timeout`, and
+`process_failure`. `requested_retry` and an orderly `manual_continue` may have
+`is_unclean_restart: false`. A step thus never infers restart from leftover
+filenames: it reads `HTTK_WORKFLOW_CONTEXT` (or the scalar variables) and then
+treats existing files according to application policy.
 
-Thus a shell or Python step does not infer restart from leftover filenames. It
-reads `HTTK_WORKFLOW_CONTEXT` (or the scalar variables), then uses the existing
-files according to application policy.
+The context's `resources` member is the validated effective requirement
+selected for the launched activation, so a runner can use it as the manager's
+placement decision without re-resolving the job declaration.
 
-The attempt context's `resources` member is the effective requirement selected
-for the activation that was launched. It is a validated resource mapping, so a
-runner can use it as the manager's placement decision without re-resolving the
-job declaration.
+### Executable workflow-hook wire formats
 
-Attempt-control directories are transient metadata. Persistent workdirs are
-application data and MUST NOT be garbage-collected merely because an attempt
-ended. Isolated workdirs may be collected under their retention policy. No
-state transition depends on cleanup.
+Directory-package instantiate and collect hooks that are not `.py` use these
+UTF-8 JSON subprocess formats. The package manifest and hook trust rules are in
+{doc}`workflow_packages`; this is the wire-format catalogue.
+
+An executable instantiate hook receives one document on stdin, with its working
+directory set to the staging payload:
+
+```json
+{
+  "format": "httk-workflow-instantiate",
+  "format_version": 3,
+  "workflow": "example.relax",
+  "tag": "silicon",
+  "parameters": {"cutoff": 520},
+  "defaults": {"cutoff": 450, "kpoint_density": 30.0},
+  "inputs": {
+    "structure": {"kind": "file", "path": "files/inputs/structure/POSCAR"},
+    "settings": {"kind": "value", "value": {"kpoints": [4, 4, 4]}}
+  }
+}
+```
+
+Its stdout is one JSON object containing `parameters` and, optionally, `tag`.
+
+An executable collect hook receives JSONL whose first line is exactly
+
+```json
+{"format": "httk-workflow-collect-stream", "format_version": 2}
+```
+
+and whose later lines are each exactly one request envelope:
+
+```json
+{"record": {"workspace_id": "workspace", "job_id": "job-1", "state": "succeeded", "job": {}}}
+```
+
+The record value is the complete `JobRecord.as_mapping()` mapping; the example
+shows only the envelope. The hook writes one ordered response per record,
+either:
+
+```json
+{"job_id": "job-1", "outputs": {"energy": {"value": 3.14}}}
+```
+
+or:
+
+```json
+{"job_id": "job-1", "error": "could not read the result"}
+```
+
+Python hook fast paths skip this subprocess boundary but keep the same
+successful-path hook and assembly semantics. Failure handling differs:
+registered Python collector exceptions abort iteration, while executable
+responses can degrade jobs independently. `httk.workflow.hookapi` provides
+`instantiate_main()` and `collect_main()` for Python executables implementing
+these formats.
 
 ## Publishing an outcome
 
-Exit codes are not the workflow protocol. A step communicates in the
+Exit codes are not the workflow protocol. A step communicates through the
 attempt-control directory named by `HTTK_WORKFLOW_CONTROL_DIR`:
 
 1. Create `outcome.tmp.<nonce>/`.
 2. Write `outcome.json` and any transaction or child bundles inside it.
-3. Close all files, and in the storage-durable profile synchronize the whole
-   draft tree — the outcome, its transaction manifest and staged payload, and
-   its child bundles — in one batch.
-4. Atomically rename the directory to `outcome.ready/`, and in the durable
-   profile synchronize the attempt-control directory so the new name survives a
+3. Close all files and, in the storage-durable profile, synchronize the whole
+   draft tree (outcome, transaction manifest and staged payload, child bundles)
+   in one batch.
+4. Atomically rename the directory to `outcome.ready/` and, in the durable
+   profile, synchronize the attempt-control directory so the name survives a
    crash.
 5. Exit.
 
-The directory rename is the **outcome publication point**. Temporary outcomes
+The directory rename is the **outcome publication point**; temporary outcomes
 are ignored. The fixed destination is nonempty, so a second publication MUST
-fail rather than replace the first. The draft is unreferenced until step 4, so a
-crash before it discards a partial outcome whole; the single batched
-synchronization at step 3 is why a published outcome can never name staged data
-the storage never received.
+fail rather than replace the first. A crash before step 4 discards the
+unreferenced draft whole, and the batched synchronization in step 3 ensures a
+published outcome never names staged data the storage did not receive.
+
+### Outcome document
 
 A minimal outcome is:
 
@@ -1743,24 +1705,23 @@ A minimal outcome is:
 ```
 
 `expected_data_generation` is required only when the outcome contains a
-transaction. It MUST equal the generation supplied in the attempt context.
-An outcome MAY contain `priority`, an integer from 0 through 999. The manager
-uses it for the marker produced by the committed action; omission preserves
-the current priority. This allows a workflow decision and its scheduling
-preference to share one atomic marker transition.
+transaction, and MUST equal the generation in the attempt context. An outcome
+MAY also contain:
 
-An outcome MAY also contain `runner_steps`, the array of step names the publishing
-runner implements. A manager copies a valid array verbatim into the state frame it
-writes and carries it forward, and ignores a malformed one with a log entry: the
-member is evidence for an operator or a tool drawing the reachable steps of a job,
-never an input of a manager decision. A runner that declares it SHOULD do so in the
-first outcome the job publishes.
+- `priority`, an integer from 0 through 999, sets the priority of the marker
+  the committed action produces, so a decision and its scheduling preference
+  share one atomic transition. Omission keeps the current priority.
+- `runner_steps` lists the step names the publishing runner implements. A
+  manager copies a valid array verbatim into the state frame and carries it
+  forward, and ignores a malformed one with a log entry. It is evidence for
+  operators and tools drawing a job's reachable steps, never an input to a
+  manager decision. A runner that declares it SHOULD do so in the job's first
+  outcome.
+- `resources`, allowed only on `advance` and `wait` (other actions MUST NOT
+  contain it), is the next activation's requirement, validated like
+  `job.json` resources.
 
-An `advance` or `wait` outcome MAY contain `resources`, a resource mapping using
-the same validation rules as `job.json`. It is the requirement of the next
-activation. Other actions MUST NOT contain it.
-
-Actions are:
+### Actions
 
 | Action | Required information | Effect after commit |
 | --- | --- | --- |
@@ -1771,56 +1732,53 @@ Actions are:
 | `retry` | `retry.reason` | Retry this activation under policy. |
 | `pause` | `pause.reason` | Require an operator request. |
 
-`advance` and `retry` first apply the total and per-activation budgets from
-`job.json`. If the requested next activation or attempt would exceed a limit,
-the committed effect is `failed/budget_exhausted` rather than another ready
-activation.
+`advance` and `retry` first apply the `job.json` budgets; if the next
+activation or attempt would exceed one, the committed effect is
+`failed/budget_exhausted`.
 
 After observing a valid outcome, the manager appends a committing frame and
 renames `running` to `committing` before modifying durable job data or
-registering children. This fences the step and makes interrupted outcome replay
-explicit in the state tree.
+registering children. This fences the step and makes interrupted replay visible
+in the state tree.
+
+A valid current outcome is authoritative over the process exit status. An
+outcome from a fenced attempt is kept only for diagnosis.
+
+### Exit without an outcome
 
 If a process exits without an outcome:
 
 - exit status zero is a `protocol_error`, because success is ambiguous;
 - nonzero exit is `process_failure`;
 - manager timeout is `timeout`;
-- loss of manager/allocation is `lease_lost`.
+- loss of manager or allocation is `lease_lost`.
 
 Retry policy decides whether these create another attempt or
-`retry_exhausted`. A declared `fail` is permanent by default. A step requesting
-a managed retry uses `retry`.
-
-A valid current outcome is authoritative over the process exit status. An
-outcome from a fenced attempt is retained only for diagnosis.
+`retry_exhausted`. A declared `fail` is permanent by default; a step wanting a
+managed retry uses `retry`.
 
 ## Optional transactional contributions to `data/`
 
 ### Visibility guarantee
 
-This section applies only when `job.json` declares
-`"data": {"mode": "transactional"}`. Such a step MUST NOT modify committed
-`data/` directly. It publishes a replayable transaction in its outcome.
+This section applies only to jobs declaring `"data": {"mode": "transactional"}`.
+Their steps MUST NOT modify committed `data/` directly; they publish a
+replayable transaction in the outcome. A job with `data.mode` `none` has no
+`data/` or transaction bundle, and a persistent-workdir job may freely update
+application files such as `WAVECAR` in `run/`, which are not protocol metadata.
 
-A job with `data.mode` equal to `none` omits `data/` and the transaction bundle.
-In particular, a persistent-workdir job may freely update application files
-such as `WAVECAR` in `run/`; those files are not workflow-protocol metadata.
-
-The required guarantee is:
+The guarantee is:
 
 > A later attempt starts only after either none of a transaction or all of it
 > has been applied to `data/`.
 
-POSIX cannot atomically rename several unrelated paths. Raw observers looking
-inside `data/` during `committing` may therefore see replay in progress. The
-atomic boundary is between workflow attempts: no runner is launched while the
-marker is `committing`.
-
-Applications that require a simultaneously atomic tree for external readers
-MAY contribute one complete version directory and atomically replace a single
-`current` name. That is an application-level use of the same protocol, not a
-mandatory per-step revision directory.
+POSIX cannot atomically rename several unrelated paths, so raw observers inside
+`data/` during `committing` may see replay in progress. The atomic boundary is
+between attempts: no runner is launched while the marker is `committing`.
+Applications that need an atomic tree for external readers MAY contribute one
+complete version directory and atomically replace a single `current` name, an
+application-level use of the protocol rather than a mandatory per-step
+revision directory.
 
 ### Transaction bundle
 
@@ -1835,7 +1793,7 @@ attempts/<attempt-id>/outcome.tmp.<nonce>/
     └── trash/
 ```
 
-Example:
+Example manifest:
 
 ```json
 {
@@ -1861,12 +1819,12 @@ Example:
 }
 ```
 
-Paths are normalized relative POSIX paths. Absolute paths, empty components,
+Paths are normalized relative POSIX paths; absolute paths, empty components,
 `.`, `..`, NUL bytes, and paths into protocol control data are forbidden.
 Operations MUST NOT overlap. Operation IDs are unique normalized protocol
 components and determine all replay scratch paths.
 
-Required operation types are:
+Required operation types:
 
 - `make-dir`: create an application directory and any explicitly declared
   missing parents;
@@ -1878,21 +1836,20 @@ Required operation types are:
   tree.
 
 Put operations declare a content digest. Replacement and removal operations
-MAY declare an expected old digest or require absence. Preconditions prevent a
-replayed or stale transaction from overwriting an unexpected workdir.
+MAY declare an expected old digest or require absence; these preconditions stop
+a replayed or stale transaction from overwriting an unexpected workdir.
 Symlinks, devices, sockets, and FIFOs are forbidden by default.
 
-Every removal uses the deterministic destination
-`transaction/trash/<operation-id>/removed`. Every `replace-tree` moves the old
-tree to `transaction/trash/<operation-id>/old` before installing its
-deterministic payload source. These destinations MUST NOT contain preexisting
-unrelated data. Replayers create the operation directory idempotently; no
-random trash name or replayer identity may affect the paths.
+A removal always goes to `transaction/trash/<operation-id>/removed`, and a
+`replace-tree` moves the old tree to `transaction/trash/<operation-id>/old`
+before installing its deterministic payload source. These destinations MUST NOT
+contain preexisting unrelated data. Replayers create the operation directory
+idempotently; no random name or replayer identity may affect the paths.
 
 ### Idempotent replay
 
 While the marker is `committing`, a manager applies operations in manifest
-order using atomic renames and the verified-transition algorithm:
+order with atomic renames and the verified-transition algorithm:
 
 - source present, destination not yet new: validate and rename source to
   destination;
@@ -1906,48 +1863,47 @@ order using atomic renames and the verified-transition algorithm:
   defined two-rename sequence;
 - any other combination: stop with transaction corruption rather than guess.
 
-More than one manager may inspect an abandoned `committing` marker. The
-deterministic source, destination, and trash paths make concurrent replay
-converge: one rename wins and every other replayer verifies the same resulting
-path state. A replayer MUST perform the bounded visibility retries from the
-verified-transition algorithm before declaring an impossible combination.
-
-The manifest and deterministic operation IDs supply all replay information. No
-per-operation progress marker files are required.
+Several managers may inspect an abandoned `committing` marker. Deterministic
+source, destination, and trash paths make concurrent replay converge: one
+rename wins and the others verify the same resulting state. A replayer MUST
+perform the bounded visibility retries of the verified-transition algorithm
+before declaring an impossible combination. The manifest and operation IDs
+carry all replay information; no per-operation progress files are needed.
 
 After all operations validate as applied, the manager:
 
-1. appends the destination state frame with incremented data generation when the
+1. appends the destination state frame, with incremented data generation if the
    transaction changed data;
 2. renames the exact committing marker to ready, waiting, succeeded, failed, or
    paused;
-3. only then permits transaction trash and, in isolated mode, an old isolated
+3. only then allows transaction trash and, in isolated mode, an old isolated
    workdir to be collected.
 
-If interrupted after the data changes but before the final marker rename, a new
+If interrupted between the data changes and the final marker rename, a new
 manager sees `committing`, reads the outcome named by the committing frame, and
-idempotently completes replay. It does not rerun the step.
-
-This retains the useful *httk* v1 `ht.atomic.*` principle while avoiding one
-permanent revision and manifest hierarchy per step.
+idempotently completes replay without rerunning the step. This keeps the
+*httk* v1 `ht.atomic.*` principle without one permanent revision and manifest
+hierarchy per step.
 
 ## Relocating and transferring jobs
 
-This section describes relocation and detached transfer in core-v2. A core
-implementation creates `relocating` and `transferring` states as needed.
+This section specifies relocation and detached transfer in core-v2. The current
+implementation performs detached transfer; relocation within one workspace is a
+reserved capability that it rejects rather than partially executes, and its
+`relocating` state is specified here so that a conforming implementation can
+add it without changing the profile.
 
-Arbitrary placement is dynamic. A job may move after submission, but a raw
-`mv` of an authoritative payload is not a state transition: the marker would
-still name the old placement. Relocation is therefore a short replayable
-protocol.
+A job may move after submission, but a raw `mv` of an authoritative payload is
+not a state transition, because the marker would still name the old placement.
+Relocation is therefore a short replayable protocol.
 
 ### Relocation within one workspace
 
-Only a quiescent job may relocate. `ready`, `waiting`, `paused`, `failed`,
-`succeeded`, and `cancelled` are quiescent. A claimed or running job must first
-be released or fenced; a committing job must finish replay.
+Only a quiescent job may relocate: `ready`, `waiting`, `paused`, `failed`,
+`succeeded`, or `cancelled`. A claimed or running job must first be released or
+fenced; a committing job must finish replay.
 
-To move from placement `A` to placement `B`, a manager:
+To move from placement `A` to `B`, a manager:
 
 1. validates that `B/<job-key>` does not exist;
 2. appends a `relocating` frame containing source `A`, destination `B`, the
@@ -1959,8 +1915,7 @@ To move from placement `A` to placement `B`, a manager:
 6. renames the same marker from `state/relocating/A/` to
    `state/<old-kind>/B/`.
 
-The marker remains the sole authority throughout. Recovery from `relocating`
-uses these cases:
+The marker remains the sole authority throughout. Recovery from `relocating`:
 
 | Source payload | Destination payload | Recovery |
 | --- | --- | --- |
@@ -1969,37 +1924,37 @@ uses these cases:
 | Present | Present | Stop: destination collision or non-atomic copy. |
 | Absent | Absent | Stop: payload loss. |
 
-Creation and later removal of empty placement parents are not state changes.
+Creating and later removing empty placement parents are not state changes.
 
-A batch relocation MAY move a common project/shard prefix with one directory
-rename. It first moves every affected job marker to `relocating` and journals
-one batch ID and the complete member set. Only after all members are fenced does
-it rename the common payload prefix. It then returns each marker to its mirrored
+A batch relocation MAY move a common project or shard prefix with one directory
+rename. It first moves every affected marker to `relocating` and journals one
+batch ID and the complete member set; only when all members are fenced does it
+rename the common payload prefix and return each marker to its mirrored
 destination placement. Recovery uses the batch record; no per-job coordinator
-files are required.
+files are needed.
 
 ### Moving new jobs into a running workspace
 
 Files may be copied or generated under `.httk-workspace/tmp/` while managers
-continue working. The complete payload is renamed to any chosen placement and
-becomes schedulable only when its `submitted` marker is published. A partial
-copy has no marker and is invisible.
+work. The complete payload is renamed to any placement and becomes schedulable
+only when its `submitted` marker is published; a partial copy has no marker and
+is invisible.
 
-A whole project tree containing many complete, unsubmitted payloads may be
-renamed into a placement prefix at once. Their markers are then published from
-a validated batch manifest. Marker publication is intentionally one job at a
-time; a batch requiring an all-at-once scheduling barrier should initially
-publish its members paused and release them through an explicit batch request.
+A whole project tree of complete, unsubmitted payloads may be renamed into a
+placement prefix at once, and their markers then published from a validated
+batch manifest, one job at a time. A batch needing an all-at-once scheduling
+barrier should publish its members paused and release them through an explicit
+batch request.
 
-If the source is on another filesystem, the copy must finish and be validated
-inside the destination workspace before marker publication. Atomic rename is relied
-on only for the final same-filesystem publication.
+From another filesystem, the copy must finish and be validated inside the
+destination workspace before marker publication; atomic rename is relied on
+only for the final same-filesystem publication.
 
 ### Moving jobs between workspaces
 
-An individual job can transfer atomically between two workspaces only when both
-control trees and the payload source/destination are on the same filesystem. A
-coordinator attached to both workspaces:
+A job transfers atomically between two workspaces only when both control trees
+and the payload source and destination are on one filesystem. A coordinator
+attached to both workspaces:
 
 1. moves the quiescent source marker to `transferring`, recording source and
    destination workspace IDs, placements, transfer ID, and prior logical state;
@@ -2008,94 +1963,97 @@ coordinator attached to both workspaces:
 4. renames the same marker inode from the source `transferring` tree to the
    mirrored destination state tree.
 
-Until step 4, the source transferring marker remains authoritative and points
-to both possible payload locations for recovery. The destination cannot run the
+Until step 4 the source `transferring` marker is authoritative and points to
+both possible payload locations for recovery, so the destination cannot run the
 job early.
 
-Moving across filesystems is necessarily copy-and-acknowledge rather than one
-atomic filesystem transaction. The source job must first be sealed in
-`transferring`; the destination publishes a marker only after a complete copy
-and transfer-token validation; the source is retired only after explicit
-acknowledgement. A executor implementing this profile must document its
-duplicate-suppression and failure policy.
+Across filesystems, transfer is necessarily copy-and-acknowledge: the source
+job is first sealed in `transferring`, the destination publishes a marker only
+after a complete copy and transfer-token validation, and the source is retired
+only after explicit acknowledgement. An executor implementing this profile must
+document its duplicate-suppression and failure policy.
 
-If the job may be named by an unresolved cross-workspace join, the source workspace
-MUST retain a packed forwarding record keyed by source workspace ID, job ID, job
-key, and old placement, naming the destination workspace and placement. It is
-retained for at least the maximum join-history period. A transfer implementation
-without such lookup support MUST reject transfer of a job participating in an
+If the job may be named by an unresolved cross-workspace join, the source
+workspace MUST retain a packed forwarding record keyed by source workspace ID,
+job ID, job key, and old placement, naming the destination workspace and
+placement, for at least the maximum join-history period. A transfer
+implementation without such lookup MUST reject transfer of a job in an
 unresolved join.
 
-To detach one job without an immediately attached destination workspace, the
-manager moves it to `transferring`, writes one compact
-`.httk-transfer/manifest.json` inside the payload, and renames the authoritative
-marker into `.httk-transfer/` inside that payload. The directory is then a
-sealed, nonschedulable bundle that can be moved out. Import places and validates
-the complete bundle first, appends an import frame, then renames the embedded
-marker into the target workspace's state tree. The extra transfer metadata exists
-only while the job is detached or retained for transfer provenance.
+### Detached transfer bundles
 
-An *ejected* job is such a bundle addressed to no workspace: its manifest has a
-null `destination_workspace_id` and no transfer sequence. The source records the
-chosen target path in its transfer ledger, moves the bundle there (one rename,
-or across filesystems a copy to a hidden sibling that is verified and renamed
-into place before the source copy is removed), and retires the source without an
-acknowledgement, keeping no retired copy. Recovery resumes from the ledger: a
-bundle still in the workspace is moved; a verified copy at the target means only
-the workspace copy remains to be removed; neither is payload loss. Any workspace
-may *adopt* the directory: it moves it into its staging area (one rename, or
-across filesystems a copy verified before the directory is removed), imports it
-exactly as an addressed bundle, and keeps the individual acknowledgement as its
-replay receipt. An adoption intent record, written before the move, lets
-recovery publish a job whose directory is already gone. A second directory with
-the same transfer id whose job has since left is refused as stale. The transfer
-envelope `.httk-transfer/` is excluded from payload digests and job seals alike,
+To detach a job without an attached destination, the manager moves it to
+`transferring`, writes one compact `.httk-transfer/manifest.json` in the
+payload, and renames the authoritative marker into `.httk-transfer/`. The
+directory is then a sealed, nonschedulable bundle that can be moved out. Import
+places and validates the complete bundle, appends an import frame, then renames
+the embedded marker into the target workspace's state tree. The transfer
+metadata exists only while the job is detached or retained for transfer
+provenance. `.httk-transfer/` is excluded from payload digests and job seals,
 so a sealed job verifies while ejected and after adoption.
 
+### Ejection and adoption
+
+An *ejected* job is a bundle addressed to no workspace: its manifest has a null
+`destination_workspace_id` and no transfer sequence. The source records the
+chosen target path in its transfer ledger and moves the bundle there (one
+rename, or across filesystems a copy to a hidden sibling that is verified and
+renamed into place before the source copy is removed). It then retires the
+source without an acknowledgement and keeps no retired copy. Recovery resumes
+from the ledger: a bundle still in the workspace is moved, and a verified copy
+at the target leaves only the workspace copy to remove; neither is payload
+loss.
+
+Any workspace may *adopt* the directory: it moves it into its staging area (one
+rename, or across filesystems a copy verified before the directory is removed),
+imports it like an addressed bundle, and keeps the individual acknowledgement
+as its replay receipt. An adoption intent record written before the move lets
+recovery publish a job whose directory is already gone. A second directory
+with the same transfer id whose job has since left is refused as stale.
+
 A tree root ejects with its bound descendants, which must all be paused or
-terminal. Its manifest lists them top-down in `eject_tree`, each with the
-transfer id reserved for it; each member is sealed as an ejected bundle of its
-own whose manifest names the root's transfer in `eject_root`, and is moved into
-the root's envelope at `.httk-transfer/tree/<placement>/<job_key>/` before the
-root itself leaves. Adoption checks every member first, refuses a member
-directory adopted on its own, then imports every member at its recorded
-placement, and then the root; a tree keeps its placements, because each child's
-record of its parent's placement is immutable. Whether a job already arrived is
-decided by its live import frame naming the transfer, not by the acknowledgement,
-which garbage collection expires. An ejection's ledger is never retired by name:
-until the ejection finishes, its bundle is the job itself.
+terminal. Its manifest lists them top-down in `eject_tree`, each with its
+reserved transfer id. Each member is sealed as an ejected bundle whose manifest
+names the root's transfer in `eject_root`, and is moved into the root's
+envelope at `.httk-transfer/tree/<placement>/<job_key>/` before the root
+leaves. Adoption checks every member, refuses a member directory adopted on its
+own, imports every member at its recorded placement, and then the root. A tree
+keeps its placements, because each child's record of its parent's placement is
+immutable. Whether a job already arrived is decided by its live import frame
+naming the transfer, not by the acknowledgement, which garbage collection
+expires. An ejection's ledger is never retired by name: until the ejection
+finishes, its bundle is the job.
 
 ### Job trees move together
 
 A spawned child is **bound** to its parent while it is not detached (see
 `.httk-job/tree/detached.json`) and its parent has a live, non-`transferring`
 marker at the placement its `job.json` records. A transfer implementation MUST
-NOT move a bound child on its own, and MUST NOT move a parent while it has bound
-children unless those children leave with it as one tree:
+NOT move a bound child alone, and MUST NOT move a parent with bound children
+unless they leave with it as one tree:
 
 - the tree of a selected job is the job plus, recursively, every bound child its
-  spawn records confirm; it is selected whole regardless of any state or
-  placement filter that selected the root;
-- every member other than the root MUST be `paused` or terminal and none may be
-  referenced by an unresolved join, so that no manager can claim a member
-  between the eligibility check and its fence; otherwise the whole tree stays;
-- the root is fenced first and the members top-down. A member whose parent failed
-  to fence stays behind with it. Because each member's parent is already
-  `transferring` when the member is fenced, the member is no longer bound at that
-  moment, and a member left behind by a partial failure is free to follow later;
-- the destination placement of a multi-member tree MUST equal its source
-  placement, because every child records its parent's placement immutably.
+  spawn records confirm, selected whole regardless of any state or placement
+  filter that selected the root;
+- every member except the root MUST be `paused` or terminal and none may be
+  referenced by an unresolved join, so no manager can claim a member between
+  the eligibility check and its fence; otherwise the whole tree stays;
+- the root is fenced first, then the members top-down. A member whose parent
+  failed to fence stays behind with it. Each member's parent is already
+  `transferring` when the member is fenced, so the member is no longer bound
+  then, and a member left behind by a partial failure may follow later;
+- a multi-member tree's destination placement MUST equal its source placement,
+  because every child records its parent's placement immutably.
 
-A parent without spawn records (one that spawned before they existed) cannot
-list its children. Such children are still bound while the parent is live, but
-the parent can leave without them. The tree metadata is excluded from digests
-and seals like the rest of `.httk-job/`, so tampering can only separate a tree,
-never corrupt one. A peer implementing an older profile moves the files intact but
-does not enforce the rule.
+A parent without spawn records (from before they existed) cannot list its
+children; they are still bound while it is live, but it can leave without them.
+Tree metadata is excluded from digests and seals like the rest of
+`.httk-job/`, so tampering can only separate a tree, never corrupt one. A peer
+implementing an older profile moves the files intact but does not enforce the
+rule.
 
-For moving whole projects, a self-contained workspace is preferable: controlled
-detach and attach carry its state tree, journals, and all arbitrary placements
-together.
+For whole projects, a self-contained workspace is preferable: controlled detach
+and attach carry its state tree, journals, and all placements together.
 
 ## Dynamic branching and joins
 
@@ -2117,24 +2075,23 @@ attempts/<attempt-id>/outcome.tmp.<nonce>/
             └── ...
 ```
 
-Each child `job.json` names parent workspace, parent job, parent activation, and
-spawn ID, and — a clean pre-release requirement — the parent's `placement`.
-`spawn.json` chooses the target workspace and arbitrary placement for each
-child. The parent placement lets the decided-join revival guard resolve the
-parent by probing its exact state set rather than scanning the workspace: a
-manager deciding whether a `continue` would revive a child a join already
-consumed reads the parent at that placement alone and never falls back to a
-whole-workspace scan inside a scheduling tick. The guard is advisory, so a child
-written before spawns carried the parent placement makes it probe nothing rather
-than rescan; a fresh child MUST carry it. Child UUIDs and tags are chosen before outcome publication. In the
-core profile, the target workspace MUST be the parent's workspace;
-cross-workspace children remain a reserved future capability.
+Each child `job.json` names the parent workspace, job, activation, spawn ID,
+and (a clean pre-release requirement) the parent's `placement`. Child UUIDs and
+tags are chosen before publication. `spawn.json` chooses each child's target
+workspace and placement; in the core profile the target workspace MUST be the
+parent's, since cross-workspace children are a reserved future capability.
 
-Every `spawn.json` entry MUST also carry a `label`: a nonempty tag-syntax name
-that is unique within that spawn set. A gathering step selects its inputs by
-label, so a missing or ambiguous label makes the parent's own join unusable and
-the manager rejects the published outcome with `protocol_error` instead of
-registering any child of the set.
+The parent placement lets the
+[revival guard](#reviving-a-child-a-decided-join-consumed) probe the parent's
+exact state set at that placement, never falling back to a whole-workspace scan
+inside a scheduling tick. The guard is advisory, so a child written before
+spawns carried the parent placement makes it probe nothing rather than rescan;
+a fresh child MUST carry it.
+
+Every `spawn.json` entry MUST carry a `label`: a nonempty tag-syntax name unique
+within the spawn set. A gathering step selects inputs by label, so a missing or
+ambiguous label makes the parent's join unusable, and the manager rejects the
+outcome with `protocol_error` without registering any child of the set.
 
 While the parent is `committing`, the manager:
 
@@ -2146,26 +2103,28 @@ While the parent is `committing`, the manager:
 4. fails on the same UUID with different immutable content.
 
 Children are registered before the parent leaves committing. A crash may expose
-only some children, but replay registers the deterministic missing set.
-Registration is not rolled back. Published children may start before the parent
-has completed its transition; that is safe.
+only some of them, and replay registers the deterministic missing set;
+registration is never rolled back. Children may safely start before the parent
+completes its transition.
 
-When a target workspace is on another filesystem, the child is first copied into
-that workspace's temporary area and validated there. Its placement rename and
-submitted-marker publication then occur within the target filesystem while the
-parent remains committing.
+For a target workspace on another filesystem, the child is first copied into
+that workspace's temporary area and validated; its placement rename and
+submitted-marker publication then happen on the target filesystem while the
+parent is still committing.
 
 Each child is an ordinary independently schedulable job with one job file, one
-state marker, its own attempts, and the ability to create more children.
-Because its `job.json` names the parent's `job_key` and `placement`, a running
-child can locate its parent's payload as `<workspace>/<placement>/<job_key>`
-without a scan, for example to read a large shared file in place; the SDKs
-expose this as the `parent` read. The location is only meaningful while parent
-and child share a workspace.
+marker, its own attempts, and its own children. Because its `job.json` names
+the parent's `job_key` and `placement`, a running child can find its parent's
+payload at `<workspace>/<placement>/<job_key>` without a scan, for example to
+read a large shared file in place; the SDKs expose this as the `parent` read.
+The location is meaningful only while parent and child share a workspace.
+
+An advance or succeed outcome may also publish detached children without a
+join.
 
 ### Waiting and joining
 
-A wait outcome explicitly names its child set:
+A wait outcome names its child set explicitly:
 
 ```json
 {
@@ -2195,99 +2154,98 @@ A wait outcome explicitly names its child set:
 }
 ```
 
-Supported conditions are:
+Supported conditions are `all_succeeded`, `all_terminal`, `any_succeeded`,
+`any_terminal`, and `at_least` with a successful-child count.
 
-- `all_succeeded`;
-- `all_terminal`;
-- `any_succeeded`;
-- `any_terminal`;
-- `at_least`, with a successful-child count.
+The waiting journal frame records each exact child identity, its spawn
+placement as `placement_hint` (a lookup hint, not identity), and the condition.
+No join file or child marker is added to the parent directory, and new
+unrelated descendants cannot affect the join.
 
-The waiting journal frame contains each exact child identity, its spawn
-placement as `placement_hint`, and the condition. The placement is explicitly a
-lookup hint rather than identity. No join file or child marker is added to the
-parent directory. New unrelated descendants cannot affect the join.
+### Resolving join children
 
 A manager resolves each named child through this ladder, in order:
 
 1. the finite set of state kinds at the child's `placement_hint`, when the
-   reference carries one — ordinary state transitions never change placement,
-   so this is a bounded number of directory lookups and resolves the normal
-   case;
+   reference has one. Ordinary transitions never change placement, so this is
+   a bounded number of lookups and resolves the normal case;
 2. its in-memory job-id-to-marker index, confirmed against the filesystem
-   before it is used;
+   before use;
 3. any packed relocation or transfer forwarding record;
 4. a complete marker scan of the named workspace.
 
 A cache is never the only recovery path, and a cache miss is never the answer.
-In the core profile a clean pre-release break makes step 1 mandatory: every join
-child reference MUST carry both `job_key` and `placement`, join evaluation
-resolves each child by probing the finite state set at that exact placement
-alone, and it never falls back to a whole-workspace scan from inside a
-scheduling tick. A reference that lacks a placement is a protocol error of
-whatever published it, and the manager rejects the outcome rather than rescanning
-the workspace per child. The whole-workspace scan of step 4 survives for the
-forwarding record of step 3 and for interactive resolution — `job show`, `job
-why`, `job log`, and collect resolve — where locating an arbitrary and possibly
-finished job by one exhaustive scan is acceptable; it is never entered on the
-scheduling hot path. The
-consequence that matters at scale is that a waiting parent's per-tick cost is
-independent of how many children its join names — each child is one hint lookup
-or one confirmed index hit — rather than one complete scan per child.
-Failure to find the child after bounded workspace visibility retries is an
-unavailable/corrupt dependency, not evidence that a join condition is
-impossible. Such a join is nevertheless never allowed to wait forever: because
-children are registered before their parent leaves committing, a child that
-stays unresolvable past a bounded grace is corrupt evidence, and the manager
-MUST fail the parent with `dependency_failure` and a message naming the missing
-child. This implementation records the first unresolved observation in memory
-and fails the parent after `join_grace_seconds`, one hour by default; a
-restarted manager restarts that grace, which is safe because the grace exists
-only to absorb transient nonvisibility.
 
-In the core profile, a child named by an unresolved join MUST NOT relocate, so
-its placement hint remains valid. Future implementations MAY relocate it only
-when they provide the forwarding and full-scan fallback above.
+In the core profile, a clean pre-release break makes step 1 mandatory: every
+join child reference MUST carry both `job_key` and `placement`, and join
+evaluation probes only the state set at that exact placement, never falling
+back to a whole-workspace scan inside a scheduling tick. A reference without a
+placement is a protocol error of its publisher, and the manager rejects the
+outcome rather than rescanning per child. The step 4 scan survives only for the
+forwarding record of step 3 and for interactive resolution (`job show`,
+`job why`, `job log`, and collect resolve), where one exhaustive scan for an
+arbitrary, possibly finished job is acceptable; it never runs on the scheduling
+hot path. A waiting parent's per-tick cost is therefore independent of how many
+children its join names: one hint lookup or confirmed index hit per child.
 
-When satisfied, the manager appends a ready frame for a new activation and
-renames waiting to ready. Its attempt context summarizes the exact child state
-generation, terminal data generation, and failure information. Each observation
-is one object carrying the child's `workspace_id`, `label`, `job_id`, `job_key`,
-`placement`, `kind`, `state_generation`, `record_ref`, its published `failure`
-object when it ended `failed` or `cancelled`, its `data_generation`, and the
-workspace-relative `payload_path` and `workdir_path` through which its results
-are read. The
-observations appear in the attempt context both as the `join` summary and as the
+A child not found after bounded visibility retries is an unavailable or corrupt
+dependency, not evidence that the join is impossible. The join still may not
+wait forever. Children are registered before their parent leaves committing,
+so a child unresolvable past a bounded grace is corrupt evidence, and the
+manager MUST fail the parent with `dependency_failure` and a message naming the
+missing child. This implementation records the first unresolved observation in
+memory and fails the parent after `join_grace_seconds`, one hour by default; a
+restarted manager restarts the grace, which is safe because it only absorbs
+transient nonvisibility.
+
+In the core profile a child named by an unresolved join MUST NOT relocate, so
+its placement hint stays valid. Future implementations MAY relocate it only
+with the forwarding and full-scan fallback above.
+
+### Join observations
+
+When the join is satisfied, the manager appends a ready frame for a new
+activation and renames waiting to ready. Its attempt context summarizes each
+child's exact state generation, terminal data generation, and failure
+information as one observation object carrying the child's:
+
+- `workspace_id`, `label`, `job_id`, `job_key`, and `placement`;
+- `kind`, `state_generation`, and `record_ref`;
+- published `failure` object, when it ended `failed` or `cancelled`;
+- `data_generation`;
+- workspace-relative `payload_path` and `workdir_path`, through which its
+  results are read.
+
+The observations appear in the context both as the `join` summary and as the
 `children` array, which is empty for an activation that follows no join. Child
-committed
-data may be exposed through read-only paths named in the context. A
-transactional parent imports selected child data through its own transaction.
-A non-transactional workflow may instead let application code inspect or copy
-child data into its persistent workdir according to its own conventions.
+committed data may be exposed through read-only paths named in the context. A
+transactional parent imports selected child data through its own transaction;
+a non-transactional workflow may instead inspect or copy child data into its
+persistent workdir by its own conventions.
 
-Join evaluation records an observation vector containing every child's exact
-marker generation, state-frame reference, and state kind. The vector need not
-be a simultaneous filesystem snapshot; it is the complete evidence on which
-the parent transition was based, and each entry must have been the child's
-current authoritative marker when observed. Once the parent marker transition
-commits, later manual continuation of a child does not change or retract that
-decision.
+Join evaluation records an observation vector of every child's exact marker
+generation, state-frame reference, and state kind. It need not be a
+simultaneous snapshot, but it is the complete evidence for the parent's
+transition, and each entry must have been the child's current authoritative
+marker when observed. Once the parent's transition commits, later manual
+continuation of a child does not change or retract that decision.
 
-Success is **currently impossible** when the recorded observation vector
-contains enough terminal nonsuccess states to make the condition false:
+### Impossible joins
+
+Success is **currently impossible** when the observation vector holds enough
+terminal nonsuccess states to make the condition false:
 
 - `all_succeeded`: any child is `failed` or `cancelled`;
 - `any_succeeded`: every child is terminal and none succeeded;
 - `at_least N`: succeeded children plus nonterminal children is less than `N`;
-- `all_terminal`: never impossible merely because a child failed.
+- `all_terminal`: never impossible merely because a child failed;
 - `any_terminal`: never impossible.
 
-A manually continuable `failed` child still counts as terminal nonsuccess in
-the current vector. If success is currently impossible, `on_impossible`
-selects an error-handling step or the parent fails with
-`dependency_failure`. A later revival of that child does not retract the
-committed `on_impossible` transition. Cancellation is terminal but not
-successful.
+Cancellation is terminal but not successful, and a manually continuable
+`failed` child counts as terminal nonsuccess. When success is impossible,
+`on_impossible` selects an error-handling step, or the parent fails with
+`dependency_failure`. A later revival of the child does not retract the
+committed `on_impossible` transition.
 
 `on_impossible` is optional and has exactly one defined form:
 
@@ -2295,36 +2253,31 @@ successful.
 {"action": "advance", "next_step": "handle_child_failure"}
 ```
 
-`advance` is the only legal action, and `next_step` MUST be a valid step name —
-any application-defined name, including the step the parent just ran. The
-member behaves exactly like an `advance` outcome: it starts a new activation of
-the parent at that step, carrying the observation vector as the join summary, so
-the error-handling step sees precisely what the satisfied step would have seen.
-An absent `on_impossible`, or one whose `action` is anything else, means the
-parent fails with `dependency_failure`; a manager MUST NOT invent another
-action, and MUST NOT treat an unrecognized one as a reason to keep waiting.
+`advance` is the only legal action, and `next_step` MUST be a valid step name,
+including the step the parent just ran. It behaves like an `advance` outcome: a
+new activation of the parent at that step, with the observation vector as join
+summary, so the error-handling step sees what the satisfied step would have
+seen. An absent `on_impossible`, or one with any other `action`, fails the
+parent with `dependency_failure`; a manager MUST NOT invent another action or
+treat an unrecognized one as a reason to keep waiting.
 
-#### Reviving a child a decided join consumed
+### Reviving a child a decided join consumed
 
-A join decision is final, but a child of a decided join is still an ordinary
-job, and `continue` or `override_step` on it would start writing its workdir and
-payload again — possibly while the parent activation that consumed it is reading
-exactly those files. Nothing in the protocol can order those two writers.
+A join decision is final, but its children are still ordinary jobs. A
+`continue` or `override_step` on one would write its workdir and payload again,
+possibly while the consuming parent activation reads them, and nothing can
+order those two writers.
 
-A manager MUST therefore refuse a `continue` or `override_step` request for a
-job that a decided join has already observed, unless the request explicitly
-carries `"force": true`. The check is a cheap, exact one and needs no index: a
-child's `job.json` names its `parent`, and the parent's current state frame
-carries the `join_summary` of the activation it is in, so the refusal applies
-precisely while the consuming activation is the parent's current one. A refused
-request is retired with the reason, which names the parent, so an operator can
-continue the parent instead. With `"force": true` the manager applies the
-request and MUST record the hazard it accepted in the resulting state frame, as
-a `revival_hazard` object naming the parent, its state, and the observation that
-consumed this child.
-
-An advance or succeed outcome may also publish detached children without a
-join.
+A manager MUST therefore refuse `continue` or `override_step` for a job that a
+decided join has observed, unless the request carries `"force": true`. The
+check is exact and needs no index: the child's `job.json` names its `parent`,
+and the parent's current state frame carries the `join_summary` of its current
+activation, so the refusal applies precisely while the consuming activation is
+current. A refused request is retired with a reason naming the parent, so the
+operator can continue the parent instead. With `"force": true` the manager
+applies the request and MUST record the accepted hazard in the resulting state
+frame as a `revival_hazard` object naming the parent, its state, and the
+observation that consumed this child.
 
 ## Failures and tracking broken jobs
 
@@ -2342,92 +2295,88 @@ A step declares itself broken with a `fail` outcome:
 }
 ```
 
-There is exactly one failure object shape, used identically by application
-runners, by every language binding, and by the manager itself:
+### Failure object
+
+Application runners, every language binding, and the manager itself use one
+failure object shape:
 
 | Member | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `code` | string | yes | Stable machine identity, one token without whitespace, at most 128 bytes. Matched against `retry_policy.retry_on`. |
 | `message` | string | yes | One nonempty human sentence. |
 | `details` | object | no | Structured evidence, such as `exit_status` or application counters. |
-| `retryable` | boolean | no, default `false` | Advisory operator evidence. It never overrides `retry_on`. |
+| `retryable` | boolean | no, default `false` | Whether repeating the attempt could help. A runner-declared failure with `retryable: true` is retry-eligible regardless of `retry_on` while the job's retry budget remains; `retry_on` governs manager-detected failures. |
 
 No other member is permitted. A manager MUST validate a runner-published
 failure before recording it and MUST NOT store an unvalidated object. A
-malformed failure is itself a protocol violation: the job enters failed with
-the manager's own `protocol_error` code and a message naming the defect, so a
-broken runner can never make a failure invisible to a consumer.
+malformed failure is a protocol violation: the job fails with the manager's own
+`protocol_error` code and a message naming the defect, so a broken runner
+cannot hide a failure from consumers.
 
-The manager embeds the structured failure in the failed state frame and moves
-the one marker to `state/failed/<placement>/`. No `failure.json`,
-`ht.reason`, per-job event directory, or second failure index marker is
-created.
+The manager embeds the failure in the failed state frame and moves the marker to
+`state/failed/<placement>/`. No `failure.json`, `ht.reason`, per-job event
+directory, or second failure index marker is created. The failure frame
+contains job, step, activation, and attempt IDs; the failure object (code,
+message, and details such as exit status or signal); retry history; manager ID;
+relevant retained log paths; and data generation (`null` when `data.mode` is
+`none`). Manager-generated failure details retain the payload-relative path
+`log_paths: ["logs/stdio.out"]`, which `job why` uses when present.
 
-Codes emitted by this manager itself are reserved. Those currently in use are:
+### Reserved failure codes
 
-- `protocol_error` — invalid submission, an outcome the protocol forbids, a
-  malformed published failure, an unusable join, or a runner that exited
-  successfully without publishing an outcome;
-- `process_failure` — a runner that could not be launched, or that exited
-  nonzero without publishing an outcome;
-- `lease_lost` — the owning manager's heartbeat expired;
-- `retry_exhausted` — `maximum_attempts_per_activation` reached during retry;
-- `budget_exhausted` — an attempt or activation budget exceeded;
-- `dependency_failure` — a join became impossible, or a named join child stayed
-  unresolvable past the manager's bounded grace;
-- `transaction_corruption` — the replay of a published transaction failed
-  midway; a transaction manifest or outcome the manager cannot parse is a
-  `protocol_error`, not this;
-- `runner_unavailable` — a runner outside the payload could not be resolved,
-  opened, or entered at all;
-- `runner_mismatch` — the bytes of such a runner did not match the
-  `runner.sha256` the job pinned;
-- `code_support_unavailable` — the Bash API of an installed simulation-code
-  support package could not be found, so the attempt environment could not be
-  built.
+Codes emitted by the manager itself are reserved. Those currently in use:
+
+| Code | Meaning |
+| --- | --- |
+| `protocol_error` | Invalid submission, an outcome the protocol forbids, a malformed published failure, an unusable join, or a runner that exited successfully without publishing an outcome. |
+| `process_failure` | A runner that could not be launched, or that exited nonzero without publishing an outcome. |
+| `lease_lost` | The owning manager's heartbeat expired. |
+| `retry_exhausted` | `maximum_attempts_per_activation` reached during retry. |
+| `budget_exhausted` | An attempt or activation budget exceeded. |
+| `dependency_failure` | A join became impossible, or a named join child stayed unresolvable past the manager's bounded grace. |
+| `transaction_corruption` | The replay of a published transaction failed midway. A transaction manifest or outcome the manager cannot parse is a `protocol_error`, not this. |
+| `runner_unavailable` | A runner outside the payload could not be resolved, opened, or entered at all. |
+| `runner_mismatch` | The bytes of such a runner did not match the `runner.sha256` the job pinned. |
+| `code_support_unavailable` | The Bash API of an installed simulation-code support package could not be found, so the attempt environment could not be built. |
 
 A runner library that dispatches steps on a runner's behalf publishes ordinary
-runner failures, so its codes are reserved too. Those of the runner libraries
-shipped with this implementation are:
+runner failures, so its codes are reserved too. The shipped runner libraries
+use:
 
-- `no_outcome` — the step handler returned without publishing an outcome;
-- `unknown_step` — the job asked for a step this runner does not implement;
-- `declared_failure` — a legacy `ht_steps` task declared itself broken, published
-  by the *httk* v1 compatibility runner only.
+| Code | Meaning |
+| --- | --- |
+| `no_outcome` | The step handler returned without publishing an outcome. |
+| `unknown_step` | The job asked for a step this runner does not implement. |
+| `declared_failure` | A legacy `ht_steps` task declared itself broken; published by the *httk* v1 compatibility runner only. |
 
-`resource_unsatisfiable`, `manager_error`, and `cancelled` remain reserved for
-manager use but are not currently emitted by this implementation. `timeout` is
-likewise reserved for a manager-enforced attempt timeout, which this manager does
-not yet apply; the *httk* v1 compatibility runner does publish it for a legacy
-task that exceeded its own timeout. Application codes SHOULD be namespaced, as in
-`vasp.nonconvergent`, to keep them distinct from the reserved set.
+`resource_unsatisfiable`, `manager_error`, and `cancelled` are reserved for
+manager use but not currently emitted. `timeout` is reserved for a
+manager-enforced attempt timeout, which this manager does not yet apply; the
+*httk* v1 compatibility runner publishes it for a legacy task that exceeded its
+own timeout. Application codes SHOULD be namespaced, as in
+`vasp.nonconvergent`, to stay distinct from the reserved set.
 
-The failure frame contains job, step, activation, and attempt IDs; the failure
-object with its code, message, and details such as exit status or signal; retry
-history; manager ID; relevant retained log paths; and data generation. For a job
-with `data.mode` equal to `none`, data generation is `null`.
-Manager-generated failure details retain the payload-relative path
-`log_paths: ["logs/stdio.out"]`; `job why` uses that frame member when present.
+### Failure history
 
-Current broken jobs are exactly the markers below `state/failed/`. This
-directory tree is authoritative and requires no reconciliation.
+Current broken jobs are exactly the markers below `state/failed/`, which is
+authoritative and needs no reconciliation. A manually continued job's marker
+moves elsewhere, but its failed frame stays in the backwards-linked history.
+"Ever failed" queries are answered from a compact journal scan, an optional
+derived database, or a periodic report, never another per-job marker inode.
 
-If a failed job is manually continued, its marker moves elsewhere, but its
-failed frame remains in the backwards-linked journal history. “Ever failed”
-queries are answered from a compact journal scan, an optional derived database,
-or a periodically generated report. They intentionally do not consume another
-per-job marker inode.
-
-Logs are evidence, not state. Missing or truncated logs cannot prevent
+Logs are evidence, not state; missing or truncated logs cannot prevent
 recovery.
 
 ## Manual continuation and control requests
 
-Operators MUST NOT edit state markers, journal segments, or `job.json`.
-They write one complete request file in `requests/tmp/` and atomically rename it
-into `requests/ready/` under the same name, so a manager never reads a partially
-written request and the publication is the same verified rename as every other
-one in this protocol. A request names:
+Operators MUST NOT edit state markers, journal segments, or `job.json`. They
+write one complete request file in `requests/tmp/` and atomically rename it,
+under the same name, into `requests/ready/`, so a manager never reads a partial
+request and publication is an ordinary verified rename.
+
+### Request contents and actions
+
+A request names:
 
 - job UUID, job key, and the job's `placement`;
 - exact expected marker generation and record reference;
@@ -2436,70 +2385,64 @@ one in this protocol. A request names:
 - optionally `force`, the operator's explicit acceptance of a hazard the
   manager would otherwise refuse;
 - any selected retained files for manual import;
-- for relocation or transfer, the exact destination workspace and placement plus a
-  unique operation ID.
+- for relocation or transfer, the exact destination workspace and placement plus
+  a unique operation ID.
 
-Actions include:
+Actions and the states they apply to:
 
-- `continue`: retry the current activation;
-- `override_step`: create a new activation at a named step;
-- `cancel`;
-- `set_priority`;
-- `pause`;
-- `relocate`, when a placement changes;
-- `transfer`, when a job moves between workspaces.
+| Action | Effect | Applies to |
+| --- | --- | --- |
+| `continue` | Retry the current activation. | `failed`, `paused` |
+| `override_step` | Create a new activation at a named step. | `failed`, `paused` |
+| `cancel` | Cancel; a live attempt uses the fencing and process-termination procedure of [Cancellation](#cancellation). | Any nonterminal state. A second `cancel` of a job in `cancelling` is not an error and changes nothing. |
+| `set_priority` | Rename the marker to a new priority. | Only `submitted`, `ready`, `waiting`, `paused`, `failed` |
+| `pause` | Pause. | Immediately from `submitted`, `ready`, `waiting`; deferred from `claimed`, `running`, `committing` to the next attempt boundary; a handled no-op on `paused`. Terminal outcomes supersede a pending deferred pause. |
+| `relocate` | Change the placement. | Its permitted quiescent states |
+| `transfer` | Move the job between workspaces. | Its permitted quiescent states |
 
-Action validity is deliberately narrow:
-
-- `continue` and `override_step` apply to `failed` or `paused`;
-- `set_priority` applies only to `submitted`, `ready`, `waiting`, `paused`, or
-  `failed`;
-- an operator `pause` applies immediately to `submitted`, `ready`, or `waiting`, is deferred from `claimed`, `running`, or `committing` until the next attempt boundary, and is a handled no-op against a job already `paused`; terminal outcomes supersede a pending deferred pause;
-- `relocate` and `transfer` apply only to their permitted quiescent states;
-- `cancel` may target any nonterminal state and uses the explicit fencing and
-  process-termination procedure of [Cancellation](#cancellation) for a live
-  attempt. A second `cancel` of a job already in `cancelling` is not an error
-  and changes nothing: the first one is still being carried out.
+`set_priority` MUST NOT rename a `claimed`, `running`, or `committing` marker
+behind its owning manager. An in-flight `pause` instead records a sticky
+`pause_requested` member in a same-kind frame and pauses at the next attempt
+boundary; a manager older than this additive member quarantines such a request
+as invalid.
 
 `continue` and `override_step` remain subject to job budgets unless the request
-contains an authorized, auditable budget change under site policy. Because
-`job.json` is immutable, such an override lives in the operator journal frame,
-not by editing the job definition. They are additionally refused, without
-`force`, for a job that a decided join already consumed; see
-[Reviving a child a decided join consumed](#reviving-a-child-a-decided-join-consumed).
+contains an authorized, auditable budget change under site policy, which lives
+in the operator journal frame because `job.json` is immutable. Without `force`,
+both are refused for a job a decided join already consumed (see
+[Reviving a child a decided join consumed](#reviving-a-child-a-decided-join-consumed)).
 
-In particular, `set_priority` MUST NOT rename a `claimed`, `running`, or
-`committing` marker behind its owning manager; an in-flight operator `pause`
-records a sticky `pause_requested` member in a same-kind frame and pauses at
-the next attempt boundary. A manager older than this additive state member
-quarantines such an in-flight pause request as invalid.
+### Applying requests
 
 A manager claims the request by rename, verifies the exact expected current
-marker, appends the new journal frame, and renames that marker. It resolves the
-target by probing the finite state set at the request's exact `placement`, the
-same clean pre-release break the join ladder makes, and never by scanning the
-workspace from a scheduling tick; a request that carries no placement is a
-protocol error, claimed and quarantined as malformed input rather than allowed
-to trigger a global lookup. A delayed request cannot apply to a newer state
-because its expected generation no longer matches. All request-induced marker moves use verified transitions. A manager
-whose live transition loses to cancellation rereads the current marker and
-stops the fenced attempt; it does not infer ownership merely from an errno.
+marker, appends the new journal frame, and renames the marker. It finds the
+target by probing the state set at the request's exact `placement`, never by
+scanning the workspace from a scheduling tick (the same clean pre-release break
+as the join ladder). A request without a placement is a protocol error: it is
+claimed and quarantined as malformed rather than allowed to trigger a global
+lookup.
+
+A delayed request cannot apply to a newer state, because its expected
+generation no longer matches. All request-induced marker moves are verified
+transitions. A manager whose live transition loses to cancellation rereads the
+current marker and stops the fenced attempt; it does not infer ownership from an
+errno.
 
 The result is written to the shared journal. The transient request file may be
-removed after retention policy permits; there is no per-job request directory.
+removed when retention policy permits; there is no per-job request directory.
 
-A claimed request lives in `requests/claimed/<manager-id>/` until the manager
-that claimed it has decided about it: a request that was applied is removed, and
-one that can never become actionable is retired.
+### Retiring requests
 
-A request that has been claimed and can never become actionable — its expected
-generation or record reference no longer matches, the job moved while the
-request was being applied, or it asks for something the protocol refuses such as
-reviving a job a decided join already consumed — MUST be retired rather than
-left where it will be read again. Retiring means writing a retirement record and
-then moving the claimed file to `requests/retired/`; a retired request is never
-rescanned. The record sits beside the request under the request's own name plus
-`.retirement` and is one object:
+A claimed request stays in `requests/claimed/<manager-id>/` until its manager
+decides: an applied request is removed, and one that can never become
+actionable MUST be retired rather than left to be read again. Examples are an
+expected generation or record reference that no longer matches, a job that
+moved while the request was applied, or a request the protocol refuses, such as
+reviving a job a decided join consumed.
+
+Retiring writes a retirement record and then moves the claimed file to
+`requests/retired/`, which is never rescanned. The record sits beside the
+request under the request's name plus `.retirement`:
 
 ```json
 {
@@ -2512,27 +2455,27 @@ rescanned. The record sits beside the request under the request's own name plus
 }
 ```
 
-Both the retired request and its record are transient evidence for an operator,
-not protocol state: nothing reads them back, and “Retention gates and
-always-safe collection” below collects them after a month. This is distinct
-from two neighbouring cases that MUST NOT be retired:
+Both are transient operator evidence, not protocol state; nothing reads them
+back, and they are collected after a month (see
+[Retention gates and always-safe collection](#retention-gates-and-always-safe-collection)).
 
-- a request whose job is served by a *runner executor this manager does not
-  serve* is left in `requests/ready/` for a manager that does serve it. A
-  manager that has decided this about a request SHOULD remember the decision
-  rather than reread the file on every pass;
-- a request that cannot be applied *right now* — a held maintenance lock, an
-  unavailable workspace — stays actionable and is simply retried.
+These cases MUST NOT be retired:
 
-A request that violates the protocol, including one naming a job that does not
-exist, is quarantined as malformed input rather than retired.
+- a request whose job uses a *runner executor this manager does not serve* is
+  left in `requests/ready/` for a manager that does; a manager SHOULD remember
+  that decision rather than reread the file every pass;
+- a request that cannot be applied *right now* (a held maintenance lock, an
+  unavailable workspace) stays actionable and is retried;
+- a request that violates the protocol, including one naming a nonexistent
+  job, is quarantined as malformed input.
+
+### Continuation and workdirs
 
 Manual continuation preserves failure history. In persistent mode it reuses the
-declared workdir in place; the new attempt context records
-`is_restart: true`, its cleanliness, and `attempt_reason: "manual_continue"`.
-No file import or transaction is required. In isolated mode, selected retained
-files may instead be imported into the new workdir; if they also become
-committed `data/`, that contribution uses a transaction.
+workdir in place, and the new context records `is_restart: true`, its
+cleanliness, and `attempt_reason: "manual_continue"`; no import or transaction
+is needed. In isolated mode, selected retained files may be imported into the
+new workdir; if they also become committed `data/`, that takes a transaction.
 
 ## Required outcome-processing order
 
@@ -2551,20 +2494,22 @@ For a valid current outcome, a manager:
 8. renames the exact committing marker to the destination;
 9. performs optional cleanup later.
 
-After the destination transition returns successfully, the manager that owned
-the attempt removes its control directory only after it has reaped that
-attempt's process and learned its return code. This applies when the actual
-destination is `ready`, `waiting`, `paused`, or `succeeded`; `failed` and
-`cancelled` retain their evidence. A manager inheriting a `committing` marker
-did not own and reap that process, so it leaves the directory for
-`attempt_control` garbage collection.
+Because steps 4 and 5 synchronize before steps 7 and 8, a power cut can never
+leave a marker out of `committing` that names data or children its storage only
+half received.
 
-Steps 4 and 5 synchronize before steps 7 and 8, so a durable workspace has the
-committed data and the registered children on storage before the marker rename
-that claims them: a power cut can never leave a marker out of `committing` that
-names a transaction its storage only half received.
+After the destination transition succeeds, the manager that owned the attempt
+removes its control directory once it has reaped the attempt's process and
+learned its return code, when the destination is `ready`, `waiting`, `paused`,
+or `succeeded`; `failed` and `cancelled` keep their evidence. A manager that
+inherited the `committing` marker did not reap that process and leaves the
+directory for `attempt_control` garbage collection.
 
-Interruption recovery follows directly:
+Before recovering a stale claimed or running job, a manager MUST check its
+attempt-control directory for a valid published outcome, so a committed
+decision is not mistaken for an abandoned attempt.
+
+Recovery from each interruption point:
 
 | Interruption point | Recovery |
 | --- | --- |
@@ -2578,106 +2523,107 @@ Interruption recovery follows directly:
 | After marker rename | New state is already authoritative; the owning manager cleans up after it reaps the process when the destination is `ready`, `waiting`, `paused`, or `succeeded`. |
 | Old fenced process publishes late | Never apply it. |
 
-Before recovering a stale claimed or running job, a manager MUST inspect its
-named attempt-control directory for a valid published outcome. A committed
-decision must not be mistaken for an abandoned attempt.
-
 ## Task-manager startup and recovery
 
 A manager:
 
 1. discovers explicit and watched workspaces and validates each `format.json`;
-2. rejects duplicate workspace IDs and unknown future capabilities before mutation;
+2. rejects duplicate workspace IDs and unknown future capabilities before
+   mutation;
 3. creates a manager record, fresh writer-incarnation journal, and heartbeat in
    each attached workspace;
 4. resumes markers in `committing` and, when enabled, `relocating` and
    `transferring`;
-5. resumes markers in `cancelling`: every one of them names a fenced attempt
-   that still has to be stopped and verified, whether this manager fenced it or
-   inherited it from one that died mid-cancellation;
+5. resumes markers in `cancelling`, each naming a fenced attempt still to be
+   stopped and verified, whether this manager fenced it or inherited it from
+   one that died mid-cancellation;
 6. examines possibly abandoned claimed and running markers;
 7. evaluates waiting joins, including cross-workspace references when enabled;
 8. handles submitted jobs and operator requests;
 9. claims eligible ready work in pool, capability, priority, and resource
    order, skipping requirements that cannot fit its advertised capacities and
    packing fitting attempts against the reservations of its running attempts;
-10. continues watching for workspaces being attached, renamed, or detached.
+10. keeps watching for workspaces being attached, renamed, or detached.
 
-It does not need to reconcile a separate state index. Listing `state/` is
-listing the authoritative scheduler state.
+There is no separate state index to reconcile: listing `state/` is listing the
+authoritative scheduler state.
+
+### Scaling scans
 
 A high-scale implementation SHOULD:
 
 - scan only non-terminal state placement prefixes relevant to its configured
   projects or job set;
 - keep an in-memory job-key-to-marker map while running;
-- process arbitrary placement subtrees incrementally rather than repeatedly
-  scanning every attached workspace;
-- use filesystem notifications only as hints, since notifications may be lost;
-- workspace task-manager query caches outside per-job directories.
+- process placement subtrees incrementally rather than repeatedly scanning
+  every attached workspace;
+- use filesystem notifications only as hints, since they may be lost;
+- keep task-manager query caches outside per-job directories.
 
-Discovering the globally highest-priority ready job requires enumerating the
-ready tree. Incremental scans MAY therefore cause long-lived operational
-priority inversion, especially after cold start; priority is a preference
-rather than a strict global ordering guarantee. This is not a gap to close by
-adding directory levels, and no scan strategy changes claim correctness.
+Finding the globally highest-priority ready job requires enumerating the ready
+tree, so incremental scans MAY cause long-lived priority inversion, especially
+after cold start. This is not a gap to close with directory levels, and no scan
+strategy affects claim correctness.
 
-A manager MAY restrict every scan to a set of placement prefixes, the same kind
-of deployment policy by which it advertises pools and capabilities, so that
-disjoint managers divide a large workspace without walking each other's trees.
-This is a restriction a manager places on itself and not a protocol change:
-placement values remain project-owned semantics that the engine only validates
-and filters on, overlapping assignments stay safe because the marker rename
-still arbitrates a claim, and a manager records its assigned prefixes in its
-manifest so a diagnosis can report when a live manager's prefixes exclude a
-job's placement. A manager with no assignment scans the whole workspace.
+A manager MAY restrict every scan to a set of placement prefixes, a deployment
+policy like its advertised pools and capabilities, so disjoint managers divide
+a large workspace without walking each other's trees. This is a
+self-restriction, not a protocol change: placement values stay project-owned
+semantics that the engine only validates and filters on, overlapping
+assignments stay safe because the marker rename still arbitrates claims, and a
+manager records its prefixes in its manifest so a diagnosis can report when a
+live manager's prefixes exclude a job's placement. A manager with no assignment
+scans the whole workspace.
 
 ## Workspace check and marker repair
 
-A marker that no longer resolves to its journal frame is the one form of damage
-a manager cannot route around: the marker is authoritative, and everything
-beyond its kind, priority, and generation lives in the frame. A workspace check
-walks every marker of every state kind and verifies that its record reference
-resolves, within the configured visibility deadline, to a readable frame whose
-checksum verifies and whose `workspace_id`, `job_id`, `job_key`, `kind`, and
-`state_generation` agree with the marker name. The `init` reference of a
-submitted marker resolves to nothing by definition and is verified as such.
-Each unresolved marker is reported with a stable problem code: `missing_segment`,
+A marker that no longer resolves to its journal frame is the one damage a
+manager cannot route around: the marker is authoritative, and everything beyond
+its kind, priority, and generation lives in the frame.
+
+### Workspace check
+
+A workspace check walks every marker of every state kind and verifies that its
+record reference resolves, within the visibility deadline, to a readable frame
+whose checksum verifies and whose `workspace_id`, `job_id`, `job_key`, `kind`,
+and `state_generation` agree with the marker name. A submitted marker's `init`
+reference resolves to nothing by definition and is verified as such. Each
+unresolved marker is reported with a stable problem code: `missing_segment`,
 `short_read`, `checksum_mismatch`, `length_mismatch`, `trailer_mismatch`,
 `reference_mismatch`, `invalid_header`, `undecodable_frame`,
 `invalid_record_ref`, `identity_mismatch`, or `unparseable_name` for a
-marker-shaped entry whose basename cannot be interpreted at all.
+marker-shaped entry whose basename cannot be interpreted.
 
-Repair is optional, separate, and conservative. Because the frame that holds
-`previous_record_ref` is precisely the unreadable one, a repair cannot follow
-the chain of the job; it walks the journal segments instead, collects the
-readable frames naming that job, and adopts the newest one whose
-`state_generation` is *strictly older* than the marker's. Adopting a frame at
-or beyond the marker's own generation is forbidden: such a frame is either the
-damaged one or a transition that was appended and never committed by a rename,
-and publishing it would invent state no marker ever carried. The repair then
-appends one ordinary state frame with `reason: "fsck_repair"`, whose
+### Marker repair
+
+Repair is optional, separate, and conservative. Since the frame holding
+`previous_record_ref` is the unreadable one, repair cannot follow the chain. It
+scans the journal segments for readable frames naming the job and adopts the
+newest whose `state_generation` is *strictly older* than the marker's. Adopting
+a frame at or beyond the marker's generation is forbidden: it is either the
+damaged frame or a transition never committed by a rename, and publishing it
+would invent state no marker carried.
+
+The repair appends one ordinary state frame with `reason: "fsck_repair"`, whose
 `previous_record_ref` is the recovered frame and whose members are carried
-forward from it, keeping the marker's own kind, placement, and priority, and
-renames the marker onto that frame at the next generation. A repair therefore
-adds history rather than rewriting it, and the job becomes loadable and
-schedulable again.
+forward from it, keeping the marker's kind, placement, and priority. It renames
+the marker onto that frame at the next generation. Repair thus adds history
+rather than rewriting it, and the job becomes loadable and schedulable again.
 
 A repair MUST NOT touch a `claimed`, `running`, `committing`, or `cancelling`
-marker whose owning manager — identified from the readable frames of that job —
-is still heartbeating within its lease. Such a marker is reported only; its
-manager owns the transition that follows. `cancelling` belongs in that set for
-a reason of its own: the marker *is* the fence a live manager put in place and
-is still acting on, and re-pointing it at an older frame would take away the
-attempt identity that manager needs to finish stopping and verifying the
-process. A marker with no readable older frame is
-unrepairable and is likewise reported, and may be moved into
-`.httk-workspace/quarantine/` only when an operator asks for that explicitly.
+marker whose owning manager (identified from the job's readable frames) is
+still heartbeating within its lease; such a marker is only reported, and its
+manager owns the next transition. For `cancelling`, the marker *is* the fence
+the live manager is acting on, and re-pointing it at an older frame would
+remove the attempt identity it needs to finish stopping and verifying the
+process.
+
+A marker with no readable older frame is unrepairable and is reported. It is
+moved into `.httk-workspace/quarantine/` only when an operator explicitly asks.
 
 ## Garbage collection and compaction
 
-The following may be collected under the explicit retention policy the
-workspace publishes in `policy.retention`:
+Under the retention policy in `policy.retention`, a collector may remove:
 
 - unpublished workspace temporary entries;
 - placed payload directories that never reached submitted state, except sealed
@@ -2691,79 +2637,78 @@ workspace publishes in `policy.retention`:
   `succeeded` destinations;
 - retained diagnostic application files.
 
-That list is permissive: it bounds what a conforming collector *may* touch, not
-what one must. The `httk workspace gc` implementation collects the
-subset tabulated in “Retention gates and always-safe collection” below, and
-adds the retired transfer bundles and per-transfer receipts core-v2 accumulates.
-It deliberately leaves isolated
-workdirs, incomplete outcome directories, and payloads that never reached
-`submitted` alone, because each of those is the only remaining evidence of a
-job that went wrong.
+That list bounds what a conforming collector *may* touch, not what it must.
+`httk workspace gc` collects the subset in
+[Retention gates and always-safe collection](#retention-gates-and-always-safe-collection),
+plus the retired transfer bundles and per-transfer receipts core-v2
+accumulates. It leaves isolated workdirs, incomplete outcome directories, and
+payloads that never reached `submitted` alone, because each may be the only
+remaining evidence of a job that went wrong.
 
-Journal compaction operates on shared segments, not by creating files per job.
-It must preserve every record reference reachable from a current marker and the
-configured amount of history.
+### What collection must preserve
 
-Terminal `job.json`, committed application data, the one state marker, and
-required journal history are retained according to site policy. Age alone is
-not permission to delete a non-terminal job.
-
-A persistent workdir is application data, not attempt scratch. It is retained
-until an explicit job or site retention rule permits its removal, including
-after failure or manual continuation.
-
-A payload containing `.httk-transfer/manifest.json` and its sealed marker is
-not an orphan even though it has no marker in a workspace state tree. Generic
-temporary/orphan GC MUST NOT collect, alter, or unseal it. Only an explicit
-transfer import, abort, or transfer-specific retention action may do so.
-
-Entries in `.httk-workspace/quarantine/` are likewise outside generic orphan
-GC. They are removed only by an explicit repair decision or a separately
-configured quarantine-retention policy that preserves an audit record.
+- Journal compaction operates on shared segments, not per-job files, and must
+  preserve every record reference reachable from a current marker plus the
+  configured history.
+- Terminal `job.json`, committed application data, the state marker, and
+  required journal history are retained according to site policy. Age alone
+  never permits deleting a non-terminal job.
+- A persistent workdir is application data, not attempt scratch. It is kept
+  until an explicit job or site retention rule permits removal, including after
+  failure or manual continuation.
+- A payload containing `.httk-transfer/manifest.json` and its sealed marker is
+  not an orphan, though it has no marker in a state tree. Generic
+  temporary/orphan GC MUST NOT collect, alter, or unseal it; only an explicit
+  transfer import, abort, or transfer-specific retention action may.
+- Entries in `.httk-workspace/quarantine/` are likewise outside generic orphan
+  GC. Only an explicit repair decision or a separately configured
+  quarantine-retention policy that keeps an audit record removes them.
+- A collector MUST NOT prune the runner store. Runners are referenced by digest
+  from `job.json` and transfer manifests, an attached workspace can gain a job
+  referring to one at any time, and the store is small. A future version may add
+  an explicit runner-retention rule; generic collection never applies one.
 
 Empty placement-directory pruning follows the nonrecursive race rules in
-“State-marker rename.” Implementations should account for these directories:
-deep or job-unique placements can temporarily leave one empty hierarchy under
-several state kinds even though the marker inode count remains one per job.
+“State-marker rename.” Deep or job-unique placements can temporarily leave one
+empty hierarchy under several state kinds, although the marker inode count
+stays one per job.
 
-No recovery operation begins by broadly deleting `tmp`, run, or unknown files.
+No recovery operation starts by broadly deleting `tmp`, run, or unknown files.
 Cleanup is separate from correctness.
 
 ### Retention gates and always-safe collection
 
-An explicit `null` or `"keep"` member of `policy.retention` means **keep**. A
-collector MUST NOT prune a category whose limit is unlimited. Thus
-`attempt_control_days` is unlimited by default, while `journal_days` and
-`trash_days` default to one day.
+An explicit `null` or `"keep"` in `policy.retention` means **keep**, and a
+collector MUST NOT prune a category whose limit is unlimited (by default
+`attempt_control_days`; see [Workspace policy](#workspace-policy)).
 
-These always-safe categories are exempt because the entries in them cannot carry
-information, plus the one conditional case of a removable marker whose payload
-the operator removed; they are collected whatever `policy.retention` says.
-Every manager runs these categories after attaching; at clean exit it runs the
-full policy-gated collection. `workspace gc` also collects them:
+These always-safe categories are collected regardless of `policy.retention`,
+because their entries carry no information (the last is the one conditional
+case). Every manager collects them after attaching, and runs the full
+policy-gated collection at clean exit; `workspace gc` also collects them.
 
-- an empty placement mirror below a state kind, pruned by `rmdir` alone;
-- an entry still sitting in `.httk-workspace/tmp/` or
-  `.httk-workspace/requests/tmp/` more than 24 hours after it was written, since
-  every publication renames its staging entry away within one operation;
-- a request in `.httk-workspace/requests/claimed/<manager-id>/` more than 30
-  days old whose manager is no longer heartbeating;
-- a request in `.httk-workspace/requests/retired/`, and its `.retirement`
-  record, more than 30 days old. A retired request was already decided about
-  and is never rescanned, so it is evidence for an operator and nothing else.
-- a removable marker (`succeeded`, `failed`, `cancelled`, `submitted`, or
-  `ready`) whose complete payload directory is absent. It is removed as an
-  operator-requested job removal, except when a non-terminal parent's
-  current `state.join.children[*].job_id` references that job; an unreadable
-  non-terminal state frame skips this category conservatively. The final
-  parent/`committing` check is a TOCTOU window of unbounded length in principle
-  because GC may be descheduled before unlinking. A parent that publishes a
-  join referencing the removed child in that window observes a missing child
-  and may fail or stall; this is a scheduling-correctness consequence, not
-  payload data loss. Operators must remove children only when their parent is
-  terminal; the GC guard is best-effort, not a lock.
+- An empty placement mirror below a state kind, pruned by `rmdir` alone.
+- An entry in `.httk-workspace/tmp/` or `.httk-workspace/requests/tmp/` more
+  than 24 hours old, since every publication renames its staging entry away
+  within one operation.
+- A request in `.httk-workspace/requests/claimed/<manager-id>/` more than 30
+  days old whose manager no longer heartbeats.
+- A request in `.httk-workspace/requests/retired/`, with its `.retirement`
+  record, more than 30 days old.
+- A removable marker (`succeeded`, `failed`, `cancelled`, `submitted`, or
+  `ready`) whose complete payload directory is absent, removed as an
+  operator-requested job removal. It is kept when a non-terminal parent's
+  current `state.join.children[*].job_id` references the job, and the category
+  is skipped conservatively when a non-terminal state frame is unreadable.
 
-The remaining categories are gated as follows.
+That final parent/`committing` check leaves a TOCTOU window, in principle
+unbounded, because GC may be descheduled before unlinking. A parent publishing a
+join on the removed child in that window sees a missing child and may fail or
+stall; this affects scheduling correctness, not payload data. Operators must
+remove children only when their parent is terminal; the GC guard is best effort,
+not a lock.
+
+The remaining categories are gated as follows:
 
 | Category | Gate | Additional condition |
 | --- | --- | --- |
@@ -2774,42 +2719,33 @@ The remaining categories are gated as follows.
 | Journal segment | `journal_days` | No current terminal marker, nor sealed marker of a bundle awaiting handover, references it; no frame chain of a current non-terminal marker contains it; and its writer belongs to no manager heartbeating within its lease. |
 | Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
 
-Failed and cancelled jobs retain their newest attempt-control directory
-regardless of age: it holds the outcome and failure breadcrumb of the attempt
-that decided the job, plus the metadata needed to identify it. A succeeded
-attempt-control directory is normally removed by the committing manager after
-the destination transition is durable and its local process has been reaped.
-If that manager dies first — or another manager inherits the committing marker
-— the leftover is eligible for `attempt_control_days`, including when it is the
-only directory left for the job.
-
-A collector MUST NOT prune the runner store. A runner is referenced by digest
-from `job.json` and from transfer manifests, an attached workspace can gain a
-job referring to one at any time, and the store is small; a future version may
-add an explicit runner-retention rule, but generic collection never applies
-one.
+Failed and cancelled jobs keep their newest attempt-control directory
+regardless of age, because it holds the outcome and failure breadcrumb of the
+deciding attempt and the metadata identifying it. A succeeded job's directory
+is normally removed by the committing manager (see
+[Required outcome-processing order](#required-outcome-processing-order)); if
+that manager dies first, or another manager inherits the committing marker, the
+leftover falls under `attempt_control_days`, even when it is the job's only
+directory.
 
 ### The cost of collecting journal history
 
 Every segment in the frame chain of a current non-terminal marker is protected;
-a terminal marker protects only its current segment. Collecting older segments
-of a terminal job's same writer is exactly what `journal_days` buys, and the
-consequence must be stated plainly: that job's deep history goes with those
-segments. `collect` and `job log` then report the terminal job's timeline from
-whatever frames remain and set `gaps`; a non-terminal job's current state and
-future transitions retain their complete reachable chain.
+a terminal marker protects only its current segment. Collecting a terminal
+job's older segments of the same writer is what `journal_days` buys, and that
+job's deep history goes with them: `collect` and `job log` then report its
+timeline from the remaining frames and set `gaps`. A non-terminal job keeps its
+complete reachable chain.
 
 ### Crash safety and journaling of a collection
 
-A collection MUST be interruptible at any instruction. It therefore removes
-entries bottom-up, renames nothing, and rewrites no protocol state: the remains
-of an interrupted removal are scratch that the next collection removes again.
-Empty-placement pruning tolerates `ENOTEMPTY` and `ENOENT` as ordinary
-outcomes, never as faults, because a concurrent transition recreating exactly
-that path is expected.
+A collection MUST be interruptible at any instruction. It removes entries
+bottom-up, renames nothing, and rewrites no protocol state, so an interrupted
+removal leaves scratch the next collection removes. Empty-placement pruning
+treats `ENOTEMPTY` and `ENOENT` as ordinary outcomes, because a concurrent
+transition may recreate the path.
 
-A collection that removed anything appends one summarizing frame to the
-journal:
+A collection that removed anything appends one summarizing frame:
 
 ```json
 {
@@ -2825,53 +2761,44 @@ journal:
 }
 ```
 
-This is not a state frame, so every reader that walks the journal for job
-history ignores it. A collection that removed nothing writes no frame at all,
-since opening a journal writer creates a writer directory and an empty
-collection must not create the garbage it came to collect.
+It is not a state frame, so history readers ignore it. A collection that
+removed nothing writes no frame, because opening a journal writer creates a
+writer directory, and an empty collection must not create garbage.
 
 ## Manual filesystem inspection
 
-The layout is intentionally legible without a database:
+The layout is legible without a database:
 
 - `state/ready/<arbitrary-placement>/` is the runnable queue, with `p000`
-  through `p999` encoded in marker names and no priority directory level;
-- `state/running/` is everything presently believed to execute;
-- `state/committing/` is exactly the replay backlog;
-- `state/cancelling/` is every attempt already fenced by a cancellation whose
-  exit has not been verified yet;
+  through `p999` in marker names and no priority directory level;
+- `state/running/` is everything believed to be executing;
+- `state/committing/` is the replay backlog;
+- `state/cancelling/` is every attempt fenced by a cancellation whose exit is
+  not yet verified;
 - `state/waiting/` is the join backlog;
 - `state/failed/` is the current broken-job collection;
 - `state/succeeded/` is the finalized-success collection;
-- `.httk-workspace/quarantine/` contains malformed entries requiring workspace
-  repair rather than workflow scheduling;
-- every marker begins with the optional human tag plus UUID job key;
+- `.httk-workspace/quarantine/` holds malformed entries needing workspace
+  repair rather than scheduling;
+- every marker begins with the optional tag plus UUID job key;
 - the matching payload is at the same relative placement outside
   `.httk-workspace`;
-- a first placement component such as `project-17` groups a project without
-  imposing a protocol-specific hierarchy.
+- a first placement component such as `project-17` groups a project without a
+  protocol-specific hierarchy.
 
-Operators may read all of these paths. They must use a workflow control command
-rather than `mv` for state changes, because a correct transition must append
-the matching journal record and validate the expected old generation.
+Operators may read all of these paths but must change state with a workflow
+control command, not `mv`, because a correct transition appends the matching
+journal record and validates the expected old generation.
 
-An inspection tool should accept any of:
-
-- UUID;
-- workspace UUID;
-- exact job key;
-- marker path;
-- current payload path;
-- placement-prefix query;
-- tag query, returning all matches.
-
-It follows the marker's journal reference and backwards links to render state,
-step, retries, manager ownership, failure, children, and manual intervention
-history.
+An inspection tool should accept a UUID, workspace UUID, exact job key, marker
+path, current payload path, placement-prefix query, or tag query (returning all
+matches). It follows the marker's journal reference and backward links to show
+state, step, retries, manager ownership, failure, children, and manual
+intervention history.
 
 ## Security and hostile input
 
-Task code is arbitrary code and should run under an appropriate OS, container,
+Task code is arbitrary code and should run inside an appropriate OS, container,
 or batch-scheduler boundary. Managers additionally MUST:
 
 - open paths relative to already opened job/run directories where possible;
@@ -2888,7 +2815,7 @@ or batch-scheduler boundary. Managers additionally MUST:
 
 ## Persistent VASP restart example
 
-A VASP workflow that wants traditional in-place execution can declare:
+A VASP workflow wanting traditional in-place execution declares:
 
 ```json
 {
@@ -2897,26 +2824,25 @@ A VASP workflow that wants traditional in-place execution can declare:
 }
 ```
 
-The behavior is then:
+Then:
 
-1. The first activation runs with `run/` as its working directory,
-   `is_restart: false`, and `HTTK_WORKFLOW_UNCLEAN_RESTART=0`.
-2. VASP writes `WAVECAR`, `CHGCAR`, `OUTCAR`, and any other application files
-   directly in `run/`. The manager does not copy, rename, or interpret them.
-3. If execution disappears without publishing an outcome, the manager fences
-   that attempt. After establishing that the old writer cannot still modify the
-   workdir, it starts a new attempt in the same `run/`.
-4. The replacement context says `is_restart: true`,
-   `is_unclean_restart: true`, and, for example,
-   `attempt_reason: "lease_lost"`. The step may validate or remove partial
-   files, adjust `INCAR`, and resume from `WAVECAR` using domain-specific logic.
-5. If the step publishes `advance`, the next workflow step may also use the
-   same `run/`, but it receives `is_restart: false`: this is its first attempt,
-   not a restart merely because the workdir already contains files.
-6. A later operator `continue` again reuses `run/` and is explicitly identified
-   as a restart. No transactional `data/` output is involved.
+1. The first activation runs in `run/` with `is_restart: false` and
+   `HTTK_WORKFLOW_UNCLEAN_RESTART=0`.
+2. VASP writes `WAVECAR`, `CHGCAR`, `OUTCAR`, and other files directly in
+   `run/`; the manager does not copy, rename, or interpret them.
+3. If execution disappears without an outcome, the manager fences the attempt
+   and, once the old writer provably cannot modify the workdir, starts a new
+   attempt in the same `run/`.
+4. The new context has `is_restart: true`, `is_unclean_restart: true`, and, for
+   example, `attempt_reason: "lease_lost"`. The step may validate or remove
+   partial files, adjust `INCAR`, and resume from `WAVECAR`.
+5. After an `advance`, the next step may use the same `run/` but gets
+   `is_restart: false`: it is a first attempt, not a restart because files
+   exist.
+6. A later operator `continue` reuses `run/` and is identified as a restart. No
+   transactional `data/` output is involved.
 
-For a POSIX shell step, the essential test can be as small as:
+For a POSIX shell step the essential test can be:
 
 ```sh
 if [ "$HTTK_WORKFLOW_UNCLEAN_RESTART" = 1 ]; then
@@ -2925,14 +2851,13 @@ fi
 exec vasp_std
 ```
 
-The context JSON remains the full, versioned interface; the environment
-variables are convenient projections for simple runners.
+The context JSON is the full, versioned interface; the environment variables
+are convenient projections for simple runners.
 
 ## Worked example
 
-This example deliberately uses isolated workdirs in a core-v2 workspace. Job
-`silicon-relax--J` starts at `prepare`,
-creates two calculations, joins them, and finalizes:
+Job `silicon-relax--J`, using isolated workdirs in a core-v2 workspace, starts
+at `prepare`, creates two calculations, joins them, and finalizes:
 
 1. Submission publishes its one marker as
    `state/submitted/project-17/0/03a/<job-key>.p500.g0.init`.
@@ -2956,8 +2881,8 @@ creates two calculations, joins them, and finalizes:
 11. `finalize` publishes succeed. The same marker that existed at submission is
     renamed to `state/succeeded/...`.
 12. Completed isolated workdirs are later collected. The payload retains one
-    job file and application data; its one external state marker mirrors its
-    arbitrary placement, and history is packed with many other jobs in journal
+    job file and application data; its one external marker mirrors its
+    placement, and its history is packed with many other jobs in journal
     segments.
 
 At every interruption point, the marker location selects exactly one recovery
@@ -2965,9 +2890,9 @@ rule.
 
 ## Relationship to *httk* v1
 
-The packaged `httk.workflow.compat.v1.v1_runner` is an ordinary
-installed `path` runner used by converted packages. The normal manager applies
-the following mapping for instantiated *httk* v1 task templates:
+The packaged `httk.workflow.compat.v1.v1_runner` is an ordinary installed `path`
+runner used by converted packages. The normal manager maps instantiated
+*httk* v1 task templates as follows:
 
 | *httk* v1 | This protocol |
 | --- | --- |
@@ -2985,33 +2910,35 @@ the following mapping for instantiated *httk* v1 task templates:
 | Restart count in pathname | Activation ID and attempt ordinal in state frame |
 | `ht.run.resume` | Audited manual continuation, reusing a persistent workdir or explicitly importing into an isolated one |
 
-The adapter preserves the *httk* v1 ordering rule that a published
-`ht_finished`/broken decision or pending atomic transaction is completed without
-rerunning `ht_steps`.
+The adapter keeps the *httk* v1 rule that a published `ht_finished`/broken
+decision or pending atomic transaction is completed without rerunning
+`ht_steps`.
 
-*httk* v1's restart counter was carried across steps but incremented only when a stale
-`running` task was adopted; it did not bound an indefinitely advancing clean
+The *httk* v1 restart counter carried across steps but grew only when a stale
+`running` task was adopted, so it did not bound an endlessly advancing clean
 workflow. *httk₂* keeps the per-activation retry limit and adds optional total
-attempt and activation budgets for that separate concern.
+attempt and activation budgets for that concern.
 
-Join migration is intentionally not a pathname-for-pathname emulation. *httk* v1
+### Joins and subtasks
+
+Join migration is not a pathname-for-pathname emulation. *httk* v1
 `waitsubtasks` searched the whole nested task subtree and could notice
-descendants that appeared later. An *httk₂* join waits only for its immutable,
+descendants that appeared later; an *httk₂* join waits only for its immutable,
 explicit child set. A child that publishes detached grandchildren may complete
-without those grandchildren, so a migrated workflow that requires subtree
-completion must make the child join its own descendants before succeeding or
-name the additional jobs explicitly in the ancestor's join.
+without them, so a migrated workflow needing subtree completion must make the
+child join its own descendants before succeeding, or name the extra jobs in the
+ancestor's join.
 
 The shipped runner makes each discovered direct subtask an explicit native
-child. Each such child applies the same rule recursively, so ordinary nested
-*httk* v1 task trees retain subtree completion. It uses `all_terminal`, rather
-than `all_succeeded`, because *httk* v1 resumed a `waitsubtasks` parent once no
-descendant remained in an active state; broken descendants did not keep it
-waiting. The original legacy task directories remain in place; they are not
-mirrored with symlinks. Native child payloads, markers, and journal state are
-authoritative, and state-based deduplication prevents rediscovering a child.
+child, and each child applies the same rule recursively, so ordinary nested
+*httk* v1 task trees keep subtree completion. It uses `all_terminal` rather than
+`all_succeeded`, because *httk* v1 resumed a `waitsubtasks` parent once no
+descendant remained active; broken descendants did not keep it waiting. The
+legacy task directories stay in place and are not mirrored with symlinks.
+Native child payloads, markers, and journal state are authoritative, and
+state-based deduplication prevents rediscovering a child.
 
-The principal improvements are:
+### Improvements over *httk* v1
 
 - one authoritative, atomically moving state entry rather than a state plus a
   potentially stale index;
@@ -3026,6 +2953,6 @@ The principal improvements are:
 - structured, durable manual and failure history.
 
 The filesystem remains the interoperability layer. Its steady-state inode cost
-is a design property described by the arithmetic above, while capacity beyond
-the measured snapshot is an operational question for the target filesystem and
-should be evaluated with {doc}`/details/benchmarks` before a campaign is sized.
+follows from the arithmetic above; capacity beyond the measured snapshot is an
+operational question for the target filesystem and should be evaluated with
+{doc}`/details/benchmarks` before sizing a campaign.

@@ -1,17 +1,15 @@
 # Workflow packages in detail
 
-*For workflow authors who want one portable directory to describe, instantiate,
-run, and collect a workflow.*
-
-A workflow package is a directory whose `httk_workflow.toml` is the strictly
-*httk*-owned glue around a runner. It is not an embedded OPTIMADE declaration
-language: the manifest can generate the workflow declaration, or point to an
-externally authored declaration that it validates and carries.
+A workflow package is one portable directory that describes, instantiates,
+runs, and collects a workflow. Its `httk_workflow.toml` manifest is the
+*httk*-owned glue around a runner, not an embedded OPTIMADE declaration
+language: it generates the workflow declaration, or points to an externally
+authored one that it validates and carries.
 
 ## Package layout
 
-The smallest useful package has an executable `run` entry (or a declared
-`[workflow.runner] command` in its place) and a manifest:
+The smallest useful package has a manifest and an executable `run` entry (or a
+`[workflow.runner] command` in its place):
 
 ```text
 my-workflow/
@@ -24,24 +22,22 @@ my-workflow/
 └── support/              # any regular support files
 ```
 
-`run` receives the normal runner environment and publishes the outcome protocol
-used by the manager. A workflow package is language-independent: its runner
-entry, instantiate hook, collect hook, and postprocess scripts may be written in
-any language available as an executable on the host. A workflow is a manifest
-plus the members it references. Python hooks remain first-class: a `.py`
-instantiate or collect hook uses the existing in-process path, while an
-executable hook uses the contracts below. Successful outputs share the same
-assembly semantics; collector failure handling is intentionally different and
-is documented below.
+`run` receives the normal runner environment and publishes the outcome
+protocol the manager reads. The runner entry, hooks, and postprocess scripts
+may be written in any language that runs as an executable on the host. A
+workflow is a manifest plus the members it references.
 
-A package may contain other regular files needed by its entry or hooks; manifest
-members must be relative regular files inside the package. `.py` is the Python
-fast path for instantiate and collect; a non-`.py` instantiate or collect member
-must have execute mode (`chmod +x`). Postprocess members must also be
-executable when selected. Symlinks, special files, absolute names, and `..`
-members are refused.
+A `.py` instantiate or collect hook runs in-process; any other hook runs as an
+executable under the contracts in [Hooks and trust](#hooks-and-trust). Both
+assemble successful outputs the same way but handle collector failures
+differently.
 
-Resolve or register a package with the Python API:
+Manifest members must be relative regular files inside the package, which may
+also hold other support files. A non-`.py` instantiate or collect member, and
+a selected postprocess member, must be executable (`chmod +x`). Symlinks,
+special files, absolute names, and `..` members are refused.
+
+Resolve and register a package in Python:
 
 ```python
 from httk.workflow.packages import load_workflow_package
@@ -60,8 +56,8 @@ httk job new --workspace WS --workflow-dir ./my-workflow --input structure=POSCA
 
 `[workflow.runner]` selects one of four forms. The executable form is the
 ordinary package runner. The `format` forms delegate instantiate, run, and
-default collection to the registered realization in `httk.workflow.compat`
-(see {doc}`/details/workflow_compat`).
+default collection to a registered realization in `httk.workflow.compat` (see
+{doc}`/details/workflow_compat`).
 
 | Form | Manifest selector | Required/allowed members | Runner contract |
 | --- | --- | --- | --- |
@@ -70,39 +66,35 @@ default collection to the registered realization in `httk.workflow.compat`
 | jobflow | `format = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
 | httk-v1 | `format = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot plus `pkg:httk.workflow.compat.v1/v1_runner.py` through the ordinary `path` runner |
 
-For `format` forms, `entry`, `command`, `steps`, and `initial_step` are forbidden because
-the realization supplies built-in steps. `[workflow.instantiate]` is forbidden
-because their inputs are hook-consumed. `destination` is forbidden on
-CWL/PWD, jobflow, and httk-v1 inputs; an omitted v1 destination is an
-`ht.instantiate.py` global. These workflows may declare
-`[workflow.collect]` to override the default. CWL and PWD have defaults;
-jobflow has a default; httk-v1 has none and normally declares a hook.
-
-`format` manifests cannot set `data_mode` or `workdir_mode` for jobflow or
-httk-v1. Jobflow pins the workdir persistent; httk-v1 forces `none` and
-persistent `ht.run.current`. Unknown format keys are errors.
+In the `format` forms the realization supplies the steps and consumes the
+inputs, so `entry`, `command`, `steps`, `initial_step`, `[workflow.instantiate]`
+and input `destination` keys are forbidden. An omitted httk-v1 destination
+becomes an `ht.instantiate.py` global. Jobflow and httk-v1 cannot set
+`data_mode` or `workdir_mode`: jobflow pins a persistent workdir, and httk-v1
+forces `none` and a persistent `ht.run.current`. `[workflow.collect]` may
+override the default collector; CWL, PWD, and jobflow have one, while httk-v1
+has none and normally declares a hook. Unknown format keys are errors.
 
 ## `httk_workflow.toml` reference
 
-This is the complete manifest vocabulary validated by
-`parse_workflow_manifest`. Unknown keys at any level are errors. TOML syntax,
-member containment, nonempty names, aliases, runner modes, hook members,
-parameter destinations, input defaults, and output relationships are validated
-before a provider is returned.
+`parse_workflow_manifest` validates the vocabulary below, and unknown keys at
+any level are errors. TOML syntax, member containment, nonempty names,
+aliases, runner modes, hook members, parameter destinations, input defaults,
+and output relationships are all validated before a provider is returned.
 
 ### `[workflow]`
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `name` | yes | Nonempty workflow name with no whitespace, not starting with `git+`. This is the registry key, the `job.json` workflow, and the collect dispatch key; for a package installed by git URI it is the short name and the URI is the id. |
+| `name` | yes | Nonempty workflow name with no whitespace, not starting with `git+`. It is the registry key, the `job.json` workflow, and the collect dispatch key. For a package installed by git URI it is the short name, and the URI is the id. |
 | `alias` | no | Alternate name matching `[a-z0-9._-]+`. |
 | `description` | no | Human-readable summary and generated declaration description. |
 | `declaration_uri` | no | String `$id` for the generated or external workflow declaration. |
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
-| `resources` | no | Default resource requirements, a table mapping resource labels to non-negative integer values. |
-| `steps` | no | Per-step resource overrides; only valid with an executable runner and only for names in its declared `steps` list. |
-| `calls` | no | The workflows this one calls as sub-workflows: a `[workflow.calls]` table mapping an alias to a workflow name or git URI (see below). |
-| `requires` | no | Minimum distribution versions, a list of `NAME>=VERSION` strings (only `>=`, a plain `N(.N)*` release, each distribution once), for example `["httk-workflow>=2.2.0", "httk-atomistic>=2.1.2"]`. |
+| `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers. |
+| `steps` | no | Per-step resource overrides. Valid only with an executable runner, and only for names in its declared `steps` list. |
+| `calls` | no | The sub-workflows this one calls: a `[workflow.calls]` table mapping an alias to a workflow name or git URI. |
+| `requires` | no | Minimum distribution versions as a list of `NAME>=VERSION` strings (only `>=`, a plain `N(.N)*` release, each distribution once), for example `["httk-workflow>=2.2.0", "httk-atomistic>=2.1.2"]`. |
 
 ```toml
 [workflow]
@@ -121,33 +113,31 @@ mem = 4096
 procs = 8
 ```
 
-### `requires`: where it is checked
+### Where `requires` is checked
 
 `requires` is checked twice, each time against the interpreter doing the work:
 
-- **at job creation**, when `job new`, `campaign submit`, `workflow describe`,
-  or `Attempt.call` resolves the workflow — a package directory, a registered
-  or plugin-bundled name, or a git URI (after it is fetched). An unmet entry
-  refuses with every unmet requirement and its installed version. A plugin's
+- **At job creation**, when `job new`, `campaign submit`, `workflow describe`,
+  or `Attempt.call` resolves the workflow: a package directory, a registered
+  or plugin-bundled name, or a git URI (after it is fetched). The refusal lists
+  every unmet requirement and its installed version. A plugin's
   `[plugin] requires` applies to every workflow it bundles and is merged in,
-  keeping the higher minimum per distribution;
-- **at claim time**, inside the workspace: the requirement texts are copied into
-  the job's `job.json` as the optional `requires` member, and a manager whose
-  own environment does not meet them leaves the ready job unclaimed for another
-  manager, exactly like a missing capability. Install the required distribution
-  versions in that manager's environment and restart the manager.
+  keeping the higher minimum per distribution.
+- **At claim time.** The requirements are copied into `job.json` as the
+  optional `requires` member. A manager whose environment does not meet them
+  leaves the job unclaimed for another manager, as with a missing capability.
+  Install the required versions in its environment and restart it.
 
-The manager runs every runner with its own interpreter's directory first on
-`PATH`, so a Python runner's `#!/usr/bin/env python3` is the interpreter the
-requirements were just checked in and needs no import guard of its own.
-Describe, executable instantiate hooks, and postprocess scripts get the same
-interpreter-first `PATH`.
+The manager puts its own interpreter's directory first on `PATH` for every
+runner, so a Python runner's `#!/usr/bin/env python3` is the interpreter the
+requirements were checked in and needs no import guard. Describe, executable
+instantiate hooks, and postprocess scripts get the same `PATH`.
 
 ### `[workflow.calls]`: declared sub-workflows
 
-A workflow that calls other workflows with `Attempt.call` (or
-`httk_workflow_call` and the other SDKs' `call`) declares them, so its
-dependencies are known before any job runs:
+A workflow that calls others with `Attempt.call` (or `httk_workflow_call` and
+the other SDKs' `call`) declares them, so its dependencies are known before
+any job runs:
 
 ```toml
 [workflow.calls]
@@ -155,106 +145,40 @@ child = "examples.subworkflow-child"
 relax = "git+https://github.com/httk/workflows-vasp@458aacb2493586faa2c9ac033334457569aeaf75#vasp-relax"
 ```
 
-Each key is an alias (label syntax) and each value a workflow name or a git URI.
-A name must select a registered, plugin-bundled, or installed workflow; a path is
-refused, because it would resolve against whatever directory a job is created
-from. A git URI must be pinned to a full commit hash, so every job of a campaign
-calls the same definition. An alias may not equal another entry's reference.
+Each key is an alias (label syntax) and may not equal another entry's
+reference. Each value is either a name selecting a registered, plugin-bundled,
+or installed workflow, or a git URI pinned to a full commit hash, so every job
+of a campaign calls the same definition. A path is refused, because it would
+resolve against whatever directory a job is created from.
+
 The declaration is checked three times:
 
-- **at job creation**, every declared call must resolve, and so must every call
-  those workflows declare in turn; a job whose dependency is unknown is refused. The job records the calls in its `job.json` as the
-  `calls` member: a name as written, resolved again wherever the job runs, and a
-  git URI as its canonical, commit-pinned form, so the job calls exactly the
-  definition that existed when it was created;
-- **at claim time**, a manager claims the job only when every recorded call
-  resolves on its own machine and, for a compiled package, is built in the
-  workspace, again transitively. A running manager notices a workflow installed
-  or built after it started within about a minute. Otherwise the job stays unclaimed and `httk job why`,
-  `httk workflow precheck`, and the manager's idle summary name what to install
-  or build. `httk workflow build NAME` builds a workflow together with every
-  workflow it declares it calls, transitively. The check only looks things up: a git
-  URI resolves through the installed cache and never fetches;
-- **at call time**, a job whose workflow declares `[workflow.calls]` may call
+- **At job creation**, every declared call must resolve, transitively; a job
+  with an unknown dependency is refused. The job records the calls as the
+  `job.json` `calls` member: a name as written, resolved again wherever the
+  job runs, and a git URI in canonical, commit-pinned form, so the job calls
+  the definition that existed at creation.
+- **At claim time**, a manager claims the job only when every recorded call
+  resolves on its machine and, for a compiled package, is built in the
+  workspace, again transitively. The check only looks things up: a git URI
+  resolves through the installed cache and is never fetched. A running
+  manager notices a newly installed or built workflow within about a minute.
+  Until then the job stays unclaimed, and `httk job why`,
+  `httk workflow precheck`, and the manager's idle summary name what to
+  install or build. `httk workflow build NAME` builds a workflow and,
+  transitively, every workflow it declares it calls.
+- **At call time**, a job whose workflow declares `[workflow.calls]` may call
   only those workflows, by alias (`a.call("child", ...)`) or by the recorded
-  reference; anything else is refused. A job run from a runner file of your
-  own, which has no manifest to declare in, may call anything.
-
-### `[workflow.runner]`: executable form
-
-With no `format`, the table is a normal executable runner. `steps` is a
-nonempty list; if `initial_step` is omitted, `start` is selected when present,
-or the sole step is selected. Otherwise `initial_step` is required.
-
-| Key | Required/default | Meaning |
-| --- | --- | --- |
-| `entry` | `"run"` | Relative executable package member the manager runs, for example `run.py` or `run.sh`; excludes `command`. |
-| `command` | absent | Argument vector the manager runs instead of the entry; excludes `entry`. |
-| `initial_step` | `"start"` when present; otherwise sole step | First scaffolded step. |
-| `steps` | required | Nonempty runner step list. |
-| `data_mode` | `"none"` | `"none"` or `"transactional"`. |
-| `workdir_mode` | `"persistent"` | `"persistent"` or `"isolated"`. |
-
-A descriptive entry name such as `run.py` or `run.sh` is recommended: it says
-what the file is and keeps editors and linters working. An entry other than
-`run` is recorded in each job exactly as the one-element command
-`["{package}/<entry>"]`, so it follows every `command` rule below: it must be an
-executable regular member (`chmod +x`, with a `#!` line), not a build artifact,
-and the package must then have no `run` member, which a manager that predates
-`runner.command` would otherwise run instead.
-
-`command` names the program a compiled, JVM, or interpreted package runs, so
-the package needs no one-line `run` bridge script. It is a nonempty array of
-strings. Two placeholders, and no others, may appear in an element:
-`{package}` expands to the verified published package tree and `{artifacts}` to
-the build registered for this machine (see
-[Building and registering binaries](#building-and-registering-binaries)). The
-manager appends the job's runner arguments, keeps the attempt environment
-(including `HTTK_WORKFLOW_RUNNER_ARTIFACTS`) and any workflow prelude, and runs
-the expanded vector in the job workdir.
-
-```toml
-[workflow.runner]
-command = ["{artifacts}/relax"]                        # C, C++, Fortran, Ada, Rust
-# command = ["java", "-cp", "{artifacts}/classes", "Relax"]
-# command = ["perl", "{package}/relax.pl"]
-steps = ["publish", "prepare", "run"]
-initial_step = "prepare"
-```
-
-The manifest is validated when the package loads:
-
-- a placeholder starts its element or directly follows `NAME=` (as in
-  `-Dhome={package}`), and the rest of the element is empty or `/PATH`, a
-  relative POSIX path whose parts are nonempty and not `.` or `..`;
-- the first element starts with a placeholder or is a bare program name found
-  on the attempt `PATH` (`java`, `perl`, `python3`); absolute paths and other
-  paths containing `/` are refused;
-- each `{package}/MEMBER` reference names an existing regular source member (not
-  a build artifact), and a `{package}/MEMBER` program must be executable;
-- `{artifacts}` requires `[workflow.build]`, and each `{artifacts}/PATH`
-  reference must be a relative path covered by `[workflow.build].artifacts`;
-- the package must not contain a `run` member. A job records the command in
-  `job.json`, and a manager that predates `command` looks for `run` and fails
-  with `runner_unavailable` instead of running a stray entry.
-
-A package whose command uses `{artifacts}` fails with `runner_not_built` until
-its build is registered, exactly like a `run` bridge into the artifacts.
-`httk workflow describe` runs the command with `HTTK_WORKFLOW_DESCRIBE=1` to
-check the manifest steps only when it uses no `{artifacts}`; describe has no
-build registration, so for a compiled package it reports the manifest alone.
+  reference. A job run from your own runner file has no manifest and may call
+  anything.
 
 ### `[workflow.resources]` and `[workflow.steps.NAME]`
 
-`[workflow.resources]` maps resource labels to non-negative integers. Resource
-names are validated labels, values are not booleans, and units are opaque. An
-executable runner may add `[workflow.steps.NAME]` tables, each allowing only a
-`resources` table. `NAME` must occur in `[workflow.runner].steps`; an unknown
-name is an error. `[workflow.steps]` is rejected for `format` runners because
-their step set is supplied by the realization.
-
-For example, a manifest can set workflow defaults and denser per-step
-requirements together:
+`[workflow.resources]` maps validated resource labels to non-negative,
+non-boolean integers; units are opaque. An executable runner may add
+`[workflow.steps.NAME]` tables, each holding only a `resources` table, where
+`NAME` must occur in `[workflow.runner].steps`. `format` runners reject
+`[workflow.steps]`, because the realization supplies the steps.
 
 ```toml
 [workflow.resources]
@@ -268,8 +192,70 @@ resources = { procs = 32, mem = 120000 }
 resources = { procs = 1, mem = 2000, matlab_license_slots = 1 }
 ```
 
-The `relax` and `analyse` declarations override the defaults for those steps;
-the manager's advertised capacities determine whether each activation fits.
+Here `relax` and `analyse` override the defaults. The manager's advertised
+capacities decide whether each activation fits.
+
+### `[workflow.runner]`: executable form
+
+Without `format`, the table describes an executable runner.
+
+| Key | Required/default | Meaning |
+| --- | --- | --- |
+| `entry` | `"run"` | Relative executable package member the manager runs, for example `run.py` or `run.sh`; excludes `command`. |
+| `command` | absent | Argument vector the manager runs instead of the entry; excludes `entry`. |
+| `initial_step` | `"start"` when present; otherwise sole step | First scaffolded step. |
+| `steps` | required | Nonempty runner step list. |
+| `data_mode` | `"none"` | `"none"` or `"transactional"`. |
+| `workdir_mode` | `"persistent"` | `"persistent"` or `"isolated"`. |
+
+`initial_step` is required when `steps` has several names and no `start`.
+
+A descriptive entry name such as `run.py` or `run.sh` is recommended, because
+it keeps editors and linters working. An entry other than `run` is recorded in
+each job as the command `["{package}/<entry>"]` and follows the `command`
+rules below: it must be an executable regular member (`chmod +x`, with a `#!`
+line), not a build artifact, and the package must have no `run` member, which
+a manager that predates `runner.command` would run instead.
+
+`command` is a nonempty array of strings naming the program a compiled, JVM,
+or interpreted package runs, so no one-line `run` bridge script is needed. An
+element may use only two placeholders: `{package}`, the verified published
+package tree, and `{artifacts}`, the build registered for this machine (see
+[Building and registering binaries](#building-and-registering-binaries)). The
+manager appends the job's runner arguments and runs the expanded vector in the
+job workdir with the attempt environment (including
+`HTTK_WORKFLOW_RUNNER_ARTIFACTS`) and any workflow prelude.
+
+```toml
+[workflow.runner]
+command = ["{artifacts}/relax"]                        # C, C++, Fortran, Ada, Rust
+# command = ["java", "-cp", "{artifacts}/classes", "Relax"]
+# command = ["perl", "{package}/relax.pl"]
+steps = ["publish", "prepare", "run"]
+initial_step = "prepare"
+```
+
+The command is validated when the package loads:
+
+- A placeholder starts its element or directly follows `NAME=` (as in
+  `-Dhome={package}`). The rest of the element is empty or `/PATH`, a relative
+  POSIX path whose parts are nonempty and not `.` or `..`.
+- The first element starts with a placeholder or is a bare program name found
+  on the attempt `PATH` (`java`, `perl`, `python3`). Absolute paths and other
+  paths containing `/` are refused.
+- Each `{package}/MEMBER` names an existing regular source member (not a build
+  artifact); as the program, it must be executable.
+- `{artifacts}` requires `[workflow.build]`, and each `{artifacts}/PATH` must
+  be a relative path covered by `[workflow.build].artifacts`.
+- The package must not contain a `run` member. A job records the command in
+  `job.json`, and a manager that predates `command` looks for `run` and fails
+  with `runner_unavailable` instead of running a stray entry.
+
+A command using `{artifacts}` fails with `runner_not_built` until its build is
+registered, like a `run` bridge into the artifacts. `httk workflow describe`
+runs a command without `{artifacts}` with `HTTK_WORKFLOW_DESCRIBE=1` to check
+the manifest steps. Describe has no build registration, so for a compiled
+package it reports the manifest alone.
 
 ### `[workflow.runner]`: format vocabulary
 
@@ -287,183 +273,14 @@ the manager's advertised capacities determine whether each activation fits.
 | `entry`, `steps`, `initial_step` | forbidden | forbidden | forbidden | Built-in realization steps. |
 | `data_mode`, `workdir_mode` | allowed only in executable form | forbidden; jobflow pins a persistent workdir | forbidden | v1 forces `none`/persistent. |
 
-For a document format, each effective input and output port must exist in the
-document and may occur only once. `port` defaults to the manifest name. Jobflow
-has open ports because Maker `make()` signatures are not inspected during
-manifest preparation. Preparing a `maker`-form job imports the named module on
-the submitting machine to verify the class exists, so submit where the Maker is
-installed; merely describing or resolving the package never imports it.
-
-## Building and registering binaries
-
-A compiled package declares its foreground build and disposable outputs in
-`[workflow.build]`:
-
-```toml
-[workflow.build]
-command = "make"
-platform = "uname -sm"       # optional; omit for one `any` registration
-artifacts = ["relax", "*.o"]
-```
-
-`command` and the optional `platform` are shell-word command strings. Each
-`artifacts` member is a relative POSIX `fnmatch` pattern. A directory match
-covers that directory's subtree; patterns are evaluated against relative paths.
-The patterns may not strip `run` or `httk_workflow.toml`, so a committed
-`run` entry and the manifest remain in the source package. The build command runs in
-a copy of the published source tree and can use only files inside that package
-and the installed language SDKs. Every `HTTK_WORKFLOW_*` variable is removed from
-its environment except `HTTK_WORKFLOW_LANGUAGES_DIR`, the absolute path of the
-installed `httk/workflow/languages` directory with one subdirectory per SDK (`c`,
-`cpp`, `fortran`, `rust`, `ada`, `java`, `perl`). A C package, for example,
-builds with `cc -I"$HTTK_WORKFLOW_LANGUAGES_DIR/c" relax.c
-"$HTTK_WORKFLOW_LANGUAGES_DIR/c/httk_workflow.c" -o relax`. The source digest does
-not cover that SDK, so re-register builds after upgrading *httk-workflow*; a
-package that must not depend on the installed SDK vendors it instead. The
-manager exports the same variable to every attempt. The per-language relax packages of
-[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages)
-are complete examples.
-
-The `[workflow.build]` vocabulary and build engine are shared
-`httk.core.building` machinery; `BuildSpec` and its execution helpers live
-there. *httk-workflow* owns the workspace store layout and platform-tagged
-build registrations. The manager passes a registered artifact directory to the
-runner as `HTTK_WORKFLOW_RUNNER_ARTIFACTS`; it does not modify or overlay the
-published source tree. The package build semantics described here are
-unchanged.
-
-Publication is sources-only for build-declaring packages. Declared artifacts are
-stripped before publication, and the digest pins those remaining sources, not a
-machine's compiler output. Binaries never ride a transfer bundle. This makes a
-package self-contained and lets each destination build its own native runner.
-
-The operational sequence is one foreground registration per platform class:
-
-```console
-httk workflow build --workspace WORKSPACE ./my-workflow
-httk job new --workspace WORKSPACE --workflow-dir ./my-workflow --step prepare
-httk workflow run --workspace WORKSPACE
-```
-
-The build target may also be a workflow reference, resolved exactly as
-`httk job new --workflow` resolves it: a registered id or alias, a workflow an
-installed plugin bundles, an installed git workflow's short name, or a git URI
-(fetched and installed, like `job new --workflow URI`). The command builds the
-package directory that reference resolves to, so the registration is the one a
-job selecting that name pins; there is no need to locate a plugin's installed
-directory:
-
-```console
-httk workflow build --workspace WORKSPACE examples.chain-rust
-httk job new --workspace WORKSPACE --workflow examples.chain-rust
-```
-
-A target spelled as a path (absolute, `./`, `../`, or containing `/`) is always
-a package directory; write `./NAME` for a directory in the current directory. A
-bare name is a workspace runner-store name when that store entry exists,
-otherwise a workflow reference, otherwise a job reference. A workflow reference
-whose package has no `[workflow.build]` section succeeds with "nothing to
-build"; one that is not a directory package (a packaged runner file) is an
-error.
-
-Managers never build. This rejects a thundering herd of managers compiling the
-same package; on a shared filesystem, one registration for a platform tag serves
-all matching nodes. A heterogeneous cluster should declare `platform` and run
-the command once for each resulting tag. Omitting it on such a cluster creates
-one `any` registration, so every node uses the same binary regardless of its
-architecture.
-
-Registrations live under
-`WORKSPACE/.httk-workspace/runner-builds/<store-name>/<tag>/current.json`, which
-points to `<tag>/gen-*/artifacts/`. Each generation's `build.json` stamp records
-the source digest, command, platform probe, and time; the sibling `<tag>.log`
-records the command metadata and exit status. Re-registration leaves prior
-generations on disk; remove the tag directory only while no managers are
-running. Use
-`httk workflow build --workspace WORKSPACE --list` to inspect registrations. A missing or
-stale registration produces structured `runner_not_built`; a failed platform
-probe, build, or artifact collection produces `runner_build_failed`. These
-manager-detected failures are terminal unless the job explicitly opts into
-`retry_on`, for example `retry_on = ["runner_not_built"]`.
-
-`workflow precheck` checks an unqualified (`platform` omitted) build
-registration and reports a missing one as a problem. Platform-specific builds
-are reported as indeterminate because the local precheck cannot stand in for the
-manager's machine; the manager probes its own platform at attempt start. The
-build command is never inferred from the runner entry. A compiled package
-declares `command = ["{artifacts}/relax"]` (or, with a committed `run` entry,
-locates its binaries under `$HTTK_WORKFLOW_RUNNER_ARTIFACTS`); the source tree
-remains unchanged and the runner runs with the job workdir as its cwd.
-
-### Hook tables
-
-Each hook table has exactly one key, `file`, naming a relative regular file
-member. A `.py` member selects the Python in-process fast path. Any other member
-must be executable (`chmod +x`) and selects the language-neutral subprocess
-contract. `workflow describe` reports `kind=python` or `kind=executable` for
-each present hook. Presence of `[workflow.instantiate]` declares an instantiate
-hook; presence of `[workflow.collect]` declares a collect hook.
-
-```toml
-[workflow.instantiate]
-file = "instantiate.py"
-
-[workflow.collect]
-file = "collect.py"
-```
-
-### [workflow.postprocess.<NAME>]: curated scripts
-
-Curated postprocess scripts are provider-owned executables that run after a job
-has been collected. A package can declare more than one:
-
-~~~toml
-[workflow.postprocess.relaxation-report]
-file = "scripts/relaxation_report"
-description = "write a text and JSON relaxation summary"
-
-[workflow.postprocess.archive]
-file = "scripts/archive_results.sh"
-description = "copy selected results to an archive"
-~~~
-
-| Key | Required | Meaning |
-| --- | --- | --- |
-| <NAME> | required | The name selected by httk workflow postprocess --script. |
-| file | required | A relative executable regular file inside the registered package. |
-| description | optional | Human-readable text shown by workflow describe. |
-
-The old flat [workflow.postprocess] table with a file key is rejected with
-a teaching error: the collect hook belongs in [workflow.collect], while
-[workflow.postprocess.<NAME>] tables declare curated scripts.
-
-Scripts run only from the registered provider package or from the package
-explicitly supplied with --workflow-dir; they are never loaded from job
-payloads or pinned workflow-store trees. (Loading curated scripts from those
-trees is future work.) The process receives
-HTTK_WORKFLOW_WORKSPACE_DIR, HTTK_WORKFLOW_JOB_DIR (the immutable payload,
-read-only from the script's perspective), and HTTK_WORKFLOW_POSTPROCESS_DIR
-(the output directory); it also receives HTTK_WORKFLOW_WORKDIR and
-HTTK_WORKFLOW_DATA_DIR when those exist, otherwise scripts should fall back
-across them, and runs with the framework's interpreter directory first on
-`PATH`. The current working directory is the output directory,
-<root>/<placement>/<job_key>/<NAME>/, where reports should be written; the
-root is <workspace>/postprocess by default, the postprocess.directory
-workspace setting when set, or the postprocess --output-dir override. Output
-never lands in the payload, so a sealed job can still be postprocessed.
-
-The collect hook is a provider output adapter that returns role-keyed data
-for the collect verb; the postprocess scripts: section in describe lists
-these separate, explicitly selected follow-up executables.
-
-The `url` of a workflow-produced `files` entry is deliberately a
-workspace-relative POSIX locator, resolved against a root at read time and
-containment-checked, not a dereferenceable URL; it is relocation-stable by
-design and follows the established local-file locator convention.
+`port` defaults to the manifest name. For a document format, each effective
+input and output port must exist in the document and occur only once. Jobflow
+ports are open, because Maker `make()` signatures are not inspected. Preparing
+a `maker`-form job imports the named module on the submitting machine to
+verify the class, so submit where the Maker is installed; describing or
+resolving the package never imports it.
 
 ### `[workflow.inputs.<NAME>]`
-
-Every input table accepts these keys:
 
 | Key | Meaning |
 | --- | --- |
@@ -472,7 +289,14 @@ Every input table accepts these keys:
 | `entry_type` | Optional declaration entry type. |
 | `ref` | Optional declaration reference. |
 | `role` | Optional declaration role; defaults to the input key. |
-| `required` | Optional boolean. Defaults to `true` when the input declares `entry_type` and `false` otherwise. A required input must be supplied at submission — for an input with a `destination`, staging that destination (including a directly staged file) satisfies it; for a hook-consumed input, the value must be supplied. The check runs before any instantiate hook, so a missing required input is refused without running package code and a hook need not null-check required inputs. `format` workflows satisfy their own inputs, so the check does not apply to them. |
+| `required` | Optional boolean; defaults to `true` when the input declares `entry_type`, otherwise `false`. |
+
+A required input must be supplied at submission: staging its `destination`
+(including a directly staged file) satisfies it, and a hook-consumed input
+needs a value. The check runs before any instantiate hook, so a missing input
+is refused without running package code, and hooks need not null-check
+required inputs. It does not apply to `format` workflows, which satisfy their
+own inputs.
 
 ```toml
 [workflow.inputs.structure]
@@ -490,9 +314,9 @@ role = "settings"
 
 ### `[workflow.parameters.<NAME>]`
 
-Each parameter accepts `type`, `description`, and `default`. `type`, when present,
-must be one of `"string"`, `"number"`, `"integer"`, `"boolean"`, `"array"`,
-or `"object"`; a supplied default must have that matching JSON/TOML type.
+Each parameter accepts `type`, `description`, and `default`. `type` is one of
+`"string"`, `"number"`, `"integer"`, `"boolean"`, `"array"`, or `"object"`,
+and a default must have that JSON/TOML type.
 
 ```toml
 [workflow.parameters.kpoint_density]
@@ -501,35 +325,35 @@ default = 30.0
 description = "Sampling density."
 ```
 
-When a workflow declares any parameters, three rules apply at submission — and
-only then, because a workflow that declares no parameters leaves the channel
-fully open. A `default` is applied for a declared name nobody supplied, so it
-is recorded verbatim in `job.json`. Defaults are applied *after* any instantiate
-hook: the hook's parameters hold only the caller-supplied values plus any a
-format realization wires in, the declared
-defaults reach it separately (`InstantiateContext.defaults`, or the executable
-envelope's `defaults`), and a default then fills in each name still absent. So
-the hook's final parameters win over defaults, and a caller-supplied value
-stays unless the hook itself changes it. A parameter the hook sets must match
-its declared `type`, exactly like a supplied value. A supplied value whose declared `type`
-mismatches is an error, exactly like the environment channel. A supplied name
-outside the declaration is *not* an error — parameters are deliberately open —
-but it prints one warning on stderr naming it and the declared names, and the
-value is kept. The declared parameter and input metadata are also carried in
-`job.json`'s optional `declared` member (sections `parameters` and `inputs`),
-mirroring the environment member's shape, so a later precheck can read them.
+A workflow that declares no parameters leaves the channel fully open. Once it
+declares any, three rules apply at submission:
+
+- **Defaults** fill in each declared name nobody supplied and are recorded
+  verbatim in `job.json`. They are applied *after* any instantiate hook. The
+  hook's parameters hold only caller-supplied values plus any a format
+  realization wires in; it sees the declared defaults separately, as
+  `InstantiateContext.defaults` or the executable envelope's `defaults`. The
+  hook's final parameters therefore win over defaults, and a caller-supplied
+  value stays unless the hook changes it.
+- **Types** are enforced: a supplied value, or one the hook sets, that
+  mismatches its declared `type` is an error, as in the environment channel.
+- **Undeclared names** are kept, because parameters are open, with one stderr
+  warning naming it and the declared names.
+
+The declared parameter and input metadata also travel in the optional
+`job.json` `declared` member (sections `parameters` and `inputs`), shaped like
+the environment member, so a later precheck can read them.
 
 ### `[workflow.environment.<NAME>]`
 
-Environment entries are declared, typed workflow settings consumed by a
-runner. Each table accepts `type`, `description`, `default`, and `setting`.
-Format realizations may contribute entries automatically; manifest entries
-override entries with the same name. The `httk-v1` realization contributes its
-four `httk_v1.*` entries.
-`type` may be `string`, `number`, `integer`, `boolean`, `array`, or `object`;
-when present, defaults and job overrides must have that JSON/TOML type.
-`setting` names the dotted workspace setting and therefore the environment
-variable used for lookup; when omitted, the environment name is used.
+Environment entries are declared, typed settings a runner consumes. Each table
+accepts `type`, `description`, `default`, and `setting`. `type` is `string`,
+`number`, `integer`, `boolean`, `array`, or `object`; when present, defaults
+and job overrides must have that JSON/TOML type. `setting` names the dotted
+workspace setting, and so the environment variable used for lookup; it
+defaults to the entry name. Format realizations may contribute entries (the
+`httk-v1` realization contributes four `httk_v1.*` entries), and a manifest
+entry overrides one with the same name.
 
 ```toml
 [workflow.environment.command]
@@ -547,40 +371,38 @@ Resolution is most-specific first:
 3. the workspace application setting;
 4. the declaration's `default`.
 
-`Attempt.environment(name, default=...)` reads this resolved value. The name
-must be declared; an unresolved name raises `KeyError` unless the call supplies
-its own default. `Attempt.setting` is the separate, untyped application-setting
-lookup and follows its own parameter → `HTTK_*` → workspace → call-default
-order.
+`Attempt.environment(name, default=...)` reads the resolved value of a
+declared name and raises `KeyError` for an unresolved one unless the call
+supplies a default. `Attempt.setting` is the separate, untyped
+application-setting lookup, ordered parameter, `HTTK_*`, workspace, call
+default.
 
-At attempt start, before any step code runs, the runner resolves every declared
-entry. A missing default-less entry or a type error publishes the non-retryable
-`environment_unresolved` failure and names the consulted layers and remedies.
-On success, the resolved values and their source layers are recorded as the
-observed `environment` declaration in
-`httk-workflow-environment-resolution` version 2, and a one-line run-log note
-records the same resolution after the handler completes. Deferring that note
-ensures the gate never creates or touches a workdir before the handler; if the
-handler aborts before a workdir exists, the observed declaration is still kept
-but the note is omitted. The snapshot is consistent for the whole attempt;
-unchanged resolutions on later activations do not create new observed data or
-log churn.
+The runner resolves every declared entry at attempt start, before any step
+code runs. A missing default-less entry or a type error publishes the
+non-retryable `environment_unresolved` failure, naming the layers consulted
+and the remedies. On success, the values and their source layers are recorded
+as the observed `environment` declaration
+(`httk-workflow-environment-resolution` version 2). A one-line run-log note
+records the same resolution after the handler completes, so the gate never
+creates or touches a workdir before the handler; if the handler aborts before
+a workdir exists, the declaration is kept and the note omitted. The snapshot
+holds for the whole attempt, and unchanged resolutions on later activations
+add no observed data or log lines.
 
-The CLI supplies per-job overrides with repeatable
-`--environment NAME=VALUE`; JSON values are decoded when possible. Python
-`new_job(environment={...})` supplies shared overrides, and each `JobItem` in
-`new_jobs` may supply its own `environment` mapping. `workflow describe`
-renders the declared environment entries, including type, setting, default, and
-description.
+The CLI supplies per-job overrides with repeatable `--environment NAME=VALUE`,
+decoding JSON values when possible. In Python, `new_job(environment={...})`
+supplies shared overrides, and each `JobItem` in `new_jobs` may carry its own
+`environment` mapping. `workflow describe` shows each entry's type, setting,
+default, and description.
 
 ### `[workflow.outputs.<NAME>]`
 
-`entry_type` is required. The other accepted keys are `ref`, `description`,
-`product_of`, and `role`. `role` defaults to the output key. `product_of` is a
-scalar role reference: it may name an input role or another output role. It
-means “the single entity this output is an attribute-like property of”; joint
-derivations stay unmarked—the `Run` carries them. Self-references, output
-cycles, ambiguous parameter/output names, and unknown roles are rejected.
+`entry_type` is required; `ref`, `description`, `product_of`, and `role` are
+optional, and `role` defaults to the output key. `product_of` is a scalar
+reference to an input or output role naming "the single entity this output is
+an attribute-like property of". Joint derivations stay unmarked; the `Run`
+carries them. Self-references, output cycles, ambiguous parameter/output
+names, and unknown roles are rejected.
 
 ```toml
 [workflow.outputs.relaxed]
@@ -591,94 +413,251 @@ product_of = "initial_structure"
 role = "relaxed_structure"
 ```
 
-### Inputs, parameters, and files
+### `[workflow.instantiate]` and `[workflow.collect]`
+
+The presence of either table declares that hook. Each has exactly one key,
+`file`, naming a relative regular member: a `.py` file selects the in-process
+Python path, and any other must be executable and selects the subprocess
+contract. `workflow describe` reports `kind=python` or `kind=executable` for
+each. The contracts are in [Hooks and trust](#hooks-and-trust).
+
+```toml
+[workflow.instantiate]
+file = "instantiate.py"
+
+[workflow.collect]
+file = "collect.py"
+```
+
+### `[workflow.postprocess.<NAME>]`
+
+Curated postprocess scripts are provider-owned executables, explicitly
+selected and run after a job is collected. A package can declare several:
+
+```toml
+[workflow.postprocess.relaxation-report]
+file = "scripts/relaxation_report"
+description = "write a text and JSON relaxation summary"
+
+[workflow.postprocess.archive]
+file = "scripts/archive_results.sh"
+description = "copy selected results to an archive"
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `<NAME>` | required | The name selected by `httk workflow postprocess --script`. |
+| `file` | required | A relative executable regular file inside the registered package. |
+| `description` | optional | Human-readable text shown by `workflow describe`. |
+
+`describe` lists them under `postprocess scripts:`, separately from the
+collect hook, which is the provider's output adapter returning role-keyed data
+to `collect`. The old flat `[workflow.postprocess]` table with a `file` key is
+rejected with an error pointing the collect hook to `[workflow.collect]`.
+
+Scripts run only from the registered provider package or the package given
+with `--workflow-dir`, never from job payloads or pinned workflow-store trees
+(loading them from those trees is future work). A script receives `HTTK_WORKFLOW_WORKSPACE_DIR`,
+`HTTK_WORKFLOW_JOB_DIR` (the immutable payload, read-only to the script), and
+`HTTK_WORKFLOW_POSTPROCESS_DIR` (the output directory), plus
+`HTTK_WORKFLOW_WORKDIR` and `HTTK_WORKFLOW_DATA_DIR` when they exist, so
+scripts should fall back across them. It runs with the framework's
+interpreter directory first on `PATH`, in the output directory
+`<root>/<placement>/<job_key>/<NAME>/`, where reports belong. The root is
+`<workspace>/postprocess` by default, the `postprocess.directory` workspace
+setting when set, or the `postprocess --output-dir` override. Output never lands in the payload,
+so a sealed job can still be postprocessed.
+
+### `[workflow.build]`
+
+A compiled package declares its foreground build and disposable outputs:
+
+```toml
+[workflow.build]
+command = "make"
+platform = "uname -sm"       # optional; omit for one `any` registration
+artifacts = ["relax", "*.o"]
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `command` | yes | Shell-word build command string. |
+| `platform` | no | Shell-word platform probe command; omit it for one `any` registration. |
+| `artifacts` | yes | Nonempty list of relative POSIX `fnmatch` patterns for build outputs. |
+
+Patterns match relative paths, and a directory match covers its subtree. They
+may not strip `run` or `httk_workflow.toml`, so a committed `run` entry and
+the manifest stay in the source package. See
+[Building and registering binaries](#building-and-registering-binaries).
+
+## Inputs, parameters, and files
 
 A job is created from three kinds of things, and the distinction carries
-meaning beyond convenience.
+meaning.
 
-**Inputs** are the objects the workflow *operates on* — the things named in the
-workflow's declaration, described by OPTIMADE property and entry-type
-definitions. They define what the workflow *is*: two runs of `vasp.relax`
-on different structures are the same workflow applied to different inputs, and
-it is the inputs (and the declared outputs) that give the workflow's `$id` its
-meaning across databases. Inputs are staged into the job payload at creation
-time (`new_job(..., inputs={"structure": ...})`), become the input roles of the
-recorded provenance, and are what a served entry's `has_input` edges point back
-to.
+**Inputs** are what the workflow operates on, named in its declaration and
+described by OPTIMADE property and entry-type definitions. They define what
+the workflow is: two runs of `vasp.relax` on different structures are one
+workflow applied to different inputs, and the inputs and declared outputs give
+its `$id` meaning across databases. Inputs are staged into the payload at
+creation (`new_job(..., inputs={"structure": ...})`), become the input roles
+of the recorded provenance, and are what a served entry's `has_input` edges
+point to.
 
-**Parameters** are the knobs a particular workflow *implementation* exposes —
-cutoffs, densities, tolerances, switches. They are deliberately **not** part of
-the declaration, and this is a design decision rather than an omission.
-Practically everything in a VASP calculation could be regarded as an input:
-hundreds of settings, each either hard-coded in an INCAR template or lifted out
-as something the caller may adjust. If adjusting any of them changed *which*
-workflow was being run, nearly every calculation would be a semantically
-distinct workflow, the declaration registry would fragment into uselessness,
-and every knob would demand a curated property definition. Parameters are the
-escape from that: an implementation may lift as many knobs as it likes without
-touching the workflow's declared identity. They require no property
-definitions, travel in `job.json` as opaque JSON — so they remain
-digest-pinned, recorded facts of the execution, fully reproducible — but they
-never appear among the declared inputs and outputs.
+**Parameters** are the knobs one implementation exposes: cutoffs, densities,
+tolerances, switches. They are left out of the declaration by design. Almost
+any of the hundreds of settings in a VASP calculation could be hard-coded in
+an INCAR template or lifted out for the caller. If each changed which
+workflow ran, nearly every calculation would be a distinct workflow, the
+declaration registry would fragment, and every knob would need a curated
+property definition. Instead, an implementation may expose any number of
+parameters without changing its declared identity. They need no property
+definitions and travel in `job.json` as opaque JSON, digest-pinned and
+reproducible, but never appear among the declared inputs and outputs.
 
 **Files** stage additional payload content by name, without either role.
 
-The boundary is a judgment the workflow implementer owns: if turning a knob
-genuinely changes *what* is being computed — not just how carefully or by what
-route — it does not belong among the parameters. It belongs as a declared
-input, or in a differently declared workflow.
+The implementer draws the boundary. A knob that changes what is computed, not
+just how carefully or by what route, is not a parameter: make it a declared
+input, or declare a different workflow.
 
-### Declarations
+## Generated and external declarations
 
 Without `declaration_file`, `workflow_declaration_from_manifest(provider)`
 generates an OPTIMADE-format document with optional `$id` and `description`,
 entry-typed input entries, and output entries. `product_of` is curation
-metadata and is never emitted in this declaration. It becomes
+metadata and is never emitted. The document becomes
 `provider.declarations["workflow"]` and is embedded in `job.json`.
 
-With `declaration_file`, the JSON document is loaded and embedded verbatim after
-validation. Its `$id` must equal `declaration_uri` when both are supplied. Every
-external input and output role maps must exactly cover the manifest's
-entry-typed inputs and outputs. An external declaration must not contain
-`product_of`; the declaration remains the authoritative OPTIMADE document, and
-the manifest remains the authoritative strictly httk-owned package glue.
+With `declaration_file`, the document is validated and embedded verbatim. Its
+`$id` must equal `declaration_uri` when both are given, its input and output
+role maps must exactly cover the manifest's entry-typed inputs and outputs,
+and it must not contain `product_of`. The declaration is the authoritative
+OPTIMADE document; the manifest is the authoritative *httk*-owned glue.
 
-## Hooks and trust
+## Building and registering binaries
 
-### Installed plugin workflows
+The `[workflow.build]` vocabulary, the build engine, `BuildSpec`, and its
+execution helpers are shared `httk.core.building` machinery. *httk-workflow*
+owns the workspace store layout and the platform-tagged build registrations.
 
-Installed *httk₂* plugins can bundle workflow package directories by declaring them
-in `httk_plugin.toml`:
+### Build environment
+
+The build command runs in a copy of the published source tree and can use only
+files in that package and the installed language SDKs. Its environment keeps
+no `HTTK_WORKFLOW_*` variable except `HTTK_WORKFLOW_LANGUAGES_DIR`, the
+absolute path of the installed `httk/workflow/languages` directory, with one
+subdirectory per SDK (`c`, `cpp`, `fortran`, `rust`, `ada`, `java`, `perl`).
+The manager exports the same variable to every attempt. A C package, for
+example, builds with `cc -I"$HTTK_WORKFLOW_LANGUAGES_DIR/c" relax.c
+"$HTTK_WORKFLOW_LANGUAGES_DIR/c/httk_workflow.c" -o relax`.
+
+The source digest does not cover the SDK, so re-register builds after
+upgrading *httk-workflow*, or vendor the SDK into the package. The
+per-language relax packages of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages)
+are complete examples.
+
+### Sources-only publication
+
+Build-declaring packages publish sources only. Declared artifacts are
+stripped, and the digest pins the remaining sources, not a machine's compiler
+output. Binaries never ride a transfer bundle, so each destination builds its
+own native runner. The manager passes the registered artifact directory to the
+runner as `HTTK_WORKFLOW_RUNNER_ARTIFACTS` and never modifies or overlays the
+published tree.
+
+The build command is never inferred from the runner entry. A compiled package
+declares `command = ["{artifacts}/relax"]`, or locates its binaries under
+`$HTTK_WORKFLOW_RUNNER_ARTIFACTS` from a committed `run` entry. The runner
+runs with the job workdir as its cwd.
+
+### Registering a build
+
+Register one foreground build per platform class:
+
+```console
+httk workflow build --workspace WORKSPACE ./my-workflow
+httk job new --workspace WORKSPACE --workflow-dir ./my-workflow --step prepare
+httk workflow run --workspace WORKSPACE
+```
+
+The target may also be a workflow reference, resolved as by
+`httk job new --workflow`: a registered id or alias, a plugin-bundled
+workflow, an installed git workflow's short name, or a git URI (fetched and
+installed). The command builds the package directory the reference resolves
+to, which is the registration a job selecting that name pins, so you need not
+locate a plugin's installed directory:
+
+```console
+httk workflow build --workspace WORKSPACE examples.chain-rust
+httk job new --workspace WORKSPACE --workflow examples.chain-rust
+```
+
+A target spelled as a path (absolute, `./`, `../`, or containing `/`) is
+always a package directory; write `./NAME` for one in the current directory.
+A bare name is a workspace runner-store name if that entry exists, otherwise a
+workflow reference, otherwise a job reference. A workflow without
+`[workflow.build]` succeeds with "nothing to build"; one that is not a
+directory package (a packaged runner file) is an error.
+
+Managers never build, which avoids a thundering herd compiling the same
+package. On a shared filesystem, one registration per platform tag serves all
+matching nodes. A heterogeneous cluster should declare `platform` and build
+once per resulting tag; without it, one `any` registration gives every node
+the same binary regardless of architecture.
+
+### Registrations and failures
+
+Registrations live under
+`WORKSPACE/.httk-workspace/runner-builds/<store-name>/<tag>/current.json`,
+which points to `<tag>/gen-*/artifacts/`. Each generation's `build.json`
+records the source digest, command, platform probe, and time; the sibling
+`<tag>.log` records the command metadata and exit status. Re-registration
+keeps prior generations; remove the tag directory only while no managers are
+running. `httk workflow build --workspace WORKSPACE --list` lists
+registrations.
+
+A missing or stale registration fails with a structured `runner_not_built`; a
+failed platform probe, build, or artifact collection with
+`runner_build_failed`. Both are terminal unless the job opts into `retry_on`,
+for example `retry_on = ["runner_not_built"]`.
+
+`workflow precheck` reports a missing unqualified registration (`platform`
+omitted) as a problem. Platform-specific builds are indeterminate, because a
+local precheck cannot stand in for the manager's machine, which probes its own
+platform at attempt start.
+
+## Installed plugin workflows
+
+Installed *httk₂* plugins bundle workflow package directories by listing them
+in `httk_plugin.toml`; the full plugin manifest and installation rules are
+documented in *httk-core*:
 
 ```toml
 [plugin]
 workflows = ["workflows/relax"]
 ```
 
-Each listed directory is loaded as a normal workflow package, including its
-canonical id and optional alias. The full plugin manifest and installation
-rules are documented in *httk-core*; this is only the workflow-package entry
-point.
+Each directory loads as a normal workflow package, with its canonical id and
+optional alias. Resolution checks in-process registrations first and plugins
+only on a miss, so an in-process registration wins. A name provided by two
+plugins is poisoned: looking it up raises an error naming both. Other plugin
+workflows stay resolvable.
 
-Workflow resolution first checks in-process registrations. Only on a miss does
-it consult installed plugins, so an in-process registration wins a plugin id or
-alias. If two plugins provide the same id or alias, that name is poisoned:
-looking it up raises an error naming both owning plugins. Other, non-conflicting
-plugin workflows remain resolvable.
+Plugin discovery is lazy and cached per process, so start a new process after
+installing a plugin. Installation is explicit consent, so plugin workflows
+share the installed/registered trust tier. They are published and built
+through the normal pinning and build-registration path; resolving a name
+never executes a hook or build command. Listings and unknown-workflow hints
+label plugin entries `[plugin PLUGIN_NAME]`, with any alias, and
+`workflow describe` reports `source: installed-package`.
 
-Plugin discovery is lazy and cached for the lifetime of the process. Install a
-plugin, then start a new process before expecting its workflows to resolve.
-Installing a plugin is explicit consent, so plugin-bundled workflows share the
-installed/registered trust tier. Their packages are published and built through
-the normal workspace pinning and build-registration path; resolving a name does
-not execute a hook or build command.
+## Hooks and trust
 
-Workflow-name listings and unknown-workflow hints label plugin entries with
-`[plugin PLUGIN_NAME]`, including an alias when one exists. `workflow describe`
-resolves these names and reports `source: installed-package`.
+### Python hooks
 
-The hook contracts are deliberately small. Python hooks keep their existing
-in-process signatures:
+Python hooks keep their in-process signatures:
 
 ```python
 def instantiate(context):
@@ -692,24 +671,24 @@ def collect(record):
     ...
 ```
 
-An instantiate hook runs during scaffolding and may write the payload or update
-parameters. A collect hook runs during `collect`; it returns role-keyed outputs.
-The framework validates those roles, derives unfulfilled roles, writes each
-manifest/provider `product_of` curation into its data-record output as a
-`product_of` edge (record content, `--into` rewrites it to the store-minted id),
-overlays output edges onto the `Run`, and emits `ProductLink` values. A direct
-package path's instantiate hook and the job-pinned collect fallback execute
-from the published, digest-pinned tree; registered-directory collectors
-instead execute current source bytes by explicit registration consent.
+An instantiate hook runs during scaffolding and may write the payload or
+update parameters. A collect hook runs during `collect` and returns role-keyed
+outputs. The framework validates the roles, derives unfulfilled ones, writes
+each manifest/provider `product_of` curation into its data-record output as a
+`product_of` edge (record content; `--into` rewrites it to the store-minted
+id), overlays output edges onto the `Run`, and emits `ProductLink` values.
+
+A direct package path's instantiate hook and the job-pinned collect fallback
+run from the published, digest-pinned tree. Registered-directory collectors
+run current source bytes, by explicit registration consent.
 
 ### Executable instantiate hook
 
-An executable instantiate hook is launched from the published, digest-pinned
-package tree. Its current working directory is the staging payload. The
-framework removes inherited `HTTK_WORKFLOW_*` variables, then supplies only
-`HTTK_WORKFLOW_WORKSPACE_DIR` with the workspace path, and puts the framework's
-interpreter directory first on `PATH`. It sends one JSON request
-on stdin:
+The hook is launched from the published, digest-pinned package tree with the
+staging payload as working directory. Inherited `HTTK_WORKFLOW_*` variables
+are removed; only `HTTK_WORKFLOW_WORKSPACE_DIR` (the workspace path) is
+supplied, and the framework's interpreter directory is first on `PATH`. One
+JSON request arrives on stdin:
 
 ```json
 {
@@ -726,28 +705,26 @@ on stdin:
 }
 ```
 
-`tag` is a string or `null`; `parameters`, `defaults`, and `inputs` are JSON
-objects. `parameters` holds only the caller-supplied values (plus any a
-format realization wires in); `defaults` holds
-the manifest's declared parameter defaults, which are applied after the hook to
-every parameter still absent. Version 3 added `defaults` and stopped merging
-them into `parameters`; `httk.workflow.hookapi` accepts only version 3. An
-input descriptor is either `{"kind": "file", "path": "<payload-relative POSIX
-path>"}` or `{"kind": "value", "value": <JSON value>}`. The hook may read
-file descriptors relative to its payload working directory, write files into
-that payload, and return one JSON object on stdout:
+`tag` is a string or `null`. `parameters`, `defaults`, and `inputs` are
+objects: `parameters` holds only caller-supplied values (plus any a format
+realization wires in), and `defaults` the declared parameter defaults, applied
+after the hook to every parameter still absent. Version 3 added `defaults` and
+stopped merging them into `parameters`; `httk.workflow.hookapi` accepts only
+version 3. An input descriptor is `{"kind": "file", "path": "<payload-relative
+POSIX path>"}` or `{"kind": "value", "value": <JSON value>}`. The hook may
+read file inputs relative to its working directory and write files into the
+payload. It returns one JSON object on stdout:
 
 ```json
 {"parameters": {"cutoff": 520, "derived": "ready"}, "tag": "silicon-4x4x4"}
 ```
 
-`parameters` is required and must be an object. `tag` is optional and, when
-returned, must be a string. Returned parameters are merged into the job
-parameters; a returned tag is used only when the caller did not supply one.
-Nonzero exit status, malformed stdout, or an invalid response aborts submission.
+`parameters` is a required object and is merged into the job parameters. An
+optional string `tag` is used only when the caller supplied none. A nonzero
+exit, malformed stdout, or an invalid response aborts submission.
 
-Before launching this form, the framework pre-serializes only inputs consumed
-by the hook (`destination` omitted in the manifest):
+Before launch, the framework serializes the inputs the hook consumes (those
+without a manifest `destination`):
 
 | Supplied input | Descriptor and staged member |
 | --- | --- |
@@ -755,28 +732,28 @@ by the hook (`destination` omitted in the manifest):
 | JSON-native value | `{"kind": "value", "value": <value>}` with the value unchanged. Accepted shapes are strings, booleans, `null`, finite numbers, lists, and string-keyed mappings, recursively. |
 | Live object or other non-JSON-native value | Everything else goes through registered-writer serialization. `httk.core.save` probes registered dispatch keys in deterministic sorted order: extension keys stage `files/inputs/<name>/<name><extension>`, while exact-basename keys stage `files/inputs/<name>/<basename>`; the first successful writer wins. |
 
-An object with no registered writer is a submission error naming the object type
-and the remedies: use a `.py` hook, or register a `httk.core` writer. The Python
-fast path receives the original `InstantiateContext` and inputs; this
-pre-serialization is the executable boundary, not a semantic difference.
+An object with no registered writer is a submission error naming its type and
+the remedies: use a `.py` hook, or register a `httk.core` writer. The Python
+path receives the original `InstantiateContext` and inputs; serialization is a
+property of the executable boundary, not a semantic difference.
 
 ### Executable collect hook
 
-An executable collect hook is launched with its package tree as the current
-working directory. For a direct package path and the opt-in job-pinned fallback,
-that is the published tree whose full digest is checked against `job.json`; a
-registered-directory provider is the explicit-consent exception and runs its
-current source tree. It receives one stream per executable-collector sweep:
-first the handshake line, then one record line per job, in collection order:
+The hook runs with its package tree as working directory. For a direct package
+path and the opt-in job-pinned fallback, that is the published tree, whose
+full digest is checked against `job.json`; a registered-directory provider is
+the explicit-consent exception and runs its current source tree.
+
+One process handles all of a collector's records in a sweep. It receives a
+handshake line, then one record line per job in collection order:
 
 ```json
 {"format": "httk-workflow-collect-stream", "format_version": 2}
 {"record": {"workspace_id": "workspace", "job_id": "job-1", "state": "succeeded", "job": {}}}
 ```
 
-The `record` value is the complete `JobRecord.as_mapping()` mapping; the
-shortened object above only illustrates the envelope. The hook writes one
-response line for each record, in the same order:
+`record` is the complete `JobRecord.as_mapping()` mapping, shortened above.
+The hook writes one response line per record, in the same order:
 
 ```json
 {"job_id": "job-1", "outputs": {"energy": {"value": 3.14}}}
@@ -788,13 +765,11 @@ or:
 {"job_id": "job-1", "error": "could not read the result"}
 ```
 
-The response `job_id` must match the input record. A malformed response, a
-wrong job id, an explicit error, a missing response, or a response whose output
-cannot be resolved degrades that job only; the sweep continues and other jobs'
-responses remain usable. One executable collector process handles all records
-for that collector in the sweep.
+The response `job_id` must match the record. A malformed response, wrong job
+id, explicit error, missing response, or unresolvable output degrades that job
+only; the sweep continues with the other responses.
 
-Each output value must be exactly one of these discriminator wrappers:
+Each output value is exactly one of these wrappers:
 
 | Wrapper | Result |
 | --- | --- |
@@ -802,72 +777,80 @@ Each output value must be exactly one of these discriminator wrappers:
 | `{"value": <JSON value>}` | A `DataRecord`. If the declared output has `ref`, the referenced property definition is loaded and the value is hard-validated with `httk-store` (which is required at collect time); without `ref`, a generated `_httk_custom_*` property definition is used. |
 | `{"file": "<path>"}` | A workspace-confined `FileRecord`. The wrapper must contain exactly the `file` key, and the path must resolve to a regular file below the workspace or workdir. |
 
-The wrapper discriminator is reserved: extra keys are rejected. On the
-successful path, the Python fast path returns ordinary Python objects to the
-existing assembler and has the same role validation and record assembly
-semantics as these executable wrappers. Failure behavior remains deliberately
-different: an exception from a registered Python collector aborts collection
-iteration, while an executable collector's malformed, errored, missing, or
-unresolvable response degrades only its job and lets the sweep continue.
+The discriminator is reserved, and extra keys are rejected. The `url` of a
+workflow-produced `files` entry is a workspace-relative POSIX locator,
+resolved against a root at read time and containment-checked, not a
+dereferenceable URL; this keeps it relocation-stable and follows the
+local-file locator convention.
 
-The job-embedded declaration governs the Run (immutable facts per job). Product
-curation (`product_of` edges on data records and `ProductLink`s)
-comes from the live registered provider's manifest and therefore applies today's
-curation; if collection uses the job-pinned fallback instead, they come from
-that job's own verified pinned manifest and preserve its historical curation,
-not today's. If no provider or pinned manifest is reachable, no products are
-emitted.
+The Python path hands ordinary objects to the same assembler, with the same
+role validation and record assembly. Only failures differ: an exception from a
+registered Python collector aborts collection iteration, while a bad
+executable response degrades only its job.
 
-There are THREE TRUST TIERS:
+### Run and product curation
 
-1. **installed/registered** — a provider registered by a package or domain
+The job-embedded declaration governs the `Run`, the immutable facts per job.
+Product curation (`product_of` edges on data records and `ProductLink`s)
+comes from the live registered provider's manifest, so it reflects today's
+curation. Under the job-pinned fallback it comes from the job's verified
+pinned manifest and keeps its historical curation. With neither reachable, no
+products are emitted.
+
+### Trust tiers
+
+1. **Installed/registered.** A provider registered by a package or domain
    carries its runner and collect adapter. Installed runner references are
    trusted by the registration and distribution boundary.
-2. **explicit-path consent** — a package or runner supplied by an explicit
-   filesystem path is parsed and used because the caller selected that path.
-   Registered directory providers execute the current source-directory hook
-   bytes at collection time: this is tier two and is not digest-gated. A direct
-   package path is published and its scaffold instantiate hook executes from
-   the resulting pinned tree.
-3. **allow-job-collector off-by-default digest-verified** — `collect` only
-   loads a collect hook from a job-pinned workspace package tree when
-   `allow_job_collector=True` (or the CLI flag is supplied). The tree's own
-   manifest `name` must equal the job workflow (for a git URI job, the installed
-   short name, and no comparison when the URI is not installed here), and its
-   full tree digest must match
-   `job.json`; refusal or tampering degrades that job instead of stopping the
-   sweep.
+2. **Explicit-path consent.** A package or runner given by an explicit
+   filesystem path is used because the caller selected it. Registered
+   directory providers run the current source-directory hook bytes at
+   collection time, without a digest gate. A direct package path is
+   published, and its scaffold instantiate hook runs from the pinned tree.
+3. **Job collector, off by default and digest-verified.** `collect` loads a
+   collect hook from a job-pinned workspace package tree only with
+   `allow_job_collector=True` (CLI `--allow-job-collector`). The tree's
+   manifest `name` must equal the job workflow (for a git URI job, the
+   installed short name; not compared when the URI is not installed here), and
+   its full tree digest must match `job.json`. Refusal or tampering degrades
+   that job instead of stopping the sweep.
 
 ## Git URI references
 
 A workflow reference starting with `git+` is a git URI
-({py:mod}`httk.workflow.git_workflows`, on top of the shared
-`httk.core.git_sources`); one that fails to parse is an error and never falls
-through to path or id resolution. The grammar is
+({py:mod}`httk.workflow.git_workflows`, built on the shared
+`httk.core.git_sources`). One that fails to parse is an error and never falls
+through to path or id resolution.
+
+### Grammar
 
 ```text
 git+SCHEME://AUTHORITY/PATH[@REF][#SUBDIR]      SCHEME = https | http | file
 ```
 
-`#` is split first (the fragment is the package subdirectory), then `@REF` is
-split with the last `@` after the authority, so refs may contain `/`. Refused:
-ssh and `git@host:path` forms, userinfo in the authority (it would be copied
-into `job.json`), a query, an empty ref, a ref starting with `-`, an empty
-fragment, and a subdirectory that is absolute, has backslashes, or has empty,
-`.` or `..` components. The authority may be empty only for `file`.
+`#` is split first (the fragment is the package subdirectory), then `@REF` at
+the last `@` after the authority, so refs may contain `/`. The authority may
+be empty only for `file`. Refused: ssh and `git@host:path` forms, userinfo in
+the authority (it would be copied into `job.json`), a query, an empty ref or
+one starting with `-`, an empty fragment, and a subdirectory that is
+absolute, has backslashes, or has empty, `.`, or `..` components.
 
-The **canonical form** is
+### Canonical form
+
+The canonical form is
 `git+SCHEME://AUTHORITY(scheme and host lowercased)PATH(trailing / stripped)@COMMIT[#SUBDIR]`,
 where `COMMIT` is the full lowercase commit hash (40 or 64 hex digits). The
-repository path is otherwise verbatim, so `…/repo` and `…/repo.git` are
-distinct. The canonical URI is the provider's `workflow_id` and
-`definition_uri`, the job's `workflow`, and the collected `Run`'s
-`workflow_definition_uri`. It identifies the workflow *definition* (its code);
-the declaration `$id` stays the manifest's `declaration_uri`, if any. The
-manifest `[workflow] name` becomes the provider's `name`, its short name; a
-manifest name may not itself start with `git+`.
+path is otherwise verbatim, so `…/repo` and `…/repo.git` differ.
 
-**Cache layout**, under `httk.core.userdirs.data_home()`:
+The canonical URI is the provider's `workflow_id` and `definition_uri`, the
+job's `workflow`, and the collected `Run`'s `workflow_definition_uri`. It
+identifies the workflow *definition* (its code); the declaration `$id` stays
+the manifest's `declaration_uri`, if any. The manifest `[workflow] name`, which
+may not start with `git+`, becomes the provider's short `name`.
+
+### Cache layout
+
+Under `httk.core.userdirs.data_home()`:
 
 ```text
 git/<sha256(repository)[:16]>/<commit>/                 checkout tree, .git removed
@@ -875,55 +858,64 @@ git/<sha256(repository)[:16]>/<commit>.json             checkout record
 workflows/installed/<sha256(canonical URI)[:32]>.json   installed workflow entry
 ```
 
-A cached `<commit>/` tree is a cache hit: a pinned URI whose tree exists runs
-no git. Clones land in a temporary directory beside the final name and are
-renamed into place, and JSON files are replaced atomically. Every explicit
-reference rewrites the installed entry, refreshing `referenced_at`. Git runs
-without hooks, global or system configuration, credential helpers, `GIT_*`
+A pinned URI whose `<commit>/` tree exists is a cache hit and runs no git.
+Clones land in a temporary directory beside the final name and are renamed
+into place; JSON files are replaced atomically. Every explicit reference
+rewrites the installed entry, refreshing `referenced_at`. Git runs without
+hooks, global or system configuration, credential helpers, `GIT_*`
 environment, or terminal prompts, so private repositories are not supported.
-A package whose tree could not be published (for example one containing a
-symlink) is refused at fetch time, before it is installed. Its instantiate
-hook runs from the published, digest-pinned tree; its collect hook and
-postprocess scripts run from the installed cache tree, like a plugin package.
-`httk workflow install URI...` installs without creating a job, and
-`httk workflow uninstall SELECTOR...` removes installed entries (never the
-cached checkouts).
 
-**Resolution precedence.** `resolve_workflow` (and so `new_job`,
-`job new --workflow`, `campaign submit --workflow`, `workflow describe` and
-`Attempt.call`) tries a git URI first, fetching and installing it with
-{py:func}`~httk.workflow.git_workflows.fetch_workflow`; the result is a
-directory package published and digest-pinned into the runner store like any
-other. A short name resolves to in-process registrations first, then installed
-plugins, then installed git workflows by `name` or `alias`. Among installed
-entries claiming the name, one lineage (`repository`, `subdir`) selects its
-most recently referenced commit; several lineages are an error naming the
+A package whose tree cannot be published (for example one containing a
+symlink) is refused at fetch time, before installation. Its instantiate hook
+runs from the published, digest-pinned tree; its collect hook and postprocess
+scripts run from the installed cache tree, like a plugin package.
+`httk workflow install URI...` installs without creating a job, and
+`httk workflow uninstall SELECTOR...` removes installed entries, never the
+cached checkouts.
+
+### Resolution precedence
+
+`resolve_workflow`, and so `new_job`, `job new --workflow`,
+`campaign submit --workflow`, `workflow describe`, and `Attempt.call`, tries a
+git URI first, fetching and installing it with
+{py:func}`~httk.workflow.git_workflows.fetch_workflow`; the result is
+published and digest-pinned into the runner store like any directory package.
+A short name resolves to in-process registrations, then installed plugins,
+then installed git workflows by `name` or `alias`. Among installed entries
+claiming the name, one lineage (`repository`, `subdir`) selects its most
+recently referenced commit, and several lineages are an error naming the
 competing URIs. `workflow list` and the unknown-workflow hint include
 installed short names that are neither shadowed nor conflicted.
 
-**Cache-only rule.** `workflow_provider(URI)`, like
+### Cache-only lookup
+
+`workflow_provider(URI)`, like
 {py:func}`~httk.workflow.git_workflows.fetched_workflows`, returns an installed
-provider only for a pinned URI with an installed entry, and otherwise `None`,
-also for malformed URI text; it never runs git or writes files. Collection
-dispatches through it, so a job payload can never cause code acquisition. With
-`--allow-job-collector`, a job whose URI is not installed here uses its
-digest-verified pinned tree without a name comparison; when the URI is
+provider only for a pinned URI with an installed entry and otherwise `None`,
+also for malformed URI text. It never runs git or writes files. Collection
+dispatches through it, so a job payload can never cause code acquisition.
+With `--allow-job-collector`, a job whose URI is not installed here uses its
+digest-verified pinned tree without a name comparison; if the URI is
 installed, the tree's manifest name must equal the installed short name.
 
 ## Publication and lifecycle
 
-`job new --workflow-dir` publishes the complete package tree into the workspace
-runner store. Publication computes one tree digest, installs a read-only tree,
-and records the full digest in `job.json`. Republish of identical content is an
-idempotent no-op; changed content cannot replace an existing name without an
-explicit replacement. The manager verifies the same digest before execution.
+### Publication
 
-`publish=` is ignored for `format` workflows: CWL/PWD/jobflow and httk-v1 use
-their installed realization runners. `new_jobs` and CLI
-`--input-from` campaigns prepare a format package once and instantiate it per
-job. Realization-produced parameter names are reserved and collisions fail
-loudly. httk-v1 snapshots the complete package at preparation, so edits made
-after preparation do not change later jobs; symlinks are rejected.
+`job new --workflow-dir` publishes the complete package tree into the
+workspace runner store: one tree digest, a read-only tree, and the full digest
+recorded in `job.json`, which the manager verifies before execution.
+Republishing identical content is an idempotent no-op; changed content cannot
+replace an existing name without an explicit replacement.
+
+`publish=` is ignored for `format` workflows, which use their installed
+realization runners. `new_jobs` and CLI `--input-from` campaigns prepare a
+format package once and instantiate it per job. Realization-produced parameter
+names are reserved, and collisions fail loudly. httk-v1 snapshots the complete
+package at preparation, so later edits do not affect later jobs, and rejects
+symlinks.
+
+### Lifecycle commands
 
 The usual lifecycle is instantiate, run, then collect:
 
@@ -938,26 +930,27 @@ httk collect --workspace WS --into results.sqlite --id-base httk.workflow
 ```
 
 `httk workflow describe TARGET [--json]` reports a registered id or alias,
-runner file, or package directory without publishing it. The default collect
-verb emits one `CollectedJob` summary per line; `--raw` emits `JobRecord`
-records. `--allow-job-collector` enables the third trust tier above.
+runner file, or package directory without publishing it. `collect` emits one
+`CollectedJob` summary per line by default, `--raw` emits `JobRecord`
+records, and `--allow-job-collector` enables the third trust tier.
 
-Python users who need persistence call `store.save(...)` themselves. `--into`
-is the CLI shortcut: it opens a file-backed SQLite `SqlStore`, saves output
-entries, runs, and products, and reports stored ids. Entry families and record
-classes are resolved lazily from the core registry; output types may require
-`httk-store` and `httk-atomistic` to be installed.
+### Storing results
 
-`--id-base BASE` is required with `--into`; `--id-series SERIES` defaults to
-`1`. Collected edges to outputs without store ids use content ids until the
-outputs are saved, after which `--into` rewrites those edges to the minted ids.
+In Python, call `store.save(...)` yourself. `--into` is the CLI shortcut: it
+opens a file-backed SQLite `SqlStore`, saves output entries, runs, and
+products, and reports stored ids. Entry families and record classes resolve
+lazily from the core registry, so output types may require *httk-store* and
+*httk-atomistic*. `--id-base BASE` is required with `--into`, and
+`--id-series SERIES` defaults to `1`. Edges to outputs without store ids use
+content ids until the outputs are saved; `--into` then rewrites them to the
+minted ids.
 
-With `--into`, each job's entries, run, and products are stored as one job-level
-operation. A storage failure is reported on that job's summary as
-`storage_error`; other jobs may still be stored, so a sweep can partially
-succeed. Inspect each JSONL line's `storage_error` before retrying or
-reconciling the destination store.
+Each job's entries, run, and products are stored as one job-level operation.
+A storage failure appears on that job's summary as `storage_error` while other
+jobs may still be stored, so a sweep can partially succeed. Check each JSONL
+line's `storage_error` before retrying or reconciling the destination store.
 
-See {doc}`/details/declarations` for declaration carriage, {doc}`/details/provenance` for the
-tree-pinned provenance handoff, {doc}`/details/collecting` for collect-hook and
-fallback behavior, and {doc}`workflow_cli` for the complete command reference.
+See {doc}`/details/declarations` for declaration carriage,
+{doc}`/details/provenance` for the tree-pinned provenance handoff,
+{doc}`/details/collecting` for collect-hook and fallback behavior, and
+{doc}`workflow_cli` for the complete command reference.

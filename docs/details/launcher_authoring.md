@@ -1,10 +1,9 @@
 # Writing a manager launcher in detail
 
-*For operators and integrators who need to start workflow managers with a
-scheduler or process system the maintained templates do not cover.* A launcher
-is to starting managers what a remote is to reaching a machine. A remote
-adapter moves data and executes commands on a machine; a launcher starts one or
-more managers on the machine that hosts a workspace.
+A launcher starts one or more workflow managers on the machine that hosts a
+workspace, just as a remote adapter moves data and runs commands on a machine.
+This guide covers writing one for a scheduler or process system that the
+maintained templates do not cover.
 
 ## The bundle
 
@@ -16,11 +15,11 @@ my-cluster/
 └── launcher
 ```
 
-Project launchers live below
-`PROJECT/httk_project/launchers/NAME/`; global launchers live below
-`$XDG_CONFIG_HOME/httk/launchers/NAME/`. Project definitions shadow global
-definitions of the same name. The `process` name is reserved for the built-in
-detached-process implementation and cannot be defined as a bundle.
+Project launchers live below `PROJECT/httk_project/launchers/NAME/` and global
+launchers below `$XDG_CONFIG_HOME/httk/launchers/NAME/`. A project definition
+shadows a global definition of the same name. The name `process` is reserved
+for the built-in detached-process implementation and cannot be defined as a
+bundle.
 
 The maintained Slurm template is installed with:
 
@@ -36,9 +35,9 @@ The executable is normally a small wrapper:
 exec python3 -m httk.workflow.launch_runtime "$@"
 ```
 
-It receives one temporary JSON request filename, prints exactly one JSON result
-object, and writes diagnostics to stderr. The engine never invokes it through a
-shell.
+It receives the name of one temporary JSON request file, prints exactly one JSON
+result object, and writes diagnostics to stderr. The engine never invokes it
+through a shell.
 
 ## `launcher.json`
 
@@ -67,15 +66,15 @@ The maintained format is:
 | `required_binaries` | no | Programs checked with `shutil.which` on the launcher host |
 | `timeout_seconds` | no | Positive operation timeout, default `60` |
 
-`launcher` must exist and be executable. `required_binaries` is checked locally;
-it should name `qsub` when the launcher itself calls a local `qsub`, but not a
-binary that only exists after a remote hop. A custom kind is allowed in the
-metadata, but the packaged dispatcher refuses kinds it does not implement.
+`launcher` must exist and be executable. `required_binaries` is checked
+locally: list `qsub` when the launcher itself calls a local `qsub`, but not a
+binary that only exists after a remote hop. The metadata may name a custom
+kind, but the packaged dispatcher refuses kinds it does not implement.
 
 ## The request and result envelopes
 
-Every operation is sent as a request like this (the operation-specific members
-follow the envelope):
+Every operation is sent as a request like this, with the operation-specific
+members following the envelope:
 
 ```json
 {
@@ -110,46 +109,56 @@ The dispatcher prints one result object:
 ```
 
 The engine checks the format, version, operation, and `ok`. A refusal has
-`ok: false` and an `error`; the dispatcher still exits zero so that the JSON
+`ok: false` and an `error`, and the dispatcher still exits zero so that the JSON
 refusal crosses the boundary intact. A non-zero dispatcher exit, malformed JSON,
 or a mismatched envelope is an engine error. Stderr is attached as
-`diagnostics` on successful results. The caller can override the positive
-`timeout_seconds` bound for one operation; a timeout raises `TimeoutError`.
+`diagnostics` on successful results. The caller can override the
+`timeout_seconds` bound for one operation with another positive value; a
+timeout raises `TimeoutError`.
+
+The engine refuses an unknown operation, malformed metadata or result, a
+non-executable dispatcher, a missing required binary, a non-zero dispatcher
+exit, or a result that does not confirm success. It also refuses a launcher that
+tries to take over remote transport, because reaching a machine belongs to a
+remote adapter.
 
 ## The two operations
 
 `check` verifies every `required_binaries` entry with `shutil.which` and returns
-the kind. It performs no submission.
+the kind. It submits nothing.
 
 `start` receives an absolute `workspace`, the full manager `argv`, a positive
 manager `count`, the workspace `settings` mapping, and the bundle's
-`launcher_settings` mapping; for the maintained Slurm kind, bundle settings
-take precedence over workspace settings for keys the kind consumes. Settings are not copied
-into the bundle: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
-`slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
-`slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation` are scheduler
-settings; `manager.workers` belongs to the manager command; and
-`environment.prelude` is shell setup such as module loads. A launcher may use
-other settings, but should keep its interpretation explicit.
+`launcher_settings` mapping. The maintained Slurm kind merges them, with bundle
+settings taking precedence over workspace settings for the keys the kind
+consumes; custom launchers define their own merge. Workspace settings are not
+copied into the bundle. The settings fall into three groups:
+
+- scheduler settings: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
+  `slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
+  `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation`;
+- `manager.workers`, which belongs to the manager command;
+- `environment.prelude`, shell setup such as module loads.
+
+A launcher may use other settings, but should keep its interpretation explicit.
 
 The maintained Slurm dispatcher writes one mode-0700 script below
 `.httk-workspace/batch/`, adds `--chdir`, output, and error paths, and calls
-`sbatch` once per requested manager. Its final command is an argument-quoted
-`exec` line. If `environment.prelude` is set, the prelude runs under `set -e`
-first and the manager command is resolved on the resulting `PATH` as
-`manager.command` (default `httk`); without a prelude, the supplied Python
-interpreter argv is preserved. If submission fails after some jobs were
+`sbatch` once per requested manager. The script's final command is an
+argument-quoted `exec` line. If `environment.prelude` is set, the prelude runs
+first under `set -e`, and the manager command is resolved on the resulting
+`PATH` as `manager.command` (default `httk`). Without a prelude, the supplied
+Python interpreter argv is preserved. A successful result contains the parsed
+Slurm job IDs and the script path. If submission fails after some jobs were
 accepted, the refusal includes `submitted` and `job_ids` so the operator can
-cancel those jobs. The successful result contains the parsed Slurm job IDs and
-the script path.
+cancel those jobs.
 
 ## A PBS launcher
 
-Here is a compact custom dispatcher. It follows the same request/result rules,
+This compact custom dispatcher follows the same request and result rules,
 composes PBS directives from workspace settings, and submits the same manager
-command once per requested count. In a real bundle, save it as `launcher`, add
-the executable bit, use `"kind": "pbs"`, and list `qsub` in
-`required_binaries`.
+command once per requested count. In a real bundle, save it as `launcher`, make
+it executable, use `"kind": "pbs"`, and list `qsub` in `required_binaries`.
 
 ```python
 #!/usr/bin/env python3

@@ -1,8 +1,6 @@
 # Run provenance
 
-*For workflow authors and data-layer authors connecting one `JobRecord` to
-one stored `httk.core.Run`.*
-
+This page describes how one `JobRecord` becomes one stored `httk.core.Run`.
 The `provenance` declaration describes the entries one workflow execution
 consumed, created, and returned. All members are optional:
 
@@ -15,18 +13,15 @@ consumed, created, and returned. All members are optional:
 }
 ```
 
-The object keys are labels, unique per side. Targets are loose served-entry
-references. The declaration is carried verbatim by workflow; this page
-documents the collection used by `run_record`.
+The object keys are labels, unique per side, and the targets are loose
+served-entry references. The workflow layer carries the declaration verbatim;
+this page documents how `run_record` collects it.
 
-File-valued output roles yield run edges with `type = "files"` and the
-corresponding `FileRecord` id, so stored provenance names the file entry
-directly.
-
-The `type` strings above are httk's internal entry-type names
-(`records`, `runs`, `structures`, `files`); OPTIMADE wire prefixing
-(`_httk_records`, `_httk_runs`, …) is applied only at the OPTIMADE serving
-edge.
+The `type` strings are *httk*'s internal entry-type names (`records`, `runs`,
+`structures`, `files`). OPTIMADE wire prefixing (`_httk_records`,
+`_httk_runs`, …) is applied only at the OPTIMADE serving edge. File-valued
+output roles yield run edges with `type = "files"` and the corresponding
+`FileRecord` id, so stored provenance names the file entry directly.
 
 ## Declared and observed
 
@@ -40,8 +35,8 @@ declared = {
 prepare_job_payload(payload, JobSpec(..., declarations={"provenance": declared}))
 ```
 
-At collect time, a runner writes the complete observed document once produced
-entry ids exist:
+Once produced entry ids exist, a runner writes the complete observed document
+for collection:
 
 ```python
 a.declare("provenance", {
@@ -52,27 +47,32 @@ a.declare("provenance", {
 })
 ```
 
-The runtime also records an observed `environment` declaration when the job
-declares workflow environment entries. Its
-`httk-workflow-environment-resolution` version 2 document carries each value
-and the layer that supplied it, so provenance can identify the settings that
-drove the run.
+The observed document replaces the declared one wholesale; the two are not
+merged. Without any provenance document, `run_record` still uses the `$id` of
+the `workflow` declaration when available.
 
-Observed replaces declared wholesale; it is a full replacement document, not
-a merge. If no provenance document exists, `run_record` still uses the `$id`
-from the `workflow` declaration when available.
+When the job declares workflow environment entries, the runtime also records
+an observed `environment` declaration. This
+`httk-workflow-environment-resolution` version 2 document carries each value
+and the layer that supplied it, so provenance identifies the settings that
+drove the run.
 
 ## Declaration and definition
 
-A `Run` names the workflow twice, for two different things.
-`workflow_declaration_uri` is the `$id` of the workflow *declaration*, the
-document describing what the workflow consumes and produces (see
-{doc}`declarations`). `workflow_definition_uri` identifies the workflow
-*definition*, the code that ran: `run_record` sets it to the job's `workflow`
-when that is a commit-pinned git URI (see {doc}`workflow_uris`), and to `None`
-otherwise. A git workflow without a `declaration_uri` therefore has a
-definition URI but no declaration URI. The v1 reader records the declaration
-URI of its package, if any, and no definition URI. `httk collect` reports both in each run summary.
+A `Run` names the workflow twice, for two different things:
+
+- `workflow_declaration_uri` is the `$id` of the workflow *declaration*, the
+  document describing what the workflow consumes and produces (see
+  {doc}`declarations`).
+- `workflow_definition_uri` identifies the workflow *definition*, the code
+  that ran. `run_record` sets it to the job's `workflow` when that is a
+  commit-pinned git URI (see {doc}`workflow_uris`), and to `None` otherwise.
+
+A git workflow without a `declaration_uri` therefore has a definition URI but
+no declaration URI. The v1 reader records its package's declaration URI, if
+any, and no definition URI. `httk collect` reports both in each run summary.
+
+## From job record to stored run
 
 The end-to-end handoff is:
 
@@ -85,30 +85,31 @@ run = run_record(record)
 store.save(run)  # the httk-store side
 ```
 
-The resulting `Run.source_id` is the executing system's identity for the job,
-formatted by httk-workflow as `"<workspace_id>:<job_id>"`. It participates in
-content identity, so repeated collection of one job deduplicates while distinct
-jobs remain distinct; `collect --into` stores a job's changed run as a new
+`Run.source_id` is the executing system's identity for the job, formatted by
+*httk-workflow* as `"<workspace_id>:<job_id>"`. It participates in content
+identity, so collecting one job repeatedly deduplicates while distinct jobs
+stay distinct, and `collect --into` stores a job's changed run as a new
 revision of the same entry rather than a second entry. `Run.immutable_id` is
-left `None` for `httk-store` to mint as its own per-revision identifier.
+left `None` for *httk-store* to mint as its per-revision identifier.
 
-`run_record` does not fold children into the parent run. Each child collects to
-its own `Run`, including a child that only called or spawned further jobs, and
-`collect --into` links them: the parent's stored run gains a `has_artifact`
-edge of type `runs` to each child's run (see {doc}`collecting`). A parent still
-names child *products* explicitly in its observed declaration. Runner identity, the attempt timeline, and failure remain on the
-`JobRecord` for callers that need them.
+`run_record` does not fold children into the parent run. Each child collects
+to its own `Run`, including a child that only called or spawned further jobs,
+and `collect --into` links them: the parent's stored run gains a
+`has_artifact` edge of type `runs` to each child's run (see
+{doc}`collecting`). A parent still names child products explicitly in its
+observed declaration. Runner identity, the attempt timeline, and failure stay
+on the `JobRecord` for callers that need them.
 
-For directory workflows, the runner tree digest and generated or external
+For directory workflows, the runner tree digest and the generated or external
 workflow declaration travel with the job and anchor this provenance chain to
-the exact published package. See {doc}`workflow_packages`.
+the exact published package; see {doc}`workflow_packages`. VASP runners will
+adopt this declaration in future work. Built-in VASP result collection is
+documented in {doc}`collecting`.
 
-VASP runners will adopt this declaration in future work.
+## Provenance and sealing
 
 Provenance records where a result came from; a **seal** proves it has not
 changed since. A manager seals each job as it succeeds, signing its payload's
-file hashes, and workspaces and projects can be sealed on top to pin whole trees
-under one signature that travels with a transfer. When integrity, not just
-origin, matters, see {doc}`sealing`.
-
-Built-in VASP result collection is documented in {doc}`collecting`.
+file hashes, and workspaces and projects can be sealed on top to pin whole
+trees under one signature that travels with a transfer. When integrity, not
+only origin, matters, see {doc}`sealing`.

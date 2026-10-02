@@ -1,41 +1,41 @@
 # Workflow declarations
 
-*For workflow authors and data-layer authors: what a workflow says about itself, carried verbatim beside the result.*
+A *workflow declaration* is a property-like document that states what a
+workflow is: the inputs it consumes, the method it applies, and the outputs it
+produces, without describing a graph. A data layer stores it next to a result
+so the result can later be explained. It records what was meant to run; the
+trace of what actually ran is the {doc}`collecting` provenance.
 
-A *workflow declaration* is a property-like document that says what a workflow
-**is** — the inputs it consumes, the method it applies, the outputs it produces —
-without describing a graph. It is what a data layer stores next to a result so
-the result can later be explained: not the trace of what ran, which is the
-{doc}`collecting` provenance, but the statement of what was meant to run.
-
-OPTIMADE is standardizing exactly this document, graph-free and versioned like
-its other property definitions. That work is in progress, so *httk-workflow*
-deliberately takes no position on its contents.
+OPTIMADE is standardizing this document, graph-free and versioned like its
+other property definitions. That work is in progress, so *httk-workflow* takes
+no position on its contents.
 
 ## Carried verbatim
 
 A declaration is opaque to the engine. `job.json` carries the document
-unchanged, the protocol checks only that it is a JSON object under a
-well-formed name, and no member is ever added, removed or rewritten. There is
-no *httk* envelope around it: versioning and self-description belong inside
-the document, in the `$id`-style members of the OPTIMADE property-definition
+unchanged; the protocol checks only that it is a JSON object under a
+well-formed name, and never adds, removes, or rewrites a member. There is no
+*httk* envelope around it. Versioning and self-description belong inside the
+document, in the `$id`-style members of the OPTIMADE property-definition
 conventions, so that a consumer who understands the vocabulary gives the
-document its meaning. Interpreting declarations is therefore the business of
-*httk-store* and OPTIMADE tooling; carrying them, covering them by digest and
-reporting them honestly is the business of this module.
+document its meaning. Interpreting declarations is the business of
+*httk-store* and OPTIMADE tooling; this module carries them, covers them by
+digest, and reports them faithfully.
 
-Packaged workflows may carry declarations into every scaffolded `job.json`; the
-built-in VASP workflows declare their `workflow` `$id` using the published
-`schemas.httk.org` URIs. See {doc}`provenance` for the rule that uses this `$id`
-as the workflow URI fallback.
+### Where declarations come from
 
-A declaration `$id` names the *declaration* document, never the code: a
+- Packaged workflows may carry declarations into every scaffolded `job.json`.
+  The built-in VASP workflows declare their `workflow` `$id` with the
+  published `schemas.httk.org` URIs. {doc}`provenance` describes the rule that
+  uses this `$id` as the workflow URI fallback.
+- Directory packages can generate the declaration from their manifest or carry
+  an externally authored, validated declaration file; see
+  {doc}`workflow_packages`.
+
+A declaration `$id` names the declaration document, never the code. A
 workflow referenced by git URI keeps that URI as its *definition* URI, and its
 generated declaration carries a `$id` only when the manifest names a
 `declaration_uri`. See {doc}`workflow_uris`.
-
-Directory packages can generate this declaration from their manifest or carry
-an externally authored, validated declaration file; see {doc}`workflow_packages`.
 
 ## Declared and observed
 
@@ -46,22 +46,22 @@ A declaration attaches in two places, and the two are never merged.
 | **declared** | the `declarations` member of `job.json` | at submission | no — the immutable job digest covers it |
 | **observed** | `.httk-job/declarations/<name>.json` in the payload | at run time | yes — the last write wins |
 
-The declared document is the static statement of intent, pinned by the immutable
-job digest like every other member of `job.json`.
+The declared document is the static statement of intent, pinned by the
+immutable job digest like every other `job.json` member.
 
 The observed document exists because campaigns are dynamic: a step may only
-discover at run time which children it spawned and which outputs it produced,
-and it writes the refined document as it learns. The whole `.httk-job/`
-directory is excluded from every payload digest, so declaring never disturbs
-the immutability check of a payload, a child registration or a transfer.
+learn at run time which children it spawned and which outputs it produced, and
+it writes the refined document as it goes. The whole `.httk-job/` directory is
+excluded from every payload digest, so declaring never disturbs the
+immutability check of a payload, a child registration, or a transfer.
 
-A collect reports both, side by side, per name. Reconciling them requires
+A collect reports both side by side, per name. Reconciling them requires
 understanding the vocabulary, which is the consumer's job, not the engine's.
 
 ## A job that declares
 
-The document below is one plausible shape, shown to make the mechanics concrete;
-the normative shape is the one OPTIMADE settles on.
+The document below is one plausible shape, shown to make the mechanics
+concrete; the normative shape is the one OPTIMADE settles on.
 
 ```python
 from httk.workflow import JobSpec, prepare_job_payload
@@ -92,7 +92,7 @@ prepare_job_payload(
 )
 ```
 
-A spawned child declares for itself. Nothing is inherited: a declaration
+A spawned child declares for itself and inherits nothing: a declaration
 describes the job it belongs to, and a child that runs a different step is a
 different thing from its parent.
 
@@ -105,9 +105,10 @@ a.spawn(
 
 ## Declaring what a job observed
 
-A step records the refined document with one call, and reads one back with
-another. Reading answers with the observed document when the job wrote one, the
-declared one from `job.json` otherwise, and `None` when the job knows neither.
+A step records the refined document with one call and reads one back with
+another. Reading returns the observed document when the job wrote one,
+otherwise the declared one from `job.json`, and `None` when the job has
+neither.
 
 ```python
 @run.step
@@ -117,10 +118,10 @@ def aggregate(a):
     a.succeed()
 ```
 
-The Bash API is the same two calls, and publishes the same bytes. The document
-is passed as a file, because a whole JSON object is what a command line cannot
-quote; reading prints it compactly and returns 1 when there is no declaration of
-that name at all.
+The Bash API has the same two calls and publishes the same bytes. The
+document is passed as a file, because a command line cannot quote a whole
+JSON object. Reading prints the document compactly and returns 1 when there is
+no declaration of that name.
 
 ```bash
 step_aggregate() {
@@ -131,12 +132,14 @@ step_aggregate() {
 }
 ```
 
-Declaration names are keys and file basenames at once, so they are single safe
+## Names and size limits
+
+Declaration names are both keys and file basenames, so they are single safe
 path components: letters, digits, `_`, `.`, and `-`, starting with a letter,
-digit, or underscore, at most 64 characters. The whole `declarations` object of
-one `job.json` is limited to 262144 serialized bytes, the same allowance
-`inputs` has and for the same reason — bulk content belongs in the payload or in
-transactional `data/`.
+digit, or underscore, at most 64 characters. The whole `declarations` object
+of one `job.json` is limited to 262144 serialized bytes, the same allowance
+`inputs` has and for the same reason: bulk content belongs in the payload or
+in transactional `data/`.
 
 ## What a collect reports
 
@@ -155,13 +158,13 @@ transactional `data/`.
 }
 ```
 
-A name that only `job.json` declared has `"observed": null`; a name only the
-runner wrote has `"declared": null`. An observed document that cannot be read is
-reported as `null` and sets `provenance.gaps` on the record, exactly like every
-other damaged evidence a collect still reports rather than hides.
+A name only `job.json` declared has `"observed": null`, and a name only the
+runner wrote has `"declared": null`. An observed document that cannot be read
+is reported as `null` and sets `provenance.gaps` on the record, like all
+damaged evidence a collect reports rather than hides.
 
 See {doc}`collecting` for the record as a whole, {doc}`runtime_helpers` and
 {doc}`../sdks/bash_api` for the two authoring APIs, and
-{doc}`workflow_filesystem_api` for the normative statement of the `declarations`
-member and the payload area it is stored in. See {doc}`provenance` for the
-collection of the `provenance` declaration.
+{doc}`workflow_filesystem_api` for the normative statement of the
+`declarations` member and the payload area it is stored in. See
+{doc}`provenance` for the collection of the `provenance` declaration.

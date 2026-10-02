@@ -1,29 +1,28 @@
 # Launchers
 
-*For operators who need to choose where workflow managers start.* A launcher is
-to starting managers what a remote is to reaching a machine. It is a named
-bundle containing `launcher.json` and one executable named `launcher`; the
-bundle's `check` and `start` operations let *httk-workflow* validate an
-environment and start managers without embedding scheduler-specific commands
-in the workflow engine. The built-in `process` launcher is the default for a
-workspace, and named launchers such as `slurm` submit managers through an
-external scheduler.
+A launcher decides where workflow managers start. It is to starting managers
+what a remote is to reaching a machine: a named bundle containing
+`launcher.json` and one executable named `launcher`. The bundle's `check` and
+`start` operations let *httk-workflow* validate an environment and start
+managers without scheduler-specific commands in the workflow engine. The
+built-in `process` launcher is a workspace's default; named launchers such as
+`slurm` submit managers through an external scheduler.
 
-Named launchers are resolved project-first and then globally. A project-local
-bundle lives at `httk_project/launchers/NAME`; a global bundle lives at
+Named launchers are resolved project-first, then globally. A project-local
+bundle lives at `httk_project/launchers/NAME`, a global one at
 `~/.config/httk/launchers/NAME`.
 
 ## Setting one up
 
-The packaged template is `slurm`. Create a global launcher profile on a
-machine where `sbatch` is available:
+The packaged template is `slurm`. Create a global launcher profile on a machine
+where `sbatch` is available:
 
 ```console
 $ httk workflow launcher add --template slurm --global cluster
 $ httk workflow launcher check cluster
 ```
 
-You can provide a setting while creating it:
+Settings can also be given at creation:
 
 ```console
 $ httk workflow launcher add --template slurm --global --set slurm.partition=batch cluster
@@ -32,9 +31,9 @@ $ httk workflow launcher add --template slurm --global --set slurm.partition=bat
 Launcher settings are non-secret configuration stored in `launcher.json` and
 shared with the project; credentials do not belong there.
 
-Then select it for the workspace. The workspace setting is deliberately
-separate from the launcher bundle, so the same launcher can be used by several
-workspaces with different workspace-level values:
+Then select the launcher in the workspace. The workspace setting is separate
+from the bundle, so several workspaces can use the same launcher with different
+workspace-level values:
 
 ```console
 $ httk workspace settings set --key manager.launch --value cluster default
@@ -45,8 +44,9 @@ $ httk workspace settings set --key environment.prelude --value 'module load htt
 $ httk workflow run --count 4 --workspace default
 ```
 
-`httk workflow run --count 4` returns the submitted scheduler job IDs. The
-available workspace settings are:
+`httk workflow run --count 4` returns the submitted scheduler job IDs.
+
+### Workspace settings
 
 | Setting | Meaning |
 | --- | --- |
@@ -66,15 +66,24 @@ available workspace settings are:
 | `slurm.reservation` | Slurm reservation. |
 | `environment.prelude` | Shell setup run before the manager, such as a module load or environment activation. |
 
-The `slurm.*` values become batch directives. `environment.prelude` runs
-before the manager under `set -e`; with a prelude, `manager.command` is looked
-up on the resulting `PATH`. Without a prelude, the launcher preserves the
-Python interpreter that started the command.
+The `slurm.*` values become batch directives. `environment.prelude` runs before
+the manager under `set -e`, and `manager.command` is then looked up on the
+resulting `PATH`. Without a prelude, the launcher preserves the Python
+interpreter that started the command.
 
 For MPI programs, `slurm.ntasks` requests the total number of processes and
-`slurm.ntasks_per_node` controls their placement per node; `slurm.cpus_per_task`
-instead requests the CPU cores allocated to each process. Set the task count
-for MPI ranks and use `cpus_per_task` when each rank needs multiple cores.
+`slurm.ntasks_per_node` their placement per node, while `slurm.cpus_per_task`
+requests the CPU cores allocated to each process. Set the task count for MPI
+ranks, and use `cpus_per_task` when each rank needs several cores.
+
+### Overrides and debugging
+
+`--launcher NAME` overrides `manager.launch` for one invocation, including
+`--launcher process`:
+
+```console
+$ httk workflow run --workspace default --count 4 --launcher cluster
+```
 
 For a debugging pass, run exactly one manager in the current process:
 
@@ -82,17 +91,15 @@ For a debugging pass, run exactly one manager in the current process:
 $ httk workflow run --count 1 --inline --workspace default
 ```
 
-`--inline` is useful for seeing manager output directly and ignores the
-workspace launcher. `--detach` starts `process` managers detached and returns
-immediately. The same launch behavior applies on a login node, through a
-workspace addressed by a configured `machine_names` name, or when a remote
-invokes the manager on its owning machine; a remote supplies transport, while
-the target workspace's launcher starts the managers. Use `--launcher NAME` to
-override `manager.launch` for one invocation (including `--launcher process`):
+`--inline` shows manager output directly and ignores the workspace launcher.
+`--detach` starts `process` managers detached and returns immediately.
 
-```console
-$ httk workflow run --workspace default --count 4 --launcher cluster
-```
+Launch behaves the same on a login node, through a workspace addressed by a
+configured `machine_names` name, and when a remote invokes the manager on its
+owning machine: the remote supplies transport, and the target workspace's
+launcher starts the managers.
+
+### Generated files
 
 After submission, the Slurm template leaves its generated files below the
 workspace:
@@ -105,12 +112,12 @@ workspace:
 ```
 
 The batch script and scheduler output are launcher output. `managers.log` is
-the workspace-level manager log shared by managers attached to that workspace.
+the workspace-level log shared by all managers attached to the workspace.
 
 ## Several launchers
 
-Create separate profiles when, for example, CPU and GPU managers need
-different queues or reservations:
+Create separate profiles when, for example, CPU and GPU managers need different
+queues or reservations:
 
 ```console
 $ httk workflow launcher add --template slurm --global --set slurm.partition=cpu cpu
@@ -121,10 +128,10 @@ $ httk workflow run --workspace default --launcher gpu --count 2
 ```
 
 Settings in a launcher's `launcher.json` `settings` object take precedence over
-workspace settings with the same key. This lets `cpu` and `gpu` retain
-different scheduler values even when they start managers for the same
-workspace. `launcher list`, `launcher show [--json]`, and `launcher remove`
-inspect and manage the visible bundles.
+workspace settings with the same key, so `cpu` and `gpu` keep different
+scheduler values while starting managers for the same workspace. `launcher
+list`, `launcher show [--json]`, and `launcher remove` inspect and manage the
+visible bundles.
 
 ## From Python
 
@@ -174,11 +181,13 @@ result = start_managers(
 print(result)
 ```
 
-`add_launcher` creates the maintained template and `check_launcher` runs its
-environment check. Pass a `settings` mapping to `add_launcher`, or update an
-existing bundle with `configure_launcher`; the CLI equivalent is `httk workflow
-launcher configure --set KEY=VALUE NAME`. For local debugging, bypass launcher
-submission and run one manager in-process:
+`add_launcher` creates the bundle from the maintained template and
+`check_launcher` runs its environment check. Pass a `settings` mapping to
+`add_launcher`, or update an existing bundle with `configure_launcher` (the CLI
+equivalent is `httk workflow launcher configure --set KEY=VALUE NAME`).
+
+For local debugging, bypass launcher submission and run one manager
+in-process:
 
 ```python
 from httk.workflow import TaskManager, Workspace
@@ -192,16 +201,6 @@ print(census)
 ## Writing a launcher
 
 A custom launcher is a versioned bundle with `launcher.json` and an executable
-`launcher`. The executable answers two operations, `check` and `start`, each
-from one JSON request and with one JSON result. `check` verifies the launcher's
-local requirements; `start` receives the workspace path, complete manager
-argument vector, manager count, and separate `settings` (workspace) and
-`launcher_settings` (bundle) mappings. The packaged Slurm kind merges these
-with launcher precedence; custom launchers define their own merge. The engine refuses an
-unknown operation, malformed metadata or result, a non-executable dispatcher,
-missing required binary, non-zero dispatcher exit, or a result that does not
-confirm success. It also refuses a launcher that tries to take over remote
-transport: reaching a machine belongs to a remote adapter.
-
-The complete bundle layout, request and result documents, settings precedence,
-and refusal rules are in {doc}`launcher_authoring`.
+`launcher` that answers the `check` and `start` operations, each with one JSON
+request and one JSON result. {doc}`launcher_authoring` has the complete bundle
+layout, request and result documents, settings precedence, and refusal rules.

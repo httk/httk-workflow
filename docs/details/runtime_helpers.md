@@ -1,24 +1,24 @@
 # Native runner helpers in detail
 
-*For authors writing a workflow runner in Python.* The complete authoring
-surface, Python beside its Bash equivalent, is the table in {doc}`/sdks/sdk_parity`,
-which is normative and enforced by the test suite; this page teaches it.
+This page teaches the Python runner API. The complete authoring surface,
+Python beside its Bash equivalent, is the table in {doc}`/sdks/sdk_parity`,
+which is normative and enforced by the test suite.
 
-A native *httk₂* runner is one program that implements the steps of one workflow.
-The manager launches it once per attempt, tells it which step to run, and reads
-exactly one published outcome back. `Runner` registers the steps, and
-`Runner.main` dispatches the requested step to its handler with one `Attempt`
-object that carries everything the step may read, do, and publish.
+A native *httk₂* runner is one program that implements the steps of one
+workflow. The manager launches it once per attempt, tells it which step to
+run, and reads exactly one published outcome back. `Runner` registers the
+steps, and `Runner.main` dispatches the requested step to its handler with an
+`Attempt` object carrying everything the step may read, do, and publish.
 
-Nothing declares the shape of a workflow. A step decides *at run time* which
-children to spawn and which step runs next, so the graph of a job is whatever its
-steps published — one runner can drive a two-step relaxation and a large,
+Nothing declares the shape of a workflow. A step decides at run time which
+children to spawn and which step runs next, so a job's graph is whatever its
+steps published. One runner can drive a two-step relaxation or a large,
 partitioned child campaign without a graph definition anywhere.
 
 ## A complete runner
 
-This is a full defect campaign: it characterizes a structure, spawns one child
-job per candidate site, gathers them, and either reports or triages.
+This defect campaign characterizes a structure, spawns one child job per
+candidate site, gathers them, and either reports or triages.
 
 ```python
 #!/usr/bin/env python3
@@ -85,8 +85,8 @@ if __name__ == "__main__":
 ```
 
 The runner is a single file, and every child job runs the same file at a
-different step. Publish it once in the workspace and every job — parent and
-child — references those bytes by digest:
+different step. Publish it once in the workspace, and every job, parent and
+child, references those bytes by digest:
 
 ```console
 httk workflow runner publish --workspace workflow-workspace --name defects/run.py defects.py
@@ -114,20 +114,24 @@ workspace.submit("prepared-job", "project/si-vacancies")
 
 ## Steps and dispatch
 
-`Runner(workflow, inputs=...)` declares creation-time staged inputs as
-`name` → destination (or `null` for a hook-consumed input). The optional
-`inputs` member is included in the runner description when non-empty.
+### Registering steps
 
-`@run.step` registers the handler under the function's own name;
-`@run.step(name="collect-results")` names it explicitly. Registering the same
-name twice is an error at decoration time, so the step set is complete and
-unambiguous before any work starts. `run.steps` is that set.
+`Runner(workflow, inputs=...)` declares creation-time staged inputs as `name`
+→ destination, or `null` for a hook-consumed input. The optional `inputs`
+member appears in the runner description when non-empty.
 
-Because registration precedes work, every step name a handler *publishes* is
-checked against it at the call that names it: `a.advance("colect")` raises
-immediately, listing the registered steps, instead of failing the job one
-activation later. The same check covers `gather`, its `on_impossible` step, and
-the `step` of a `ChildSpec` that inherits this runner.
+`@run.step` registers the handler under the function's own name, and
+`@run.step(name="collect-results")` names it explicitly. Registering a name
+twice is an error at decoration time, so the step set, `run.steps`, is
+complete and unambiguous before any work starts.
+
+Every step name a handler publishes is therefore checked at the call that
+names it: `a.advance("colect")` raises immediately, listing the registered
+steps, instead of failing the job one activation later. The same check covers
+`gather`, its `on_impossible` step, and the `step` of a `ChildSpec` that
+inherits this runner.
+
+### How `Runner.main` ends
 
 `Runner.main` turns every ending into an outcome:
 
@@ -140,20 +144,26 @@ the `step` of a `ChildSpec` that inherits this runner.
 
 `HTTK_WORKFLOW_DESCRIBE=1` (or `--describe`) makes `main` print
 `{"format": "httk-workflow-runner-description", "format_version": 2, "workflow":
-..., "steps": [...]}` and exit without binding an attempt or touching anything,
-so a tool can enumerate the steps of a runner it is not running. The step set is
-also recorded in the job's state frame as `runner_steps`, from the first outcome
-the job publishes.
+..., "steps": [...]}` and exit without binding an attempt or touching
+anything, so a tool can list the steps of a runner it is not running. The
+step set is also recorded in the job's state frame as `runner_steps`, from the
+first outcome the job publishes.
 
 ### Creation-time instantiation
 
-There are two equivalent creation-time forms. For a Python runner,
-`@run.instantiate` is the in-process hook replacing v1's `ht.instantiate.py`.
-`new_job(s)` resolves it on the creating machine, after declared inputs are
-staged and before `job.json` is finalized. Its `InstantiateContext` provides the
-staging `payload`, read-only `inputs`, mutable caller-supplied `parameters`,
-the read-only declared `defaults` (applied after the hook to every parameter
-still absent), and caller `tag`; `suggest_tag` supplies a tag only when the caller did not. For example:
+There are two equivalent creation-time forms. In a Python runner,
+`@run.instantiate` is the in-process hook that replaces v1's
+`ht.instantiate.py`. `new_job(s)` runs it on the creating machine after
+declared inputs are staged and before `job.json` is finalized. Its
+`InstantiateContext` provides:
+
+- the staging `payload`;
+- read-only `inputs`;
+- mutable caller-supplied `parameters`;
+- read-only declared `defaults`, applied after the hook to every parameter
+  still absent;
+- the caller's `tag`, and `suggest_tag`, which supplies a tag only when the
+  caller did not.
 
 ```python
 @run.instantiate
@@ -163,19 +173,20 @@ def instantiate(ctx):
     ctx.suggest_tag("generated")
 ```
 
-The hook may write anywhere below `payload`. It is trusted workflow code: the
-file is code being published and executed anyway.
+The hook may write anywhere below `payload`. It is trusted workflow code,
+since the file is published and executed anyway.
 
 A directory package may instead name any executable member in
 `[workflow.instantiate].file`. The framework starts it in the staging payload,
 pre-serializes hook-consumed inputs, and sends the JSON
 `httk-workflow-instantiate` envelope on stdin. The executable returns
-`{"parameters": {...}}` and may return a string `tag`; nonzero exit or malformed
-output aborts submission. This form is language-neutral and has the same
+`{"parameters": {...}}` and may return a string `tag`; a nonzero exit or
+malformed output aborts submission. This language-neutral form has the same
 parameter, tag, payload, and input semantics as the Python hook: `parameters`
-holds only caller-supplied values and the declared defaults arrive separately
-(`defaults`, like `ctx.defaults`), applied after the hook. The complete
-envelope and serialization rules are normative in {doc}`workflow_packages`.
+holds only caller-supplied values, and the declared defaults arrive
+separately (`defaults`, like `ctx.defaults`) and are applied after the hook.
+{doc}`workflow_packages` holds the normative envelope and serialization
+rules.
 
 ## What an attempt reads
 
@@ -192,9 +203,11 @@ envelope and serialization rules are normative in {doc}`workflow_packages`.
 | `a.parent` | the job that spawned this one, located for reading its files in place; `None` for a root job |
 | `a.declaration(name)` | one workflow declaration: the observed document, else the declared one, else `None` |
 
-`a.state` is stored inside the payload, below `.httk-job/`, so it survives
-retries, step advances, and isolated workdirs, and it travels with a transferred
-job. The directory is excluded from every payload digest, so writing state never
+### Job state
+
+`a.state` is stored in the payload below `.httk-job/`, so it survives retries,
+step advances, and isolated workdirs, and travels with a transferred job. The
+directory is excluded from every payload digest, so writing state never
 disturbs an immutability check. Keys are strings, values are JSON, and every
 mutation is one atomic replace:
 
@@ -205,25 +218,30 @@ if a.state.get("converged"):
     ...
 ```
 
-`a.declare(name, document)` records what this job *observed* about its own
-workflow declaration, and `a.declaration(name)` reads one back — the observed
-document when the job wrote one, the document `job.json` declared otherwise. The
-document is a JSON object carried verbatim; nothing in *httk-workflow* looks
-inside it. It is written to `.httk-job/declarations/<name>.json`, atomically and
-digest-excluded like the rest of `.httk-job/`, and the last write of a name wins,
-because a dynamic campaign refines what it declares as it learns it:
+### Declarations
+
+`a.declare(name, document)` records what this job observed about its own
+workflow declaration. `a.declaration(name)` reads one back: the observed
+document when the job wrote one, otherwise the document `job.json` declared.
+The document is a JSON object carried verbatim; *httk-workflow* never looks
+inside it. It is written atomically to `.httk-job/declarations/<name>.json`,
+digest-excluded like the rest of `.httk-job/`. The last write of a name wins,
+because a dynamic campaign refines its declaration as it learns:
 
 ```python
 a.declare("workflow", {**a.declaration("workflow"), "outputs": {"structures": 3}})
 ```
 
-See {doc}`/details/declarations` for the declared/observed contract and what a collect
-reports.
+See {doc}`/details/declarations` for the declared/observed contract and what a
+collect reports.
 
-`a.children` is empty unless this activation followed a `gather`. Every child is
-a frozen `ChildResult` with its `label`, `job_id`, `job_key`, terminal `kind`,
-its published `failure` as the canonical `Failure`, and absolute `payload`,
-`workdir`, and `data` paths, so reading a child's results is a plain file read:
+### Children
+
+`a.children` is empty unless this activation followed a `gather`. Each child
+is a frozen `ChildResult` with its `label`, `job_id`, `job_key`, terminal
+`kind`, its published `failure` as the canonical `Failure`, and absolute
+`payload`, `workdir`, and `data` paths, so reading a child's results is a
+plain file read:
 
 ```python
 for child in a.children.succeeded:
@@ -233,13 +251,15 @@ reference = a.children["site-0"]           # by label
 codes = [child.failure.code for child in a.children.failed]
 ```
 
-A new activation reached by `advance` observes no children, which is why
+An activation reached by `advance` observes no children, which is why
 `aggregate` above hands what it learned to `triage` through `a.state`.
 
-`a.parent` is the other direction: a frozen `ParentJob` naming the job that
+### Parent
+
+`a.parent` is the other direction: a frozen `ParentJob` for the job that
 spawned this one, with its `job_id`, `job_key`, `placement`, and absolute
 `payload` and `workdir` paths, located from the `parent` member of this job's
-`job.json`. `workdir` is `None` when the parent uses isolated workdirs, and
+`job.json`. `workdir` is `None` when the parent uses isolated workdirs.
 `a.parent` itself is `None` for a root job and for a child whose parent is not
 reachable in this workspace:
 
@@ -250,19 +270,18 @@ if parent is not None and parent.workdir is not None:
 ```
 
 It raises `FormatError` when this job's `parent` member or the parent's
-`job.json` is malformed, which is corruption rather than absence.
-
-When to read a parent's files in place instead of copying them into the child,
-and the rules that keep it safe, are in the "Sharing files with children"
-section of {doc}`/details/composing_workflows`.
+`job.json` is malformed, which is corruption rather than absence. When to read
+a parent's files in place instead of copying them into the child, and the
+rules that keep it safe, are in the "Sharing files with children" section of
+{doc}`/details/composing_workflows`.
 
 ## What an attempt publishes
 
-Exactly one outcome per attempt. `spawn`, `put`, and `remove` accumulate in one
-implicit draft below the attempt control directory, and the draft has no effect
-until a terminal call publishes it with a single atomic rename. A second
-terminal call raises, and a draft left by a handler that raises is discarded, so
-no half-outcome ever reaches the manager.
+Each attempt publishes exactly one outcome. `spawn`, `put`, and `remove`
+accumulate in one implicit draft below the attempt control directory. The
+draft has no effect until a terminal call publishes it with a single atomic
+rename. A second terminal call raises, and the draft of a handler that raises
+is discarded, so no half-outcome reaches the manager.
 
 | Call | Meaning |
 | --- | --- |
@@ -273,35 +292,35 @@ no half-outcome ever reaches the manager.
 | `a.pause(reason)` | stop until an operator resumes the job |
 | `a.fail(code, message, details=..., retryable=...)` | the canonical failure record |
 
-`fail` publishes the one canonical failure object,
-`{"code", "message", "details", "retryable"}`, which is also what the Bash
-bridge and the manager itself publish. `code` is the string a job lists in
-`retry_on`; `retryable` declares that repeating the attempt could help, which the
-manager honours within the job's budgets. A malformed failure is recorded by the
-manager as `protocol_error`.
+`fail` publishes the canonical failure object
+`{"code", "message", "details", "retryable"}`, the same one the Bash bridge
+and the manager publish. `code` is the string a job lists in `retry_on`.
+`retryable` declares that repeating the attempt could help, which the manager
+honours within the job's budgets. The manager records a malformed failure as
+`protocol_error`.
 
 ### Spawning children
 
-`a.spawn(child, label=..., placement=...)` registers one child job, to be
-created when the outcome is published. The label is mandatory and unique within
-one attempt: it is how `gather` and `a.children` name that child later. It also
-becomes the child's job tag by default, so its payload directory is readable at a
-glance.
+`a.spawn(child, label=..., placement=...)` registers one child job, created
+when the outcome is published. The label is mandatory and unique within one
+attempt; `gather` and `a.children` use it to name the child. It is also the
+child's default job tag, so its payload directory is readable at a glance.
+`placement` defaults to the placement of the spawning job.
 
-A `ChildSpec` needs no prepared payload at all. It synthesizes a complete
-`job.json` from the step and parameters the child starts with, and everything else
-follows the spawning job: workflow, claim pool, priority, resources, and runner.
-`RunnerRef.inherit()` — the default — copies the parent's own `(source, path,
-sha256)`, which is what a campaign whose steps all live in one published runner
-wants; `RunnerRef.workspace(path, sha256)` and `RunnerRef.installed(path,
-sha256)` name another shared runner. A payload runner cannot be inherited,
-because a synthesized child has no payload to copy it into: publish it with
-`Workspace.publish_runner`, or spawn a prepared payload directory
-instead:
+A `ChildSpec` needs no prepared payload. It synthesizes a complete `job.json`
+from the child's starting step and parameters, and everything else follows
+the spawning job: workflow, claim pool, priority, resources, and runner. The
+default, `RunnerRef.inherit()`, copies the parent's own
+`(source, path, sha256)`, which suits a campaign whose steps all live in one
+published runner. `RunnerRef.workspace(path, sha256)` and
+`RunnerRef.installed(path, sha256)` name another shared runner. Shared
+runners execute from their published file or tree, and compiled package
+runners use the manager-provided `HTTK_WORKFLOW_RUNNER_ARTIFACTS` directory
+for registered build outputs.
 
-Shared runners execute from their published file or tree. Compiled package
-runners use the manager-provided `HTTK_WORKFLOW_RUNNER_ARTIFACTS` directory for
-registered build outputs.
+A payload runner cannot be inherited, because a synthesized child has no
+payload to copy it into. Publish it with `Workspace.publish_runner`, or spawn
+a prepared payload directory instead:
 
 ```python
 prepare_job_payload(
@@ -311,17 +330,15 @@ prepare_job_payload(
 a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 ```
 
-`placement` defaults to the placement of the spawning job.
-
 ### Calling another workflow
 
-`a.call(workflow, label=..., files=..., ...)` spawns a *different* registered
-workflow as a child job. Where `spawn` runs a step of this same runner, `call`
-scaffolds a complete child payload for `workflow` — resolved exactly as
-`new_job` resolves it (a registered id or alias, a git URI or the short name of
-an installed workflow like `"vasp.relax"`, a runner file of your own, a package directory, or a language document) — stages its
-`files` and `inputs`, and registers it as a child, so the child runs that
-workflow's own runner:
+`a.call(workflow, label=..., files=..., ...)` spawns a different workflow as a
+child job, which runs that workflow's own runner rather than a step of this
+one. `workflow` is resolved as `new_job` resolves it: a registered id or
+alias, a git URI or the short name of an installed workflow like
+`"vasp.relax"`, a runner file of your own, a package directory, or a language
+document. `call` scaffolds a complete child payload, stages its `files` and
+`inputs`, and registers it as a child:
 
 ```python
 a.call("vasp.relax", label="relax", files={"POSCAR": path})
@@ -336,32 +353,32 @@ def after_relax(a):
 ```
 
 A packaged workflow is referenced through `pkg:` and copies nothing; a runner
-file of your own is published into the workspace runner store (content-addressed,
-idempotent). Calling needs the workspace root reachable from the step, the same
-condition `a.children` needs. See {doc}`composing_workflows` for the full
-model, a worked example, failure semantics, and how results move between calls.
+file of your own is published into the content-addressed, idempotent
+workspace runner store. Calling needs the workspace root reachable from the
+step, as `a.children` does. {doc}`composing_workflows` covers the full model,
+a worked example, failure semantics, and how results move between calls.
 
-### Gathering them
+### Gathering children
 
-`a.gather(step)` joins the children spawned on this attempt and can add children
-from earlier activations by label with `rejoin=(...)`. It runs `step` when the
-condition holds. `when` is `all_succeeded` (the default), `all_terminal`,
-`any_succeeded`, `any_terminal`, or `at_least` with `count`. When the condition
-can no longer be met the job advances to `on_impossible` if one is named, and
-fails with `dependency_failure` otherwise. A named child the manager cannot
-resolve fails the parent with `dependency_failure` once its grace expires,
-rather than waiting forever.
+`a.gather(step)` joins the children spawned on this attempt, plus children
+from earlier activations named by label in `rejoin=(...)`, and runs `step`
+when the condition holds. `when` is `all_succeeded` (the default),
+`all_terminal`, `any_succeeded`, `any_terminal`, or `at_least` with `count`.
+When the condition can no longer be met, the job advances to `on_impossible`
+if one is named and otherwise fails with `dependency_failure`. A named child
+the manager cannot resolve fails the parent with `dependency_failure` once its
+grace expires, rather than waiting forever.
 
 ### Data and workdir changes
 
-For a job with `data_mode="transactional"`, `a.put(source, destination)` stages a
-file or a directory and `a.remove(destination, missing_ok=...)` stages a removal.
-The manager applies them exactly once when it commits the outcome. A `put`
-overwrites its destination whether the source is a file or a directory: when the
-destination already exists in the committed data, a directory put replaces that
-tree, so a step that advances back onto a step and re-puts the same tree
-succeeds rather than failing. Operation identifiers are generated in call order
-(`op-0001`, `op-0002`, …), so replaying the same step produces the same manifest:
+For a job with `data_mode="transactional"`, `a.put(source, destination)`
+stages a file or directory and `a.remove(destination, missing_ok=...)` stages
+a removal. The manager applies them exactly once when it commits the outcome.
+A `put` overwrites its destination whether the source is a file or a
+directory: a directory put replaces an existing tree in the committed data, so
+a step that advances back onto a step and re-puts the same tree succeeds.
+Operation identifiers are generated in call order (`op-0001`, `op-0002`, …),
+so replaying a step produces the same manifest:
 
 ```python
 a.put(a.workdir / "energy.json", "results/energy.json")
@@ -370,33 +387,37 @@ a.remove("scratch", missing_ok=True)
 a.succeed()
 ```
 
-`a.workdir_batch()` groups changes to the *workdir* into a sealed batch that is
-replayed idempotently: `Attempt.initialize`, and therefore every dispatch through
+`a.workdir_batch()` groups changes to the workdir into a sealed batch that is
+replayed idempotently. `Attempt.initialize`, and so every dispatch through
 `Runner.main`, completes any batch an interrupted attempt sealed but did not
 apply.
 
-`a.run(argv, timeout=...)` runs an argv array in the workdir and terminates its
-whole process group on timeout. `ProcessSupervisor` adds streamed stdout/stderr
-and followed-file monitoring, process-group timeout handling, and versioned
-executable checkers; a checker receives `httk-workflow-checker-event` version 2
-JSON lines and emits `httk-workflow-checker-result` version 2 JSON lines.
-Commands and checker commands are always argument arrays: this API deliberately
-does not reproduce the *httk* v1 exit-code and `ht.nextstep` interface.
+### Running processes
+
+`a.run(argv, timeout=...)` runs an argv array in the workdir and terminates
+its whole process group on timeout. `ProcessSupervisor` adds streamed
+stdout/stderr, followed-file monitoring, process-group timeout handling, and
+versioned executable checkers. A checker receives
+`httk-workflow-checker-event` version 2 JSON lines and emits
+`httk-workflow-checker-result` version 2 JSON lines. Commands and checker
+commands are always argument arrays; the API does not reproduce the *httk* v1
+exit-code and `ht.nextstep` interface.
 
 Native Bash runners use the same protocol through {doc}`/sdks/bash_api`.
 
 ## Simulation-code helpers
 
 *httk-workflow* bundles no helpers for a particular simulation code. The VASP
-helpers — input preparation, supervised execution, structured diagnosis, and the
-explicit remedy ladder — live in the separate *httk-workflow-vasp* distribution
-(`pip install httk-workflow-vasp`) as `httk.codes.vasp`, documented there; see
-{doc}`/code_support` for how such a distribution plugs in, and {doc}`/vasp_runners`
-for the ready-made workflows built on it. The native runtime and supervision
-modules above are independent *httk₂* interfaces that use only the Python
-standard library and other `httk.workflow` modules.
+helpers (input preparation, supervised execution, structured diagnosis, and
+the explicit remedy ladder) live in the separate *httk-workflow-vasp*
+distribution (`pip install httk-workflow-vasp`) as `httk.codes.vasp`,
+documented there. See {doc}`/code_support` for how such a distribution plugs
+in, and {doc}`/vasp_runners` for the ready-made workflows built on it. The
+native runtime and supervision modules above are independent *httk₂*
+interfaces that use only the Python standard library and other
+`httk.workflow` modules.
 
-For unchanged *httk* v1 `ht_steps`, continue sourcing the exact historic filenames
-under `$HTTK_DIR/Execution/tasks/`. Those are thin redirects to the attributed
+For unchanged *httk* v1 `ht_steps`, keep sourcing the historic filenames
+under `$HTTK_DIR/Execution/tasks/`. They are thin redirects to the attributed
 compatibility implementation described in [*httk* v1 task
 compatibility](v1_compatibility.md).
