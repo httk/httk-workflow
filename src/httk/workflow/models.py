@@ -1157,6 +1157,7 @@ class StateFrame:
         total_attempts: int = _UNSET,
         data_generation: int | None = _UNSET,
         resources: Mapping[str, int] | None = _UNSET,
+        reservation: Mapping[str, int] = _UNSET,
         join_summary: Sequence[object] | None = _UNSET,
         runner_steps: Sequence[str] = _UNSET,
         manager_id: str = _UNSET,
@@ -1207,6 +1208,7 @@ class StateFrame:
         :param total_attempts: The total attempt count.
         :param data_generation: The transactional data generation.
         :param resources: The dynamic requirement of this activation.
+        :param reservation: The effective requirement this manager reserved for the attempt, fair share included.
         :param join_summary: The children observed by the activation.
         :param runner_steps: The runner's registered step names.
         :param manager_id: The owning manager identifier.
@@ -1252,6 +1254,7 @@ class StateFrame:
             ("total_attempts", total_attempts),
             ("data_generation", data_generation),
             ("resources", resources),
+            ("reservation", reservation),
             ("join_summary", join_summary),
             ("runner_steps", runner_steps),
             ("manager_id", manager_id),
@@ -1368,6 +1371,12 @@ class StateFrame:
         """Return the validated dynamic resource requirement, when present."""
         value = self.members.get("resources")
         return None if value is None else validate_resources(value, "state.resources")
+
+    @property
+    def reservation(self) -> dict[str, int] | None:
+        """Return the validated effective requirement reserved for the attempt, when present."""
+        value = self.members.get("reservation")
+        return None if value is None else validate_resources(value, "state.reservation")
 
     @property
     def join_summary(self) -> object:

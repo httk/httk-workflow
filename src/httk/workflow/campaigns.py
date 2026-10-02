@@ -347,11 +347,13 @@ def campaign_managers(
     """
 
     from .adapters import resolve_remote, run_adapter
+    from .workflow_cli._manager import manager_option_defaults
 
     try:
         manager_resources = validate_resources({} if resources is None else resources, "manager.resources")
     except FormatError as exc:
         raise ValueError(str(exc)) from exc
+    worker_resource = [[resource, str(capacity)] for resource, capacity in manager_resources.items()]
     config = read_campaign(project)
     report: list[dict[str, object]] = []
     for partition in _selected(config, partitions):
@@ -362,32 +364,16 @@ def campaign_managers(
             from .workflow_cli._manager import launch_workspace_managers
 
             options = argparse.Namespace(
-                pool=[],
-                capability=[],
-                placement_prefix=[],
-                workers=workers,
-                worker_resource=[[resource, str(capacity)] for resource, capacity in manager_resources.items()],
-                count=count,
-                launcher=launcher,
-                lease_seconds=None,
-                heartbeat_interval=30.0,
-                poll_interval=poll_interval,
-                join_grace_seconds=3600.0,
-                idle=False,
-                idle_timeout=idle_timeout,
-                unsafe_persistent_takeover=False,
-                unsafe_isolated_takeover=False,
-                takeover_grace_factor=2.0,
-                runner_search_path=[],
-                drain_timeout=30.0,
-                gc_interval=None,
-                log_level=None,
-                log_file=None,
-                json_logs=False,
-                adapter_timeout=adapter_timeout,
-                inline=False,
-                detach=False,
-                no_durable=False,
+                **{
+                    **manager_option_defaults(),
+                    "workers": workers,
+                    "worker_resource": worker_resource,
+                    "count": count,
+                    "launcher": launcher,
+                    "poll_interval": poll_interval,
+                    "idle_timeout": idle_timeout,
+                    "adapter_timeout": adapter_timeout,
+                }
             )
             mode, result = launch_workspace_managers(
                 Path(binding.path), options, CLIContext("httk", Path(project) if project is not None else Path.cwd())
@@ -397,29 +383,15 @@ def campaign_managers(
             target = resolve_remote(binding.remote, project=project)
             remote_name = binding.name.split(":", 1)[1]
             options = argparse.Namespace(
-                pool=[],
-                capability=[],
-                placement_prefix=[],
-                workers=workers,
-                worker_resource=[[resource, str(capacity)] for resource, capacity in manager_resources.items()],
-                count=count,
-                launcher=launcher,
-                lease_seconds=None,
-                heartbeat_interval=30.0,
-                poll_interval=poll_interval,
-                join_grace_seconds=3600.0,
-                idle=False,
-                idle_timeout=idle_timeout,
-                unsafe_persistent_takeover=False,
-                unsafe_isolated_takeover=False,
-                takeover_grace_factor=2.0,
-                runner_search_path=[],
-                drain_timeout=30.0,
-                gc_interval=None,
-                log_level=None,
-                log_file=None,
-                json_logs=False,
-                no_durable=False,
+                **{
+                    **manager_option_defaults(),
+                    "workers": workers,
+                    "worker_resource": worker_resource,
+                    "count": count,
+                    "launcher": launcher,
+                    "poll_interval": poll_interval,
+                    "idle_timeout": idle_timeout,
+                }
             )
             from .workflow_cli._manager import _remote_manager_argv
 

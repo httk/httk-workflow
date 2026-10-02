@@ -2257,7 +2257,7 @@ def _attempt_contexts(workspace: Workspace, job_id: str) -> list[dict[str, objec
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     return [
-        {"step": frame.get("step"), "resources": frame.get("resources", {})}
+        {"step": frame.get("step"), "resources": frame.get("reservation", {})}
         for frame in job_frames(workspace, marker)
         if frame.get("kind") == "claimed"
     ]
@@ -2431,3 +2431,49 @@ os.rename(temporary, control / "outcome.ready")
         manager.run_until_idle(timeout=30.0)
         contexts = [context for context in _attempt_contexts(workspace, job_id) if context["step"] == "retry"]
     assert [context["resources"] for context in contexts] == [{"procs": 3}, {"procs": 3}]
+
+
+def test_released_or_retried_claim_is_not_pinned_to_fair_share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.introspection._reading import job_frames
+
+    runner = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+base = {"format": "httk-workflow-outcome", "format_version": 2,
+        "job_id": context["job_id"], "activation_id": context["activation_id"],
+        "attempt_id": context["attempt_id"]}
+if context["attempt_ordinal"] == 1:
+    outcome = {**base, "action": "fail", "failure": {"code": "temporary", "message": "try again", "retryable": True}}
+else:
+    outcome = {**base, "action": "succeed"}
+(temporary / "outcome.json").write_text(json.dumps(outcome))
+os.rename(temporary, control / "outcome.ready")
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", runner, tag="unpinned")
+    workspace.submit(payload, "project/unpinned")
+    with TaskManager(workspace, resources={"procs": 4}, maximum_workers=2, heartbeat_interval=0.01) as manager:
+        _drive_until(workspace, manager, job_id, {"claimed", "running"})
+        # Stop claiming so the retry is left ready for the smaller manager.
+        monkeypatch.setattr(manager, "_claim_pass", lambda changed: changed)
+        marker = _drive_until(workspace, manager, job_id, {"ready"})
+    between = job_frames(workspace, marker)[-1]
+    assert between.get("attempt_ordinal") == 1
+    assert between.get("resources") is None
+    assert "reservation" not in between
+    with TaskManager(workspace, resources={"procs": 1}, maximum_workers=1, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+    assert workspace.find_marker_by_id(job_id).kind == "succeeded"  # type: ignore[union-attr]
+    assert [context["resources"] for context in _attempt_contexts(workspace, job_id)] == [{"procs": 2}, {"procs": 1}]
+    frames = job_frames(workspace, workspace.find_marker_by_id(job_id))  # type: ignore[arg-type]
+    assert [frame.get("reservation") for frame in frames if frame.get("kind") == "running"] == [
+        {"procs": 2},
+        {"procs": 1},
+    ]
+    assert all(frame.get("resources") is None for frame in frames)

@@ -264,3 +264,25 @@ def test_process_launcher_is_available_for_detached_managers(tmp_path: Path, mon
     )
     assert result["pids"] == [1, 2]
     assert len(captured) == 2
+
+
+def test_manager_option_defaults_match_the_parsers_and_cover_the_argv_tail(tmp_path: Path) -> None:
+    import argparse
+    import inspect
+    import re
+
+    from httk.core.cli import CLIContext
+
+    from httk.workflow import workflow_cli
+
+    parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
+    defaults = _manager.manager_option_defaults()
+    for argv in (["manager", "run"], ["run"]):
+        parsed = vars(parser.parse_args(argv))
+        assert {name: parsed[name] for name in defaults} == defaults
+    tail = _manager.manager_argv_tail(argparse.Namespace(**defaults))
+    assert tail == [] == _manager.manager_argv_tail(parser.parse_args(["manager", "run"]))
+    source = inspect.getsource(_manager.manager_argv_tail)
+    read = set(re.findall(r'(?:getattr\(arguments, |changed\()"(\w+)"', source))
+    # The durability switches default to argparse.SUPPRESS; absent reads as false.
+    assert read - {"durable", "no_durable"} <= set(defaults)

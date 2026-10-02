@@ -106,6 +106,14 @@ def test_state_frame_resources_accessor_validates_and_round_trips() -> None:
         assert value is None
 
 
+def test_state_frame_reservation_validates_and_is_not_carried() -> None:
+    frame = StateFrame.replace(resources={"procs": 1}, reservation={"procs": 2})
+    assert frame.reservation == {"procs": 2}
+    assert frame.carried().as_mapping() == {"resources": {"procs": 1}}
+    with pytest.raises(FormatError, match=r"state\.reservation"):
+        _ = StateFrame({"reservation": {"procs": -1}}).reservation
+
+
 def test_a_bare_pwd_document_is_synthesized_with_a_declaration(tmp_path: Path) -> None:
     document = tmp_path / "flow.json"
     document.write_text(

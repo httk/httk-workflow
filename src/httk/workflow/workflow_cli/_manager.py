@@ -168,6 +168,47 @@ def _add_worker_resource_argument(parser: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 
 
+def manager_option_defaults() -> dict[str, object]:
+    """Return the default value of every manager option, freshly built.
+
+    The manager parsers, :func:`manager_argv_tail` and every caller that builds
+    a manager namespace by hand take their defaults from here. The durability
+    switches are absent on purpose: they default to ``argparse.SUPPRESS`` (see
+    :func:`add_durability_arguments`), and an absent switch reads as false.
+
+    :return: The option defaults keyed by ``argparse`` destination.
+    """
+
+    return {
+        "pool": [],
+        "capability": [],
+        "placement_prefix": [],
+        "workers": None,
+        "worker_resource": [],
+        "count": None,
+        "launcher": None,
+        "inline": False,
+        "detach": False,
+        "by_path": False,
+        "adapter_timeout": None,
+        "lease_seconds": None,
+        "heartbeat_interval": 30.0,
+        "poll_interval": 1.0,
+        "idle": False,
+        "idle_timeout": 3600.0,
+        "join_grace_seconds": 3600.0,
+        "unsafe_persistent_takeover": False,
+        "unsafe_isolated_takeover": False,
+        "takeover_grace_factor": DEFAULT_TAKEOVER_GRACE_FACTOR,
+        "runner_search_path": [],
+        "drain_timeout": 30.0,
+        "gc_interval": None,
+        "log_level": None,
+        "log_file": None,
+        "json_logs": False,
+    }
+
+
 def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`manager run`."""
 
@@ -179,14 +220,12 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pool",
         action="append",
-        default=[],
         metavar="POOL",
         help="claim only jobs of this pool (repeatable, default: default)",
     )
     parser.add_argument(
         "--count",
         type=int,
-        default=None,
         metavar="COUNT",
         help="managers to start (default: the workspace's manager.count, or 1)",
     )
@@ -195,14 +234,12 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--capability",
         action="append",
-        default=[],
         metavar="CAPABILITY",
         help="advertise this capability to the scheduler (repeatable)",
     )
     parser.add_argument(
         "--placement-prefix",
         action="append",
-        default=[],
         metavar="PREFIX",
         help=(
             "restrict every scheduling scan to jobs at or below this placement subtree "
@@ -225,14 +262,12 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--heartbeat-interval",
         type=float,
-        default=30.0,
         metavar="SECONDS",
         help="how often this manager refreshes its lease (default: 30)",
     )
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=1.0,
         metavar="SECONDS",
         help="how often this manager looks for work (default: 1)",
     )
@@ -244,14 +279,12 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--idle-timeout",
         type=float,
-        default=3600.0,
         metavar="SECONDS",
         help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
     )
     parser.add_argument(
         "--join-grace-seconds",
         type=float,
-        default=3600.0,
         metavar="SECONDS",
         help=(
             "how long a waiting job tolerates an unresolvable join child before it fails; measured from when a "
@@ -271,21 +304,18 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--takeover-grace-factor",
         type=float,
-        default=DEFAULT_TAKEOVER_GRACE_FACTOR,
         metavar="FACTOR",
         help="multiples of the lease a silent attempt is left alone before it may be taken over (default: 2.0)",
     )
     parser.add_argument(
         "--runner-search-path",
         action="append",
-        default=[],
         metavar="DIRECTORY",
         help="ordered root for jobs whose runner.source is installed (repeatable)",
     )
     parser.add_argument(
         "--drain-timeout",
         type=float,
-        default=30.0,
         metavar="SECONDS",
         help="seconds to keep committing outcomes after a stop signal (default: 30)",
     )
@@ -321,6 +351,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     _add_launcher_argument(parser)
     add_durability_arguments(parser)
+    parser.set_defaults(**manager_option_defaults())
 
 
 def add_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -334,21 +365,18 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pool",
         action="append",
-        default=[],
         metavar="POOL",
         help="claim only jobs of this pool (repeatable, default: default)",
     )
     parser.add_argument(
         "--capability",
         action="append",
-        default=[],
         metavar="CAPABILITY",
         help="advertise this capability to the scheduler, so capability-gated jobs become claimable (repeatable)",
     )
     parser.add_argument(
         "--placement-prefix",
         action="append",
-        default=[],
         metavar="PREFIX",
         help="restrict every scheduling scan to jobs at or below this placement subtree (repeatable)",
     )
@@ -356,7 +384,6 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--idle-timeout",
         type=float,
-        default=3600.0,
         metavar="SECONDS",
         help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
     )
@@ -371,7 +398,6 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--count",
         type=int,
-        default=None,
         metavar="COUNT",
         help="managers to start (default: the workspace's manager.count, or 1)",
     )
@@ -396,21 +422,18 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--heartbeat-interval",
         type=float,
-        default=30.0,
         metavar="SECONDS",
         help="how often this manager refreshes its lease (default: 30)",
     )
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=1.0,
         metavar="SECONDS",
         help="how often this manager looks for work (default: 1)",
     )
     parser.add_argument(
         "--join-grace-seconds",
         type=float,
-        default=3600.0,
         metavar="SECONDS",
         help="how long a waiting job tolerates an unresolvable join child (default: 3600)",
     )
@@ -425,21 +448,18 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--takeover-grace-factor",
         type=float,
-        default=DEFAULT_TAKEOVER_GRACE_FACTOR,
         metavar="FACTOR",
         help="multiples of the lease before a silent attempt may be taken over (default: 2.0)",
     )
     parser.add_argument(
         "--runner-search-path",
         action="append",
-        default=[],
         metavar="DIRECTORY",
         help="ordered root for installed runners (repeatable)",
     )
     parser.add_argument(
         "--drain-timeout",
         type=float,
-        default=30.0,
         metavar="SECONDS",
         help="seconds to keep committing outcomes after a stop signal (default: 30)",
     )
@@ -447,26 +467,16 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-file", metavar="PATH", help="manager log file")
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     add_durability_arguments(parser)
-    parser.set_defaults(
-        handler=handle_manager_run,
-        by_path=False,
-        lease_seconds=None,
-        heartbeat_interval=30.0,
-        poll_interval=1.0,
-        join_grace_seconds=3600.0,
-        unsafe_persistent_takeover=False,
-        unsafe_isolated_takeover=False,
-        takeover_grace_factor=DEFAULT_TAKEOVER_GRACE_FACTOR,
-        runner_search_path=[],
-        drain_timeout=30.0,
-        log_file=None,
-        json_logs=False,
-        gc_interval=None,
-    )
+    parser.set_defaults(handler=handle_manager_run, **manager_option_defaults())
 
 
 def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
     """Serialize the non-default manager options shared by every launch path."""
+
+    defaults = manager_option_defaults()
+
+    def changed(name: str) -> bool:
+        return getattr(arguments, name, defaults[name]) != defaults[name]
 
     argv: list[str] = []
     for pool in getattr(arguments, "pool", []):
@@ -477,11 +487,11 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--placement-prefix", prefix]
     if getattr(arguments, "lease_seconds", None) is not None:
         argv += ["--lease-seconds", str(arguments.lease_seconds)]
-    if getattr(arguments, "heartbeat_interval", 30.0) != 30.0:
+    if changed("heartbeat_interval"):
         argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
-    if getattr(arguments, "poll_interval", 1.0) != 1.0:
+    if changed("poll_interval"):
         argv += ["--poll-interval", str(arguments.poll_interval)]
-    if getattr(arguments, "join_grace_seconds", 3600.0) != 3600.0:
+    if changed("join_grace_seconds"):
         argv += ["--join-grace-seconds", str(arguments.join_grace_seconds)]
     workers = getattr(arguments, "workers", None)
     if workers is not None:
@@ -492,17 +502,17 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--worker-resource", name, str(count)]
     if getattr(arguments, "idle", False):
         argv.append("--idle")
-    elif getattr(arguments, "idle_timeout", 3600.0) != 3600.0:
+    elif changed("idle_timeout"):
         argv += ["--idle-timeout", str(arguments.idle_timeout)]
     if getattr(arguments, "unsafe_persistent_takeover", False):
         argv.append("--unsafe-persistent-takeover")
     if getattr(arguments, "unsafe_isolated_takeover", False):
         argv.append("--unsafe-isolated-takeover")
-    if getattr(arguments, "takeover_grace_factor", DEFAULT_TAKEOVER_GRACE_FACTOR) != DEFAULT_TAKEOVER_GRACE_FACTOR:
+    if changed("takeover_grace_factor"):
         argv += ["--takeover-grace-factor", str(arguments.takeover_grace_factor)]
     for path in getattr(arguments, "runner_search_path", []):
         argv += ["--runner-search-path", path]
-    if getattr(arguments, "drain_timeout", 30.0) != 30.0:
+    if changed("drain_timeout"):
         argv += ["--drain-timeout", str(arguments.drain_timeout)]
     if getattr(arguments, "gc_interval", None) is not None:
         argv += ["--gc-interval", str(arguments.gc_interval)]

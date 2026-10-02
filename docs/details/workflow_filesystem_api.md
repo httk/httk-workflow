@@ -786,6 +786,9 @@ State frames have this shape; `resources` is absent until an outcome sets it:
 - `resources` is the validated dynamic resource requirement of the current
   activation. It carries across that activation's attempts; a new activation
   replaces it with its own selected requirement.
+- `reservation` (claimed and running frames) is the effective requirement the
+  owning manager reserved for the attempt, fair share included; it is not
+  carried into later attempts or activations.
 - `pause_requested` is added by an in-flight operator pause, carried to the
   next attempt boundary, and consumed when the job enters `paused`; a terminal
   outcome supersedes it.
@@ -1303,7 +1306,8 @@ The claimed frame names:
 - input data generation when transactional data are enabled;
 - lease duration and start time;
 - matched pool and capabilities;
-- resource allocation;
+- the resource `reservation`, the effective requirement including the
+  manager's fair share (the running frame repeats it);
 - preceding record reference.
 
 ### Launching an attempt

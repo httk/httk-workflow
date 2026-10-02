@@ -14,6 +14,7 @@ from ..workflow_cli import (
     submit_remote_manager_result,
 )
 from ..workflow_cli._job import _resolve_request_identity
+from ..workflow_cli._manager import manager_option_defaults
 from ..workspace import Workspace
 from .data import WorkspaceView
 
@@ -87,34 +88,14 @@ def start_managers(view: WorkspaceView, count: int, launcher: str | None = None)
     if view.context is None:
         raise ValueError("a CLI context is required for monitor actions")
     arguments = Namespace(
-        workspace=view.name,
-        count=count,
-        launcher=launcher,
-        detach=True,
-        inline=False,
-        by_path=False,
-        pool=[],
-        capability=[],
-        placement_prefix=[],
-        workers=None,
-        worker_resource=[],
-        lease_seconds=None,
-        heartbeat_interval=30.0,
-        poll_interval=1.0,
-        idle=False,
-        idle_timeout=3600.0,
-        drain_timeout=30.0,
-        join_grace_seconds=3600.0,
-        unsafe_persistent_takeover=False,
-        unsafe_isolated_takeover=False,
-        runner_search_path=[],
-        gc_interval=None,
-        log_level=None,
-        log_file=None,
-        json_logs=False,
-        adapter_timeout=view.adapter_timeout,
-        durable=False,
-        no_durable=False,
+        **{
+            **manager_option_defaults(),
+            "workspace": view.name,
+            "count": count,
+            "launcher": launcher,
+            "detach": True,
+            "adapter_timeout": view.adapter_timeout,
+        }
     )
     if view.remote:
         status, _stdout, _stderr = submit_remote_manager_result(view.binding, arguments, view.context)

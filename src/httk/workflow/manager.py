@@ -1464,6 +1464,10 @@ class TaskManager:
             )
             return True
         attempt_id = str(uuid.uuid4())
+        # The carried ``resources`` keep only the dynamic requirement an outcome
+        # declared. The effective requirement, with this manager's fair share,
+        # is recorded as the non-carried ``reservation``, so a retry or released
+        # claim is not pinned to this manager's capacity.
         requirement = _manager_scheduling.effective_requirement(job, state, self.resources, self.maximum_workers)
         claimed = self._transition(
             marker,
@@ -1477,7 +1481,7 @@ class TaskManager:
                 attempt_control=f"{ATTEMPTS_DIRECTORY}/{attempt_id}",
                 attempt_ordinal=attempt_ordinal,
                 total_attempts=total_attempts,
-                resources=dict(requirement),
+                reservation=dict(requirement),
                 lease_seconds=self.lease_seconds,
                 matched_pool=job.claim_pool,
                 matched_capabilities=sorted(job.required_capabilities),
@@ -1603,8 +1607,8 @@ class TaskManager:
         workdir.mkdir(parents=True, exist_ok=True)
         settings = self.workspace.read_settings()
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
-        # The ready-to-claimed rename preserves the activation frame. The
-        # claimed frame is authoritative for the reservation.
+        # Same manager and inputs as the claim, so this equals the claimed
+        # frame's ``reservation``.
         requirement = _manager_scheduling.effective_requirement(
             job, claimed_state, self.resources, self.maximum_workers
         )
@@ -1801,6 +1805,7 @@ class TaskManager:
                     manager_id=self.manager_id,
                     writer_id=self.writer.writer_id,
                     attempt_id=attempt_id,
+                    reservation=dict(requirement),
                     lease_seconds=self.lease_seconds,
                     started_at=utc_now(),
                     workdir=str(workdir.relative_to(payload)),
