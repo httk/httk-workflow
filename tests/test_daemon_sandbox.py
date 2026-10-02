@@ -1,5 +1,6 @@
 """Exercise the daemon boundary in a real Bubblewrap namespace."""
 
+import base64
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 BOOTSTRAP = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "_daemon_bootstrap.py"
+AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
 
 def _unsupported_namespace_failure(result: subprocess.CompletedProcess[str]) -> None:
@@ -133,6 +135,7 @@ def test_real_payload_confinement(tmp_path: Path) -> None:
             "cluster": "sandbox-test",
             "readonly_paths": [str(path) for path in readonly_paths],
             "broker_paths": [str(broker)],
+            "authorized_keys": [AUTHORIZED_KEY],
             "profiles": {"small": {"cpus": 1, "memory_mb": 128, "time_minutes": 1}},
         }
         policy_path = tmp_path / "policy.json"
@@ -232,6 +235,7 @@ def test_real_mpi_ranks_share_only_allocation_shm(tmp_path: Path) -> None:
         "cluster": "sandbox-test",
         "readonly_paths": readonly,
         "broker_paths": [str(roots["broker"])],
+        "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {"mpi": {"cpus": 1, "memory_mb": 128, "time_minutes": 1, "mpi": {"nodes": 1, "ranks": 2}}},
         "mpi": {
             "srun": str(roots["broker"] / "srun"),

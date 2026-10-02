@@ -3,7 +3,7 @@
 `httk workspace daemon` is an opt-in, foreground Slurm broker for a file command
 mailbox. It accepts health checks, starts a manager from an operator-defined
 profile, and requests status or cancellation by opaque manager handle.
-Requests cannot supply commands, shell fragments, environment variables, paths
+Requests require an authorized httk identity signature. They cannot supply commands, shell fragments, environment variables, paths
 or Slurm arguments.
 
 Serial execution supports one node, one Slurm task and one manager worker per
@@ -80,6 +80,8 @@ state and mailboxes need not exist there.
   "squeue": "/usr/bin/squeue",
   "scancel": "/usr/bin/scancel",
   "cluster": "example",
+  "authorized_keys": ["ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY"],
+  "request_max_age": 3600,
   "readonly_paths": ["/usr", "/bin", "/lib", "/lib64", "/opt/httk"],
   "broker_paths": ["/etc/slurm", "/run/munge"],
   "slurm_conf": "/etc/slurm/slurm.conf",
@@ -109,7 +111,7 @@ httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json
 
 `--check` enters the real broker sandbox and checks scheduler client requirements;
 it does not submit a job or validate compute-node execution. `--initialize`
-exclusively creates a new enrollment ledger and exits. Ordinary startup refuses
+exclusively creates a new enrollment ledger and private response-signing key, then exits. Ordinary startup refuses
 missing or corrupt state. `--once` processes one bounded mailbox scan and exits.
 Otherwise the daemon polls until SIGINT or SIGTERM. Run it under the site's
 service supervisor if restart supervision is needed.
@@ -121,18 +123,39 @@ from failures; never remove it merely to clear an uncertain result.
 
 ## File command protocol
 
-The internal version-1 format is intentionally narrow. A health request is:
+The internal version-2 format requires identity signatures. The maintained client
+constructs and signs documents using its configured httk operator identity. An
+unsigned request is never executed. The policy's `authorized_keys` lists allowed
+Ed25519 public keys; removing a key also prevents that key from replaying old
+results. This daemon authorization rule is separate from the ordinary optional
+attribution semantics of httk identity signatures.
 
-```json
-{
-  "format": "httk-workspace-command",
-  "format_version": 1,
-  "request_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "workspace_id": "12345678-1234-4234-8234-123456789abc",
-  "enrollment_id": "0123456789abcdef0123456789abcdef",
-  "operation": "health"
-}
-```
+Each signature covers the format/version, request/workspace/enrollment IDs,
+operation and its fields, `created_at`, `expires_at`, and `operator_key`. Times
+are integer Unix seconds. The default lifetime and policy `request_max_age` are
+3600 seconds. The clock-skew allowance is **7800 seconds (130 minutes)** in both
+directions: first execution requires `created_at - 7800 <= now <= expires_at +
+7800`. Equality is accepted. With a one-hour lifetime, the total acceptance
+interval spans 5 hours 20 minutes. The expiry limits admission/execution of the
+request; an already submitted Slurm job can remain queued beyond that deadline.
+
+The protected ledger retains exact signed requests. A duplicate never submits
+again, including after restart. Previously recorded results remain retrievable
+after expiry by a currently authorized key. A stale request that has not acted
+is durably refused, subject to ledger capacity. A request recovered before
+submission must still meet the time window before it can act.
+
+Responses are signed by a separate daemon key in private broker state. Clients
+must configure its public key through a trusted operator handoff; they never
+learn a trust anchor from a mailbox response. Signed responses bind the exact
+signed request digest as well as all destination/request identities. Signatures
+provide integrity and authorization, not encryption or protection against mailbox
+deletion. Slurm still uses the site's separate authentication, such as its MUNGE
+socket; cluster secrets and daemon private keys are never exposed to payloads.
+
+Old unsigned enrollments are refused by this protocol. Preserve their state and
+reconcile outstanding work with the earlier software before provisioning a new
+enrollment. There is no automatic migration or ledger reset.
 
 Publish complete UTF-8 JSON by writing a temporary file and atomically renaming it
 to `<request_id>.json` in the request directory. Use a fresh random 32-character

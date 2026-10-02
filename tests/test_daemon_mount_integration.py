@@ -14,8 +14,10 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.identity import identity_public_key, initialize_identity
 
 from httk.workflow import Workspace
+from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import Policy, Profile
 from httk.workflow._daemon_service import Broker
@@ -49,7 +51,9 @@ def _broker(policy: Policy, *, initialize: bool) -> Iterator[None]:
                 gateway = SlurmGateway(policy, policy.state / "policy.json")
                 gateway.check()
                 ready.set()
-                Broker(policy, gateway, ledger, requests, responses).run(stop)
+                Broker(
+                    policy, gateway, ledger, requests, responses, response_seed=response_seed_path(policy.state)
+                ).run(stop)
         except BaseException as exc:
             errors.append(exc)
             ready.set()
@@ -71,7 +75,11 @@ def _broker(policy: Policy, *, initialize: bool) -> Iterator[None]:
 def test_mounted_transfer_typed_control_timeout_and_restart_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path / "client-data"))
+    initialize_identity("Test Operator", "operator@example.test")
+    client_key = identity_public_key()
+    assert client_key is not None
     source = Workspace.initialize(tmp_path / "source")
     mounted = Workspace.initialize(tmp_path / "mounted-data")
     payload = tmp_path / "payload"
@@ -124,7 +132,9 @@ def test_mounted_transfer_typed_control_timeout_and_restart_replay(
         broker_paths=(scheduler,),
         profiles=(Profile("cpu", 2, 512, 5),),
         poll_seconds=0.05,
+        authorized_keys=(client_key,),
     )
+    response_seed = initialize_response_seed(policy.state)
     add_remote("mounted", template="mount-daemon", global_scope=True)
     settings = {
         "mount_root": str(mounted.root),
@@ -132,6 +142,7 @@ def test_mounted_transfer_typed_control_timeout_and_restart_replay(
         "daemon_responses": str(policy.responses),
         "daemon_workspace_id": policy.workspace_id,
         "daemon_enrollment_id": policy.enrollment_id,
+        "daemon_public_key": response_public_key(response_seed),
     }
     configure = ["remote", "configure", "mounted"]
     for key, value in settings.items():

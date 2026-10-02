@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
-from ._daemon_client import Endpoint, exchange
+from ._daemon_client import Endpoint, exchange, prepare_request
 from ._daemon_protocol import Request, decode_request, encode_response
 
 _REQUEST_FORMAT = "httk-computer-request"
@@ -235,11 +235,14 @@ def _install(request: Mapping[str, object]) -> None:
     if "settings" in request and _mapping(request["settings"], "settings"):
         raise ValueError("mount-daemon check refuses pending settings; configure them first")
     endpoint = _endpoint(request, pending=False)
-    health = Request(
-        secrets.token_hex(16),
-        endpoint.workspace_id,
-        "health",
-        enrollment_id=endpoint.enrollment_id,
+    health = prepare_request(
+        endpoint,
+        Request(
+            secrets.token_hex(16),
+            endpoint.workspace_id,
+            "health",
+            enrollment_id=endpoint.enrollment_id,
+        ),
     )
     response = exchange(endpoint, health)
     _result(

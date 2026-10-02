@@ -1,5 +1,6 @@
 """Strict validation for the confined workspace daemon policy."""
 
+import base64
 import importlib
 import json
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any
 import pytest
 
 from httk.workflow._daemon_policy import Policy, Profile, load_policy
+
+AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
 
 def _document(tmp_path: Path) -> dict[str, object]:
@@ -31,6 +34,7 @@ def _document(tmp_path: Path) -> dict[str, object]:
         "cluster": "cluster-1",
         "readonly_paths": [str(runtime)],
         "broker_paths": [str(broker)],
+        "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {
             "cpu": {"cpus": 8, "memory_mb": 16384, "time_minutes": 60},
             "long-1": {
@@ -59,6 +63,8 @@ def test_policy_loads_exact_fields_and_defaults(tmp_path: Path) -> None:
     assert policy.poll_seconds == 1.0
     assert policy.command_timeout == 30.0
     assert policy.max_output_bytes == 65536
+    assert policy.request_max_age == 3600
+    assert policy.authorized_keys == (AUTHORIZED_KEY,)
     assert policy.profile("cpu") == Profile("cpu", 8, 16384, 60)
     assert policy.profile("long-1").partition == "compute.1"
     with pytest.raises(ValueError, match="unknown daemon profile"):
@@ -71,6 +77,18 @@ def test_required_policy_fields_cannot_be_omitted(tmp_path: Path, field: str) ->
     del document[field]
     with pytest.raises(ValueError, match="missing or unknown"):
         load_policy(_write(tmp_path, document))
+
+
+def test_authorized_keys_must_be_explicit_and_nonempty(tmp_path: Path) -> None:
+    missing = _document(tmp_path)
+    del missing["authorized_keys"]
+    with pytest.raises(ValueError, match="authorized_keys.*required.*nonempty"):
+        load_policy(_write(tmp_path, missing))
+
+    empty = _document(tmp_path)
+    empty["authorized_keys"] = []
+    with pytest.raises(ValueError, match="authorized_keys.*nonempty"):
+        load_policy(_write(tmp_path, empty))
 
 
 def test_unknown_and_duplicate_keys_are_refused(tmp_path: Path) -> None:
@@ -128,6 +146,9 @@ def test_nonfinite_json_numbers_are_refused(tmp_path: Path, number: str) -> None
         ("command_timeout", 601),
         ("max_output_bytes", 1023),
         ("max_output_bytes", 1048577),
+        ("request_max_age", 0),
+        ("request_max_age", 86401),
+        ("request_max_age", True),
     ],
 )
 def test_policy_numeric_bounds_are_enforced(tmp_path: Path, field: str, value: object) -> None:
@@ -141,6 +162,35 @@ def test_submission_quota_cannot_exceed_record_quota(tmp_path: Path) -> None:
     document = _document(tmp_path)
     document.update(max_records=5, max_submissions=6)
     with pytest.raises(ValueError, match="max_submissions"):
+        load_policy(_write(tmp_path, document))
+
+
+def test_authorized_keys_are_canonical_unique_ed25519_values(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    document["request_max_age"] = 7200
+    policy = load_policy(_write(tmp_path, document))
+    assert policy.authorized_keys == (AUTHORIZED_KEY,)
+    assert policy.request_max_age == 7200
+
+    for invalid in (
+        AUTHORIZED_KEY.removeprefix("ed25519:"),
+        "rsa:" + AUTHORIZED_KEY.removeprefix("ed25519:"),
+        "ed25519:AAAA",
+        "ed25519:not-base64",
+    ):
+        document = _document(tmp_path)
+        document["authorized_keys"] = [invalid]
+        with pytest.raises(ValueError, match="canonical Ed25519"):
+            load_policy(_write(tmp_path, document))
+
+    document = _document(tmp_path)
+    document["authorized_keys"] = [AUTHORIZED_KEY, AUTHORIZED_KEY]
+    with pytest.raises(ValueError, match="unique"):
+        load_policy(_write(tmp_path, document))
+
+    document = _document(tmp_path)
+    document["authorized_keys"] = AUTHORIZED_KEY
+    with pytest.raises(ValueError, match="array"):
         load_policy(_write(tmp_path, document))
 
 

@@ -1,5 +1,6 @@
 """Test MPI bootstrap trust boundaries with a non-confining Bubblewrap recorder."""
 
+import base64
 import json
 import os
 import runpy
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 
 BOOTSTRAP = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "_daemon_bootstrap.py"
+AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 HANDLE = "a" * 32
 REQUEST_ID = "b" * 32
 REQUIRED_BWRAP_OPTIONS = (
@@ -93,6 +95,7 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         "cluster": "test-cluster",
         "readonly_paths": [str(roots["runtime"])],
         "broker_paths": [str(roots["broker"])],
+        "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {
             "serial": {"cpus": 2, "memory_mb": 1024, "time_minutes": 10},
             "parallel": {

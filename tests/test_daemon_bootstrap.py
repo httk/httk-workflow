@@ -1,5 +1,6 @@
 """Test bootstrap argument and descriptor boundaries with a non-confining recorder."""
 
+import base64
 import json
 import os
 import runpy
@@ -13,6 +14,7 @@ from typing import Any
 import pytest
 
 BOOTSTRAP = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "_daemon_bootstrap.py"
+AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 REQUIRED_BWRAP_OPTIONS = (
     "--assert-userns-disabled",
     "--bind-fd",
@@ -77,6 +79,7 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         "cluster": "test-cluster",
         "readonly_paths": [str(roots["runtime"])],
         "broker_paths": [str(roots["broker"])],
+        "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {"small": {"cpus": 2, "memory_mb": 1024, "time_minutes": 10}},
     }
     policy_path = tmp_path / "policy.json"

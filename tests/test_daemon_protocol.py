@@ -25,11 +25,15 @@ REQUEST_DIGEST = "a" * 64
 def _document(operation: str, **fields: object) -> bytes:
     value: dict[str, object] = {
         "format": "httk-workspace-command",
-        "format_version": 1,
+        "format_version": 2,
         "request_id": REQUEST_ID,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "operation": operation,
+        "created_at": 0,
+        "expires_at": 0,
+        "operator_key": None,
+        "signature": None,
     }
     value.update(fields)
     return json.dumps(value).encode("utf-8")
@@ -47,7 +51,14 @@ def _document(operation: str, **fields: object) -> bytes:
 def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> None:
     request = decode_request(_document(operation, **fields))
 
-    assert request == Request(REQUEST_ID, WORKSPACE_ID, operation, **fields, enrollment_id=ENROLLMENT_ID)
+    assert request == Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        operation,
+        profile=fields.get("profile"),
+        handle=fields.get("handle"),
+        enrollment_id=ENROLLMENT_ID,
+    )
     encoded = encode_request(request)
     assert encoded.isascii()
     assert not encoded.endswith(b"\n")
@@ -75,7 +86,8 @@ def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
-        b'"format_version":1,"format":"httk-workspace-command" }'
+        b'"created_at":0,"expires_at":0,"operator_key":null,"signature":null,'
+        b'"format_version":2,"format":"httk-workspace-command" }'
     )
     first = decode_request(ordered)
     second = decode_request(reordered)
@@ -145,9 +157,9 @@ def test_direct_construction_validates_all_fields(kwargs: dict[str, object]) -> 
     assert len(str(error.value)) < 256
 
 
-@pytest.mark.parametrize("version", ["true", "1.0", "1e0", "2", "null", '"1"'])
-def test_version_must_be_exact_integer_one(version: str) -> None:
-    data = _document("health").replace(b'"format_version": 1', f'"format_version": {version}'.encode())
+@pytest.mark.parametrize("version", ["true", "2.0", "2e0", "1", "null", '"2"'])
+def test_version_must_be_exact_integer_two(version: str) -> None:
+    data = _document("health").replace(b'"format_version": 2', f'"format_version": {version}'.encode())
 
     with pytest.raises(ValueError):
         decode_request(data)
@@ -167,10 +179,11 @@ def test_wire_request_id_rejects_wrong_length_or_newline(request_id: str) -> Non
 
 def test_duplicate_keys_reject_escaped_equivalent_names() -> None:
     data = (
-        b'{"format":"httk-workspace-command","format_version":1,'
+        b'{"format":"httk-workspace-command","format_version":2,'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
+        b'"created_at":0,"expires_at":0,"operator_key":null,"signature":null,'
         b'"operation":"health","\\u006fperation":"cancel_manager"}'
     )
 
@@ -319,7 +332,8 @@ def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
         b'{ "outcome":"ready", "request_digest":"' + REQUEST_DIGEST.encode() + b'",'
         b'"enrollment_id":"' + ENROLLMENT_ID.encode() + b'",'
         b'"workspace_id":"' + WORKSPACE_ID.encode() + b'",'
-        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":1,'
+        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":2,'
+        b'"operator_key":null,"signature":null,'
         b'"format":"httk-workspace-response" }'
     )
     assert decode_response(alternate) == response
@@ -369,7 +383,7 @@ def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
     valid = encode_response(Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready"))
     invalid_documents = (
         valid.replace(b"httk-workspace-response", b"httk-workspace-command"),
-        valid.replace(b'"format_version":1', b'"format_version":true'),
+        valid.replace(b'"format_version":2', b'"format_version":true'),
         valid[:-1] + b',"old_field":1}',
         valid[:-1] + b',"handle":null}',
         valid.replace(b'"request_id":', b'"request_id":"' + REQUEST_ID.encode() + b'","request_id":'),

@@ -1,5 +1,6 @@
 """Strict operator policy for the confined workspace daemon."""
 
+import base64
 import json
 import math
 import os
@@ -141,6 +142,28 @@ def _environment(value: object) -> tuple[tuple[str, str], ...]:
     return tuple(result)
 
 
+def _authorized_keys(value: object) -> tuple[str, ...]:
+    """Return canonical unique Ed25519 public keys from an immutable sequence."""
+
+    if not isinstance(value, tuple):
+        raise ValueError("authorized_keys must be a tuple")
+    result: list[str] = []
+    for key in value:
+        if type(key) is not str or not key.startswith("ed25519:"):
+            raise ValueError("authorized_keys entries must be canonical Ed25519 public keys")
+        encoded = key.removeprefix("ed25519:")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except ValueError as exc:
+            raise ValueError("authorized_keys entries must be canonical Ed25519 public keys") from exc
+        if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != encoded:
+            raise ValueError("authorized_keys entries must be canonical Ed25519 public keys")
+        if key in result:
+            raise ValueError("authorized_keys entries must be unique")
+        result.append(key)
+    return tuple(result)
+
+
 @dataclass(frozen=True, slots=True)
 class MPIProfile:
     """Define fixed MPI geometry for one protected profile.
@@ -254,12 +277,14 @@ class Policy:
     :param readonly_paths: Runtime roots mounted into both sandbox roles.
     :param broker_paths: Privileged runtime roots for the broker and MPI allocation launcher.
     :param profiles: Allowed resource profiles.
+    :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
     :param slurm_conf: Optional fixed Slurm configuration path.
     :param max_records: Maximum mailbox records retained per enrollment.
     :param max_submissions: Maximum accepted submissions per enrollment.
     :param poll_seconds: Mailbox polling interval in seconds.
     :param command_timeout: Slurm command timeout in seconds.
     :param max_output_bytes: Maximum captured command output in bytes.
+    :param request_max_age: Maximum signed request lifetime in seconds.
     :param mpi: Optional protected MPI launcher and containment settings.
     """
 
@@ -278,12 +303,14 @@ class Policy:
     readonly_paths: tuple[Path, ...]
     broker_paths: tuple[Path, ...]
     profiles: tuple[Profile, ...]
+    authorized_keys: tuple[str, ...] = ()
     slurm_conf: Path | None = None
     max_records: int = 4096
     max_submissions: int = 128
     poll_seconds: float = 1.0
     command_timeout: float = 30.0
     max_output_bytes: int = 65_536
+    request_max_age: int = 3600
     mpi: MPISettings | None = None
 
     def __post_init__(self) -> None:
@@ -376,11 +403,13 @@ class Policy:
             raise ValueError("profile names must be unique")
         if any(profile.mpi is not None for profile in self.profiles) and self.mpi is None:
             raise ValueError("MPI profiles require policy MPI settings")
+        _authorized_keys(self.authorized_keys)
         _integer(self.max_records, "max_records", 1, 100_000)
         _integer(self.max_submissions, "max_submissions", 1, self.max_records)
         _number(self.poll_seconds, "poll_seconds", 0.05, 60.0)
         _number(self.command_timeout, "command_timeout", 0.1, 600.0)
         _integer(self.max_output_bytes, "max_output_bytes", 1024, 1_048_576)
+        _integer(self.request_max_age, "request_max_age", 1, 86_400)
 
     def profile(self, name: str) -> Profile:
         """Return the named profile.
@@ -510,6 +539,7 @@ def _decode_policy(data: bytes) -> Policy:
         "readonly_paths",
         "broker_paths",
         "profiles",
+        "authorized_keys",
     }
     optional = {
         "slurm_conf",
@@ -518,8 +548,11 @@ def _decode_policy(data: bytes) -> Policy:
         "poll_seconds",
         "command_timeout",
         "max_output_bytes",
+        "request_max_age",
         "mpi",
     }
+    if "authorized_keys" not in value:
+        raise ValueError("policy authorized_keys is required and must be a nonempty array")
     if not required <= set(value) or not set(value) <= required | optional:
         raise ValueError("policy fields are missing or unknown")
     if (
@@ -563,6 +596,9 @@ def _decode_policy(data: bytes) -> Policy:
                 mpi_profile,
             )
         )
+    raw_authorized_keys = value["authorized_keys"]
+    if not isinstance(raw_authorized_keys, list) or not raw_authorized_keys:
+        raise ValueError("policy authorized_keys must be a nonempty array")
     mpi: MPISettings | None
     if "mpi" not in value:
         mpi = None
@@ -599,7 +635,14 @@ def _decode_policy(data: bytes) -> Policy:
         )
     kwargs = {
         name: value[name]
-        for name in ("max_records", "max_submissions", "poll_seconds", "command_timeout", "max_output_bytes")
+        for name in (
+            "max_records",
+            "max_submissions",
+            "poll_seconds",
+            "command_timeout",
+            "max_output_bytes",
+            "request_max_age",
+        )
         if name in value
     }
     return Policy(
@@ -618,6 +661,7 @@ def _decode_policy(data: bytes) -> Policy:
         readonly_paths=tuple(_json_path(item, "readonly_paths entry") for item in value["readonly_paths"]),
         broker_paths=tuple(_json_path(item, "broker_paths entry") for item in value["broker_paths"]),
         profiles=tuple(profiles),
+        authorized_keys=_authorized_keys(tuple(raw_authorized_keys)),
         slurm_conf=_json_path(value["slurm_conf"], "slurm_conf") if "slurm_conf" in value else None,
         mpi=mpi,
         **kwargs,

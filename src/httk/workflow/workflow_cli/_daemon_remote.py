@@ -9,7 +9,7 @@ from collections.abc import Mapping
 
 from httk.core.cli import CLIContext
 
-from .._daemon_client import Endpoint, decode_matching_response
+from .._daemon_client import Endpoint, decode_matching_response, prepare_request
 from .._daemon_protocol import Request, encode_request, encode_response
 from ..adapters import read_metadata, remote_settings, resolve_remote, run_adapter
 from ._common import _group, _leaf
@@ -72,7 +72,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     endpoint = Endpoint.from_settings(settings)
 
     verb = arguments.daemon_verb
-    request = Request(
+    intent = Request(
         _request_id(arguments.request_id, required=verb in {"start", "cancel"}),
         endpoint.workspace_id,
         _OPERATION_NAMES[verb],
@@ -80,6 +80,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         handle=getattr(arguments, "handle", None),
         enrollment_id=endpoint.enrollment_id,
     )
+    request = prepare_request(endpoint, intent)
     request_document = json.loads(encode_request(request))
     print(f"daemon request ID: {request.request_id}", file=sys.stderr)
     try:
@@ -92,7 +93,11 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         response_data = result.get("stdout")
         if not isinstance(response_data, str):
             raise ValueError("daemon adapter did not return a response document")
-        response = decode_matching_response(response_data.encode("utf-8"), request)
+        response = decode_matching_response(
+            response_data.encode("utf-8"),
+            request,
+            public_key=endpoint.daemon_public_key,
+        )
         returncode = _response_returncode(response.outcome)
         if result.get("returncode") != returncode or result.get("stderr", "") != "":
             raise ValueError("daemon adapter returned an inconsistent result")

@@ -1,5 +1,6 @@
 """Test the protected daemon MPI policy schema and invariants."""
 
+import base64
 import json
 import uuid
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 import pytest
 
 from httk.workflow._daemon_policy import MPIProfile, MPISettings, Policy, Profile, load_policy
+
+AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
 
 def _document(tmp_path: Path) -> dict[str, Any]:
@@ -32,6 +35,7 @@ def _document(tmp_path: Path) -> dict[str, Any]:
         "cluster": "cluster",
         "readonly_paths": [str(roots["runtime"])],
         "broker_paths": [str(roots["broker"])],
+        "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {
             "serial": {"cpus": 2, "memory_mb": 1024, "time_minutes": 10},
             "mpi": {

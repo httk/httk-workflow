@@ -1,6 +1,7 @@
 """Durability and corruption tests for the private daemon ledger."""
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,13 +14,20 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
 
 
-def _request(number: int, operation: str = "health", **fields: str) -> Request:
+def _request(
+    number: int,
+    operation: str = "health",
+    *,
+    profile: str | None = None,
+    handle: str | None = None,
+) -> Request:
     return Request(
         f"{number:032x}",
         WORKSPACE_ID,
         operation,
+        profile=profile,
+        handle=handle,
         enrollment_id=ENROLLMENT_ID,
-        **fields,
     )
 
 
@@ -98,6 +106,47 @@ def test_replay_conflict_and_canonical_persisted_response(tmp_path: Path) -> Non
 
     with Ledger(state, WORKSPACE_ID, ENROLLMENT_ID) as ledger:
         assert ledger.admit(request).response == response
+
+
+def test_lookup_request_is_read_only_and_validates_identifiers(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    request = _request(1)
+    with Ledger(state, WORKSPACE_ID, ENROLLMENT_ID, initialize=True) as ledger:
+        assert ledger.lookup_request(request.request_id) is None
+        admitted = ledger.admit(request)
+        assert ledger.lookup_request(request.request_id) == admitted
+        assert ledger.lookup_request(f"{2:032x}") is None
+        with pytest.raises(ValueError, match="identifier"):
+            ledger.lookup_request("invalid")
+
+
+def test_ledger_refuses_signed_responses(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    request = _request(1)
+    with Ledger(state, WORKSPACE_ID, ENROLLMENT_ID, initialize=True) as ledger:
+        ledger.admit(request)
+        signed = replace(_response(request, "ready"), operator_key="operator", signature="signature")
+        with pytest.raises(ValueError, match="unsigned"):
+            ledger.finish(request.request_id, signed)
+
+
+def test_old_unsigned_ledger_version_is_preserved_and_refused(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with Ledger(state, WORKSPACE_ID, ENROLLMENT_ID, initialize=True):
+        pass
+    database = state / "ledger.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA user_version=1")
+    connection.commit()
+    connection.close()
+    old_ledger = database.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError, match="preserve this state.*reconcile.*new enrollment"):
+        Ledger(state, WORKSPACE_ID, ENROLLMENT_ID)
+    assert database.read_bytes() == old_ledger
 
 
 def test_submission_intent_recovers_to_uncertain_without_scheduler_identity(tmp_path: Path) -> None:

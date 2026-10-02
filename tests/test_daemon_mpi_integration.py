@@ -1,6 +1,7 @@
 """Compose MPI client, launcher and rank with a non-confining scheduler stand-in."""
 
 import argparse
+import base64
 import json
 import sys
 import threading
@@ -12,6 +13,8 @@ import pytest
 from httk.workflow import _daemon_mpi_client as client
 from httk.workflow import _daemon_mpi_service as service
 from httk.workflow._daemon_policy import load_policy
+
+AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
 
 def test_client_service_rank_roundtrip(
@@ -66,6 +69,7 @@ def test_client_service_rank_roundtrip(
                 "cluster": "site",
                 "readonly_paths": ["/usr", sys.prefix, str(runtime)],
                 "broker_paths": [],
+                "authorized_keys": [AUTHORIZED_KEY],
                 "profiles": {"mpi": {"cpus": 1, "memory_mb": 128, "time_minutes": 1, "mpi": {"nodes": 1, "ranks": 2}}},
                 "mpi": {"srun": str(srun), "control_root": str(tmp_path / "control"), "termination_grace": 0.1},
             }

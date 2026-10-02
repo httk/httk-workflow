@@ -16,8 +16,8 @@ from urllib.parse import quote
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, encode_response
 from ._daemon_protocol import request_digest as canonical_request_digest
 
-_SCHEMA_VERSION = 1
-_SCHEMA_ID = "httk-workspace-daemon-ledger-v1"
+_SCHEMA_VERSION = 2
+_SCHEMA_ID = "httk-workspace-daemon-ledger-v2"
 _STATES = frozenset({"received", "submitting", "submitted", "uncertain", "refused", "done"})
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
@@ -226,7 +226,10 @@ class Ledger:
             raise sqlite3.DatabaseError("daemon ledger integrity check failed")
         version = connection.execute("PRAGMA user_version").fetchone()
         if version != (_SCHEMA_VERSION,):
-            raise sqlite3.DatabaseError("unsupported daemon ledger version")
+            raise sqlite3.DatabaseError(
+                "unsupported daemon ledger version; preserve this state, reconcile outstanding work, "
+                "and initialize a new enrollment"
+            )
         objects = {
             (row[0], row[1])
             for row in connection.execute("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
@@ -357,6 +360,8 @@ class Ledger:
                 raise sqlite3.DatabaseError("invalid stored response") from exc
             if encode_response(response) != response_bytes:
                 raise sqlite3.DatabaseError("noncanonical stored response")
+            if response.operator_key is not None or response.signature is not None:
+                raise sqlite3.DatabaseError("stored daemon responses must be unsigned")
             if (
                 response.request_id != request.request_id
                 or response.workspace_id != request.workspace_id
@@ -466,6 +471,18 @@ class Ledger:
                 connection.execute("ROLLBACK")
             raise
 
+    def lookup_request(self, request_id: str) -> Entry | None:
+        """Return one durable request without admitting or changing it.
+
+        :param request_id: Canonical 32-digit lowercase request identifier.
+        :return: Existing durable entry, or ``None``.
+        :raises ValueError: If the identifier is malformed.
+        """
+
+        if type(request_id) is not str or _HANDLE.fullmatch(request_id) is None:
+            raise ValueError("invalid request identifier")
+        return self._entry(self._row(request_id))
+
     def begin_submission(self, request_id: str) -> Entry:
         """Commit submission intent before the scheduler is contacted."""
 
@@ -500,6 +517,8 @@ class Ledger:
 
         if type(response) is not Response:
             raise ValueError("response must be a Response")
+        if response.operator_key is not None or response.signature is not None:
+            raise ValueError("ledger responses must be unsigned")
         connection = self._db()
         connection.execute("BEGIN IMMEDIATE")
         try:

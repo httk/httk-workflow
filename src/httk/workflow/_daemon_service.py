@@ -10,6 +10,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from types import FrameType
 
+from ._daemon_auth import check_request_time, sign_response, verify_request
+from ._daemon_keys import initialize_response_seed, read_response_seed, response_public_key, response_seed_path
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_policy import Policy, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
@@ -33,6 +35,7 @@ class Broker:
     :param ledger: Locked durable daemon ledger.
     :param requests: Descriptor-anchored request mailbox.
     :param responses: Descriptor-anchored response mailbox.
+    :param response_seed: Validated protected response-signing seed.
     """
 
     def __init__(
@@ -42,12 +45,18 @@ class Broker:
         ledger: Ledger,
         requests: MailboxDirectory,
         responses: MailboxDirectory,
+        *,
+        response_seed: Path,
     ) -> None:
+        if not isinstance(response_seed, Path):
+            raise ValueError("response_seed must be a Path")
+        read_response_seed(response_seed)
         self.policy = policy
         self.gateway = gateway
         self.ledger = ledger
         self.requests = requests
         self.responses = responses
+        self.response_seed = response_seed
 
     @staticmethod
     def _response(request: Request, outcome: str, **fields: str) -> Response:
@@ -63,7 +72,8 @@ class Broker:
     def _publish(self, publication: str, request: Request, response: Response) -> None:
         """Publish a response after state commit, then consume the request."""
 
-        self.responses.replace(f"{request.request_id}.json", encode_response(response))
+        signed = sign_response(response, seed_path=self.response_seed)
+        self.responses.replace(f"{request.request_id}.json", encode_response(signed))
         try:
             self.requests.remove(publication)
         except FileNotFoundError:
@@ -96,6 +106,11 @@ class Broker:
             profile = self.policy.profile(request.profile)
         except ValueError:
             return self._finish_refused(entry, "invalid_profile")
+
+        try:
+            check_request_time(request, max_age=self.policy.request_max_age)
+        except ValueError:
+            return self._finish_refused(entry, "request_expired")
 
         submitting = self.ledger.begin_submission(request.request_id)
         if submitting.handle is None:
@@ -138,6 +153,11 @@ class Broker:
         if manager.cluster != self.policy.cluster:
             raise sqlite3.DatabaseError("stored scheduler cluster does not match policy")
 
+        try:
+            check_request_time(request, max_age=self.policy.request_max_age)
+        except ValueError:
+            return self._finish_refused(entry, "request_expired")
+
         if request.operation == "manager_status":
             try:
                 scheduler_state = self.gateway.status(manager.job_id, manager.cluster, request.handle)
@@ -179,6 +199,17 @@ class Broker:
         return self._manager(entry)
 
     def _process(self, publication: str, request: Request) -> None:
+        try:
+            verify_request(request, self.policy.authorized_keys)
+        except ValueError:
+            self._discard_invalid(publication, "request_unauthorized")
+            return
+
+        existing = self.ledger.lookup_request(request.request_id)
+        if existing is not None and request_digest(existing.request) != request_digest(request):
+            response = self._response(request, "refused", reason="request_conflict")
+            self._publish(publication, request, response)
+            return
         if request.workspace_id != self.policy.workspace_id:
             response = self._response(request, "refused", reason="wrong_workspace")
             self._publish(publication, request, response)
@@ -187,21 +218,29 @@ class Broker:
             response = self._response(request, "refused", reason="wrong_enrollment")
             self._publish(publication, request, response)
             return
-        try:
-            entry = self.ledger.admit(request)
-        except ConflictError:
-            response = self._response(request, "refused", reason="request_conflict")
-            self._publish(publication, request, response)
-            return
-        except CapacityError:
-            response = self._response(request, "busy", reason="capacity")
-            self._publish(publication, request, response)
-            return
+        if existing is None:
+            try:
+                entry = self.ledger.admit(request)
+            except ConflictError:
+                response = self._response(request, "refused", reason="request_conflict")
+                self._publish(publication, request, response)
+                return
+            except CapacityError:
+                response = self._response(request, "busy", reason="capacity")
+                self._publish(publication, request, response)
+                return
+        else:
+            entry = existing
 
         if entry.response is not None:
             response = entry.response
         elif entry.state == "received":
-            response = self._execute(entry)
+            try:
+                check_request_time(request, max_age=self.policy.request_max_age)
+            except ValueError:
+                response = self._finish_refused(entry, "request_expired")
+            else:
+                response = self._execute(entry)
         elif entry.state == "submitting":
             # Normal startup calls recover(), but this keeps direct broker use
             # from ever turning a committed intent into another submission.
@@ -276,15 +315,30 @@ def _run(arguments: argparse.Namespace) -> None:
     if arguments.check:
         return
     if arguments.initialize:
-        with Ledger(
-            _STATE_DIRECTORY,
-            policy.workspace_id,
-            policy.enrollment_id,
-            initialize=True,
-            max_records=policy.max_records,
-            max_submissions=policy.max_submissions,
-        ):
-            return
+        try:
+            seed = initialize_response_seed(_STATE_DIRECTORY)
+            with Ledger(
+                _STATE_DIRECTORY,
+                policy.workspace_id,
+                policy.enrollment_id,
+                initialize=True,
+                max_records=policy.max_records,
+                max_submissions=policy.max_submissions,
+            ):
+                print(response_public_key(seed))
+        except FileExistsError as exc:
+            raise ValueError(
+                "daemon state already exists or initialization is partial; preserve protected state and reconcile it"
+            ) from exc
+        return
+
+    seed = response_seed_path(_STATE_DIRECTORY)
+    try:
+        read_response_seed(seed)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "daemon response seed is missing or invalid; preserve protected state and reconcile initialization"
+        ) from exc
 
     stop = threading.Event()
 
@@ -307,7 +361,7 @@ def _run(arguments: argparse.Namespace) -> None:
             requests = stack.enter_context(MailboxDirectory(_REQUEST_DIRECTORY))
             responses = stack.enter_context(MailboxDirectory(_RESPONSE_DIRECTORY))
             ledger.recover()
-            Broker(policy, gateway, ledger, requests, responses).run(stop, once=arguments.once)
+            Broker(policy, gateway, ledger, requests, responses, response_seed=seed).run(stop, once=arguments.once)
     finally:
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
@@ -319,8 +373,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = _parser().parse_args(argv)
         _run(arguments)
-    except (OSError, ValueError, sqlite3.DatabaseError, SchedulerError):
+    except SchedulerError:
         _LOGGER.error("daemon_service_failed")
+        return 1
+    except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+        _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
     return 0
 

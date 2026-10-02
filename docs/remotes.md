@@ -182,11 +182,14 @@ $ httk workflow remote configure confined \
       --set daemon_requests=/home/me/mounts/cluster/requests \
       --set daemon_responses=/home/me/mounts/cluster/responses \
       --set daemon_workspace_id=12345678-1234-4234-8234-123456789abc \
-      --set daemon_enrollment_id=0123456789abcdef0123456789abcdef
+      --set daemon_enrollment_id=0123456789abcdef0123456789abcdef \
+      --set daemon_public_key=ed25519:REPLACE_WITH_DAEMON_PUBLIC_KEY
 $ httk workflow remote check confined
 ```
 
-These five settings are the entire configuration. The adapter accepts no executor,
+These six settings are the entire configuration. Obtain the daemon public key
+through a trusted operator handoff. Configure an httk identity whose public key
+is authorized by the daemon; a missing signing key is an error. The adapter accepts no executor,
 prelude, arbitrary environment or scheduler options. `configure` checks the local
 paths and workspace identity without contacting the daemon. `check` sends a health
 request; it verifies a matching broker response, not compute-node readiness.
@@ -211,7 +214,12 @@ ID; health and status generate one unless supplied. Each call prints its ID to
 stderr before dispatch and a validated JSON response to stdout. Reuse **the same
 ID and identical fields** after a timeout. Never retry an uncertain submission
 with a new ID; reconcile it with the operator. Use a fresh ID for each status
-refresh. Run only one caller per request ID at a time.
+refresh. The client retains exact signed requests in its local httk data directory
+before publication. Retries reuse their original timestamps and signatures;
+changing the intent, signer or endpoint pin under an existing ID is refused.
+Do not delete this local request history to resolve an uncertain operation.
+Run only one caller per request ID at a time. The clock-skew allowance is 130
+minutes; see {doc}`workspace_daemon` for the acceptance window and replay rules.
 
 `health`, `start`, `status` and `cancel` accept `--wait-seconds` from 0.05 to 120
 (default 10). Exit 0 means a positive protocol outcome; `refused`, `busy`,

@@ -9,7 +9,9 @@ import time
 from pathlib import Path
 
 import pytest
+from httk.core.identity import add_identity, identity_public_key
 
+from httk.workflow._daemon_auth import sign_request, sign_response
 from httk.workflow._daemon_client import Endpoint
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_protocol import (
@@ -24,6 +26,13 @@ from httk.workflow.adapters import run_adapter
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
+
+
+@pytest.fixture(autouse=True)
+def _identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path / "data"))
+    add_identity("tester", "Test Operator", "test@example.test")
 
 
 def _endpoint(tmp_path: Path) -> Endpoint:
@@ -43,7 +52,11 @@ def _endpoint(tmp_path: Path) -> Endpoint:
         ),
         encoding="utf-8",
     )
-    return Endpoint(workspace, requests, responses, WORKSPACE_ID, ENROLLMENT_ID)
+    response_seed = tmp_path / "response.seed"
+    response_seed.write_text("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n", encoding="ascii")
+    public_key = identity_public_key(response_seed)
+    assert public_key is not None
+    return Endpoint(workspace, requests, responses, WORKSPACE_ID, ENROLLMENT_ID, public_key)
 
 
 def _settings(endpoint: Endpoint) -> dict[str, object]:
@@ -53,6 +66,7 @@ def _settings(endpoint: Endpoint) -> dict[str, object]:
         "daemon_responses": str(endpoint.responses),
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
+        "daemon_public_key": endpoint.daemon_public_key,
     }
 
 
@@ -113,13 +127,16 @@ def _broker(endpoint: Endpoint, outcome: str, **fields: str) -> tuple[threading.
                     names = requests.names()
                     if names:
                         request = decode_request(requests.read(names[0]))
-                        response = Response(
-                            request.request_id,
-                            request.workspace_id,
-                            request.enrollment_id,
-                            request_digest(request),
-                            outcome,
-                            **fields,
+                        response = sign_response(
+                            Response(
+                                request.request_id,
+                                request.workspace_id,
+                                request.enrollment_id,
+                                request_digest(request),
+                                outcome,
+                                **fields,
+                            ),
+                            seed_path=endpoint.responses.parent / "response.seed",
                         )
                         with MailboxDirectory(endpoint.responses) as responses:
                             responses.replace(names[0], encode_response(response))
@@ -152,7 +169,7 @@ def test_configure_rejects_unknown_settings(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     bundle = _bundle(tmp_path, endpoint)
 
-    with pytest.raises(RuntimeError, match="five endpoint settings"):
+    with pytest.raises(RuntimeError, match="six endpoint settings"):
         run_adapter(bundle, "configure", {"settings": {"exec_command": "touch /tmp/no"}})
 
 
@@ -180,12 +197,15 @@ def test_install_sends_only_health_and_reports_ready(tmp_path: Path) -> None:
                     if names:
                         request = decode_request(requests.read(names[0]))
                         observed.append(request.operation)
-                        response = Response(
-                            request.request_id,
-                            request.workspace_id,
-                            request.enrollment_id,
-                            request_digest(request),
-                            "ready",
+                        response = sign_response(
+                            Response(
+                                request.request_id,
+                                request.workspace_id,
+                                request.enrollment_id,
+                                request_digest(request),
+                                "ready",
+                            ),
+                            seed_path=endpoint.responses.parent / "response.seed",
                         )
                         with MailboxDirectory(endpoint.responses) as responses:
                             responses.replace(names[0], encode_response(response))
@@ -211,7 +231,10 @@ def test_install_sends_only_health_and_reports_ready(tmp_path: Path) -> None:
 def test_real_adapter_subprocess_preserves_confirmed_refusal(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     bundle = _bundle(tmp_path, endpoint)
-    request = Request("0" * 32, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID)
+    request = sign_request(
+        Request("0" * 32, WORKSPACE_ID, "start_manager", profile="cpu", enrollment_id=ENROLLMENT_ID),
+        now=1_000_000,
+    )
     thread, errors = _broker(endpoint, "refused", reason="policy_refused")
     try:
         result = run_adapter(

@@ -110,6 +110,7 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "check_connectivity",
         "check_mount",
         "daemon_enrollment_id",
+        "daemon_public_key",
         "daemon_requests",
         "daemon_responses",
         "daemon_workspace_id",

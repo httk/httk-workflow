@@ -10,7 +10,9 @@ from typing import cast
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.identity import add_identity, identity_public_key
 
+from httk.workflow._daemon_auth import sign_response
 from httk.workflow.adapters import PERSISTABLE_REMOTE_SETTINGS, add_remote
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.workflow_cli import build_parser, command
@@ -23,19 +25,27 @@ def _remote(project: Path) -> Path:
     bundle = add_remote("cluster", template="mount-daemon", project=project)
     path = bundle / "remote.json"
     metadata = json.loads(path.read_text(encoding="utf-8"))
+    response_seed = project / "response.seed"
+    response_seed.write_text("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n", encoding="ascii")
+    public_key = identity_public_key(response_seed)
+    assert public_key is not None
     metadata["settings"] = {
         "mount_root": "/mnt/workspace/data",
         "daemon_requests": "/mnt/workspace/requests",
         "daemon_responses": "/mnt/workspace/responses",
         "daemon_workspace_id": WORKSPACE_ID,
         "daemon_enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": public_key,
     }
     path.write_text(json.dumps(metadata), encoding="utf-8")
     return bundle
 
 
 @pytest.fixture
-def project(tmp_path: Path) -> Path:
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path / "data"))
+    add_identity("tester", "Test Operator", "test@example.test")
     root = tmp_path / "project"
     initialize_project(root, name="daemon-cli")
     _remote(root)
@@ -80,6 +90,7 @@ def test_template_and_shareable_daemon_settings(project: Path) -> None:
         "daemon_responses",
         "daemon_workspace_id",
         "daemon_enrollment_id",
+        "daemon_public_key",
         "mount_root",
     } <= PERSISTABLE_REMOTE_SETTINGS
 
@@ -95,6 +106,9 @@ def test_configure_persists_only_successful_shareable_daemon_settings(
         "daemon_responses": "/mnt/w/responses",
         "daemon_workspace_id": WORKSPACE_ID,
         "daemon_enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": json.loads(
+            (project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json").read_text(encoding="utf-8")
+        )["settings"]["daemon_public_key"],
     }
     monkeypatch.setattr(_transfer, "run_adapter", lambda *_args, **_kwargs: {"returncode": 0, "ok": True})
     args = ["configure", "cluster"]
@@ -204,30 +218,22 @@ def test_cli_sends_exact_request_and_renders_confirmed_outcomes(
         observed["operation"] = operation
         observed["payload"] = payload
         observed["timeout"] = timeout
-        request = protocol.decode_request(
-            protocol.encode_request(
-                protocol.Request(
-                    payload["daemon_request"]["request_id"],
-                    WORKSPACE_ID,
-                    payload["daemon_request"]["operation"],
-                    profile=payload["daemon_request"].get("profile"),
-                    handle=payload["daemon_request"].get("handle"),
-                    enrollment_id=ENROLLMENT_ID,
-                )
-            )
-        )
+        request = protocol.decode_request(json.dumps(payload["daemon_request"]).encode("utf-8"))
         handle = "2" * 32 if outcome in {"submitted", "status", "cancel_requested", "uncertain"} else None
         state = "PENDING" if outcome == "status" else None
         reason = "busy" if outcome == "busy" else "policy" if outcome in {"refused", "uncertain"} else None
-        response = protocol.Response(
-            request.request_id,
-            WORKSPACE_ID,
-            ENROLLMENT_ID,
-            protocol.request_digest(request),
-            outcome,
-            handle=handle,
-            scheduler_state=state,
-            reason=reason,
+        response = sign_response(
+            protocol.Response(
+                request.request_id,
+                WORKSPACE_ID,
+                ENROLLMENT_ID,
+                protocol.request_digest(request),
+                outcome,
+                handle=handle,
+                scheduler_state=state,
+                reason=reason,
+            ),
+            seed_path=project / "response.seed",
         )
         encoded = protocol.encode_response(response).decode("ascii")
         return {
@@ -325,12 +331,15 @@ def test_cli_rejects_mismatched_response_identity(project: Path, monkeypatch: py
 
     def run_adapter(_bundle, _operation, payload, *, timeout):
         request = protocol.decode_request(json.dumps(payload["daemon_request"]).encode("utf-8"))
-        response = protocol.Response(
-            "0" * 32,
-            request.workspace_id,
-            request.enrollment_id,
-            protocol.request_digest(request),
-            "ready",
+        response = sign_response(
+            protocol.Response(
+                "0" * 32,
+                request.workspace_id,
+                request.enrollment_id,
+                protocol.request_digest(request),
+                "ready",
+            ),
+            seed_path=project / "response.seed",
         )
         return {"returncode": 0, "stdout": protocol.encode_response(response).decode("ascii"), "stderr": ""}
 

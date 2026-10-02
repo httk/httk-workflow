@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from httk.workflow._daemon_auth import sign_request
+from httk.workflow._daemon_keys import initialize_response_seed, response_public_key
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import Policy, Profile
 from httk.workflow._daemon_protocol import Request, decode_response, encode_request
@@ -157,6 +159,11 @@ def test_protected_slurm_conf_is_the_only_extra_environment(policy: Policy, tmp_
 
 
 def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Policy, tmp_path: Path) -> None:
+    client_keys = tmp_path / "client-keys"
+    client_keys.mkdir()
+    client_seed = initialize_response_seed(client_keys)
+    response_seed = initialize_response_seed(policy.state)
+    policy = replace(policy, authorized_keys=(response_public_key(client_seed),))
     submitted_calls = tmp_path / "submitted"
     cancelled_calls = tmp_path / "cancelled"
     _client(
@@ -165,15 +172,23 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
         f"with open({str(submitted_calls)!r}, 'a') as record: record.write('submitted\\n')\n"
         "print('123;cluster')\n",
     )
-    start = Request("1" * 32, policy.workspace_id, "start_manager", profile="cpu", enrollment_id=policy.enrollment_id)
+    start = sign_request(
+        Request("1" * 32, policy.workspace_id, "start_manager", profile="cpu", enrollment_id=policy.enrollment_id),
+        seed_path=client_seed,
+    )
     with ExitStack() as stack:
         requests = stack.enter_context(MailboxDirectory(policy.requests))
         responses = stack.enter_context(MailboxDirectory(policy.responses))
         with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True) as ledger:
             requests.replace(start.request_id + ".json", encode_request(start))
-            Broker(policy, SlurmGateway(policy, tmp_path / "policy.json"), ledger, requests, responses).run(
-                threading.Event(), once=True
-            )
+            Broker(
+                policy,
+                SlurmGateway(policy, tmp_path / "policy.json"),
+                ledger,
+                requests,
+                responses,
+                response_seed=response_seed,
+            ).run(threading.Event(), once=True)
             submitted = decode_response(responses.read(start.request_id + ".json"))
             assert submitted.outcome == "submitted" and submitted.handle is not None
             assert requests.names() == ()
@@ -182,7 +197,14 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
         _client(policy.scancel, f"open({str(cancelled_calls)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
         with Ledger(policy.state, policy.workspace_id, policy.enrollment_id) as ledger:
             ledger.recover()
-            broker = Broker(policy, SlurmGateway(policy, tmp_path / "policy.json"), ledger, requests, responses)
+            broker = Broker(
+                policy,
+                SlurmGateway(policy, tmp_path / "policy.json"),
+                ledger,
+                requests,
+                responses,
+                response_seed=response_seed,
+            )
             requests.replace(start.request_id + ".json", encode_request(start))
             status = Request(
                 "2" * 32, policy.workspace_id, "manager_status", handle=handle, enrollment_id=policy.enrollment_id
@@ -191,7 +213,9 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
                 "3" * 32, policy.workspace_id, "cancel_manager", handle=handle, enrollment_id=policy.enrollment_id
             )
             for request in (status, cancel):
-                requests.replace(request.request_id + ".json", encode_request(request))
+                requests.replace(
+                    request.request_id + ".json", encode_request(sign_request(request, seed_path=client_seed))
+                )
             broker.run(threading.Event(), once=True)
             assert decode_response(responses.read(start.request_id + ".json")) == submitted
             assert decode_response(responses.read(status.request_id + ".json")).scheduler_state == "RUNNING"

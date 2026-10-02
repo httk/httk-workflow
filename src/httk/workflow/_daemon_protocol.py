@@ -10,7 +10,7 @@ from typing import cast
 _MAX_REQUEST_SIZE = 16 * 1024
 _REQUEST_FORMAT = "httk-workspace-command"
 _RESPONSE_FORMAT = "httk-workspace-response"
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"})
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -39,6 +39,10 @@ class Request:
     profile: str | None = None
     handle: str | None = None
     enrollment_id: str = field(kw_only=True)
+    created_at: int = field(default=0, kw_only=True)
+    expires_at: int = field(default=0, kw_only=True)
+    operator_key: str | None = field(default=None, kw_only=True)
+    signature: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
@@ -56,6 +60,14 @@ class Request:
             raise ValueError("invalid workspace_id") from exc
         if type(self.operation) is not str or self.operation not in _OPERATIONS:
             raise ValueError("invalid operation")
+        if type(self.created_at) is not int or self.created_at < 0:
+            raise ValueError("invalid created_at")
+        if type(self.expires_at) is not int or self.expires_at < 0:
+            raise ValueError("invalid expires_at")
+        if self.operator_key is not None and type(self.operator_key) is not str:
+            raise ValueError("invalid operator_key")
+        if self.signature is not None and type(self.signature) is not str:
+            raise ValueError("invalid signature")
         if self.profile is not None and type(self.profile) is not str:
             raise ValueError("invalid profile")
         if self.handle is not None and type(self.handle) is not str:
@@ -139,6 +151,10 @@ def _request_fields(request: Request) -> dict[str, object]:
         "workspace_id": request.workspace_id,
         "enrollment_id": request.enrollment_id,
         "operation": request.operation,
+        "created_at": request.created_at,
+        "expires_at": request.expires_at,
+        "operator_key": request.operator_key,
+        "signature": request.signature,
     }
     if request.operation == "start_manager":
         fields["profile"] = request.profile
@@ -165,7 +181,18 @@ def decode_request(data: bytes) -> Request:
     operation = value.get("operation")
     if type(operation) is not str or operation not in _OPERATIONS:
         raise ValueError("invalid operation")
-    keys = {"format", "format_version", "request_id", "workspace_id", "enrollment_id", "operation"}
+    keys = {
+        "format",
+        "format_version",
+        "request_id",
+        "workspace_id",
+        "enrollment_id",
+        "operation",
+        "created_at",
+        "expires_at",
+        "operator_key",
+        "signature",
+    }
     if operation == "start_manager":
         keys.add("profile")
     elif operation in {"manager_status", "cancel_manager"}:
@@ -177,11 +204,21 @@ def decode_request(data: bytes) -> Request:
     enrollment_id = value["enrollment_id"]
     profile = value.get("profile")
     handle = value.get("handle")
+    created_at = value["created_at"]
+    expires_at = value["expires_at"]
+    operator_key = value["operator_key"]
+    signature = value["signature"]
     if type(request_id) is not str or type(workspace_id) is not str or type(enrollment_id) is not str:
         raise ValueError("invalid request fields")
     if "profile" in value and type(profile) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
+        raise ValueError("invalid request fields")
+    if type(created_at) is not int or type(expires_at) is not int:
+        raise ValueError("invalid request fields")
+    if operator_key is not None and type(operator_key) is not str:
+        raise ValueError("invalid request fields")
+    if signature is not None and type(signature) is not str:
         raise ValueError("invalid request fields")
     try:
         return Request(
@@ -191,6 +228,10 @@ def decode_request(data: bytes) -> Request:
             cast(str | None, profile),
             cast(str | None, handle),
             enrollment_id=enrollment_id,
+            created_at=created_at,
+            expires_at=expires_at,
+            operator_key=cast(str | None, operator_key),
+            signature=cast(str | None, signature),
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
@@ -232,6 +273,8 @@ class Response:
     handle: str | None = None
     scheduler_state: str | None = None
     reason: str | None = None
+    operator_key: str | None = field(default=None, kw_only=True)
+    signature: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid identifiers and outcome-specific combinations."""
@@ -259,6 +302,10 @@ class Response:
             raise ValueError("invalid scheduler_state")
         if self.reason is not None and (type(self.reason) is not str or _REASON_PATTERN.fullmatch(self.reason) is None):
             raise ValueError("invalid reason")
+        if self.operator_key is not None and type(self.operator_key) is not str:
+            raise ValueError("invalid operator_key")
+        if self.signature is not None and type(self.signature) is not str:
+            raise ValueError("invalid signature")
 
         has_handle = self.handle is not None
         has_state = self.scheduler_state is not None
@@ -287,6 +334,8 @@ def _response_fields(response: Response) -> dict[str, object]:
         "enrollment_id": response.enrollment_id,
         "request_digest": response.request_digest,
         "outcome": response.outcome,
+        "operator_key": response.operator_key,
+        "signature": response.signature,
     }
     if response.handle is not None:
         fields["handle"] = response.handle
@@ -311,7 +360,17 @@ def decode_response(data: bytes) -> Response:
     version = value.get("format_version")
     if type(version) is not int or version != _FORMAT_VERSION:
         raise ValueError("unsupported response version")
-    keys = {"format", "format_version", "request_id", "workspace_id", "enrollment_id", "request_digest", "outcome"}
+    keys = {
+        "format",
+        "format_version",
+        "request_id",
+        "workspace_id",
+        "enrollment_id",
+        "request_digest",
+        "outcome",
+        "operator_key",
+        "signature",
+    }
     optional = {"handle", "scheduler_state", "reason"}
     if not keys <= set(value) or not set(value) <= keys | optional:
         raise ValueError("invalid response fields")
@@ -327,6 +386,8 @@ def decode_response(data: bytes) -> Response:
             handle=value.get("handle"),  # type: ignore[arg-type]
             scheduler_state=value.get("scheduler_state"),  # type: ignore[arg-type]
             reason=value.get("reason"),  # type: ignore[arg-type]
+            operator_key=value["operator_key"],  # type: ignore[arg-type]
+            signature=value["signature"],  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid response fields") from exc
