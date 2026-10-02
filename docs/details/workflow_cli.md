@@ -1439,7 +1439,7 @@ required. All three kinds implement the same six operations:
 
 `mount-daemon` supports `configure`, `install` (a health request), and the optional
 `daemon` operation. It refuses the generic operations in the table above. Its
-five settings and typed request/result contract are in {doc}`adapter_authoring`.
+eight settings and typed request/result contract are in {doc}`adapter_authoring`.
 
 ### Quoting
 
