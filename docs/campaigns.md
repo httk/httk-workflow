@@ -1,33 +1,20 @@
 # Campaigns
 
-*Spreading a very large body of work across many workspaces — a convention and a
-few helpers, not a new scheduler.*
+A **campaign** runs work at a scale one workspace should not hold. It is not
+a new engine or scheduler, only a *partition map* over ordinary registered
+workspaces: each partition is a named bucket pointing at one workspace, and
+every command that drives a workspace drives a partition unchanged. Partition
+sizes are chosen from local measurements such as those in
+{doc}`details/benchmarks`. The map lives in the project's `project.json`, so
+it travels with the project.
 
-A **campaign** is how one project runs work at a scale a single workspace should
-not hold: not a new graph, not a new engine, not a sharding policy inside the
-scheduler, but a *partition map* over the ordinary workspaces you already
-{doc}`register <workflow_cli>`. Each partition is a named bucket that points at
-one workspace name in the machine registry; every command that drives a
-workspace drives a partition's workspace unchanged. Multi-workspace partitioning is the intended
-route to a campaign larger than one measured workspace: its partition sizes are
-chosen from the local measurements in {doc}`benchmarks`, with each partition an
-ordinary workspace a manager serves and a collect reads.
+Two rules keep this simple:
 
-The map lives in the project, in a `campaign` member of `project.json`, so it
-travels with the project and every helper reads it from there.
-
-## The two rules
-
-Two rules keep this safe at scale without any new machinery:
-
-- **Root jobs are assigned per policy.** When you submit a *root* job, the
-  campaign picks which partition it lands in — by content, by position, or by
-  your explicit choice.
-- **Dynamically spawned children always inherit their parent's workspace.** This
-  is already true of the execution engine: a child is scaffolded into the same
-  workspace its parent runs in. A campaign therefore never re-routes a subtree,
-  and this convention changes nothing about spawning — the whole tree below a
-  root stays in the partition the root was assigned.
+- **Root jobs are assigned by policy.** When you submit a root job, the
+  campaign picks its partition by hash, by position, or by your explicit choice.
+- **Spawned children inherit their parent's workspace.** The engine already
+  scaffolds a child into the workspace its parent runs in, so the whole tree
+  below a root stays in the partition the root was assigned.
 
 ## The partition map
 
@@ -42,11 +29,10 @@ north	screening-a
 south	screening-b
 ```
 
-`campaign init` writes the map: each `--partition NAME=WORKSPACE` names a bucket
-and the workspace name it points at, and `--assignment` sets how a root
-job's partition is chosen. The workspaces must be registered first with
-{doc}`workspace init <workflow_cli>` — a partition names a workspace the same way
-every other command does, never a bare path.
+Each `--partition NAME=WORKSPACE` names a bucket and the registered workspace
+it points at, and `--assignment` sets how a root job's partition is chosen.
+The workspaces must exist first ({doc}`workspaces`); a partition names a
+workspace the way every other command does, never a bare path.
 
 ### Assignment policies
 
@@ -87,58 +73,37 @@ job = campaign_submit(
 )
 ```
 
-Only the partition's *local* workspaces can be submitted into directly; a
-partition that points at a remote workspace is submitted to locally and moved
-with {doc}`transfer <workflow_cli>`, because a job is created where the client
-runs.
+A job is created where the client runs, so a partition that points at a
+remote workspace is submitted to locally and moved with `httk job transfer`
+({doc}`running`).
 
 ## Running and collecting across partitions
 
 ```console
-$ httk workflow campaign start-"managers"            # every partition
-$ httk workflow campaign start-"managers" --partition north
+$ httk workflow campaign start-managers            # every partition
+$ httk workflow campaign start-managers --partition north
 $ httk workflow campaign collect --state succeeded
 ```
 
-`campaign start-<wbr>managers` starts managers at each selected partition's launch
-site through that partition's workspace launcher. For a remote partition it
-invokes the manager command on the owning machine; the remote is transport only.
-This is exactly how {doc}`manager run <workflow_cli>` behaves for a single
-workspace. Each target workspace supplies its own launcher and settings. A
-launcher or invocation failure fails the command. `campaign collect` chains `campaign_collect()` across the
-partitions lazily, one workspace after another in stable order. `campaign
-collect` passes `--batch-size` (default 64) and `--fail-fast` to each local
-workspace collection; normal JSONL reports stream, while `--into` deliberately
-keeps the campaign sweep in memory for its cross-job provenance storage pass.
-
-Both take `--partition` to act on a subset, so a campaign can be managed and
-collected a few partitions at a time.
+`campaign start-managers` starts managers at each selected partition through
+that workspace's own launcher, exactly as `httk workflow run` does for one
+workspace; for a remote partition the manager command runs on the owning
+machine. `campaign collect` collects the partitions one after another in
+stable order and accepts the same `--into`, `--batch-size` and `--fail-fast`
+options as `httk collect`. Both take `--partition` to act on a subset.
 
 ## Bounded fan-out: placement recipes
 
-Partitioning across workspaces bounds *how many jobs one workspace holds*; within
-a workspace, `--placement` bounds *how wide any one directory gets*. A workspace
-scans its state tree by placement, so a flat directory with many markers is one
-wide `scandir`, while a shallow tree is cheaper to walk and resume. These are
-recipes, not policy — the engine imposes none of them:
-
-- **Hash-prefix fan-out** — place a job under a short prefix of its key's hash:
-  `project/<hash-prefix>/<batch>`. Multiple prefixes turn one wide directory
-  into a shallow tree with a bounded fan-out at every level.
-- **Batch buckets** — place a submission run under its own `project/<date>/<run>`,
-  so each batch is a subtree a collect or a placement-scoped manager can take on
-  its own.
-- **Per-source subtrees** — place each structure family under
-  `project/<family>/…`, so a partition's work is browsable by what it is.
-
-A manager restricted with `--placement-prefix` serves exactly one such subtree,
-so a campaign's partitions *and* their internal subtrees can each be given their
-own managers.
+Partitioning bounds how many jobs one workspace holds; within a workspace,
+`--placement` bounds how wide any one directory gets, since a shallow tree is
+cheaper to scan and resume than one flat directory of markers. The engine
+imposes no scheme; common ones are a short hash prefix of the job key
+(`project/<hash-prefix>/<batch>`), one subtree per submission batch
+(`project/<date>/<run>`), or one per structure family. A manager started with
+`--placement-prefix` serves exactly one such subtree.
 
 ## Where to go next
 
-- {doc}`workflow_cli` — `workspace init`, `transfer`, `manager run`, and the
-  `campaign` group in full.
-- {doc}`collecting` — the `JobRecord` stream `campaign_collect()` provides, and the data-layer
-  boundary it marks.
-- {doc}`taskmanager` — running managers for real.
+- {doc}`details/workflow_cli` for the `campaign` group in full.
+- {doc}`collecting` for the records `campaign collect` yields.
+- {doc}`running` for managers, transfers and sealing.

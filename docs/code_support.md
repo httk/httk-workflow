@@ -1,13 +1,11 @@
 # Supporting a simulation code
 
-*For developers adding helpers for a simulation code — input preparation,
-supervised runs, diagnostics, Bash functions — that workflow authors can reuse.*
-
-*httk-workflow* itself bundles no code support. Each simulation code is
-supported by its own distribution, `httk-workflow-<code>`, that plugs into the
-runtime through the *httk* registry. The VASP helpers, for example, live in the
-separate *httk-workflow-vasp* distribution (`pip install httk-workflow-vasp`);
-this page uses it as the worked example throughout.
+*httk-workflow* bundles no code support. Each simulation code is supported
+by its own distribution, `httk-workflow-<code>`, which provides input
+preparation, supervised runs, diagnostics and Bash functions that workflow
+authors reuse, and plugs into the runtime through the *httk* registry. This
+page uses *httk-workflow-vasp* (`pip install httk-workflow-vasp`) as the
+example throughout.
 
 ## What a code-support distribution provides
 

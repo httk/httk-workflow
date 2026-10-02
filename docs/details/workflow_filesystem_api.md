@@ -37,7 +37,7 @@ instructions. A later task manager must be able to identify the last commit
 point and continue from it.
 
 The design target is workspaces larger than the measured local snapshot in
-{doc}`/benchmarks`; that target is not a capacity measurement. Metadata inode
+{doc}`/details/benchmarks`; that target is not a capacity measurement. Metadata inode
 count, directory fan-out, scheduler scan cost, and manual filesystem inspection
 are therefore correctness-level design concerns, not later optimizations.
 
@@ -3028,4 +3028,4 @@ The principal improvements are:
 The filesystem remains the interoperability layer. Its steady-state inode cost
 is a design property described by the arithmetic above, while capacity beyond
 the measured snapshot is an operational question for the target filesystem and
-should be evaluated with {doc}`/benchmarks` before a campaign is sized.
+should be evaluated with {doc}`/details/benchmarks` before a campaign is sized.

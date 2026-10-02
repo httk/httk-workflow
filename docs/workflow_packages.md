@@ -1,21 +1,14 @@
-# Workflow packages
+# Workflow packages and URIs
 
-*For workflow authors who want one portable directory to describe,
-instantiate, run, and collect a workflow.* A package is a directory whose
-`httk_workflow.toml` is the strictly *httk*-owned glue around a runner; the
-whole directory is published content-addressed and digest-pinned per job:
+A workflow package is one portable directory: a manifest, `httk_workflow.toml`,
+beside a runner written in any language. The whole directory is published into
+the workspace content-addressed and pinned by digest in every job made from it.
 
 ```text
 my-workflow/
 ├── httk_workflow.toml
 └── run                    # the executable entry (any language)
 ```
-
-`[workflow.runner] entry` may name any executable member instead, and a
-descriptive name such as `run.py` or `run.sh` is recommended; the package then
-has no `run` member. A package may instead declare `[workflow.runner] command`, an argument vector
-such as `["{artifacts}/relax"]` or `["perl", "{package}/relax.pl"]`, and carry
-no `run` script.
 
 ```toml
 [workflow]
@@ -30,9 +23,6 @@ initial_step = "prepare"
 procs = 4
 mem = 4096
 
-[workflow.steps.relax.resources]
-procs = 8
-
 [workflow.inputs.structure]
 destination = "POSCAR"
 entry_type = "structures"
@@ -41,38 +31,68 @@ entry_type = "structures"
 default = 520
 ```
 
-`job new --workflow-dir my-workflow --input structure=POSCAR` instantiates a
-job from it. Declared inputs are staged objects; parameters are knobs;
-`[workflow.environment.*]` consumes typed workspace settings;
-`[workflow.instantiate]`/`[workflow.collect]` hooks and
-`[workflow.postprocess.NAME]` scripts run in any language and write outside the
-payload (under `<workspace>/postprocess/`, so a sealed job can still be
-postprocessed); and compiled
-workflows declare `[workflow.build]` (sources-only digests, binaries built and
-registered per machine with `httk workflow build`).
-An instantiate hook's parameters are the caller-supplied values plus any a
-format realization wires in; the declared defaults reach it separately and
-fill in every parameter still absent after it returns.
+`httk job new --workflow-dir my-workflow --input structure=POSCAR` instantiates
+a job from it. Beyond runner, inputs and parameters, the manifest can declare
+typed workspace settings the runner consumes (`[workflow.environment.*]`),
+hooks that run at instantiation and collection (`[workflow.instantiate]`,
+`[workflow.collect]`), curated postprocess scripts
+(`[workflow.postprocess.NAME]`), a build step for compiled runners
+(`[workflow.build]`), the other workflows it calls (`[workflow.calls]`), and
+minimum distribution versions (`requires`). Hooks and scripts are executables
+in any language that exchange JSON envelopes.
 
-The `[workflow.build]` vocabulary and engine are shared `httk.core.building`
-machinery. *httk-workflow* owns the workspace store layout and platform-tagged
-registrations; the manager passes registered build artifacts through
-`HTTK_WORKFLOW_RUNNER_ARTIFACTS` without modifying the published source tree.
-The build semantics are unchanged.
+## Sharing a workflow by URI
 
-`[workflow] requires = ["httk-workflow>=2.2.0", ...]` declares minimum
-distribution versions; they are checked when a job is created and again by the
-claiming manager in its own environment, so a runner needs no import guard.
+A package committed to a Git repository is referenced from anywhere by a git
+URI, and that URI is the installed workflow's id:
 
-An installed *httk₂* plugin may bundle workflow packages. Resolution checks
-in-process registrations first, then installed plugins; `httk workflow list`
-labels plugin entries with their owning plugin, while `workflow describe`
-reports a plugin entry as `source: installed-package`.
+```text
+git+https://github.com/<org>/<repo>[@<ref>][#<subdir>]
+```
 
-A package committed to a Git repository can be referenced from anywhere by a
-git URI such as `git+https://github.com/httk/workflows-vasp#vasp-relax`,
-which fetches and installs it; see {doc}`workflow_uris`.
+```console
+httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR
+httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk job new --workflow vasp.relax --input structure=POSCAR
+httk workflow uninstall vasp.relax
+```
 
-The full guide, {doc}`details/workflow_packages`, is the manifest reference:
-every table and key, hook envelopes, output declarations and provenance,
-format realizations, and the build-registration mechanics.
+Referencing a URI fetches the repository and installs the workflow; the job
+records the canonical URI with the ref expanded to the full commit, so what a
+queued job runs cannot change under it. Once installed, the manifest's
+`name` is its short name. Only `git+https://`, `git+http://` and `git+file://`
+URIs without credentials are accepted. Referencing a URI is consent to run its
+code with the trust of an installed plugin. A repository that also carries an
+`httk_plugin.toml` installs as a plugin with `httk plugin install`.
+
+## Calling other workflows
+
+A runner can call another workflow as a child job and resume when it finishes,
+which is how one workflow is assembled from others without copying their
+steps. A package declares what it calls, and a step calls it by alias:
+
+```toml
+[workflow.calls]
+relax = "vasp.relax"
+```
+
+```python
+@run.step
+def start(a):
+    a.call("relax", label="relax", files={"POSCAR": a.payload / "files" / "POSCAR"})
+    a.gather("after_relax", when="all_succeeded", on_impossible="triage")
+```
+
+Results flow back through `a.children`; input files are copied into the child
+or, for large shared files, read from the parent's workdir in place. See
+{doc}`details/composing_workflows`.
+
+## Further reading
+
+- {doc}`details/workflow_packages` is the manifest reference: every table and
+  key, hook envelopes, output declarations, format realizations, and build
+  registration.
+- {doc}`details/workflow_uris` covers the URI grammar, short-name
+  resolution, caching and trust, and the definition-versus-declaration URIs.
+- {doc}`runtime_helpers` and {doc}`sdks/index` describe the runner a package
+  wraps.

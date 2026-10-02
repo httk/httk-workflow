@@ -8,4 +8,4 @@ or rewritten against the native APIs; finished v1 trees are harvested with
 newly instantiated task directories, never a live v1 task-manager queue.
 
 The full guide, {doc}`details/httk_v1_migration_guide`, walks through every
-step; {doc}`v1_compatibility` describes the compatibility surface itself.
+step; {doc}`details/v1_compatibility` describes the compatibility surface itself.

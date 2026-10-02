@@ -61,7 +61,7 @@ $ httk workflow postprocess --script relaxation-plot
 On a VASP machine, set `vasp.command` to a command such as
 `"srun -n 32 vasp_std"` instead. If the machine needs shell setup first — a
 `module load`, a `source activate` — put it in a prelude rather than in
-`vasp.command`; see [Environment preludes](taskmanager.md#environment-preludes).
+`vasp.command`; see [Environment preludes](workspaces.md#environment-preludes).
 
 ## What each command did
 
@@ -177,55 +177,24 @@ Neither side of that loop is ever materialized: one runner publication is
 amortized over every job, and each job costs one payload directory and one state
 marker.
 
-## Launchers
+## Launchers, remotes, and other machines
 
-Managers normally run in-process when `httk workflow run` uses the built-in
-`process` launcher. On a cluster, set `manager.launch` to a named launcher so
-the same command submits managers through that launcher's scheduler profile.
-Use `--inline` for a one-manager debugging run or `--launcher NAME` for a
-one-invocation choice; see {doc}`launchers` for setup and scheduler settings.
-
-## Remotes
-
-A remote lets you reach another machine, move jobs to its workspace, and run
-the same workflow commands there. Initialize and address that workspace with
-`NAME:WORKSPACE`, such as `kappa:runs`; the remote invokes the manager on its
-owning machine, where that workspace's launcher still controls scheduling.
-See {doc}`remotes` for SSH setup, transfers, and the `local` adapter.
-
-## Moving a project between machines
-
-A project directory is self-describing: copy the whole tree (its `httk_project/`
-and its workspaces) to another machine and run `httk project repair` inside it.
-That registers every workspace in the new machine's per-user registry under the
-name `httk_project/members.json` recorded when you created it, so
-`httk workflow run`, `--workspace NAME`, and the rest work immediately — no
-re-`init`. `httk project repair` applies any safe fixes and adopts every member
-in one shot (`--dry-run` to preview, `--no-adopt` to skip adoption); adopt a
-single workspace with `httk workspace adopt`. All are idempotent and refuse to
-overwrite a name already pointing somewhere else.
+Managers run in-process until the workspace's `manager.launch` setting names a
+launcher such as `slurm`; a remote reaches another machine, so that jobs can be
+moved to a workspace there and run by its own launcher. A whole project is
+moved by copying its directory and running `httk project repair` inside it.
+{doc}`workspaces` sets all of this up, and {doc}`running` covers the job
+cycle in full.
 
 ## Where to go next
 
-- {doc}`vasp_runners` — the VASP workflows of the workflows-vasp repository:
-  their URIs, how to install and uninstall them, and the helper API they build on.
-- {doc}`runtime_helpers` — authoring a runner of your own. `job new --from-runner
-  ./my_runner.py --step characterize` scaffolds jobs for it exactly as for a
-  registered one; the file is published into the workspace and pinned by digest.
-  Two complete campaign runners are in `examples/defect_campaign.py` and
-  `examples/defect_campaign.sh`.
-- {doc}`workflow_packages` — authoring a directory workflow with hooks and a
-  manifest.
-- {doc}`sdks/bash_api` — the same runner protocol from Bash.
-- {doc}`workflow_compat` — a Python Workflow Definition, CWL workflow,
-  jobflow Maker document, or explicitly selected httk-v1 template becomes one
-  job with `httk job new --from-runner DOCUMENT`, without being rewritten
-  and without a runner file.
-- {doc}`collecting` — turning finished jobs into stored results.
-- Running on a cluster — add and configure a remote, initialize `R:NAME`, then
-  `transfer --job JOB LOCAL R:NAME` puts jobs there and `run --workspace R:NAME` invokes
-  the manager on its owning machine, where its workspace launcher starts it; a very large run spread across many workspaces
-  is a {doc}`campaigns`. See
-  {doc}`workflow_cli`.
-- {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the
-  complete command tree.
+- {doc}`workspaces` and {doc}`running`: setting up workspaces, launchers and
+  remotes, and creating, running, inspecting, transferring and sealing jobs.
+- {doc}`vasp_runners`: the VASP workflows of the workflows-vasp repository.
+- {doc}`runtime_helpers`: writing a runner of your own, which
+  `job new --from-runner ./my_runner.py` publishes and pins by digest exactly
+  like a registered one; {doc}`sdks/bash_api` is the same protocol from Bash.
+- {doc}`workflow_packages`: packaging a workflow with its manifest and hooks.
+- {doc}`workflow_compat`: running CWL, PWD, jobflow and httk v1 workflows as jobs.
+- {doc}`collecting`: turning finished jobs into stored results.
+- {doc}`campaigns`: one very large run spread across many workspaces.

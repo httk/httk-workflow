@@ -288,7 +288,7 @@ jq '.outputs = {"structures": 3}' declared.json >refined.json
 httk_workflow_declare workflow refined.json
 ```
 
-See {doc}`../declarations` for the declared/observed contract and what a collect
+See {doc}`../details/declarations` for the declared/observed contract and what a collect
 reports.
 
 `httk_workflow_children` prints `label`, terminal state, job key, workdir, and
@@ -324,7 +324,7 @@ parent_workdir=$(httk_workflow_parent workdir)
 ln -sfn "$parent_workdir/CHGCAR" CHGCAR
 ```
 
-See the "Sharing files with children" section of {doc}`../composing_workflows`
+See the "Sharing files with children" section of {doc}`../details/composing_workflows`
 for when reading in place is the right choice and what keeps it safe.
 
 ## What a step publishes
@@ -426,7 +426,7 @@ child's job tag defaults to the label, just as with `spawn`.
 | `--workflow-id ID` | override the workflow id written into the child's `job.json` |
 
 Calling needs the workspace root reachable from where the step runs, the same
-condition `httk_workflow_children` needs. See {doc}`../composing_workflows` for
+condition `httk_workflow_children` needs. See {doc}`../details/composing_workflows` for
 the full model, a worked example, and how results move between calls.
 
 ### Gathering them
@@ -610,6 +610,6 @@ these functions is `vasp.relax-bash` of workflows-vasp: see {doc}`../vasp_runner
 Trivial path matching and field splitting use normal quoted Bash constructs.
 Native code does not source or expose the legacy `HT_TASK_*` or `VASP_*`
 function names. Unchanged *httk* v1 workflows continue to use
-[*httk* v1 task compatibility](v1_compatibility.md). For a step-by-step
+[*httk* v1 task compatibility](../details/v1_compatibility.md). For a step-by-step
 conversion, see
-[*httk* v1 migration guide](httk_v1_migration_guide.md).
+[*httk* v1 migration guide](../httk_v1_migration_guide.md).

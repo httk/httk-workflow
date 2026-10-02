@@ -5,7 +5,7 @@ of the package — the modules grouped by layer below, and the names each declar
 in its `__all__` — rather than every source object. The three layers are:
 
 - **Filesystem protocol** — `httk.workflow.protocol` and `httk.workflow.errors`;
-  see {doc}`../workflow_protocol_api`.
+  see {doc}`../workflow_filesystem_api`.
 - **Execution / authoring** — the package root `httk.workflow` (`Runner`,
   `Attempt`, and the small job and result types), with `httk.workflow.sdk`,
   `httk.workflow.runtime`, `httk.workflow.runtime_utils`, and

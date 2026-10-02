@@ -14,20 +14,15 @@ deliberately takes no position on its contents.
 
 ## Carried verbatim
 
-A declaration is opaque to this engine. `job.json` carries the document
-unchanged, the protocol validates only that it *is* a JSON object under a
-well-formed name, and nothing here ever looks inside it — no member is added,
-removed, renamed, or rewritten.
-
-There is no *httk* envelope around it, and there will not be one. Versioning and
-self-description belong **inside** the document, in the `$id`-style members the
-OPTIMADE property-definition conventions already define: a document says which
-vocabulary and which version it follows, and a consumer that understands that
-vocabulary gives it meaning. An engine that wrapped or changed the document
-could only ever come to disagree with the standard it is carrying.
-
-collection therefore belongs to *httk-store* and OPTIMADE tooling. Carriage,
-digest coverage, and honest reporting belong here.
+A declaration is opaque to the engine. `job.json` carries the document
+unchanged, the protocol checks only that it is a JSON object under a
+well-formed name, and no member is ever added, removed or rewritten. There is
+no *httk* envelope around it: versioning and self-description belong inside
+the document, in the `$id`-style members of the OPTIMADE property-definition
+conventions, so that a consumer who understands the vocabulary gives the
+document its meaning. Interpreting declarations is therefore the business of
+*httk-store* and OPTIMADE tooling; carrying them, covering them by digest and
+reporting them honestly is the business of this module.
 
 Packaged workflows may carry declarations into every scaffolded `job.json`; the
 built-in VASP workflows declare their `workflow` `$id` using the published
@@ -54,13 +49,11 @@ A declaration attaches in two places, and the two are never merged.
 The declared document is the static statement of intent, pinned by the immutable
 job digest like every other member of `job.json`.
 
-The observed document exists because *httk₂* campaigns are dynamic: nothing
-declares the shape of a workflow up front, so a step may only discover at run
-time which children it spawned and which outputs it actually produced. A step
-writes the refined document as it learns it. That write is runner-private — the
-whole `.httk-job/` directory is excluded from every payload digest — so declaring
-can never disturb the immutability check of a payload, a child registration, or a
-detached transfer.
+The observed document exists because campaigns are dynamic: a step may only
+discover at run time which children it spawned and which outputs it produced,
+and it writes the refined document as it learns. The whole `.httk-job/`
+directory is excluded from every payload digest, so declaring never disturbs
+the immutability check of a payload, a child registration or a transfer.
 
 A collect reports both, side by side, per name. Reconciling them requires
 understanding the vocabulary, which is the consumer's job, not the engine's.
@@ -168,7 +161,7 @@ reported as `null` and sets `provenance.gaps` on the record, exactly like every
 other damaged evidence a collect still reports rather than hides.
 
 See {doc}`collecting` for the record as a whole, {doc}`runtime_helpers` and
-{doc}`sdks/bash_api` for the two authoring APIs, and
+{doc}`../sdks/bash_api` for the two authoring APIs, and
 {doc}`workflow_filesystem_api` for the normative statement of the `declarations`
 member and the payload area it is stored in. See {doc}`provenance` for the
 collection of the `provenance` declaration.

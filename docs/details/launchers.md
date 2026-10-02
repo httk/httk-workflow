@@ -204,4 +204,4 @@ confirm success. It also refuses a launcher that tries to take over remote
 transport: reaching a machine belongs to a remote adapter.
 
 The complete bundle layout, request and result documents, settings precedence,
-and refusal rules are in {doc}`details/launcher_authoring`.
+and refusal rules are in {doc}`launcher_authoring`.

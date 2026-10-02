@@ -393,7 +393,7 @@ Local protocol tests and scheduler stand-ins do not establish real cluster
 containment. This development host cannot create Bubblewrap namespaces and has
 no Slurm or MPI runtime; real cluster acceptance remains a deployment check.
 
-The {download}`MPI site probe <../tools/probe_daemon_mpi.c>` (also in a source
+The {download}`MPI site probe <../../tools/probe_daemon_mpi.c>` (also in a source
 checkout at `tools/probe_daemon_mpi.c`) provides the communication and spawn checks. Build it on the cluster with `mpicc -O2 -Wall -Wextra -o probe
 probe_daemon_mpi.c -lrt`, place the executable in the workspace and invoke it from
 a workflow with `httk workflow mpi run -- ./probe FRESHALPHANUMERICTOKEN`.

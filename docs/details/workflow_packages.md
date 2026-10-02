@@ -61,7 +61,7 @@ httk job new --workspace WS --workflow-dir ./my-workflow --input structure=POSCA
 `[workflow.runner]` selects one of four forms. The executable form is the
 ordinary package runner. The `format` forms delegate instantiate, run, and
 default collection to the registered realization in `httk.workflow.compat`
-(see {doc}`/workflow_compat`).
+(see {doc}`/details/workflow_compat`).
 
 | Form | Manifest selector | Required/allowed members | Runner contract |
 | --- | --- | --- | --- |
@@ -958,6 +958,6 @@ operation. A storage failure is reported on that job's summary as
 succeed. Inspect each JSONL line's `storage_error` before retrying or
 reconciling the destination store.
 
-See {doc}`/declarations` for declaration carriage, {doc}`/provenance` for the
-tree-pinned provenance handoff, {doc}`/collecting` for collect-hook and
+See {doc}`/details/declarations` for declaration carriage, {doc}`/details/provenance` for the
+tree-pinned provenance handoff, {doc}`/details/collecting` for collect-hook and
 fallback behavior, and {doc}`workflow_cli` for the complete command reference.

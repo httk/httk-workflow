@@ -99,4 +99,4 @@ fixed at `C=500` in both snapshot runs.
 These numbers come from one local filesystem and differ on shared filesystems.
 Large campaigns should use project-partitioned workspaces, choosing each
 partition's size from measurements appropriate to its storage and workload;
-see {doc}`campaigns`.
+see {doc}`../campaigns`.

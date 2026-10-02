@@ -217,7 +217,7 @@ because a dynamic campaign refines what it declares as it learns it:
 a.declare("workflow", {**a.declaration("workflow"), "outputs": {"structures": 3}})
 ```
 
-See {doc}`/declarations` for the declared/observed contract and what a collect
+See {doc}`/details/declarations` for the declared/observed contract and what a collect
 reports.
 
 `a.children` is empty unless this activation followed a `gather`. Every child is
@@ -254,7 +254,7 @@ It raises `FormatError` when this job's `parent` member or the parent's
 
 When to read a parent's files in place instead of copying them into the child,
 and the rules that keep it safe, are in the "Sharing files with children"
-section of {doc}`/composing_workflows`.
+section of {doc}`/details/composing_workflows`.
 
 ## What an attempt publishes
 
@@ -338,7 +338,7 @@ def after_relax(a):
 A packaged workflow is referenced through `pkg:` and copies nothing; a runner
 file of your own is published into the workspace runner store (content-addressed,
 idempotent). Calling needs the workspace root reachable from the step, the same
-condition `a.children` needs. See {doc}`../composing_workflows` for the full
+condition `a.children` needs. See {doc}`composing_workflows` for the full
 model, a worked example, failure semantics, and how results move between calls.
 
 ### Gathering them

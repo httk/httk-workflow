@@ -23,14 +23,14 @@ through {py:attr}`~httk.workflow.Attempt.children`.
 This is a distinct tool from the two nearby ones:
 
 - It is **not** a single multi-step runner sharing one workdir. `vasp.relax-static`
-  (see {doc}`vasp_runners`) is one runner whose steps hand a directory from
+  (see {doc}`../vasp_runners`) is one runner whose steps hand a directory from
   relaxation to a static run in place. Reach for that when the stages are one
   program's phases; reach for `call` when a stage *is* another workflow with its
   own runner, inputs, and failure handling.
 - It is **not** a `ChildSpec` spawn. {py:class}`~httk.workflow.ChildSpec` and
   {py:meth}`~httk.workflow.Attempt.spawn` fan a job out into children that run
   *this same runner's* steps — the partitioned-campaign pattern of
-  {doc}`campaigns`. `call` runs a *different* workflow, and carries input files a
+  {doc}`../campaigns`. `call` runs a *different* workflow, and carries input files a
   `ChildSpec` deliberately cannot.
 
 ## What can be called
@@ -62,7 +62,7 @@ The declaration makes the dependencies known before anything runs: a job is
 refused at creation if a declared workflow is unknown, a manager does not start
 it until each is installed (and built, when compiled) on its machine, and a call
 to an undeclared workflow is refused. See the `[workflow.calls]` section of
-{doc}`details/workflow_packages`. A runner file of your own has no manifest and
+{doc}`workflow_packages`. A runner file of your own has no manifest and
 may call anything.
 
 Where the runner ends up depends on what it is. A registered packaged workflow is
@@ -245,13 +245,13 @@ gathering step.
 - **A child inherits its parent's workspace and placement.** Like every spawned
   child, a called child is created in the calling job's workspace (and its
   placement, unless you pass `placement=`), so the whole tree below a root stays
-  where the root was assigned — the convention {doc}`campaigns` relies on.
+  where the root was assigned — the convention {doc}`../campaigns` relies on.
 
 ## Where to go next
 
-- {doc}`sdks/bash_api` — `httk_workflow_call` and the rest of the Bash
+- {doc}`../sdks/bash_api` — `httk_workflow_call` and the rest of the Bash
   authoring SDK.
-- {doc}`campaigns` — `ChildSpec` fan-out and partitioning, the other way one job
+- {doc}`../campaigns` — `ChildSpec` fan-out and partitioning, the other way one job
   becomes many.
 - {doc}`declarations` — what a workflow records about its inputs and outputs.
-- {doc}`vasp_runners` — the VASP workflows a runner most often calls.
+- {doc}`../vasp_runners` — the VASP workflows a runner most often calls.

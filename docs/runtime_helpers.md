@@ -1,10 +1,9 @@
-# Native runner helpers
+# Writing runners
 
-*For authors writing a workflow runner in Python.* A runner is one program
-implementing the steps of one workflow: the manager launches it once per
-attempt, names the step, and reads exactly one published outcome back. There
-is no graph language — a step decides at run time what to spawn and what runs
-next:
+A runner is one program implementing the steps of one workflow. The manager
+launches it once per attempt, names the step, and reads exactly one published
+outcome back. There is no graph language; a step decides at run time what to
+spawn and what runs next.
 
 ```python
 #!/usr/bin/env python3
@@ -31,11 +30,21 @@ def relax(a):
 raise SystemExit(run.main())
 ```
 
-`job new --from-runner ./relax.py` publishes and digest-pins it; the same surface
-exists in Bash, C, Fortran, Rust, Perl, Ada, C++, and Java ({doc}`sdks/index`),
-and the normative operation table is {doc}`sdks/sdk_parity`.
+`httk job new --from-runner ./relax.py` publishes the file into the
+workspace, pins it by digest, and creates a job for it. Inside a
+step, the `Attempt` object `a` gives the job's parameters, settings and
+declared environment, a private `state` that survives retries, the workdir and
+payload paths, transactional data, and the outcomes: `advance`, `retry`,
+`succeed`, `fail`. `a.spawn` fans a job out into children that run this
+runner's steps and `a.gather` waits for them; `a.call` runs another workflow
+as a child ({doc}`workflow_packages`).
+
+The same surface exists in Bash, C, Fortran, Rust, Perl, Ada, C++ and Java
+({doc}`sdks/index`), with {doc}`sdks/sdk_parity` as the normative operation
+table.
 
 The full guide, {doc}`details/runtime_helpers`, covers the complete `Attempt`
-surface — parameters, settings, declared environment, state, transactional
-data, spawning and gathering children (`ChildSpec`, join conditions),
-outcomes and retry semantics, logging, and a full defect-campaign example.
+surface, child specifications and join conditions, outcome and retry
+semantics, logging, and a complete defect-campaign example;
+{doc}`details/composing_workflows` covers calling other workflows and sharing
+files with children.

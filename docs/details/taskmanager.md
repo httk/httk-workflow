@@ -816,7 +816,7 @@ assumed.
 
 Reading *results* rather than status is collecting: `httk collect
 WORKSPACE` streams `CollectedJob` summaries, while `--raw` exposes the
-`JobRecord` stream for a data layer; see {doc}`/collecting`.
+`JobRecord` stream for a data layer; see {doc}`/details/collecting`.
 
 ## The foreground debug runner
 

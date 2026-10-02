@@ -111,8 +111,8 @@ local clone. Module CI does not set it yet, so these tests skip there.
 - **Runs workflows written elsewhere.** Python Workflow Definition and CWL
   documents become ordinary jobs; see
   [`docs/workflow_compat.md`](docs/workflow_compat.md).
-- **Reaches other machines.** Versioned [remote adapters](docs/remotes.md)
-  transport files and run commands on a cluster; the workspace's [launcher](docs/launchers.md)
+- **Reaches other machines.** Versioned [remote adapters](docs/details/remotes.md)
+  transport files and run commands on a cluster; the workspace's [launcher](docs/details/launchers.md)
   starts its managers, and crash-recoverable detached transfer fetches results back.
 - **Manages projects and identity**: XDG configuration, signed project
   manifests, and workspace policy — see
@@ -121,7 +121,7 @@ local clone. Module CI does not set it yet, so these tests skip there.
   collected result per stopped job; *httk-workflow* itself has no database dependency.
 - **Keeps *httk* v1 workflows running.** Converted `ht_steps`/`ht_run` packages
   execute unchanged on the normal engine — see
-  [`docs/v1_compatibility.md`](docs/v1_compatibility.md) and the
+  [`docs/details/v1_compatibility.md`](docs/details/v1_compatibility.md) and the
   [migration guide](docs/httk_v1_migration_guide.md).
 
 ```console

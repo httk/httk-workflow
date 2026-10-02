@@ -1,7 +1,5 @@
 # VASP workflows
 
-*For campaigns that want an ordinary VASP calculation without writing a runner at all.*
-
 The ready-made VASP workflows live in the
 [workflows-vasp](https://github.com/httk/workflows-vasp) repository, one
 workflow package per subdirectory. *httk-workflow* does not bundle them, nor the
@@ -38,7 +36,7 @@ httk workflow uninstall vasp.relax
 ```
 
 `httk plugin install git+https://github.com/httk/workflows-vasp` installs all
-four at once as a plugin instead. See {doc}`workflow_uris` for URI resolution,
+four at once as a plugin instead. See {doc}`details/workflow_uris` for URI resolution,
 short names and the trust model.
 
 The VASP command is the `vasp.command` application setting, resolved most
@@ -50,64 +48,16 @@ See {doc}`sdks/sdk_parity` for the resolution table. The workflows default to
 `--data-mode transactional` to `job new` to also publish a curated copy into
 `data/`.
 
-## Writing a VASP runner in Python
+## Writing a VASP runner of your own
 
-A Python VASP runner is an ordinary {py:class}`~httk.workflow.Runner` whose
-steps spell out their work on the `httk.codes.vasp` primitives of
-*httk-workflow-vasp*, the same functions its Bash VASP API wraps. The workflows-vasp runners
-(`vasp-relax/run`, `vasp-static/run`, `vasp-relax-static/run`) are the worked
-examples: copy one and edit it. Each step reads its job parameters directly with
-`a.parameter(...)`, `a.setting(...)` and `a.state`, the way the Bash runner
-reads `httk_workflow_parameter`:
-
-- `prepare` copies the payload POSCAR (failing `vasp.input_missing` when it is
-  absent), INCAR and POTCAR into the workdir, builds a
-  `VaspPreparationOptions` from the job
-  parameters and calls `prepare_vasp_inputs`.
-- `run` resolves the `vasp.command` setting, calls
-  `clean_vasp_outputs` and
-  `run_vasp`, and advances on a completed run with
-  the `classification` and the energy from
-  `last_oszicar_energy`. Otherwise it plans a remedy
-  with `plan_vasp_remedy`, fails `vasp.failed`
-  when the ladder or the remedy budget is exhausted, and else applies it with
-  `apply_vasp_remedy`, optionally rattles the POSCAR
-  (`rattle_poscar`), counts `remedies`, and retries.
-- `publish` puts the collected files into transactional data, or only notes
-  them when the persistent workdir is the result, and succeeds.
-
-A condensed form of the `run` step of `vasp-relax/run` (the file adds the
-command check, the remedy-policy parameter, rattling and log notes):
-
-```python
-report = run_vasp(argv, directory=a.workdir, timeout=a.parameter("timeout", 86400.0))
-oszicar = a.workdir / "OSZICAR"
-energy = last_oszicar_energy(oszicar) if oszicar.is_file() else None
-state: dict[str, object] = {"classification": report.classification}
-if energy is not None:
-    state["energy"] = energy
-if report.classification == "completed":
-    a.advance("publish", state=state)
-    return
-applied = int(a.state.get("remedies", 0))
-history = job_remedy_history_path(a.payload)
-decision = plan_vasp_remedy(report.diagnostics, directory=a.workdir, history_path=history)
-if decision.give_up or applied >= int(a.parameter("maximum_remedies", 8)):
-    a.state.merge(state)
-    a.fail("vasp.failed", f"VASP {report.classification}", details=decision.as_mapping())
-    return
-apply_vasp_remedy(decision, directory=a.workdir, history_path=history)
-a.state.merge({**state, "remedies": applied + 1})
-a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
-```
-
-A relax-then-static runner (`vasp-relax-static/run`) adds a `promote` step that
-archives the relaxation, turns its CONTCAR into the next POSCAR with
-`contcar_to_poscar`, and re-derives the inputs
-with the static tags; the Bash counterpart uses the Bash VASP API, which a Bash
-runner sources as `$HTTK_WORKFLOW_VASP_BASH_API` after `$HTTK_WORKFLOW_BASH_API`.
-That variable is exported only when *httk-workflow-vasp* is installed, so guard
-it first with `: "${HTTK_WORKFLOW_VASP_BASH_API:?install httk-workflow-vasp}"`.
-
-A group whose practice differs copies a workflow package from the repository
-and edits it, or keeps the workflows and registers its own remedy policy.
+The workflows-vasp runners (`vasp-relax/run`, `vasp-static/run`,
+`vasp-relax-static/run`) are ordinary runners ({doc}`runtime_helpers`) whose
+steps call the `httk.codes.vasp` helpers of *httk-workflow-vasp*: `prepare`
+builds the inputs with `prepare_vasp_inputs`, `run` supervises VASP with
+`run_vasp` and, on a known failure, applies a remedy from `plan_vasp_remedy`
+and retries, and `publish` records the results. A Bash runner uses the same
+functions through the VASP Bash API, sourced as `$HTTK_WORKFLOW_VASP_BASH_API`
+after the generic `$HTTK_WORKFLOW_BASH_API`. A group whose practice differs
+copies a workflow package from the repository and edits it, or keeps the
+workflows and registers its own remedy policy. See {doc}`code_support` for the
+helper library and the Bash API.

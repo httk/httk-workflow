@@ -126,5 +126,5 @@ on this machine is collected as a job without a provider (see
 {doc}`collecting`), and nothing named in a job payload ever causes a download.
 
 The full reference, including the grammar and resolution precedence, is in
-{doc}`details/workflow_packages`; the API is {py:mod}`httk.workflow.git_workflows`
+{doc}`workflow_packages`; the API is {py:mod}`httk.workflow.git_workflows`
 and the shared `httk.core.git_sources`.

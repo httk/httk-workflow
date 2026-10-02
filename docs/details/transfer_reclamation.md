@@ -1,5 +1,20 @@
 # Transfer completion and bounded metadata
 
+*For operators who move many jobs between workspaces on quota-limited
+filesystems, and for implementers of the transfer protocol.*
+
+`httk job transfer` moves a job by detaching it from the source workspace,
+importing its sealed bundle at the destination, and retiring the source only
+after the destination has acknowledged the import. This page describes what
+that completion protocol leaves on disk, how it recovers when a transfer is
+interrupted or replayed, and why its bookkeeping stays small: an HPC workspace
+that has sent thousands of jobs home keeps a handful of protocol files whose
+count does not grow with the number of jobs. Ordinary use needs none of this;
+it matters when a transfer was interrupted, when both ends run different
+*httk-workflow* versions, or when a filesystem quota counts files.
+
+## Epochs and sequence numbers
+
 New detached transfers carry a random UUID `transfer_epoch` and a positive
 `transfer_sequence`. Each process allocates a fresh epoch per workspace/destination
 stream, with its counter and pending reservations held in process memory. A
@@ -138,14 +153,7 @@ test pass. A returning home workspace necessarily retains the N actual jobs and
 their live state markers/journals; the boundedness guarantee concerns transfer
 bookkeeping there, and the entire control tree of an emptied HPC workspace.
 
-`tests/test_transfer_residuals.py` compares exact metadata file lists for 5 and
-50 roundtrips, including shared terminal journal segments, and checks crash
-boundaries, delayed replays, concurrent receivers, sequence reservation recovery,
-remote incoming staging, and transfer-specific retirement. The existing retirement
-suite checks shared/live journal protection, partial reclamation, retention,
-sealed integrity, and quarantine preservation.
-
-## Sweep complexity
+## Cost of a sweep
 
 The CLI seals/pulls a sweep before importing it in a batch, then retires the
 acknowledgements in a batch. There is one source recovery/selection pass per
@@ -174,16 +182,3 @@ independent of U. Thus this is **amortized sweep complexity**, not a claim that
 one isolated, cold single-job call is O(1). The timing regression includes the
 initial scan in its batch mean and also reports the warm median. Repeatedly
 issuing single-job commands forfeits batching; use one multi-job transfer/sweep.
-
-The epoch regressions cover delete/reset, allocator-only and consistent two-file
-in-place rollback, clone, inherited fork memory, interleaved processes, and both
-live-destination and job-already-left cases. Restart tests cover sealed resume
-and unfenced pending reissue, including a second process completing a fenced
-transfer and a subsequent consistent restore of its old pending reservation
-before the job is sent again. Conflicting live-job transfer IDs and payload
-digests are rejected. The 0/1,000/4,000-marker timing test asserts one protection
-scan per 128-job batch. A separate terminal-history test counts protection-chain
-frame reads for 4 and 4,000 terminal jobs, including six-frame histories: counts
-must be identical. Another test verifies that old terminal references do not
-prevent eager collection while terminal heads remain protected. All original
-interruption and file-residual tests remain in place.

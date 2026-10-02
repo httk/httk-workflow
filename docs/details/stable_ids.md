@@ -52,14 +52,14 @@ same id rather than a fresh entry.
 
 ## The anchoring rule
 
-A key must derive from a *stable* identity, never from a path that can silently
-move. A live-collected job is always stable. A job harvested from a **v1 tree
-with no manifest** is identified only by its absolute path, so
-{py:func}`httk.workflow.ledger_key` **refuses** it
+A key must derive from a stable identity, never from a path that can move.
+A live-collected job is always stable. A job harvested from a v1 tree with no
+manifest is identified only by its absolute path, so
+{py:func}`httk.workflow.ledger_key` refuses it
 ({py:class}`httk.workflow.UnstableIdentityError`, with a `force=True` escape
-hatch). A path-derived key that goes stale would hand an old id to new content —
-the one unforgivable ledger failure — so `collect` degrades such a job to
-store-minted (unstable) ids with a loud warning rather than pinning it wrongly.
+hatch): a path-derived key that goes stale would hand an old id to new
+content. `collect` instead degrades such a job to store-minted, unstable ids
+with a warning.
 
 ## Using it from `collect`
 

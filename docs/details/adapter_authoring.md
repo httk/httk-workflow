@@ -344,7 +344,7 @@ Beyond the standard request envelope, `daemon` accepts exactly:
 
 | Member | Meaning |
 | --- | --- |
-| `daemon_request` | complete signed version-3 command object from {doc}`/workspace_daemon` |
+| `daemon_request` | complete signed version-3 command object from {doc}`/details/workspace_daemon` |
 | `wait_seconds` | optional finite number from 0.05 to 120, default 10 |
 
 The client checks workspace/enrollment IDs against the configured endpoint before
@@ -361,7 +361,7 @@ boundary. Failure to obtain a validated response is an adapter error and may
 leave a live request. Callers must retain its ID and fields for retry.
 
 This kind's `configure` merges pending settings, validates the eight settings
-listed in {doc}`/remotes` and checks mounted workspace identity. It publishes
+listed in {doc}`/details/remotes` and checks mounted workspace identity. It publishes
 nothing. Its `install` operation rejects nonempty pending settings and sends a
 health request; success means the matching daemon answered `ready`. It does not
 install software or validate compute-node confinement.
@@ -374,7 +374,7 @@ in two, by name:
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
   `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
   `port`, `username`, mount settings, the seven `daemon_*` settings documented
-  in {doc}`/remotes`, `vasp_command`, and `vasp_pseudo_library` —
+  in {doc}`/details/remotes`, `vasp_command`, and `vasp_pseudo_library` —
   are written into the flat `settings` object of the shareable, signable
   `remote.json`;
 - **every other key** is a credential. It is written into
@@ -424,7 +424,7 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
 
 Every remote command string is built by that helper and by nothing else. A
 manager launcher owns any generated scheduler script and its quoting; see
-{doc}`/launchers` for that separate contract.
+{doc}`/details/launchers` for that separate contract.
 
 `rsync` transfers pass `--protect-args`, so even file names travel inside the
 protocol rather than through the remote shell. When an explicit `files` batch is
@@ -462,7 +462,7 @@ of a large campaign — belongs to a bundle whose `timeout_seconds` says so.
 For a PBS site, write a custom adapter that implements these six operations and
 uses `qsub` only when a command is explicitly invoked on that site. The manager
 launch policy belongs to the target workspace's launcher, not to the remote
-adapter. See {doc}`/launchers` for the compact PBS launcher example,
+adapter. See {doc}`/details/launchers` for the compact PBS launcher example,
 including its batch directives, script lifecycle, and partial-submission rules.
 
 ## Reading the maintained implementation

@@ -3,76 +3,46 @@
 This site documents the *httk-workflow* module. For the full documentation of
 *httk₂*, see [docs.httk.org](https://docs.httk.org).
 
-The module implements a recoverable, language-neutral workflow protocol whose
-source of truth is a single atomically renamed state marker per job. It presents
-three layers, each with its own import home: the **filesystem protocol**
-(`httk.workflow.protocol`), the **execution and authoring** surface
-(`httk.workflow` — `Runner`, `Attempt` — with lower-level helpers in
-`httk.workflow.runtime`), and **orchestration and management** (`Workspace`,
-`TaskManager`, `collect`, and named submodules for transfers, remotes, and
-compatibility). Installations register the `httk workflow` command tree.
-
-Managers are started by the workspace's `manager.launch` setting, using the
-built-in `process` launcher or a launcher bundle such as `slurm`. A remote is
-only the transport for files and commands on another machine.
-
-*httk₂* workflows are language-independent: runners, hooks, and postprocess
-scripts can be written in any language; a workflow is a manifest plus the
-members it references. Python hooks remain first-class, with an in-process fast
-path. Successful hook outputs use the same assembly semantics as executable
-hooks; collector failures differ deliberately: registered `.py` exceptions
-abort iteration, while executable-hook errors degrade per job and continue the
-sweep.
+*httk-workflow* runs computational workflows from the filesystem. A
+**workspace** holds jobs as directories, each with one atomically renamed state
+marker as its source of truth, so an interrupted manager, node or calculation
+is resumed from what is on disk rather than cleaned up. A **runner** implements
+the steps of a workflow in any language and decides at run time what to spawn
+and what runs next; there is no graph language. Managers run the jobs, on the
+local machine or through a scheduler, and `collect` hands the finished results
+to a data layer such as *httk-store*.
 
 ```{admonition} Quick links
 :class: tip
 
-**New here** — start with {doc}`quickstart`: five commands from an empty
-directory to a finished relaxation, no runner written and no VASP required.
+- **Quickstart**: {doc}`quickstart`, from an empty directory to a finished
+  relaxation in eight commands
+- **Setting up workspaces**: {doc}`workspaces`, projects, settings, launchers,
+  and remotes
+- **Running workflows**: {doc}`running`, creating jobs, managers, transfers,
+  collecting, and sealing
+- **Writing runners in Python**: {doc}`runtime_helpers`
+- **Runner SDKs in other languages**: {doc}`sdks/index`
+- **Workflow packages and URIs**: {doc}`workflow_packages`
+- **Ready-made VASP workflows**: {doc}`vasp_runners`
+- **Supporting a simulation code**: {doc}`code_support`
+- **Collecting results**: {doc}`collecting`
+- **Provenance, declarations, and stable ids**: {doc}`provenance`
+- **CWL, PWD, jobflow, and httk v1 workflows**: {doc}`workflow_compat`
+- **Campaigns across many workspaces**: {doc}`campaigns`
+- **The command line**: {doc}`workflow_cli`
+- **The filesystem protocol**: {doc}`workflow_filesystem_api`
+- **Migrating from httk v1**: {doc}`httk_v1_migration_guide`
+- **API reference**: {doc}`reference/index`
+- **Examples notebook**: {doc}`notebooks/examples`
 
-**The filesystem protocol** — the language-neutral on-disk contract
-
-- {doc}`workflow_protocol_api` — the `httk.workflow.protocol` namespace
-- {doc}`workflow_filesystem_api` — the normative on-disk specification
-
-**The execution API** — writing and running workflow steps
-
-- {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
-- {doc}`sdks/index` — the same authoring surface in eight more languages
-- {doc}`vasp_runners` — the ready-made VASP workflows of workflows-vasp, for campaigns that write none
-- {doc}`code_support` — supporting a simulation code with an `httk-workflow-<code>` distribution
-- {doc}`workflow_packages` — authoring directory packages and their manifest
-- {doc}`workflow_uris` — sharing and referencing workflows in Git repositories by URI
-- {doc}`declarations` — saying what a workflow *is*, for a data layer
-- {doc}`provenance` — turning one `JobRecord` into one `httk.core.Run`
-- {doc}`collecting` — collecting provider-produced outputs and products
-- {doc}`workflow_compat` — compatibility with other workflow systems: CWL, PWD, jobflow, and httk-v1 (`format = ...`)
-- {doc}`notebooks/examples` — worked examples as a notebook
-
-**Orchestration and management** — driving and inspecting a workspace
-
-- {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
-- {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes, and launchers
-- {doc}`sealing` — signing finished jobs, workspaces, and projects so tampering is detectable
-- {doc}`stable_ids` — keeping entry ids stable across store rebuilds with a sealed id ledger
-- {doc}`campaigns` — partitioning a very large campaign across many workspaces
-- {doc}`composing_workflows` — a workflow that calls other workflows as child jobs
-- {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
-- {doc}`collecting` — reading finished jobs back out as records and collected outputs
-- {doc}`remotes` — reaching a machine with a packaged or custom remote adapter
-- {doc}`launchers` — starting managers with a packaged or custom launcher
-- {doc}`workspace_daemon` — a confined serial Slurm broker using a file mailbox
-- {doc}`reference/index` — the generated API reference
-
-**Migration**
-
-- [*httk* v1 migration guide](httk_v1_migration_guide.md)
-- [*httk* v1 compatibility](v1_compatibility.md)
+The topic pages above are short and practical; each links onward to its full
+guide in the **Details** section of the sidebar.
 ```
 
 ## Install
 
-Preferably work in a Python virtual environment:
+Preferably work in a Python virtual environment, then do:
 
 ```bash
 git clone https://github.com/httk/httk-workflow
@@ -95,59 +65,57 @@ httk workflow run
 httk collect
 ```
 
-{doc}`quickstart` walks through exactly those commands, including how to run them
-without VASP installed. A complete payload prepared some other way is still
-submitted directly:
-
-```console
-httk job submit --workspace workflow-workspace --placement project/00 prepared-job
-```
+{doc}`quickstart` walks through exactly those commands, including how to run
+them without VASP installed.
 
 ```{toctree}
 :maxdepth: 2
 :caption: Documentation
 
 quickstart
-workflow_protocol_api
+workspaces
+running
 runtime_helpers
 sdks/index
+workflow_packages
 vasp_runners
 code_support
-workflow_packages
-workflow_uris
-declarations
-provenance
 collecting
+provenance
 workflow_compat
-taskmanager
-workflow_cli
-sealing
-stable_ids
 campaigns
-composing_workflows
-benchmarks
-remotes
-transfer_reclamation
-launchers
-workspace_daemon
-reference/index
-notebooks/examples
+workflow_cli
 workflow_filesystem_api
 httk_v1_migration_guide
+reference/index
+notebooks/examples
 ```
 
 ```{toctree}
 :maxdepth: 1
 :caption: Details
 
-details/runtime_helpers
 details/taskmanager
-details/workflow_packages
 details/workflow_cli
-details/monitor
-details/adapter_authoring
+details/launchers
 details/launcher_authoring
-details/workflow_filesystem_api
+details/remotes
+details/adapter_authoring
+details/transfer_reclamation
+details/workspace_daemon
+details/sealing
+details/monitor
+details/runtime_helpers
+details/composing_workflows
+details/workflow_packages
+details/workflow_uris
+details/collecting
+details/declarations
+details/provenance
+details/stable_ids
+details/workflow_compat
+details/v1_compatibility
 details/httk_v1_migration_guide
-v1_compatibility
+details/benchmarks
+details/workflow_filesystem_api
 ```

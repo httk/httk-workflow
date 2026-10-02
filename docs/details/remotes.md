@@ -240,7 +240,7 @@ operator. The old `mount` adapter still uses its separate executor as described
 above; it does not gain confinement from this feature.
 
 The mount must meet the workspace's atomic rename and metadata visibility
-requirements (see {doc}`details/taskmanager`). Root paths must be absolute,
+requirements (see {doc}`taskmanager`). Root paths must be absolute,
 existing, disjoint and free of symlink components. Local descriptor checks cannot
 prove the server's layout or SSHFS cache coherence. Validate these at the site,
 including that SSHFS does not hide server symlinks by following them. Unsupported
@@ -308,7 +308,7 @@ required binaries, unsupported operations, non-zero dispatcher exits, and
 malformed or unsuccessful result documents.
 
 The complete bundle layout, operation request and result documents, settings and
-credential handling, and refusal rules are in {doc}`details/adapter_authoring`.
+credential handling, and refusal rules are in {doc}`adapter_authoring`.
 
 For the transfer completion protocol, crash recovery, and metadata bounds on
 quota-limited filesystems, see {doc}`transfer_reclamation`.

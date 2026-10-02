@@ -110,7 +110,7 @@ job UUIDs when precise attribution matters.
 | `workspace seal [--force] [--keys REFS] [NAME...]` | record every job's seal digest under one signed workspace seal | `--force` seals still-unsealed jobs first; `--keys` overrides the `seal.keys` setting |
 | `workspace unseal [--force] [NAME...]` | remove a workspace's seal, refused while its project is sealed | `--force` skips the confirmation |
 
-Sealing is described in full in {doc}`../sealing`. `workspace status` gains a
+Sealing is described in full in {doc}`sealing`. `workspace status` gains a
 `sealed` line (and JSON field). `workspace seal` runs inside the maintenance
 guard, so it requires a quiescent workspace; without `--force` it lists the
 still-unsealed jobs and refuses rather than sealing a partial set.
@@ -224,7 +224,7 @@ When giving more than one `JOB_ID`, name the workspace explicitly.
 
 `job show` gains a `sealed` line — `yes` with the signer roles, or `no` — and,
 in `--json`, a `sealed` boolean plus `seal_roles`. `job seal` and `job unseal`
-are the per-job half of {doc}`../sealing`; a job must be quiescent to be sealed.
+are the per-job half of {doc}`sealing`; a job must be quiescent to be sealed.
 
 `job detach` makes a spawned job independent of its parent: it no longer moves
 with its parent's tree, it can be transferred on its own, and `Attempt.parent`
@@ -294,7 +294,7 @@ threshold without progressing; and any **pending** operator request still in
 `requests/ready`, or the reason recorded for the most recent **retired** one.
 
 CWL, PWD, and jobflow documents use `job new --from-runner DOCUMENT`; see
-{doc}`/workflow_compat` for PWD, CWL, jobflow, and httk-v1 details.
+{doc}`/details/workflow_compat` for PWD, CWL, jobflow, and httk-v1 details.
 
 ### `job transfer` — moving jobs between two workspaces
 
@@ -389,12 +389,12 @@ calculation tree is collected as a workspace with the default states and is not
 walked. `--dry-run` prints one `httk-collect-claim` line per claimed, declined
 or workspace directory and collects nothing; it cannot be combined with
 `--into`. A calculation's summary line names its `"directory"` relative to the
-swept root. See {doc}`/collecting` for recognized calculations.
+swept root. See {doc}`/details/collecting` for recognized calculations.
 
 With `--into`, a sealed id ledger keeps entry ids stable across rebuilds. It is
 on by default at `<into>.ids.sqlite`; `--id-ledger PATH` relocates it and
 `--no-id-ledger` disables it (ids then become unstable across rebuilds). See
-{doc}`/stable_ids`.
+{doc}`/details/stable_ids`.
 
 `--upgrade` (only with `--into`) lets an existing store take an additive layout
 change: new record kinds appended to a family or new families, for example a
@@ -412,7 +412,7 @@ Every form except the pure-array `--json` ends with one
 `unclaimed` for a calculation tree and `revised` with `--into`. The command
 exits nonzero when any job was degraded, failed to store, or was skipped for an
 unreadable `job.json`; unfulfilled roles and unclaimed directories alone keep
-the exit at `0`. See {doc}`/collecting` for the triage members and `--into`
+the exit at `0`. See {doc}`/details/collecting` for the triage members and `--into`
 partial-state semantics.
 
 ### postprocess — run a curated script
@@ -502,7 +502,7 @@ pinned URI, and the whole repository-and-subdirectory lineage for an unpinned
 URI or a short name. A selector naming only an in-process registration is an
 error, and one naming a plugin workflow points to `httk plugin uninstall`.
 Each argument is processed independently; any failure exits `1` after the
-rest. See {doc}`/workflow_uris`.
+rest. See {doc}`/details/workflow_uris`.
 
 ### `precheck` — readiness before an attempt
 
@@ -672,7 +672,7 @@ are documented with *httk-core*.
 
 Writing seals lives beside each level (`job seal`, `workspace seal`, `project
 seal`); the top-level `seal` group carries the one verb that belongs to no
-single level: verifying a whole sealed tree. {doc}`../sealing` is the full guide.
+single level: verifying a whole sealed tree. {doc}`sealing` is the full guide.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
@@ -731,7 +731,7 @@ confined destination broker). The first three use the target workspace
 `manager.launch` setting, such as a packaged `slurm` launcher. `mount-daemon`
 selects a locally approved serial or MPI launcher configuration through the daemon; it refuses generic
 `REMOTE:NAME` operations. Transfer jobs using absolute mounted workspace paths.
-See {doc}`/remotes` for configuration and request-ID retry rules.
+See {doc}`/details/remotes` for configuration and request-ID retry rules.
 
 `remote show` never prints a credential *value*: a remote setting stored in
 the manifest-excluded `credentials.json` is reported by name only, so a
@@ -828,7 +828,7 @@ httk job new --from-command 'srun --ntasks=10 my_executable {input}' --file inpu
 `--workflow` also accepts a git URI, `git+https://HOST/PATH[@REF][#SUBDIR]`:
 the repository is fetched at `REF`, the package in `SUBDIR` is installed, and
 the job records the canonical URI with the full commit hash as its workflow id.
-See {doc}`/workflow_uris`.
+See {doc}`/details/workflow_uris`.
 
 The workflows-vasp workflows default to `--data-mode none`: results remain in the
 persistent workdir and `collect` reads them there, with no `data/` copy. Add
@@ -908,7 +908,7 @@ The same `--format` option accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for
 bare document inputs. Manifest packages and registered ids reject the option
 because their format is already declared.
 
-See {doc}`/workflow_compat` for package manifests, bare-document rules,
+See {doc}`/details/workflow_compat` for package manifests, bare-document rules,
 the supported CWL subset, PWD security, jobflow Makers, and format default collection.
 
 Harvest old v1 results without submitting them:
@@ -956,7 +956,7 @@ locally first.
 
 `httk collect --workspace WORKSPACE` streams one `CollectedJob` summary per finished
 job as JSON lines by default. Use `--raw` to stream `JobRecord` records for a
-data layer; see {doc}`/collecting`.
+data layer; see {doc}`/details/collecting`.
 
 ## Configuration and projects
 
@@ -1230,7 +1230,7 @@ environment:
   `--json`, `show` is line-oriented (`WORKFLOW⇥text`), so a multi-line prelude's
   continuation lines carry no id prefix — machine consumers should use `--json`.
 
-See {doc}`/taskmanager` for how each layer is delivered by the workspace's
+See {doc}`/running` for how each layer is delivered by the workspace's
 launcher, and why preludes stay behind when a job is transferred.
 
 ## Workspace policy and integrity
@@ -1602,4 +1602,4 @@ current daemon MPI allocation. The approved configuration fixes nodes, ranks and
 there are no caller-supplied Slurm options. The wrapper requires an active daemon
 MPI manager, streams stdout/stderr, uses `/dev/null` for stdin and returns the step
 status. A connection failure produces an uncertain result without resubmission.
-See {doc}`/workspace_daemon` for policy, containment and shared-memory requirements.
+See {doc}`/details/workspace_daemon` for policy, containment and shared-memory requirements.
