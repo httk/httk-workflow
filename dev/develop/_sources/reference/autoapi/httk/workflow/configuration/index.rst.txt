@@ -1,0 +1,177 @@
+httk.workflow.configuration
+===========================
+
+.. py:module:: httk.workflow.configuration
+
+.. autoapi-nested-parse::
+
+   Manage XDG configuration for workflow commands.
+
+   The per-user configuration and data directory functions are provided by
+   ``httk.core.userdirs`` and re-exported here for workflow callers. Operator
+   identity — signing keys, named identities, and signatures — lives in
+   ``httk.core.identity``; the workflow configuration below holds only
+   machine-level settings such as ``machine_names``.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.configuration.CONFIG_FORMAT
+   httk.workflow.configuration.CONFIG_FORMAT_VERSION
+   httk.workflow.configuration.CONFIG_KEYS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.configuration.ConfigKey
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.configuration.settable_config_keys
+   httk.workflow.configuration.remotes_home
+   httk.workflow.configuration.launchers_home
+   httk.workflow.configuration.config_path
+   httk.workflow.configuration.read_config
+   httk.workflow.configuration.machine_names
+   httk.workflow.configuration.write_config
+   httk.workflow.configuration.set_config_key
+   httk.workflow.configuration.unset_config_key
+   httk.workflow.configuration.import_v1_configuration
+
+
+Module Contents
+---------------
+
+.. py:data:: CONFIG_FORMAT
+   :value: 'httk-config'
+
+
+.. py:data:: CONFIG_FORMAT_VERSION
+   :value: 2
+
+
+.. py:class:: ConfigKey
+
+   Describe one member the user configuration is allowed to carry.
+
+   :param name: Configuration member name.
+   :param description: Human-readable explanation shown to operators.
+   :param settable: Whether ``config set`` may change the member.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: description
+      :type:  str
+
+
+   .. py:attribute:: settable
+      :type:  bool
+      :value: True
+
+
+
+.. py:data:: CONFIG_KEYS
+   :type:  collections.abc.Mapping[str, ConfigKey]
+
+.. py:function:: settable_config_keys()
+
+   Return the configuration keys ``config set`` accepts, in order.
+
+   :return: Settable configuration member names.
+
+
+.. py:function:: remotes_home()
+
+   Return where this user's remote definitions live.
+
+   :return: Per-user remote definition directory.
+
+
+.. py:function:: launchers_home()
+
+   Return where this user's manager launcher definitions live.
+
+   :return: Per-user manager launcher definition directory.
+
+
+.. py:function:: config_path()
+
+   Return the path of this user's configuration file.
+
+   :return: User configuration path.
+
+
+.. py:function:: read_config()
+
+   Read the user configuration, returning an empty mapping if absent.
+
+   A document of an unrecognized format or version is refused by name rather
+   than read as if its members meant what this implementation means by them.
+
+   :return: Configuration members, or an empty mapping when no file exists.
+   :raises ValueError: If the file is not a supported configuration document.
+
+
+.. py:function:: machine_names()
+
+   Return the configured names by which this machine is addressed.
+
+   :return: Names configured for this machine.
+   :raises ValueError: If ``machine_names`` is not a valid comma-separated value.
+
+
+.. py:function:: write_config(values)
+
+   Write a versioned user configuration.
+
+   :param values: Configuration members to write.
+   :return: Path of the written configuration file.
+
+
+.. py:function:: set_config_key(key, value)
+
+   Set one registered configuration key and return the written path.
+
+   :param key: Settable configuration member name.
+   :param value: New member value.
+   :return: Path of the written configuration file.
+   :raises ValueError: If the key is not settable or its value is invalid.
+
+
+.. py:function:: unset_config_key(key)
+
+   Remove one registered configuration key and return the written path.
+
+   :param key: Settable configuration member name.
+   :return: Path of the written configuration file.
+   :raises ValueError: If the key is not settable or is not configured.
+
+
+.. py:function:: import_v1_configuration(source = None)
+
+   Import safe metadata and public identity from a legacy ``~/.httk`` tree.
+
+   The named operator identity report and legacy public key are returned from
+   ``httk.core.identity.import_v1_identity``; the workflow configuration
+   records only where the import came from. Legacy 64-byte private material is
+   deliberately left untouched.
+
+   :param source: Legacy configuration root, or the default legacy home.
+   :return: Imported workflow configuration and identity report members.
+   :raises FileNotFoundError: If the legacy configuration file is absent.
+
+

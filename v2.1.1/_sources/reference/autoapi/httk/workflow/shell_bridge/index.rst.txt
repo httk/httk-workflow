@@ -1,0 +1,71 @@
+httk.workflow.shell_bridge
+==========================
+
+.. py:module:: httk.workflow.shell_bridge
+
+.. autoapi-nested-parse::
+
+   Expose the command bridge behind the native Bash API.
+
+   Every function of the packaged ``shell/httk-workflow.sh`` library is one
+   invocation of one subcommand of this bridge, and every subcommand publishes
+   through :class:`httk.workflow.Attempt` and
+   :class:`httk.workflow.runtime_builders.OutcomeDraft`. A Bash runner and a Python
+   runner therefore write the same bytes, because they write through exactly one
+   implementation.
+
+   This module is the documented surface of that contract. The implementation lives
+   in the private ``httk.workflow._shell_bridge``, which is what the shell library
+   still executes; both names refer to the same objects, and the private one keeps
+   working. See the native Bash API guide in the httk-workflow documentation for
+   the subcommands themselves.
+
+   Exit codes are uniform across every subcommand: ``0`` when the call succeeded,
+   ``1`` when the answer is legitimately absent — an unset state key, a missing
+   input with no default, a null child field — and ``2`` when the call is refused,
+   which covers bad usage, a protocol violation, and a corrupt attempt context.
+   The supervised-command and VASP subcommands additionally report the classified
+   outcome of the program they ran.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.shell_bridge.ABSENT
+   httk.workflow.shell_bridge.REFUSED
+   httk.workflow.shell_bridge.RUNNER_STEPS_VARIABLE
+   httk.workflow.shell_bridge.RUNNER_WORKFLOW_VARIABLE
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.shell_bridge.main
+
+
+Module Contents
+---------------
+
+.. py:data:: ABSENT
+   :value: 1
+
+
+.. py:data:: REFUSED
+   :value: 2
+
+
+.. py:data:: RUNNER_STEPS_VARIABLE
+   :value: 'HTTK_WORKFLOW_RUNNER_STEPS'
+
+
+.. py:data:: RUNNER_WORKFLOW_VARIABLE
+   :value: 'HTTK_WORKFLOW_RUNNER_WORKFLOW'
+
+
+.. py:function:: main(argv = None)
+

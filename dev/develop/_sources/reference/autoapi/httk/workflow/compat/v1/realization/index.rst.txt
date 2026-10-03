@@ -1,0 +1,82 @@
+httk.workflow.compat.v1.realization
+===================================
+
+.. py:module:: httk.workflow.compat.v1.realization
+
+.. autoapi-nested-parse::
+
+   Realize legacy httk v1 task packages through the ordinary runner path.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.realization.PACKAGE
+   httk.workflow.compat.v1.realization.RUNNER
+   httk.workflow.compat.v1.realization.PROGRAMS
+   httk.workflow.compat.v1.realization.V1_PRIORITY_MAP
+   httk.workflow.compat.v1.realization.V2_TO_V1_PRIORITY
+   httk.workflow.compat.v1.realization.LANGUAGE
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.realization.matches
+   httk.workflow.compat.v1.realization.ports
+   httk.workflow.compat.v1.realization.validate_runner
+   httk.workflow.compat.v1.realization.prepare
+   httk.workflow.compat.v1.realization.collect
+
+
+Module Contents
+---------------
+
+.. py:data:: PACKAGE
+   :value: 'httk.workflow.compat.v1'
+
+
+.. py:data:: RUNNER
+   :value: 'v1_runner.py'
+
+
+.. py:data:: PROGRAMS
+   :value: ('ht_steps', 'ht_run')
+
+
+.. py:data:: V1_PRIORITY_MAP
+
+.. py:data:: V2_TO_V1_PRIORITY
+
+.. py:function:: matches(path)
+
+   Return false: bare v1 directories require an explicit format.
+
+
+.. py:function:: ports(path)
+
+   Return the port shape of a v1 task, which has no document ports.
+
+
+.. py:function:: validate_runner(options, root)
+
+   Validate v1 taskset and retry options.
+
+
+.. py:function:: prepare(request)
+
+   Prepare one v1 package realization.
+
+
+.. py:function:: collect(record)
+
+   Reject use as a default collector for v1 packages.
+
+
+.. py:data:: LANGUAGE
+

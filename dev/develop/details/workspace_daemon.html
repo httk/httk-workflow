@@ -1,0 +1,944 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Sealing jobs, workspaces, and projects" href="sealing.html"><link rel="prev" title="Transfer completion and bounded metadata" href="transfer_reclamation.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Confined workspace daemon - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="transfer_reclamation.html">Transfer completion and bounded metadata</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/details/workspace_daemon.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="confined-workspace-daemon">
+<h1>Confined workspace daemon<a class="headerlink" href="#confined-workspace-daemon" title="Link to this heading">¶</a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">daemon</span></code> is an opt-in, foreground Slurm broker for a file
+command mailbox. It answers health checks, starts managers from locally
+approved named launcher configurations, and requests status or cancellation
+by opaque manager handle. Requests need an authorized <em>httk</em> identity
+signature and cannot supply commands, shell fragments, environment variables,
+paths or Slurm arguments.</p>
+<p>Serial execution supports one node and one Slurm task per submission, with
+configurable manager workers sharing its capacity. Protected MPI
+configurations add direct Slurm PMIx application steps; see
+<a class="reference internal" href="#mpi-applications">MPI applications</a>. The <code class="docutils literal notranslate"><span class="pre">mount-daemon</span></code> adapter supplies
+typed client controls and native mounted-path job transfers; see
+<a class="reference internal" href="remotes.html"><span class="doc">Remotes</span></a>. The existing mount adapter and the ordinary Slurm launcher
+lack these confinement guarantees.</p>
+<section id="deployment-boundary">
+<h2>Deployment boundary<a class="headerlink" href="#deployment-boundary" title="Link to this heading">¶</a></h2>
+<section id="host-requirements">
+<h3>Host requirements<a class="headerlink" href="#host-requirements" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Linux with Bubblewrap 0.9.0 or later supporting <code class="docutils literal notranslate"><span class="pre">--bind-fd</span></code>,
+<code class="docutils literal notranslate"><span class="pre">--ro-bind-data</span></code>, <code class="docutils literal notranslate"><span class="pre">--disable-userns</span></code> and <code class="docutils literal notranslate"><span class="pre">--assert-userns-disabled</span></code>.</p></li>
+<li><p>Permitted unprivileged user namespaces.</p></li>
+<li><p>Slurm 23.11.6 or later.</p></li>
+</ul>
+<p>Startup refuses missing requirements; there is no unsandboxed fallback. The
+Python installation, its packages, the policy and the initial operator
+environment must be trusted: use a protected installation, not editable
+packages in uploaded content.</p>
+</section>
+<section id="filesystem-roots">
+<h3>Filesystem roots<a class="headerlink" href="#filesystem-roots" title="Link to this heading">¶</a></h3>
+<p>Provision separate roots for workspace data, requests, responses and broker
+state. Their parent directories must prevent transport writers from replacing
+these roots. Keep the policy and private state outside the writable export.
+The SQLite ledger needs a local filesystem with reliable locking and
+durability; do not store it over SSHFS or another network filesystem.</p>
+</section>
+<section id="transport-accounts">
+<h3>Transport accounts<a class="headerlink" href="#transport-accounts" title="Link to this heading">¶</a></h3>
+<p>An SSHFS mount root alone does not confine the server-side account to that
+directory; a same-UID unrestricted SFTP or SSH account could modify private
+state or trusted code outside the export. Enforce the restriction at the
+server or use a separate restricted transport identity. Local file-mode
+checks cannot verify that server configuration.</p>
+</section>
+<section id="sandboxes">
+<h3>Sandboxes<a class="headerlink" href="#sandboxes" title="Link to this heading">¶</a></h3>
+<p>The broker enters Bubblewrap before it listens for command requests. It sees
+the workspace read-only, writable mailbox and state mounts, selected read-only
+runtime and scheduler configuration, and the host network that Slurm needs.</p>
+<p>Each submitted manager enters a separate Bubblewrap sandbox on the compute node
+before it runs its approved prelude. That sandbox has writable workspace data,
+private temporary storage, isolated network, PID, IPC, UTS and user
+namespaces, no capabilities and disabled nested user namespaces. It receives no
+broker-only mounts.</p>
+</section>
+<section id="runtime-mounts">
+<h3>Runtime mounts<a class="headerlink" href="#runtime-mounts" title="Link to this heading">¶</a></h3>
+<p>Mount only trusted runtime directories and required files. Do not expose home
+directories, credentials, arbitrary Unix sockets or broad system configuration
+trees to payloads. Read-only mounts can still contain sockets that grant host
+services; file permissions do not disable them. Confinement also depends on a
+correctly maintained host kernel and Bubblewrap. Resource and disk exhaustion
+are separate operational concerns.</p>
+<p>Shared runtime roots and broker-only roots must be disjoint, also after
+symlink resolution. Runtime roots may not contain mutable roots or replace the
+sandbox’s private mounts. These checks reject broad aliases such as a selected
+runtime symlink that resolves to <code class="docutils literal notranslate"><span class="pre">/</span></code>.</p>
+</section>
+</section>
+<section id="operator-policy-and-startup">
+<h2>Operator policy and startup<a class="headerlink" href="#operator-policy-and-startup" title="Link to this heading">¶</a></h2>
+<section id="approved-launchers">
+<h3>Approved launchers<a class="headerlink" href="#approved-launchers" title="Link to this heading">¶</a></h3>
+<p>Named Slurm launchers serve as approved manager configurations; their
+settings override workspace settings. Create several to offer different
+resources or worker counts (see <a class="reference internal" href="launchers.html"><span class="doc">Launchers</span></a>). Approval reads their
+settings without executing their launcher programs or preludes.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow launcher add --template slurm --global small \</span>
+<span class="go">  --set slurm.cpus_per_task=2 --set slurm.mem=4G \</span>
+<span class="go">  --set slurm.time_limit=01:00:00 --set manager.workers=2</span>
+</pre></div>
+</div>
+</section>
+<section id="client-identities">
+<h3>Client identities<a class="headerlink" href="#client-identities" title="Link to this heading">¶</a></h3>
+<p>On each client, initialize or select an <em>httk</em> identity and give its public
+key to the destination operator; the private key stays on the client:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk init --name "Your Name" --email you@example.org</span>
+<span class="go">python -c 'from httk.core.identity import identity_public_key; print(identity_public_key())'</span>
+</pre></div>
+</div>
+</section>
+<section id="policy-file">
+<h3>Policy file<a class="headerlink" href="#policy-file" title="Link to this heading">¶</a></h3>
+<p>An example operator policy:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"httk-workspace-daemon-policy"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"format_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"workspace"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/srv/httk/example/data"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"readonly_paths"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"/usr"</span><span class="p">,</span><span class="w"> </span><span class="s2">"/bin"</span><span class="p">,</span><span class="w"> </span><span class="s2">"/lib"</span><span class="p">,</span><span class="w"> </span><span class="s2">"/lib64"</span><span class="p">,</span><span class="w"> </span><span class="s2">"/opt/httk"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"broker_paths"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"/etc/slurm"</span><span class="p">,</span><span class="w"> </span><span class="s2">"/run/munge"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"slurm_conf"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/etc/slurm/slurm.conf"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"authorized_keys"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"allowed_launchers"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"small"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"request_max_age"</span><span class="p">:</span><span class="w"> </span><span class="mi">3600</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"max_records"</span><span class="p">:</span><span class="w"> </span><span class="mi">4096</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"max_submissions"</span><span class="p">:</span><span class="w"> </span><span class="mi">128</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"poll_seconds"</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"command_timeout"</span><span class="p">:</span><span class="w"> </span><span class="mf">30.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"max_output_bytes"</span><span class="p">:</span><span class="w"> </span><span class="mi">65536</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Runtime libraries and trusted code must stay available through
+<code class="docutils literal notranslate"><span class="pre">readonly_paths</span></code>. Scheduler configuration and authentication sockets belong in
+<code class="docutils literal notranslate"><span class="pre">broker_paths</span></code>.</p>
+</section>
+<section id="executables-and-cluster">
+<h3>Executables and cluster<a class="headerlink" href="#executables-and-cluster" title="Link to this heading">¶</a></h3>
+<p>The initial operator environment and <code class="docutils literal notranslate"><span class="pre">PATH</span></code> are trusted. Setup discovers
+<code class="docutils literal notranslate"><span class="pre">bwrap</span></code>, <code class="docutils literal notranslate"><span class="pre">sbatch</span></code>, <code class="docutils literal notranslate"><span class="pre">squeue</span></code> and <code class="docutils literal notranslate"><span class="pre">scancel</span></code> there and saves their absolute
+paths; explicit executable paths are also supported. Python defaults to the
+running interpreter, preserving its virtual environment. Set <code class="docutils literal notranslate"><span class="pre">cluster</span></code>
+explicitly or let it be discovered from <code class="docutils literal notranslate"><span class="pre">SLURM_CLUSTER_NAME</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm_conf</span></code> or
+a bounded <code class="docutils literal notranslate"><span class="pre">scontrol</span> <span class="pre">show</span> <span class="pre">config</span></code> call.</p>
+</section>
+<section id="state-mailboxes-and-snapshots">
+<h3>State, mailboxes and snapshots<a class="headerlink" href="#state-mailboxes-and-snapshots" title="Link to this heading">¶</a></h3>
+<p>Initialization derives the workspace identity and creates a fresh enrollment.</p>
+<ul class="simple">
+<li><p>The default mailboxes are siblings named <code class="docutils literal notranslate"><span class="pre">data.daemon-requests</span></code> and
+<code class="docutils literal notranslate"><span class="pre">data.daemon-responses</span></code>. Override <code class="docutils literal notranslate"><span class="pre">requests</span></code> and <code class="docutils literal notranslate"><span class="pre">responses</span></code> to match the
+site’s exported layout.</p></li>
+<li><p>Private state defaults to <code class="docutils literal notranslate"><span class="pre">workspace-daemons/&lt;workspace-path-hash&gt;</span></code> below the
+<em>httk</em> data directory. Override <code class="docutils literal notranslate"><span class="pre">state</span></code> when that directory is on a shared
+filesystem, because the ledger needs reliable local locking and durability.</p></li>
+<li><p>Protected immutable runtime snapshots default to a directory beside the
+operator policy named <code class="docutils literal notranslate"><span class="pre">&lt;policy-stem&gt;.daemon</span></code>; <code class="docutils literal notranslate"><span class="pre">snapshot_root</span></code> overrides it.
+This directory must be visible at the same path on compute nodes. Private
+state and mailboxes need not be.</p></li>
+</ul>
+<p>The active approval pointer lives in private state. Keep state, snapshots,
+policy and trusted code outside writable exports.</p>
+</section>
+<section id="initializing-and-running">
+<h3>Initializing and running<a class="headerlink" href="#initializing-and-running" title="Link to this heading">¶</a></h3>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --initialize</span>
+<span class="go">httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --check</span>
+<span class="go">httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --export-endpoint &gt; endpoint.json</span>
+<span class="go">httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json</span>
+</pre></div>
+</div>
+<p>Relative paths are taken from the current directory, so from inside the
+workspace data directory <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">daemon</span> <span class="pre">.</span> <span class="pre">--policy</span> <span class="pre">../example.json</span></code>
+also works. <code class="docutils literal notranslate"><span class="pre">..</span></code> is accepted only at the start of a relative path. The
+workspace must be the same directory as the policy’s <code class="docutils literal notranslate"><span class="pre">workspace</span></code>, and the
+policy file must be outside it.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--initialize</span></code> creates the ledger and private response key, saves the
+approved settings and publishes the active approval last. It runs no
+scheduler or sandbox preflight.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--check</span></code> enters the real broker sandbox and checks the scheduler clients,
+without submitting work or validating compute-node execution.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--once</span></code> processes one bounded scan. Normal startup polls until SIGINT or
+SIGTERM; a site service supervisor can restart the foreground daemon.</p></li>
+</ul>
+<p>An interrupted initialization keeps its partial artifacts and refuses
+automatic replacement. Keep the ledger and keys when diagnosing failures, and
+do not remove them to clear an uncertain submission.</p>
+</section>
+<section id="resources">
+<h3>Resources<a class="headerlink" href="#resources" title="Link to this heading">¶</a></h3>
+<p>Set CPU count, memory and time in the workspace or launcher as
+<code class="docutils literal notranslate"><span class="pre">slurm.cpus_per_task</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.mem</span></code> and <code class="docutils literal notranslate"><span class="pre">slurm.time_limit</span></code>:</p>
+<ul class="simple">
+<li><p>Memory accepts positive integer MiB or K/M/G/T suffixes; KiB rounds up to
+MiB.</p></li>
+<li><p>Time accepts the standard
+<a class="reference external" href="https://slurm.schedmd.com/sbatch.html">Slurm time forms</a>; seconds round up
+to minutes.</p></li>
+<li><p>Zero or unlimited requests are rejected.</p></li>
+<li><p>The current limits are 1024 CPUs per task, 1,048,576 MiB per node and
+10,080 minutes.</p></li>
+</ul>
+<p>Serial configurations use one Slurm task; <code class="docutils literal notranslate"><span class="pre">manager.workers</span></code> runs several
+concurrent attempts within the manager’s total capacity. Each signed start
+starts exactly one manager, whatever <code class="docutils literal notranslate"><span class="pre">manager.count</span></code> says. The other
+supported scheduler fields are nodes, ntasks, ntasks_per_node, partition,
+account and the MPI selector described below; other <code class="docutils literal notranslate"><span class="pre">slurm.*</span></code> fields are
+rejected. <code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code> and a single executable <code class="docutils literal notranslate"><span class="pre">manager.command</span></code>
+are frozen at approval and run inside the payload sandbox. Daemon managers
+run with <code class="docutils literal notranslate"><span class="pre">--allocation</span> <span class="pre">none</span></code>: their capacity is the approved configuration’s,
+never probed inside the sandbox.</p>
+</section>
+<section id="changing-approved-configurations">
+<h3>Changing approved configurations<a class="headerlink" href="#changing-approved-configurations" title="Link to this heading">¶</a></h3>
+<p>Stop the daemon, edit the operator policy or the launcher or workspace
+settings, then run:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --reload</span>
+<span class="go">httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --export-endpoint &gt; endpoint.json</span>
+</pre></div>
+</div>
+<p>Reload refuses while the daemon holds its lifetime ledger lock. Startup checks
+its chosen snapshot against the active approval after taking the same lock, so
+a startup racing with a reload cannot serve revoked keys or old approvals.
+Workspace edits alone never change approved manager settings. Re-import the
+exported catalog on clients after changing approvals.</p>
+<p>Queued and running jobs keep their immutable snapshot, including prelude and
+resource geometry. New starts must name a currently approved configuration and
+its exact digest; a retained old snapshot does not authorize them. Reload
+preserves the enrollment, ledger, response key and old snapshots. Changing the
+scheduler connection or enrollment roots requires a separate, reconciled
+enrollment. Installed binaries and site configuration file contents remain
+operator-maintained external dependencies.</p>
+</section>
+</section>
+<section id="file-command-protocol">
+<h2>File command protocol<a class="headerlink" href="#file-command-protocol" title="Link to this heading">¶</a></h2>
+<section id="request-signatures">
+<h3>Request signatures<a class="headerlink" href="#request-signatures" title="Link to this heading">¶</a></h3>
+<p>The internal version-3 format requires identity signatures. The maintained
+client builds and signs documents with its configured <em>httk</em> operator
+identity; an unsigned request is never executed. The policy’s
+<code class="docutils literal notranslate"><span class="pre">authorized_keys</span></code> lists the allowed Ed25519 public keys, and removing a key
+also stops it from replaying old results. This authorization rule is separate
+from the ordinary, optional attribution meaning of <em>httk</em> identity signatures.</p>
+<p>Each signature covers the format and version, the request, workspace and
+enrollment IDs, the operation and its fields, <code class="docutils literal notranslate"><span class="pre">created_at</span></code>, <code class="docutils literal notranslate"><span class="pre">expires_at</span></code> and
+<code class="docutils literal notranslate"><span class="pre">operator_key</span></code>.</p>
+</section>
+<section id="time-window">
+<h3>Time window<a class="headerlink" href="#time-window" title="Link to this heading">¶</a></h3>
+<p>Times are integer Unix seconds. The default lifetime and the policy
+<code class="docutils literal notranslate"><span class="pre">request_max_age</span></code> are 3600 seconds. The clock-skew allowance is 7800 seconds
+(130 minutes) in both directions, so first execution requires
+<code class="docutils literal notranslate"><span class="pre">created_at</span> <span class="pre">-</span> <span class="pre">7800</span> <span class="pre">&lt;=</span> <span class="pre">now</span> <span class="pre">&lt;=</span> <span class="pre">expires_at</span> <span class="pre">+</span> <span class="pre">7800</span></code>, with equality accepted. With a
+one-hour lifetime the acceptance interval spans 5 hours 20 minutes in total.
+The expiry limits admission and execution of the request; a Slurm job already
+submitted can stay queued past that deadline.</p>
+</section>
+<section id="ledger-and-replay">
+<h3>Ledger and replay<a class="headerlink" href="#ledger-and-replay" title="Link to this heading">¶</a></h3>
+<p>The protected ledger keeps the exact signed requests. A duplicate never
+submits again, even after a restart. A currently authorized key can still
+retrieve recorded results after expiry. A stale request that has not acted
+is durably refused, subject to ledger capacity. A request recovered before
+submission must still meet the time window before it can act.</p>
+</section>
+<section id="response-signatures">
+<h3>Response signatures<a class="headerlink" href="#response-signatures" title="Link to this heading">¶</a></h3>
+<p>Responses are signed by a separate daemon key held in private broker state.
+Clients configure its public key through a trusted operator handoff and never
+learn a trust anchor from a mailbox response. Signed responses bind the exact
+signed request digest and all destination and request identities. Signatures
+provide integrity and authorization, not encryption or protection against
+mailbox deletion. Slurm keeps using the site’s own authentication, such as its
+MUNGE socket. Cluster secrets and daemon private keys are never exposed to
+payloads.</p>
+</section>
+<section id="earlier-enrollments">
+<h3>Earlier enrollments<a class="headerlink" href="#earlier-enrollments" title="Link to this heading">¶</a></h3>
+<p>Enrollments that use an earlier protocol or ledger layout are refused.
+Preserve their state and reconcile outstanding work with the earlier software
+before provisioning a new enrollment. There is no automatic migration or
+ledger reset.</p>
+</section>
+<section id="publishing-requests">
+<h3>Publishing requests<a class="headerlink" href="#publishing-requests" title="Link to this heading">¶</a></h3>
+<p>Publish complete UTF-8 JSON by writing a temporary file and atomically
+renaming it to <code class="docutils literal notranslate"><span class="pre">&lt;request_id&gt;.json</span></code> in the request directory. Use a fresh random
+32-character lowercase hexadecimal request ID for each new operation.
+Documents are limited to 16 KiB. Unknown keys, duplicate keys and extra
+operation fields are rejected. Besides health checks, the operations are:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Additional fields</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">start_manager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">configuration</span></code> and <code class="docutils literal notranslate"><span class="pre">configuration_digest</span></code>: the approved name and SHA256 digest</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">manager_status</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">handle</span></code>: the returned manager handle</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cancel_manager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">handle</span></code>: the returned manager handle</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="responses">
+<h3>Responses<a class="headerlink" href="#responses" title="Link to this heading">¶</a></h3>
+<p>Responses appear under the same filename in the response directory, with the
+request identities, the canonical request digest and the outcome. Scheduler
+IDs and raw scheduler output are not exposed. Verify the identities and digest
+when consuming a response: the uploader can interfere with mailbox contents,
+and the protected ledger is authoritative.</p>
+<p>Responses are committed before publication, and requests are removed only
+after their response is published. Malformed requests are discarded with a
+bounded diagnostic and no response.</p>
+</section>
+<section id="request-ids">
+<h3>Request IDs<a class="headerlink" href="#request-ids" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Use one active caller per request ID.</p></li>
+<li><p>Do not replace a request while the broker may still be consuming it, since
+responses are published before request removal. The maintained client waits
+for removal and checks again for a response before republishing.</p></li>
+<li><p>A repeated request ID with unchanged content replays its recorded response.
+Changed content under the same ID is refused.</p></li>
+<li><p>Use a new request ID for each status refresh.</p></li>
+</ul>
+</section>
+<section id="outcomes">
+<h3>Outcomes<a class="headerlink" href="#outcomes" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">submitted</span></code> returns an opaque handle.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">uncertain</span></code> means submission may have happened. The daemon will not retry
+it, including after restart; an operator must reconcile it with Slurm.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">UNKNOWN</span></code> status does not mean a job finished. Accounting reconciliation is
+not implemented.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">cancel_requested</span></code> means the filtered cancellation call succeeded, not that
+termination is confirmed. Cancellation filters on controller-side job name
+and user to avoid acting on a reused numeric scheduler ID.</p></li>
+</ul>
+</section>
+<section id="quotas">
+<h3>Quotas<a class="headerlink" href="#quotas" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">max_records</span></code> limits all durable request records. <code class="docutils literal notranslate"><span class="pre">max_submissions</span></code> limits
+manager starts admitted over the enrollment’s lifetime, including refused or
+uncertain starts. Both are cumulative quotas, not active-job counts.
+Exhaustion returns a nonpersisted <code class="docutils literal notranslate"><span class="pre">busy</span></code> response, retryable with the same
+request ID and identical fields. Freeing capacity may need operator action;
+there is no automatic history pruning or quota reset. Intentional
+re-enrollment requires preserving and reconciling outstanding work, a new
+enrollment ID and a new private ledger.</p>
+</section>
+</section>
+<section id="site-acceptance">
+<h2>Site acceptance<a class="headerlink" href="#site-acceptance" title="Link to this heading">¶</a></h2>
+<p>The repository has executable scheduler stand-in tests and a required real
+Bubblewrap CI gate. Neither replaces site acceptance of SSHFS access controls,
+Slurm authentication, compute-node mounts, prelude confinement, cancellation,
+restart recovery or the actual simulation executable. Run those checks before
+relying on this daemon for production jobs.</p>
+</section>
+<section id="mpi-applications">
+<h2>MPI applications<a class="headerlink" href="#mpi-applications" title="Link to this heading">¶</a></h2>
+<section id="execution-model">
+<h3>Execution model<a class="headerlink" href="#execution-model" title="Link to this heading">¶</a></h3>
+<p>MPI is opt-in through protected policy. An MPI allocation runs one manager and
+one application step at a time. Every rank enters Bubblewrap before reading
+its executable, arguments, environment or working directory from workspace
+data. The external step command is always a fixed <code class="docutils literal notranslate"><span class="pre">srun</span> <span class="pre">--mpi=pmix</span></code>
+bootstrap; <code class="docutils literal notranslate"><span class="pre">mpirun</span></code> is not used. The manager stays network-isolated; only the
+trusted allocation launcher and the MPI ranks use host networking.</p>
+</section>
+<section id="mpi-policy-settings">
+<h3>MPI policy settings<a class="headerlink" href="#mpi-policy-settings" title="Link to this heading">¶</a></h3>
+<p>Add the MPI site settings to the operator policy, using your site’s paths:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">"mpi"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"srun"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/usr/bin/srun"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"control_root"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/var/tmp/httk-mpi-control"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"pmix_roots"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"/var/spool/slurmd"</span><span class="p">],</span>
+<span class="w">    </span><span class="nt">"shm_root"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/dev/shm"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"devices"</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">    </span><span class="nt">"environment"</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">    </span><span class="nt">"max_steps"</span><span class="p">:</span><span class="w"> </span><span class="mi">128</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"termination_grace"</span><span class="p">:</span><span class="w"> </span><span class="mf">10.0</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="launcher-geometry">
+<h3>Launcher geometry<a class="headerlink" href="#launcher-geometry" title="Link to this heading">¶</a></h3>
+<p>Approve an existing launcher whose settings include, for example:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">"slurm.cpus_per_task"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"slurm.mem"</span><span class="p">:</span><span class="w"> </span><span class="s2">"4G"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"slurm.time_limit"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01:00:00"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"slurm.nodes"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"slurm.ntasks"</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"slurm.ntasks_per_node"</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"slurm.mpi"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pmix"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"manager.workers"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">slurm.mpi=pmix</span></code> selects MPI even with one rank; multiple nodes or tasks
+also select MPI.</p></li>
+<li><p>MPI requires one manager worker.</p></li>
+<li><p>Nodes default to one. Without a task count, the count is nodes times
+tasks-per-node when placement is given, and one task per node otherwise. An
+explicit task count takes precedence.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">slurm.cpus_per_task</span></code> is CPUs per rank, and <code class="docutils literal notranslate"><span class="pre">slurm.mem</span></code> is memory per node.</p></li>
+</ul>
+<p>Each MPI invocation uses the approved configuration’s entire fixed geometry.
+The manager advertises the aggregate capacity to workflow matching but runs
+ordinary commands on its single manager CPU.</p>
+</section>
+<section id="running-an-mpi-application">
+<h3>Running an MPI application<a class="headerlink" href="#running-an-mpi-application" title="Link to this heading">¶</a></h3>
+<p>Use the explicit wrapper for distributed applications:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow mpi run -- /opt/application/bin/program input.dat</span>
+</pre></div>
+</div>
+<p>The same argv works through Python <code class="docutils literal notranslate"><span class="pre">Attempt.run</span></code>, Bash <code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code> or
+a simulation-code command setting. It needs a running daemon MPI manager and
+never falls back to an ordinary local launcher. Output streams to the caller,
+stdin is <code class="docutils literal notranslate"><span class="pre">/dev/null</span></code>, and a nonzero application exit status is returned to
+the workflow.</p>
+<p>Workspace and workflow preludes run inside the manager’s sandbox. Put
+application-specific node setup in an application script, which runs inside
+every rank’s sandbox. Only environment variables with portable ASCII
+identifier names are forwarded, including module-derived variables such as
+<code class="docutils literal notranslate"><span class="pre">PATH</span></code> and <code class="docutils literal notranslate"><span class="pre">LD_LIBRARY_PATH</span></code>. Exported Bash functions are omitted: keep any
+needed function definitions in an application script and source them in each
+rank.</p>
+</section>
+<section id="shared-memory">
+<h3>Shared memory<a class="headerlink" href="#shared-memory" title="Link to this heading">¶</a></h3>
+<p>The ranks on each node share one allocation-specific backing directory
+mounted at <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>. This supports POSIX shared-memory files without
+exposing unrelated host shared-memory objects. The normal root-owned sticky
+<code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code> parent is permitted, and each allocation directory is private to
+the runtime UID.</p>
+<p>Private PID and user namespaces can affect CMA transports, and private IPC
+namespaces prevent cross-rank SysV IPC. Validate the transport your MPI
+installation actually uses: a shared-file test alone does not prove that MPI
+selected its shared-memory transport. No default forces TCP or disables
+shared memory.</p>
+</section>
+<section id="pmix-devices-and-environment">
+<h3>PMIx, devices and environment<a class="headerlink" href="#pmix-devices-and-environment" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">pmix_roots</span></code> bounds the Slurm-supplied <code class="docutils literal notranslate"><span class="pre">PMIX_SERVER_TMPDIR</span></code>. Only the verified
+per-step directory is exposed, at its original path, and the launcher does not
+fall back to mounting broad authentication or socket directories. The site’s
+PMIx layout must fit this contract.</p>
+<p><code class="docutils literal notranslate"><span class="pre">devices</span></code> can expose individually approved device paths, such as needed RDMA
+devices; it does not establish tested RDMA or GPU support. Protected
+<code class="docutils literal notranslate"><span class="pre">environment</span></code> entries can tune the installed MPI transport. Application
+manifests cannot override rank or server identities.</p>
+</section>
+<section id="control-socket">
+<h3>Control socket<a class="headerlink" href="#control-socket" title="Link to this heading">¶</a></h3>
+<p>Provision <code class="docutils literal notranslate"><span class="pre">control_root</span></code> on the batch node so that both the batch and manager
+Slurm steps see the same directory; site mount plugins must preserve that
+visibility. The manager reaches the private socket at
+<code class="docutils literal notranslate"><span class="pre">/run/httk-mpi/control.sock</span></code>, and its requests contain only a random request
+ID. The launcher never interprets uploaded application arguments. The
+workspace holds bounded application manifests under <code class="docutils literal notranslate"><span class="pre">.httk-workspace/mpi/</span></code>. A
+lost connection ends the allocation and leaves uncertain manifests for
+diagnosis; they are never resubmitted automatically.</p>
+</section>
+<section id="cleanup">
+<h3>Cleanup<a class="headerlink" href="#cleanup" title="Link to this heading">¶</a></h3>
+<p>The site owns cleanup of the private control and node-local shared-memory
+directories after Slurm confirms allocation quiescence, including after
+cancellation and node failure. Use a trusted per-node epilog, or manual
+anchored cleanup of the verified allocation directory. Launcher exit cannot
+clean another node’s local storage. Do not use age-only deletion, which can
+remove live allocation storage.</p>
+</section>
+<section id="failure-handling">
+<h3>Failure handling<a class="headerlink" href="#failure-handling" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>MPI configurations disable requeue, and the bootstrap also refuses a
+restarted batch job.</p></li>
+<li><p>Duplicate application IDs never launch again during the allocation.</p></li>
+<li><p>Manager exit, client disconnect and service shutdown stop the active step.</p></li>
+<li><p>If local launcher termination leaves remote completion uncertain, the
+service stops accepting work, stops its manager and ends the allocation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">termination_grace</span></code> is a local cleanup deadline. Slurm may forward TERM to
+tasks as KILL, so it does not promise graceful application termination.</p></li>
+</ul>
+</section>
+<section id="service-authorities">
+<h3>Service authorities<a class="headerlink" href="#service-authorities" title="Link to this heading">¶</a></h3>
+<p>Host networking and the PMIx endpoint are additional service authorities. The
+site must verify that they do not let ranks launch unconfined processes or
+reach other protected services. A generic <code class="docutils literal notranslate"><span class="pre">MPI_ERR_SPAWN</span></code> is inconclusive,
+since lack of resources or a configuration error can also cause it. Test with
+spare capacity, record the installed Slurm, Open MPI and PMIx versions, and
+distinguish explicit unsupported-operation evidence from other errors.</p>
+</section>
+<section id="mpi-acceptance">
+<h3>MPI acceptance<a class="headerlink" href="#mpi-acceptance" title="Link to this heading">¶</a></h3>
+<p>Before production use, test this exact mount and environment configuration
+for:</p>
+<ul class="simple">
+<li><p>positive multi-node communication and confirmed shared-memory transport on
+nodes with multiple ranks;</p></li>
+<li><p>an allocation-shared <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code> object, and an unrelated host shared-memory
+canary that stays invisible to ranks;</p></li>
+<li><p>host filesystem and process canaries, dynamic MPI spawn, nested scheduler
+commands and exposed authentication or socket routes;</p></li>
+<li><p>rank startup failure, client timeout or disconnect, manager death,
+cancellation, requeue refusal, and per-node cleanup after completion and
+after node failure.</p></li>
+</ul>
+<p>Local protocol tests and scheduler stand-ins do not establish real cluster
+containment. This development host cannot create Bubblewrap namespaces and has
+no Slurm or MPI runtime, so real cluster acceptance remains a deployment
+check.</p>
+</section>
+<section id="mpi-site-probe">
+<h3>MPI site probe<a class="headerlink" href="#mpi-site-probe" title="Link to this heading">¶</a></h3>
+<p>The <a class="reference download internal" download="" href="../_downloads/d3e34adaec81e7fc32402bb5ad976e0a/probe_daemon_mpi.c"><code class="xref download docutils literal notranslate"><span class="pre">MPI</span> <span class="pre">site</span> <span class="pre">probe</span></code></a> (also at
+<code class="docutils literal notranslate"><span class="pre">tools/probe_daemon_mpi.c</span></code> in a source checkout) provides the communication
+and spawn checks. Build it on the cluster with
+<code class="docutils literal notranslate"><span class="pre">mpicc</span> <span class="pre">-O2</span> <span class="pre">-Wall</span> <span class="pre">-Wextra</span> <span class="pre">-o</span> <span class="pre">probe</span> <span class="pre">probe_daemon_mpi.c</span> <span class="pre">-lrt</span></code>, place the
+executable in the workspace and invoke it from a workflow with
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">mpi</span> <span class="pre">run</span> <span class="pre">--</span> <span class="pre">./probe</span> <span class="pre">FRESHALPHANUMERICTOKEN</span></code>.</p>
+<ul class="simple">
+<li><p>At least two ranks must share a node.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">--spawn</span></code> only for the separate spawn check, with independently
+established spare capacity.</p></li>
+<li><p>Exit 77 means inconclusive. Spawn success is a failure.</p></li>
+<li><p>The probe creates only a named object in the exposed <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code> and never
+writes an escape proof into the host home directory.</p></li>
+</ul>
+<p>Inspect MPI transport diagnostics separately. The probe is a site test, not a
+replacement for the filesystem, process, scheduler and lifecycle checks above.</p>
+</section>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="sealing.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Sealing jobs, workspaces, and projects</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="transfer_reclamation.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Transfer completion and bounded metadata</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Confined workspace daemon</a><ul>
+<li><a class="reference internal" href="#deployment-boundary">Deployment boundary</a><ul>
+<li><a class="reference internal" href="#host-requirements">Host requirements</a></li>
+<li><a class="reference internal" href="#filesystem-roots">Filesystem roots</a></li>
+<li><a class="reference internal" href="#transport-accounts">Transport accounts</a></li>
+<li><a class="reference internal" href="#sandboxes">Sandboxes</a></li>
+<li><a class="reference internal" href="#runtime-mounts">Runtime mounts</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#operator-policy-and-startup">Operator policy and startup</a><ul>
+<li><a class="reference internal" href="#approved-launchers">Approved launchers</a></li>
+<li><a class="reference internal" href="#client-identities">Client identities</a></li>
+<li><a class="reference internal" href="#policy-file">Policy file</a></li>
+<li><a class="reference internal" href="#executables-and-cluster">Executables and cluster</a></li>
+<li><a class="reference internal" href="#state-mailboxes-and-snapshots">State, mailboxes and snapshots</a></li>
+<li><a class="reference internal" href="#initializing-and-running">Initializing and running</a></li>
+<li><a class="reference internal" href="#resources">Resources</a></li>
+<li><a class="reference internal" href="#changing-approved-configurations">Changing approved configurations</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#file-command-protocol">File command protocol</a><ul>
+<li><a class="reference internal" href="#request-signatures">Request signatures</a></li>
+<li><a class="reference internal" href="#time-window">Time window</a></li>
+<li><a class="reference internal" href="#ledger-and-replay">Ledger and replay</a></li>
+<li><a class="reference internal" href="#response-signatures">Response signatures</a></li>
+<li><a class="reference internal" href="#earlier-enrollments">Earlier enrollments</a></li>
+<li><a class="reference internal" href="#publishing-requests">Publishing requests</a></li>
+<li><a class="reference internal" href="#responses">Responses</a></li>
+<li><a class="reference internal" href="#request-ids">Request IDs</a></li>
+<li><a class="reference internal" href="#outcomes">Outcomes</a></li>
+<li><a class="reference internal" href="#quotas">Quotas</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#site-acceptance">Site acceptance</a></li>
+<li><a class="reference internal" href="#mpi-applications">MPI applications</a><ul>
+<li><a class="reference internal" href="#execution-model">Execution model</a></li>
+<li><a class="reference internal" href="#mpi-policy-settings">MPI policy settings</a></li>
+<li><a class="reference internal" href="#launcher-geometry">Launcher geometry</a></li>
+<li><a class="reference internal" href="#running-an-mpi-application">Running an MPI application</a></li>
+<li><a class="reference internal" href="#shared-memory">Shared memory</a></li>
+<li><a class="reference internal" href="#pmix-devices-and-environment">PMIx, devices and environment</a></li>
+<li><a class="reference internal" href="#control-socket">Control socket</a></li>
+<li><a class="reference internal" href="#cleanup">Cleanup</a></li>
+<li><a class="reference internal" href="#failure-handling">Failure handling</a></li>
+<li><a class="reference internal" href="#service-authorities">Service authorities</a></li>
+<li><a class="reference internal" href="#mpi-acceptance">MPI acceptance</a></li>
+<li><a class="reference internal" href="#mpi-site-probe">MPI site probe</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

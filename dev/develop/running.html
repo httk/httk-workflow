@@ -1,0 +1,552 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Writing runners" href="runtime_helpers.html"><link rel="prev" title="Setting up workspaces" href="workspaces.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Running workflows - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/transfer_reclamation.html">Transfer completion and bounded metadata</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workspace_daemon.html">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="_sources/running.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="running-workflows">
+<h1>Running workflows<a class="headerlink" href="#running-workflows" title="Link to this heading">¶</a></h1>
+<p>With a workspace in place (<a class="reference internal" href="workspaces.html"><span class="doc">Setting up workspaces</span></a>), work goes through the same
+cycle every time: create jobs from a workflow, run managers until they are
+done, look at what happened, collect the results, and seal what is finished.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon</span>
+<span class="go">httk workflow run</span>
+<span class="go">httk job list</span>
+<span class="go">httk collect --into results.sqlite --id-base httk.campaign</span>
+</pre></div>
+</div>
+<section id="creating-jobs">
+<h2>Creating jobs<a class="headerlink" href="#creating-jobs" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">job</span> <span class="pre">new</span></code> instantiates one job from a workflow. The workflow can be named
+in several ways:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p><code class="docutils literal notranslate"><span class="pre">--workflow</span></code> / option</p></th>
+<th class="head"><p>Selects</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">vasp.relax</span></code></p></td>
+<td><p>an installed or registered workflow by short name</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">'git+https://github.com/httk/workflows-vasp#vasp-relax'</span></code></p></td>
+<td><p>a workflow package in a Git repository, fetched and installed on first use</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--workflow-dir</span> <span class="pre">./my-workflow</span></code></p></td>
+<td><p>a local workflow package directory</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--from-runner</span> <span class="pre">./relax.py</span></code></p></td>
+<td><p>a runner file of your own, published into the workspace</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--from-runner</span> <span class="pre">flow.cwl</span></code></p></td>
+<td><p>a CWL, PWD or jobflow document (<a class="reference internal" href="workflow_compat.html"><span class="doc">Compatibility with other workflow systems</span></a>)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Declared <strong>inputs</strong> are files or entries the workflow stages into the payload
+(<code class="docutils literal notranslate"><span class="pre">--input</span> <span class="pre">structure=POSCAR</span></code>); <strong>parameters</strong> are plain values
+(<code class="docutils literal notranslate"><span class="pre">--parameter</span> <span class="pre">encut=520</span></code>). <code class="docutils literal notranslate"><span class="pre">--tag</span></code> gives the job a readable key, and
+<code class="docutils literal notranslate"><span class="pre">--placement</span> <span class="pre">project/screening</span></code> puts it in a subtree of the workspace that
+managers and collects can address on its own. <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">describe</span> <span class="pre">NAME</span></code>
+shows what a workflow declares before anything is created, and
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">precheck</span></code> reports whether the workspace can run it.</p>
+<p>Many jobs at once come from a directory of inputs, one job per file:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job new --workflow vasp.relax --input-from structure structures/ --parameter kpoint_density=30.0</span>
+</pre></div>
+</div>
+<p>The same thing streams from Python, which is how a campaign of any size is
+built without materializing it:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">Workspace</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow.scaffold</span><span class="w"> </span><span class="kn">import</span> <span class="n">new_jobs</span><span class="p">,</span> <span class="n">structure_tag</span>
+
+<span class="n">workspace</span> <span class="o">=</span> <span class="n">Workspace</span><span class="o">.</span><span class="n">default</span><span class="p">()</span>
+<span class="n">items</span> <span class="o">=</span> <span class="p">({</span><span class="s2">"inputs"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"structure"</span><span class="p">:</span> <span class="n">p</span><span class="p">},</span> <span class="s2">"tag"</span><span class="p">:</span> <span class="n">structure_tag</span><span class="p">(</span><span class="n">p</span><span class="p">)}</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">Path</span><span class="p">(</span><span class="s2">"structures"</span><span class="p">)</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">"POSCAR.*"</span><span class="p">))</span>
+<span class="k">for</span> <span class="n">job</span> <span class="ow">in</span> <span class="n">new_jobs</span><span class="p">(</span><span class="n">workspace</span><span class="p">,</span> <span class="s2">"vasp.relax"</span><span class="p">,</span> <span class="n">items</span><span class="p">,</span> <span class="n">parameters</span><span class="o">=</span><span class="p">{</span><span class="s2">"kpoint_density"</span><span class="p">:</span> <span class="mf">30.0</span><span class="p">}):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">job</span><span class="o">.</span><span class="n">job_key</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The job records the workflow it was made from, pinned by digest (and by commit
+for a git workflow), so a later upgrade cannot change what a queued job runs.
+A payload prepared some other way is submitted as it is with
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">job</span> <span class="pre">submit</span> <span class="pre">--workspace</span> <span class="pre">NAME</span> <span class="pre">--placement</span> <span class="pre">project/00</span> <span class="pre">prepared-job</span></code>.</p>
+</section>
+<section id="running-managers">
+<h2>Running managers<a class="headerlink" href="#running-managers" title="Link to this heading">¶</a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow run                      # serve ready jobs until nothing is left</span>
+<span class="go">httk workflow run --idle               # keep serving; this is how a campaign runs</span>
+<span class="go">httk workflow run --count 4 --workers 8</span>
+<span class="go">httk workflow run --workspace kappa:runs --count 4</span>
+</pre></div>
+</div>
+<p>A manager claims jobs, runs their steps and records every transition. <code class="docutils literal notranslate"><span class="pre">--count</span></code>
+starts several managers through the workspace launcher, <code class="docutils literal notranslate"><span class="pre">--workers</span></code> sets how
+many attempts each runs at once, and <code class="docutils literal notranslate"><span class="pre">--worker-resource</span> <span class="pre">procs</span> <span class="pre">32</span></code> advertises
+capacities for jobs that declare resource needs. Inside a Slurm allocation the
+capacities are derived from it. A manager that cannot meet a job’s declared
+requirements leaves it for another manager and says why in its idle summary.</p>
+<p>Running against a remote workspace starts the managers on the owning machine,
+through that workspace’s own launcher and preludes.</p>
+</section>
+<section id="inspecting-and-controlling-jobs">
+<h2>Inspecting and controlling jobs<a class="headerlink" href="#inspecting-and-controlling-jobs" title="Link to this heading">¶</a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job list --placement project/screening</span>
+<span class="go">httk job show silicon</span>
+<span class="go">httk job why silicon                   # why is this job not progressing?</span>
+<span class="go">httk job log silicon</span>
+<span class="go">httk job debug --workspace default silicon</span>
+</pre></div>
+</div>
+<p>Any job UUID, full <code class="docutils literal notranslate"><span class="pre">tag--uuid</span></code> key, or unique prefix of either names a job.
+<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> explains a stalled job: an unmet requirement, a paused job, no
+manager running. <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">debug</span></code> drives one job in the foreground and prints each
+transition, which is the fastest loop while a runner is being written. A
+finished job’s files are in the payload directory <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> printed: <code class="docutils literal notranslate"><span class="pre">run/</span></code>
+holds the persistent workdir and <code class="docutils literal notranslate"><span class="pre">data/</span></code> the committed results of a job with
+transactional data.</p>
+<p>Operator requests change a job’s course without touching its files:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job request pause --reason "hold for quota" silicon</span>
+<span class="go">httk job request continue --reason "quota restored" silicon</span>
+<span class="go">httk job request cancel --reason "wrong structure" silicon</span>
+<span class="go">httk job delete silicon                # finished or not yet started jobs only</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">status</span></code> summarizes the workspace; <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">fsck</span></code> verifies the
+state tree and repairs what it can with <code class="docutils literal notranslate"><span class="pre">--repair</span></code>, <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code> frees
+journal and trash space, and <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">unlock</span></code> clears a stale maintenance
+lock. <a class="reference internal" href="details/taskmanager.html"><span class="doc">Task-manager usage in detail</span></a> explains each of them.</p>
+</section>
+<section id="moving-jobs-between-machines">
+<h2>Moving jobs between machines<a class="headerlink" href="#moving-jobs-between-machines" title="Link to this heading">¶</a></h2>
+<p>Jobs are created locally and moved to the workspace that will run them; when
+they have stopped, the reverse transfer brings them home:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job transfer --job silicon default kappa:runs</span>
+<span class="go">httk workflow run --workspace kappa:runs --count 4</span>
+<span class="go">httk job transfer kappa:runs default</span>
+</pre></div>
+</div>
+<p>A transfer moves the job’s sealed bundle, imports it on the other side, and
+retires the source only after the destination has acknowledged it, so an
+interrupted transfer is resumed rather than duplicated. A job that spawned
+children moves together with its whole tree. <a class="reference internal" href="details/remotes.html"><span class="doc">Remotes</span></a> covers
+job trees, the mount-based remotes and their restrictions;
+<a class="reference internal" href="details/transfer_reclamation.html"><span class="doc">Transfer completion and bounded metadata</span></a> describes what is left on disk by
+completed and interrupted transfers.</p>
+</section>
+<section id="collecting-results">
+<h2>Collecting results<a class="headerlink" href="#collecting-results" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">collect</span></code> reads the stopped jobs of a workspace back out as records,
+one summary line per job, and <code class="docutils literal notranslate"><span class="pre">--into</span></code> stores their entries, run provenance and
+products in a <em>httk-store</em> database:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk collect --workspace default</span>
+<span class="go">httk collect --workspace default --into results.sqlite --id-base httk.campaign</span>
+</pre></div>
+</div>
+<p>Collecting is read-only and stateless, so it can be repeated. Jobs fetched back
+from a remote collect exactly like local ones. See <a class="reference internal" href="collecting.html"><span class="doc">Collecting results</span></a>.</p>
+</section>
+<section id="postprocessing">
+<h2>Postprocessing<a class="headerlink" href="#postprocessing" title="Link to this heading">¶</a></h2>
+<p>Workflow packages may ship curated scripts that run against a finished job’s
+files, such as the relaxation plot of the VASP workflows:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow postprocess --script relaxation-plot</span>
+<span class="go">httk workflow postprocess --script relaxation-plot silicon</span>
+</pre></div>
+</div>
+<p>Output lands under <code class="docutils literal notranslate"><span class="pre">&lt;workspace&gt;/postprocess/</span></code>, never in the payload, so a
+sealed job can still be postprocessed.</p>
+</section>
+<section id="sealing">
+<h2>Sealing<a class="headerlink" href="#sealing" title="Link to this heading">¶</a></h2>
+<p>A seal is a signed statement of what a job, workspace or project contained, so
+that a later change is detected when the seal is verified. Managers seal each
+job as it succeeds, using the keys named by the <code class="docutils literal notranslate"><span class="pre">seal.keys</span></code> setting. Workspaces
+and projects are sealed on top, bottom-up, and unsealed top-down:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job seal silicon</span>
+<span class="go">httk workspace seal --force            # seals the remaining jobs first</span>
+<span class="go">httk project seal</span>
+<span class="go">httk workflow seal verify</span>
+<span class="go">httk project unseal</span>
+</pre></div>
+</div>
+<p>A sealed job refuses state changes, deletion and runner republication; reading,
+<code class="docutils literal notranslate"><span class="pre">fsck</span></code>, <code class="docutils literal notranslate"><span class="pre">gc</span></code>, postprocessing and transfers still work, and a seal travels with
+its job. <a class="reference internal" href="details/sealing.html"><span class="doc">Sealing jobs, workspaces, and projects</span></a> covers key refs, verdicts and what each level
+records.</p>
+</section>
+<section id="further-reading">
+<h2>Further reading<a class="headerlink" href="#further-reading" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="details/taskmanager.html"><span class="doc">Task-manager usage in detail</span></a> for resources and scheduling, placement, requests,
+and repair.</p></li>
+<li><p><a class="reference internal" href="details/workflow_cli.html"><span class="doc">Project and workflow command line in detail</span></a> for every command and option.</p></li>
+<li><p><a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a> for one run spread across many workspaces.</p></li>
+</ul>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="runtime_helpers.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Writing runners</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="workspaces.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Setting up workspaces</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Running workflows</a><ul>
+<li><a class="reference internal" href="#creating-jobs">Creating jobs</a></li>
+<li><a class="reference internal" href="#running-managers">Running managers</a></li>
+<li><a class="reference internal" href="#inspecting-and-controlling-jobs">Inspecting and controlling jobs</a></li>
+<li><a class="reference internal" href="#moving-jobs-between-machines">Moving jobs between machines</a></li>
+<li><a class="reference internal" href="#collecting-results">Collecting results</a></li>
+<li><a class="reference internal" href="#postprocessing">Postprocessing</a></li>
+<li><a class="reference internal" href="#sealing">Sealing</a></li>
+<li><a class="reference internal" href="#further-reading">Further reading</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=952df46a"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script src="_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>
