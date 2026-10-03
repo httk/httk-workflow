@@ -21,11 +21,11 @@ def test_worker_resources_reject_invalid_and_duplicate_pairs() -> None:
 
 
 def test_slurm_resources_require_an_active_job() -> None:
-    assert _manager._slurm_resources({"SLURM_NTASKS": "8"}) == {}
+    assert _manager._scheduler_resources({"SLURM_NTASKS": "8"}) == {}
 
 
 def test_slurm_resources_parse_full_allocation() -> None:
-    assert _manager._slurm_resources(
+    assert _manager._scheduler_resources(
         {
             "SLURM_JOB_ID": "123",
             "SLURM_NTASKS": "8",
@@ -39,18 +39,18 @@ def test_slurm_resources_parse_full_allocation() -> None:
 
 def test_slurm_resources_memory_fallback_and_units(caplog: pytest.LogCaptureFixture) -> None:
     assert (
-        _manager._slurm_resources({"SLURM_JOB_ID": "123", "SLURM_JOB_NUM_NODES": "2", "SLURM_MEM_PER_NODE": "4G"})[
+        _manager._scheduler_resources({"SLURM_JOB_ID": "123", "SLURM_JOB_NUM_NODES": "2", "SLURM_MEM_PER_NODE": "4G"})[
             "mem"
         ]
         == 8192
     )
     assert (
-        _manager._slurm_resources({"SLURM_JOB_ID": "123", "SLURM_NTASKS": "2", "SLURM_MEM_PER_CPU": "4G"})["mem"]
+        _manager._scheduler_resources({"SLURM_JOB_ID": "123", "SLURM_NTASKS": "2", "SLURM_MEM_PER_CPU": "4G"})["mem"]
         == 8192
     )
 
     caplog.clear()
-    resources = _manager._slurm_resources(
+    resources = _manager._scheduler_resources(
         {"SLURM_JOB_ID": "123", "SLURM_NTASKS": "garbage", "SLURM_MEM_PER_CPU": "2000"}
     )
     assert "procs" not in resources and "mem" not in resources

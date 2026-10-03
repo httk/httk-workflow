@@ -19,9 +19,9 @@ from httk.workflow._allocation import (
     local_cpu_slots,
     parse_cpulist,
     probe_allocation,
-    slurm_allocation,
 )
 from httk.workflow._manager_binding import Inventory, NodeShare, Placement
+from httk.workflow._slurm import slurm_allocation
 from httk.workflow.errors import FormatError
 from test_binding import HOST, _Campaign
 from test_manager_scheduling import _payload

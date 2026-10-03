@@ -2193,7 +2193,6 @@ class TaskManager:
         if template is not None and not isinstance(template, str):
             raise FormatError("workspace setting manager.launch_template must be a string")
         assert self.allocation is not None
-        cpus_per_task = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
         try:
             launch = render_launch(
                 placement,
@@ -2201,11 +2200,12 @@ class TaskManager:
                 template=template,
                 nodefile=str(nodefile),
                 gpus_present=self.resources.get("gpus", 0) > 0,
-                cpus_per_task=int(cpus_per_task) if cpus_per_task.isdigit() and int(cpus_per_task) > 0 else None,
+                cpus_per_proc=self.allocation.cpus_per_proc,
                 mem=mem,
             )
         except ValueError as exc:
-            raise FormatError(f"workspace setting manager.launch_template: {exc}") from exc
+            source = "workspace setting manager.launch_template" if template is not None else "scheduler launch"
+            raise FormatError(f"{source}: {exc}") from exc
         nodes = describe(placement)
         full: dict[str, Any] = {"nodes": nodes, "nodefile": str(nodefile)}
         if launch is not None:
@@ -2271,6 +2271,10 @@ class TaskManager:
                 continue
             if not local.timed_out:
                 if now < local.started + local.maxtime:
+                    continue
+                if local.process.poll() is not None:
+                    # A delayed manager tick must not turn an observed normal
+                    # exit into a timeout and select the wrong retry policy.
                     continue
                 local.timed_out = True
                 local.timeout_kill_at = now + self.cancel_grace_seconds

@@ -598,9 +598,14 @@ start line.
 
 The Slurm probe lists the job's hosts with `scontrol show hostnames
 $SLURM_JOB_NODELIST` (a one-node job needs no `scontrol`), splits the tasks
-over them by `SLURM_TASKS_PER_NODE` (`16(x2),8`), splits memory and GPUs the way
-the counts below sum them, and reads the GPU device ids of the batch host from
-the first of the variables above. When the nodes cannot be described
+over them by `SLURM_TASKS_PER_NODE` (`16(x2),8`), splits memory the way
+the counts below sum it, and reads the GPU device ids of the batch host from
+the first of the variables above. A one-node allocation can use its total GPU
+count. Multiple GPU nodes require `SLURM_GPUS_PER_NODE` consistent with the
+total; divisibility of the total alone does not establish per-node capacity.
+Unknown or contradictory GPU placement falls back to aggregate counts.
+The probe also records `SLURM_CPUS_PER_TASK` as the allocation's CPUs per
+processor slot. When the nodes cannot be described
 consistently with those counts, it warns and keeps the aggregate counts only, so
 its capacity is always exactly the table below.
 
@@ -630,17 +635,21 @@ memory; otherwise it stays a counted label like any other, and a
 - An attempt goes on one node when it fits there, on the node with the fewest
   free `procs` that holds its `procs`, `gpus` and `mem` (ties go to the first
   node in allocation order), leaving larger holes for larger attempts.
-- Otherwise it spills onto the fewest nodes: they are filled from the node with
+- Otherwise it spills, preferring fewer nodes: they are filled from the node with
   the most free `procs` (most free `gpus` for an attempt without `procs`), its
-  `gpus` come from the same nodes in the same order, and its `mem` is split
-  over them in proportion to the `procs` taken on each (the remainder on the
-  first), so every node must have its share free. A `mem`-only requirement
+  `gpus` come from nodes with reserved processor slots when `procs` is
+  positive, and its `mem` is split over them in proportion to the `procs`
+  taken on each (rounding remainder goes to nodes with space), so every node
+  must have its share free. If that first choice cannot fit, the manager tries
+  alternative nodes and processor distributions. A `mem`-only requirement
   never spills.
 - `nodes=N` gives the attempt N whole idle nodes to itself (all their `procs`,
   `gpus` and `mem`), the smallest ones in allocation order that together hold
   its `procs`, `gpus` and `mem`; nothing else is placed on them until it ends,
   and a node holding any other attempt, even one given no `procs`, is not
-  idle. Such an attempt gets no fair share of `procs` or `mem`.
+  idle. Such an attempt gets no fair share of `procs` or `mem`. The selection
+  considers nonadjacent combinations too, so a smaller GPU node can be paired
+  with a larger CPU node.
 
 Concurrent attempts never share a processor slot or GPU id. A
 `--worker-resource` for `procs`, `gpus`, `mem` or `nodes` that differs from the
@@ -662,8 +671,8 @@ that a large allocation cannot overflow the context's 100000-byte limit (a
 binding too large even without them fails the attempt with `protocol_error`
 naming its node count). The runner environment carries `HTTK_WORKFLOW_NODELIST` (the hosts,
 comma-separated), `HTTK_WORKFLOW_NODEFILE` (a file in the attempt control
-directory with one host line per processor slot, the `PBS_NODEFILE`
-convention, and one line for a node given no slot) and `HTTK_WORKFLOW_LAUNCH`
+directory with exactly one host line per reserved processor slot, the
+`PBS_NODEFILE` convention) and `HTTK_WORKFLOW_LAUNCH`
 (the launch prefix, shell-quoted). The Python SDK exposes the member as
 `Attempt.binding`, and Bash reads it with `httk_workflow_context binding`.
 
@@ -676,16 +685,20 @@ is
 
 ```text
 env SLURM_HOSTFILE=NODEFILE srun --nodes=N --ntasks=T --nodelist=HOSTS
-     --distribution=arbitrary --exact [--cpus-per-task=C]
+     --distribution=arbitrary --exact --cpus-per-task=C
      [--mem=MBM | --mem-per-cpu=MBM] [--gpus=G | --gres=none]
 ```
 
-with `T` the nodefile's line count. The prefix sets `SLURM_HOSTFILE` to the
+with `T` the nodefile's line count, equal to the reserved processor slots.
+A share with zero slots adds no task. A reservation with no processor slots
+gets no default scheduler launch prefix; a parallel application must request
+the processor slots it will use. The default Slurm prefix rejects a mixed
+placement with GPUs on a node without processor slots. The prefix sets `SLURM_HOSTFILE` to the
 nodefile for its own `srun` only, so the arbitrary distribution places exactly
 the reserved tasks on each node while any other `srun` the runner starts is
 unaffected. `--cpus-per-task` repeats the
-manager's own `SLURM_CPUS_PER_TASK`, which a step under `--exact` does not
-inherit. A one-node attempt with `mem` gets `--mem` (its share); a multi-node
+allocation's normalized CPUs per processor slot, captured by the probe when
+the manager starts. A one-node attempt with `mem` gets `--mem` (its share); a multi-node
 one gets `--mem-per-cpu`, its `mem` divided over its tasks' CPUs and rounded
 up, so a node may be asked slightly more than its share. When the inventory
 does not place memory, the attempt's counted `mem` requirement is used the
@@ -697,7 +710,8 @@ need not be the binding's `gpu_ids`. This built-in prefix still needs
 acceptance on a real Slurm cluster. The workspace setting `manager.launch_template` replaces it for every kind of
 allocation; it is split like shell words, and `{procs}`, `{nodes}` (the node
 count), `{hosts}`, `{nodefile}`, `{gpus}`, `{mem}` (MB on the first node, or
-empty) and `{cpus_per_proc}` (the CPUs in one slot's cpulist, else 1) are
+empty) and `{cpus_per_proc}` (the CPUs in one slot's cpulist, otherwise the
+allocation's normalized value) are
 substituted in each word; other braces, such as `{}`, are kept as written:
 
 ```console

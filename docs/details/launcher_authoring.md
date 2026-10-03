@@ -255,10 +255,12 @@ stdout:
   "format_version": 1,
   "kind": "pbs",
   "end_time": 1790000000,
+  "cpus_per_proc": 8,
   "nodes": [
     {"host": "n001", "procs": 4, "mem": 128000, "gpus": 2,
      "cpus": ["0-7", "8-15", "16-23", "24-31"],
-     "gpu_ids": ["0", "1"], "gpu_variable": "CUDA_VISIBLE_DEVICES"}
+     "gpu_ids": ["0", "1"], "gpu_variable": "CUDA_VISIBLE_DEVICES",
+     "local": true}
   ],
   "resources": {"license": 2}
 }
@@ -269,6 +271,7 @@ stdout:
 | `format`, `format_version` | yes | `httk-workflow-allocation`, `1` |
 | `kind` | yes | A label naming the probe, such as `pbs` |
 | `end_time` | no | Epoch second the allocation ends, a positive number or `null` |
+| `cpus_per_proc` | no | CPUs per processor slot, a positive integer, default `1` |
 | `nodes` | yes | Non-empty list of nodes with unique `host` names |
 | `nodes[].host` | yes | Non-empty host name |
 | `nodes[].procs` | yes | Processor slots on the node, a non-negative integer |
@@ -277,13 +280,27 @@ stdout:
 | `nodes[].cpus` | no | One Linux cpulist (`0-7`, `0,2,4-6`) per processor slot, `procs` entries |
 | `nodes[].gpu_ids` | no | One non-empty device id per GPU, `gpus` entries |
 | `nodes[].gpu_variable` | with `gpu_ids` | The environment variable the ids belong in, such as `CUDA_VISIBLE_DEVICES` |
+| `nodes[].local` | no | Whether this is the manager's host, default `false`; at most one node may set it to `true` |
 | `resources` | no | Extra non-negative integer capacities; not `procs`, `mem`, `gpus`, `nodes`, `maxtime` or `mintime` |
+
+CPU sets of different slots on one node must be disjoint, and GPU IDs on that
+node must be unique. The same CPU numbers or GPU IDs may occur on different
+nodes. Set `local: true` when the scheduler's name for the manager's host differs
+from its operating-system hostname, so local CPU and GPU binding applies.
 
 Unknown members are refused. The capacity the manager advertises is the node
 sums of `procs`, `gpus` and `mem`, the node count as `nodes`, and the extra
 `resources`; `--worker-resource` overrides any of them. A non-zero exit, a
 timeout after 60 seconds, or an invalid envelope stops the manager with an error
 naming the probe and the end of its stderr.
+
+Maintained scheduler integrations use the private `_scheduler.Scheduler`
+interface for environment detection, aggregate capacity, allocation end,
+node probing and default application-step arguments. The Slurm implementation
+lives in `_slurm`; the manager consumes normalized allocation metadata and
+placement results. Site integrations use the launcher bundle, allocation
+envelope and `manager.launch_template` described here without importing those
+private Python modules.
 
 For the PBS launcher above, save this as `allocation` next to `launcher` and
 make it executable. `$PBS_NODEFILE` lists one line per processor slot, repeating

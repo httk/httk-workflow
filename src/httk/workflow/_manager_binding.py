@@ -10,11 +10,12 @@ returns it.
 import re
 import shlex
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Self
 
 from ._allocation import Allocation, Node
+from ._scheduler import scheduler_for
 
 #: The requirement labels an inventory places, checked in this order when
 #: reporting which one can never fit.
@@ -190,6 +191,213 @@ def _total(nodes: Sequence[Node], label: str) -> int:
     return len(nodes) if label == "nodes" else sum(getattr(node, label) or 0 for node in nodes)
 
 
+def _memory_shares(
+    plan: Sequence[tuple[_Free, int, int]], mem: int | None, denominator: int, *, by_gpus: bool = False
+) -> list[int | None] | None:
+    """Return proportional memory shares that fit each selected node."""
+
+    if mem is None:
+        empty_shares: list[int | None] = [None] * len(plan)
+        return empty_shares
+    if denominator <= 0:
+        return None
+    shares = [mem * (taken_gpus if by_gpus else taken_procs) // denominator for _, taken_procs, taken_gpus in plan]
+    if any(share > (free.mem or 0) for (free, _, _), share in zip(plan, shares, strict=True)):
+        return None
+    remainder = mem - sum(shares)
+    for index, (free, _, _) in enumerate(plan):
+        room = (free.mem or 0) - shares[index]
+        if room and remainder:
+            shares[index] += 1
+            remainder -= 1
+    result: list[int | None] = list(shares)
+    return None if remainder else result
+
+
+def _whole_fallback(idle: Sequence[_Free], count: int, procs: int, gpus: int, mem: int | None) -> list[_Free] | None:
+    """Find an exact whole-node combination after the ordered-window fast path."""
+
+    # ponytail: this exact fallback is exponential for adversarial node mixes;
+    # the ordered-window fast path keeps ordinary homogeneous allocations linear.
+    suffix: list[tuple[int, int, int]] = [(0, 0, 0)] * (len(idle) + 1)
+    for index in reversed(range(len(idle))):
+        node = idle[index]
+        old = suffix[index + 1]
+        suffix[index] = (
+            old[0] + node.procs,
+            old[1] + node.gpus,
+            old[2] + (node.mem or 0),
+        )
+    memo: set[tuple[int, int, int, int, int]] = set()
+    stack: list[tuple[int, int, int, int, int, tuple[int, ...]]] = [(0, count, procs, gpus, mem or 0, ())]
+    selected: tuple[int, ...] | None = None
+    while stack:
+        index, left, need_procs, need_gpus, need_mem, chosen = stack.pop()
+        key = (index, left, max(0, need_procs), max(0, need_gpus), max(0, need_mem))
+        if key in memo:
+            continue
+        memo.add(key)
+        if left == 0:
+            if need_procs <= 0 and need_gpus <= 0 and need_mem <= 0:
+                selected = chosen
+                break
+            continue
+        if len(idle) - index < left:
+            continue
+        available = suffix[index]
+        if available[0] < need_procs or available[1] < need_gpus or available[2] < need_mem:
+            continue
+        if any(
+            sum(sorted((getattr(item.node, label) or 0 for item in idle[index:]), reverse=True)[:left]) < need
+            for label, need in (("procs", need_procs), ("gpus", need_gpus), ("mem", need_mem))
+            if need
+        ):
+            continue
+        node = idle[index]
+        # Push the skip branch first so the preferred include-first order is
+        # retained when the stack pops the next state.
+        stack.append((index + 1, left, need_procs, need_gpus, need_mem, chosen))
+        stack.append(
+            (
+                index + 1,
+                left - 1,
+                need_procs - node.procs,
+                need_gpus - node.gpus,
+                need_mem - (node.mem or 0),
+                (*chosen, index),
+            )
+        )
+    return None if selected is None else [idle[index] for index in selected]
+
+
+def _spill_options(
+    free: _Free,
+    left_procs: int,
+    left_gpus: int,
+    *,
+    require_procs_for_gpus: bool,
+    mem: int | None = None,
+    denominator: int = 0,
+    by_gpus: bool = False,
+    largest_first: bool = True,
+) -> Iterable[tuple[int, int]]:
+    """Yield a node's processor/GPU allocations in largest-first order."""
+
+    max_procs = min(free.procs, left_procs)
+    max_gpus = min(free.gpus, left_gpus)
+    proc_values = range(max_procs, -1, -1) if largest_first else range(max_procs + 1)
+    gpu_values = range(max_gpus, -1, -1) if largest_first else range(max_gpus + 1)
+    for taken_procs in proc_values:
+        for taken_gpus in gpu_values:
+            if not taken_procs and not taken_gpus:
+                continue
+            if require_procs_for_gpus and taken_gpus and not taken_procs:
+                continue
+            if mem is not None and denominator:
+                weighted = taken_gpus if by_gpus else taken_procs
+                if mem * weighted // denominator > (free.mem or 0):
+                    continue
+            yield taken_procs, taken_gpus
+
+
+def _spill_fallback(
+    candidates: Sequence[_Free], procs: int, gpus: int, mem: int | None
+) -> list[tuple[_Free, NodeShare]] | None:
+    """Find a processor/GPU distribution after the greedy placement fails."""
+
+    # ponytail: exact fallback is exponential in the number of heterogeneous
+    # capacities; greedy placement handles the normal large homogeneous case.
+    require_procs_for_gpus = procs > 0
+    denominator = procs or gpus
+    suffix: list[tuple[int, int, int]] = [(0, 0, 0)] * (len(candidates) + 1)
+    credit_suffix = [0] * (len(candidates) + 1)
+    for index in reversed(range(len(candidates))):
+        node = candidates[index]
+        old = suffix[index + 1]
+        suffix[index] = (
+            old[0] + node.procs,
+            old[1] + (node.gpus if not require_procs_for_gpus or node.procs else 0),
+            old[2] + (node.mem or 0),
+        )
+        if mem and node.mem is not None:
+            max_weight = min(node.gpus if procs == 0 else node.procs, procs or gpus)
+            max_weight = min(max_weight, ((node.mem + 1) * denominator - 1) // mem)
+            if max_weight:
+                floor = mem * max_weight // denominator
+                credit_suffix[index] = credit_suffix[index + 1] + floor + int(node.mem > floor)
+            else:
+                credit_suffix[index] = credit_suffix[index + 1]
+        else:
+            credit_suffix[index] = credit_suffix[index + 1]
+    if mem is not None and suffix[0][2] < mem:
+        return None
+    links: list[tuple[int, tuple[_Free, int, int]]] = []
+    failed: set[tuple[int, int, int, int]] = set()
+    # The fourth resource is the memory credit still needed.  A selected
+    # node contributes its proportional floor plus one credit when it has
+    # room for the integer-rounding remainder.
+    stack: list[tuple[int, int, int, int, int, bool]] = [(0, procs, gpus, mem or 0, -1, False)]
+    while stack:
+        index, need_procs, need_gpus, need_memory, link, expanded = stack.pop()
+        key = (index, max(0, need_procs), max(0, need_gpus), max(0, need_memory))
+        if key in failed:
+            continue
+        if expanded:
+            failed.add(key)
+            continue
+        if need_procs <= 0 and need_gpus <= 0:
+            if need_memory > 0:
+                failed.add(key)
+                continue
+            plan: list[tuple[_Free, int, int]] = []
+            while link >= 0:
+                link, item = links[link]
+                plan.append(item)
+            plan.reverse()
+            shares = _memory_shares(plan, mem, denominator, by_gpus=procs == 0)
+            if shares is not None:
+                return [
+                    (free, free.share(taken_procs, taken_gpus, share))
+                    for (free, taken_procs, taken_gpus), share in zip(plan, shares, strict=True)
+                ]
+            failed.add(key)
+            continue
+        if index == len(candidates):
+            failed.add(key)
+            continue
+        available = suffix[index]
+        if available[0] < need_procs or available[1] < need_gpus:
+            failed.add(key)
+            continue
+        if mem is not None and credit_suffix[index] < need_memory:
+            failed.add(key)
+            continue
+        node = candidates[index]
+        options = list(
+            _spill_options(
+                node,
+                need_procs,
+                need_gpus,
+                require_procs_for_gpus=require_procs_for_gpus,
+                mem=mem,
+                denominator=denominator,
+                by_gpus=procs == 0,
+                largest_first=mem is None,
+            )
+        )
+        stack.append((index, need_procs, need_gpus, need_memory, link, True))
+        stack.append((index + 1, need_procs, need_gpus, need_memory, link, False))
+        for taken_procs, taken_gpus in reversed(options):
+            next_procs = need_procs - taken_procs
+            next_gpus = need_gpus - taken_gpus
+            weighted = taken_gpus if procs == 0 else taken_procs
+            floor = 0 if mem is None else mem * weighted // denominator
+            credit = floor + int(mem is not None and (node.mem or 0) > floor)
+            links.append((link, (node, taken_procs, taken_gpus)))
+            stack.append((index + 1, next_procs, next_gpus, max(0, need_memory - credit), len(links) - 1, False))
+    return None
+
+
 def _plan(inventory: Inventory, requirement: Mapping[str, int]) -> list[tuple[_Free, NodeShare]] | None:
     """Choose one attempt's node shares without reserving them (see :func:`assign`)."""
 
@@ -211,7 +419,10 @@ def _plan(inventory: Inventory, requirement: Mapping[str, int]) -> list[tuple[_F
                 kept = {id(free) for free in chosen}
                 chosen = [free for free in inventory.nodes if id(free) in kept]
                 return [(free, free.share(free.procs, free.gpus, free.mem, whole=True)) for free in chosen]
-        return None
+        fallback_chosen = _whole_fallback(idle, count, procs, gpus, mem)
+        if fallback_chosen is None:
+            return None
+        return [(free, free.share(free.procs, free.gpus, free.mem, whole=True)) for free in fallback_chosen]
     if procs == gpus == 0 and not mem:
         if not candidates:
             return None
@@ -237,23 +448,20 @@ def _plan(inventory: Inventory, requirement: Mapping[str, int]) -> list[tuple[_F
             break
         taken_procs, taken_gpus = min(free.procs, left_procs), min(free.gpus, left_gpus)
         if taken_procs or taken_gpus:
+            if procs > 0 and taken_gpus and not taken_procs:
+                continue
             plan.append((free, taken_procs, taken_gpus))
             left_procs -= taken_procs
             left_gpus -= taken_gpus
     if left_procs > 0 or left_gpus > 0:
-        return None
-    mems: list[int | None] = [None] * len(plan)
-    if mem is not None:
-        total = procs or gpus
-        split = [mem * (taken_procs if procs else taken_gpus) // total for _, taken_procs, taken_gpus in plan]
-        split[0] += mem - sum(split)
-        if any(share > (free.mem or 0) for (free, _, _), share in zip(plan, split, strict=True)):
-            return None
-        mems = list(split)
-    return [
-        (free, free.share(taken_procs, taken_gpus, share))
-        for (free, taken_procs, taken_gpus), share in zip(plan, mems, strict=True)
-    ]
+        return _spill_fallback(candidates, procs, gpus, mem)
+    mems = _memory_shares(plan, mem, procs or gpus, by_gpus=procs == 0)
+    if mems is not None:
+        return [
+            (free, free.share(taken_procs, taken_gpus, share))
+            for (free, taken_procs, taken_gpus), share in zip(plan, mems, strict=True)
+        ]
+    return _spill_fallback(candidates, procs, gpus, mem)
 
 
 def assign(inventory: Inventory, requirement: Mapping[str, int]) -> Placement | None:
@@ -261,11 +469,11 @@ def assign(inventory: Inventory, requirement: Mapping[str, int]) -> Placement | 
 
     ``nodes=N`` takes N idle nodes whole, the smallest that together hold the
     ``procs``, ``gpus`` and ``mem``. Otherwise the attempt goes on the one node
-    with the fewest free ``procs`` that holds it all, else on the fewest nodes,
-    filled from the node with the most free ``procs`` (``gpus`` when it needs no
-    ``procs``), with ``mem`` split in proportion. An attempt needing none of
-    them gets no ``procs`` on the node with the most free ones. ``mem`` counts
-    only when the inventory places it.
+    with the fewest free ``procs`` that holds it all, else it prefers a small
+    set of nodes filled from the node with the most free ``procs`` (``gpus``
+    when it needs no ``procs``), with ``mem`` split in proportion. An attempt
+    needing none of them gets no ``procs`` on the node with the most free ones.
+    ``mem`` counts only when the inventory places it.
 
     :param inventory: The inventory, changed only when the attempt is placed.
     :param requirement: The attempt's effective requirement; other labels are ignored.
@@ -331,13 +539,13 @@ def fits(inventory: Inventory, requirement: Mapping[str, int]) -> bool:
 
 
 def nodefile_lines(placement: Placement) -> list[str]:
-    """Return the nodefile of a placement: one host line per processor slot, one for a share without any.
+    """Return one host line per processor slot in a placement.
 
     :param placement: The placement.
     :return: The host lines, without line ends.
     """
 
-    return [share.host for share in placement.nodes for _ in range(max(share.procs, 1))]
+    return [share.host for share in placement.nodes for _ in range(share.procs)]
 
 
 def describe(placement: Placement) -> list[dict[str, Any]]:
@@ -371,7 +579,7 @@ def render_launch(
     template: str | None,
     nodefile: str,
     gpus_present: bool = False,
-    cpus_per_task: int | None = None,
+    cpus_per_proc: int = 1,
     mem: int | None = None,
 ) -> list[str] | None:
     """Return the launch prefix a runner puts before its parallel command.
@@ -380,27 +588,23 @@ def render_launch(
     word list and ``{procs}``, ``{nodes}``, ``{hosts}``, ``{nodefile}``,
     ``{gpus}``, ``{mem}`` (MB on the first node, or empty) and
     ``{cpus_per_proc}`` are substituted in each word; other braces stay as
-    written. Without one, a Slurm allocation gets an ``srun`` step that lays its
-    tasks out as the nodefile does (``--distribution=arbitrary``, with
-    ``SLURM_HOSTFILE`` set to the nodefile for that ``srun`` only).
+    written. Without one, the allocation scheduler supplies its default step
+    arguments from the placement and normalized allocation metadata.
 
     :param placement: The attempt's placement.
     :param kind: The allocation kind.
     :param template: The launch template, or ``None``.
     :param nodefile: The path of the attempt's nodefile.
-    :param gpus_present: Whether the allocation has GPUs, so a Slurm step
-        without any must say so.
-    :param cpus_per_task: The manager's Slurm ``--cpus-per-task``, which a step
-        under ``--exact`` does not inherit, or ``None``.
+    :param gpus_present: Whether the allocation has GPUs.
+    :param cpus_per_proc: The allocation's normalized CPUs per processor slot.
     :param mem: The attempt's ``mem`` requirement, the step memory when the
         shares carry none because the inventory does not place memory.
-    :return: The prefix, or ``None`` without a template outside Slurm.
-    :raises ValueError: If the template names an unknown placeholder or cannot be split.
+    :return: The prefix, or ``None`` when no default scheduler step applies.
+    :raises ValueError: If the template is invalid or the scheduler cannot launch the placement.
     """
 
     shares = placement.nodes
     hosts = ",".join(share.host for share in shares)
-    tasks = len(nodefile_lines(placement))
     gpus = sum(share.gpus for share in shares)
     if template is not None:
         slots = shares[0].cpu_slots
@@ -411,7 +615,7 @@ def render_launch(
             "nodefile": nodefile,
             "gpus": str(gpus),
             "mem": "" if shares[0].mem is None else str(shares[0].mem),
-            "cpus_per_proc": str(_cpulist_size(slots[0])) if slots else "1",
+            "cpus_per_proc": str(_cpulist_size(slots[0]) if slots else cpus_per_proc),
         }
 
         def substitute(match: re.Match[str]) -> str:
@@ -420,29 +624,9 @@ def render_launch(
             return values[match.group(1)]
 
         return [_PLACEHOLDER.sub(substitute, token) for token in shlex.split(template)]
-    if kind != "slurm":
+    scheduler = scheduler_for(kind)
+    if scheduler is None:
         return None
-    argv = [
-        "env",
-        f"SLURM_HOSTFILE={nodefile}",
-        "srun",
-        f"--nodes={len(shares)}",
-        f"--ntasks={tasks}",
-        f"--nodelist={hosts}",
-        "--distribution=arbitrary",
-        "--exact",
-    ]
-    if cpus_per_task is not None:
-        argv.append(f"--cpus-per-task={cpus_per_task}")
-    mems = [share.mem for share in shares]
-    total = mem if None in mems else sum(share or 0 for share in mems)
-    # Zero is no option: srun reads --mem=0 as all of the node's memory.
-    if total and len(shares) == 1:
-        argv.append(f"--mem={total}M")
-    elif total:
-        argv.append(f"--mem-per-cpu={-(-total // (tasks * (cpus_per_task or 1)))}M")
-    if gpus:
-        argv.append(f"--gpus={gpus}")
-    elif gpus_present:
-        argv.append("--gres=none")
-    return argv
+    return scheduler.step_argv(
+        placement, nodefile=nodefile, gpus_present=gpus_present, cpus_per_proc=cpus_per_proc, mem=mem
+    )

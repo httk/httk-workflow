@@ -19,12 +19,11 @@ from .._allocation import (
     bind_cpus_setting,
     parse_allocation_spec,
     probe_allocation,
-    slurm_counts,
-    slurm_end_time,
     split_allocation,
 )
 from .._durations import format_duration, parse_slurm_duration
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
+from .._scheduler import detect_scheduler
 from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
 from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
@@ -46,7 +45,7 @@ from ._common import (
 
 _TIME_LIMIT_HELP = (
     "this manager's allocation ends after DURATION (Slurm --time syntax such as 12:00:00); "
-    "default: the Slurm job's end time when running inside one"
+    "default: the enclosing scheduler allocation's end time when available"
 )
 _DEADLINE_MARGIN_HELP = "start draining this many seconds before the allocation ends (default: 120)"
 _ALLOCATION_HELP = (
@@ -112,14 +111,15 @@ def _worker_resources(pairs: Sequence[Sequence[str]]) -> dict[str, int]:
         raise ValueError(str(exc)) from exc
 
 
-def _slurm_resources(environ: Mapping[str, str]) -> dict[str, int]:
-    """Read manager resource capacities from an active SLURM allocation.
+def _scheduler_resources(environ: Mapping[str, str]) -> dict[str, int]:
+    """Read manager resource capacities from an active scheduler allocation.
 
     :param environ: Environment mapping to inspect.
-    :return: Resource capacities advertised by SLURM, or an empty mapping.
+    :return: Resource capacities advertised by the scheduler, or an empty mapping.
     """
 
-    return slurm_counts(environ)
+    scheduler = detect_scheduler(environ)
+    return {} if scheduler is None else scheduler.counts(environ)
 
 
 def _time_limit_seconds(arguments: argparse.Namespace) -> int | None:
@@ -628,8 +628,8 @@ def _run_local_manager_children(
     signal.signal(signal.SIGTERM, terminate)
     try:
         cli_resources = _worker_resources(arguments.worker_resource)
-        slurm_resources = _slurm_resources(os.environ)
-        capacity = {**slurm_resources, **cli_resources}
+        scheduler_resources = _scheduler_resources(os.environ)
+        capacity = {**scheduler_resources, **cli_resources}
         actual_count = arguments.count if count is None else count
         assert actual_count is not None
         base_tail = manager_argv_tail(arguments)
@@ -700,10 +700,11 @@ def _run_in_process_manager(
         getattr(arguments, "allocation", "auto"), os.environ, cpu_slots=bind_cpus_setting(settings)
     )
     capacity = _manager_capacity(arguments, allocation)
-    # A probe without an end (none, host, an envelope without one) still honours the Slurm job's.
+    # A probe without an end still honours the enclosing scheduler allocation.
     allocation_end = None if allocation is None else allocation.end_time
     if allocation_end is None:
-        allocation_end = slurm_end_time(os.environ)
+        scheduler = detect_scheduler(os.environ)
+        allocation_end = None if scheduler is None else scheduler.end_time(os.environ)
     end_time, deadline_margin = _manager_end_time(arguments, allocation_end)
     log_file = Path(arguments.log_file) if getattr(arguments, "log_file", None) else workspace.control / "managers.log"
 

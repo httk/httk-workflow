@@ -10,7 +10,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace, workflow_cli
-from httk.workflow._allocation import slurm_end_time
+from httk.workflow._slurm import slurm_end_time
 from httk.workflow.introspection import read_managers
 from httk.workflow.introspection._diagnosis import claim_requirements, manager_refusals
 from httk.workflow.workflow_cli import _manager
@@ -24,7 +24,7 @@ def test_slurm_end_time_reads_only_a_positive_epoch_inside_a_job(caplog: pytest.
     assert slurm_end_time({"SLURM_JOB_END_TIME": "1900000000"}) is None
     assert slurm_end_time({"SLURM_JOB_ID": "7"}) is None
     assert slurm_end_time({"SLURM_JOB_ID": "7", "SLURM_JOB_END_TIME": "1900000000"}) == 1_900_000_000.0
-    with caplog.at_level(logging.WARNING, logger="httk.workflow._allocation"):
+    with caplog.at_level(logging.WARNING, logger="httk.workflow._slurm"):
         assert slurm_end_time({"SLURM_JOB_ID": "7", "SLURM_JOB_END_TIME": "soon"}) is None
     assert "SLURM_JOB_END_TIME" in caplog.text
 

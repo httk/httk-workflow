@@ -23,7 +23,6 @@ from .models import validate_capacity, validate_label
 _LOGGER = logging.getLogger(__name__)
 
 ALLOCATION_FORMAT = "httk-workflow-allocation"
-ALLOCATION_SPECS = ("auto", "none", "slurm", "host")
 #: The capacity labels an allocation derives from its nodes.
 NODE_LABELS = frozenset({"procs", "mem", "gpus", "nodes"})
 #: The variables a GPU allocation is announced in, in the order they are read.
@@ -33,7 +32,6 @@ GPU_VARIABLES = ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "ZE_AFFINITY_MA
 GPU_HIDING_VARIABLES = frozenset({"CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
 _CPULIST = re.compile(r"[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_REPEATED = re.compile(r"([0-9]+)(?:\(x([0-9]+)\))?")
 _TRUE = frozenset({"true", "1", "yes"})
 
 type Run = Callable[..., subprocess.CompletedProcess[str]]
@@ -73,12 +71,14 @@ class Allocation:
     :param nodes: The allocation's nodes, empty when only aggregate counts are known.
     :param resources: Aggregate counts when *nodes* is empty; otherwise only
         extras such as licenses, never ``procs``, ``mem``, ``gpus`` or ``nodes``.
+    :param cpus_per_proc: CPUs assigned to each scheduler process.
     """
 
     kind: str
     end_time: float | None
     nodes: tuple[Node, ...] = ()
     resources: Mapping[str, int] = field(default_factory=dict)
+    cpus_per_proc: int = 1
 
     def capacity(self) -> dict[str, int]:
         """Return the manager capacity this allocation advertises.
@@ -176,107 +176,6 @@ def local_cpu_slots(procs: int) -> tuple[str, ...] | None:
     return tuple(format_cpulist(cpus[index * chunk : (index + 1) * chunk]) for index in range(procs))
 
 
-def slurm_end_time(environ: Mapping[str, str]) -> float | None:
-    """Return the epoch second the enclosing Slurm job ends, if it is known.
-
-    :param environ: The environment to read ``SLURM_JOB_ID`` and ``SLURM_JOB_END_TIME`` from.
-    :return: The end time, or ``None`` outside a Slurm job or when it is not a positive integer.
-    """
-
-    raw = environ.get("SLURM_JOB_END_TIME")
-    if "SLURM_JOB_ID" not in environ or raw is None:
-        return None
-    text = raw.strip()
-    if not text.isdigit() or int(text) <= 0:
-        _LOGGER.warning("ignoring SLURM_JOB_END_TIME=%r: not a positive epoch second", raw)
-        return None
-    return float(text)
-
-
-def _slurm_gpus(raw: str) -> int:
-    """Parse ``SLURM_GPUS``: ``4``, ``a100:4``, or ``a100:2,v100:2``."""
-
-    total = 0
-    for item in raw.split(","):
-        count = item.rsplit(":", 1)[-1].strip()
-        if not count.isdigit():
-            raise ValueError(raw)
-        total += int(count)
-    return total
-
-
-def slurm_counts(environ: Mapping[str, str]) -> dict[str, int]:
-    """Read manager resource capacities from an active Slurm allocation.
-
-    :param environ: Environment mapping to inspect.
-    :return: The aggregate capacities Slurm advertises, or an empty mapping outside a job.
-    """
-
-    if "SLURM_JOB_ID" not in environ:
-        return {}
-
-    def integer(name: str, *, memory: bool = False) -> int | None:
-        raw = environ.get(name)
-        if raw is None:
-            return None
-        value = raw.strip()
-        multiplier = 1
-        divide_kibibytes = False
-        if memory and value:
-            suffix = value[-1].upper()
-            if suffix in {"M", "G", "K"}:
-                value = value[:-1]
-                if suffix == "G":
-                    multiplier = 1024
-                elif suffix == "K":
-                    divide_kibibytes = True
-        try:
-            parsed = _slurm_gpus(value) if name == "SLURM_GPUS" else int(value)
-        except ValueError:
-            _LOGGER.warning("ignoring unparsable SLURM resource variable %s=%r", name, raw)
-            return None
-        if parsed < 0:
-            _LOGGER.warning("ignoring negative SLURM resource variable %s=%r", name, raw)
-            return None
-        if divide_kibibytes:
-            return parsed // 1024
-        return parsed * multiplier
-
-    resources: dict[str, int] = {}
-    ntasks = integer("SLURM_NTASKS")
-    if ntasks is not None:
-        resources["procs"] = ntasks
-    gpus = integer("SLURM_GPUS")
-    if gpus is not None:
-        resources["gpus"] = gpus
-    nodes = integer("SLURM_JOB_NUM_NODES")
-    if nodes is not None:
-        resources["nodes"] = nodes
-
-    if "SLURM_MEM_PER_CPU" in environ:
-        mem_per_cpu = integer("SLURM_MEM_PER_CPU", memory=True)
-        cpus = integer("SLURM_CPUS_PER_TASK") if "SLURM_CPUS_PER_TASK" in environ else 1
-        if mem_per_cpu is not None and cpus is not None and ntasks is not None:
-            resources["mem"] = mem_per_cpu * cpus * ntasks
-    elif "SLURM_MEM_PER_NODE" in environ:
-        mem_per_node = integer("SLURM_MEM_PER_NODE", memory=True)
-        if mem_per_node is not None and nodes is not None:
-            resources["mem"] = mem_per_node * nodes
-    return resources
-
-
-def _expand_per_node(text: str) -> list[int] | None:
-    """Expand Slurm's per-node count lists such as ``16(x2),8``, or ``None`` when malformed."""
-
-    counts: list[int] = []
-    for item in text.split(","):
-        match = _REPEATED.fullmatch(item.strip())
-        if match is None:
-            return None
-        counts += [int(match.group(1))] * int(match.group(2) or 1)
-    return counts
-
-
 def _gpu_ids(environ: Mapping[str, str]) -> tuple[str, tuple[str, ...]] | None:
     """Return the first announced GPU variable and its ids, or ``None``."""
 
@@ -284,99 +183,6 @@ def _gpu_ids(environ: Mapping[str, str]) -> tuple[str, tuple[str, ...]] | None:
         if variable in environ:
             return variable, tuple(item.strip() for item in environ[variable].split(",") if item.strip())
     return None
-
-
-def _slurm_hosts(environ: Mapping[str, str], run: Run) -> list[str] | None:
-    """List the job's hosts with ``scontrol``, or the batch host of a one-node job."""
-
-    nodelist = environ.get("SLURM_JOB_NODELIST")
-    if nodelist:
-        try:
-            completed = run(
-                ["scontrol", "show", "hostnames", nodelist], capture_output=True, text=True, timeout=30, check=False
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            _LOGGER.debug("scontrol show hostnames failed: %s", exc)
-        else:
-            hosts = completed.stdout.split() if completed.returncode == 0 else []
-            if hosts:
-                return hosts
-    if environ.get("SLURM_JOB_NUM_NODES", "").strip() == "1":
-        return [environ.get("SLURMD_NODENAME") or socket.gethostname()]
-    return None
-
-
-def slurm_allocation(
-    environ: Mapping[str, str], *, run: Run = subprocess.run, cpu_slots: bool = False
-) -> Allocation | None:
-    """Probe the enclosing Slurm job's nodes.
-
-    The nodes come from ``scontrol show hostnames``, tasks per node from
-    ``SLURM_TASKS_PER_NODE``, memory from the job's memory request, and GPU ids
-    of the batch host from its ``CUDA_VISIBLE_DEVICES`` (or ROCm/oneAPI
-    equivalent). Whenever the nodes cannot be described consistently with the
-    aggregate counts of :func:`slurm_counts`, the allocation carries those
-    counts only, so its capacity is always exactly theirs.
-
-    :param environ: The job's environment.
-    :param run: The :func:`subprocess.run` used to call ``scontrol``.
-    :param cpu_slots: Whether to split this process's CPU affinity into the
-        batch host's slots (see :func:`local_cpu_slots`).
-    :return: The allocation, or ``None`` outside a Slurm job.
-    """
-
-    if "SLURM_JOB_ID" not in environ:
-        return None
-    end_time = slurm_end_time(environ)
-    counts = slurm_counts(environ)
-    aggregate = Allocation("slurm", end_time, (), counts)
-    hosts = _slurm_hosts(environ, run)
-    if hosts is None:
-        _LOGGER.warning("cannot list the Slurm job's nodes; using its aggregate counts only")
-        return aggregate
-    procs = [0] * len(hosts)
-    if "procs" in counts:
-        per_node = _expand_per_node(environ.get("SLURM_TASKS_PER_NODE", "")) if len(hosts) > 1 else [counts["procs"]]
-        if per_node is None or len(per_node) != len(hosts) or sum(per_node) != counts["procs"]:
-            _LOGGER.warning(
-                "SLURM_TASKS_PER_NODE=%r does not match the job's tasks and nodes; using its aggregate counts only",
-                environ.get("SLURM_TASKS_PER_NODE"),
-            )
-            return aggregate
-        procs = per_node
-    gpus = counts.get("gpus", 0)
-    if gpus % len(hosts):
-        _LOGGER.warning("%d GPUs do not split evenly over %d nodes; using aggregate counts only", gpus, len(hosts))
-        return aggregate
-    # Memory follows the tasks, exactly as slurm_counts sums it.
-    mem: list[int | None] = [None] * len(hosts)
-    if "mem" in counts:
-        if "SLURM_MEM_PER_CPU" in environ:
-            mem = [counts["mem"] * count // counts["procs"] if counts["procs"] else 0 for count in procs]
-        else:
-            mem = [counts["mem"] // len(hosts)] * len(hosts)
-    per_node_gpus = gpus // len(hosts)
-    batch = environ.get("SLURMD_NODENAME")
-    # The ids are the batch host's; an unknown batch host, or one outside the
-    # list (an salloc shell on a login node), owns none of them.
-    batch_index = hosts.index(batch) if batch in hosts else -1
-    announced = _gpu_ids(environ)
-    if announced is not None and (not announced[1] or len(announced[1]) != per_node_gpus):
-        announced = None
-    nodes = [Node(host, procs[index], mem[index], per_node_gpus) for index, host in enumerate(hosts)]
-    if batch_index >= 0:
-        batch_node = nodes[batch_index]
-        batch_node = replace(batch_node, local=True)
-        if announced is not None:
-            batch_node = replace(batch_node, gpu_ids=announced[1], gpu_variable=announced[0])
-        if cpu_slots:
-            batch_node = replace(batch_node, cpu_slots=local_cpu_slots(batch_node.procs))
-        nodes[batch_index] = batch_node
-    allocation = Allocation("slurm", end_time, tuple(nodes), {})
-    if allocation.capacity() != counts:
-        _LOGGER.warning("the Slurm job's nodes do not add up to its counts %s; using the counts only", counts)
-        return aggregate
-    return allocation
 
 
 def half_physical_memory_mb() -> int | None:
@@ -428,8 +234,8 @@ def _strings(value: object, name: str, length: int) -> tuple[str, ...]:
     return tuple(value)
 
 
-_ENVELOPE_KEYS = frozenset({"format", "format_version", "kind", "end_time", "nodes", "resources"})
-_NODE_KEYS = frozenset({"host", "procs", "mem", "gpus", "cpus", "gpu_ids", "gpu_variable"})
+_ENVELOPE_KEYS = frozenset({"format", "format_version", "kind", "end_time", "nodes", "resources", "cpus_per_proc"})
+_NODE_KEYS = frozenset({"host", "procs", "mem", "gpus", "cpus", "gpu_ids", "gpu_variable", "local"})
 
 
 def _envelope_node(value: object, name: str) -> Node:
@@ -448,18 +254,27 @@ def _envelope_node(value: object, name: str) -> Node:
     cpus = None
     if "cpus" in item:
         cpus = _strings(item["cpus"], f"{name}.cpus", procs)
-        try:
-            for text in cpus:
-                parse_cpulist(text)
-        except ValueError as exc:
-            raise FormatError(f"{name}.cpus entries must be ascending Linux cpulists such as 0-7,16") from exc
+        seen_cpus: set[int] = set()
+        for slot in cpus:
+            try:
+                parsed = parse_cpulist(slot)
+            except ValueError as exc:
+                raise FormatError(f"{name}.cpus entries must be ascending Linux cpulists such as 0-7,16") from exc
+            if seen_cpus & parsed:
+                raise FormatError(f"{name}.cpus slots overlap")
+            seen_cpus.update(parsed)
     gpu_ids = None if "gpu_ids" not in item else _strings(item["gpu_ids"], f"{name}.gpu_ids", gpus)
+    if gpu_ids is not None and len(set(gpu_ids)) != len(gpu_ids):
+        raise FormatError(f"{name}.gpu_ids must not contain duplicate device ids")
     variable = item.get("gpu_variable")
     if variable is not None and (not isinstance(variable, str) or not _VARIABLE.fullmatch(variable)):
         raise FormatError(f"{name}.gpu_variable must be an environment variable name")
     if gpu_ids is not None and variable is None:
         raise FormatError(f"{name}.gpu_variable is required with gpu_ids")
-    return Node(host, procs, mem, gpus, cpu_slots=cpus, gpu_ids=gpu_ids, gpu_variable=variable)
+    local = item.get("local", False)
+    if not isinstance(local, bool):
+        raise FormatError(f"{name}.local must be a boolean")
+    return Node(host, procs, mem, gpus, cpus, gpu_ids, variable, local)
 
 
 def allocation_from_envelope(value: object) -> Allocation:
@@ -484,17 +299,22 @@ def allocation_from_envelope(value: object) -> Allocation:
         isinstance(end_time, bool) or not isinstance(end_time, (int, float)) or not 0 < end_time < float("inf")
     ):
         raise FormatError("allocation.end_time must be a positive epoch second or null")
+    cpus_per_proc = envelope.get("cpus_per_proc", 1)
+    if isinstance(cpus_per_proc, bool) or not isinstance(cpus_per_proc, int) or cpus_per_proc < 1:
+        raise FormatError("allocation.cpus_per_proc must be a positive integer")
     nodes = envelope.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         raise FormatError("allocation.nodes must be a non-empty list")
     parsed = tuple(_envelope_node(node, f"allocation.nodes[{index}]") for index, node in enumerate(nodes))
     if len({node.host for node in parsed}) != len(parsed):
         raise FormatError("allocation.nodes hosts must be unique")
+    if sum(node.local for node in parsed) > 1:
+        raise FormatError("allocation.nodes may mark at most one node local")
     resources = validate_capacity(envelope.get("resources", {}), "allocation.resources")
     clash = sorted(NODE_LABELS & resources.keys())
     if clash:
         raise FormatError(f"allocation.resources.{clash[0]} is derived from the allocation's nodes")
-    return Allocation(kind, None if end_time is None else float(end_time), parsed, resources)
+    return Allocation(kind, None if end_time is None else float(end_time), parsed, resources, cpus_per_proc)
 
 
 def exec_allocation(path: str, environ: Mapping[str, str], *, timeout: float = 60.0) -> Allocation:
@@ -562,41 +382,41 @@ def split_allocation(spec: str | None, count: int) -> list[str]:
 
 
 def parse_allocation_spec(spec: str) -> str:
-    """Validate an ``--allocation`` spec without probing.
+    """Validate an allocation specification without probing it.
 
-    :param spec: ``auto``, ``none``, ``slurm``, ``host`` or ``exec:PATH``.
-    :return: The spec.
-    :raises ValueError: If the spec is unknown or ``exec:`` names no path.
+    :param spec: ``auto``, ``none``, ``host``, a maintained scheduler, or ``exec:PATH``.
+    :return: The unchanged specification.
+    :raises ValueError: If the specification is not supported.
     """
 
-    if spec in ALLOCATION_SPECS or (spec.startswith("exec:") and spec[5:]):
+    from ._scheduler import scheduler_for
+
+    if spec in {"auto", "none", "host"} or scheduler_for(spec) is not None or (spec.startswith("exec:") and spec[5:]):
         return spec
-    raise ValueError(f"--allocation {spec!r}: expected auto, none, slurm, host, or exec:PATH")
+    raise ValueError(f"--allocation {spec!r}: expected auto, none, host, a maintained scheduler, or exec:PATH")
 
 
 def probe_allocation(
     spec: str, environ: Mapping[str, str], *, run: Run = subprocess.run, cpu_slots: bool = False
 ) -> Allocation | None:
-    """Probe the allocation an ``--allocation`` spec selects.
+    """Probe the allocation selected by *spec* through the scheduler lookup.
 
-    :param spec: ``auto`` (``slurm`` inside a Slurm job, else ``none``),
-        ``none``, ``slurm``, ``host`` or ``exec:PATH``.
-    :param environ: The environment the probe reads.
-    :param run: The :func:`subprocess.run` used to call ``scontrol``.
-    :param cpu_slots: Whether the ``slurm`` and ``host`` probes split this
-        process's CPU affinity into the local node's slots; an envelope's
-        ``cpus`` are always kept.
-    :return: The allocation, or ``None`` when there is none.
-    :raises ValueError: If the spec is invalid or a site probe fails.
+    :param spec: The validated allocation specification.
+    :param environ: Environment used for scheduler detection and probing.
+    :param run: Command runner used for scheduler helper commands.
+    :param cpu_slots: Whether to include local CPU affinity slots.
+    :return: The allocation, or ``None`` when allocation is disabled/unavailable.
+    :raises ValueError: If the specification is invalid or a site probe fails.
     """
 
     spec = parse_allocation_spec(spec)
-    if spec == "auto":
-        spec = "slurm" if "SLURM_JOB_ID" in environ else "none"
     if spec == "none":
         return None
-    if spec == "slurm":
-        return slurm_allocation(environ, run=run, cpu_slots=cpu_slots)
     if spec == "host":
         return host_allocation(environ, cpu_slots=cpu_slots)
-    return exec_allocation(spec[5:], environ)
+    if spec.startswith("exec:"):
+        return exec_allocation(spec[5:], environ)
+    from ._scheduler import detect_scheduler, scheduler_for
+
+    scheduler = detect_scheduler(environ) if spec == "auto" else scheduler_for(spec)
+    return None if scheduler is None else scheduler.probe_allocation(environ, run=run, cpu_slots=cpu_slots)

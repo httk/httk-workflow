@@ -21,9 +21,8 @@ from httk.workflow._allocation import (
     host_allocation,
     parse_allocation_spec,
     probe_allocation,
-    slurm_allocation,
-    slurm_counts,
 )
+from httk.workflow._slurm import slurm_allocation, slurm_counts
 from httk.workflow.errors import FormatError
 from httk.workflow.workflow_cli import _manager
 
@@ -51,6 +50,7 @@ _TWO_NODES = {
     "SLURM_TASKS_PER_NODE": "16(x2)",
     "SLURM_MEM_PER_NODE": "64000",
     "SLURM_GPUS": "a100:4",
+    "SLURM_GPUS_PER_NODE": "2",
     "SLURMD_NODENAME": "n01",
     "CUDA_VISIBLE_DEVICES": "GPU-a, GPU-b",
 }
@@ -73,7 +73,7 @@ def _no_scontrol(argv: list[str], **_kwargs: object) -> subprocess.CompletedProc
 
 @pytest.mark.parametrize("environ", _SLURM_FIXTURES)
 def test_slurm_counts_are_the_cli_capacity_and_the_allocation_capacity(environ: dict[str, str]) -> None:
-    assert _manager._slurm_resources(environ) == slurm_counts(environ)
+    assert _manager._scheduler_resources(environ) == slurm_counts(environ)
     allocation = slurm_allocation(environ, run=_no_scontrol)
     assert (allocation.capacity() if allocation is not None else {}) == slurm_counts(environ)
 
@@ -130,6 +130,21 @@ def test_slurm_allocation_falls_back_to_aggregate_counts(
     assert allocation.resources == slurm_counts(environ) == allocation.capacity()
     assert allocation.end_time == 5000.0
     assert "aggregate counts only" in caplog.text or "using the counts only" in caplog.text
+
+
+def test_slurm_does_not_infer_equal_gpu_distribution_without_typed_counts() -> None:
+    environ = {key: value for key, value in _TWO_NODES.items() if key != "SLURM_GPUS_PER_NODE"}
+    allocation = slurm_allocation(environ, run=_scontrol("n01 n02")[0])
+    assert allocation is not None
+    assert allocation.nodes == ()
+    assert allocation.resources == {"procs": 32, "gpus": 4, "nodes": 2, "mem": 128000}
+
+
+def test_slurm_visible_gpu_ids_contradicting_typed_distribution_fall_back() -> None:
+    environ = {**_TWO_NODES, "CUDA_VISIBLE_DEVICES": "GPU-a,GPU-b,GPU-c"}
+    allocation = slurm_allocation(environ, run=_scontrol("n01 n02")[0])
+    assert allocation is not None and allocation.nodes == ()
+    assert allocation.resources["gpus"] == 4
 
 
 def test_slurm_allocation_without_ntasks_lists_nodes_without_procs() -> None:
@@ -197,6 +212,36 @@ def test_envelope_round_trips() -> None:
     assert allocation.capacity() == {"procs": 6, "gpus": 2, "nodes": 2, "license": 2}
 
 
+def test_envelope_rejects_duplicate_gpu_ids_and_overlapping_cpu_slots() -> None:
+    with pytest.raises(FormatError, match="duplicate device ids"):
+        allocation_from_envelope(_node(gpu_ids=["0", "0"]))
+    with pytest.raises(FormatError, match="cpus slots overlap"):
+        allocation_from_envelope(_node(cpus=["0-2", "2-3", "4-5", "6-7"]))
+
+
+def test_envelope_allows_repeated_cpu_ids_on_different_nodes() -> None:
+    envelope = {
+        **_ENVELOPE,
+        "nodes": [
+            {"host": "n001", "procs": 1, "cpus": ["0-3"]},
+            {"host": "n002", "procs": 1, "cpus": ["0-3"]},
+        ],
+    }
+    assert allocation_from_envelope(envelope).nodes[1].cpu_slots == ("0-3",)
+
+
+def test_envelope_allows_at_most_one_local_node() -> None:
+    envelope = {
+        **_ENVELOPE,
+        "nodes": [
+            {**_ENVELOPE["nodes"][0], "local": True},  # type: ignore[index]
+            {**_ENVELOPE["nodes"][1], "local": True},  # type: ignore[index]
+        ],
+    }
+    with pytest.raises(FormatError, match="at most one node local"):
+        allocation_from_envelope(envelope)
+
+
 def _node(**change: object) -> dict[str, object]:
     nodes = cast(list[dict[str, object]], _ENVELOPE["nodes"])
     return {**_ENVELOPE, "nodes": [{**nodes[0], **change}]}
@@ -212,6 +257,8 @@ def _node(**change: object) -> dict[str, object]:
         {**_ENVELOPE, "kind": "Bad Kind"},
         {**_ENVELOPE, "end_time": 0},
         {**_ENVELOPE, "end_time": "soon"},
+        {**_ENVELOPE, "cpus_per_proc": True},
+        {**_ENVELOPE, "cpus_per_proc": 0},
         {**_ENVELOPE, "nodes": []},
         {**_ENVELOPE, "nodes": [_ENVELOPE["nodes"][1], _ENVELOPE["nodes"][1]]},  # type: ignore[index]
         {**_ENVELOPE, "resources": {"procs": 1}},
@@ -228,6 +275,7 @@ def _node(**change: object) -> dict[str, object]:
         _node(gpu_ids=["0", ""]),
         _node(gpu_variable="1BAD"),
         _node(gpu_variable=None),
+        _node(local="yes"),
         _node(socket=0),
     ],
 )

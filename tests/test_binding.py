@@ -5,6 +5,8 @@ import json
 import socket
 import sys
 import time
+from dataclasses import replace
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -70,6 +72,127 @@ def test_assign_places_by_the_rules(requirement: dict[str, int], expected: objec
     inventory = _inventory(*_TWO)
     placement = assign(inventory, requirement)
     assert (None if placement is None else _hosts(placement)) == expected
+
+
+def test_whole_node_fallback_finds_a_noncontiguous_feasible_set() -> None:
+    inventory = _inventory(Node("a", 2, 100, 4), Node("b", 4, 100), Node("c", 8, 100))
+    placement = assign(inventory, {"nodes": 2, "procs": 10, "gpus": 4})
+    assert _hosts(placement) == [("a", 2, 4, 100), ("c", 8, 0, 100)]
+
+
+def test_spill_fallback_finds_memory_feasible_distribution() -> None:
+    inventory = _inventory(Node("a", 8, 0), Node("b", 4, 100), Node("c", 4, 100))
+    placement = assign(inventory, {"procs": 8, "mem": 100})
+    assert _hosts(placement) == [("b", 4, 0, 50), ("c", 4, 0, 50)]
+
+
+def test_gpu_shares_need_a_reserved_processor_slot() -> None:
+    inventory = _inventory(Node("a", 4, 100), Node("b", 0, 100, 1))
+    assert assign(inventory, {"procs": 4, "gpus": 1}) is None
+
+    inventory = _inventory(Node("a", 4, 100), Node("b", 1, 100, 1))
+    placement = assign(inventory, {"procs": 4, "gpus": 1})
+    assert _hosts(placement) == [("a", 3, 0, None), ("b", 1, 1, None)]
+    assert placement is not None
+    assert len(nodefile_lines(placement)) == 4
+
+
+def _oracle_fits(nodes: tuple[Node, ...], procs: int, gpus: int, mem: int) -> bool:
+    """Check the small integer placement space independently of the planner."""
+
+    if not procs and not gpus:
+        return any((node.mem or 0) >= mem for node in nodes)
+    processor_options = product(*(range(node.procs + 1) for node in nodes))
+    for processor_share in processor_options:
+        if sum(processor_share) != procs:
+            continue
+        gpu_options = product(*(range(node.gpus + 1) for node in nodes))
+        for gpu_share in gpu_options:
+            if sum(gpu_share) != gpus or (
+                procs and any(gpu and not proc for proc, gpu in zip(processor_share, gpu_share))
+            ):
+                continue
+            base = (
+                [mem * proc // procs for proc in processor_share] if procs else [mem * gpu // gpus for gpu in gpu_share]
+            )
+            if any(share > (node.mem or 0) for share, node in zip(base, nodes, strict=True)):
+                continue
+            remainder = mem - sum(base)
+            if (
+                sum(
+                    (node.mem or 0) - share > 0 and bool(proc or gpu)
+                    for node, share, proc, gpu in zip(nodes, base, processor_share, gpu_share, strict=True)
+                )
+                >= remainder
+            ):
+                return True
+    return False
+
+
+def test_small_integer_placements_match_an_independent_feasibility_oracle() -> None:
+    nodes = (
+        Node("a", 2, 2, 1),
+        Node("b", 2, 2, 1),
+        Node("c", 1, 3, 0),
+        Node("gpu-only", 0, 4, 2),
+        Node("cpu-only", 3, 0, 0),
+    )
+    for procs in range(5):
+        for gpus in range(3):
+            for mem in range(7):
+                inventory = _inventory(*nodes)
+                requirement = {"procs": procs, "gpus": gpus, "mem": mem}
+                expected = _oracle_fits(nodes, procs, gpus, mem)
+                assert fits(inventory, requirement) == expected
+                empty = copy.deepcopy(inventory)
+                placement = assign(inventory, requirement)
+                assert (placement is not None) == expected
+                if placement is not None:
+                    release(inventory, placement)
+                assert inventory == empty
+
+
+def test_large_homogeneous_whole_node_request_uses_the_fast_path() -> None:
+    nodes = tuple(Node(f"n{index}", 8, 100, 1) for index in range(1000))
+    inventory = _inventory(*nodes)
+    placement = assign(inventory, {"nodes": 1, "procs": 8, "gpus": 1})
+    assert placement is not None and len(placement.nodes) == 1
+
+
+def test_large_homogeneous_impossible_whole_request_is_rejected() -> None:
+    nodes = tuple(Node(f"n{index}", 2, 100) for index in range(2000))
+    inventory = _inventory(*nodes)
+    assert assign(inventory, {"nodes": 1000, "procs": 2001}) is None
+
+
+def test_large_homogeneous_memory_shortfall_is_rejected() -> None:
+    nodes = tuple(Node(f"n{index}", 2, 1) for index in range(2000))
+    inventory = _inventory(*nodes)
+    assert assign(inventory, {"procs": 2001, "mem": 2001}) is None
+
+
+def test_impossible_gpu_colocation_is_rejected() -> None:
+    nodes = tuple(Node(f"n{index}", 1, 100, 1) for index in range(30))
+    inventory = _inventory(*nodes)
+
+    assert assign(inventory, {"procs": 10, "gpus": 11, "mem": 1}) is None
+
+
+def test_memory_rounding_shortfall_with_heterogeneous_nodes_is_rejected() -> None:
+    nodes = tuple(Node(f"n{index}", 2, 0) for index in range(100)) + (Node("rich", 2, 50),)
+    inventory = _inventory(*nodes)
+
+    assert assign(inventory, {"procs": 101, "mem": 50}) is None
+
+
+def test_large_feasible_spill_is_found() -> None:
+    nodes = tuple(Node(f"n{index}", 2, 1) for index in range(200))
+    inventory = _inventory(*nodes)
+    placement = assign(inventory, {"procs": 201, "mem": 200})
+
+    assert placement is not None
+    assert sum(share.procs for share in placement.nodes) == 201
+    assert sum(share.mem or 0 for share in placement.nodes) == 200
 
 
 def test_whole_nodes_refuse_partially_used_nodes_and_release_restores_exactly() -> None:
@@ -148,6 +271,10 @@ def test_nodefile_and_launch_prefix() -> None:
         NodeShare("b", 0, None, 1, ("7",), None, False),
     )
     placement = Placement(shares, None)
+    assert nodefile_lines(placement) == ["a", "a"]
+    with pytest.raises(ValueError, match="GPU share"):
+        render_launch(placement, kind="slurm", template=None, nodefile="/n")
+    placement = Placement((shares[0], replace(shares[1], procs=1)), None)
     assert nodefile_lines(placement) == ["a", "a", "b"]
     # The prefix scopes SLURM_HOSTFILE to its own srun.
     srun = ("env", "SLURM_HOSTFILE=/n", "srun")
@@ -155,18 +282,18 @@ def test_nodefile_and_launch_prefix() -> None:
     # b's memory is unknown, so a multi-node step gets no memory option.
     assert render_launch(placement, kind="slurm", template=None, nodefile="/n") == [
         *srun,
-        *("--nodes=2", "--ntasks=3", "--nodelist=a,b", *layout, "--gpus=1"),
+        *("--nodes=2", "--ntasks=3", "--nodelist=a,b", *layout, "--cpus-per-task=1", "--gpus=1"),
     ]
     single = Placement((NodeShare("a", 4, 900, 0, None, None, True),), None)
     assert render_launch(single, kind="slurm", template=None, nodefile="/n", gpus_present=True) == [
         *srun,
-        *("--nodes=1", "--ntasks=4", "--nodelist=a", *layout, "--mem=900M", "--gres=none"),
+        *("--nodes=1", "--ntasks=4", "--nodelist=a", *layout, "--cpus-per-task=1", "--mem=900M", "--gres=none"),
     ]
     # Several nodes: memory per CPU, rounded up, over every task's CPUs.
     spread = Placement(
         (NodeShare("a", 3, 700, 0, None, None, False), NodeShare("b", 1, 300, 0, None, None, False)), None
     )
-    assert render_launch(spread, kind="slurm", template=None, nodefile="/n", cpus_per_task=2) == [
+    assert render_launch(spread, kind="slurm", template=None, nodefile="/n", cpus_per_proc=2) == [
         *srun,
         *("--nodes=2", "--ntasks=4", "--nodelist=a,b", *layout),
         *("--cpus-per-task=2", "--mem-per-cpu=125M"),
@@ -187,6 +314,7 @@ def test_nodefile_and_launch_prefix() -> None:
         "mem" in item for item in render_launch(one, kind="slurm", template=None, nodefile="/n", mem=0) or []
     )
     assert render_launch(single, kind="host", template=None, nodefile="/n") is None
+    placement = Placement(shares, None)
     template = "mpirun -np {procs} --hostfile {nodefile} -x OMP={cpus_per_proc} --host '{hosts}' {mem}"
     assert render_launch(placement, kind="host", template=template, nodefile="/n") == [
         *("mpirun", "-np", "2", "--hostfile", "/n", "-x", "OMP=2", "--host", "a,b", "100"),

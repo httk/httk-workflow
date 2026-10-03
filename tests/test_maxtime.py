@@ -106,6 +106,36 @@ def test_timeout_is_retried_when_listed_in_retry_on(tmp_path: Path) -> None:
     assert state["attempt_ordinal"] == 2
 
 
+@pytest.mark.parametrize(("status", "code"), [(7, "process_failure"), (0, "protocol_error")])
+def test_already_exited_attempt_is_not_retried_as_a_timeout(tmp_path: Path, status: int, code: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _HEADER + f"sys.exit({status})\n",
+        tag="exited",
+        resources={"maxtime": 1},
+        retry_on=("timeout",),
+    )
+    workspace.submit(payload, "project/exited")
+    with TaskManager(workspace) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        assert manager._claim_and_launch(marker)
+        (attempt,) = manager._running.values()
+        assert attempt.process.wait(timeout=10) == status
+        # Model a delayed next tick after a known exit, without a timed sleep.
+        attempt.started -= 2
+        manager.run_until_idle(timeout=10)
+    kind, state = _final(workspace, job_id)
+    assert kind == "failed"
+    failure = state["failure"]
+    assert isinstance(failure, dict)
+    assert failure["code"] == code
+    assert failure["details"]["exit_status"] == status
+    assert state["total_attempts"] == 1
+
+
 @pytest.mark.parametrize("maxtime", [600, None])
 def test_deadline_is_present_exactly_with_maxtime(tmp_path: Path, maxtime: int | None) -> None:
     body = """
