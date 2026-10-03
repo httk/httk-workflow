@@ -28,9 +28,25 @@ from . import (
     _manager_runners,
     _manager_scheduling,
 )
-from ._allocation import Allocation
+from ._allocation import (
+    GPU_HIDING_VARIABLES,
+    Allocation,
+    Node,
+    bind_cpus_setting,
+    format_cpulist,
+    parse_cpulist,
+)
 from ._durations import format_duration
-from ._manager_binding import Inventory, Placement, assign, describe, nodefile_lines, release, render_launch
+from ._manager_binding import (
+    Inventory,
+    NodeShare,
+    Placement,
+    assign,
+    describe,
+    nodefile_lines,
+    release,
+    render_launch,
+)
 from ._util import (
     interpreter_first_path,
     json_bytes,
@@ -1842,8 +1858,8 @@ class TaskManager:
         settings = self.workspace.read_settings()
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
         deadline = self._attempt_deadline(requirement)
-        binding, binding_environment = (
-            (None, {})
+        binding, binding_environment, pin = (
+            (None, {}, None)
             if placement is None
             else self._attempt_binding(placement, control, settings, requirement.get("mem"))
         )
@@ -2065,6 +2081,19 @@ class TaskManager:
                     reason="launched",
                 ),
             )
+            if pin is not None:
+                # The launcher is blocked on the gate, so the runner it execs
+                # inherits this mask.
+                try:
+                    os.sched_setaffinity(process.pid, pin)
+                except (AttributeError, OSError) as exc:
+                    _LOGGER.warning(
+                        "cannot pin attempt %s to CPUs %s: %s",
+                        attempt_id,
+                        format_cpulist(pin),
+                        exc,
+                        extra=self._event("attempt_pin_failed", running, attempt_id=attempt_id),
+                    )
             os.write(gate_write, b"R")
             started = time.monotonic()
             if verified is not None and verified.fd is not None:
@@ -2139,10 +2168,24 @@ class TaskManager:
             extra=self._event("launch", running, **launch_fields),
         )
 
+    def _local_share(self, placement: Placement) -> tuple[NodeShare, Node] | None:
+        """Return a placement's only share and its node when that is this manager's host, else ``None``.
+
+        The node is local when its probe marked it so or its host name matches,
+        exactly or up to the first dot.
+        """
+
+        if len(placement.nodes) != 1 or self._inventory is None:
+            return None
+        share = placement.nodes[0]
+        node = next(free.node for free in self._inventory.nodes if free.node.host == share.host)
+        same = share.host == self.hostname or share.host.split(".")[0] == self.hostname.split(".")[0]
+        return (share, node) if node.local or same else None
+
     def _attempt_binding(
         self, placement: Placement, control: Path, settings: Mapping[str, Any], mem: int | None
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Write the attempt's nodefile and ``binding.json``; return its context ``binding`` and environment."""
+    ) -> tuple[dict[str, Any], dict[str, str], set[int] | None]:
+        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs."""
 
         nodefile = control / "nodefile"
         nodefile.write_text("".join(f"{host}\n" for host in nodefile_lines(placement)), encoding="utf-8")
@@ -2181,7 +2224,20 @@ class TaskManager:
         }
         if launch is not None:
             environment["HTTK_WORKFLOW_LAUNCH"] = shlex.join(launch)
-        return binding, environment
+        # Device identity holds only for a runner executed here; an srun step
+        # chooses its own CPUs and GPUs.
+        local = self._local_share(placement)
+        pin: set[int] | None = None
+        if local is not None:
+            share, node = local
+            if share.gpus and share.gpu_ids and placement.gpu_variable:
+                environment[placement.gpu_variable] = ",".join(share.gpu_ids)
+            elif not share.gpus and node.gpu_ids and node.gpu_variable in GPU_HIDING_VARIABLES:
+                # An attempt given no GPUs must not see those given to others.
+                environment[node.gpu_variable] = ""
+            if share.cpu_slots and bind_cpus_setting(settings):
+                pin = set[int]().union(*(parse_cpulist(slot) for slot in share.cpu_slots))
+        return binding, environment, pin
 
     def _attempt_deadline(self, requirement: Mapping[str, int]) -> int | None:
         """Return the epoch second an attempt launched now must finish by.

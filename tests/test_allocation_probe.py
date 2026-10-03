@@ -92,7 +92,7 @@ def test_slurm_allocation_lists_nodes_with_batch_host_gpu_ids() -> None:
         "slurm",
         5000.0,
         (
-            Node("n01", 16, 64000, 2, gpu_ids=("GPU-a", "GPU-b"), gpu_variable="CUDA_VISIBLE_DEVICES"),
+            Node("n01", 16, 64000, 2, gpu_ids=("GPU-a", "GPU-b"), gpu_variable="CUDA_VISIBLE_DEVICES", local=True),
             Node("n02", 16, 64000, 2),
         ),
         {},
@@ -153,7 +153,7 @@ def test_batch_gpu_ids_belong_to_no_node_when_the_batch_host_is_not_listed(batch
 def test_single_node_slurm_job_needs_no_scontrol() -> None:
     environ = {"SLURM_JOB_ID": "1", "SLURM_JOB_NUM_NODES": "1", "SLURM_NTASKS": "4", "SLURMD_NODENAME": "n07"}
     allocation = slurm_allocation(environ, run=_no_scontrol)
-    assert allocation is not None and allocation.nodes == (Node("n07", 4),)
+    assert allocation is not None and allocation.nodes == (Node("n07", 4, local=True),)
     assert slurm_allocation({}, run=_no_scontrol) is None
 
 

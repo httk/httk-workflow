@@ -13,8 +13,8 @@ import os
 import re
 import socket
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .errors import FormatError
@@ -28,9 +28,13 @@ ALLOCATION_SPECS = ("auto", "none", "slurm", "host")
 NODE_LABELS = frozenset({"procs", "mem", "gpus", "nodes"})
 #: The variables a GPU allocation is announced in, in the order they are read.
 GPU_VARIABLES = ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "ZE_AFFINITY_MASK")
+#: The GPU variables whose empty value hides every device; an empty
+#: ``ZE_AFFINITY_MASK`` does not hide Level Zero devices.
+GPU_HIDING_VARIABLES = frozenset({"CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
 _CPULIST = re.compile(r"[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _REPEATED = re.compile(r"([0-9]+)(?:\(x([0-9]+)\))?")
+_TRUE = frozenset({"true", "1", "yes"})
 
 type Run = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -47,6 +51,7 @@ class Node:
     :param gpu_ids: One opaque device id per GPU, when known.
     :param gpu_variable: The environment variable the GPU ids belong in, such as
         ``CUDA_VISIBLE_DEVICES``.
+    :param local: Whether the probe knows this node is the manager's own host.
     """
 
     host: str
@@ -56,6 +61,7 @@ class Node:
     cpu_slots: tuple[str, ...] | None = None
     gpu_ids: tuple[str, ...] | None = None
     gpu_variable: str | None = None
+    local: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,72 @@ class Allocation:
             capacity["mem"] = sum(mem for mem in mems if mem is not None)
         capacity["nodes"] = len(self.nodes)
         return validate_capacity({**capacity, **self.resources}, "allocation")
+
+
+def bind_cpus_setting(settings: Mapping[str, object]) -> bool:
+    """Return whether the workspace setting ``manager.bind_cpus`` asks for CPU pinning.
+
+    :param settings: The workspace settings.
+    :return: ``True`` for ``True``, the integer ``1``, or ``true``, ``1`` or ``yes``
+        in any case; otherwise ``False``.
+    """
+
+    value = settings.get("manager.bind_cpus")
+    # ``True == 1``, so the integer test covers both.
+    return (isinstance(value, int) and value == 1) or (isinstance(value, str) and value.lower() in _TRUE)
+
+
+def format_cpulist(cpus: Iterable[int]) -> str:
+    """Render CPU numbers as a compact Linux cpulist such as ``0-3,8``.
+
+    :param cpus: The CPU numbers.
+    :return: The cpulist.
+    """
+
+    ranges: list[list[int]] = []
+    for cpu in sorted(set(cpus)):
+        if ranges and ranges[-1][1] == cpu - 1:
+            ranges[-1][1] = cpu
+        else:
+            ranges.append([cpu, cpu])
+    return ",".join(str(first) if first == last else f"{first}-{last}" for first, last in ranges)
+
+
+def parse_cpulist(cpulist: str) -> set[int]:
+    """Return the CPU numbers of a Linux cpulist such as ``0-3,8``.
+
+    :param cpulist: The cpulist.
+    :return: The CPU numbers.
+    :raises ValueError: If it is not a cpulist or has a descending range.
+    """
+
+    if not _CPULIST.fullmatch(cpulist):
+        raise ValueError(f"{cpulist!r} is not a Linux cpulist such as 0-7,16")
+    cpus: set[int] = set()
+    for item in cpulist.split(","):
+        first, _, last = item.partition("-")
+        if int(last or first) < int(first):
+            raise ValueError(f"{cpulist!r} has the descending range {item}")
+        cpus.update(range(int(first), int(last or first) + 1))
+    return cpus
+
+
+def local_cpu_slots(procs: int) -> tuple[str, ...] | None:
+    """Split this process's CPU affinity into *procs* equal slots.
+
+    :param procs: The processor slots.
+    :return: One cpulist per slot (leftover CPUs stay unused), or ``None`` when
+        the affinity is unknown or has fewer CPUs than slots.
+    """
+
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return None
+    chunk = len(cpus) // procs if procs > 0 else 0
+    if chunk == 0:
+        return None
+    return tuple(format_cpulist(cpus[index * chunk : (index + 1) * chunk]) for index in range(procs))
 
 
 def slurm_end_time(environ: Mapping[str, str]) -> float | None:
@@ -234,7 +306,9 @@ def _slurm_hosts(environ: Mapping[str, str], run: Run) -> list[str] | None:
     return None
 
 
-def slurm_allocation(environ: Mapping[str, str], *, run: Run = subprocess.run) -> Allocation | None:
+def slurm_allocation(
+    environ: Mapping[str, str], *, run: Run = subprocess.run, cpu_slots: bool = False
+) -> Allocation | None:
     """Probe the enclosing Slurm job's nodes.
 
     The nodes come from ``scontrol show hostnames``, tasks per node from
@@ -246,6 +320,8 @@ def slurm_allocation(environ: Mapping[str, str], *, run: Run = subprocess.run) -
 
     :param environ: The job's environment.
     :param run: The :func:`subprocess.run` used to call ``scontrol``.
+    :param cpu_slots: Whether to split this process's CPU affinity into the
+        batch host's slots (see :func:`local_cpu_slots`).
     :return: The allocation, or ``None`` outside a Slurm job.
     """
 
@@ -287,12 +363,15 @@ def slurm_allocation(environ: Mapping[str, str], *, run: Run = subprocess.run) -
     announced = _gpu_ids(environ)
     if announced is not None and (not announced[1] or len(announced[1]) != per_node_gpus):
         announced = None
-    nodes = [
-        Node(host, procs[index], mem[index], per_node_gpus)
-        if index != batch_index or announced is None
-        else Node(host, procs[index], mem[index], per_node_gpus, gpu_ids=announced[1], gpu_variable=announced[0])
-        for index, host in enumerate(hosts)
-    ]
+    nodes = [Node(host, procs[index], mem[index], per_node_gpus) for index, host in enumerate(hosts)]
+    if batch_index >= 0:
+        batch_node = nodes[batch_index]
+        batch_node = replace(batch_node, local=True)
+        if announced is not None:
+            batch_node = replace(batch_node, gpu_ids=announced[1], gpu_variable=announced[0])
+        if cpu_slots:
+            batch_node = replace(batch_node, cpu_slots=local_cpu_slots(batch_node.procs))
+        nodes[batch_index] = batch_node
     allocation = Allocation("slurm", end_time, tuple(nodes), {})
     if allocation.capacity() != counts:
         _LOGGER.warning("the Slurm job's nodes do not add up to its counts %s; using the counts only", counts)
@@ -309,10 +388,12 @@ def half_physical_memory_mb() -> int | None:
         return None
 
 
-def host_allocation(environ: Mapping[str, str]) -> Allocation:
+def host_allocation(environ: Mapping[str, str], *, cpu_slots: bool = False) -> Allocation:
     """Describe this host as a one-node allocation.
 
     :param environ: The environment to read announced GPU ids from.
+    :param cpu_slots: Whether to split this process's CPU affinity into the
+        node's slots (see :func:`local_cpu_slots`).
     :return: This host with its usable processors, half its memory and its announced GPUs.
     """
 
@@ -324,10 +405,12 @@ def host_allocation(environ: Mapping[str, str]) -> Allocation:
     host = socket.gethostname()
     memory = half_physical_memory_mb()
     node = (
-        Node(host, procs, memory, len(announced[1]), gpu_ids=announced[1], gpu_variable=announced[0])
+        Node(host, procs, memory, len(announced[1]), gpu_ids=announced[1], gpu_variable=announced[0], local=True)
         if announced is not None and announced[1]
-        else Node(host, procs, memory)
+        else Node(host, procs, memory, local=True)
     )
+    if cpu_slots:
+        node = replace(node, cpu_slots=local_cpu_slots(procs))
     return Allocation("host", None, (node,), {})
 
 
@@ -365,8 +448,11 @@ def _envelope_node(value: object, name: str) -> Node:
     cpus = None
     if "cpus" in item:
         cpus = _strings(item["cpus"], f"{name}.cpus", procs)
-        if not all(_CPULIST.fullmatch(text) for text in cpus):
-            raise FormatError(f"{name}.cpus entries must be Linux cpulists such as 0-7,16")
+        try:
+            for text in cpus:
+                parse_cpulist(text)
+        except ValueError as exc:
+            raise FormatError(f"{name}.cpus entries must be ascending Linux cpulists such as 0-7,16") from exc
     gpu_ids = None if "gpu_ids" not in item else _strings(item["gpu_ids"], f"{name}.gpu_ids", gpus)
     variable = item.get("gpu_variable")
     if variable is not None and (not isinstance(variable, str) or not _VARIABLE.fullmatch(variable)):
@@ -488,13 +574,18 @@ def parse_allocation_spec(spec: str) -> str:
     raise ValueError(f"--allocation {spec!r}: expected auto, none, slurm, host, or exec:PATH")
 
 
-def probe_allocation(spec: str, environ: Mapping[str, str], *, run: Run = subprocess.run) -> Allocation | None:
+def probe_allocation(
+    spec: str, environ: Mapping[str, str], *, run: Run = subprocess.run, cpu_slots: bool = False
+) -> Allocation | None:
     """Probe the allocation an ``--allocation`` spec selects.
 
     :param spec: ``auto`` (``slurm`` inside a Slurm job, else ``none``),
         ``none``, ``slurm``, ``host`` or ``exec:PATH``.
     :param environ: The environment the probe reads.
     :param run: The :func:`subprocess.run` used to call ``scontrol``.
+    :param cpu_slots: Whether the ``slurm`` and ``host`` probes split this
+        process's CPU affinity into the local node's slots; an envelope's
+        ``cpus`` are always kept.
     :return: The allocation, or ``None`` when there is none.
     :raises ValueError: If the spec is invalid or a site probe fails.
     """
@@ -505,7 +596,7 @@ def probe_allocation(spec: str, environ: Mapping[str, str], *, run: Run = subpro
     if spec == "none":
         return None
     if spec == "slurm":
-        return slurm_allocation(environ, run=run)
+        return slurm_allocation(environ, run=run, cpu_slots=cpu_slots)
     if spec == "host":
-        return host_allocation(environ)
+        return host_allocation(environ, cpu_slots=cpu_slots)
     return exec_allocation(spec[5:], environ)

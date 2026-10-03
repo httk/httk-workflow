@@ -56,6 +56,7 @@ $ httk workflow run --count 4 --workspace default
 | `manager.command` | The manager interpreter/command used after `environment.prelude`; without a prelude, the launching Python interpreter is used. |
 | `manager.allocation` | The `--allocation` probe a launcher passes its managers: `auto`, `none`, `slurm`, `host` or `exec:PATH`; the Slurm launcher's default is `slurm`. |
 | `manager.launch_template` | Argv template for the attempt launch prefix; placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}` `{cpus_per_proc}`. |
+| `manager.bind_cpus` | `true`, `1` or `yes` pins locally executed attempts to the CPUs of their processor slots; off by default. |
 | `slurm.account` | Slurm account directive. |
 | `slurm.partition` | Slurm partition directive. |
 | `slurm.time_limit` | Slurm time limit directive. |

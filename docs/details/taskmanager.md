@@ -330,6 +330,10 @@ shape the launch:
 - `manager.launch_template`: the argv template for the attempt launch prefix;
   placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}`
   `{cpus_per_proc}`.
+- `manager.bind_cpus`: `true`, `1` or `yes` (any case) pins every locally
+  executed attempt to the CPUs of its processor slots; anything else, or no
+  value, leaves CPU affinity alone; set it before the manager starts (see
+  [placement and binding](#placement-and-binding)).
 
 `--inline` runs one manager in the current process, ignoring the workspace
 launcher, and combines only with `--count 1`. `--detach` starts the managers
@@ -705,17 +709,48 @@ A template naming any other placeholder fails the attempt's preparation with
 `protocol_error`. Outside Slurm and without a template there is no launch
 prefix.
 
+An attempt placed on one node that is the manager's own host is executed
+locally, so the manager also binds it to its devices. The `host` probe's node
+and the Slurm batch host (the node named by `SLURMD_NODENAME`) are the
+manager's own host; any other node is when its host name equals the manager's,
+exactly or up to the first dot.
+
+- When the share has GPUs whose ids are known, the runner environment sets the
+  variable the ids came from (`CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`
+  or `ZE_AFFINITY_MASK`) to exactly those ids, comma-separated. This is
+  always on. A local attempt that requests no GPUs on a node with known GPUs
+  sees none (`CUDA_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` set empty); an
+  empty `ZE_AFFINITY_MASK` does not hide Level Zero devices, so that one is
+  inherited. Any other attempt inherits the manager's value unchanged.
+- With the workspace setting `manager.bind_cpus` true, the `slurm` (batch host
+  only) and `host` probes split the manager's CPU affinity into equal slots,
+  one per processor slot, in ascending CPU id order and ignoring core and
+  hyperthread topology (leftover CPUs stay unused; with fewer CPUs than slots
+  there are none), and an `exec:` envelope's `cpus` are used as given. The
+  runner is then pinned to the union of its slots' CPUs before it starts. A
+  pin the kernel refuses is logged as `attempt_pin_failed` and the attempt
+  runs unpinned. Thread-count variables such as `OMP_NUM_THREADS` are not set.
+- The probes discover slots once, when the manager starts, so for `slurm` and
+  `host` set `manager.bind_cpus` before starting the manager. The pinning
+  decision itself reads the setting at every launch, so turning it off takes
+  effect at the next launch.
+
+```console
+httk workspace settings set --key manager.bind_cpus --value true WORKSPACE
+```
+
 Placement is in memory only and not recorded: a replacement manager places its
 own attempts on its own inventory. Accepted limitations:
 
 - The binding is information for well-behaved runners; the manager neither
-  confines an attempt to its nodes nor sets CPU affinity.
+  confines an attempt to its nodes nor, beyond the local binding above, sets
+  CPU affinity or GPU visibility.
 - There is no backfill or reservation: a `nodes=N` or other wide attempt can
   wait behind a stream of small attempts that keep every node partly busy.
-- GPU identity (`gpu_ids`) is guaranteed only for attempts executed locally,
-  on the manager's own host; the Slurm probe knows device ids for the batch
-  host only, and the manager does not yet export them into the attempt's GPU
-  variable.
+- Device identity (`gpu_ids` and pinned CPUs) holds only for attempts
+  executed locally, on the manager's own host; the Slurm probe knows device
+  ids and CPUs for the batch host only, and an `srun` step started through the
+  launch prefix chooses its own CPUs and GPUs.
 
 ### Capacities from SLURM
 

@@ -16,6 +16,7 @@ from httk.core.cli import CLIContext
 from .._allocation import (
     Allocation,
     argv_allocation,
+    bind_cpus_setting,
     parse_allocation_spec,
     probe_allocation,
     slurm_counts,
@@ -695,7 +696,9 @@ def _run_in_process_manager(
     )
     # After configure_logging so its warnings are formatted; managers.log only
     # attaches inside TaskManager, which needs the end time first.
-    allocation = probe_allocation(getattr(arguments, "allocation", "auto"), os.environ)
+    allocation = probe_allocation(
+        getattr(arguments, "allocation", "auto"), os.environ, cpu_slots=bind_cpus_setting(settings)
+    )
     capacity = _manager_capacity(arguments, allocation)
     # A probe without an end (none, host, an envelope without one) still honours the Slurm job's.
     allocation_end = None if allocation is None else allocation.end_time

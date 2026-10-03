@@ -1562,7 +1562,13 @@ HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 member and carries it. `HTTK_WORKFLOW_NODELIST` (the comma-separated hosts),
 `HTTK_WORKFLOW_NODEFILE` (the nodefile path) and, when the binding has a
 `launch` prefix, `HTTK_WORKFLOW_LAUNCH` (that prefix, shell-quoted) are set
-exactly when the context has a `binding` member.
+exactly when the context has a `binding` member. When the binding is one node
+on the manager's own host with GPUs of known ids, the variable those ids came
+from (`CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` or `ZE_AFFINITY_MASK`) is
+set to exactly them, comma-separated. A local attempt that requests no GPUs on
+a node with known GPUs sees none (`CUDA_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES`
+set empty; `ZE_AFFINITY_MASK` is inherited, since an empty mask hides
+nothing). Otherwise the variable is inherited unchanged.
 `HTTK_WORKFLOW_RUNNER_ROOT` names a shared runner's file or tree root. The JSON
 document is the source of truth; the scalar variables are language-neutral
 conveniences.
@@ -1666,7 +1672,9 @@ slots) added when known; they are kept out of the context so that it stays
 within its size limit. The built-in Slurm prefix starts with
 `env SLURM_HOSTFILE=<nodefile>`, so the hostfile applies to its own `srun`
 only; the runner environment does not carry it. The binding is advice to a
-well-behaved runner; the manager does not confine the attempt to it.
+well-behaved runner; the manager does not confine the attempt to it, except
+that a locally executed attempt sees only its GPUs and, with the
+`manager.bind_cpus` setting, is pinned to its CPUs.
 
 ### Executable workflow-hook wire formats
 
