@@ -180,7 +180,8 @@ non-boolean integers; units are opaque. The reserved time labels `maxtime`
 time a manager needs to start one) are instead Slurm `--time` strings: `M`,
 `M:S`, `H:M:S`, `D-H`, `D-H:M`, or `D-H:M:S`, so `"30"` is 30 minutes and
 `"2-12"` is 60 hours. Integers are refused for them, and `job.json` stores
-seconds. An executable runner may add
+seconds. A Python `WorkflowProvider(resources=..., step_resources=...)` takes the
+same Slurm strings as the manifest. An executable runner may add
 `[workflow.steps.NAME]` tables, each holding only a `resources` table, where
 `NAME` must occur in `[workflow.runner].steps`. `format` runners reject
 `[workflow.steps]`, because the realization supplies the steps.

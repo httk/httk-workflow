@@ -216,6 +216,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `$HTTK_WORKFLOW_STEP` | the step this attempt runs |
 | `$HTTK_WORKFLOW_WORKDIR`, `$HTTK_WORKFLOW_JOB_DIR`, `$HTTK_WORKFLOW_DATA_DIR` | absolute paths; the data directory is set only for a transactional job |
 | `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
+| `httk_workflow_context deadline`, `$HTTK_WORKFLOW_DEADLINE` | the epoch second at which the manager stops this attempt; only when the attempt has a `maxtime`, otherwise the call exits 1 and the variable is unset |
 
 A step starts in its workdir, so ordinary relative paths are workdir paths.
 

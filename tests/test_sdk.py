@@ -285,6 +285,7 @@ def _attempt(
     resources: dict[str, int] | None = None,
     step_resources: dict[str, dict[str, int]] | None = None,
     context_resources: dict[str, int] | None = None,
+    deadline: int | None = None,
 ) -> Attempt:
     """Bind one attempt of a fabricated job, without a manager."""
 
@@ -326,6 +327,7 @@ def _attempt(
             "children": children or [],
             "settings": settings or {},
             "resources": context_resources or {},
+            **({} if deadline is None else {"deadline": deadline}),
         }
     )
     attempt_environment = {
@@ -339,6 +341,11 @@ def _attempt(
     if data_generation is not None:
         attempt_environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
     return Attempt.initialize(attempt_environment, runner=runner)
+
+
+def test_attempt_deadline_reads_the_context(tmp_path: Path) -> None:
+    assert _attempt(tmp_path / "none", step="start").deadline is None
+    assert _attempt(tmp_path / "set", step="start", deadline=1_900_000_000).deadline == 1_900_000_000
 
 
 def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:

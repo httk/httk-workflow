@@ -114,6 +114,7 @@ language, and compares everything both left behind.
 | `Attempt.workspace` | — | The workspace root this job belongs to. | **$HTTK_WORKFLOW_WORKSPACE_DIR** |
 | `Attempt.data` | — | The job's published transactional data, or `None` when the job has `data.mode` `none`. | **$HTTK_WORKFLOW_DATA_DIR** |
 | `runtime.AttemptContext.durable` | `httk_workflow_context durable` | The workspace durability mode, threaded into every artifact the attempt publishes so an outcome, transaction, or child is synchronized before it is renamed authoritative. Neither SDK needs a call to act on it. | `HTTK_WORKFLOW_CONTEXT` → `durable`; **$HTTK_WORKFLOW_DURABLE** |
+| `Attempt.deadline` | `httk_workflow_context deadline` | The epoch second at which the manager stops this attempt, or none when it has no `maxtime`; a step can checkpoint or publish `retry` before it. Bash also reads it from the environment. | `HTTK_WORKFLOW_CONTEXT` → `deadline`; **$HTTK_WORKFLOW_DEADLINE** |
 | `Attempt.job` | — | The immutable job definition as a typed value. | `job.json` (read-only) |
 | `Attempt.parameters` | `httk_workflow_parameter` | The opaque implementation `parameters` object of the job. | `job.json` → `parameters` |
 | `Attempt.parameter` | `httk_workflow_parameter` | One parameter, with an optional default; without one, a missing parameter raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `parameters` |

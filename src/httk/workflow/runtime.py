@@ -53,6 +53,8 @@ class AttemptContext:
     :param resources: Record the resources assigned to the attempt.
     :param join: Record the job's join description.
     :param raw: Preserve the complete decoded context.
+    :param deadline: Record the epoch second at which the manager stops the
+        attempt, or ``None`` when it has no time limit.
     """
 
     workspace_id: str
@@ -92,6 +94,10 @@ class AttemptContext:
     resources: Mapping[str, int]
     join: object
     raw: Mapping[str, Any]
+    #: The epoch second at which the manager stops this attempt, present exactly
+    #: when the attempt runs under a ``maxtime``. An old context that predates
+    #: the member reads as ``None``.
+    deadline: int | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> Self:
@@ -174,6 +180,7 @@ class AttemptContext:
             resources=resources,
             join=value.get("join"),
             raw=value,
+            deadline=optional_integer("deadline"),
         )
 
 

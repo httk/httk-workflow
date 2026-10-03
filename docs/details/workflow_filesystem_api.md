@@ -1554,6 +1554,8 @@ HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 ```
 
 `HTTK_WORKFLOW_DATA_DIR` is set only for transactional-data jobs.
+`HTTK_WORKFLOW_DEADLINE` is set only for an attempt with a `maxtime`; it
+carries the context's `deadline` member.
 `HTTK_WORKFLOW_RUNNER_ROOT` names a shared runner's file or tree root. The JSON
 document is the source of truth; the scalar variables are language-neutral
 conveniences.
@@ -1634,6 +1636,12 @@ The context's `resources` member is the validated effective requirement
 selected for the launched activation, including the resolved `maxtime` and
 `mintime` in seconds, so a runner can use it as the manager's placement
 decision without re-resolving the job declaration.
+
+The context's `deadline` member, present exactly when the effective requirement
+has a `maxtime`, is the integer epoch second (launch time plus `maxtime`); the
+manager stops the attempt at or shortly after it, never before. A runner that wants to checkpoint or
+publish a `retry` before it is stopped watches this rather than recomputing it.
+A context written before the member existed has no time limit.
 
 ### Executable workflow-hook wire formats
 
@@ -1778,7 +1786,7 @@ If a process exits without an outcome:
 
 - exit status zero is a `protocol_error`, because success is ambiguous;
 - nonzero exit is `process_failure`;
-- manager timeout is `timeout`;
+- an attempt the manager stopped for exceeding its `maxtime` is `timeout`;
 - loss of manager or allocation is `lease_lost`.
 
 Retry policy decides whether these create another attempt or
@@ -2359,6 +2367,7 @@ Codes emitted by the manager itself are reserved. Those currently in use:
 | `protocol_error` | Invalid submission, an outcome the protocol forbids, a malformed published failure, an unusable join, or a runner that exited successfully without publishing an outcome. |
 | `process_failure` | A runner that could not be launched, or that exited nonzero without publishing an outcome. |
 | `lease_lost` | The owning manager's heartbeat expired. |
+| `timeout` | The manager stopped an attempt that ran longer than its `maxtime`, and it published no outcome. |
 | `retry_exhausted` | `maximum_attempts_per_activation` reached during retry. |
 | `budget_exhausted` | An attempt or activation budget exceeded. |
 | `dependency_failure` | A join became impossible, or a named join child stayed unresolvable past the manager's bounded grace. |
@@ -2377,11 +2386,9 @@ use:
 | `unknown_step` | The job asked for a step this runner does not implement. |
 | `declared_failure` | A legacy `ht_steps` task declared itself broken; published by the *httk* v1 compatibility runner only. |
 
-`resource_unsatisfiable`, `manager_error`, and `cancelled` are reserved for
-manager use but not currently emitted. `timeout` is reserved for a
-manager-enforced attempt timeout, which this manager does not yet apply; the
-*httk* v1 compatibility runner publishes it for a legacy task that exceeded its
-own timeout. Application codes SHOULD be namespaced, as in
+The *httk* v1 compatibility runner also publishes `timeout` for a legacy task
+that exceeded its own timeout. `resource_unsatisfiable`, `manager_error`, and
+`cancelled` are reserved for manager use but not currently emitted. Application codes SHOULD be namespaced, as in
 `vasp.nonconvergent`, to stay distinct from the reserved set.
 
 ### Failure history

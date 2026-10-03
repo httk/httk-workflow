@@ -681,6 +681,12 @@ class Attempt:
         return self._job
 
     @property
+    def deadline(self) -> int | None:
+        """Return the epoch second at which the manager stops this attempt, or None when it has no time limit."""
+
+        return self.context.deadline
+
+    @property
     def parameters(self) -> Mapping[str, object]:
         """The application-defined ``parameters`` object of this job."""
 

@@ -26,6 +26,7 @@ from . import (
     _manager_runners,
     _manager_scheduling,
 )
+from ._durations import format_duration
 from ._util import (
     interpreter_first_path,
     json_bytes,
@@ -388,6 +389,11 @@ class RunningAttempt:
     :param fenced: Mark an attempt whose marker ownership is already resolved.
     :param cancelling: Mark an attempt currently being cancelled.
     :param owner_uid: Record the operating-system owner when known.
+    :param started: Record the monotonic launch time the ``maxtime`` is measured from.
+    :param maxtime: Stop the attempt after this many seconds, or never when ``None``.
+    :param timeout_kill_at: Escalate a timed-out attempt to ``SIGKILL`` at this
+        monotonic time, or ``None`` once escalated or before a timeout.
+    :param timed_out: Mark an attempt this manager stopped for exceeding its ``maxtime``.
     """
 
     marker: Marker
@@ -395,6 +401,8 @@ class RunningAttempt:
     control: Path
     attempt_id: str
     resources: Mapping[str, int]
+    started: float
+    maxtime: int | None
     outcome_action: str | None = None
     cleanup_pending: bool = False
     cleanup_request: tuple[Marker, StateFrame, Marker] | None = None
@@ -408,6 +416,8 @@ class RunningAttempt:
     # cancelled state has to record.
     cancelling: bool = False
     owner_uid: int | None = None
+    timeout_kill_at: float | None = None
+    timed_out: bool = False
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
@@ -1063,6 +1073,7 @@ class TaskManager:
             self._process_cancelling,
             self._resume_committing,
             self._evaluate_joins,
+            self._enforce_deadlines,
             self._poll_running,
             self._recover_abandoned_claims,
         ):
@@ -1612,6 +1623,7 @@ class TaskManager:
         requirement = _manager_scheduling.effective_requirement(
             job, claimed_state, self.resources, self.maximum_workers
         )
+        deadline = self._attempt_deadline(requirement)
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
@@ -1645,6 +1657,7 @@ class TaskManager:
             # parameters → environment → workspace → default resolution.
             "settings": settings,
             "resources": dict(requirement),
+            **({} if deadline is None else {"deadline": deadline}),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an
             # empty array when the activation follows no join. ``join`` keeps the
@@ -1658,6 +1671,9 @@ class TaskManager:
         environment = os.environ.copy()
         environment.pop("HTTK_WORKFLOW_RUNNER_ARTIFACTS", None)
         environment.pop("HTTK_WORKFLOW_RUNNER_ROOT", None)
+        environment.pop("HTTK_WORKFLOW_DEADLINE", None)
+        if deadline is not None:
+            environment["HTTK_WORKFLOW_DEADLINE"] = str(deadline)
         environment.update(
             {
                 # A runner's ``#!/usr/bin/env python3`` finds this interpreter, the
@@ -1820,6 +1836,7 @@ class TaskManager:
                 ),
             )
             os.write(gate_write, b"R")
+            started = time.monotonic()
             if verified is not None and verified.fd is not None:
                 os.close(verified.fd)
                 verified = _manager_runners.VerifiedRunner(
@@ -1870,6 +1887,8 @@ class TaskManager:
             control,
             attempt_id,
             dict(requirement),
+            started,
+            requirement.get("maxtime"),
             owner_uid=self.uid,
         )
         launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
@@ -1888,6 +1907,57 @@ class TaskManager:
             workdir,
             extra=self._event("launch", running, **launch_fields),
         )
+
+    @staticmethod
+    def _attempt_deadline(requirement: Mapping[str, int]) -> int | None:
+        """Return the epoch second at which an attempt launched now is stopped."""
+
+        maxtime = requirement.get("maxtime")
+        return None if maxtime is None else int(time.time()) + maxtime
+
+    def _enforce_deadlines(self) -> bool:
+        """Stop every local attempt that has run longer than its ``maxtime``.
+
+        A timed-out attempt gets ``SIGTERM`` and, after the cancel grace, one
+        ``SIGKILL``. It is neither cancelled nor fenced: its exit is reaped by the
+        running pass like any other, which commits an outcome the runner still
+        published and otherwise fails the attempt with ``timeout``.
+        """
+
+        changed = False
+        now = time.monotonic()
+        for local in self._running.values():
+            if local.maxtime is None or local.reaped or local.cancelling or local.fenced:
+                continue
+            if not local.timed_out:
+                if now < local.started + local.maxtime:
+                    continue
+                local.timed_out = True
+                local.timeout_kill_at = now + self.cancel_grace_seconds
+                if local.process.poll() is None:
+                    self._terminate_process(local.process.pid)
+                _LOGGER.warning(
+                    "attempt %s of %s exceeded its maxtime %s; terminating it",
+                    local.attempt_id,
+                    local.marker.job_key,
+                    format_duration(local.maxtime),
+                    extra=self._event(
+                        "attempt_timeout", local.marker, attempt_id=local.attempt_id, maxtime=local.maxtime
+                    ),
+                )
+                changed = True
+            elif local.timeout_kill_at is not None and now >= local.timeout_kill_at:
+                local.timeout_kill_at = None
+                if local.process.poll() is None:
+                    self._terminate_process(local.process.pid, signal.SIGKILL)
+                    _LOGGER.warning(
+                        "attempt %s of %s outlived the %.1fs grace after its timeout; killing it",
+                        local.attempt_id,
+                        local.marker.job_key,
+                        self.cancel_grace_seconds,
+                        extra=self._event("attempt_timeout_kill", local.marker, attempt_id=local.attempt_id),
+                    )
+        return changed
 
     @staticmethod
     def _context_children(join_summary: object) -> list[dict[str, object]]:
@@ -1972,6 +2042,14 @@ class TaskManager:
             if outcome_path.is_dir():
                 self._reaped_attempts.add(attempt_id)
                 self._commit_published_outcome(marker, job, state, outcome_path)
+            elif local.timed_out and local.maxtime is not None:
+                self._handle_attempt_failure(
+                    marker,
+                    job,
+                    "timeout",
+                    f"attempt exceeded its maxtime {format_duration(local.maxtime)}",
+                    exit_status=return_code,
+                )
             else:
                 code = "protocol_error" if return_code == 0 else "process_failure"
                 self._handle_attempt_failure(

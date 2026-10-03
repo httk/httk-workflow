@@ -505,9 +505,18 @@ requirement, then step, then job), so a job-level `maxtime` still applies to a
 step that overrides only `procs`; a mapping that names only time labels leaves
 the consumable selection to the next level, and a resolved `mintime` above the
 resolved `maxtime` is lowered to it. The resolved values are part of the
-attempt's reservation and its context `resources`. In this release a manager
-records them in the reservation and the attempt context; it does not yet
-enforce a time limit or a start gate. A child spawned from a `ChildSpec` or
+attempt's reservation and its context `resources`.
+
+A manager enforces `maxtime`: an attempt still running `maxtime` seconds after
+its launch gets `SIGTERM` on its process group, and `SIGKILL` once the
+manager's cancellation grace (`TaskManager(cancel_grace_seconds=...)`, 10 s by
+default) has passed. Unless the runner published an outcome meanwhile
+(a runner may trap `SIGTERM` and publish `retry` or `succeed`), the attempt
+fails with the reserved code `timeout`, which `retry_policy.retry_on` can list
+to retry it. Every attempt with a `maxtime` is told when it will be stopped:
+the context member `deadline` and `HTTK_WORKFLOW_DEADLINE` carry the epoch
+second at or shortly after which (never before) the `SIGTERM` comes, and the Python SDK exposes it as `Attempt.deadline`. The start gate
+(`mintime`) is not yet enforced. A child spawned from a `ChildSpec` or
 by `Attempt.call` never inherits `mintime`, and every `maxtime` it carries is
 capped at the spawning attempt's `maxtime`; a prepared payload directory passed
 to `Attempt.spawn` is registered as written.
