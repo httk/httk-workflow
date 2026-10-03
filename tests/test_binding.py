@@ -2,6 +2,7 @@
 
 import copy
 import json
+import random
 import socket
 import sys
 import time
@@ -19,6 +20,7 @@ from httk.workflow._manager_binding import (
     Inventory,
     NodeShare,
     Placement,
+    _Free,
     assign,
     can_assign,
     describe,
@@ -56,8 +58,8 @@ _TWO = (Node("a", 4, 4000), Node("b", 8, 8000))
         # Best fit: the node with the fewest free procs that holds it.
         ({"procs": 2, "mem": 100}, [("a", 2, 0, 100)]),
         ({"procs": 6}, [("b", 6, 0, None)]),
-        # Spill to the fewest nodes, largest first, mem split by procs.
-        ({"procs": 10, "mem": 1000}, [("b", 8, 0, 800), ("a", 2, 0, 200)]),
+        # Spill filled from the largest node, listed in inventory order, mem split by procs.
+        ({"procs": 10, "mem": 1000}, [("a", 2, 0, 200), ("b", 8, 0, 800)]),
         ({"procs": 13}, None),
         # Whole nodes: the smallest idle ones that hold the requirement.
         ({"nodes": 1}, [("a", 4, 0, 4000)]),
@@ -80,7 +82,7 @@ def test_whole_node_fallback_finds_a_noncontiguous_feasible_set() -> None:
     assert _hosts(placement) == [("a", 2, 4, 100), ("c", 8, 0, 100)]
 
 
-def test_spill_fallback_finds_memory_feasible_distribution() -> None:
+def test_spill_skips_nodes_whose_memory_cannot_hold_a_share() -> None:
     inventory = _inventory(Node("a", 8, 0), Node("b", 4, 100), Node("c", 4, 100))
     placement = assign(inventory, {"procs": 8, "mem": 100})
     assert _hosts(placement) == [("b", 4, 0, 50), ("c", 4, 0, 50)]
@@ -95,6 +97,12 @@ def test_gpu_shares_need_a_reserved_processor_slot() -> None:
     assert _hosts(placement) == [("a", 3, 0, None), ("b", 1, 1, None)]
     assert placement is not None
     assert len(nodefile_lines(placement)) == 4
+
+
+def test_gpu_nodes_without_memory_capacity_are_skipped() -> None:
+    inventory = _inventory(Node("a", 2, 0, 2), Node("b", 2, 10, 1), Node("c", 2, 10, 0))
+    placement = assign(inventory, {"procs": 3, "gpus": 1, "mem": 10})
+    assert _hosts(placement) == [("b", 1, 1, 4), ("c", 2, 0, 6)]
 
 
 def _oracle_fits(nodes: tuple[Node, ...], procs: int, gpus: int, mem: int) -> bool:
@@ -112,18 +120,9 @@ def _oracle_fits(nodes: tuple[Node, ...], procs: int, gpus: int, mem: int) -> bo
                 procs and any(gpu and not proc for proc, gpu in zip(processor_share, gpu_share))
             ):
                 continue
-            base = (
-                [mem * proc // procs for proc in processor_share] if procs else [mem * gpu // gpus for gpu in gpu_share]
-            )
-            if any(share > (node.mem or 0) for share, node in zip(base, nodes, strict=True)):
-                continue
-            remainder = mem - sum(base)
-            if (
-                sum(
-                    (node.mem or 0) - share > 0 and bool(proc or gpu)
-                    for node, share, proc, gpu in zip(nodes, base, processor_share, gpu_share, strict=True)
-                )
-                >= remainder
+            weights = processor_share if procs else gpu_share
+            if all(
+                -(-mem * weight // (procs or gpus)) <= (node.mem or 0) for node, weight in zip(nodes, weights) if weight
             ):
                 return True
     return False
@@ -150,6 +149,58 @@ def test_small_integer_placements_match_an_independent_feasibility_oracle() -> N
                 if placement is not None:
                     release(inventory, placement)
                 assert inventory == empty
+
+
+def _brute_spill(frees: list[_Free], procs: int, gpus: int, mem: int | None) -> bool:
+    """Try every per-node procs/gpus vector against the rounded-up memory share rule."""
+
+    need = procs or gpus
+    if not need:
+        return bool(frees) and (not mem or any((free.mem or 0) >= mem for free in frees))
+    for taken_procs in product(*(range(free.procs + 1) for free in frees)):
+        if sum(taken_procs) != procs:
+            continue
+        for taken_gpus in product(*(range(free.gpus + 1) for free in frees)):
+            if sum(taken_gpus) != gpus or (procs and any(g and not p for p, g in zip(taken_procs, taken_gpus))):
+                continue
+            weights = taken_procs if procs else taken_gpus
+            if not mem or all(-(-mem * w // need) <= (free.mem or 0) for free, w in zip(frees, weights) if w):
+                return True
+    return False
+
+
+def test_spill_feasibility_matches_brute_force() -> None:
+    rng = random.Random(20261003)
+    for _ in range(2000):
+        nodes = tuple(
+            Node(f"n{index}", rng.randint(0, 4), rng.randint(0, 40), rng.randint(0, 2))
+            for index in range(rng.randint(1, 5))
+        )
+        inventory = _inventory(*nodes)
+        if rng.random() < 0.2:
+            inventory.labels -= {"mem"}
+        for _ in range(rng.randint(0, 2)):
+            assign(inventory, {"procs": rng.randint(0, 2), "gpus": rng.randint(0, 1), "mem": rng.randint(0, 15)})
+        procs, gpus, mem = rng.randint(0, 8), rng.randint(0, 4), rng.randint(0, 120)
+        requirement = {"procs": procs, "gpus": gpus, "mem": mem}
+        placed = mem if "mem" in inventory.labels else None
+        frees = [free for free in inventory.nodes if not free.whole]
+        expected = _brute_spill(frees, procs, gpus, placed)
+        assert can_assign(inventory, requirement) == expected, (nodes, inventory, requirement)
+        before = {free.node.host: (free.procs, free.gpus, free.mem) for free in inventory.nodes}
+        placement = assign(inventory, requirement)
+        if placement is None:
+            continue
+        shares = placement.nodes
+        assert sum(share.procs for share in shares) == procs and sum(share.gpus for share in shares) == gpus
+        for share in shares:
+            free_procs, free_gpus, free_mem = before[share.host]
+            assert share.procs <= free_procs and share.gpus <= free_gpus
+            assert not (procs and share.gpus and not share.procs)
+            if placed is not None:
+                assert share.mem is not None and share.mem <= (free_mem or 0)
+        if placed is not None:
+            assert sum(share.mem or 0 for share in shares) == placed
 
 
 def test_large_homogeneous_whole_node_request_uses_the_fast_path() -> None:
@@ -186,13 +237,16 @@ def test_memory_rounding_shortfall_with_heterogeneous_nodes_is_rejected() -> Non
 
 
 def test_large_feasible_spill_is_found() -> None:
-    nodes = tuple(Node(f"n{index}", 2, 1) for index in range(200))
+    # Filling the larger, memory-poor nodes first cannot hold the mem shares.
+    nodes = tuple(Node(f"big{index}", 4, 1) for index in range(100))
+    nodes += tuple(Node(f"n{index}", 2, 2) for index in range(200))
     inventory = _inventory(*nodes)
     placement = assign(inventory, {"procs": 201, "mem": 200})
 
     assert placement is not None
     assert sum(share.procs for share in placement.nodes) == 201
     assert sum(share.mem or 0 for share in placement.nodes) == 200
+    assert all((share.mem or 0) <= (1 if share.host.startswith("big") else 2) for share in placement.nodes)
 
 
 def test_whole_nodes_refuse_partially_used_nodes_and_release_restores_exactly() -> None:

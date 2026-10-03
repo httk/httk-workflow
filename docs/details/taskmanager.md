@@ -635,14 +635,16 @@ memory; otherwise it stays a counted label like any other, and a
 - An attempt goes on one node when it fits there, on the node with the fewest
   free `procs` that holds its `procs`, `gpus` and `mem` (ties go to the first
   node in allocation order), leaving larger holes for larger attempts.
-- Otherwise it spills, preferring fewer nodes: they are filled from the node with
-  the most free `procs` (most free `gpus` for an attempt without `procs`), its
-  `gpus` come from nodes with reserved processor slots when `procs` is
-  positive, and its `mem` is split over them in proportion to the `procs`
-  taken on each (rounding remainder goes to nodes with space), so every node
-  must have its share free. If that first choice cannot fit, the manager tries
-  alternative nodes and processor distributions. A `mem`-only requirement
-  never spills.
+- Otherwise it spills. When the attempt needs `gpus`, the nodes with capacity
+  and the most free `gpus` are taken first, each with at least one processor
+  slot. The remaining processor slots are filled from the nodes with the
+  largest remaining capacity, where a node's capacity is its free slots
+  limited so that their proportional share of the attempt's `mem`, rounded up,
+  fits its free memory (an attempt without `procs` is spread the same way by
+  `gpus`). Its `mem` is then split in proportion to the slots taken on each
+  node, with the rounding remainder going to nodes with space. This prefers
+  few nodes, without guaranteeing the fewest, and always finds a placement
+  when one exists under that rule. A `mem`-only requirement never spills.
 - `nodes=N` gives the attempt N whole idle nodes to itself (all their `procs`,
   `gpus` and `mem`), the smallest ones in allocation order that together hold
   its `procs`, `gpus` and `mem`; nothing else is placed on them until it ends,

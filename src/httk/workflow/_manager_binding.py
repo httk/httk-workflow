@@ -10,7 +10,7 @@ returns it.
 import re
 import shlex
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Self
 
@@ -270,134 +270,6 @@ def _whole_fallback(idle: Sequence[_Free], count: int, procs: int, gpus: int, me
     return None if selected is None else [idle[index] for index in selected]
 
 
-def _spill_options(
-    free: _Free,
-    left_procs: int,
-    left_gpus: int,
-    *,
-    require_procs_for_gpus: bool,
-    mem: int | None = None,
-    denominator: int = 0,
-    by_gpus: bool = False,
-    largest_first: bool = True,
-) -> Iterable[tuple[int, int]]:
-    """Yield a node's processor/GPU allocations in largest-first order."""
-
-    max_procs = min(free.procs, left_procs)
-    max_gpus = min(free.gpus, left_gpus)
-    proc_values = range(max_procs, -1, -1) if largest_first else range(max_procs + 1)
-    gpu_values = range(max_gpus, -1, -1) if largest_first else range(max_gpus + 1)
-    for taken_procs in proc_values:
-        for taken_gpus in gpu_values:
-            if not taken_procs and not taken_gpus:
-                continue
-            if require_procs_for_gpus and taken_gpus and not taken_procs:
-                continue
-            if mem is not None and denominator:
-                weighted = taken_gpus if by_gpus else taken_procs
-                if mem * weighted // denominator > (free.mem or 0):
-                    continue
-            yield taken_procs, taken_gpus
-
-
-def _spill_fallback(
-    candidates: Sequence[_Free], procs: int, gpus: int, mem: int | None
-) -> list[tuple[_Free, NodeShare]] | None:
-    """Find a processor/GPU distribution after the greedy placement fails."""
-
-    # ponytail: exact fallback is exponential in the number of heterogeneous
-    # capacities; greedy placement handles the normal large homogeneous case.
-    require_procs_for_gpus = procs > 0
-    denominator = procs or gpus
-    suffix: list[tuple[int, int, int]] = [(0, 0, 0)] * (len(candidates) + 1)
-    credit_suffix = [0] * (len(candidates) + 1)
-    for index in reversed(range(len(candidates))):
-        node = candidates[index]
-        old = suffix[index + 1]
-        suffix[index] = (
-            old[0] + node.procs,
-            old[1] + (node.gpus if not require_procs_for_gpus or node.procs else 0),
-            old[2] + (node.mem or 0),
-        )
-        if mem and node.mem is not None:
-            max_weight = min(node.gpus if procs == 0 else node.procs, procs or gpus)
-            max_weight = min(max_weight, ((node.mem + 1) * denominator - 1) // mem)
-            if max_weight:
-                floor = mem * max_weight // denominator
-                credit_suffix[index] = credit_suffix[index + 1] + floor + int(node.mem > floor)
-            else:
-                credit_suffix[index] = credit_suffix[index + 1]
-        else:
-            credit_suffix[index] = credit_suffix[index + 1]
-    if mem is not None and suffix[0][2] < mem:
-        return None
-    links: list[tuple[int, tuple[_Free, int, int]]] = []
-    failed: set[tuple[int, int, int, int]] = set()
-    # The fourth resource is the memory credit still needed.  A selected
-    # node contributes its proportional floor plus one credit when it has
-    # room for the integer-rounding remainder.
-    stack: list[tuple[int, int, int, int, int, bool]] = [(0, procs, gpus, mem or 0, -1, False)]
-    while stack:
-        index, need_procs, need_gpus, need_memory, link, expanded = stack.pop()
-        key = (index, max(0, need_procs), max(0, need_gpus), max(0, need_memory))
-        if key in failed:
-            continue
-        if expanded:
-            failed.add(key)
-            continue
-        if need_procs <= 0 and need_gpus <= 0:
-            if need_memory > 0:
-                failed.add(key)
-                continue
-            plan: list[tuple[_Free, int, int]] = []
-            while link >= 0:
-                link, item = links[link]
-                plan.append(item)
-            plan.reverse()
-            shares = _memory_shares(plan, mem, denominator, by_gpus=procs == 0)
-            if shares is not None:
-                return [
-                    (free, free.share(taken_procs, taken_gpus, share))
-                    for (free, taken_procs, taken_gpus), share in zip(plan, shares, strict=True)
-                ]
-            failed.add(key)
-            continue
-        if index == len(candidates):
-            failed.add(key)
-            continue
-        available = suffix[index]
-        if available[0] < need_procs or available[1] < need_gpus:
-            failed.add(key)
-            continue
-        if mem is not None and credit_suffix[index] < need_memory:
-            failed.add(key)
-            continue
-        node = candidates[index]
-        options = list(
-            _spill_options(
-                node,
-                need_procs,
-                need_gpus,
-                require_procs_for_gpus=require_procs_for_gpus,
-                mem=mem,
-                denominator=denominator,
-                by_gpus=procs == 0,
-                largest_first=mem is None,
-            )
-        )
-        stack.append((index, need_procs, need_gpus, need_memory, link, True))
-        stack.append((index + 1, need_procs, need_gpus, need_memory, link, False))
-        for taken_procs, taken_gpus in reversed(options):
-            next_procs = need_procs - taken_procs
-            next_gpus = need_gpus - taken_gpus
-            weighted = taken_gpus if procs == 0 else taken_procs
-            floor = 0 if mem is None else mem * weighted // denominator
-            credit = floor + int(mem is not None and (node.mem or 0) > floor)
-            links.append((link, (node, taken_procs, taken_gpus)))
-            stack.append((index + 1, next_procs, next_gpus, max(0, need_memory - credit), len(links) - 1, False))
-    return None
-
-
 def _plan(inventory: Inventory, requirement: Mapping[str, int]) -> list[tuple[_Free, NodeShare]] | None:
     """Choose one attempt's node shares without reserving them (see :func:`assign`)."""
 
@@ -440,28 +312,45 @@ def _plan(inventory: Inventory, requirement: Mapping[str, int]) -> list[tuple[_F
         # ponytail: mem alone never spills over nodes; an attempt that needs it
         # should declare the procs that come with the memory.
         return None
-    weight = "procs" if procs else "gpus"
-    plan: list[tuple[_Free, int, int]] = []
-    left_procs, left_gpus = procs, gpus
-    for free in sorted(candidates, key=lambda free: -getattr(free, weight)):
-        if left_procs <= 0 and left_gpus <= 0:
-            break
-        taken_procs, taken_gpus = min(free.procs, left_procs), min(free.gpus, left_gpus)
-        if taken_procs or taken_gpus:
-            if procs > 0 and taken_gpus and not taken_procs:
-                continue
-            plan.append((free, taken_procs, taken_gpus))
-            left_procs -= taken_procs
-            left_gpus -= taken_gpus
-    if left_procs > 0 or left_gpus > 0:
-        return _spill_fallback(candidates, procs, gpus, mem)
-    mems = _memory_shares(plan, mem, procs or gpus, by_gpus=procs == 0)
-    if mems is not None:
-        return [
-            (free, free.share(taken_procs, taken_gpus, share))
-            for (free, taken_procs, taken_gpus), share in zip(plan, mems, strict=True)
-        ]
-    return _spill_fallback(candidates, procs, gpus, mem)
+    need = procs or gpus
+    limits = [free.procs if procs else free.gpus for free in candidates]
+    caps = [
+        limit if not mem else min(limit, (free.mem or 0) * need // mem)
+        for free, limit in zip(candidates, limits, strict=True)
+    ]
+    eligible = [index for index, cap in enumerate(caps) if cap >= 1]
+    taken_procs, taken_gpus = [0] * len(candidates), [0] * len(candidates)
+    left = gpus if procs else 0
+    if left:
+        gpu_nodes = [index for index in eligible if candidates[index].gpus]
+        for index in sorted(gpu_nodes, key=lambda index: (-candidates[index].gpus, -caps[index])):
+            if not left:
+                break
+            taken_gpus[index] = min(candidates[index].gpus, left)
+            taken_procs[index] = 1
+            left -= taken_gpus[index]
+    filled = taken_procs if procs else taken_gpus
+    if left or sum(filled) > need:
+        return None
+    left = need - sum(filled)
+    for index in sorted(eligible, key=lambda index: filled[index] - caps[index]):
+        more = min(caps[index] - filled[index], left)
+        filled[index] += more
+        left -= more
+    if left:
+        return None
+    plan = [
+        (free, used_procs, used_gpus)
+        for free, used_procs, used_gpus in zip(candidates, taken_procs, taken_gpus, strict=True)
+        if used_procs or used_gpus
+    ]
+    shares = _memory_shares(plan, mem, need, by_gpus=not procs)
+    if shares is None:  # cannot happen: every share fits rounded up
+        return None
+    return [
+        (free, free.share(used_procs, used_gpus, share))
+        for (free, used_procs, used_gpus), share in zip(plan, shares, strict=True)
+    ]
 
 
 def assign(inventory: Inventory, requirement: Mapping[str, int]) -> Placement | None:
@@ -469,11 +358,17 @@ def assign(inventory: Inventory, requirement: Mapping[str, int]) -> Placement | 
 
     ``nodes=N`` takes N idle nodes whole, the smallest that together hold the
     ``procs``, ``gpus`` and ``mem``. Otherwise the attempt goes on the one node
-    with the fewest free ``procs`` that holds it all, else it prefers a small
-    set of nodes filled from the node with the most free ``procs`` (``gpus``
-    when it needs no ``procs``), with ``mem`` split in proportion. An attempt
-    needing none of them gets no ``procs`` on the node with the most free ones.
-    ``mem`` counts only when the inventory places it.
+    with the fewest free ``procs`` that holds it all, else it spills: when it
+    needs ``gpus`` (and ``procs``), the nodes with the most free ``gpus`` are
+    taken first with one processor slot each, then the remaining ``procs`` are
+    filled from the largest remaining per-node capacity, a node's capacity
+    being its free ``procs`` limited so that its proportional ``mem`` share,
+    rounded up, fits its free memory (``gpus`` stand in for ``procs`` when it
+    needs none). ``mem`` is split in proportion to what each node takes. This
+    prefers few nodes without guaranteeing the fewest, and finds a placement
+    whenever one exists under that rule. An attempt needing none of them gets
+    no ``procs`` on the node with the most free ones. ``mem`` counts only when
+    the inventory places it.
 
     :param inventory: The inventory, changed only when the attempt is placed.
     :param requirement: The attempt's effective requirement; other labels are ignored.
