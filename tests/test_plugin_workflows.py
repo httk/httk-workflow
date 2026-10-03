@@ -9,6 +9,7 @@ from httk.workflow import Workspace, scaffold
 from httk.workflow._runner_builds import register_build
 from httk.workflow.models import JobDefinition
 from httk.workflow.packages import _reset_plugin_workflow_cache, parse_workflow_manifest
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import (
     WorkflowProvider,
     new_job,
@@ -16,6 +17,7 @@ from httk.workflow.scaffold import (
     registered_workflow_labels,
     registered_workflows,
     resolve_workflow,
+    scaffold_job,
     workflow_provider,
 )
 
@@ -103,6 +105,10 @@ def test_manifest_resource_requirements_reach_provider_and_job(tmp_path: Path) -
         ("[workflow.steps.other.resources]\nprocs = 1\n", "unknown step"),
         ("[workflow.resources]\nprocs = true\n", "must be an integer"),
         ("[workflow.resources]\nprocs = -1\n", "non-negative"),
+        ("[workflow.resources]\nmaxtime = 3600\n", "Slurm duration"),
+        ("[workflow.resources]\nmaxtime = \"1:00:60\"\n", "Slurm duration"),
+        ("[workflow.resources]\nmaxtime = \"1:00\"\nmintime = \"2:00\"\n", "must not exceed"),
+        ("[workflow.steps.start.resources]\nmintime = 60\n", "Slurm duration"),
     ],
 )
 def test_manifest_resource_requirements_reject_bad_declarations(tmp_path: Path, extra: str, message: str) -> None:
@@ -116,6 +122,53 @@ def test_manifest_resource_requirements_reject_bad_declarations(tmp_path: Path, 
     )
     with pytest.raises(ValueError, match=message):
         parse_workflow_manifest(package)
+
+
+def _time_package(root: Path, maxtime: str) -> Path:
+    root.mkdir()
+    (root / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (root / "run").chmod(0o755)
+    (root / "httk_workflow.toml").write_text(
+        '[workflow]\nname = "test.resources"\n'
+        '[workflow.runner]\nsteps = ["start", "finish"]\n'
+        f'[workflow.resources]\nmaxtime = "{maxtime}"\nmintime = "30"\nprocs = 2\n'
+        '[workflow.steps.finish.resources]\nmaxtime = "2-0"\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_manifest_time_resources_are_slurm_durations_stored_as_seconds(tmp_path: Path) -> None:
+    package = _time_package(tmp_path / "workflow", "1:00:00")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    definition = JobDefinition.from_path(new_job(workspace, package, tag="timed").payload / "job.json")
+    assert definition.resources == {"maxtime": 3600, "mintime": 1800, "procs": 2}
+    assert definition.step_resources == {"finish": {"maxtime": 172800}}
+
+    # A called child (scaffold_job under Attempt.call) is capped by its caller's maxtime.
+    (tmp_path / "called").mkdir()
+    called = scaffold_job(workspace, package, tmp_path / "called", maxtime_cap=600)
+    assert called.resources == {"maxtime": 600, "mintime": 600, "procs": 2}
+    assert called.step_resources == {"finish": {"maxtime": 600}}
+
+    # Equivalent spellings make byte-identical job definitions.
+    digests = set()
+    for spelling in ("60", "1:00:00", "0-1"):
+        resolved = resolve_workflow(_time_package(tmp_path / spelling, spelling))
+        payload = tmp_path / f"payload-{spelling}"
+        (payload / "files").mkdir(parents=True)
+        (payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        spec = JobSpec(
+            name="timed",
+            workflow="test.resources",
+            runner_path="files/runner",
+            initial_step="start",
+            job_id="00000000-0000-4000-8000-000000000000",
+            resources=resolved.resources,
+            step_resources=resolved.step_resources,
+        )
+        digests.add(prepare_job_payload(payload, spec).digest)
+    assert len(digests) == 1
 
 
 def test_manifest_step_resources_require_an_executable_runner_steps_list(tmp_path: Path) -> None:

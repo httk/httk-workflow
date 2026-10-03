@@ -489,6 +489,29 @@ at most two at a time because of the two `matlab_license_slots`. A manager
 started without `--worker-resource matlab_license_slots` never runs `analyse`
 and reports it as `ready_blocked["resources"]` and in the idle summary.
 
+### Time requirements
+
+`maxtime` (the time limit of one attempt) and `mintime` (the least remaining
+allocation time needed to start one) are reserved labels. Jobs declare them as
+Slurm `--time` strings, such as `maxtime = "24:00:00"` in a manifest,
+`resources={"maxtime": "2:00:00"}` from the SDK, or `--resource maxtime=2:00:00`
+from the Bash bridge; `job.json`, state frames and the attempt context hold
+seconds. They are job requirements, never capacities: managers do not count
+them against capacity, and `--worker-resource`, `TaskManager(resources=...)`
+and campaign manager resources refuse them.
+
+Unlike the other labels, each time label resolves on its own (dynamic
+requirement, then step, then job), so a job-level `maxtime` still applies to a
+step that overrides only `procs`; a mapping that names only time labels leaves
+the consumable selection to the next level, and a resolved `mintime` above the
+resolved `maxtime` is lowered to it. The resolved values are part of the
+attempt's reservation and its context `resources`. In this release a manager
+records them in the reservation and the attempt context; it does not yet
+enforce a time limit or a start gate. A child spawned from a `ChildSpec` or
+by `Attempt.call` never inherits `mintime`, and every `maxtime` it carries is
+capped at the spawning attempt's `maxtime`; a prepared payload directory passed
+to `Attempt.spawn` is registered as written.
+
 ### Capacities from SLURM
 
 Inside a SLURM batch allocation, a manager derives capacities, but only when

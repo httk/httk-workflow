@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from .collecting import JobRecord
     from .compat import LanguageRequest
 
+from ._durations import cap_maxtime
 from ._util import interpreter_first_path, validate_inputs
 from .codes import code_environment
 from .errors import FormatError, WorkflowError
@@ -82,6 +83,7 @@ from .models import (
     ensure_step_known,
     expand_runner_command,
     normalize_placement,
+    normalize_resources,
     validate_parameters,
     validate_resources,
     validate_step,
@@ -176,8 +178,9 @@ class WorkflowProvider:
     :param initial_step: Select the default starting step.
     :param alias: Provide an alternate registered name.
     :param steps: Declare the steps the runner provides.
-    :param resources: Declare the default resource requirement.
-    :param step_resources: Declare per-step resource requirements.
+    :param resources: Declare the default resource requirement; ``maxtime`` and ``mintime`` are Slurm
+        duration strings such as ``"24:00:00"``.
+    :param step_resources: Declare per-step resource requirements, time labels spelled as in *resources*.
     :param data_mode: Declare the workflow's default data mode.
     :param workdir_mode: Declare the workflow's default workdir mode.
     :param summary: Describe the workflow for callers.
@@ -214,8 +217,8 @@ class WorkflowProvider:
     initial_step: str = "start"
     alias: str | None = None
     steps: tuple[str, ...] = ()
-    resources: Mapping[str, int] = field(default_factory=dict)
-    step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    resources: Mapping[str, int | str] = field(default_factory=dict)
+    step_resources: Mapping[str, Mapping[str, int | str]] = field(default_factory=dict)
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     summary: str = ""
@@ -287,23 +290,27 @@ class WorkflowProvider:
         object.__setattr__(self, "inputs", MappingProxyType(inputs))
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
-        object.__setattr__(
-            self, "resources", MappingProxyType(validate_resources(self.resources, "workflow.resources"))
-        )
+        # The authored form is kept, so dataclasses.replace() never converts
+        # seconds twice; _requirements() is the one conversion to seconds.
+        self._requirements()
+        object.__setattr__(self, "resources", MappingProxyType(dict(self.resources)))
         object.__setattr__(
             self,
             "step_resources",
-            MappingProxyType(
-                {
-                    validate_step(step, "workflow step"): validate_resources(requirement, f"workflow.steps.{step}")
-                    for step, requirement in self.step_resources.items()
-                }
-            ),
+            MappingProxyType({step: dict(requirement) for step, requirement in self.step_resources.items()}),
         )
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
+
+    def _requirements(self) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+        """Return the resource requirements in protocol form, time labels in seconds."""
+
+        return normalize_resources(self.resources, "workflow.resources"), {
+            validate_step(step, "workflow step"): normalize_resources(requirement, f"workflow.steps.{step}")
+            for step, requirement in self.step_resources.items()
+        }
 
     @property
     def definition_uri(self) -> str | None:
@@ -530,8 +537,8 @@ class ResolvedWorkflow:
     :param initial_step: Select the step a job starts at.
     :param alias: Preserve the registered workflow alias.
     :param steps: Preserve the steps the runner provides.
-    :param resources: Preserve the default resource requirement.
-    :param step_resources: Preserve per-step resource requirements.
+    :param resources: Preserve the default resource requirement, time labels in seconds.
+    :param step_resources: Preserve per-step resource requirements, time labels in seconds.
     :param data_mode: Preserve the workflow data mode.
     :param workdir_mode: Preserve the workflow workdir mode.
     :param packaged: Preserve the packaged runner file name when applicable.
@@ -1044,6 +1051,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
     """Return the resolution of one registered, plugin, or fetched provider."""
 
     source = provider.directory if provider.directory is not None else _packaged_runner_path(provider)
+    resources, step_resources = provider._requirements()
     return ResolvedWorkflow(
         source=source,
         workflow_id=provider.workflow_id,
@@ -1059,8 +1067,8 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         alias=provider.alias,
         initial_step=provider.initial_step,
         steps=provider.steps,
-        resources=provider.resources,
-        step_resources=provider.step_resources,
+        resources=resources,
+        step_resources=step_resources,
         data_mode=provider.data_mode,
         workdir_mode=provider.workdir_mode,
         packaged=None if provider.directory is not None else provider.runner_file,
@@ -1197,6 +1205,7 @@ def resolve_workflow(
             from .packages import load_workflow_package
 
             provider = load_workflow_package(path, register=False)
+            resources, step_resources = provider._requirements()
             resolved = ResolvedWorkflow(
                 source=provider.directory or path.resolve(),
                 workflow_id=provider.workflow_id,
@@ -1215,8 +1224,8 @@ def resolve_workflow(
                 workdir_mode=provider.workdir_mode,
                 summary=provider.summary,
                 inputs=provider.inputs,
-                resources=provider.resources,
-                step_resources=provider.step_resources,
+                resources=resources,
+                step_resources=step_resources,
                 instantiate=provider.instantiate,
                 declarations=provider.declarations,
                 collector=provider.collector,
@@ -1926,6 +1935,7 @@ def scaffold_job(
     workflow_id: str | None = None,
     runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
+    maxtime_cap: int | None = None,
 ) -> JobDefinition:
     """Build one job payload of *workflow* into *destination*, without submitting it.
 
@@ -1960,6 +1970,8 @@ def scaffold_job(
     :param workflow_id: Override the workflow id in the job definition.
     :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the job's display name.
+    :param maxtime_cap: Cap every ``maxtime`` of the job at these seconds, setting the job-level one
+        when the workflow declares none; :meth:`httk.workflow.Attempt.call` passes its own ``maxtime``.
     :return: The written job definition.
     :raises ValueError: If the destination is not an empty directory, or workflow, inputs, or job settings are invalid.
     """
@@ -1991,6 +2003,7 @@ def scaffold_job(
         priority=priority,
         workdir_mode=workdir_mode,
         name=name,
+        maxtime_cap=maxtime_cap,
     )
 
 
@@ -2008,6 +2021,7 @@ def _build_payload(
     workdir_mode: WorkdirMode,
     name: str | None,
     provenance: Mapping[str, object] | None = None,
+    maxtime_cap: int | None = None,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
 
@@ -2186,6 +2200,9 @@ def _build_payload(
         spec = prepared.finalize(spec)
         if not isinstance(spec, JobSpec):
             raise ValueError("language finalize hook must return a JobSpec")
+    if maxtime_cap is not None:
+        resources, step_resources = cap_maxtime(spec.resources, spec.step_resources, maxtime_cap)
+        spec = replace(spec, resources=resources, step_resources=step_resources)
     return prepare_job_payload(destination, spec)
 
 

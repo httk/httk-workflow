@@ -332,7 +332,34 @@ def test_malformed_advance_resource_option_is_refused(tmp_path: Path) -> None:
         )
     )
     assert completed.returncode == 2
-    assert "NAME=INT" in completed.stderr
+    assert "NAME=VALUE" in completed.stderr
+
+
+def test_advance_time_resource_options_are_slurm_durations(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path / "accepted", step="start")
+    completed = fixture.run(
+        _runner(
+            "start",
+            "next",
+            body=(
+                "step_start() { httk_workflow_advance next --resource maxtime=1:30:00 --resource procs=2; }\n"
+                "step_next() { :; }"
+            ),
+        )
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert fixture.outcome()["resources"] == {"maxtime": 5400, "procs": 2}
+    for option, message in (("maxtime=abc", "Slurm duration"), ("procs=1:00", "NAME=VALUE")):
+        fixture = _fixture(tmp_path / option, step="start")
+        completed = fixture.run(
+            _runner(
+                "start",
+                "next",
+                body=f"step_start() {{ httk_workflow_advance next --resource {option}; }}\nstep_next() {{ :; }}",
+            )
+        )
+        assert completed.returncode == 2
+        assert message in completed.stderr
 
 
 def test_a_step_that_publishes_nothing_is_reported_as_no_outcome(tmp_path: Path) -> None:

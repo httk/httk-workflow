@@ -17,7 +17,7 @@ from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
 from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
 from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, NotIdleError, TaskManager
-from ..models import WORKSPACE_DIRECTORY, validate_resources
+from ..models import WORKSPACE_DIRECTORY, validate_capacity
 from ..registry import WorkspaceBinding
 from ..workspace import Workspace
 from ._common import (
@@ -87,7 +87,7 @@ def _worker_resources(pairs: Sequence[Sequence[str]]) -> dict[str, int]:
             raise ValueError(f"--worker-resource {name} COUNT must be a non-negative integer")
         resources[name] = count
     try:
-        return validate_resources(resources, "worker resources")
+        return validate_capacity(resources, "worker resources")
     except FormatError as exc:
         raise ValueError(str(exc)) from exc
 

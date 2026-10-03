@@ -903,11 +903,34 @@ non-negative integer; booleans, negative values, and non-integers are invalid.
 mapping. Units are opaque integers; SLURM-derived `mem` values, for example,
 are megabytes.
 
+Two labels are reserved for time requirements, in integer seconds:
+
+- `maxtime` is the time limit of one attempt; it MUST be at least 1.
+- `mintime` is the least remaining allocation time a manager needs to start an
+  attempt; it MUST NOT exceed `maxtime` in the same mapping.
+
+The protocol stores only integer seconds. Every authoring surface (the workflow
+manifest, the SDKs, the Bash bridge's `--resource NAME=VALUE`) spells them as
+Slurm `--time` strings (`M`, `M:S`, `H:M:S`, `D-H`, `D-H:M`, `D-H:M:S`, so
+`"30"` is 30 minutes and `"2-12"` is 60 hours) and refuses integers.
+
 The manager selects the effective requirement for step `s` from the first
 present of: the state frame's dynamic `resources`, `job.step_resources[s]`,
 `job.resources`, and `{}`. For manager resources named `procs` or `mem` that a
 requirement omits, it assumes the worker's fair share (`capacity // workers`).
-A manager never runs a job requiring a resource it does not provide.
+A manager never runs a job requiring a resource it does not provide. The time
+labels are not consumable and never a manager capacity: they never block a
+claim, and each resolves on its own through the same three layers, so a
+job-level `maxtime` still applies to a step whose `step_resources` names only
+`procs`. A mapping that names only time labels leaves the consumable
+selection to the next level, and a resolved `mintime` above the resolved
+`maxtime` is lowered to it. How a manager acts on them is described in the
+[task-manager guide](taskmanager.md).
+
+A child that a running step synthesizes never inherits `mintime`, and each of
+its `maxtime` values is capped at the spawning attempt's effective `maxtime`
+(a child without a job-level `maxtime` gets the cap). A prepared payload
+directory spawned as a child is registered as written, uncapped.
 
 ### Declarations
 
@@ -1608,8 +1631,9 @@ filenames: it reads `HTTK_WORKFLOW_CONTEXT` (or the scalar variables) and then
 treats existing files according to application policy.
 
 The context's `resources` member is the validated effective requirement
-selected for the launched activation, so a runner can use it as the manager's
-placement decision without re-resolving the job declaration.
+selected for the launched activation, including the resolved `maxtime` and
+`mintime` in seconds, so a runner can use it as the manager's placement
+decision without re-resolving the job declaration.
 
 ### Executable workflow-hook wire formats
 
@@ -1723,7 +1747,7 @@ MAY also contain:
   outcome.
 - `resources`, allowed only on `advance` and `wait` (other actions MUST NOT
   contain it), is the next activation's requirement, validated like
-  `job.json` resources.
+  `job.json` resources (time labels in seconds).
 
 ### Actions
 

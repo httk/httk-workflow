@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .._durations import TIME_RESOURCES
 from .._util import read_json
 from ..errors import WorkspaceCorruptionError
 from ..manager import TaskManager
@@ -228,7 +229,7 @@ def _print_line(line: str) -> None:
 
 
 def _debug_capacity(job: Any, dynamic: Mapping[str, int] | None = None) -> dict[str, int]:
-    """Return capacity sufficient for every declared requirement of *job*."""
+    """Return capacity sufficient for every declared consumable requirement of *job*."""
 
     capacity: dict[str, int] = {}
     requirements = (job.resources, *job.step_resources.values())
@@ -236,6 +237,8 @@ def _debug_capacity(job: Any, dynamic: Mapping[str, int] | None = None) -> dict[
         requirements += (dynamic,)
     for requirement in requirements:
         for name, value in requirement.items():
+            if name in TIME_RESOURCES:
+                continue
             capacity[name] = max(capacity.get(name, 0), max(1, value))
     return capacity
 

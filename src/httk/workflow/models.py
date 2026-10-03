@@ -12,6 +12,7 @@ from typing import Any
 
 from httk.core.requirements import parse_requirements
 
+from ._durations import TIME_RESOURCES, parse_slurm_duration
 from ._util import (
     DEFAULT_VISIBILITY_DEADLINE_SECONDS,
     json_bytes,
@@ -237,10 +238,13 @@ def validate_parameters(value: object, name: str = "parameters") -> dict[str, ob
 
 
 def validate_resources(value: object, name: str = "resources") -> dict[str, int]:
-    """Validate one quantitative resource-requirement mapping.
+    """Validate one quantitative resource-requirement mapping in protocol form.
 
     Resource names are protocol labels and values are opaque non-negative
-    integers.  The protocol does not assign units or meanings to names.
+    integers, except the reserved time labels ``maxtime`` and ``mintime``,
+    which are seconds: ``maxtime`` is at least 1 and ``mintime`` is at most
+    ``maxtime`` when one mapping holds both.  The protocol assigns no units or
+    meanings to other names.
 
     :param value: The resource mapping to validate.
     :param name: The field name used in validation errors.
@@ -257,6 +261,52 @@ def validate_resources(value: object, name: str = "resources") -> dict[str, int]
         if raw < 0:
             raise FormatError(f"{name}.{label} must be non-negative")
         result[label] = raw
+    if result.get("maxtime") == 0:
+        raise FormatError(f"{name}.maxtime must be at least 1 second")
+    if "maxtime" in result and result.get("mintime", 0) > result["maxtime"]:
+        raise FormatError(f"{name}.mintime must not exceed {name}.maxtime")
+    return result
+
+
+def normalize_resources(value: object, name: str = "resources") -> dict[str, int]:
+    """Convert one authored resource mapping to protocol form.
+
+    The time labels ``maxtime`` and ``mintime`` must be Slurm ``--time``
+    strings and become seconds; other values pass through unchanged.
+
+    :param value: The authored resource mapping.
+    :param name: The field name used in validation errors.
+    :return: The validated resource mapping in protocol form.
+    :raises httk.workflow.errors.FormatError: If the mapping, names, or values are invalid.
+    """
+
+    mapping = require_mapping(value, name)
+    result: dict[str, object] = {}
+    for key, raw in mapping.items():
+        if key in TIME_RESOURCES:
+            if not isinstance(raw, str):
+                raise FormatError(f"{name}.{key} must be a Slurm duration such as 01:30:00")
+            try:
+                raw = parse_slurm_duration(raw)
+            except ValueError as exc:
+                raise FormatError(f"{name}.{key}: {exc}") from exc
+        result[key] = raw
+    return validate_resources(result, name)
+
+
+def validate_capacity(value: object, name: str) -> dict[str, int]:
+    """Validate one manager resource-capacity mapping.
+
+    :param value: The capacity mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated capacity mapping.
+    :raises httk.workflow.errors.FormatError: If the mapping is invalid or names a time label.
+    """
+
+    result = validate_resources(value, name)
+    reserved = sorted(TIME_RESOURCES & result.keys())
+    if reserved:
+        raise FormatError(f"{name}.{reserved[0]} is a job requirement, not a manager capacity")
     return result
 
 

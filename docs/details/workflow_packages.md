@@ -91,7 +91,7 @@ and output relationships are all validated before a provider is returned.
 | `description` | no | Human-readable summary and generated declaration description. |
 | `declaration_uri` | no | String `$id` for the generated or external workflow declaration. |
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
-| `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers. |
+| `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers, or to Slurm duration strings for `maxtime` and `mintime`. |
 | `steps` | no | Per-step resource overrides. Valid only with an executable runner, and only for names in its declared `steps` list. |
 | `calls` | no | The sub-workflows this one calls: a `[workflow.calls]` table mapping an alias to a workflow name or git URI. |
 | `requires` | no | Minimum distribution versions as a list of `NAME>=VERSION` strings (only `>=`, a plain `N(.N)*` release, each distribution once), for example `["httk-workflow>=2.2.0", "httk-atomistic>=2.1.2"]`. |
@@ -175,7 +175,12 @@ The declaration is checked three times:
 ### `[workflow.resources]` and `[workflow.steps.NAME]`
 
 `[workflow.resources]` maps validated resource labels to non-negative,
-non-boolean integers; units are opaque. An executable runner may add
+non-boolean integers; units are opaque. The reserved time labels `maxtime`
+(the time limit of one attempt) and `mintime` (the least remaining allocation
+time a manager needs to start one) are instead Slurm `--time` strings: `M`,
+`M:S`, `H:M:S`, `D-H`, `D-H:M`, or `D-H:M:S`, so `"30"` is 30 minutes and
+`"2-12"` is 60 hours. Integers are refused for them, and `job.json` stores
+seconds. An executable runner may add
 `[workflow.steps.NAME]` tables, each holding only a `resources` table, where
 `NAME` must occur in `[workflow.runner].steps`. `format` runners reject
 `[workflow.steps]`, because the realization supplies the steps.
@@ -184,6 +189,7 @@ non-boolean integers; units are opaque. An executable runner may add
 [workflow.resources]
 procs = 4
 mem = 16000            # MB
+maxtime = "24:00:00"
 
 [workflow.steps.relax]
 resources = { procs = 32, mem = 120000 }
@@ -193,7 +199,9 @@ resources = { procs = 1, mem = 2000, matlab_license_slots = 1 }
 ```
 
 Here `relax` and `analyse` override the defaults. The manager's advertised
-capacities decide whether each activation fits.
+capacities decide whether each activation fits. The time labels resolve one by
+one rather than as a whole table, so `relax` keeps the 24-hour `maxtime`; they
+are never counted against a manager's capacity.
 
 ### `[workflow.runner]`: executable form
 

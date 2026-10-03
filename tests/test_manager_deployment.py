@@ -16,6 +16,8 @@ def test_worker_resources_reject_invalid_and_duplicate_pairs() -> None:
         _manager._worker_resources([["procs", "-1"]])
     with pytest.raises(ValueError, match="non-negative"):
         _manager._worker_resources([["procs", "four"]])
+    with pytest.raises(ValueError, match="job requirement, not a manager capacity"):
+        _manager._worker_resources([["maxtime", "10"]])
 
 
 def test_slurm_resources_require_an_active_job() -> None:

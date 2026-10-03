@@ -10,6 +10,7 @@ from typing import Any
 
 from httk.core.git_sources import parse_git_uri
 
+from .._durations import TIME_RESOURCES, format_duration
 from ..git_workflows import _uninstall_workflows, fetch_workflow
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
 from ..scaffold import (
@@ -212,6 +213,12 @@ def _value(value: object) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def _resources_text(resources: Any) -> dict[str, object]:
+    """Return one resource mapping with its time labels as Slurm durations."""
+
+    return {name: format_duration(value) if name in TIME_RESOURCES else value for name, value in resources.items()}
+
+
 def _render_text(description: Mapping[str, object]) -> str:
     build = description["build"]
     assert isinstance(build, Mapping)
@@ -221,6 +228,8 @@ def _render_text(description: Mapping[str, object]) -> str:
         if build["present"]
         else "build: no"
     )
+    step_resources = description["step_resources"]
+    assert isinstance(step_resources, Mapping)
     lines = [
         f"workflow: {description['workflow']}",
         f"alias: {description['alias'] or '-'}",
@@ -237,8 +246,12 @@ def _render_text(description: Mapping[str, object]) -> str:
             f"data_mode: {description['data_mode']}",
             f"workdir_mode: {description['workdir_mode']}",
             build_line,
-            f"resources: {_value(description['resources'])}" if description["resources"] else "",
-            f"step_resources: {_value(description['step_resources'])}" if description["step_resources"] else "",
+            f"resources: {_value(_resources_text(description['resources']))}" if description["resources"] else "",
+            (
+                f"step_resources: {_value({step: _resources_text(value) for step, value in step_resources.items()})}"
+                if step_resources
+                else ""
+            ),
             "steps:",
         ]
     )

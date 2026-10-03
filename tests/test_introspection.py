@@ -886,6 +886,22 @@ def test_debug_admits_declared_resources_for_every_job_step(tmp_path: Path) -> N
     assert outcome.state == "succeeded"
 
 
+def test_debug_runs_a_job_declaring_time_resources(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _THREE_STEP_RUNNER,
+        initial_step="run",
+        resources={"maxtime": 3600, "mintime": 60, "procs": 1},
+        step_resources={"run": {"maxtime": 600}},
+    )
+
+    outcome = debug_job(workspace, str(payload), emit=lambda line: None)
+
+    assert outcome.job_id == job_id
+    assert outcome.exit_code == DEBUG_EXIT_SUCCEEDED
+
+
 def test_debug_refreshes_capacity_for_dynamic_resources(tmp_path: Path) -> None:
     runner = """#!/usr/bin/env python3
 import json

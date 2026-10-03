@@ -2477,3 +2477,136 @@ os.rename(temporary, control / "outcome.ready")
         {"procs": 1},
     ]
     assert all(frame.get("resources") is None for frame in frames)
+
+
+def test_time_resources_are_never_counted_against_capacity(tmp_path: Path) -> None:
+    from httk.workflow.introspection._reading import job_frames
+
+    for capacity, resources in (({"procs": 1}, {"maxtime": 3600, "procs": 1}), ({}, {"maxtime": 60})):
+        name = "procs" if capacity else "empty"
+        workspace = Workspace.initialize(tmp_path / f"workspace-{name}")
+        payload, job_id = _payload(tmp_path / f"source-{name}", _SUCCEED_RUNNER, tag="timed", resources=resources)
+        workspace.submit(payload, "project/timed")
+        with TaskManager(workspace, resources=capacity, heartbeat_interval=0.01) as manager:
+            manager.run_until_idle(timeout=30.0)
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None and marker.kind == "succeeded"
+        assert [context["resources"] for context in _attempt_contexts(workspace, job_id)] == [resources]
+        claimed = [
+            frame.get("reservation") for frame in job_frames(workspace, marker) if frame.get("kind") == "claimed"
+        ]
+        assert claimed == [resources]
+
+
+def test_time_resources_resolve_per_label(tmp_path: Path) -> None:
+    runner = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+base = {"format": "httk-workflow-outcome", "format_version": 2,
+        "job_id": context["job_id"], "activation_id": context["activation_id"],
+        "attempt_id": context["attempt_id"]}
+if context["step"] == "first":
+    outcome = {**base, "action": "advance", "next_step": "second"}
+elif context["step"] == "second":
+    outcome = {**base, "action": "advance", "next_step": "third",
+               "resources": {"maxtime": 600, "mintime": 60, "procs": 1}}
+else:
+    outcome = {**base, "action": "succeed"}
+(temporary / "outcome.json").write_text(json.dumps(outcome))
+os.rename(temporary, control / "outcome.ready")
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(
+        tmp_path / "source",
+        runner,
+        tag="per-label",
+        initial_step="first",
+        resources={"maxtime": 3600},
+        step_resources={"first": {"procs": 1}, "second": {"maxtime": 1200, "procs": 1}},
+    )
+    workspace.submit(payload, "project/per-label")
+    with TaskManager(workspace, resources={"procs": 2}, maximum_workers=1, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+    contexts = {context["step"]: context["resources"] for context in _attempt_contexts(workspace, job_id)}
+    assert contexts == {
+        "first": {"maxtime": 3600, "procs": 1},
+        "second": {"maxtime": 1200, "procs": 1},
+        "third": {"maxtime": 600, "mintime": 60, "procs": 1},
+    }
+
+
+def test_time_resources_are_not_manager_capacity(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="job requirement, not a manager capacity"):
+        TaskManager(workspace, resources={"mintime": 1})
+
+
+def test_a_time_only_mapping_leaves_the_consumable_selection_to_the_next_level(tmp_path: Path) -> None:
+    runner = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+base = {"format": "httk-workflow-outcome", "format_version": 2,
+        "job_id": context["job_id"], "activation_id": context["activation_id"],
+        "attempt_id": context["attempt_id"]}
+following = {"first": ("second", {"maxtime": 120}), "second": ("third", {})}
+if context["step"] in following:
+    step, resources = following[context["step"]]
+    outcome = {**base, "action": "advance", "next_step": step, "resources": resources}
+else:
+    outcome = {**base, "action": "succeed"}
+(temporary / "outcome.json").write_text(json.dumps(outcome))
+os.rename(temporary, control / "outcome.ready")
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(
+        tmp_path / "source",
+        runner,
+        tag="time-only",
+        initial_step="first",
+        resources={"procs": 2, "maxtime": 3600},
+        step_resources={"first": {"maxtime": 600}},
+    )
+    workspace.submit(payload, "project/time-only")
+    with TaskManager(workspace, resources={"procs": 4}, maximum_workers=4, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+    contexts = {context["step"]: context["resources"] for context in _attempt_contexts(workspace, job_id)}
+    assert contexts == {
+        "first": {"procs": 2, "maxtime": 600},
+        "second": {"procs": 2, "maxtime": 120},
+        "third": {"procs": 1, "maxtime": 3600},
+    }
+
+
+def test_a_resolved_mintime_above_the_resolved_maxtime_is_lowered_to_it(tmp_path: Path) -> None:
+    from httk.workflow.introspection._reading import job_frames
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _SUCCEED_RUNNER,
+        tag="cross-level",
+        resources={"maxtime": 3600},
+        step_resources={"only": {"mintime": 7200}},
+    )
+    workspace.submit(payload, "project/cross-level")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    expected = {"maxtime": 3600, "mintime": 3600}
+    assert [context["resources"] for context in _attempt_contexts(workspace, job_id)] == [expected]
+    assert [frame.get("reservation") for frame in job_frames(workspace, marker) if frame.get("kind") == "claimed"] == [
+        expected
+    ]

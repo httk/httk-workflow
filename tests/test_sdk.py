@@ -284,6 +284,7 @@ def _attempt(
     name: str = "payload",
     resources: dict[str, int] | None = None,
     step_resources: dict[str, dict[str, int]] | None = None,
+    context_resources: dict[str, int] | None = None,
 ) -> Attempt:
     """Bind one attempt of a fabricated job, without a manager."""
 
@@ -324,6 +325,7 @@ def _attempt(
             "data_generation": data_generation,
             "children": children or [],
             "settings": settings or {},
+            "resources": context_resources or {},
         }
     )
     attempt_environment = {
@@ -350,6 +352,49 @@ def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:
     spec = child._job_spec(attempt.job, "child")
     assert spec.resources == {"procs": 2}
     assert spec.step_resources == {"start": {"mem": 1024}}
+
+
+def test_child_spec_never_inherits_mintime_and_caps_maxtime(tmp_path: Path) -> None:
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        resources={"maxtime": 3600, "mintime": 600, "procs": 2},
+        step_resources={"start": {"maxtime": 7200, "mintime": 60}},
+        context_resources={"maxtime": 3600, "procs": 2},
+    )
+    runner = RunnerRef.workspace("runner", "a" * 64)
+    cap = attempt.context.resources.get("maxtime")
+
+    def spec(**members: Any) -> JobSpec:
+        return ChildSpec(step="start", runner=runner, **members)._job_spec(attempt.job, "child", cap)
+
+    inherited = spec()
+    assert inherited.resources == {"maxtime": 3600, "procs": 2}
+    assert inherited.step_resources == {"start": {"maxtime": 3600}}
+    assert spec(resources={"maxtime": "2:00:00"}).resources == {"maxtime": 3600}
+    assert spec(resources={"maxtime": "10:00", "mintime": "5:00"}).resources == {"maxtime": 600, "mintime": 300}
+    assert spec(resources={"procs": 1}).resources == {"maxtime": 3600, "procs": 1}
+    clamped = spec(step_resources={"start": {"maxtime": "1-0", "mintime": "1:30:00"}, "other": {"procs": 1}})
+    assert clamped.step_resources == {"start": {"maxtime": 3600, "mintime": 3600}, "other": {"procs": 1}}
+    with pytest.raises(ValueError, match="Slurm duration"):
+        spec(resources={"maxtime": 60})
+    uncapped = ChildSpec(step="start", runner=runner)._job_spec(attempt.job, "child", None)
+    assert uncapped.resources == {"maxtime": 3600, "procs": 2}
+
+    # Attempt.spawn passes the attempt's own effective maxtime as the cap.
+    attempt.spawn(ChildSpec(step="start", runner=runner, resources={"maxtime": "3:00:00"}), label="capped")
+    draft = next(iter(attempt.control.glob("outcome.tmp.*")))
+    (job,) = (json.loads(path.read_text(encoding="utf-8")) for path in draft.glob("children/jobs/*/job.json"))
+    assert job["resources"] == {"maxtime": 3600}
+
+
+def test_advance_takes_time_resources_as_slurm_durations(tmp_path: Path) -> None:
+    accepted = _attempt(tmp_path / "accepted", step="start")
+    accepted.advance("next", resources={"maxtime": "2:00", "procs": 1})
+    assert _published(accepted)["resources"] == {"maxtime": 120, "procs": 1}
+    refused = _attempt(tmp_path / "refused", step="start")
+    with pytest.raises(ValueError, match="Slurm duration"):
+        refused.advance("next", resources={"maxtime": 120})
 
 
 def test_outcome_resource_requirements_are_action_scoped(tmp_path: Path) -> None:
@@ -1259,6 +1304,27 @@ def test_a_prepared_payload_child_can_be_spawned_by_path(tmp_path: Path) -> None
     spawn = json.loads((draft / "children" / "spawn.json").read_text(encoding="utf-8"))
     assert [entry["label"] for entry in spawn["children"]] == ["prepared"]
     assert (draft / "children" / "jobs" / reference.job_key / "files" / "runner").is_file()
+
+
+def test_a_prepared_payload_spawn_is_not_capped(tmp_path: Path) -> None:
+    attempt = _attempt(tmp_path, step="start", context_resources={"maxtime": 60})
+    child = tmp_path / "child"
+    (child / "files").mkdir(parents=True)
+    (child / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    prepare_job_payload(
+        child,
+        JobSpec(
+            name="Child",
+            workflow="tests.sdk",
+            runner_path="files/runner",
+            initial_step="start",
+            resources={"maxtime": 3600, "mintime": 600},
+        ),
+    )
+    reference = attempt.spawn(child, label="prepared")
+    draft = next(iter(attempt.control.glob("outcome.tmp.*")))
+    registered = json.loads((draft / "children" / "jobs" / reference.job_key / "job.json").read_text(encoding="utf-8"))
+    assert registered["resources"] == {"maxtime": 3600, "mintime": 600}
 
 
 def test_inheriting_a_payload_runner_is_refused_with_a_usable_message(tmp_path: Path) -> None:

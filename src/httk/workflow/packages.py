@@ -25,10 +25,10 @@ from .errors import FormatError
 from .models import (
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
     environment_variable_name,
+    normalize_resources,
     runner_command_reference,
     validate_calls,
     validate_declarations,
-    validate_resources,
     validate_runner_command,
 )
 from .scaffold import DataMode, RecognizeSpec, WorkdirMode, WorkflowProvider, payload_relative, register_workflow
@@ -312,14 +312,14 @@ def _validate_steps(
     directory: Path,
     *,
     language: str | None,
-) -> dict[str, dict[str, int]]:
-    """Validate per-step resource requirements from a workflow manifest."""
+) -> dict[str, Mapping[str, int | str]]:
+    """Validate per-step resource requirements from a workflow manifest, returning them as authored."""
 
     if raw is None:
         return {}
     if language is not None:
         raise _error(directory, "[workflow.steps] requires [workflow.runner].steps")
-    result: dict[str, dict[str, int]] = {}
+    result: dict[str, Mapping[str, int | str]] = {}
     declared = ", ".join(executable_steps) or "none"
     for name, value in raw.items():
         path = f"[workflow.steps.{name}]"
@@ -327,10 +327,12 @@ def _validate_steps(
             raise _error(directory, f"{path} is an unknown step; declared runner steps: {declared}")
         table = _table(value, path, directory)
         _unknown(table, {"resources"}, path, directory)
+        resources = table.get("resources", {})
         try:
-            result[name] = validate_resources(table.get("resources", {}), f"{path}.resources")
+            normalize_resources(resources, f"{path}.resources")
         except FormatError as exc:
             raise _error(directory, str(exc)) from exc
+        result[name] = cast(Mapping[str, int | str], resources)
     return result
 
 
@@ -798,8 +800,10 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
     if workdir_mode not in {"persistent", "isolated"}:
         raise _error(root, "[workflow.runner].workdir_mode must be 'persistent' or 'isolated'")
 
+    # Validated here for a manifest-located error; the provider converts the authored values.
+    resources = cast(Mapping[str, int | str], workflow.get("resources", {}))
     try:
-        resources = validate_resources(workflow.get("resources", {}), "[workflow.resources]")
+        normalize_resources(resources, "[workflow.resources]")
     except FormatError as exc:
         raise _error(root, str(exc)) from exc
     step_resources = _validate_steps(

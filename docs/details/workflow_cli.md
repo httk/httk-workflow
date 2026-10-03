@@ -946,7 +946,9 @@ to the scheduler; local managers also use SLURM allocation variables when
 present. With a local `--count N`, explicit `--worker-resource` pairs are passed
 to every manager verbatim. Only auto-detected SLURM capacities are split across
 the N managers, using quotient-plus-remainder distribution so that their
-aggregate equals the detected allocation. For a resource-aware run, advertise
+aggregate equals the detected allocation. The reserved time labels `maxtime`
+and `mintime` are job requirements and are refused as capacities. For a
+resource-aware run, advertise
 the manager's complete allotment:
 
 ```console

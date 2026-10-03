@@ -394,6 +394,24 @@ def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) ->
     assert "build: yes" in capsys.readouterr().out
 
 
+def test_workflow_describe_renders_time_resources_as_durations(tmp_path: Path, capsys) -> None:
+    package = _package(
+        tmp_path / "timed",
+        _MANIFEST
+        + '\n[workflow.resources]\nmaxtime = "1-0"\nprocs = 4\n'
+        + '\n[workflow.steps.start.resources]\nmaxtime = "90"\n',
+    )
+    context = _context(tmp_path)
+    assert command(["describe", "--json", str(package)], context) == 0
+    described = json.loads(capsys.readouterr().out)[0]
+    assert described["resources"] == {"maxtime": 86400, "procs": 4}
+    assert described["step_resources"] == {"start": {"maxtime": 5400}}
+    assert command(["describe", str(package)], context) == 0
+    text = capsys.readouterr().out
+    assert 'resources: {"maxtime": "1-00:00:00", "procs": 4}' in text
+    assert 'step_resources: {"start": {"maxtime": "01:30:00"}}' in text
+
+
 @pytest.mark.usefixtures("relax_workflow")
 def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)

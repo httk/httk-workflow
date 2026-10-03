@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from httk.core.requirements import parse_requirements, unmet_requirements
 
 from ._calls import unready_calls
+from ._durations import TIME_RESOURCES
 from .errors import (
     FormatError,
     TransitionLostError,
@@ -41,27 +42,59 @@ def effective_requirement(
     capacity: Mapping[str, int],
     maximum_workers: int,
 ) -> dict[str, int]:
-    """Return the resource requirement selected for one ready activation."""
+    """Return the resource requirement selected for one ready activation.
 
-    if state.resources is not None:
-        requirement = dict(state.resources)
-    elif state.step is not None and state.step in job.step_resources:
-        requirement = dict(job.step_resources[state.step])
-    else:
-        requirement = dict(job.resources)
+    Consumable resources resolve wholesale (dynamic frame, then step, then job)
+    and gain this manager's fair share of ``procs`` and ``mem``; a mapping that
+    names only time labels leaves that choice to the next level. The time labels
+    resolve one label at a time through the same precedence.
+    """
+
+    step = job.step_resources.get(state.step) if state.step is not None else None
+    selected = next(
+        mapping
+        for mapping in (state.resources, step, job.resources, {})
+        if mapping is not None and (not mapping or mapping.keys() - TIME_RESOURCES)
+    )
+    requirement = consumable(selected)
     for name in ("procs", "mem"):
         if name in capacity and name not in requirement:
             share = capacity[name] // maximum_workers
             if share == 0 and capacity[name] > 0:
                 share = capacity[name]
             requirement[name] = share
-    return requirement
+    return requirement | time_requirement(job, state)
+
+
+def consumable(requirement: Mapping[str, int]) -> dict[str, int]:
+    """Return the part of *requirement* counted against manager capacity."""
+
+    return {name: value for name, value in requirement.items() if name not in TIME_RESOURCES}
+
+
+def time_requirement(job: JobDefinition, state: StateFrame) -> dict[str, int]:
+    """Return the time labels of one activation, each resolved frame, then step, then job.
+
+    Labels from different levels may disagree, so a resolved ``mintime`` above
+    the resolved ``maxtime`` is lowered to it.
+    """
+
+    step = job.step_resources.get(state.step, {}) if state.step is not None else {}
+    result: dict[str, int] = {}
+    for name in sorted(TIME_RESOURCES):
+        for mapping in (state.resources or {}, step, job.resources):
+            if name in mapping:
+                result[name] = mapping[name]
+                break
+    if "maxtime" in result and result.get("mintime", 0) > result["maxtime"]:
+        result["mintime"] = result["maxtime"]
+    return result
 
 
 def unfit_resource(requirement: Mapping[str, int], capacity: Mapping[str, int]) -> str | None:
-    """Return the first sorted resource key that cannot fit the capacity."""
+    """Return the first sorted consumable resource key that cannot fit the capacity."""
 
-    for name in sorted(requirement):
+    for name in sorted(consumable(requirement)):
         value = requirement[name]
         if name not in capacity or capacity[name] <= 0 or value > capacity[name]:
             return name
@@ -282,7 +315,7 @@ def claim_pass(manager: Any, changed: bool, logger: Any) -> bool:
             "mem" in manager.resources and available["mem"] == 0
         ):
             break
-        if any(value > available.get(name, 0) for name, value in requirement.items()):
+        if any(value > available.get(name, 0) for name, value in consumable(requirement).items()):
             continue
         try:
             changed |= manager._claim_and_launch(marker)

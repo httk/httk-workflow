@@ -59,8 +59,8 @@ from .models import (
     canonical_uuid,
     normalize_placement,
     validate_attempt_control,
+    validate_capacity,
     validate_process,
-    validate_resources,
 )
 from .runtime_builders import RunLog
 from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
@@ -472,7 +472,7 @@ class TaskManager:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
         try:
-            validated_resources = validate_resources({} if resources is None else resources, "manager.resources")
+            validated_resources = validate_capacity({} if resources is None else resources, "manager.resources")
         except FormatError as exc:
             raise ValueError(str(exc)) from exc
         if discovery_budget < 1:

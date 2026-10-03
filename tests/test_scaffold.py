@@ -8,6 +8,7 @@ they *run* are driven to completion by a real
 test-only ``tests.relax`` (``conftest.relax_workflow``).
 """
 
+import dataclasses
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,7 +22,14 @@ from httk.core.register import register_format_serializer, register_reader, regi
 
 from conftest import RELAX_PROVIDER, RELAX_RUNNER, register_ws
 from httk.workflow import FormatError, TaskManager, Workspace, job_records, scaffold
-from httk.workflow.models import JobDefinition, StateFrame, validate_label, validate_resources
+from httk.workflow.models import (
+    JobDefinition,
+    StateFrame,
+    normalize_resources,
+    validate_capacity,
+    validate_label,
+    validate_resources,
+)
 from httk.workflow.postprocessing import run_postprocess_script
 from httk.workflow.runtime_builders import JobSpec
 from httk.workflow.scaffold import (
@@ -81,6 +89,41 @@ def test_resource_requirements_accept_nonnegative_integers(value: object, expect
 def test_resource_requirements_reject_invalid_values(value: object) -> None:
     with pytest.raises(FormatError):
         validate_resources(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ({"maxtime": 0}, "at least 1 second"),
+        ({"maxtime": 60, "mintime": 61}, "must not exceed"),
+        ({"maxtime": "1:00:00"}, "must be an integer"),
+    ],
+)
+def test_protocol_time_resources_are_seconds_within_bounds(value: object, message: str) -> None:
+    assert validate_resources({"maxtime": 60, "mintime": 60}) == {"maxtime": 60, "mintime": 60}
+    with pytest.raises(FormatError, match=message):
+        validate_resources(value)
+
+
+def test_authored_time_resources_are_slurm_durations() -> None:
+    assert normalize_resources({"maxtime": "1:30:00", "mintime": "0", "procs": 2}) == {
+        "maxtime": 5400,
+        "mintime": 0,
+        "procs": 2,
+    }
+    for value in (5400, True, None):
+        with pytest.raises(FormatError, match="Slurm duration"):
+            normalize_resources({"maxtime": value})
+    with pytest.raises(FormatError, match="Slurm duration"):
+        normalize_resources({"mintime": "1.5"})
+    with pytest.raises(FormatError, match="must not exceed"):
+        normalize_resources({"maxtime": "1:00", "mintime": "2:00"})
+
+
+def test_manager_capacity_refuses_time_resources() -> None:
+    assert validate_capacity({"procs": 4}, "manager.resources") == {"procs": 4}
+    with pytest.raises(FormatError, match="job requirement, not a manager capacity"):
+        validate_capacity({"procs": 4, "maxtime": 60}, "manager.resources")
 
 
 def test_job_definition_round_trips_step_resource_requirements() -> None:
@@ -300,6 +343,26 @@ def test_workflow_declarations_are_forwarded_and_digest_covered(
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.declarations == declarations
     assert definition.digest == sha256_file(job.payload / "job.json")
+
+
+def test_provider_time_resources_are_slurm_durations(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = WorkflowProvider(
+        workflow_id="tests.timed",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+        resources={"maxtime": "1:00:00", "procs": 2},
+        step_resources={"run": {"mintime": "10"}},
+    )
+    # replace() keeps the authored form, so nothing is converted twice.
+    provider = dataclasses.replace(provider, alias="test-timed")
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+    definition = JobDefinition.from_path(new_job(workspace, provider.workflow_id).payload / "job.json")
+    assert definition.resources == {"maxtime": 3600, "procs": 2}
+    assert definition.step_resources == {"run": {"mintime": 600}}
+    with pytest.raises(FormatError, match="Slurm duration"):
+        dataclasses.replace(provider, resources={"maxtime": 3600})
 
 
 def test_no_provenance_leaves_declarations_byte_identical(workspace: Workspace, structure: Path) -> None:

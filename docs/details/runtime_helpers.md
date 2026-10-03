@@ -309,7 +309,9 @@ child's default job tag, so its payload directory is readable at a glance.
 
 A `ChildSpec` needs no prepared payload. It synthesizes a complete `job.json`
 from the child's starting step and parameters, and everything else follows
-the spawning job: workflow, claim pool, priority, resources, and runner. The
+the spawning job: workflow, claim pool, priority, resources, and runner. A
+child never inherits `mintime`, and its `maxtime` is capped at the spawning
+attempt's `maxtime`. The
 default, `RunnerRef.inherit()`, copies the parent's own
 `(source, path, sha256)`, which suits a campaign whose steps all live in one
 published runner. `RunnerRef.workspace(path, sha256)` and

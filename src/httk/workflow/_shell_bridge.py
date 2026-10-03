@@ -45,10 +45,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Literal, cast
 
+from ._durations import TIME_RESOURCES
 from ._util import read_json, write_json_atomic
 from .codes import BRIDGE_ABSENT, installed_codes
 from .errors import FormatError
-from .models import validate_resources
+from .models import normalize_resources
 from .runtime import _read_environment
 from .runtime_builders import (
     JobSpec,
@@ -439,25 +440,38 @@ def _assignments(values: Sequence[str], name: str) -> dict[str, object]:
     return result
 
 
-def _resources(values: Sequence[str]) -> dict[str, int] | None:
-    """Parse repeatable ``NAME=INT`` resource arguments."""
+def _resources(values: Sequence[str]) -> dict[str, int | str] | None:
+    """Parse repeatable ``NAME=VALUE`` resource arguments.
+
+    A time label keeps its Slurm duration text, so the outcome draft performs
+    the one conversion to seconds; the mapping is validated here only to
+    refuse a bad spelling early.
+    """
 
     if not values:
         return None
 
-    result: dict[str, int] = {}
+    result: dict[str, int | str] = {}
     for item in values:
         key, separator, text = item.partition("=")
+        refusal = (
+            f"a resource must be spelled NAME=VALUE (an integer, or a Slurm duration for maxtime and mintime), "
+            f"not {item!r}"
+        )
         if not separator or not key or not text:
-            raise _Refused(f"a resource must be spelled NAME=INT, not {item!r}")
+            raise _Refused(refusal)
+        if key in TIME_RESOURCES:
+            result[key] = text
+            continue
         try:
             result[key] = int(text)
         except ValueError as exc:
-            raise _Refused(f"a resource must be spelled NAME=INT, not {item!r}") from exc
+            raise _Refused(refusal) from exc
     try:
-        return validate_resources(result)
+        normalize_resources(result)
     except FormatError as exc:
         raise _Refused(str(exc)) from exc
+    return result
 
 
 def _runner_reference(value: str) -> RunnerRef:

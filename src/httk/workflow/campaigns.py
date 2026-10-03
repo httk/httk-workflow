@@ -38,7 +38,7 @@ from httk.core.cli import CLIContext
 
 from .collecting import DEFAULT_COLLECT_STATES, JobRecord, job_records
 from .errors import FormatError
-from .models import validate_resources
+from .models import validate_capacity
 from .projects import read_project_section, write_project_section
 from .registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from .scaffold import JobItem, ScaffoldedJob, new_job, new_jobs
@@ -350,7 +350,7 @@ def campaign_managers(
     from .workflow_cli._manager import manager_option_defaults
 
     try:
-        manager_resources = validate_resources({} if resources is None else resources, "manager.resources")
+        manager_resources = validate_capacity({} if resources is None else resources, "manager.resources")
     except FormatError as exc:
         raise ValueError(str(exc)) from exc
     worker_resource = [[resource, str(capacity)] for resource, capacity in manager_resources.items()]

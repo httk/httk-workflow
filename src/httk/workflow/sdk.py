@@ -43,6 +43,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, Self, cast, overload
 
+from ._durations import cap_maxtime
 from ._job_tree import is_detached
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
 from .errors import FormatError
@@ -54,6 +55,7 @@ from .models import (
     _matches_environment_type,
     environment_variable_name,
     normalize_placement,
+    normalize_resources,
     parse_job_key,
     validate_declaration_name,
     validate_declarations,
@@ -354,8 +356,10 @@ class ChildSpec:
     :param priority: The child's priority, or the parent's when omitted.
     :param claim_pool: The child's claim pool, or the parent's when omitted.
     :param required_capabilities: Capabilities required by the child.
-    :param resources: Resources requested by the child, or the parent's when omitted.
-    :param step_resources: Per-step resources requested by the child, or the parent's when omitted.
+    :param resources: Resources requested by the child, or the parent's without ``mintime`` when
+        omitted; ``maxtime`` and ``mintime`` are Slurm duration strings.
+    :param step_resources: Per-step resources requested by the child, or the parent's without
+        ``mintime`` when omitted; time labels are spelled as in *resources*.
     :param maximum_attempts_per_activation: The child's per-activation attempt budget.
     :param maximum_total_attempts: The child's total attempt budget.
     :param maximum_activations: The child's activation budget.
@@ -378,17 +382,36 @@ class ChildSpec:
     priority: int | None = None
     claim_pool: str | None = None
     required_capabilities: tuple[str, ...] = ()
-    resources: Mapping[str, int] | None = None
-    step_resources: Mapping[str, Mapping[str, int]] | None = None
+    resources: Mapping[str, int | str] | None = None
+    step_resources: Mapping[str, Mapping[str, int | str]] | None = None
     maximum_attempts_per_activation: int | None = None
     maximum_total_attempts: int | None = None
     maximum_activations: int | None = None
     retry_on: tuple[str, ...] = ()
 
-    def _job_spec(self, parent: JobDefinition, label: str) -> JobSpec:
-        """Return the job specification of this child under *parent*."""
+    def _job_spec(self, parent: JobDefinition, label: str, maxtime_cap: int | None = None) -> JobSpec:
+        """Return the job specification of this child under *parent*.
+
+        A child never inherits ``mintime``, and every ``maxtime`` it ends with
+        is at most *maxtime_cap*, the spawning attempt's effective ``maxtime``.
+        """
 
         executor, source, path, sha256, arguments, command = self.runner._resolve(parent)
+        if self.resources is None:
+            resources = {name: value for name, value in parent.resources.items() if name != "mintime"}
+        else:
+            resources = normalize_resources(self.resources, "child resources")
+        if self.step_resources is None:
+            step_resources = {
+                step: {name: value for name, value in requirement.items() if name != "mintime"}
+                for step, requirement in parent.step_resources.items()
+            }
+        else:
+            step_resources = {
+                step: normalize_resources(requirement, f"child step_resources.{step}")
+                for step, requirement in self.step_resources.items()
+            }
+        resources, step_resources = cap_maxtime(resources, step_resources, maxtime_cap)
         return JobSpec(
             name=self.name or f"{parent.name}: {self.step} ({label})",
             workflow=self.workflow or parent.workflow,
@@ -410,12 +433,8 @@ class ChildSpec:
             maximum_total_attempts=self.maximum_total_attempts,
             maximum_activations=self.maximum_activations,
             retry_on=self.retry_on,
-            resources=dict(parent.resources) if self.resources is None else dict(self.resources),
-            step_resources=(
-                {step: dict(resources) for step, resources in parent.step_resources.items()}
-                if self.step_resources is None
-                else {step: dict(resources) for step, resources in self.step_resources.items()}
-            ),
+            resources=resources,
+            step_resources=step_resources,
             parameters=dict(self.parameters),
             declarations=validate_declarations(self.declarations, "child declarations"),
         )
@@ -1090,6 +1109,10 @@ class Attempt:
         be unique within one attempt: it is how :meth:`gather` and
         :attr:`children` name this child later.
 
+        A :class:`ChildSpec` child never inherits ``mintime``, and its ``maxtime``
+        requirements are capped at this attempt's effective ``maxtime``. A
+        prepared payload directory is registered exactly as written, uncapped.
+
         :param child: The child specification or prepared payload directory.
         :param label: The unique label used to observe the child later.
         :param placement: The workspace placement for the child, or this attempt's placement when omitted.
@@ -1108,7 +1131,7 @@ class Attempt:
             self._check_step(child.step, "spawned child step")
         # Everything this child needs is validated before the draft exists, so a
         # refused spawn leaves the attempt exactly as it found it.
-        spec = child._job_spec(self.job, entry_label)
+        spec = child._job_spec(self.job, entry_label, self.context.resources.get("maxtime"))
         reference = self._require_draft().add_child_job(spec.as_mapping(), target, label=entry_label)
         _LOGGER.debug("spawned %s at step %s as %s", reference.job_key, child.step, entry_label)
         return reference
@@ -1170,6 +1193,9 @@ class Attempt:
         this job when the child is terminal, and read it back through
         :attr:`children`.
 
+        The child takes the called workflow's resources, with every ``maxtime``
+        capped at this attempt's effective ``maxtime``.
+
         A registered packaged workflow is referenced through the reserved
         ``pkg:`` form, so nothing is copied into the workspace runner store; a
         runner file of your own is published into that store instead, which is
@@ -1228,6 +1254,7 @@ class Attempt:
                 step=step,
                 workflow_id=workflow_id,
                 name=name,
+                maxtime_cap=self.context.resources.get("maxtime"),
             )
             # spawn copies the payload tree into the draft at registration time
             # (OutcomeDraft._register_child), so the staging directory is
@@ -1244,7 +1271,7 @@ class Attempt:
         *,
         state: Mapping[str, object] | None = None,
         priority: int | None = None,
-        resources: Mapping[str, int] | None = None,
+        resources: Mapping[str, int | str] | None = None,
     ) -> Path:
         """Publish a new activation of this job at *step*.
 
@@ -1254,7 +1281,8 @@ class Attempt:
         :param step: The next registered step.
         :param state: State members to merge before publication.
         :param priority: The priority of the new activation, when changed.
-        :param resources: The requirement of the new activation, when changed.
+        :param resources: The requirement of the new activation, when changed; ``maxtime`` and
+            ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
         :return: The path of the published outcome.
         :raises RuntimeError: If this attempt already published an outcome.
         """
@@ -1274,7 +1302,7 @@ class Attempt:
         on_impossible: str | None = None,
         rejoin: Iterable[str] = (),
         priority: int | None = None,
-        resources: Mapping[str, int] | None = None,
+        resources: Mapping[str, int | str] | None = None,
     ) -> Path:
         """Wait for this attempt's and optionally earlier children, then run *step*.
 
@@ -1291,7 +1319,8 @@ class Attempt:
         :param on_impossible: The step to run when the condition cannot be met.
         :param rejoin: Labels of children observed by an earlier join activation.
         :param priority: The priority of the join activation, when changed.
-        :param resources: The requirement of the join activation, when changed.
+        :param resources: The requirement of the join activation, when changed; ``maxtime`` and
+            ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
         :return: The path of the published wait outcome.
         :raises ValueError: If no children were spawned or rejoined, a rejoined label is unknown, or a named step is invalid.
         """
@@ -1446,7 +1475,7 @@ class Attempt:
         retry: Mapping[str, object] | None = None,
         join: Mapping[str, object] | None = None,
         pause: Mapping[str, object] | None = None,
-        resources: Mapping[str, int] | None = None,
+        resources: Mapping[str, int | str] | None = None,
     ) -> Path:
         draft = self._require_draft()
         declared = self._undeclared_steps()
