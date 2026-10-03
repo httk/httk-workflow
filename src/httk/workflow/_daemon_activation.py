@@ -46,8 +46,8 @@ def _read_pointer(state: Path) -> bytes:
         information = os.fstat(descriptor)
         if not stat.S_ISREG(information.st_mode):
             raise ValueError("active snapshot pointer must be a regular file")
-        if information.st_mode & 0o022:
-            raise ValueError("active snapshot pointer must not be writable by group or other")
+        if information.st_mode & 0o002:
+            raise ValueError("active snapshot pointer must not be world-writable")
         if information.st_size > _MAX_BYTES:
             raise ValueError("active snapshot pointer is too large")
         data = bytearray()

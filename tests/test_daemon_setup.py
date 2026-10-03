@@ -410,6 +410,25 @@ def test_export_is_exact_and_remains_readable_while_broker_lock_is_held(
     assert str(exported["daemon_public_key"]).startswith("ed25519:")
 
 
+def test_group_writable_policy_and_ancestry_initialize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    layout.policy.chmod(0o660)
+    layout.project.chmod(0o770)
+    snapshot = _daemon_setup.initialize(layout.workspace.root, layout.policy)
+    assert load_policy(snapshot).workspace == layout.workspace.root
+
+
+@pytest.mark.parametrize("target", ["policy", "project"])
+def test_world_writable_policy_or_ancestry_is_refused(
+    target: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    path = layout.policy if target == "policy" else layout.project
+    path.chmod(path.stat().st_mode | 0o002)
+    with pytest.raises(ValueError, match="world-writable"):
+        _daemon_setup.initialize(layout.workspace.root, layout.policy)
+
+
 def test_policy_inside_writable_workspace_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     layout = _layout(tmp_path, monkeypatch)
     inside = layout.workspace.root / "operator.json"

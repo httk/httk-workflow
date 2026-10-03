@@ -110,8 +110,8 @@ def _read_bounded(path: Path, limit: int, *, protected: bool = False) -> bytes:
         information = os.fstat(descriptor)
         if not stat.S_ISREG(information.st_mode):
             raise ValueError(f"expected a regular file: {path}")
-        if protected and information.st_mode & 0o022:
-            raise ValueError(f"protected file must not be writable by group or other: {path}")
+        if protected and information.st_mode & 0o002:
+            raise ValueError(f"protected file must not be world-writable: {path}")
         if information.st_size > limit:
             raise ValueError(f"JSON document is too large: {path}")
         data = bytearray()
@@ -706,8 +706,8 @@ def _mkdir_exclusive(path: Path) -> None:
                 information = os.fstat(next_descriptor)
             mode = stat.S_IMODE(information.st_mode)
             sticky_administrator = information.st_uid == administrator_uid and bool(mode & stat.S_ISVTX)
-            if mode & 0o022 and not sticky_administrator:
-                raise ValueError(f"directory ancestry must not be writable by group or other: {path}")
+            if mode & 0o002 and not sticky_administrator:
+                raise ValueError(f"directory ancestry must not be world-writable: {path}")
             if information.st_uid not in (administrator_uid, os.geteuid()):
                 raise ValueError(f"directory ancestry has foreign ownership: {path}")
             if final and (information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700):

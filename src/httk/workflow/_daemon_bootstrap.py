@@ -102,8 +102,8 @@ def _check_protected_file(path: Path, mutable_roots: tuple[Path, ...] = ()) -> o
         raise ValueError(f"trusted source is unavailable: {path}") from exc
     if not stat.S_ISREG(information.st_mode):
         raise ValueError(f"trusted source must be a regular non-symlink file: {path}")
-    if information.st_mode & 0o022:
-        raise ValueError(f"trusted source must not be writable by group or other: {path}")
+    if information.st_mode & 0o002:
+        raise ValueError(f"trusted source must not be world-writable: {path}")
     if _is_within(path, mutable_roots):
         raise ValueError(f"trusted source must be outside daemon mutable roots: {path}")
     return information
@@ -157,10 +157,10 @@ def _validate_directory(
         raise ValueError(f"protected directory has foreign ownership: {path}")
     if exact_mode is not None and mode != exact_mode:
         raise ValueError(f"protected directory must have mode {exact_mode:04o}: {path}")
-    if exact_mode is None and mode & 0o022:
+    if exact_mode is None and mode & 0o002:
         sticky_root = allow_root_sticky_parent and information.st_uid == 0 and bool(mode & stat.S_ISVTX)
         if not sticky_root:
-            raise ValueError(f"protected directory must not be writable by group or other: {path}")
+            raise ValueError(f"protected directory must not be world-writable: {path}")
     return information
 
 
@@ -430,7 +430,7 @@ def _check_command(path: Path, approved: tuple[Path, ...], mutable_roots: tuple[
     information = resolved.stat()
     if not stat.S_ISREG(information.st_mode) or information.st_mode & 0o111 == 0:
         raise ValueError(f"trusted command must be an executable regular file: {path}")
-    if information.st_uid not in (0, os.geteuid()) or information.st_mode & 0o022:
+    if information.st_uid not in (0, os.geteuid()) or information.st_mode & 0o002:
         raise ValueError(f"trusted command has unprotected ownership or mode: {path}")
 
 

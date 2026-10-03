@@ -538,8 +538,8 @@ def _read_policy_bytes(path: Path) -> bytes:
         information = os.fstat(descriptor)
         if not stat.S_ISREG(information.st_mode):
             raise ValueError("policy source must be a regular file")
-        if information.st_mode & 0o022:
-            raise ValueError("policy source must not be writable by group or other")
+        if information.st_mode & 0o002:
+            raise ValueError("policy source must not be world-writable")
         if information.st_size > MAX_POLICY_BYTES:
             raise ValueError("policy document is too large")
         data = bytearray()

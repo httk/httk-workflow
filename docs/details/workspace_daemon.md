@@ -150,6 +150,12 @@ Initialization derives the workspace identity and creates a fresh enrollment.
 The active approval pointer lives in private state. Keep state, snapshots,
 policy and trusted code outside writable exports.
 
+The policy and trusted runtime files must be owned by you or root, and
+neither they nor the directories leading to the policy and snapshots may be
+world-writable. Group write permission is accepted, so
+anyone in a file's group is trusted like you; on a host with shared project
+groups, remove group write with `chmod g-w`.
+
 ### Initializing and running
 
 ```console

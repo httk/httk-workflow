@@ -368,10 +368,26 @@ def test_mutable_root_symlink_is_refused(tmp_path: Path, mode: str) -> None:
 
 def test_policy_file_must_be_protected(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
-    policy_path.chmod(0o620)
+    policy_path.chmod(0o602)
     result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--mode", "broker"])
     assert result.returncode == 2
-    assert "writable by group or other" in result.stderr
+    assert "world-writable" in result.stderr
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("target", ["policy", "bwrap"])
+def test_group_writable_sources_are_accepted_but_world_writable_refused(target: str, tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    path = policy_path if target == "policy" else Path(policy["bwrap"])
+    base = path.stat().st_mode & 0o7777
+    arguments = ["--workspace", str(policy["workspace"]), "--mode", "broker", "--once"]
+    path.chmod(base | 0o020)
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 0, result.stderr
+    record.unlink()
+    path.chmod(base | 0o002)
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 2
     assert not record.exists()
 
 
