@@ -1,6 +1,7 @@
 """Filesystem workflow task manager for the current core profile."""
 
 import logging
+import math
 import os
 import re
 import signal
@@ -204,7 +205,8 @@ class WorkCensus:
     ``ready_blocked`` groups the ready and unregisterable-submitted jobs this
     manager cannot progress by the requirement it lacks — ``executor``, ``pool``,
     ``capability``, ``requirements`` (an unmet ``requires`` entry of the job, checked in
-    this manager's environment), or ``resources`` — mapping each requirement to the count of jobs it would
+    this manager's environment), ``resources``, or ``time`` (a ``mintime`` beyond the
+    time left before this manager's drain start, or ``drain_point`` once it has passed) — mapping each requirement to the count of jobs it would
     turn away. Every such job is attributed to exactly one requirement, so the
     grouped counts sum to :attr:`ready_blocked_total`.
 
@@ -247,11 +249,14 @@ class WorkCensus:
 
     def _blocked_groups(self) -> list[str]:
         groups: list[str] = []
-        for kind in ("executor", "pool", "capability", "requirements", "calls", "resources"):
+        for kind in ("executor", "pool", "capability", "requirements", "calls", "resources", "time"):
             for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
-                label = {"resources": f"resource={name}", "requirements": f"requires {name}", "calls": name}.get(
-                    kind, f"{kind}={name}"
-                )
+                label = {
+                    "resources": f"resource={name}",
+                    "requirements": f"requires {name}",
+                    "calls": name,
+                    "time": "past the drain point" if name == "drain_point" else f"{name} beyond the time left",
+                }.get(kind, f"{kind}={name}")
                 groups.append(f"{label}: {count}")
         return groups
 
@@ -274,6 +279,26 @@ class WorkCensus:
             line += f", {self.unreadable} with an unreadable definition"
         return line
 
+    def time_advice(self) -> str | None:
+        """Explain the ready jobs held back by this manager's allocation end.
+
+        :return: The advice, or ``None`` when no job is held back for time.
+        """
+
+        timed = self.ready_blocked.get("time", {})
+        parts: list[str] = []
+        if timed.get("mintime"):
+            parts.append(
+                f"{timed['mintime']} ready job(s) need more time than this manager has left; start a manager "
+                "with a longer allocation (slurm.time_limit / --time-limit) or lower the jobs' mintime"
+            )
+        if timed.get("drain_point"):
+            parts.append(
+                f"{timed['drain_point']} ready job(s) wait because this manager is past its drain point; "
+                "start a manager with a fresh allocation"
+            )
+        return "; ".join(parts) or None
+
     def mismatch_advice(self) -> str | None:
         """Name the requirements blocked jobs need that this manager lacks.
 
@@ -286,9 +311,11 @@ class WorkCensus:
         resources = sorted(self.ready_blocked.get("resources", {}))
         requirements = sorted(self.ready_blocked.get("requirements", {}))
         calls = sorted(self.ready_blocked.get("calls", {}))
+        time_advice = self.time_advice()
+        timed = time_advice is not None
         if not (pools or capabilities or executors or resources or requirements or calls):
-            return None
-        if resources and not (pools or capabilities or executors or requirements or calls):
+            return time_advice
+        if resources and not (pools or capabilities or executors or requirements or calls or timed):
             count = sum(self.ready_blocked["resources"].values())
             names = ", ".join(f"`{name}`" for name in resources)
             resource_flags = " ".join(f"--worker-resource {name} COUNT" for name in resources)
@@ -328,10 +355,12 @@ class WorkCensus:
                 "(a running manager notices within a minute)"
             )
         remedy = "; ".join(remedies) if remedies else "start a manager that serves them"
-        return (
-            f"{self.ready_blocked_total} job(s) cannot be claimed here because this manager does not serve "
-            f"{'; '.join(lacks)}; {remedy}, or pass --idle to keep serving"
+        advice = (
+            f"{self.ready_blocked_total - sum(self.ready_blocked.get('time', {}).values())} job(s) cannot be "
+            f"claimed here because this manager does not serve {'; '.join(lacks)}; {remedy}, "
+            "or pass --idle to keep serving"
         )
+        return advice if time_advice is None else f"{advice}; {time_advice}"
 
     def timeout_message(self, seconds: float) -> str:
         """Render the not-idle advice, naming mismatches when there are any.
@@ -394,6 +423,7 @@ class RunningAttempt:
     :param timeout_kill_at: Escalate a timed-out attempt to ``SIGKILL`` at this
         monotonic time, or ``None`` once escalated or before a timeout.
     :param timed_out: Mark an attempt this manager stopped for exceeding its ``maxtime``.
+    :param interrupted: Mark an attempt this manager signalled while draining.
     """
 
     marker: Marker
@@ -418,6 +448,7 @@ class RunningAttempt:
     owner_uid: int | None = None
     timeout_kill_at: float | None = None
     timed_out: bool = False
+    interrupted: bool = False
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
@@ -449,6 +480,8 @@ class TaskManager:
     :param gc_interval: Run background collection at this interval when supplied.
     :param on_attached: Call this after the manager directory and heartbeat are
         published, before startup collection runs.
+    :param end_time: The epoch second this manager's allocation ends, or ``None`` when unknown.
+    :param deadline_margin: Stop claiming work this many seconds before *end_time*.
     :raises ValueError: If a manager limit is invalid or executor configuration conflicts.
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
     """
@@ -478,6 +511,8 @@ class TaskManager:
         runner_modules: Iterable[str] = DEFAULT_RUNNER_MODULES,
         gc_interval: float | None = None,
         on_attached: Callable[[str], None] | None = None,
+        end_time: float | None = None,
+        deadline_margin: float = 120.0,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
@@ -497,6 +532,10 @@ class TaskManager:
             raise ValueError("maximum_pass_markers must be positive")
         if takeover_grace_factor < 1.0:
             raise ValueError("takeover_grace_factor cannot be shorter than one lease")
+        if end_time is not None and not (math.isfinite(end_time) and end_time > 0):
+            raise ValueError("end_time must be a finite positive epoch second")
+        if not (math.isfinite(deadline_margin) and deadline_margin >= 0):
+            raise ValueError("deadline_margin cannot be negative")
         if workspace.core_profile != CORE_PROFILE:
             # Serving a workspace means writing it, so an older profile is
             # refused here as well as at attach time.
@@ -514,6 +553,10 @@ class TaskManager:
         self.capabilities = frozenset(capabilities)
         self.resources = validated_resources
         self.maximum_workers = maximum_workers
+        self.end_time = end_time
+        # The epoch second this manager stops claiming work that cannot fit, or
+        # None when its allocation end is unknown.
+        self.drain_start = None if end_time is None else end_time - deadline_margin
         # A lease is workspace policy unless this manager overrides it, so two
         # managers of one workspace expire each other's claims consistently.
         self.lease_seconds = workspace.policy.lease_seconds if lease_seconds is None else lease_seconds
@@ -585,8 +628,7 @@ class TaskManager:
         # Repeating anomaly key -> last reported text, so a permanently broken
         # job is reported loudly once instead of once per poll interval.
         self._reported: dict[str, str] = {}
-        self._draining = False
-        self._drain_signals = 0
+        self._reset_drain()
         self._closed = False
         write_json_atomic(
             self._manager_dir / "manager.json",
@@ -605,6 +647,9 @@ class TaskManager:
                 "runner_search_paths": [str(path) for path in self.runner_search_paths],
                 "runner_modules": list(self.runner_modules),
                 "accept_any_pool": self.accept_any_pool,
+                "resources": dict(self.resources),
+                "end_time": self.end_time,
+                "drain_start": self.drain_start,
                 "started_at": utc_now(),
             },
             durable=workspace.durable,
@@ -623,6 +668,12 @@ class TaskManager:
             self.maximum_workers,
             extra=self._event("manager_started", workspace=str(self.workspace.root)),
         )
+        if self.drain_start is not None and self.drain_start <= time.time():
+            _LOGGER.warning(
+                "the allocation's drain point passed %.0f s before this manager started; it will claim nothing",
+                time.time() - self.drain_start,
+                extra=self._event("drain_point_passed", end_time=self.end_time),
+            )
         for name in self.allowed_executors:
             try:
                 self.executors[name].reconcile(self.workspace)
@@ -726,10 +777,12 @@ class TaskManager:
             ),
         )
 
-    def _has_live_owned_marker(self) -> bool:
-        """Return whether this manager still owns a live-kind state marker."""
+    def _has_live_owned_marker(
+        self, kinds: tuple[str, ...] = ("claimed", "running", "committing", "cancelling")
+    ) -> bool:
+        """Return whether this manager still owns a state marker of one of *kinds*."""
 
-        for marker in self.workspace.scan_markers(("claimed", "running", "committing", "cancelling")):
+        for marker in self.workspace.scan_markers(kinds):
             try:
                 state = self.workspace.read_state(marker)
             except (WorkflowError, OSError):
@@ -1253,8 +1306,7 @@ class TaskManager:
         """
 
         previous: dict[int, Any] = {}
-        self._draining = False
-        self._drain_signals = 0
+        self._reset_drain()
         for number in _DRAIN_SIGNALS:
             try:
                 previous[number] = signal.signal(number, self._request_drain)
@@ -1272,14 +1324,112 @@ class TaskManager:
             _LOGGER.info("interrupted; stopping without a drain", extra=self._event("interrupted"))
         finally:
             for installed, handler in previous.items():
-                signal.signal(installed, handler)
+                # None means a handler not installed from Python, which cannot be restored.
+                if handler is not None:
+                    signal.signal(installed, handler)
             self._draining = False
+
+    def _reset_drain(self) -> None:
+        """Forget any earlier drain before a manager loop starts."""
+
+        self._draining = False
+        self._drain_signals = 0
+        # Why the last drain started, or None while no drain has started.
+        self._drain_reason: str | None = None
+        self._drain_deadline: float | None = None
+        self._drain_kill_at: float | None = None
+
+    @property
+    def running_attempts(self) -> int:
+        """The number of local attempts this manager still tracks."""
+
+        return len(self._running)
+
+    @property
+    def drained(self) -> str | None:
+        """Why the last manager loop drained (``"signal"`` or ``"deadline"``), or ``None``."""
+
+        return self._drain_reason
 
     def _request_drain(self, number: int, frame: FrameType | None) -> None:
         """Record one drain request from a signal handler."""
 
         self._drain_signals += 1
         self._draining = True
+
+    def _deadline_reached(self) -> bool:
+        """Return whether this manager's drain start has passed."""
+
+        return self.drain_start is not None and time.time() >= self.drain_start
+
+    def _drain_begin(self, *, drain_timeout: float, drain_grace_seconds: float) -> bool:
+        """Start a due drain before one tick, returning whether the loop must stop.
+
+        Both manager loops share this state machine: the allocation's drain start
+        or a stop signal starts the drain, a second signal ends it at once.
+        """
+
+        end_time = self.end_time
+        if not self._draining and end_time is not None and self._deadline_reached():
+            self._draining = True
+            self._drain_reason = "deadline"
+            _LOGGER.info(
+                "drain point reached with %s left before the allocation ends; draining",
+                format_duration(max(0, int(end_time - time.time()))),
+                extra=self._event("drain_deadline", end_time=end_time),
+            )
+        # A signal during a drain the deadline started is already a second request.
+        if self._drain_signals >= (1 if self._drain_reason == "deadline" else 2):
+            _LOGGER.warning(
+                "%s: killing %d running attempt(s) and exiting",
+                "stop signal during the deadline drain" if self._drain_reason == "deadline" else "second stop signal",
+                len(self._running),
+                extra=self._event("drain_forced", attempts=len(self._running)),
+            )
+            self._signal_running_attempts(signal.SIGKILL)
+            return True
+        if self._draining and self._drain_deadline is None:
+            self._drain_reason = self._drain_reason or "signal"
+            now = time.monotonic()
+            self._drain_deadline = now + drain_timeout
+            self._drain_kill_at = now + drain_grace_seconds
+            _LOGGER.info(
+                "draining: terminating %d running attempt(s) with a %.0fs timeout",
+                len(self._running),
+                drain_timeout,
+                extra=self._event("drain_started", attempts=len(self._running), reason=self._drain_reason),
+            )
+            self._signal_running_attempts(signal.SIGTERM)
+        return False
+
+    def _drain_after_tick(self) -> bool:
+        """Advance a started drain after one tick, returning whether the loop must stop."""
+
+        if not self._draining or self._drain_deadline is None:
+            return False
+        now = time.monotonic()
+        # An outcome already committed may still sit in this manager's committing marker.
+        if not self._running and not self._has_live_owned_marker(("committing",)):
+            _LOGGER.info("drain complete: no local attempt remains", extra=self._event("drain_complete"))
+            return True
+        if now >= self._drain_deadline:
+            _LOGGER.warning(
+                "drain timeout expired with %d attempt(s) unreaped%s; leaving them to lease recovery",
+                len(self._running),
+                "" if self._running else " and a committing marker of this manager pending",
+                extra=self._event("drain_timeout", attempts=len(self._running)),
+            )
+            self._signal_running_attempts(signal.SIGKILL)
+            return True
+        if self._drain_kill_at is not None and now >= self._drain_kill_at:
+            _LOGGER.warning(
+                "drain grace expired: killing %d running attempt(s)",
+                len(self._running),
+                extra=self._event("drain_kill", attempts=len(self._running)),
+            )
+            self._signal_running_attempts(signal.SIGKILL)
+            self._drain_kill_at = None
+        return False
 
     def _serve_loop(
         self,
@@ -1288,50 +1438,10 @@ class TaskManager:
         drain_timeout: float,
         drain_grace_seconds: float,
     ) -> None:
-        drain_deadline: float | None = None
-        kill_at: float | None = None
-        while True:
-            if self._drain_signals >= 2:
-                _LOGGER.warning(
-                    "second stop signal: killing %d running attempt(s) and exiting",
-                    len(self._running),
-                    extra=self._event("drain_forced", attempts=len(self._running)),
-                )
-                self._signal_running_attempts(signal.SIGKILL)
-                return
-            if self._draining and drain_deadline is None:
-                now = time.monotonic()
-                drain_deadline = now + drain_timeout
-                kill_at = now + drain_grace_seconds
-                _LOGGER.info(
-                    "draining: terminating %d running attempt(s) with a %.0fs timeout",
-                    len(self._running),
-                    drain_timeout,
-                    extra=self._event("drain_started", attempts=len(self._running)),
-                )
-                self._signal_running_attempts(signal.SIGTERM)
+        while not self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
             self.tick()
-            if self._draining and drain_deadline is not None:
-                now = time.monotonic()
-                if not self._running:
-                    _LOGGER.info("drain complete: no local attempt remains", extra=self._event("drain_complete"))
-                    return
-                if now >= drain_deadline:
-                    _LOGGER.warning(
-                        "drain timeout expired with %d attempt(s) unreaped; leaving them to lease recovery",
-                        len(self._running),
-                        extra=self._event("drain_timeout", attempts=len(self._running)),
-                    )
-                    self._signal_running_attempts(signal.SIGKILL)
-                    return
-                if kill_at is not None and now >= kill_at:
-                    _LOGGER.warning(
-                        "drain grace expired: killing %d running attempt(s)",
-                        len(self._running),
-                        extra=self._event("drain_kill", attempts=len(self._running)),
-                    )
-                    self._signal_running_attempts(signal.SIGKILL)
-                    kill_at = None
+            if self._drain_after_tick():
+                return
             time.sleep(min(poll_interval, 0.25) if self._draining else poll_interval)
 
     def _signal_running_attempts(self, signal_number: int) -> int:
@@ -1342,6 +1452,9 @@ class TaskManager:
             if attempt.process.poll() is not None:
                 continue
             self._terminate_process(attempt.process.pid, signal_number)
+            # Only a drain signals every attempt, and an attempt it stops
+            # without an outcome is lost to the manager, not failed by itself.
+            attempt.interrupted = True
             signalled += 1
             _LOGGER.info(
                 "sent signal %d to attempt %s process group %d",
@@ -1357,7 +1470,14 @@ class TaskManager:
             )
         return signalled
 
-    def run_until_idle(self, *, timeout: float = 60.0, poll_interval: float = 0.02) -> WorkCensus:
+    def run_until_idle(
+        self,
+        *,
+        timeout: float = 60.0,
+        poll_interval: float = 0.02,
+        drain_timeout: float = 30.0,
+        drain_grace_seconds: float = 10.0,
+    ) -> WorkCensus:
         """Run until no local process or claimable marker remains, and report it.
 
         A job this manager cannot progress — one whose pool, capability, or
@@ -1365,29 +1485,66 @@ class TaskManager:
         operator — does not keep it awake: it is counted in the returned census
         instead. The census is what the caller prints as the idle summary.
 
+        A ``SIGTERM`` (not ``SIGINT``) or reaching the allocation's drain start
+        drains the manager as :meth:`serve` does and then returns the census; a
+        ``SIGTERM`` during a deadline drain, or a second one during a signal
+        drain, kills the local attempts and returns at once. When the allocation
+        end time is known, running attempts keep extending *timeout*: the
+        deadline drain bounds them, and the timeout still ends a manager that
+        makes no progress with nothing running.
+
         :param timeout: Stop waiting after this many seconds.
         :param poll_interval: Wait this long between scheduling passes.
+        :param drain_timeout: Stop draining after this much time.
+        :param drain_grace_seconds: Kill attempts after this much drain grace.
         :return: The work census of the settled workspace.
-        :raises httk.workflow.manager.NotIdleError: If the manager does not become idle before the timeout.
+        :raises httk.workflow.manager.NotIdleError: If the manager does not become idle
+            before the timeout, extended by running attempts when the allocation end is known.
         """
 
-        deadline = time.monotonic() + timeout
-        quiet_passes = 0
-        while time.monotonic() < deadline:
-            changed = self.tick()
-            if changed or self._running:
-                quiet_passes = 0
+        self._reset_drain()
+        previous: Any = None
+        try:
+            previous = signal.signal(signal.SIGTERM, self._request_drain)
+        except ValueError:
+            _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", signal.SIGTERM)
+        if self.end_time is not None:
+            _LOGGER.debug("running attempts extend the %.0fs idle timeout up to the allocation's drain point", timeout)
+        try:
+            deadline = time.monotonic() + timeout
+            quiet_passes = 0
+            while True:
+                if self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
+                    return self._work_census()
+                if self.end_time is not None and self._running:
+                    # The drain point bounds running attempts; the timeout
+                    # still ends a manager making no progress with none.
+                    deadline = time.monotonic() + timeout
+                if not self._draining and time.monotonic() >= deadline:
+                    raise NotIdleError(self._work_census())
+                changed = self.tick()
+                if self._draining:
+                    if self._drain_after_tick():
+                        return self._work_census()
+                    time.sleep(min(poll_interval, 0.25))
+                    continue
+                if changed or self._running:
+                    quiet_passes = 0
+                    time.sleep(poll_interval)
+                    continue
+                census = self._work_census()
+                if census.actionable:
+                    quiet_passes = 0
+                else:
+                    quiet_passes += 1
+                    if quiet_passes >= 2:
+                        return census
                 time.sleep(poll_interval)
-                continue
-            census = self._work_census()
-            if census.actionable:
-                quiet_passes = 0
-            else:
-                quiet_passes += 1
-                if quiet_passes >= 2:
-                    return census
-            time.sleep(poll_interval)
-        raise NotIdleError(self._work_census())
+        finally:
+            # None means no handler was installed here, or one not installed from Python.
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+            self._draining = False
 
     def _work_census(self) -> WorkCensus:
         return _manager_scheduling.work_census(self)
@@ -1908,12 +2065,18 @@ class TaskManager:
             extra=self._event("launch", running, **launch_fields),
         )
 
-    @staticmethod
-    def _attempt_deadline(requirement: Mapping[str, int]) -> int | None:
-        """Return the epoch second at which an attempt launched now is stopped."""
+    def _attempt_deadline(self, requirement: Mapping[str, int]) -> int | None:
+        """Return the epoch second an attempt launched now must finish by.
 
-        maxtime = requirement.get("maxtime")
-        return None if maxtime is None else int(time.time()) + maxtime
+        It is the earlier of its ``maxtime`` deadline and this manager's drain start.
+        """
+
+        candidates: list[int] = []
+        if "maxtime" in requirement:
+            candidates.append(int(time.time()) + requirement["maxtime"])
+        if self.drain_start is not None:
+            candidates.append(int(self.drain_start))
+        return min(candidates, default=None)
 
     def _enforce_deadlines(self) -> bool:
         """Stop every local attempt that has run longer than its ``maxtime``.
@@ -1924,6 +2087,9 @@ class TaskManager:
         published and otherwise fails the attempt with ``timeout``.
         """
 
+        if self._draining:
+            # The drain is already stopping every attempt on its own clock.
+            return False
         changed = False
         now = time.monotonic()
         for local in self._running.values():
@@ -2049,6 +2215,15 @@ class TaskManager:
                     "timeout",
                     f"attempt exceeded its maxtime {format_duration(local.maxtime)}",
                     exit_status=return_code,
+                )
+            elif local.interrupted:
+                self._handle_attempt_failure(
+                    marker,
+                    job,
+                    "lease_lost",
+                    f"the manager drained before the attempt finished ({self._drain_reason or 'signal'})",
+                    exit_status=return_code,
+                    unclean=True,
                 )
             else:
                 code = "protocol_error" if return_code == 0 else "process_failure"

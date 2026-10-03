@@ -6,12 +6,15 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
 from httk.core.cli import CLIContext
 
+from .._allocation import slurm_end_time
+from .._durations import format_duration, parse_slurm_duration
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
@@ -32,6 +35,11 @@ from ._common import (
     remote_workspace_output,
 )
 
+_TIME_LIMIT_HELP = (
+    "this manager's allocation ends after DURATION (Slurm --time syntax such as 12:00:00); "
+    "default: the Slurm job's end time when running inside one"
+)
+_DEADLINE_MARGIN_HELP = "start draining this many seconds before the allocation ends (default: 120)"
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
 
 
@@ -152,6 +160,65 @@ def _slurm_resources(environ: Mapping[str, str]) -> dict[str, int]:
     return resources
 
 
+def _time_limit_seconds(arguments: argparse.Namespace) -> int | None:
+    """Return the parsed ``--time-limit``, or ``None`` when it is not given.
+
+    :param arguments: The parsed manager options.
+    :return: The allocation length in seconds.
+    :raises ValueError: If the duration is not a Slurm ``--time`` duration.
+    """
+
+    text = getattr(arguments, "time_limit", None)
+    if text is None:
+        return None
+    try:
+        return parse_slurm_duration(text)
+    except ValueError as exc:
+        raise ValueError(f"--time-limit: {exc}") from exc
+
+
+def _effective_margin(arguments: argparse.Namespace) -> float:
+    """Return ``--deadline-margin`` raised to at least ``--drain-timeout``."""
+
+    return max(getattr(arguments, "deadline_margin", 120.0), getattr(arguments, "drain_timeout", 30.0))
+
+
+def _manager_end_time(arguments: argparse.Namespace, environ: Mapping[str, str]) -> tuple[float | None, float]:
+    """Return when this manager's allocation ends and the deadline margin it drains with.
+
+    ``--time-limit`` counts from now; with the enclosing Slurm job's end time also
+    known, the earlier of the two wins. The margin is ``--deadline-margin`` raised
+    to ``--drain-timeout``, so draining can finish before the allocation ends.
+
+    :param arguments: The parsed manager options.
+    :param environ: The environment to read the Slurm job's end time from.
+    :return: The allocation end time, or ``None`` when unknown, and the margin.
+    :raises ValueError: If ``--time-limit`` is invalid.
+    """
+
+    seconds = _time_limit_seconds(arguments)
+    slurm = slurm_end_time(environ)
+    limit = None if seconds is None else time.time() + seconds
+    if limit is not None and slurm is not None and limit > slurm:
+        _LOGGER.warning(
+            "--time-limit %s ends after the Slurm job does; using the Slurm job's end time",
+            arguments.time_limit,
+        )
+    ends = [value for value in (limit, slurm) if value is not None]
+    margin = _effective_margin(arguments)
+    if ends and margin > getattr(arguments, "deadline_margin", 120.0):
+        _LOGGER.warning(
+            "raising --deadline-margin to the --drain-timeout of %g s so draining finishes before the allocation ends",
+            margin,
+        )
+    return min(ends, default=None), margin
+
+
+def _add_time_limit_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--time-limit", metavar="DURATION", help=_TIME_LIMIT_HELP)
+    parser.add_argument("--deadline-margin", type=float, metavar="SECONDS", help=_DEADLINE_MARGIN_HELP)
+
+
 def _add_worker_resource_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--worker-resource",
@@ -202,6 +269,8 @@ def manager_option_defaults() -> dict[str, object]:
         "takeover_grace_factor": DEFAULT_TAKEOVER_GRACE_FACTOR,
         "runner_search_path": [],
         "drain_timeout": 30.0,
+        "time_limit": None,
+        "deadline_margin": 120.0,
         "gc_interval": None,
         "log_level": None,
         "log_file": None,
@@ -317,8 +386,12 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--drain-timeout",
         type=float,
         metavar="SECONDS",
-        help="seconds to keep committing outcomes after a stop signal (default: 30)",
+        help=(
+            "seconds to keep committing outcomes after a drain starts "
+            "(stop signal or the allocation's drain point) (default: 30)"
+        ),
     )
+    _add_time_limit_arguments(parser)
     parser.add_argument(
         "--gc-interval",
         type=float,
@@ -461,8 +534,12 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--drain-timeout",
         type=float,
         metavar="SECONDS",
-        help="seconds to keep committing outcomes after a stop signal (default: 30)",
+        help=(
+            "seconds to keep committing outcomes after a drain starts "
+            "(stop signal or the allocation's drain point) (default: 30)"
+        ),
     )
+    _add_time_limit_arguments(parser)
     parser.add_argument("--gc-interval", type=float, metavar="SECONDS", help="background garbage collection interval")
     parser.add_argument("--log-file", metavar="PATH", help="manager log file")
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
@@ -514,6 +591,20 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--runner-search-path", path]
     if changed("drain_timeout"):
         argv += ["--drain-timeout", str(arguments.drain_timeout)]
+    # Parsed here because every launch path builds this tail first: a bad
+    # duration fails before any manager is started.
+    seconds = _time_limit_seconds(arguments)
+    if seconds is not None:
+        if seconds <= _effective_margin(arguments):
+            raise ValueError(
+                f"--time-limit {format_duration(seconds)} does not exceed the "
+                f"{_effective_margin(arguments):g} s deadline margin"
+            )
+        argv += ["--time-limit", arguments.time_limit]
+    if changed("deadline_margin"):
+        if arguments.deadline_margin < 0:
+            raise ValueError("--deadline-margin cannot be negative")
+        argv += ["--deadline-margin", str(arguments.deadline_margin)]
     if getattr(arguments, "gc_interval", None) is not None:
         argv += ["--gc-interval", str(arguments.gc_interval)]
     if getattr(arguments, "log_level", None) is not None:
@@ -631,6 +722,9 @@ def _run_in_process_manager(
     configure_logging(
         level=getattr(arguments, "log_level", None) or "warning", json_logs=getattr(arguments, "json_logs", False)
     )
+    # After configure_logging so its warnings are formatted; managers.log only
+    # attaches inside TaskManager, which needs the end time first.
+    end_time, deadline_margin = _manager_end_time(arguments, os.environ)
     log_file = Path(arguments.log_file) if getattr(arguments, "log_file", None) else workspace.control / "managers.log"
 
     def install_manager_log(manager_id: str) -> None:
@@ -661,13 +755,17 @@ def _run_in_process_manager(
         runner_search_paths=getattr(arguments, "runner_search_path", []),
         gc_interval=getattr(arguments, "gc_interval", None),
         on_attached=install_manager_log,
+        end_time=end_time,
+        deadline_margin=deadline_margin,
     ) as manager:
+        ends = "" if end_time is None else f", ends={format_duration(max(0, int(end_time - time.time())))}"
         serving_line = (
             f"manager {manager.manager_id} serving {workspace.root} "
             f"(pools={','.join(sorted(manager.pools)) or '-'}, "
             f"capabilities={','.join(sorted(manager.capabilities)) or '-'}, "
             f"executors={','.join(sorted(manager.allowed_executors))}, "
-            f"resources={','.join(f'{name}={value}' for name, value in manager.resources.items()) or '-'}); log {log_file}"
+            f"resources={','.join(f'{name}={value}' for name, value in manager.resources.items()) or '-'}{ends}); "
+            f"log {log_file}"
         )
         print(serving_line, file=sys.stderr)
         _LOGGER.info("%s", serving_line)
@@ -681,11 +779,21 @@ def _run_in_process_manager(
                 census = manager.run_until_idle(
                     timeout=getattr(arguments, "idle_timeout", 3600.0),
                     poll_interval=getattr(arguments, "poll_interval", 1.0),
+                    drain_timeout=getattr(arguments, "drain_timeout", 30.0),
                 )
             except NotIdleError as exc:
                 print(exc.census.timeout_message(getattr(arguments, "idle_timeout", 3600.0)), file=sys.stderr)
                 return 2
-            print(census.summary_line(), file=sys.stderr)
+            if manager.drained is not None:
+                print(
+                    f"drained ({manager.drained}): {manager.running_attempts} attempt(s) left to lease recovery",
+                    file=sys.stderr,
+                )
+            else:
+                print(census.summary_line(), file=sys.stderr)
+            advice = census.time_advice()
+            if advice is not None:
+                print(advice, file=sys.stderr)
     return 0
 
 

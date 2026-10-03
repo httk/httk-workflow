@@ -215,6 +215,8 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     assert code == 0
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "failed"
+    # Stopped by the drain without an outcome: lost to the manager, not failed by itself.
+    assert workspace.read_state(marker)["failure"]["code"] == "lease_lost"
     log = workspace.control / "managers.log"
     assert log.is_file() and not list((workspace.control / "managers").iterdir())
     events = [json.loads(line).get("event") for line in log.read_text(encoding="utf-8").splitlines() if line]

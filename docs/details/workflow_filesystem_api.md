@@ -1349,6 +1349,10 @@ cannot serve as `no_live_attempt` or as proof that the application never ran.
 ### Heartbeats and manager logs
 
 Managers update `managers/<manager-id>/heartbeat.json` by atomic replacement.
+`manager.json` records the manager's identity and what it serves, including
+its `resources` capacity, `end_time`, the epoch second its allocation ends,
+and `drain_start`, the epoch second it stops claiming and drains (both `null`
+when unknown; absent from older managers).
 The directory holds only `manager.json` and `heartbeat.json` and is removed when
 the manager exits cleanly; after a crash it awaits policy-gated
 `manager_directories` collection.
@@ -1554,8 +1558,8 @@ HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 ```
 
 `HTTK_WORKFLOW_DATA_DIR` is set only for transactional-data jobs.
-`HTTK_WORKFLOW_DEADLINE` is set only for an attempt with a `maxtime`; it
-carries the context's `deadline` member.
+`HTTK_WORKFLOW_DEADLINE` is set exactly when the context has a `deadline`
+member and carries it.
 `HTTK_WORKFLOW_RUNNER_ROOT` names a shared runner's file or tree root. The JSON
 document is the source of truth; the scalar variables are language-neutral
 conveniences.
@@ -1637,9 +1641,11 @@ selected for the launched activation, including the resolved `maxtime` and
 `mintime` in seconds, so a runner can use it as the manager's placement
 decision without re-resolving the job declaration.
 
-The context's `deadline` member, present exactly when the effective requirement
-has a `maxtime`, is the integer epoch second (launch time plus `maxtime`); the
-manager stops the attempt at or shortly after it, never before. A runner that wants to checkpoint or
+The context's `deadline` member is the integer epoch second by which the
+attempt must finish: the earlier of launch time plus the effective `maxtime`
+and the launching manager's drain point (its allocation end minus its deadline
+margin). It is present exactly when either exists. The manager stops the
+attempt at or shortly after it, never before. A runner that wants to checkpoint or
 publish a `retry` before it is stopped watches this rather than recomputing it.
 A context written before the member existed has no time limit.
 
@@ -1787,7 +1793,10 @@ If a process exits without an outcome:
 - exit status zero is a `protocol_error`, because success is ambiguous;
 - nonzero exit is `process_failure`;
 - an attempt the manager stopped for exceeding its `maxtime` is `timeout`;
-- loss of manager or allocation is `lease_lost`.
+- loss of manager or allocation is `lease_lost`, including an attempt the
+  manager stopped while draining (on a stop signal or at its allocation's drain
+  point) unless it had already exceeded its `maxtime`; `lease_lost` is an
+  unclean restart.
 
 Retry policy decides whether these create another attempt or
 `retry_exhausted`. A declared `fail` is permanent by default; a step wanting a
@@ -2366,7 +2375,7 @@ Codes emitted by the manager itself are reserved. Those currently in use:
 | --- | --- |
 | `protocol_error` | Invalid submission, an outcome the protocol forbids, a malformed published failure, an unusable join, or a runner that exited successfully without publishing an outcome. |
 | `process_failure` | A runner that could not be launched, or that exited nonzero without publishing an outcome. |
-| `lease_lost` | The owning manager's heartbeat expired. |
+| `lease_lost` | The owning manager's heartbeat expired, or the manager drained and stopped an attempt that published no outcome. |
 | `timeout` | The manager stopped an attempt that ran longer than its `maxtime`, and it published no outcome. |
 | `retry_exhausted` | `maximum_attempts_per_activation` reached during retry. |
 | `budget_exhausted` | An attempt or activation budget exceeded. |

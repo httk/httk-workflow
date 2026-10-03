@@ -911,8 +911,8 @@ such greetings to stderr or guard them with a non-interactive-shell test.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `run` is the recommended spelling and `manager run` the advanced one. Both
 follow the binding: a local workspace uses its `manager.launch` setting (the
@@ -934,6 +934,20 @@ The workspace settings `manager.launch`, `manager.count`, `manager.workers`, and
 
 `--inline` forces one in-process manager, and `--detach` returns after starting
 the managers. See {doc}`launchers` for launcher bundles and their settings.
+
+`--time-limit DURATION` tells each manager its allocation ends DURATION (Slurm
+`--time` syntax such as `12:00:00`) after it starts; without it a manager
+inside a Slurm job uses that job's end time. `--deadline-margin SECONDS` (120
+by default, raised to `--drain-timeout` when shorter) sets the drain point
+before that end: the manager does not start a job whose `mintime` exceeds the
+time left until it. When both are known the earlier of `--time-limit` and the
+Slurm job's end wins. An invalid duration, or one not longer than the margin,
+is refused before any manager starts. See
+{doc}`taskmanager` under "Time requirements".
+
+`--idle-timeout` still ends a manager that makes no progress with nothing
+running; while attempts run, a manager with a known end is bounded by its
+drain point, where it drains and exits.
 
 `run` also takes `--capability` and `--placement-prefix`, so the quickstart
 command can claim a capability-gated job and scope its scan. Both commands print

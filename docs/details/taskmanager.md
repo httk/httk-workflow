@@ -383,13 +383,32 @@ The shared log rotates when a manager starts, or every 1000 records once it
 exceeds 16 MiB, keeping one backup, `managers.log.1`. A manager that has not yet
 reopened the file keeps appending to the backup.
 
-### Draining on signals
+### Draining
 
-A manager drains on `SIGTERM` or `SIGINT`, which batch systems send at walltime.
-The first signal stops claiming, terminates the running attempts, and keeps
-committing their outcomes for `--drain-timeout` seconds before exiting
-successfully. A second signal exits immediately. The next manager recovers
-anything left behind from its expired lease.
+A draining manager stops claiming, sends `SIGTERM` to its running attempts,
+keeps committing their outcomes for up to `--drain-timeout` seconds (sending
+`SIGKILL` to any attempt still running 10 s into the drain), and then exits
+successfully. Three things start a drain:
+
+- `SIGTERM` or `SIGINT`, which batch systems send at walltime, for an `--idle`
+  manager;
+- `SIGTERM` (not `SIGINT`, which still stops at once) for a manager running
+  until idle;
+- reaching the drain point of a known allocation end (see
+  [Time requirements](#time-requirements)), in either mode.
+
+A signal during a drain the deadline started, or a second signal during a
+signal drain, kills the attempts and exits immediately. The next manager recovers anything left behind from its expired lease. An attempt
+the drain stopped that published no outcome fails with `lease_lost` (an
+unclean restart, retried only if `retry_policy.retry_on` lists it), unless it
+had already exceeded its `maxtime`, which stays `timeout`; an outcome the
+runner publishes on `SIGTERM` wins as usual. `maxtime` is not enforced during
+a drain, which already stops every attempt on its own clock. A manager that
+knows its allocation end and runs until idle is bounded by its drain point
+while attempts run, however long they take; `--idle-timeout` still ends it
+when it makes no progress with nothing running. After a drain it prints
+`drained (<reason>): N attempt(s) left to lease recovery` instead of the idle
+summary.
 
 ### Taking over another manager's attempt
 
@@ -515,11 +534,36 @@ default) has passed. Unless the runner published an outcome meanwhile
 fails with the reserved code `timeout`, which `retry_policy.retry_on` can list
 to retry it. Every attempt with a `maxtime` is told when it will be stopped:
 the context member `deadline` and `HTTK_WORKFLOW_DEADLINE` carry the epoch
-second at or shortly after which (never before) the `SIGTERM` comes, and the Python SDK exposes it as `Attempt.deadline`. The start gate
-(`mintime`) is not yet enforced. A child spawned from a `ChildSpec` or
+second at or shortly after which (never before) the `SIGTERM` comes, and the Python SDK exposes it as `Attempt.deadline`. A child spawned from a `ChildSpec` or
 by `Attempt.call` never inherits `mintime`, and every `maxtime` it carries is
 capped at the spawning attempt's `maxtime`; a prepared payload directory passed
 to `Attempt.spawn` is registered as written.
+
+A manager may also know when its own allocation ends: `--time-limit DURATION`
+(a Slurm `--time` string such as `12:00:00`) sets it, and a manager inside a
+Slurm job reads `SLURM_JOB_END_TIME` (only when `SLURM_JOB_ID` is present).
+`--time-limit` is counted from each manager's own start, and when both are
+known the earlier end wins. Sites whose Slurm does not export
+`SLURM_JOB_END_TIME` must pass `--time-limit`. Its drain point is
+`--deadline-margin` seconds (120 by default) before that end; a margin shorter
+than `--drain-timeout` is raised to it with a warning, and a `--time-limit`
+that does not exceed the margin is refused before any manager starts. A
+manager that starts past its drain point warns and claims nothing. With a known end, the manager stops claiming work that
+cannot fit before its drain point: a ready job whose resolved `mintime` exceeds
+the time left until the drain point stays ready, and from the drain point on
+no ready job is claimed. Only an explicit `mintime` gates a job before the
+drain point; `maxtime` does not imply one. Such jobs are counted under the
+census kind `time` (`mintime beyond the time left: N` in the idle summary, or
+`past the drain point: N` once it has passed), so
+a manager left with only them goes idle and exits; start a manager with a
+longer allocation (`slurm.time_limit` / `--time-limit`) or lower the jobs'
+`mintime`. An attempt launched by such a manager is told the earlier of its
+`maxtime` deadline and the drain point as its `deadline`, so an attempt
+without a `maxtime` still gets one. The end time (`end_time`), drain point
+(`drain_start`) and capacity (`resources`) are recorded in the manager's
+`manager.json`, and `workspace managers` and `job why` show the
+time left ("ends in HH:MM:SS", or "ended"). At the drain point the manager
+[drains](#draining) and exits.
 
 ### Capacities from SLURM
 

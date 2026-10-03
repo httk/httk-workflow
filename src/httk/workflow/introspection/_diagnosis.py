@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .._durations import format_duration
 from .._manager_runners import runner_module_allowed
 from .._manager_scheduling import unmet_job_requirements
 from .._util import read_json, timestamp_seconds
@@ -66,6 +67,16 @@ class ManagerRecord:
     uid: int | None = None
     runner_modules: tuple[str, ...] = DEFAULT_RUNNER_MODULES
     runner_search_paths: tuple[str, ...] = ()
+    end_time: float | None = None
+    drain_start: float | None = None
+
+    def ends(self) -> str | None:
+        """Describe when this manager's allocation ends, or ``None`` when it published no end."""
+
+        if self.end_time is None:
+            return None
+        left = int(self.end_time - time.time())
+        return f"ends in {format_duration(left)}" if left > 0 else "ended"
 
     def alive(self, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
         """Whether this manager's heartbeat is still inside *lease_seconds*."""
@@ -84,9 +95,10 @@ class ManagerRecord:
         age = (
             "no heartbeat" if self.heartbeat_age_seconds is None else f"heartbeat {self.heartbeat_age_seconds:.0f}s ago"
         )
+        ends = self.ends()
         return (
             f"{self.manager_id} on {where} (pools {pools}, capabilities {capabilities}, "
-            f"placement {prefixes}, executors {executors}, {age})"
+            f"placement {prefixes}, executors {executors}, {age}{'' if ends is None else ', ' + ends})"
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -107,6 +119,8 @@ class ManagerRecord:
             "started_at": self.started_at,
             "heartbeat_at": self.heartbeat_at,
             "heartbeat_age_seconds": self.heartbeat_age_seconds,
+            "end_time": self.end_time,
+            "drain_start": self.drain_start,
             "alive": self.alive(),
         }
 
@@ -170,6 +184,8 @@ def read_managers(workspace: Workspace) -> list[ManagerRecord]:
                 started_at=_optional_string(manifest.get("started_at")),
                 heartbeat_at=heartbeat_at,
                 heartbeat_age_seconds=age,
+                end_time=_optional_float(manifest.get("end_time")),
+                drain_start=_optional_float(manifest.get("drain_start")),
             )
         )
     return records
@@ -298,6 +314,18 @@ def manager_refusals(
     runner = _runner_refusal(record, job)
     if runner is not None:
         reasons.append(runner)
+    if job is not None and record.drain_start is not None:
+        # ponytail: reads the initial step's mintime, then the job's; a job
+        # already past its first step may resolve another one.
+        mintime = job.step_resources.get(job.initial_step, {}).get("mintime", job.resources.get("mintime", 0))
+        left = record.drain_start - time.time()
+        if left <= 0:
+            reasons.append("is past its allocation's drain point")
+        elif mintime > left:
+            reasons.append(
+                f"its allocation leaves {format_duration(int(left))} before draining; "
+                f"the job needs mintime {format_duration(mintime)}"
+            )
     return reasons
 
 

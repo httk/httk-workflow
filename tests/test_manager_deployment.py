@@ -76,6 +76,7 @@ def test_run_passes_cli_resources_over_slurm(tmp_path: Path, monkeypatch: pytest
         capabilities: frozenset[str] = frozenset()
         allowed_executors = frozenset({"path"})
         manager_directory = workspace.root / ".httk-workspace" / "managers" / "manager"
+        drained: str | None = None
 
         def __init__(self, _workspace, **kwargs: object) -> None:
             seen.update(kwargs)
@@ -89,7 +90,7 @@ def test_run_passes_cli_resources_over_slurm(tmp_path: Path, monkeypatch: pytest
             return None
 
         def run_until_idle(self, **_kwargs: object):
-            return type("Census", (), {"summary_line": lambda _self: "idle"})()
+            return type("Census", (), {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None})()
 
     monkeypatch.setattr(_manager, "TaskManager", FakeManager)
     monkeypatch.setenv("SLURM_JOB_ID", "123")

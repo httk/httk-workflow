@@ -292,6 +292,7 @@ def handle_workspace_managers(arguments: argparse.Namespace, context: CLIContext
             f"pools={pools}\tcapabilities={','.join(sorted(manager.capabilities)) or '-'}\t"
             f"executors={','.join(sorted(manager.executors)) or '-'}\t"
             f"runner-modules={','.join(manager.runner_modules) or '-'}"
+            + ("" if manager.ends() is None else f"\t{manager.ends()}")
         )
     return 0
 

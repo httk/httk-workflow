@@ -2,6 +2,7 @@
 
 import functools
 import logging
+import time
 import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -112,6 +113,12 @@ def available_resources(capacity: Mapping[str, int], running: Iterable[Any]) -> 
     return available
 
 
+def time_left(manager: Any) -> float | None:
+    """Return the seconds until the manager's drain start, negative once past, or ``None`` when unknown."""
+
+    return None if manager.drain_start is None else manager.drain_start - time.time()
+
+
 def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
     """Filter and order ready work, pairing each marker with its requirement."""
 
@@ -167,6 +174,15 @@ def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
                 "skipping ready job %s: resource %s does not fit manager capacity",
                 marker.job_key,
                 missing_resource,
+            )
+            continue
+        left = time_left(manager)
+        if left is not None and requirement.get("mintime", 0) > left:
+            _LOGGER.debug(
+                "skipping ready job %s: mintime %ds exceeds the %.0fs left before draining",
+                marker.job_key,
+                requirement.get("mintime", 0),
+                left,
             )
             continue
         eligible.append((marker, requirement))
@@ -336,7 +352,8 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     """Classify one submitted or ready marker, returning whether it is actionable.
 
     A submitted job only needs its executor served to register; a ready job must
-    also match the pool, capabilities, ``requires``, and static resource capacity. A job this
+    also match the pool, capabilities, ``requires``, static resource capacity, and fit its
+    ``mintime`` in the time left before the manager's drain start. A job this
     manager cannot progress is attributed to exactly one missing requirement, in the same order
     :func:`eligible_ready` checks them.
     """
@@ -379,6 +396,10 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     if missing_resource is not None:
         blocked["resources"][missing_resource] += 1
         return False
+    left = time_left(manager)
+    if left is not None and requirement.get("mintime", 0) > left:
+        blocked["time"]["drain_point" if left <= 0 else "mintime"] += 1
+        return False
     return True
 
 
@@ -387,7 +408,7 @@ def work_census(manager: Any) -> "WorkCensus":
 
     Actionability applies exactly the claim predicates of :func:`eligible_ready`:
     a ready job counts as actionable only if this manager could claim it. A
-    wrong-pool, missing-capability, unmet-requirement, resource-unfit, or unserved-executor job is not actionable
+    wrong-pool, missing-capability, unmet-requirement, resource-unfit, too-long, or unserved-executor job is not actionable
     — the manager can do nothing about it — so it is reported for the operator
     instead of silently keeping the manager awake or silently letting it exit.
     """
@@ -414,6 +435,7 @@ def work_census(manager: Any) -> "WorkCensus":
         "requirements": Counter(),
         "calls": Counter(),
         "resources": Counter(),
+        "time": Counter(),
     }
     ready_claimable = 0
     actionable = 0
