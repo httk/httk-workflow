@@ -137,6 +137,18 @@ def test_workspace_alias_initializes_and_hands_canonical_path_to_bootstrap(
     assert argv[argv.index("--policy") + 1] == str(snapshot)
 
 
+def test_relative_cli_paths_initialize_and_export_from_inside_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    monkeypatch.chdir(layout.workspace.root)
+    relative_policy = os.path.relpath(layout.policy)
+    assert relative_policy.startswith("..")
+    assert _daemon_cli.command([".", "--policy", relative_policy, "--initialize"], program="httk") == 0
+    assert _daemon_cli.command([".", "--policy", relative_policy, "--export-endpoint"], program="httk") == 0
+    assert json.loads(capsys.readouterr().out) == _daemon_setup.export_endpoint(layout.workspace.root, layout.policy)
+
+
 def test_project_launcher_shadows_global_and_approval_never_executes_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

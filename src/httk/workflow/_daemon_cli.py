@@ -16,14 +16,29 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     :param parser: The daemon command parser.
     """
 
-    parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="absolute local workspace data directory")
-    parser.add_argument("--policy", required=True, type=Path, help="absolute protected operator policy file")
+    parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
+    parser.add_argument("--policy", required=True, type=Path, help="protected operator policy file")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="check the real sandbox and scheduler requirements")
     mode.add_argument("--initialize", action="store_true", help="approve and initialize a new protected enrollment")
     mode.add_argument("--reload", action="store_true", help="approve and activate updated local configurations")
     mode.add_argument("--export-endpoint", action="store_true", help="print the saved public endpoint and catalog")
     mode.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
+
+
+def _anchored(path: Path, name: str) -> Path:
+    # Anchor lexically instead of resolving, so symlinks stay visible to the ancestry checks. getcwd() is
+    # symlink-free, which makes leading '..' exact; a later '..' could climb out of a symlink target.
+    if not path.is_absolute():
+        base, parts = Path(os.getcwd()), path.parts
+        while parts and parts[0] == "..":
+            base, parts = base.parent, parts[1:]
+        path = base.joinpath(*parts)
+    if ".." in path.parts or "\0" in str(path):
+        raise ValueError(
+            f"{name} path may use '..' only as a leading relative component and must not contain NUL: {path}"
+        )
+    return path
 
 
 def _close_inherited() -> None:
@@ -44,31 +59,33 @@ def launch(arguments: argparse.Namespace) -> int:
     :return: A failure exit status if the bootstrap cannot start.
     """
 
-    for path in (arguments.workspace, arguments.policy):
-        if not path.is_absolute() or ".." in path.parts or "\0" in str(path):
-            print("httk workspace daemon: explicit absolute local paths are required", file=sys.stderr)
-            return 2
+    try:
+        workspace = _anchored(arguments.workspace, "workspace")
+        policy = _anchored(arguments.policy, "policy")
+    except (OSError, ValueError) as exc:
+        print(f"httk workspace daemon: {exc}", file=sys.stderr)
+        return 2
     try:
         from . import _daemon_setup
 
         if arguments.initialize:
-            _daemon_setup.initialize(arguments.workspace, arguments.policy)
+            _daemon_setup.initialize(workspace, policy)
             return 0
         if arguments.reload:
-            _daemon_setup.reload(arguments.workspace, arguments.policy)
+            _daemon_setup.reload(workspace, policy)
             return 0
         if arguments.export_endpoint:
             print(
                 json.dumps(
-                    _daemon_setup.export_endpoint(arguments.workspace, arguments.policy),
+                    _daemon_setup.export_endpoint(workspace, policy),
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=True,
                 )
             )
             return 0
-        runtime_policy = _daemon_setup.active_policy_path(arguments.workspace, arguments.policy)
-        runtime_workspace = arguments.workspace.resolve(strict=True)
+        runtime_policy = _daemon_setup.active_policy_path(workspace, policy)
+        runtime_workspace = workspace.resolve(strict=True)
     except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2

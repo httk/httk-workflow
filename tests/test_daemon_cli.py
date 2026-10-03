@@ -32,15 +32,28 @@ def test_daemon_dispatch_does_not_build_ordinary_parser(monkeypatch: pytest.Monk
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["relative", "--policy", "/policy"],
-        ["/data", "--policy", "relative"],
         ["/data/../other", "--policy", "/policy"],
+        ["data/../other", "--policy", "/policy"],
+        ["/data", "--policy", "../link/../policy"],
         ["/data", "--policy", "/policy", "--check", "--once"],
         ["/data", "--policy", "/policy", "--command", "rm"],
     ],
 )
 def test_daemon_refuses_ambiguous_paths_and_execution_options(arguments: list[str]) -> None:
     assert _daemon_cli.command(arguments, program="httk workspace daemon") == 2
+
+
+def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd = tmp_path / "site" / "data"
+    cwd.mkdir(parents=True)
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(_daemon_setup, "initialize", lambda workspace, policy: calls.append((workspace, policy)))
+    monkeypatch.chdir(cwd)
+    assert _daemon_cli.command([".", "--policy", "../../example.json", "--initialize"], program="httk") == 0
+    assert _daemon_cli.command(["link/x", "--policy", "./example.json", "--initialize"], program="httk") == 0
+    assert calls == [(cwd, tmp_path / "example.json"), (cwd / "link" / "x", cwd / "example.json")]
 
 
 def test_isolated_handoff_cleans_environment_cwd_and_inherited_descriptors(tmp_path: Path) -> None:

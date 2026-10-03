@@ -159,6 +159,12 @@ httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --e
 httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json
 ```
 
+Relative paths are taken from the current directory, so from inside the
+workspace data directory `httk workspace daemon . --policy ../example.json`
+also works. `..` is accepted only at the start of a relative path. The
+workspace must be the same directory as the policy's `workspace`, and the
+policy file must be outside it.
+
 - `--initialize` creates the ledger and private response key, saves the
   approved settings and publishes the active approval last. It runs no
   scheduler or sandbox preflight.
