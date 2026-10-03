@@ -911,8 +911,8 @@ such greetings to stderr or guard them with a non-interactive-shell test.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `run` is the recommended spelling and `manager run` the advanced one. Both
 follow the binding: a local workspace uses its `manager.launch` setting (the
@@ -937,11 +937,11 @@ the managers. See {doc}`launchers` for launcher bundles and their settings.
 
 `--time-limit DURATION` tells each manager its allocation ends DURATION (Slurm
 `--time` syntax such as `12:00:00`) after it starts; without it a manager
-inside a Slurm job uses that job's end time. `--deadline-margin SECONDS` (120
+inside a Slurm job uses that job's end time (its allocation probe's end). `--deadline-margin SECONDS` (120
 by default, raised to `--drain-timeout` when shorter) sets the drain point
 before that end: the manager does not start a job whose `mintime` exceeds the
 time left until it. When both are known the earlier of `--time-limit` and the
-Slurm job's end wins. An invalid duration, or one not longer than the margin,
+allocation's end wins. An invalid duration, or one not longer than the margin,
 is refused before any manager starts. See
 {doc}`taskmanager` under "Time requirements".
 
@@ -956,8 +956,11 @@ unclaimable by the pools, capabilities, resources, or executors this manager
 serves, or left committing with an unreadable definition.
 
 `--worker-resource NAME COUNT` is repeatable and advertises per-manager capacity
-to the scheduler; local managers also use SLURM allocation variables when
-present. With a local `--count N`, explicit `--worker-resource` pairs are passed
+to the scheduler, overriding the same-named capacity of the manager's
+allocation. `--allocation SPEC` selects where a manager learns its nodes,
+processors and devices: `auto` (the default: Slurm inside a Slurm job, else
+nothing), `none`, `slurm`, `host`, or `exec:PATH` for a site probe; launchers
+pass the spec their managers need. See {doc}`taskmanager` under "Allocations". With a local `--count N`, explicit `--worker-resource` pairs are passed
 to every manager verbatim. Only auto-detected SLURM capacities are split across
 the N managers, using quotient-plus-remainder distribution so that their
 aggregate equals the detected allocation. The reserved time labels `maxtime`

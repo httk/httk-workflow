@@ -205,7 +205,7 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
         assert f"#SBATCH {directive}" in script
     assert f"#SBATCH --chdir={workspace.root}" in script
     assert "module load python" in script
-    assert f"exec httk workflow manager run --workspace {workspace.root}" in script
+    assert f"exec httk workflow manager run --workspace {workspace.root} --allocation slurm" in script
     assert bundle.exists()
 
 
@@ -275,6 +275,8 @@ def test_launch_processes_detaches_and_filters_slurm(monkeypatch: pytest.MonkeyP
     assert "--worker-resource procs 2" in " ".join(launched_argvs[1])
     assert all(sys.executable not in argv for argv in launched_argvs)
     assert all("httk workflow manager run" in " ".join(argv) for argv in launched_argvs)
+    # Two managers split the host, so neither may bind to its devices.
+    assert all("--allocation none" in " ".join(argv) for argv in launched_argvs)
 
 
 def test_manager_command_must_be_a_nonempty_string(tmp_path: Path) -> None:

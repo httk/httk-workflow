@@ -402,7 +402,8 @@ def test_process_launcher_option_uses_exact_local_child_and_detached_argv(
 
     monkeypatch.setattr(_manager.subprocess, "Popen", fake_popen)
     assert command(["run", "--workspace", "station", "--launcher", "process", "--count", "2"], context) == 0
-    assert children == [expected, expected]
+    # Split foreground children only count; none probes an allocation to bind.
+    assert children == [[*expected, "--allocation", "none"]] * 2
     assert all(argv.count("--launcher") == 0 for argv in children)
     capsys.readouterr()
 

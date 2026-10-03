@@ -316,7 +316,7 @@ A launcher is to starting managers what a remote is to reaching a machine.
 `run` and `manager run` launch managers through the launcher bundle that the
 workspace's `manager.launch` setting selects. The built-in local `process`
 launcher starts detached local processes; a named bundle, such as the Slurm
-launcher `cluster` above, starts them as it defines. Three workspace settings
+launcher `cluster` above, starts them as it defines. These workspace settings
 shape the launch:
 
 - `manager.count`: the default number of managers; `--count` overrides it at
@@ -325,6 +325,11 @@ shape the launch:
   concurrently; `--workers` overrides it per manager.
 - `manager.command`: the command used after an environment prelude (default
   `httk`).
+- `manager.allocation`: the [allocation probe](#allocations) a launcher passes
+  its managers (the Slurm launcher's default is `slurm`).
+- `manager.launch_template`: the argv template for the attempt launch prefix;
+  placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}`
+  `{cpus_per_proc}`.
 
 `--inline` runs one manager in the current process, ignoring the workspace
 launcher, and combines only with `--count 1`. `--detach` starts the managers
@@ -540,8 +545,10 @@ capped at the spawning attempt's `maxtime`; a prepared payload directory passed
 to `Attempt.spawn` is registered as written.
 
 A manager may also know when its own allocation ends: `--time-limit DURATION`
-(a Slurm `--time` string such as `12:00:00`) sets it, and a manager inside a
-Slurm job reads `SLURM_JOB_END_TIME` (only when `SLURM_JOB_ID` is present).
+(a Slurm `--time` string such as `12:00:00`) sets it, and its
+[allocation probe](#allocations) may report one. When the probe reports no end
+(`none`, `host`, or an envelope without `end_time`), a manager inside a Slurm
+job still reads `SLURM_JOB_END_TIME` (only when `SLURM_JOB_ID` is present).
 `--time-limit` is counted from each manager's own start, and when both are
 known the earlier end wins. Sites whose Slurm does not export
 `SLURM_JOB_END_TIME` must pass `--time-limit`. Its drain point is
@@ -565,6 +572,151 @@ without a `maxtime` still gets one. The end time (`end_time`), drain point
 time left ("ends in HH:MM:SS", or "ended"). At the drain point the manager
 [drains](#draining) and exits.
 
+### Allocations
+
+A manager learns what its allocation consists of from an allocation probe
+selected by `--allocation SPEC`: a list of nodes, each with its host name,
+`procs`, `mem`, `gpus` and, when known, GPU device ids and CPU lists, plus the
+allocation's end time. The allocation's capacity is the node sums (`procs`,
+`gpus`, `mem` when every node knows it, and `nodes`) plus any extra resources it
+reports; `--worker-resource` still overrides any same-named capacity. The probe
+runs once, when the manager starts, and the allocation kind and host names are
+recorded in `manager.json` (`allocation`, `nodes`) and shown in the manager's
+start line.
+
+| SPEC | Meaning |
+| --- | --- |
+| `auto` (default) | `slurm` when `SLURM_JOB_ID` is set, else `none` |
+| `none` | no allocation; capacities come only from `--worker-resource` |
+| `slurm` | the Slurm probe below |
+| `host` | this machine as one node: its usable processors, half its physical memory, and the GPUs announced in `CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` or `ZE_AFFINITY_MASK` |
+| `exec:PATH` | run executable PATH inside the allocation; it prints one allocation envelope (see [launcher authoring](launcher_authoring.md#allocation-probes)) |
+
+The Slurm probe lists the job's hosts with `scontrol show hostnames
+$SLURM_JOB_NODELIST` (a one-node job needs no `scontrol`), splits the tasks
+over them by `SLURM_TASKS_PER_NODE` (`16(x2),8`), splits memory and GPUs the way
+the counts below sum them, and reads the GPU device ids of the batch host from
+the first of the variables above. When the nodes cannot be described
+consistently with those counts, it warns and keeps the aggregate counts only, so
+its capacity is always exactly the table below.
+
+Launchers choose the probe for the managers they start: the Slurm launcher
+passes `--allocation slurm` (or its `manager.allocation` setting), the process
+launcher passes `host` for one manager and `none` for several, foreground
+`--count` children get `none`, and [daemon](workspace_daemon.md) managers get
+`none`. A single detached process-launched manager therefore probes this host:
+it advertises `nodes=1`, GPUs from `CUDA_VISIBLE_DEVICES`,
+`ROCR_VISIBLE_DEVICES` or `ZE_AFFINITY_MASK`, and `procs` from its CPU
+affinity. An explicit `--allocation` (either `--allocation SPEC` or
+`--allocation=SPEC`) is kept for one manager. Several managers splitting one
+allocation only count capacity, because binding to devices needs one manager
+per allocation: with `--count` above one every child gets `none`, and an
+explicit `slurm`, `host` or `exec:` spec is overridden with a warning.
+
+### Placement and binding
+
+A manager whose allocation lists its nodes keeps a per-node inventory and
+places every attempt on it: `procs`, `gpus`, `mem` and `nodes` are then decided
+by the inventory, while other labels are still counted. Without listed nodes
+(`--allocation none`, or a probe that knows only aggregate counts) everything is
+counted as described above. `mem` is placed only when every node knows its
+memory; otherwise it stays a counted label like any other, and a
+`--worker-resource mem` capacity applies to it as a counter.
+
+- An attempt goes on one node when it fits there, on the node with the fewest
+  free `procs` that holds its `procs`, `gpus` and `mem` (ties go to the first
+  node in allocation order), leaving larger holes for larger attempts.
+- Otherwise it spills onto the fewest nodes: they are filled from the node with
+  the most free `procs` (most free `gpus` for an attempt without `procs`), its
+  `gpus` come from the same nodes in the same order, and its `mem` is split
+  over them in proportion to the `procs` taken on each (the remainder on the
+  first), so every node must have its share free. A `mem`-only requirement
+  never spills.
+- `nodes=N` gives the attempt N whole idle nodes to itself (all their `procs`,
+  `gpus` and `mem`), the smallest ones in allocation order that together hold
+  its `procs`, `gpus` and `mem`; nothing else is placed on them until it ends,
+  and a node holding any other attempt, even one given no `procs`, is not
+  idle. Such an attempt gets no fair share of `procs` or `mem`.
+
+Concurrent attempts never share a processor slot or GPU id. A
+`--worker-resource` for `procs`, `gpus`, `mem` or `nodes` that differs from the
+allocation's own sum is taken from the last nodes backwards (or drops trailing
+nodes), and the manager then advertises the inventory's totals for those
+labels; one larger than the allocation cannot be placed, so the manager warns
+and schedules by counts only. Without explicit `resources`, a `TaskManager`
+given an allocation advertises the allocation's capacity. A job that can never be placed even on an idle
+inventory, such as `nodes=3` on two nodes or `nodes=1` with more `procs` than
+any node has, is reported under `ready_blocked["resources"]` with the first of
+`nodes`, `procs`, `gpus`, `mem` that does not fit.
+
+Every placed attempt is told what it got. Its context member `binding` holds
+`nodes` (per node: `host`, `procs`, `gpus` and, when placed, `mem`),
+`nodefile`, `file` and, when one applies, `launch`. `file` is `binding.json` in
+the attempt control directory: the same object with each node's `gpu_ids` and
+`cpus` (the cpulists of its slots) added when known, kept out of the context so
+that a large allocation cannot overflow the context's 100000-byte limit (a
+binding too large even without them fails the attempt with `protocol_error`
+naming its node count). The runner environment carries `HTTK_WORKFLOW_NODELIST` (the hosts,
+comma-separated), `HTTK_WORKFLOW_NODEFILE` (a file in the attempt control
+directory with one host line per processor slot, the `PBS_NODEFILE`
+convention, and one line for a node given no slot) and `HTTK_WORKFLOW_LAUNCH`
+(the launch prefix, shell-quoted). The Python SDK exposes the member as
+`Attempt.binding`, and Bash reads it with `httk_workflow_context binding`.
+
+The launch prefix is what a runner puts before its parallel command. It is
+`shlex`-quoted, so in Bash run `eval "$HTTK_WORKFLOW_LAUNCH vasp_std"` (or split
+it with `read -ra`) rather than relying on word splitting when the prefix may
+hold quoted words; the built-in Slurm prefix has none unless the workspace path
+needs quoting, so `$HTTK_WORKFLOW_LAUNCH vasp_std` usually works there too. Inside a Slurm allocation it
+is
+
+```text
+env SLURM_HOSTFILE=NODEFILE srun --nodes=N --ntasks=T --nodelist=HOSTS
+     --distribution=arbitrary --exact [--cpus-per-task=C]
+     [--mem=MBM | --mem-per-cpu=MBM] [--gpus=G | --gres=none]
+```
+
+with `T` the nodefile's line count. The prefix sets `SLURM_HOSTFILE` to the
+nodefile for its own `srun` only, so the arbitrary distribution places exactly
+the reserved tasks on each node while any other `srun` the runner starts is
+unaffected. `--cpus-per-task` repeats the
+manager's own `SLURM_CPUS_PER_TASK`, which a step under `--exact` does not
+inherit. A one-node attempt with `mem` gets `--mem` (its share); a multi-node
+one gets `--mem-per-cpu`, its `mem` divided over its tasks' CPUs and rounded
+up, so a node may be asked slightly more than its share. When the inventory
+does not place memory, the attempt's counted `mem` requirement is used the
+same way; without either, or with zero (which `srun` reads as all of the
+node's memory), there is no memory option.
+`--gpus=G` is added when it has GPUs and `--gres=none` when the allocation has
+GPUs it does not get; with `--gpus` Slurm chooses the step's devices, which
+need not be the binding's `gpu_ids`. This built-in prefix still needs
+acceptance on a real Slurm cluster. The workspace setting `manager.launch_template` replaces it for every kind of
+allocation; it is split like shell words, and `{procs}`, `{nodes}` (the node
+count), `{hosts}`, `{nodefile}`, `{gpus}`, `{mem}` (MB on the first node, or
+empty) and `{cpus_per_proc}` (the CPUs in one slot's cpulist, else 1) are
+substituted in each word; other braces, such as `{}`, are kept as written:
+
+```console
+httk workspace settings set --key manager.launch_template \
+  --value 'mpirun -np {procs} --hostfile {nodefile}' WORKSPACE
+```
+
+A template naming any other placeholder fails the attempt's preparation with
+`protocol_error`. Outside Slurm and without a template there is no launch
+prefix.
+
+Placement is in memory only and not recorded: a replacement manager places its
+own attempts on its own inventory. Accepted limitations:
+
+- The binding is information for well-behaved runners; the manager neither
+  confines an attempt to its nodes nor sets CPU affinity.
+- There is no backfill or reservation: a `nodes=N` or other wide attempt can
+  wait behind a stream of small attempts that keep every node partly busy.
+- GPU identity (`gpu_ids`) is guaranteed only for attempts executed locally,
+  on the manager's own host; the Slurm probe knows device ids for the batch
+  host only, and the manager does not yet export them into the attempt's GPU
+  variable.
+
 ### Capacities from SLURM
 
 Inside a SLURM batch allocation, a manager derives capacities, but only when
@@ -573,7 +725,7 @@ Inside a SLURM batch allocation, a manager derives capacities, but only when
 | SLURM variable | Manager resource |
 | --- | --- |
 | `SLURM_NTASKS` | `procs` |
-| `SLURM_GPUS` | `gpus` |
+| `SLURM_GPUS` (`4`, `a100:4` or `a100:2,v100:2`) | `gpus` |
 | `SLURM_JOB_NUM_NODES` | `nodes` |
 | `SLURM_MEM_PER_CPU`, `SLURM_CPUS_PER_TASK`, `SLURM_NTASKS` | `mem = MEM_PER_CPU × CPUS_PER_TASK (default 1) × NTASKS` |
 | `SLURM_MEM_PER_NODE`, `SLURM_JOB_NUM_NODES` | fallback `mem = MEM_PER_NODE × JOB_NUM_NODES` when `SLURM_MEM_PER_CPU` is absent |
@@ -589,10 +741,11 @@ let the allocation variables describe the real allocation.
 
 ### Local capacities
 
-Local adapters supply host `procs` and total host physical memory in MB when the
-caller did not. For multiple local managers, explicit resource pairs are
-per-manager values and stay unchanged; only injected host capacities are split
-across managers, quotient plus remainder.
+One local manager probes the host itself (`--allocation host`). For multiple
+local managers, the launcher supplies host `procs` and half the host physical
+memory in MB when the caller did not; explicit resource pairs are per-manager
+values and stay unchanged, and only injected host capacities are split across
+managers, quotient plus remainder.
 
 ## Scheduling
 

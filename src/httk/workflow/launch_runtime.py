@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ._allocation import argv_allocation, parse_allocation_spec
 from .launchers import _manager_command
 
 BATCH_DIRECTORY = ".httk-workspace/batch"
@@ -136,15 +137,17 @@ def _launcher_settings(request: Mapping[str, object]) -> dict[str, object]:
 
 
 def _manager_argv(argv: Sequence[str], settings: Mapping[str, object]) -> list[str]:
-    """Add configured manager workers when the caller supplied none."""
+    """Add configured manager workers and allocation probe when the caller supplied none."""
 
     result = list(argv)
-    if "--workers" in result or "manager.workers" not in settings:
-        return result
-    value = _text(settings, "manager.workers")
-    if value is None or not value.isdigit() or int(value) < 1:
-        raise ValueError("launcher setting manager.workers must be a positive integer")
-    return [*result, "--workers", value]
+    if "--workers" not in result and "manager.workers" in settings:
+        value = _text(settings, "manager.workers")
+        if value is None or not value.isdigit() or int(value) < 1:
+            raise ValueError("launcher setting manager.workers must be a positive integer")
+        result += ["--workers", value]
+    if argv_allocation(result) is None:
+        result += ["--allocation", parse_allocation_spec(_text(settings, "manager.allocation") or "slurm")]
+    return result
 
 
 def _prelude_argv(argv: Sequence[str], settings: Mapping[str, object]) -> list[str]:

@@ -191,7 +191,9 @@ starts exactly one manager, whatever `manager.count` says. The other
 supported scheduler fields are nodes, ntasks, ntasks_per_node, partition,
 account and the MPI selector described below; other `slurm.*` fields are
 rejected. `environment.prelude` and a single executable `manager.command`
-are frozen at approval and run inside the payload sandbox.
+are frozen at approval and run inside the payload sandbox. Daemon managers
+run with `--allocation none`: their capacity is the approved configuration's,
+never probed inside the sandbox.
 
 ### Changing approved configurations
 

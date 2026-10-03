@@ -687,6 +687,12 @@ class Attempt:
         return self.context.deadline
 
     @property
+    def binding(self) -> Mapping[str, Any] | None:
+        """Return the nodes, slots, and launch prefix this attempt was given, or None without a node inventory."""
+
+        return self.context.binding
+
+    @property
     def parameters(self) -> Mapping[str, object]:
         """The application-defined ``parameters`` object of this job."""
 

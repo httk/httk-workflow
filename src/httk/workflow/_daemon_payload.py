@@ -39,7 +39,8 @@ def _manager_command(policy: Policy, profile: Profile) -> list[str]:
     ]
     if mpi is not None:
         command += ["--worker-resource", "nodes", str(mpi.nodes), "--worker-resource", "mpi_ranks", str(mpi.ranks)]
-    return [*command, "--idle"]
+    # Never probe an allocation inside the sandbox: the profile fixes the capacity.
+    return [*command, "--allocation", "none", "--idle"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:

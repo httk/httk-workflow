@@ -13,7 +13,15 @@ from typing import cast
 
 from httk.core.cli import CLIContext
 
-from .._allocation import slurm_end_time
+from .._allocation import (
+    Allocation,
+    argv_allocation,
+    parse_allocation_spec,
+    probe_allocation,
+    slurm_counts,
+    slurm_end_time,
+    split_allocation,
+)
 from .._durations import format_duration, parse_slurm_duration
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from ..adapters import REMOTE_MANAGER_COMMAND
@@ -40,6 +48,9 @@ _TIME_LIMIT_HELP = (
     "default: the Slurm job's end time when running inside one"
 )
 _DEADLINE_MARGIN_HELP = "start draining this many seconds before the allocation ends (default: 120)"
+_ALLOCATION_HELP = (
+    "where this manager learns its nodes, processors and devices: auto, none, slurm, host, or exec:PATH (default: auto)"
+)
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
 
 
@@ -107,57 +118,7 @@ def _slurm_resources(environ: Mapping[str, str]) -> dict[str, int]:
     :return: Resource capacities advertised by SLURM, or an empty mapping.
     """
 
-    if "SLURM_JOB_ID" not in environ:
-        return {}
-
-    def integer(name: str, *, memory: bool = False) -> int | None:
-        raw = environ.get(name)
-        if raw is None:
-            return None
-        value = raw.strip()
-        multiplier = 1
-        divide_kibibytes = False
-        if memory and value:
-            suffix = value[-1].upper()
-            if suffix in {"M", "G", "K"}:
-                value = value[:-1]
-                if suffix == "G":
-                    multiplier = 1024
-                elif suffix == "K":
-                    divide_kibibytes = True
-        try:
-            parsed = int(value)
-        except ValueError:
-            _LOGGER.warning("ignoring unparsable SLURM resource variable %s=%r", name, raw)
-            return None
-        if parsed < 0:
-            _LOGGER.warning("ignoring negative SLURM resource variable %s=%r", name, raw)
-            return None
-        if divide_kibibytes:
-            return parsed // 1024
-        return parsed * multiplier
-
-    resources: dict[str, int] = {}
-    ntasks = integer("SLURM_NTASKS")
-    if ntasks is not None:
-        resources["procs"] = ntasks
-    gpus = integer("SLURM_GPUS")
-    if gpus is not None:
-        resources["gpus"] = gpus
-    nodes = integer("SLURM_JOB_NUM_NODES")
-    if nodes is not None:
-        resources["nodes"] = nodes
-
-    if "SLURM_MEM_PER_CPU" in environ:
-        mem_per_cpu = integer("SLURM_MEM_PER_CPU", memory=True)
-        cpus = integer("SLURM_CPUS_PER_TASK") if "SLURM_CPUS_PER_TASK" in environ else 1
-        if mem_per_cpu is not None and cpus is not None and ntasks is not None:
-            resources["mem"] = mem_per_cpu * cpus * ntasks
-    elif "SLURM_MEM_PER_NODE" in environ:
-        mem_per_node = integer("SLURM_MEM_PER_NODE", memory=True)
-        if mem_per_node is not None and nodes is not None:
-            resources["mem"] = mem_per_node * nodes
-    return resources
+    return slurm_counts(environ)
 
 
 def _time_limit_seconds(arguments: argparse.Namespace) -> int | None:
@@ -183,28 +144,27 @@ def _effective_margin(arguments: argparse.Namespace) -> float:
     return max(getattr(arguments, "deadline_margin", 120.0), getattr(arguments, "drain_timeout", 30.0))
 
 
-def _manager_end_time(arguments: argparse.Namespace, environ: Mapping[str, str]) -> tuple[float | None, float]:
+def _manager_end_time(arguments: argparse.Namespace, allocation_end: float | None) -> tuple[float | None, float]:
     """Return when this manager's allocation ends and the deadline margin it drains with.
 
-    ``--time-limit`` counts from now; with the enclosing Slurm job's end time also
+    ``--time-limit`` counts from now; with the probed allocation's end time also
     known, the earlier of the two wins. The margin is ``--deadline-margin`` raised
     to ``--drain-timeout``, so draining can finish before the allocation ends.
 
     :param arguments: The parsed manager options.
-    :param environ: The environment to read the Slurm job's end time from.
+    :param allocation_end: The probed allocation's end time, or ``None`` when unknown.
     :return: The allocation end time, or ``None`` when unknown, and the margin.
     :raises ValueError: If ``--time-limit`` is invalid.
     """
 
     seconds = _time_limit_seconds(arguments)
-    slurm = slurm_end_time(environ)
     limit = None if seconds is None else time.time() + seconds
-    if limit is not None and slurm is not None and limit > slurm:
+    if limit is not None and allocation_end is not None and limit > allocation_end:
         _LOGGER.warning(
-            "--time-limit %s ends after the Slurm job does; using the Slurm job's end time",
+            "--time-limit %s ends after the allocation does; using the allocation's end time",
             arguments.time_limit,
         )
-    ends = [value for value in (limit, slurm) if value is not None]
+    ends = [value for value in (limit, allocation_end) if value is not None]
     margin = _effective_margin(arguments)
     if ends and margin > getattr(arguments, "deadline_margin", 120.0):
         _LOGGER.warning(
@@ -220,6 +180,7 @@ def _add_time_limit_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_worker_resource_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--allocation", metavar="SPEC", help=_ALLOCATION_HELP)
     parser.add_argument(
         "--worker-resource",
         nargs=2,
@@ -252,6 +213,7 @@ def manager_option_defaults() -> dict[str, object]:
         "placement_prefix": [],
         "workers": None,
         "worker_resource": [],
+        "allocation": "auto",
         "count": None,
         "launcher": None,
         "inline": False,
@@ -577,6 +539,9 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--workers", str(workers)]
     for name, count in _worker_resources(getattr(arguments, "worker_resource", [])).items():
         argv += ["--worker-resource", name, str(count)]
+    if changed("allocation"):
+        # The path of exec:PATH may only exist where the manager runs.
+        argv += ["--allocation", parse_allocation_spec(arguments.allocation)]
     if getattr(arguments, "idle", False):
         argv.append("--idle")
     elif changed("idle_timeout"):
@@ -667,6 +632,7 @@ def _run_local_manager_children(
         actual_count = arguments.count if count is None else count
         assert actual_count is not None
         base_tail = manager_argv_tail(arguments)
+        base_tail += split_allocation(argv_allocation(base_tail), actual_count)
         explicit = set(_worker_resources(getattr(arguments, "worker_resource", [])))
         for index in range(actual_count):
             if stopping:
@@ -711,20 +677,31 @@ def _positive_setting(settings: Mapping[str, object], key: str, default: int) ->
     return int(text)
 
 
+def _manager_capacity(arguments: argparse.Namespace, allocation: Allocation | None) -> dict[str, int]:
+    """Return the allocation's capacity overridden by ``--worker-resource``."""
+
+    probed = {} if allocation is None else allocation.capacity()
+    return {**probed, **_worker_resources(getattr(arguments, "worker_resource", []))}
+
+
 def _run_in_process_manager(
     arguments: argparse.Namespace, root: Path, context: CLIContext, settings: Mapping[str, object]
 ) -> int:
     """Run one manager in this process using resolved workspace defaults."""
 
-    cli_resources = _worker_resources(getattr(arguments, "worker_resource", []))
-    capacity = {**_slurm_resources(os.environ), **cli_resources}
     workspace = Workspace(root, durable=_durable(arguments))
     configure_logging(
         level=getattr(arguments, "log_level", None) or "warning", json_logs=getattr(arguments, "json_logs", False)
     )
     # After configure_logging so its warnings are formatted; managers.log only
     # attaches inside TaskManager, which needs the end time first.
-    end_time, deadline_margin = _manager_end_time(arguments, os.environ)
+    allocation = probe_allocation(getattr(arguments, "allocation", "auto"), os.environ)
+    capacity = _manager_capacity(arguments, allocation)
+    # A probe without an end (none, host, an envelope without one) still honours the Slurm job's.
+    allocation_end = None if allocation is None else allocation.end_time
+    if allocation_end is None:
+        allocation_end = slurm_end_time(os.environ)
+    end_time, deadline_margin = _manager_end_time(arguments, allocation_end)
     log_file = Path(arguments.log_file) if getattr(arguments, "log_file", None) else workspace.control / "managers.log"
 
     def install_manager_log(manager_id: str) -> None:
@@ -757,8 +734,12 @@ def _run_in_process_manager(
         on_attached=install_manager_log,
         end_time=end_time,
         deadline_margin=deadline_margin,
+        allocation=allocation,
     ) as manager:
         ends = "" if end_time is None else f", ends={format_duration(max(0, int(end_time - time.time())))}"
+        if allocation is not None:
+            nodes = f" nodes={len(allocation.nodes)}" if allocation.nodes else ""
+            ends = f", allocation={allocation.kind}{nodes}{ends}"
         serving_line = (
             f"manager {manager.manager_id} serving {workspace.root} "
             f"(pools={','.join(sorted(manager.pools)) or '-'}, "

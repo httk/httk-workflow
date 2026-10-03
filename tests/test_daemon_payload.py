@@ -66,6 +66,8 @@ def test_prelude_runs_in_payload_shell_before_fixed_manager(tmp_path: Path, monk
     assert script.index("export TEST_PRELUDE=inside") < script.index("\nexec ")
     assert "changed-after-approval" not in script
     assert "exec '/opt/approved httk' workflow manager run " in script
-    assert "--count 1 --workers 3 --worker-resource procs 4 --worker-resource mem 2048 --idle" in script
+    assert (
+        "--count 1 --workers 3 --worker-resource procs 4 --worker-resource mem 2048 --allocation none --idle" in script
+    )
     assert (workspace.control / ("daemon-manager-" + "a" * 32 + ".log")).is_file()
     assert os.getcwd() == str(workspace.root)

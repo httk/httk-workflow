@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import signal
 import socket
 import stat
@@ -27,7 +28,9 @@ from . import (
     _manager_runners,
     _manager_scheduling,
 )
+from ._allocation import Allocation
 from ._durations import format_duration
+from ._manager_binding import Inventory, Placement, assign, describe, nodefile_lines, release, render_launch
 from ._util import (
     interpreter_first_path,
     json_bytes,
@@ -424,6 +427,9 @@ class RunningAttempt:
         monotonic time, or ``None`` once escalated or before a timeout.
     :param timed_out: Mark an attempt this manager stopped for exceeding its ``maxtime``.
     :param interrupted: Mark an attempt this manager signalled while draining.
+    :param placement: The nodes and slots this attempt was given, or ``None``
+        when the manager has no node inventory; returned to the inventory when
+        the attempt stops being tracked.
     """
 
     marker: Marker
@@ -449,6 +455,7 @@ class RunningAttempt:
     timeout_kill_at: float | None = None
     timed_out: bool = False
     interrupted: bool = False
+    placement: Placement | None = None
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
@@ -482,6 +489,9 @@ class TaskManager:
         published, before startup collection runs.
     :param end_time: The epoch second this manager's allocation ends, or ``None`` when unknown.
     :param deadline_margin: Stop claiming work this many seconds before *end_time*.
+    :param allocation: The probed allocation this manager runs inside, or ``None``;
+        recorded in ``manager.json``. Its capacity and end time are already folded
+        into *resources* and *end_time* by the caller.
     :raises ValueError: If a manager limit is invalid or executor configuration conflicts.
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
     """
@@ -513,11 +523,14 @@ class TaskManager:
         on_attached: Callable[[str], None] | None = None,
         end_time: float | None = None,
         deadline_margin: float = 120.0,
+        allocation: Allocation | None = None,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
         try:
-            validated_resources = validate_capacity({} if resources is None else resources, "manager.resources")
+            if resources is None:
+                resources = {} if allocation is None else allocation.capacity()
+            validated_resources = validate_capacity(resources, "manager.resources")
         except FormatError as exc:
             raise ValueError(str(exc)) from exc
         if discovery_budget < 1:
@@ -554,6 +567,22 @@ class TaskManager:
         self.resources = validated_resources
         self.maximum_workers = maximum_workers
         self.end_time = end_time
+        self.allocation = allocation
+        # Per-node free capacity when the allocation lists its nodes; the
+        # placed labels are then scheduled by it instead of by counters.
+        self._inventory = Inventory.from_allocation(allocation, validated_resources)
+        if self._inventory is None and allocation is not None and allocation.nodes:
+            _LOGGER.warning(
+                "the manager capacity exceeds the allocation's nodes; scheduling by counts only, without placement"
+            )
+        if self._inventory is not None:
+            # Advertise what the inventory can place, such as only the kept
+            # nodes' procs under --worker-resource nodes 1.
+            totals = self._inventory.empty().free()
+            for label in self._inventory.labels & self.resources.keys():
+                self.resources[label] = totals[label]
+        # Placements of attempts whose launch is in progress, by attempt id.
+        self._unlaunched: dict[str, Placement] = {}
         # The epoch second this manager stops claiming work that cannot fit, or
         # None when its allocation end is unknown.
         self.drain_start = None if end_time is None else end_time - deadline_margin
@@ -650,6 +679,8 @@ class TaskManager:
                 "resources": dict(self.resources),
                 "end_time": self.end_time,
                 "drain_start": self.drain_start,
+                "allocation": None if allocation is None else allocation.kind,
+                "nodes": [] if allocation is None else [node.host for node in allocation.nodes],
                 "started_at": utc_now(),
             },
             durable=workspace.durable,
@@ -1593,7 +1624,24 @@ class TaskManager:
     def _available_resources(self) -> dict[str, int]:
         """Return manager capacity after reservations of local attempts."""
 
-        return _manager_scheduling.available_resources(self.resources, self._running.values())
+        available = _manager_scheduling.available_resources(self.resources, self._running.values())
+        if self._inventory is not None:
+            available.update({name: value for name, value in self._inventory.free().items() if name in available})
+        return available
+
+    def _release_placement(self, placement: Placement | None) -> None:
+        """Return one attempt's placement to the inventory."""
+
+        if placement is not None and self._inventory is not None:
+            release(self._inventory, placement)
+
+    def _drop_running(self, attempt_id: str) -> RunningAttempt | None:
+        """Stop tracking one local attempt, returning its placement to the inventory."""
+
+        local = self._running.pop(attempt_id, None)
+        if local is not None:
+            self._release_placement(local.placement)
+        return local
 
     def _claim_and_launch(self, marker: Marker) -> bool:
         """Claim one ready job and launch its attempt, reporting local faults."""
@@ -1636,7 +1684,9 @@ class TaskManager:
         # declared. The effective requirement, with this manager's fair share,
         # is recorded as the non-carried ``reservation``, so a retry or released
         # claim is not pinned to this manager's capacity.
-        requirement = _manager_scheduling.effective_requirement(job, state, self.resources, self.maximum_workers)
+        requirement = _manager_scheduling.effective_requirement(
+            job, state, self.resources, self.maximum_workers, whole_nodes=self._inventory is not None
+        )
         claimed = self._transition(
             marker,
             "claimed",
@@ -1677,6 +1727,9 @@ class TaskManager:
             raise
         except (WorkflowError, OSError) as exc:
             self._fail_attempt_preparation(claimed, job, exc)
+        finally:
+            # A launch that did not start a tracked attempt returns its placement.
+            self._release_placement(self._unlaunched.pop(attempt_id, None))
         return True
 
     def _release_claim(self, marker: Marker, reason: str, state: StateFrame | None = None) -> None:
@@ -1758,6 +1811,19 @@ class TaskManager:
         control_name = claimed_state.attempt_control
         if attempt_id is None or control_name is None:
             raise FormatError("a claimed frame must name its attempt and attempt control directory")
+        # Same manager and inputs as the claim, so this equals the claimed
+        # frame's ``reservation``.
+        requirement = _manager_scheduling.effective_requirement(
+            job, claimed_state, self.resources, self.maximum_workers, whole_nodes=self._inventory is not None
+        )
+        placement = None
+        if self._inventory is not None:
+            placement = assign(self._inventory, requirement)
+            if placement is None:
+                # The claim pass checked the fit, so only a changed inventory gets here.
+                self._release_claim(marker, "resources_changed", claimed_state)
+                return
+            self._unlaunched[attempt_id] = placement
         payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control = payload / control_name
         attempts = _attempt_container(payload)
@@ -1775,12 +1841,12 @@ class TaskManager:
         workdir.mkdir(parents=True, exist_ok=True)
         settings = self.workspace.read_settings()
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
-        # Same manager and inputs as the claim, so this equals the claimed
-        # frame's ``reservation``.
-        requirement = _manager_scheduling.effective_requirement(
-            job, claimed_state, self.resources, self.maximum_workers
-        )
         deadline = self._attempt_deadline(requirement)
+        binding, binding_environment = (
+            (None, {})
+            if placement is None
+            else self._attempt_binding(placement, control, settings, requirement.get("mem"))
+        )
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
@@ -1815,6 +1881,7 @@ class TaskManager:
             "settings": settings,
             "resources": dict(requirement),
             **({} if deadline is None else {"deadline": deadline}),
+            **({} if binding is None else {"binding": binding}),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an
             # empty array when the activation follows no join. ``join`` keeps the
@@ -1823,7 +1890,10 @@ class TaskManager:
         }
         context_value = json_bytes(context)
         if len(context_value) >= 100_000:
-            raise FormatError("attempt context exceeds the 100000-byte environment limit")
+            raise FormatError(
+                "attempt context exceeds the 100000-byte environment limit"
+                + ("" if binding is None else f"; its binding of {len(binding['nodes'])} nodes is too large")
+            )
         context_json = context_value.decode("utf-8")
         environment = os.environ.copy()
         environment.pop("HTTK_WORKFLOW_RUNNER_ARTIFACTS", None)
@@ -1831,6 +1901,9 @@ class TaskManager:
         environment.pop("HTTK_WORKFLOW_DEADLINE", None)
         if deadline is not None:
             environment["HTTK_WORKFLOW_DEADLINE"] = str(deadline)
+        for variable in ("HTTK_WORKFLOW_NODELIST", "HTTK_WORKFLOW_NODEFILE", "HTTK_WORKFLOW_LAUNCH"):
+            environment.pop(variable, None)
+        environment.update(binding_environment)
         environment.update(
             {
                 # A runner's ``#!/usr/bin/env python3`` finds this interpreter, the
@@ -2047,6 +2120,7 @@ class TaskManager:
             started,
             requirement.get("maxtime"),
             owner_uid=self.uid,
+            placement=self._unlaunched.pop(attempt_id, None),
         )
         launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
         if job.runner_source == "payload":
@@ -2064,6 +2138,50 @@ class TaskManager:
             workdir,
             extra=self._event("launch", running, **launch_fields),
         )
+
+    def _attempt_binding(
+        self, placement: Placement, control: Path, settings: Mapping[str, Any], mem: int | None
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Write the attempt's nodefile and ``binding.json``; return its context ``binding`` and environment."""
+
+        nodefile = control / "nodefile"
+        nodefile.write_text("".join(f"{host}\n" for host in nodefile_lines(placement)), encoding="utf-8")
+        template = settings.get("manager.launch_template")
+        if template is not None and not isinstance(template, str):
+            raise FormatError("workspace setting manager.launch_template must be a string")
+        assert self.allocation is not None
+        cpus_per_task = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
+        try:
+            launch = render_launch(
+                placement,
+                kind=self.allocation.kind,
+                template=template,
+                nodefile=str(nodefile),
+                gpus_present=self.resources.get("gpus", 0) > 0,
+                cpus_per_task=int(cpus_per_task) if cpus_per_task.isdigit() and int(cpus_per_task) > 0 else None,
+                mem=mem,
+            )
+        except ValueError as exc:
+            raise FormatError(f"workspace setting manager.launch_template: {exc}") from exc
+        nodes = describe(placement)
+        full: dict[str, Any] = {"nodes": nodes, "nodefile": str(nodefile)}
+        if launch is not None:
+            full["launch"] = launch
+        # The per-slot cpulists and GPU ids can be large, so the context keeps
+        # only the counts and points at the full binding.
+        write_json_atomic(control / "binding.json", full)
+        binding = {
+            **full,
+            "nodes": [{key: value for key, value in node.items() if key not in ("cpus", "gpu_ids")} for node in nodes],
+            "file": str(control / "binding.json"),
+        }
+        environment = {
+            "HTTK_WORKFLOW_NODELIST": ",".join(node["host"] for node in nodes),
+            "HTTK_WORKFLOW_NODEFILE": str(nodefile),
+        }
+        if launch is not None:
+            environment["HTTK_WORKFLOW_LAUNCH"] = shlex.join(launch)
+        return binding, environment
 
     def _attempt_deadline(self, requirement: Mapping[str, int]) -> int | None:
         """Return the epoch second an attempt launched now must finish by.
@@ -2235,7 +2353,7 @@ class TaskManager:
                     exit_status=return_code,
                 )
             self._finish_attempt_cleanup(local)
-            del self._running[attempt_id]
+            self._drop_running(attempt_id)
             return True
         lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
         if self._manager_alive(state.manager_id, lease_seconds=lease_seconds):
@@ -2379,7 +2497,7 @@ class TaskManager:
             self._write_attempt_end(local, return_code)
             local.reaped = True
             self._finish_attempt_cleanup(local)
-            del self._running[attempt_id]
+            self._drop_running(attempt_id)
 
     def _commit_published_outcome(
         self,

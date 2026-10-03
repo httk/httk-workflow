@@ -1559,7 +1559,10 @@ HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 
 `HTTK_WORKFLOW_DATA_DIR` is set only for transactional-data jobs.
 `HTTK_WORKFLOW_DEADLINE` is set exactly when the context has a `deadline`
-member and carries it.
+member and carries it. `HTTK_WORKFLOW_NODELIST` (the comma-separated hosts),
+`HTTK_WORKFLOW_NODEFILE` (the nodefile path) and, when the binding has a
+`launch` prefix, `HTTK_WORKFLOW_LAUNCH` (that prefix, shell-quoted) are set
+exactly when the context has a `binding` member.
 `HTTK_WORKFLOW_RUNNER_ROOT` names a shared runner's file or tree root. The JSON
 document is the source of truth; the scalar variables are language-neutral
 conveniences.
@@ -1648,6 +1651,22 @@ margin). It is present exactly when either exists. The manager stops the
 attempt at or shortly after it, never before. A runner that wants to checkpoint or
 publish a `retry` before it is stopped watches this rather than recomputing it.
 A context written before the member existed has no time limit.
+
+The context's `binding` member is present exactly when the launching manager
+places attempts on a node inventory (see {doc}`taskmanager`). It is an object
+with `nodes`, one entry per node the attempt was given (`host`, `procs`, `gpus`
+and, when the inventory places memory, `mem` in MB); `nodefile`, the absolute
+path of a file in the attempt control directory holding one host line per
+processor slot (one line for a node given no processor slot); `file`, the
+absolute path of `binding.json` in the same directory; and, when a launch
+prefix applies, `launch`, the argument vector to put before a parallel command
+(such as `env SLURM_HOSTFILE=... srun --nodes=2 ...`). `binding.json` holds the same object without
+`file`, with each node's `gpu_ids` and `cpus` (the cpulists of its processor
+slots) added when known; they are kept out of the context so that it stays
+within its size limit. The built-in Slurm prefix starts with
+`env SLURM_HOSTFILE=<nodefile>`, so the hostfile applies to its own `srun`
+only; the runner environment does not carry it. The binding is advice to a
+well-behaved runner; the manager does not confine the attempt to it.
 
 ### Executable workflow-hook wire formats
 

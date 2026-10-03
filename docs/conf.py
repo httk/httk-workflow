@@ -142,6 +142,7 @@ _INTERNAL_MODULES = (
     "runtime_builders",
     "workspace",
     "manager",
+    "_allocation",
     "introspection",
     "gc",
     "fsck",

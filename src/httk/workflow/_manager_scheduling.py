@@ -12,6 +12,7 @@ from httk.core.requirements import parse_requirements, unmet_requirements
 
 from ._calls import unready_calls
 from ._durations import TIME_RESOURCES
+from ._manager_binding import INVENTORY_LABELS, can_assign, fits
 from .errors import (
     FormatError,
     TransitionLostError,
@@ -42,13 +43,17 @@ def effective_requirement(
     state: StateFrame,
     capacity: Mapping[str, int],
     maximum_workers: int,
+    *,
+    whole_nodes: bool = False,
 ) -> dict[str, int]:
     """Return the resource requirement selected for one ready activation.
 
     Consumable resources resolve wholesale (dynamic frame, then step, then job)
     and gain this manager's fair share of ``procs`` and ``mem``; a mapping that
     names only time labels leaves that choice to the next level. The time labels
-    resolve one label at a time through the same precedence.
+    resolve one label at a time through the same precedence. With *whole_nodes*
+    (a manager placing on a node inventory), a requirement of ``nodes`` gets no
+    fair share: it is given its nodes whole.
     """
 
     step = job.step_resources.get(state.step) if state.step is not None else None
@@ -59,6 +64,8 @@ def effective_requirement(
     )
     requirement = consumable(selected)
     for name in ("procs", "mem"):
+        if whole_nodes and requirement.get("nodes", 0) >= 1:
+            break
         if name in capacity and name not in requirement:
             share = capacity[name] // maximum_workers
             if share == 0 and capacity[name] > 0:
@@ -99,6 +106,24 @@ def unfit_resource(requirement: Mapping[str, int], capacity: Mapping[str, int]) 
         value = requirement[name]
         if name not in capacity or capacity[name] <= 0 or value > capacity[name]:
             return name
+    return None
+
+
+def unplaceable_resource(manager: Any, requirement: Mapping[str, int]) -> str | None:
+    """Return the first resource that keeps *requirement* from ever fitting this manager.
+
+    Beyond :func:`unfit_resource`, a manager with a node inventory also needs the
+    labels it places to fit its nodes; the first of ``nodes``, ``procs``, ``gpus``,
+    ``mem`` whose addition makes them not fit is reported.
+    """
+
+    missing = unfit_resource(requirement, manager.resources)
+    if missing is not None or manager._inventory is None:
+        return missing
+    labels = [name for name in INVENTORY_LABELS if name in requirement and name in manager._inventory.labels]
+    for index, label in enumerate(labels):
+        if not fits(manager._inventory, {name: requirement[name] for name in labels[: index + 1]}):
+            return label
     return None
 
 
@@ -160,7 +185,9 @@ def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
             _LOGGER.debug("skipping ready job %s: %s", marker.job_key, "; ".join(unready))
             continue
         try:
-            requirement = effective_requirement(job, state, manager.resources, manager.maximum_workers)
+            requirement = effective_requirement(
+                job, state, manager.resources, manager.maximum_workers, whole_nodes=manager._inventory is not None
+            )
         except (WorkflowError, OSError) as exc:
             manager._report_anomaly(
                 f"ready:{marker.job_key}",
@@ -168,7 +195,7 @@ def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
                 manager._event("job_unusable", marker, pass_name="ready"),
             )
             continue
-        missing_resource = unfit_resource(requirement, manager.resources)
+        missing_resource = unplaceable_resource(manager, requirement)
         if missing_resource is not None:
             _LOGGER.debug(
                 "skipping ready job %s: resource %s does not fit manager capacity",
@@ -331,7 +358,14 @@ def claim_pass(manager: Any, changed: bool, logger: Any) -> bool:
             "mem" in manager.resources and available["mem"] == 0
         ):
             break
-        if any(value > available.get(name, 0) for name, value in consumable(requirement).items()):
+        inventory = manager._inventory
+        if any(
+            value > available.get(name, 0)
+            for name, value in consumable(requirement).items()
+            if inventory is None or name not in inventory.labels
+        ):
+            continue
+        if inventory is not None and not can_assign(inventory, requirement):
             continue
         try:
             changed |= manager._claim_and_launch(marker)
@@ -389,10 +423,12 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     except (WorkflowError, OSError):
         return False
     try:
-        requirement = effective_requirement(job, state, manager.resources, manager.maximum_workers)
+        requirement = effective_requirement(
+            job, state, manager.resources, manager.maximum_workers, whole_nodes=manager._inventory is not None
+        )
     except (WorkflowError, OSError):
         return False
-    missing_resource = unfit_resource(requirement, manager.resources)
+    missing_resource = unplaceable_resource(manager, requirement)
     if missing_resource is not None:
         blocked["resources"][missing_resource] += 1
         return False

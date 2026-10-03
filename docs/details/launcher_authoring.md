@@ -137,7 +137,8 @@ copied into the bundle. The settings fall into three groups:
 - scheduler settings: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
   `slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
   `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation`;
-- `manager.workers`, which belongs to the manager command;
+- `manager.workers` and `manager.allocation`, which belong to the manager
+  command;
 - `environment.prelude`, shell setup such as module loads.
 
 A launcher may use other settings, but should keep its interpretation explicit.
@@ -148,7 +149,10 @@ The maintained Slurm dispatcher writes one mode-0700 script below
 argument-quoted `exec` line. If `environment.prelude` is set, the prelude runs
 first under `set -e`, and the manager command is resolved on the resulting
 `PATH` as `manager.command` (default `httk`). Without a prelude, the supplied
-Python interpreter argv is preserved. A successful result contains the parsed
+Python interpreter argv is preserved. Unless the argv already has one, the
+dispatcher appends `--allocation` with the `manager.allocation` setting
+(default `slurm`), so each manager probes its job's nodes; see
+[allocation probes](#allocation-probes). A successful result contains the parsed
 Slurm job IDs and the script path. If submission fails after some jobs were
 accepted, the refusal includes `submitted` and `job_ids` so the operator can
 cancel those jobs.
@@ -158,7 +162,9 @@ cancel those jobs.
 This compact custom dispatcher follows the same request and result rules,
 composes PBS directives from workspace settings, and submits the same manager
 command once per requested count. In a real bundle, save it as `launcher`, make
-it executable, use `"kind": "pbs"`, and list `qsub` in `required_binaries`.
+it executable, use `"kind": "pbs"`, and list `qsub` in `required_binaries`. It
+points each manager at the bundle's `allocation` probe
+([below](#allocation-probes)) unless `manager.allocation` names another.
 
 ```python
 #!/usr/bin/env python3
@@ -193,7 +199,7 @@ def main():
         refusal(operation, "unsupported operation")
         return
     workspace = Path(request["workspace"])
-    settings = request.get("settings", {})
+    settings = {**request.get("settings", {}), **request.get("launcher_settings", {})}
     directory = workspace / ".httk-workspace" / "batch"
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / ("manager-" + uuid.uuid4().hex + ".pbs")
@@ -211,7 +217,11 @@ def main():
     lines.append("set -e")
     if settings.get("environment.prelude"):
         lines.append(str(settings["environment.prelude"]))
-    lines.append("exec " + shlex.join(request["argv"]))
+    argv = list(request["argv"])
+    if "--allocation" not in argv:
+        bundle = request["launcher_dir"]
+        argv += ["--allocation", settings.get("manager.allocation", f"exec:{bundle}/allocation")]
+    lines.append("exec " + shlex.join(argv))
     script.write_text("\n".join(lines) + "\n")
     os.chmod(script, 0o700)
     jobs = []
@@ -226,4 +236,78 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+## Allocation probes
+
+A manager learns its nodes, processors, memory and devices from the allocation
+probe its `--allocation SPEC` selects: `auto`, `none`, `slurm`, `host`, or
+`exec:PATH` (see {doc}`taskmanager` under "Allocations"). A launcher appends the
+spec its managers need; the maintained Slurm dispatcher appends the
+`manager.allocation` setting, default `slurm`. A scheduler without a built-in
+probe uses `exec:PATH`: the manager runs PATH, without a shell or arguments,
+inside the allocation when it starts, and the executable prints one envelope on
+stdout:
+
+```json
+{
+  "format": "httk-workflow-allocation",
+  "format_version": 1,
+  "kind": "pbs",
+  "end_time": 1790000000,
+  "nodes": [
+    {"host": "n001", "procs": 4, "mem": 128000, "gpus": 2,
+     "cpus": ["0-7", "8-15", "16-23", "24-31"],
+     "gpu_ids": ["0", "1"], "gpu_variable": "CUDA_VISIBLE_DEVICES"}
+  ],
+  "resources": {"license": 2}
+}
+```
+
+| Member | Required | Meaning |
+| --- | --- | --- |
+| `format`, `format_version` | yes | `httk-workflow-allocation`, `1` |
+| `kind` | yes | A label naming the probe, such as `pbs` |
+| `end_time` | no | Epoch second the allocation ends, a positive number or `null` |
+| `nodes` | yes | Non-empty list of nodes with unique `host` names |
+| `nodes[].host` | yes | Non-empty host name |
+| `nodes[].procs` | yes | Processor slots on the node, a non-negative integer |
+| `nodes[].mem` | no | Memory in MB; the allocation has a `mem` capacity only when every node gives it |
+| `nodes[].gpus` | no | GPUs on the node, default `0` |
+| `nodes[].cpus` | no | One Linux cpulist (`0-7`, `0,2,4-6`) per processor slot, `procs` entries |
+| `nodes[].gpu_ids` | no | One non-empty device id per GPU, `gpus` entries |
+| `nodes[].gpu_variable` | with `gpu_ids` | The environment variable the ids belong in, such as `CUDA_VISIBLE_DEVICES` |
+| `resources` | no | Extra non-negative integer capacities; not `procs`, `mem`, `gpus`, `nodes`, `maxtime` or `mintime` |
+
+Unknown members are refused. The capacity the manager advertises is the node
+sums of `procs`, `gpus` and `mem`, the node count as `nodes`, and the extra
+`resources`; `--worker-resource` overrides any of them. A non-zero exit, a
+timeout after 60 seconds, or an invalid envelope stops the manager with an error
+naming the probe and the end of its stderr.
+
+For the PBS launcher above, save this as `allocation` next to `launcher` and
+make it executable. `$PBS_NODEFILE` lists one line per processor slot, repeating
+each host:
+
+```python
+#!/usr/bin/env python3
+import collections
+import json
+import os
+
+with open(os.environ["PBS_NODEFILE"]) as nodefile:
+    slots = collections.Counter(line.strip() for line in nodefile if line.strip())
+print(json.dumps({
+    "format": "httk-workflow-allocation",
+    "format_version": 1,
+    "kind": "pbs",
+    "nodes": [{"host": host, "procs": procs} for host, procs in slots.items()],
+}))
+```
+
+The PBS dispatcher appends `--allocation exec:BUNDLE/allocation` by default;
+setting it explicitly is equivalent:
+
+```console
+httk workflow launcher configure --set manager.allocation=exec:/home/me/.config/httk/launchers/pbs-cluster/allocation pbs-cluster
 ```

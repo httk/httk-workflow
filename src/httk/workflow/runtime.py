@@ -55,6 +55,8 @@ class AttemptContext:
     :param raw: Preserve the complete decoded context.
     :param deadline: Record the epoch second at which the manager stops the
         attempt, or ``None`` when it has no time limit.
+    :param binding: Record the nodes, slots, nodefile and launch prefix the
+        attempt was given, or ``None`` when its manager has no node inventory.
     """
 
     workspace_id: str
@@ -98,6 +100,11 @@ class AttemptContext:
     #: when the attempt runs under a ``maxtime``. An old context that predates
     #: the member reads as ``None``.
     deadline: int | None = None
+    #: The ``nodes`` (host, procs, gpus and, when placed, mem), ``nodefile``,
+    #: ``file`` (the full ``binding.json`` with per-node ``cpus`` and
+    #: ``gpu_ids``) and, when one applies, ``launch`` prefix this attempt was
+    #: given by a manager with a node inventory; ``None`` otherwise.
+    binding: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> Self:
@@ -137,6 +144,14 @@ class AttemptContext:
         payload = value.get("payload")
         if not isinstance(payload, str) or not os.path.isabs(payload):
             raise ValueError("attempt payload must be an absolute path")
+
+        binding = value.get("binding")
+        if binding is not None and (
+            not isinstance(binding, Mapping)
+            or not isinstance(binding.get("nodes"), list)
+            or not isinstance(binding.get("nodefile"), str)
+        ):
+            raise ValueError("attempt binding must be an object with a nodes list and a nodefile path")
 
         def optional_integer(name: str) -> int | None:
             raw = value.get(name)
@@ -181,6 +196,7 @@ class AttemptContext:
             join=value.get("join"),
             raw=value,
             deadline=optional_integer("deadline"),
+            binding=binding,
         )
 
 

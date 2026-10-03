@@ -83,7 +83,7 @@ def finish(manager: Any, marker: Any, state: Any, members: tuple[str, ...], *, u
     if proof is None:
         manager._report_unverifiable_cancellation(marker, state)
         return False
-    local = manager._running.pop(attempt_id, None)
+    local = manager._drop_running(attempt_id)
     if local is not None:
         return_code = local.process.poll()
         if return_code is None:

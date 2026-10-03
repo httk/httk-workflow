@@ -148,27 +148,27 @@ def _arguments(**options: object) -> argparse.Namespace:
     return argparse.Namespace(**{**_manager.manager_option_defaults(), **options})
 
 
-def test_end_time_is_the_earlier_of_time_limit_and_slurm(
+def test_end_time_is_the_earlier_of_time_limit_and_the_allocation(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(_manager.time, "time", lambda: 1000.0)
-    slurm = {"SLURM_JOB_ID": "7", "SLURM_JOB_END_TIME": "5000"}
+    slurm = slurm_end_time({"SLURM_JOB_ID": "7", "SLURM_JOB_END_TIME": "5000"})
     with caplog.at_level(logging.WARNING):
         assert _manager._manager_end_time(_arguments(time_limit="1:00:00"), slurm) == (4600.0, 120.0)
-        assert _manager._manager_end_time(_arguments(time_limit="1:00:00"), {}) == (4600.0, 120.0)
+        assert _manager._manager_end_time(_arguments(time_limit="1:00:00"), None) == (4600.0, 120.0)
         assert _manager._manager_end_time(_arguments(), slurm) == (5000.0, 120.0)
-        assert _manager._manager_end_time(_arguments(), {}) == (None, 120.0)
+        assert _manager._manager_end_time(_arguments(), None) == (None, 120.0)
         assert not caplog.records
         assert _manager._manager_end_time(_arguments(time_limit="2:00:00"), slurm) == (5000.0, 120.0)
-        assert "ends after the Slurm job" in caplog.text
+        assert "ends after the allocation does" in caplog.text
         caplog.clear()
         # The margin is raised to the drain timeout, warning only when an end time makes it matter.
-        assert _manager._manager_end_time(_arguments(deadline_margin=10.0), {}) == (None, 30.0)
+        assert _manager._manager_end_time(_arguments(deadline_margin=10.0), None) == (None, 30.0)
         assert not caplog.records
         assert _manager._manager_end_time(_arguments(deadline_margin=10.0), slurm) == (5000.0, 30.0)
         assert "raising --deadline-margin" in caplog.text
     with pytest.raises(ValueError, match="--time-limit"):
-        _manager._manager_end_time(_arguments(time_limit="abc"), {})
+        _manager._manager_end_time(_arguments(time_limit="abc"), None)
 
 
 def test_time_options_parse_and_forward(tmp_path: Path) -> None:

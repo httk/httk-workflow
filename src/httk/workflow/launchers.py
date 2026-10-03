@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._allocation import argv_allocation, half_physical_memory_mb, split_allocation
 from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
@@ -519,10 +520,9 @@ def host_capacity() -> dict[str, int]:
     """
 
     capacity = {"procs": os.cpu_count() or 1}
-    try:
-        capacity["mem"] = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 2**20 // 2
-    except (ValueError, OSError, AttributeError):
-        pass
+    memory = half_physical_memory_mb()
+    if memory is not None:
+        capacity["mem"] = memory
     return capacity
 
 
@@ -567,7 +567,8 @@ def launch_processes(
     :param argv: Full manager command argument vector.
     :param count: Number of manager children.
     :param settings: Workspace settings, including an optional environment prelude.
-    :param capacity: Capacity to split, or :func:`host_capacity` when omitted.
+    :param capacity: Capacity to split, or :func:`host_capacity` when omitted;
+        not passed to one manager that probes the host itself (``--allocation host``).
     :return: Process launcher result document.
     """
 
@@ -582,9 +583,18 @@ def launch_processes(
     environment = {key: value for key, value in os.environ.items() if not key.startswith("SLURM_")}
     prelude = settings.get("environment.prelude")
     prelude_text = prelude.strip() if isinstance(prelude, str) else ""
+    # One manager per host may bind to the host's devices; split managers only count.
+    spec = argv_allocation(argv)
+    if count > 1:
+        allocation = split_allocation(spec, count)
+    else:
+        allocation = [] if spec is not None else ["--allocation", "host"]
+    if allocation[-1:] == ["host"]:
+        # The host probe supplies the one manager's capacity and its node inventory.
+        resources = [{}]
     pids: list[int] = []
     for child_resources in resources:
-        child_argv = list(argv)
+        child_argv = [*argv, *allocation]
         supplied = _explicit_resources(child_argv)
         for name, value in child_resources.items():
             if name not in supplied:
