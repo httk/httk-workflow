@@ -20,8 +20,8 @@ AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 def test_client_service_rank_roundtrip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = tmp_path / "site/workspace"
+    workspace.mkdir(parents=True)
     (workspace / ".httk-workspace").mkdir()
     (workspace / "input.txt").write_text("application input")
     runtime = tmp_path / "runtime"
@@ -54,13 +54,13 @@ def test_client_service_rank_roundtrip(
         json.dumps(
             {
                 "format": "httk-workspace-daemon-policy",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace": str(workspace),
                 "workspace_id": "12345678-1234-4234-8234-123456789abc",
                 "enrollment_id": "e" * 32,
-                "requests": str(tmp_path / "requests"),
-                "responses": str(tmp_path / "responses"),
+                "exchange": str(tmp_path / "site/exchange"),
                 "state": str(tmp_path / "state"),
+                "snapshots": str(tmp_path / "snapshots"),
                 "bwrap": "/usr/bin/bwrap",
                 "python": sys.executable,
                 "sbatch": str(runtime / "sbatch"),

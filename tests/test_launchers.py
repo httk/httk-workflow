@@ -329,3 +329,25 @@ def test_slurm_launcher_reports_partial_submission(tmp_path: Path, monkeypatch: 
     assert result["submitted"] == 1
     assert result["job_ids"] == ["4201"]
     assert "quota exceeded" in result["error"]
+
+
+def test_daemon_launcher_add_set_and_refusals(tmp_path: Path, remote: Remote) -> None:
+    bundle = add_launcher("small", template="daemon", settings={"slurm.partition": "debug"}, global_=True)
+    path = bundle / "launcher.json"
+    assert json.loads(path.read_text())["kind"] == "daemon"
+    assert subprocess.run([str(bundle / "launcher")], capture_output=True, text=True, check=False).returncode == 2
+    with pytest.raises(ValueError, match="daemon launchers run only"):
+        start_managers(
+            resolve_launcher("small"), workspace_root=tmp_path, argv=["x"], count=1, settings={}, timeout=None
+        )
+    before = path.read_text()
+    with pytest.raises(ValueError, match="slurm.ntasks=4 requires slurm.mpi=pmix"):
+        configure_launcher("small", {"slurm.ntasks": 4})
+    assert path.read_text() == before
+    configure_launcher("small", {"slurm.mem": "4G"})
+    assert json.loads(path.read_text())["settings"]["slurm.mem"] == "4G"
+    with pytest.raises(ValueError, match="names must match"):
+        add_launcher("Small", template="daemon", global_=True)
+    with pytest.raises(ValueError, match="unsupported daemon launcher setting"):
+        add_launcher("bad", template="daemon", settings={"slurm.qos": "x"}, global_=True)
+    assert not (bundle.parent / "bad").exists()

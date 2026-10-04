@@ -1,8 +1,11 @@
 """Strict validation for the confined workspace daemon policy."""
 
 import base64
+import ctypes
+import errno
 import importlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from httk.workflow._daemon_policy import Policy, Profile, load_policy, policy_document
+from httk.workflow._daemon_policy import Policy, Profile, check_layout, load_policy, policy_document
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
@@ -20,13 +23,13 @@ def _document(tmp_path: Path) -> dict[str, object]:
     broker = tmp_path / "broker"
     return {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 1,
-        "workspace": str(tmp_path / "workspace"),
+        "format_version": 2,
+        "workspace": str(tmp_path / "site/workspace"),
         "workspace_id": "12345678-1234-1234-1234-123456789abc",
         "enrollment_id": "0123456789abcdef0123456789abcdef",
-        "requests": str(tmp_path / "requests"),
-        "responses": str(tmp_path / "responses"),
+        "exchange": str(tmp_path / "site/exchange"),
         "state": str(tmp_path / "state"),
+        "snapshots": str(tmp_path / "snapshots"),
         "bwrap": str(runtime / "bin/bwrap"),
         "python": str(runtime / "bin/python"),
         "sbatch": str(broker / "bin/sbatch"),
@@ -58,7 +61,10 @@ def _write(tmp_path: Path, document: object) -> Path:
 def test_policy_loads_exact_fields_and_defaults(tmp_path: Path) -> None:
     policy = load_policy(_write(tmp_path, _document(tmp_path)))
 
-    assert policy.workspace == tmp_path / "workspace"
+    assert policy.workspace == tmp_path / "site/workspace"
+    assert policy.root == tmp_path / "site"
+    assert policy.requests == tmp_path / "site/exchange/requests"
+    assert policy.responses == tmp_path / "site/exchange/responses"
     assert policy.max_records == 4096
     assert policy.max_submissions == 128
     assert policy.poll_seconds == 1.0
@@ -178,6 +184,7 @@ def test_unknown_and_duplicate_keys_are_refused(tmp_path: Path) -> None:
     ("field", "value"),
     [
         ("format_version", True),
+        ("format_version", 1),
         ("workspace_id", 7),
         ("readonly_paths", "runtime"),
         ("profiles", []),
@@ -326,18 +333,43 @@ def test_profile_names_and_members_are_strict(tmp_path: Path) -> None:
         load_policy(_write(tmp_path, document))
 
 
-@pytest.mark.parametrize("field", ["workspace", "requests", "responses", "state"])
-def test_mutable_roots_must_be_disjoint(tmp_path: Path, field: str) -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("exchange", "elsewhere/exchange", "siblings in a dedicated directory"),
+        ("exchange", "site/workspace", "siblings in a dedicated directory"),
+        ("state", "site/workspace/state", "disjoint"),
+        ("state", "site", "disjoint"),
+        ("snapshots", "site/snapshots", "disjoint"),
+        ("snapshots", "state/inside", "state and snapshots must be disjoint"),
+    ],
+)
+def test_layout_rules_require_a_dedicated_disjoint_parent(tmp_path: Path, field: str, value: str, message: str) -> None:
     document = _document(tmp_path)
-    document[field] = str(tmp_path / "workspace/inside") if field != "workspace" else str(tmp_path / "requests/inside")
-    with pytest.raises(ValueError, match="pairwise disjoint"):
+    document[field] = str(tmp_path / value)
+    with pytest.raises(ValueError, match=message):
+        load_policy(_write(tmp_path, document))
+
+
+def test_daemon_parent_cannot_be_the_filesystem_root(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    document["workspace"], document["exchange"] = "/httk-test-workspace", "/httk-test-exchange"
+    with pytest.raises(ValueError, match="filesystem root"):
+        load_policy(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize("runtime", ["site", "site/lib", "site/workspace/lib"])
+def test_daemon_parent_must_be_disjoint_from_runtime_paths(tmp_path: Path, runtime: str) -> None:
+    document = _document(tmp_path)
+    document["readonly_paths"] = [str(tmp_path / runtime), *document["readonly_paths"]]  # type: ignore[misc]
+    with pytest.raises(ValueError, match="daemon parent .* runtime path"):
         load_policy(_write(tmp_path, document))
 
 
 @pytest.mark.parametrize("kind", ["readonly_paths", "broker_paths"])
 def test_runtime_roots_cannot_overlap_mutable_roots_or_be_root(tmp_path: Path, kind: str) -> None:
     document = _document(tmp_path)
-    document[kind] = [str(tmp_path / "workspace/escape")]
+    document[kind] = [str(tmp_path / "site/workspace/escape")]
     with pytest.raises(ValueError, match="disjoint"):
         load_policy(_write(tmp_path, document))
 
@@ -490,14 +522,14 @@ def test_policy_walk_closes_file_after_final_parent_close_error(monkeypatch: pyt
 def test_direct_dataclasses_enforce_the_same_invariants(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         Profile("bad name", 1, 1, 1)
-    with pytest.raises(ValueError, match="pairwise disjoint"):
+    with pytest.raises(ValueError, match="siblings"):
         Policy(
-            workspace=tmp_path / "workspace",
+            workspace=tmp_path / "site/workspace",
             workspace_id="12345678-1234-1234-1234-123456789abc",
             enrollment_id="0" * 32,
-            requests=tmp_path / "workspace/requests",
-            responses=tmp_path / "responses",
+            exchange=tmp_path / "site/workspace/exchange",
             state=tmp_path / "state",
+            snapshots=tmp_path / "snapshots",
             bwrap=tmp_path / "runtime/bwrap",
             python=tmp_path / "runtime/python",
             sbatch=tmp_path / "broker/sbatch",
@@ -508,3 +540,158 @@ def test_direct_dataclasses_enforce_the_same_invariants(tmp_path: Path) -> None:
             broker_paths=(tmp_path / "broker",),
             profiles=(),
         )
+
+
+def test_gres_and_reservation_round_trip_only_when_set(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    profiles = document["profiles"]
+    assert isinstance(profiles, dict)
+    profiles["gpu"] = {"gres": "gpu:a100=2", "reservation": "maint.1"}
+    policy = load_policy(_write(tmp_path, document))
+    assert (policy.profile("gpu").gres, policy.profile("gpu").reservation) == ("gpu:a100=2", "maint.1")
+    rendered = policy_document(policy)["profiles"]
+    assert isinstance(rendered, dict)
+    assert "gres" not in rendered["cpu"] and "reservation" not in rendered["cpu"]
+    assert load_policy(_write(tmp_path, policy_document(policy))) == policy
+    with pytest.raises(ValueError, match="invalid gres"):
+        Profile("gpu", gres="gpu a100")
+    with pytest.raises(ValueError, match="invalid reservation"):
+        Profile("gpu", reservation="-bad")
+
+
+def _layout_policy(tmp_path: Path) -> Policy:
+    (tmp_path / "site/workspace/.httk-workspace/exchange").mkdir(parents=True)
+    (tmp_path / "site/exchange").mkdir()
+    return load_policy(_write(tmp_path, _document(tmp_path)))
+
+
+def test_check_layout_accepts_the_dedicated_parent_and_leaves_no_probe(tmp_path: Path) -> None:
+    policy = _layout_policy(tmp_path)
+    check_layout(policy)
+    assert list((tmp_path / "site/exchange").iterdir()) == []
+    assert list((tmp_path / "site/workspace/.httk-workspace/exchange").iterdir()) == []
+
+
+def test_check_layout_refuses_an_extra_parent_entry(tmp_path: Path) -> None:
+    policy = _layout_policy(tmp_path)
+    (tmp_path / "site/.hidden").touch()
+    with pytest.raises(ValueError, match="must contain only") as refusal:
+        check_layout(policy)
+    assert ".hidden" in str(refusal.value)
+
+
+def test_check_layout_refuses_symlinked_components(tmp_path: Path) -> None:
+    policy = _layout_policy(tmp_path)
+    staging = tmp_path / "site/workspace/.httk-workspace/exchange"
+    staging.rmdir()
+    staging.symlink_to(tmp_path / "site/exchange")
+    with pytest.raises(OSError) as refusal:
+        check_layout(policy)
+    assert refusal.value.errno in (errno.ELOOP, errno.ENOTDIR)
+
+
+def _failing_renameat2(code: int) -> Any:
+    def renameat2(*_args: object) -> int:
+        ctypes.set_errno(code)
+        return -1
+
+    return renameat2
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (errno.EXDEV, "renameable into each other"),
+        (errno.EINVAL, "does not support no-replace renames"),
+        (errno.ENOSYS, "does not support no-replace renames"),
+        (errno.EACCES, "cannot rename the layout probe .*Permission denied"),
+    ],
+)
+def test_check_layout_refuses_failed_no_replace_renames_and_cleans_the_probe(
+    code: int, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module: Any = importlib.import_module("httk.workflow._daemon_policy")
+    policy = _layout_policy(tmp_path)
+    monkeypatch.setattr(module, "_libc_renameat2", lambda: _failing_renameat2(code))
+    with pytest.raises(ValueError, match=message):
+        check_layout(policy)
+    assert list((tmp_path / "site/exchange").iterdir()) == []
+
+
+def test_check_layout_requires_the_renameat2_symbol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module: Any = importlib.import_module("httk.workflow._daemon_policy")
+    policy = _layout_policy(tmp_path)
+    monkeypatch.setattr(module.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace())
+    with pytest.raises(ValueError, match=r"renameat2 is unavailable \(glibc 2\.28\+ and Linux 3\.15\+"):
+        check_layout(policy)
+    assert list((tmp_path / "site/exchange").iterdir()) == []
+
+
+def test_check_layout_probe_uses_a_no_replace_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module: Any = importlib.import_module("httk.workflow._daemon_policy")
+    policy = _layout_policy(tmp_path)
+    real = module._libc_renameat2()
+    calls: list[int] = []
+
+    def recording(source: int, old: bytes, target: int, new: bytes, flags: int) -> int:
+        calls.append(flags)
+        return real(source, old, target, new, flags)
+
+    monkeypatch.setattr(module, "_libc_renameat2", lambda: recording)
+    check_layout(policy)
+    assert calls == [1]
+    assert list((tmp_path / "site/workspace/.httk-workspace/exchange").iterdir()) == []
+
+
+@pytest.mark.parametrize("tamper", ["replaced", "removed"])
+def test_check_layout_detects_a_tampered_probe_and_never_moves_foreign_entries(
+    tamper: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module: Any = importlib.import_module("httk.workflow._daemon_policy")
+    policy = _layout_policy(tmp_path)
+    staging = tmp_path / "site/workspace/.httk-workspace/exchange"
+    real = module._libc_renameat2()
+    renames: list[str] = []
+
+    def rename_then_tamper(source: int, old: bytes, target: int, new: bytes, flags: int) -> int:
+        result = real(source, old, target, new, flags)
+        name = os.fsdecode(new)
+        renames.append(name)
+        (staging / name).unlink()
+        if tamper == "replaced":
+            (staging / name).mkdir()
+            (staging / name / "payload").touch()
+        return result
+
+    monkeypatch.setattr(module, "_libc_renameat2", lambda: rename_then_tamper)
+    with pytest.raises(ValueError, match="layout probe was tampered with"):
+        check_layout(policy)
+    assert len(renames) == 1
+    assert list((tmp_path / "site/exchange").iterdir()) == []
+    if tamper == "replaced":
+        assert (staging / renames[0] / "payload").is_file()
+
+
+def test_check_layout_without_probe_still_checks_the_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module: Any = importlib.import_module("httk.workflow._daemon_policy")
+    policy = _layout_policy(tmp_path)
+    monkeypatch.setattr(module, "_libc_renameat2", lambda: pytest.fail("probe must not run"))
+    check_layout(policy, probe=False)
+    (tmp_path / "site/extra").mkdir()
+    with pytest.raises(ValueError, match="must contain only"):
+        check_layout(policy, probe=False)
+
+
+@pytest.mark.parametrize("destination", ["/daemon-root", "/daemon-root/lib", "/"])
+def test_runtime_paths_cannot_overlap_the_broker_root_destination(tmp_path: Path, destination: str) -> None:
+    document = _document(tmp_path)
+    document["broker_paths"] = [*document["broker_paths"], destination]  # type: ignore[misc]
+    with pytest.raises(ValueError, match="reserved sandbox destinations|filesystem root"):
+        load_policy(_write(tmp_path, document))
+
+
+def test_check_layout_reports_a_missing_staging_directory(tmp_path: Path) -> None:
+    policy = _layout_policy(tmp_path)
+    (tmp_path / "site/workspace/.httk-workspace/exchange").rmdir()
+    with pytest.raises(ValueError, match="staging directory .* is missing; .*--reload"):
+        check_layout(policy)

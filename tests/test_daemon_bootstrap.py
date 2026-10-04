@@ -37,9 +37,16 @@ def _write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
 
 
 def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
-    roots = {name: tmp_path / name for name in ("workspace", "requests", "responses", "state", "runtime", "broker")}
-    for root in roots.values():
-        root.mkdir()
+    roots = {name: tmp_path / name for name in ("site/workspace", "site/exchange", "state", "runtime", "broker")}
+    for directory in (
+        roots["site/workspace"] / ".httk-workspace/exchange",
+        roots["site/exchange"] / "requests",
+        roots["site/exchange"] / "responses",
+        roots["state"],
+        roots["runtime"],
+        roots["broker"],
+    ):
+        directory.mkdir(parents=True)
     record = tmp_path / "bwrap-record.json"
     bwrap = roots["broker"] / "bwrap"
     options = " ".join(REQUIRED_BWRAP_OPTIONS)
@@ -64,13 +71,13 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         _write_executable(roots["broker"] / name)
     policy: dict[str, Any] = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 1,
-        "workspace": str(roots["workspace"]),
+        "format_version": 2,
+        "workspace": str(roots["site/workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
-        "requests": str(roots["requests"]),
-        "responses": str(roots["responses"]),
+        "exchange": str(roots["site/exchange"]),
         "state": str(roots["state"]),
+        "snapshots": str(tmp_path / "snapshots"),
         "bwrap": str(bwrap),
         "python": str(python),
         "sbatch": str(roots["broker"] / "sbatch"),
@@ -215,9 +222,11 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     assert "POISON" not in observed["env"]
     assert str(leak) not in observed["fds"].values()
     readonly_destinations = {destination for _, destination in _pairs(argv, "--ro-bind-fd")}
-    assert readonly_destinations == {"/workspace", *policy["readonly_paths"], *policy["broker_paths"]}
-    writable_destinations = {destination for _, destination in _pairs(argv, "--bind-fd")}
-    assert writable_destinations == {"/requests", "/responses", "/control"}
+    assert readonly_destinations == {*policy["readonly_paths"], *policy["broker_paths"]}
+    writable = _pairs(argv, "--bind-fd")
+    assert sorted(destination for _, destination in writable) == ["/control", "/daemon-root"]
+    root_fd = next(source for source, destination in writable if destination == "/daemon-root")
+    assert observed["fds"][root_fd] == str(tmp_path / "site")
     separator = argv.index("--")
     assert argv[separator + 1 :] == [
         policy["python"],
@@ -323,8 +332,9 @@ def test_serial_payload_refuses_unusable_allocation_capacity(
 
 def test_payload_does_not_require_broker_local_paths(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
-    for field in ("requests", "responses", "state"):
-        Path(policy[field]).rmdir()
+    for directory in ("requests", "responses"):
+        (Path(policy["exchange"]) / directory).rmdir()
+    Path(policy["state"]).rmdir()
     for field in ("sbatch", "squeue", "scancel"):
         Path(policy[field]).unlink()
     result = _run(
@@ -404,17 +414,47 @@ def test_resolved_runtime_roots_cannot_escape_role_boundaries(tmp_path: Path, al
     assert not record.exists()
 
 
-@pytest.mark.parametrize("mode", ["workspace", "requests", "responses", "state"])
+def test_runtime_path_overlapping_root_destination_is_refused(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    policy["readonly_paths"].append("/daemon-root/runtime")
+    _rewrite_policy(policy_path, policy)
+    result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--mode", "broker", "--once"])
+    assert result.returncode == 2
+    assert "reserved destination /daemon-root" in result.stderr
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("mode", ["root", "workspace", "exchange", "state"])
 def test_mutable_root_symlink_is_refused(tmp_path: Path, mode: str) -> None:
     policy_path, policy, record = _layout(tmp_path)
-    original = Path(policy[mode])
-    original.rmdir()
+    original = Path(policy[mode]) if mode in policy else Path(policy["exchange"]).parent
     target = tmp_path / f"{mode}-target"
-    target.mkdir()
+    original.rename(target)
     original.symlink_to(target, target_is_directory=True)
     arguments = ["--workspace", str(policy["workspace"]), "--mode", "broker"]
     result = _run(tmp_path, policy_path, arguments)
     assert result.returncode == 2
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("mode", ["payload", "broker"])
+def test_layout_is_rechecked_before_every_sandbox_entry(tmp_path: Path, mode: str) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    (tmp_path / "site" / "intruder").mkdir()
+    arguments = (
+        ["--workspace", str(policy["workspace"]), "--mode", "broker", "--once"]
+        if mode == "broker"
+        else ["--mode", "payload", "--profile", "small", "--handle", "a" * 32]
+    )
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 2
+    assert "must contain only workspace and exchange; found intruder" in result.stderr
+    assert not record.exists()
+    (tmp_path / "site" / "intruder").rmdir()
+    (Path(policy["workspace"]) / ".httk-workspace/exchange").rmdir()
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 2
+    assert "workspace staging directory" in result.stderr and "--reload" in result.stderr
     assert not record.exists()
 
 

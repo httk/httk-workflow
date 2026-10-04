@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Self, cast
@@ -26,24 +26,15 @@ from ._daemon_mailbox import MailboxDirectory
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, request_digest
 
 _LOGGER = logging.getLogger(__name__)
-_SETTING_NAMES = frozenset(
-    {
-        "mount_root",
-        "daemon_requests",
-        "daemon_responses",
-        "daemon_workspace_id",
-        "daemon_enrollment_id",
-        "daemon_public_key",
-        "daemon_configurations",
-        "daemon_request_max_age",
-    }
-)
+_SETTING_NAMES = frozenset({"exchange", "daemon_workspace_id", "daemon_enrollment_id", "daemon_public_key"})
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _CONFIGURATION_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
-_WORKSPACE_CONTROL = ".httk-workspace"
-_WORKSPACE_FORMAT = "format.json"
-_MAX_WORKSPACE_FORMAT_BYTES = 64 * 1024
+_ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
+_ENDPOINT_FORMAT_VERSION = 2
+_ENDPOINT_FILE = "endpoint.json"
+_MAX_ENDPOINT_BYTES = 64 * 1024
+_SUBDIRECTORIES = ("requests", "responses", "inbox", "outbox")
 _POLL_INTERVAL = 0.05
 _OUTCOMES = {
     "health": frozenset({"ready", "refused", "busy"}),
@@ -81,12 +72,6 @@ def _absolute_path(value: object, name: str) -> Path:
     return candidate
 
 
-def _paths_overlap(first: Path, second: Path) -> bool:
-    """Report whether either lexical path contains the other."""
-
-    return first == second or first.is_relative_to(second) or second.is_relative_to(first)
-
-
 def _canonical_public_key(value: object, name: str) -> str:
     """Return one canonical Ed25519 public key."""
 
@@ -105,23 +90,8 @@ def _canonical_public_key(value: object, name: str) -> str:
 def _configurations(value: object) -> Mapping[str, str]:
     """Return an immutable validated approved-configuration catalog."""
 
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(
-                value,
-                object_pairs_hook=_object_without_duplicates,
-                parse_constant=_reject_constant,
-            )
-        except (ValueError, RecursionError) as exc:
-            raise ValueError("daemon_configurations must be a canonical JSON object") from exc
-        if not isinstance(decoded, dict):
-            raise ValueError("daemon_configurations must be a canonical JSON object")
-        canonical = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        if value != canonical:
-            raise ValueError("daemon_configurations must be a canonical JSON object")
-        value = decoded
     if not isinstance(value, Mapping):
-        raise ValueError("daemon_configurations must be an object or canonical JSON object string")
+        raise ValueError("configurations must be an object")
     result: dict[str, str] = {}
     for name, digest in value.items():
         if type(name) is not str or _CONFIGURATION_PATTERN.fullmatch(name) is None:
@@ -133,14 +103,10 @@ def _configurations(value: object) -> Mapping[str, str]:
 
 
 def _request_max_age(value: object) -> int:
-    """Return a configured request maximum age from typed or manual settings."""
+    """Return a validated request maximum age."""
 
-    if isinstance(value, str):
-        if not value.isascii() or not value.isdigit() or (len(value) > 1 and value.startswith("0")):
-            raise ValueError("daemon_request_max_age must be an integer from 1 through 86400")
-        value = int(value)
     if type(value) is not int or not 1 <= value <= 86_400:
-        raise ValueError("daemon_request_max_age must be an integer from 1 through 86400")
+        raise ValueError("request_max_age must be an integer from 1 through 86400")
     return value
 
 
@@ -175,46 +141,37 @@ def _validate_unicode(value: object) -> None:
             _validate_unicode(item)
 
 
-def _read_workspace_format(descriptor: int) -> dict[str, object]:
-    """Read the workspace format through a pinned workspace descriptor."""
+def read_endpoint(exchange: Path) -> dict[str, object]:
+    """Read and strictly validate ``endpoint.json`` of one mounted exchange directory.
 
-    directory = -1
-    document = -1
-    try:
-        directory = os.open(
-            _WORKSPACE_CONTROL,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-            dir_fd=descriptor,
-        )
+    :param exchange: Absolute path of the mounted exchange directory.
+    :return: The validated endpoint document, with ``configurations`` as an immutable mapping.
+    :raises OSError: If the directory or file cannot be opened without following symlinks.
+    :raises ValueError: If the file is not a bounded, strict, valid version 2 endpoint document.
+    """
+
+    with MailboxDirectory(exchange) as directory:
         document = os.open(
-            _WORKSPACE_FORMAT,
+            _ENDPOINT_FILE,
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=directory,
+            dir_fd=directory._require_open(),
         )
-        information = os.fstat(document)
-        if not stat.S_ISREG(information.st_mode):
-            raise ValueError("workspace format is not a regular file")
-        if information.st_size > _MAX_WORKSPACE_FORMAT_BYTES:
-            raise ValueError("workspace format exceeds 65536 bytes")
-        data = bytearray()
-        while len(data) <= _MAX_WORKSPACE_FORMAT_BYTES:
-            chunk = os.read(document, _MAX_WORKSPACE_FORMAT_BYTES + 1 - len(data))
-            if not chunk:
-                break
-            data.extend(chunk)
-            if len(data) > _MAX_WORKSPACE_FORMAT_BYTES:
-                raise ValueError("workspace format exceeds 65536 bytes")
-    finally:
         try:
-            if document >= 0:
-                os.close(document)
+            if not stat.S_ISREG(os.fstat(document).st_mode):
+                raise ValueError("daemon endpoint is not a regular file")
+            data = bytearray()
+            while len(data) <= _MAX_ENDPOINT_BYTES:
+                chunk = os.read(document, _MAX_ENDPOINT_BYTES + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
         finally:
-            if directory >= 0:
-                os.close(directory)
-
+            os.close(document)
+    if len(data) > _MAX_ENDPOINT_BYTES:
+        raise ValueError("daemon endpoint exceeds 65536 bytes")
     raw = bytes(data)
     if any(raw.startswith(bom) for bom in _BOMS):
-        raise ValueError("workspace format must be UTF-8 without a BOM")
+        raise ValueError("daemon endpoint must be UTF-8 without a BOM")
     try:
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
@@ -223,10 +180,129 @@ def _read_workspace_format(descriptor: int) -> dict[str, object]:
         )
         _validate_unicode(value)
     except (UnicodeError, ValueError, RecursionError) as exc:
-        raise ValueError("invalid workspace format document") from exc
-    if not isinstance(value, dict):
-        raise ValueError("workspace format must be a JSON object")
+        raise ValueError("invalid daemon endpoint document") from exc
+    fields = {
+        "format",
+        "format_version",
+        "workspace_id",
+        "enrollment_id",
+        "daemon_public_key",
+        "configurations",
+        "request_max_age",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("invalid daemon endpoint fields")
+    if value["format"] != _ENDPOINT_FORMAT:
+        raise ValueError("invalid daemon endpoint format")
+    if type(value["format_version"]) is not int or value["format_version"] != _ENDPOINT_FORMAT_VERSION:
+        raise ValueError("unsupported daemon endpoint version")
+    _canonical_uuid(value["workspace_id"], "workspace_id")
+    if type(value["enrollment_id"]) is not str or _ID_PATTERN.fullmatch(value["enrollment_id"]) is None:
+        raise ValueError("enrollment_id must be 32 lower-case hexadecimal characters")
+    _canonical_public_key(value["daemon_public_key"], "daemon_public_key")
+    value["configurations"] = _configurations(value["configurations"])
+    value["request_max_age"] = _request_max_age(value["request_max_age"])
     return value
+
+
+_MAX_PASSIVE_BYTES = 1024 * 1024
+_STRING_LISTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "status": {
+        "jobs": ("job_id", "job_key", "state"),
+        "rejected": ("name", "reason"),
+        "eject_errors": ("job_id", "reason"),
+    },
+    "managers": {"managers": ("handle", "profile", "request_id", "state")},
+}
+
+
+def _read_passive_file(directory: MailboxDirectory, name: str) -> object | None:
+    """Read one bounded strict JSON file of the outbox, or ``None`` when it is absent."""
+
+    try:
+        document = os.open(
+            name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory._require_open()
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(document).st_mode):
+            raise ValueError(f"{name} is not a regular file")
+        data = bytearray()
+        while len(data) <= _MAX_PASSIVE_BYTES:
+            chunk = os.read(document, _MAX_PASSIVE_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+    finally:
+        os.close(document)
+    if len(data) > _MAX_PASSIVE_BYTES:
+        raise ValueError(f"{name} exceeds {_MAX_PASSIVE_BYTES} bytes")
+    raw = bytes(data)
+    if any(raw.startswith(bom) for bom in _BOMS):
+        raise ValueError(f"{name} must be UTF-8 without a BOM")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+        _validate_unicode(value)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{name} is not valid strict JSON") from exc
+    return value
+
+
+def _check_passive(name: str, value: object, kind: str, identity: tuple[str, str]) -> dict[str, object]:
+    """Validate the shape and pinned identity of one passive status document."""
+
+    lists = _STRING_LISTS[kind]
+    fields = {"format", "format_version", "generated_at", identity[0], *lists}
+    if kind == "status":
+        fields.add("truncated")
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError(f"{name} has invalid fields")
+    if value["format"] != f"httk-workspace-daemon-{kind}":
+        raise ValueError(f"{name} has an invalid format")
+    if type(value["format_version"]) is not int or value["format_version"] != 1:
+        raise ValueError(f"{name} has an unsupported version")
+    if value[identity[0]] != identity[1]:
+        raise ValueError(f"{name} does not belong to the pinned daemon")
+    if type(value["generated_at"]) is not str or ("truncated" in value and type(value["truncated"]) is not bool):
+        raise ValueError(f"{name} has invalid fields")
+    for key, keys in lists.items():
+        items = value[key]
+        if not isinstance(items, list) or not all(
+            isinstance(item, dict) and set(item) == set(keys) and all(type(field) is str for field in item.values())
+            for item in items
+        ):
+            raise ValueError(f"{name} has an invalid {key} list")
+    return value
+
+
+def read_passive_status(endpoint: "Endpoint") -> dict[str, object]:
+    """Read the passive ``status.json`` and ``managers.json`` of a mounted exchange.
+
+    Both files are untrusted informational content: they are validated for shape and pinned
+    identity only, and must never be acted upon.
+
+    :param endpoint: The pinned daemon endpoint.
+    :return: ``{"status": ..., "managers": ...}``, each part ``None`` when its file is absent.
+    :raises OSError: If the exchange cannot be opened safely.
+    :raises ValueError: If the enrollment changed or a present file is not a valid bounded document.
+    """
+
+    endpoint.live()
+    parts: dict[str, object] = {}
+    with MailboxDirectory(endpoint.exchange / "outbox") as directory:
+        for kind, identity in (
+            ("status", ("workspace_id", endpoint.workspace_id)),
+            ("managers", ("enrollment_id", endpoint.enrollment_id)),
+        ):
+            name = f"{kind}.json"
+            value = _read_passive_file(directory, name)
+            parts[kind] = None if value is None else _check_passive(name, value, kind, identity)
+    return parts
 
 
 def _cache_directory(endpoint: "Endpoint") -> Path:
@@ -312,7 +388,7 @@ def _binding(endpoint: "Endpoint", request: Request) -> dict[str, object]:
         "request_id": request.request_id,
         "workspace_id": endpoint.workspace_id,
         "enrollment_id": endpoint.enrollment_id,
-        "daemon_public_key": endpoint.daemon_public_key,
+        "daemon_public_key": endpoint.public_key,
         "operator_key": request.operator_key,
     }
 
@@ -456,13 +532,14 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
             verify_request(saved, [current_key])
             return saved
 
+        live = endpoint.live()
         if intent.operation == "start_manager":
-            approved_digest = endpoint.configurations.get(intent.profile or "")
+            approved_digest = cast(Mapping[str, str], live["configurations"]).get(intent.profile or "")
             if approved_digest is None:
                 raise ValueError(f"daemon configuration is not approved: {intent.profile!r}")
             if intent.configuration_digest != approved_digest:
                 raise ValueError("daemon configuration digest does not match the approved endpoint catalog")
-        signed = sign_request(intent, lifetime=min(3600, endpoint.request_max_age))
+        signed = sign_request(intent, lifetime=min(3600, cast(int, live["request_max_age"])))
         current_key = identity_public_key()
         if current_key is None or signed.operator_key != current_key:
             raise ValueError("signed daemon request does not match the local identity")
@@ -472,95 +549,100 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
 
 @dataclass(frozen=True, slots=True)
 class Endpoint:
-    """Validated mounted paths and identities for one daemon endpoint.
+    """Validated mounted exchange path and pinned identities for one daemon endpoint.
 
-    :param workspace: Mounted workspace data root.
-    :param requests: Mounted daemon request mailbox root.
-    :param responses: Mounted daemon response mailbox root.
-    :param workspace_id: Canonical UUID of the mounted workspace.
+    :param exchange: Absolute mounted exchange directory.
+    :param workspace_id: Canonical UUID of the daemon workspace.
     :param enrollment_id: Protected daemon enrollment identifier.
-    :param daemon_public_key: Pinned broker response-signing public key.
-    :param configurations: Approved configuration names and canonical digests.
-    :param request_max_age: Maximum signed request lifetime in seconds.
+    :param public_key: Pinned broker response-signing public key.
     """
 
-    workspace: Path
-    requests: Path
-    responses: Path
+    exchange: Path
     workspace_id: str
     enrollment_id: str
-    daemon_public_key: str
-    configurations: Mapping[str, str] = field(default_factory=dict)
-    request_max_age: int = 3600
+    public_key: str
 
     def __post_init__(self) -> None:
         """Refuse direct construction that bypasses endpoint invariants."""
 
-        roots = (self.workspace, self.requests, self.responses)
-        if any(not isinstance(root, Path) or not root.is_absolute() or ".." in root.parts for root in roots):
-            raise ValueError("endpoint roots must be absolute paths without .. components")
-        if any(_paths_overlap(first, second) for index, first in enumerate(roots) for second in roots[index + 1 :]):
-            raise ValueError("mount-daemon roots must be pairwise disjoint")
+        if not isinstance(self.exchange, Path) or not self.exchange.is_absolute() or ".." in self.exchange.parts:
+            raise ValueError("exchange must be an absolute path without .. components")
         _canonical_uuid(self.workspace_id, "workspace_id")
         if type(self.enrollment_id) is not str or _ID_PATTERN.fullmatch(self.enrollment_id) is None:
             raise ValueError("enrollment_id must be 32 lower-case hexadecimal characters")
-        _canonical_public_key(self.daemon_public_key, "daemon_public_key")
-        object.__setattr__(self, "configurations", _configurations(self.configurations))
-        object.__setattr__(self, "request_max_age", _request_max_age(self.request_max_age))
+        _canonical_public_key(self.public_key, "public_key")
+
+    @property
+    def requests(self) -> Path:
+        """The signed request mailbox directory."""
+
+        return self.exchange / "requests"
+
+    @property
+    def responses(self) -> Path:
+        """The signed response mailbox directory."""
+
+        return self.exchange / "responses"
 
     @classmethod
     def from_settings(cls, settings: Mapping[str, object]) -> Self:
-        """Build an endpoint from exactly the eight daemon remote settings.
+        """Build an endpoint from exactly the four daemon remote settings.
 
         :param settings: Adapter settings containing only daemon endpoint fields.
         :return: The validated endpoint value.
-        :raises ValueError: If names, paths, or identities are invalid.
+        :raises ValueError: If names, the path, or identities are invalid.
         """
 
         if not isinstance(settings, Mapping) or set(settings) != _SETTING_NAMES:
-            raise ValueError("mount-daemon settings must contain exactly the eight endpoint settings")
-        workspace = _absolute_path(settings["mount_root"], "mount_root")
-        requests = _absolute_path(settings["daemon_requests"], "daemon_requests")
-        responses = _absolute_path(settings["daemon_responses"], "daemon_responses")
-        roots = (workspace, requests, responses)
-        if any(_paths_overlap(first, second) for index, first in enumerate(roots) for second in roots[index + 1 :]):
-            raise ValueError("mount-daemon roots must be pairwise disjoint")
-        workspace_id = _canonical_uuid(settings["daemon_workspace_id"], "daemon_workspace_id")
+            raise ValueError("mount-daemon settings must contain exactly the four endpoint settings")
         enrollment_id = settings["daemon_enrollment_id"]
         if type(enrollment_id) is not str or _ID_PATTERN.fullmatch(enrollment_id) is None:
             raise ValueError("daemon_enrollment_id must be 32 lower-case hexadecimal characters")
-        daemon_public_key = _canonical_public_key(settings["daemon_public_key"], "daemon_public_key")
-        configurations = _configurations(settings["daemon_configurations"])
-        request_max_age = _request_max_age(settings["daemon_request_max_age"])
         return cls(
-            workspace,
-            requests,
-            responses,
-            workspace_id,
+            _absolute_path(settings["exchange"], "exchange"),
+            _canonical_uuid(settings["daemon_workspace_id"], "daemon_workspace_id"),
             enrollment_id,
-            daemon_public_key,
-            configurations,
-            request_max_age,
+            _canonical_public_key(settings["daemon_public_key"], "daemon_public_key"),
         )
 
-    def check(self) -> None:
-        """Open all roots without following symlinks and verify workspace identity.
+    def live(self) -> dict[str, object]:
+        """Read the current ``endpoint.json`` and require the pinned identities.
 
-        :raises OSError: If a root or workspace control file cannot be opened safely.
-        :raises ValueError: If a root or workspace format document is invalid.
+        :return: The validated document; its ``configurations`` and ``request_max_age`` are current.
+        :raises ValueError: If the document is invalid or the daemon enrollment changed.
+        :raises OSError: If the document cannot be opened safely.
         """
 
-        with (
-            MailboxDirectory(self.workspace) as workspace,
-            MailboxDirectory(self.requests),
-            MailboxDirectory(self.responses),
+        value = read_endpoint(self.exchange)
+        for name, pinned in (
+            ("workspace_id", self.workspace_id),
+            ("enrollment_id", self.enrollment_id),
+            ("daemon_public_key", self.public_key),
         ):
-            value = _read_workspace_format(workspace._require_open())
-        version = value.get("format_version")
-        if value.get("format") != "httk-workflow-filesystem" or type(version) is not int or version != 2:
-            raise ValueError("mounted workspace uses an unsupported filesystem format")
-        if value.get("workspace_id") != self.workspace_id:
-            raise ValueError("mounted workspace identity does not match daemon_workspace_id")
+            if value[name] != pinned:
+                raise ValueError(
+                    f"daemon endpoint {name} does not match the pinned value: "
+                    "the daemon enrollment changed, so reconfigure the remote"
+                )
+        return value
+
+    def check(self) -> None:
+        """Verify the exchange subdirectories and the live endpoint identity, reading nothing else.
+
+        :raises OSError: If the exchange or a subdirectory cannot be opened safely.
+        :raises ValueError: If the endpoint document is invalid or the daemon enrollment changed.
+        """
+
+        with MailboxDirectory(self.exchange) as exchange:
+            for name in _SUBDIRECTORIES:
+                os.close(
+                    os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        dir_fd=exchange._require_open(),
+                    )
+                )
+        self.live()
 
 
 def decode_matching_response(data: bytes, request: Request, *, public_key: str) -> Response:
@@ -704,7 +786,7 @@ def _exchange_locked(endpoint: Endpoint, request: Request, *, wait_seconds: floa
     with MailboxDirectory(endpoint.requests) as requests, MailboxDirectory(endpoint.responses) as responses:
         while not published:
             existing = _read_request(requests, name, encoded)
-            response = _read_response(responses, name, request, endpoint.daemon_public_key)
+            response = _read_response(responses, name, request, endpoint.public_key)
             if response is not None:
                 if response.outcome != "busy":
                     return _return_response(responses, name, response)
@@ -717,7 +799,7 @@ def _exchange_locked(endpoint: Endpoint, request: Request, *, wait_seconds: floa
             # A broker can publish a response immediately before withdrawing the
             # matching request. Check that response-after-request window once more
             # before this caller installs a new request.
-            response = _read_response(responses, name, request, endpoint.daemon_public_key)
+            response = _read_response(responses, name, request, endpoint.public_key)
             if response is not None:
                 if response.outcome != "busy":
                     return _return_response(responses, name, response)
@@ -728,7 +810,7 @@ def _exchange_locked(endpoint: Endpoint, request: Request, *, wait_seconds: floa
             published = True
 
         while True:
-            response = _read_response(responses, name, request, endpoint.daemon_public_key)
+            response = _read_response(responses, name, request, endpoint.public_key)
             if response is not None:
                 return _return_response(responses, name, response)
             _sleep_until_poll(deadline)
@@ -751,4 +833,4 @@ def exchange(endpoint: Endpoint, request: Request, *, wait_seconds: float = 10) 
         return _exchange_locked(endpoint, request, wait_seconds=wait_seconds)
 
 
-__all__ = ["Endpoint", "decode_matching_response", "exchange", "prepare_request"]
+__all__ = ["Endpoint", "decode_matching_response", "exchange", "prepare_request", "read_endpoint"]

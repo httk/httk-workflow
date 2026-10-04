@@ -37,47 +37,34 @@ def _identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def _endpoint(tmp_path: Path) -> Endpoint:
-    workspace = tmp_path / "workspace"
-    requests = tmp_path / "requests"
-    responses = tmp_path / "responses"
-    (workspace / ".httk-workspace").mkdir(parents=True)
-    requests.mkdir()
-    responses.mkdir()
-    (workspace / ".httk-workspace" / "format.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-filesystem",
-                "format_version": 2,
-                "workspace_id": WORKSPACE_ID,
-            }
-        ),
-        encoding="utf-8",
-    )
+    exchange = tmp_path / "exchange"
+    for name in ("requests", "responses", "inbox", "outbox"):
+        (exchange / name).mkdir(parents=True)
     response_seed = tmp_path / "response.seed"
     response_seed.write_text("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n", encoding="ascii")
     public_key = identity_public_key(response_seed)
     assert public_key is not None
-    return Endpoint(
-        workspace,
-        requests,
-        responses,
-        WORKSPACE_ID,
-        ENROLLMENT_ID,
-        public_key,
-        {"cpu": CONFIGURATION_DIGEST},
+    document = {
+        "format": "httk-workspace-daemon-endpoint",
+        "format_version": 2,
+        "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": public_key,
+        "configurations": {"cpu": CONFIGURATION_DIGEST},
+        "request_max_age": 3600,
+    }
+    (exchange / "endpoint.json").write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8"
     )
+    return Endpoint(exchange, WORKSPACE_ID, ENROLLMENT_ID, public_key)
 
 
 def _settings(endpoint: Endpoint) -> dict[str, object]:
     return {
-        "mount_root": str(endpoint.workspace),
-        "daemon_requests": str(endpoint.requests),
-        "daemon_responses": str(endpoint.responses),
+        "exchange": str(endpoint.exchange),
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
-        "daemon_public_key": endpoint.daemon_public_key,
-        "daemon_configurations": dict(endpoint.configurations),
-        "daemon_request_max_age": endpoint.request_max_age,
+        "daemon_public_key": endpoint.public_key,
     }
 
 
@@ -147,7 +134,7 @@ def _broker(endpoint: Endpoint, outcome: str, **fields: str) -> tuple[threading.
                                 outcome,
                                 **fields,
                             ),
-                            seed_path=endpoint.responses.parent / "response.seed",
+                            seed_path=endpoint.exchange.parent / "response.seed",
                         )
                         with MailboxDirectory(endpoint.responses) as responses:
                             responses.replace(names[0], encode_response(response))
@@ -180,7 +167,7 @@ def test_configure_rejects_unknown_settings(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     bundle = _bundle(tmp_path, endpoint)
 
-    with pytest.raises(RuntimeError, match="eight endpoint settings"):
+    with pytest.raises(RuntimeError, match="four endpoint settings"):
         run_adapter(bundle, "configure", {"settings": {"exec_command": "touch /tmp/no"}})
 
 
@@ -189,7 +176,7 @@ def test_install_rejects_pending_settings_before_publication(tmp_path: Path) -> 
     bundle = _bundle(tmp_path, endpoint)
 
     with pytest.raises(RuntimeError, match="pending settings"):
-        run_adapter(bundle, "install", {"settings": {"mount_root": str(endpoint.workspace)}})
+        run_adapter(bundle, "install", {"settings": {"exchange": str(endpoint.exchange)}})
     assert not list(endpoint.requests.iterdir())
 
 
@@ -216,7 +203,7 @@ def test_install_sends_only_health_and_reports_ready(tmp_path: Path) -> None:
                                 request_digest(request),
                                 "ready",
                             ),
-                            seed_path=endpoint.responses.parent / "response.seed",
+                            seed_path=endpoint.exchange.parent / "response.seed",
                         )
                         with MailboxDirectory(endpoint.responses) as responses:
                             responses.replace(names[0], encode_response(response))

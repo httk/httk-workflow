@@ -1,22 +1,27 @@
-"""Strict operator policy for the confined workspace daemon."""
+"""Strict runtime policy for the confined workspace daemon."""
 
 import base64
+import ctypes
+import errno
 import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import stat
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 _FORMAT = "httk-workspace-daemon-policy"
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SLURM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+_GRES = re.compile(r"[A-Za-z0-9_.:,=+-]{1,255}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 _RESERVED_ANCESTOR_TARGETS = tuple(
@@ -24,8 +29,7 @@ _RESERVED_ANCESTOR_TARGETS = tuple(
     for path in (
         "/tmp",
         "/workspace",
-        "/requests",
-        "/responses",
+        "/daemon-root",
         "/control",
         "/proc",
         "/dev",
@@ -36,8 +40,7 @@ _RESERVED_DESCENDANT_TARGETS = tuple(
     Path(path)
     for path in (
         "/workspace",
-        "/requests",
-        "/responses",
+        "/daemon-root",
         "/control",
         "/proc",
         "/dev",
@@ -107,11 +110,14 @@ def _covered(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(_contains(root, path) for root in roots)
 
 
-def _overlaps_reserved_destination(path: Path, *, mpi: bool) -> bool:
-    overlap = any(_contains(path, target) for target in _RESERVED_ANCESTOR_TARGETS) or any(
-        _contains(target, path) for target in _RESERVED_DESCENDANT_TARGETS
-    )
-    return overlap or mpi and _overlap(path, _MPI_CONTROL_DESTINATION)
+def _reserved_destination(path: Path, *, mpi: bool) -> Path | None:
+    for target in _RESERVED_ANCESTOR_TARGETS:
+        if _contains(path, target):
+            return target
+    for target in _RESERVED_DESCENDANT_TARGETS:
+        if _contains(target, path):
+            return target
+    return _MPI_CONTROL_DESTINATION if mpi and _overlap(path, _MPI_CONTROL_DESTINATION) else None
 
 
 def _environment(value: object) -> tuple[tuple[str, str], ...]:
@@ -249,6 +255,8 @@ class Profile:
     :param workers: Concurrent attempts in the single manager.
     :param prelude: Frozen shell prelude run before the manager.
     :param manager_command: Optional frozen manager executable.
+    :param gres: Optional fixed Slurm generic resources.
+    :param reservation: Optional fixed Slurm reservation.
     """
 
     name: str
@@ -261,15 +269,23 @@ class Profile:
     workers: int = 1
     prelude: str = ""
     manager_command: str | None = None
+    gres: str | None = None
+    reservation: str | None = None
 
     def __post_init__(self) -> None:
         _name(self.name, "profile name", _PROFILE_NAME)
         for number, label in ((self.cpus, "cpus"), (self.memory_mb, "memory_mb"), (self.time_minutes, "time_minutes")):
             if number is not None:
                 _integer(number, label, 1, _HARD_LIMIT)
-        for field_name, value in (("partition", self.partition), ("account", self.account)):
+        for field_name, value in (
+            ("partition", self.partition),
+            ("account", self.account),
+            ("reservation", self.reservation),
+        ):
             if value is not None:
                 _name(value, field_name, _SLURM_NAME)
+        if self.gres is not None:
+            _name(self.gres, "gres", _GRES)
         if self.mpi is not None and not isinstance(self.mpi, MPIProfile):
             raise ValueError("mpi must be an MPIProfile")
         _integer(self.workers, "workers", 1, 1024)
@@ -290,9 +306,9 @@ class Policy:
     :param workspace: Uploaded workspace root.
     :param workspace_id: Canonical workspace UUID.
     :param enrollment_id: Enrollment identifier as 32 lowercase hexadecimal digits.
-    :param requests: Broker request mailbox root.
-    :param responses: Broker response mailbox root.
+    :param exchange: Client exchange directory, a sibling of the workspace in a dedicated parent.
     :param state: Broker state root.
+    :param snapshots: Directory of immutable runtime policy snapshots.
     :param bwrap: Approved Bubblewrap executable.
     :param python: Approved Python executable visible to payloads.
     :param sbatch: Approved Slurm submission executable.
@@ -316,9 +332,9 @@ class Policy:
     workspace: Path
     workspace_id: str
     enrollment_id: str
-    requests: Path
-    responses: Path
+    exchange: Path
     state: Path
+    snapshots: Path
     bwrap: Path
     python: Path
     sbatch: Path
@@ -343,15 +359,21 @@ class Policy:
             _path(value, name)
             for name, value in (
                 ("workspace", self.workspace),
-                ("requests", self.requests),
-                ("responses", self.responses),
+                ("exchange", self.exchange),
                 ("state", self.state),
             )
         )
-        for index, left in enumerate(mutable):
-            for right in mutable[index + 1 :]:
-                if _overlap(left, right):
-                    raise ValueError("workspace, requests, responses, and state must be pairwise disjoint")
+        snapshots = _path(self.snapshots, "snapshots")
+        if self.exchange.parent != self.workspace.parent or self.exchange == self.workspace:
+            raise ValueError("workspace and exchange must be siblings in a dedicated directory")
+        root = self.root
+        if root == Path("/"):
+            raise ValueError("the daemon parent directory must not be the filesystem root")
+        if _overlap(self.state, snapshots):
+            raise ValueError("state and snapshots must be disjoint")
+        for name, value in (("state", self.state), ("snapshots", snapshots)):
+            if _overlap(root, value):
+                raise ValueError(f"daemon parent {root} must be disjoint from {name} {value}")
 
         if type(self.workspace_id) is not str:
             raise ValueError("invalid workspace_id")
@@ -381,12 +403,19 @@ class Policy:
             raise ValueError("approved path lists must not contain duplicates")
         if Path("/") in {*readonly, *broker}:
             raise ValueError("the filesystem root cannot be an approved runtime path")
-        if any(_overlaps_reserved_destination(root, mpi=self.mpi is not None) for root in (*readonly, *broker)):
-            raise ValueError("approved runtime paths must not overlap reserved sandbox destinations")
+        for runtime in (*readonly, *broker):
+            target = _reserved_destination(runtime, mpi=self.mpi is not None)
+            if target is not None:
+                raise ValueError(
+                    "approved runtime paths must not overlap reserved sandbox destinations: "
+                    f"{runtime} overlaps the reserved destination {target}"
+                )
         if any(_overlap(readonly_root, broker_root) for readonly_root in readonly for broker_root in broker):
             raise ValueError("readonly_paths and broker_paths must be pairwise disjoint")
-        for root in (*readonly, *broker):
-            if any(_overlap(root, item) for item in mutable):
+        for runtime in (*readonly, *broker):
+            if _overlap(root, runtime):
+                raise ValueError(f"daemon parent {root} must be disjoint from runtime path {runtime}")
+            if any(_overlap(runtime, item) for item in mutable):
                 raise ValueError("runtime paths must be disjoint from mutable roots")
 
         bwrap, python, sbatch, squeue, scancel = commands
@@ -435,6 +464,24 @@ class Policy:
         _number(self.command_timeout, "command_timeout", 0.1, 600.0)
         _integer(self.max_output_bytes, "max_output_bytes", 1024, 1_048_576)
         _integer(self.request_max_age, "request_max_age", 1, 86_400)
+
+    @property
+    def root(self) -> Path:
+        """Dedicated parent directory holding exactly the workspace and the exchange."""
+
+        return self.exchange.parent
+
+    @property
+    def requests(self) -> Path:
+        """Signed request mailbox inside the exchange."""
+
+        return self.exchange / "requests"
+
+    @property
+    def responses(self) -> Path:
+        """Signed response mailbox inside the exchange."""
+
+        return self.exchange / "responses"
 
     def profile(self, name: str) -> Profile:
         """Return the named profile.
@@ -579,6 +626,10 @@ def _profile_document(profile: Profile) -> dict[str, object]:
         result["partition"] = profile.partition
     if profile.account is not None:
         result["account"] = profile.account
+    if profile.gres is not None:
+        result["gres"] = profile.gres
+    if profile.reservation is not None:
+        result["reservation"] = profile.reservation
     if profile.mpi is not None:
         result["mpi"] = {
             "nodes": profile.mpi.nodes,
@@ -601,9 +652,9 @@ def policy_document(policy: Policy) -> dict[str, object]:
         "workspace": str(policy.workspace),
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
-        "requests": str(policy.requests),
-        "responses": str(policy.responses),
+        "exchange": str(policy.exchange),
         "state": str(policy.state),
+        "snapshots": str(policy.snapshots),
         "bwrap": str(policy.bwrap),
         "python": str(policy.python),
         "sbatch": str(policy.sbatch),
@@ -659,9 +710,9 @@ def _decode_policy(data: bytes) -> Policy:
         "workspace",
         "workspace_id",
         "enrollment_id",
-        "requests",
-        "responses",
+        "exchange",
         "state",
+        "snapshots",
         "bwrap",
         "python",
         "sbatch",
@@ -712,6 +763,8 @@ def _decode_policy(data: bytes) -> Policy:
             "time_minutes",
             "partition",
             "account",
+            "gres",
+            "reservation",
             "mpi",
             "workers",
             "prelude",
@@ -744,6 +797,8 @@ def _decode_policy(data: bytes) -> Policy:
                 raw.get("workers", 1),
                 raw.get("prelude", ""),
                 raw.get("manager_command"),
+                raw.get("gres"),
+                raw.get("reservation"),
             )
         )
     raw_authorized_keys = value["authorized_keys"]
@@ -799,9 +854,9 @@ def _decode_policy(data: bytes) -> Policy:
         workspace=_json_path(value["workspace"], "workspace"),
         workspace_id=value["workspace_id"],
         enrollment_id=value["enrollment_id"],
-        requests=_json_path(value["requests"], "requests"),
-        responses=_json_path(value["responses"], "responses"),
+        exchange=_json_path(value["exchange"], "exchange"),
         state=_json_path(value["state"], "state"),
+        snapshots=_json_path(value["snapshots"], "snapshots"),
         bwrap=_json_path(value["bwrap"], "bwrap"),
         python=_json_path(value["python"], "python"),
         sbatch=_json_path(value["sbatch"], "sbatch"),
@@ -816,6 +871,138 @@ def _decode_policy(data: bytes) -> Policy:
         mpi=mpi,
         **kwargs,
     )
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+def _open_directory(path: Path, base: int | None = None) -> int:
+    """Open a directory component by component without following any symlink.
+
+    :param path: Absolute path, or a path relative to ``base``.
+    :param base: Optional directory descriptor that anchors a relative path.
+    :return: An owned directory descriptor.
+    """
+
+    descriptor = os.open(path.anchor or "/", _DIRECTORY_FLAGS) if base is None else os.dup(base)
+    try:
+        for component in path.parts[1:] if base is None else path.parts:
+            next_descriptor = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            previous, descriptor = descriptor, next_descriptor
+            os.close(previous)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _check_parent_names(policy: Policy, names: list[str]) -> None:
+    for name in sorted(names):
+        if name not in (policy.workspace.name, policy.exchange.name):
+            raise ValueError(
+                f"daemon parent {policy.root} must contain only {policy.workspace.name} and "
+                f"{policy.exchange.name}; found {name}"
+            )
+
+
+_RENAME_NOREPLACE = 1
+
+
+def _libc_renameat2() -> Callable[[int, bytes, int, bytes, int], int]:
+    """Return the C library ``renameat2``, which the broker's exchange movers also use."""
+
+    try:
+        function = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise ValueError("renameat2 is unavailable (glibc 2.28+ and Linux 3.15+ are required)") from exc
+    function.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    function.restype = ctypes.c_int
+    return function
+
+
+def _remove_probe(name: str, directory: int, probe: int) -> bool:
+    """Unlink the probe from ``directory`` only while that name is still the probe's inode."""
+
+    try:
+        found = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    mine = os.fstat(probe)
+    if (found.st_dev, found.st_ino) != (mine.st_dev, mine.st_ino):
+        return False
+    # ponytail: a same-principal swap between this stat and the unlink can drop one foreign name inside the
+    # workspace or exchange; the payload already owns both, and nothing is ever moved out of the workspace.
+    os.unlink(name, dir_fd=directory)
+    return True
+
+
+def check_layout(policy: Policy, *, probe: bool = True) -> None:
+    """Verify the enforced on-disk layout of the workspace and its exchange.
+
+    The dedicated parent must hold exactly the workspace and the exchange on one device.
+    With ``probe``, a fresh file created in the exchange must also rename into the
+    workspace staging directory, which proves one filesystem and one mount. Nothing is
+    ever renamed from the workspace into the exchange.
+
+    :param policy: Validated runtime policy.
+    :param probe: Whether to run the rename probe.
+    :raises OSError: If a directory cannot be opened without following symlinks.
+    :raises ValueError: If the parent holds other entries or the probe fails or is tampered with.
+    """
+
+    exdev = "workspace and exchange must be renameable into each other (same filesystem, one mount)"
+    staging_path = policy.workspace / ".httk-workspace" / "exchange"
+    descriptors: list[int] = []
+    try:
+        root = _open_directory(policy.root)
+        descriptors.append(root)
+        _check_parent_names(policy, os.listdir(root))
+        workspace = _open_directory(Path(policy.workspace.name), root)
+        descriptors.append(workspace)
+        exchange = _open_directory(Path(policy.exchange.name), root)
+        descriptors.append(exchange)
+        if os.fstat(workspace).st_dev != os.fstat(exchange).st_dev:
+            raise ValueError(exdev)
+        try:
+            staging = _open_directory(Path(".httk-workspace", "exchange"), workspace)
+        except FileNotFoundError as exc:
+            raise ValueError(
+                f"workspace staging directory {staging_path} is missing; recreate it with "
+                "'httk workspace daemon WORKSPACE --reload'"
+            ) from exc
+        descriptors.append(staging)
+        if not probe:
+            return
+        renameat2 = _libc_renameat2()
+        name = f".probe-{secrets.token_hex(16)}"
+        try:
+            probe_fd = os.open(
+                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=exchange
+            )
+        except OSError as exc:
+            raise ValueError(f"cannot create the layout probe in {policy.exchange}: {exc.strerror}") from exc
+        descriptors.append(probe_fd)
+        # The probe uses the movers' exact primitive, so a filesystem without no-replace renames fails here.
+        encoded = os.fsencode(name)
+        if renameat2(exchange, encoded, staging, encoded, _RENAME_NOREPLACE) != 0:
+            code = ctypes.get_errno()
+            _remove_probe(name, exchange, probe_fd)
+            if code == errno.EXDEV:
+                raise ValueError(exdev)
+            if code in (errno.EINVAL, errno.ENOSYS):
+                raise ValueError("the filesystem does not support no-replace renames required for the exchange")
+            raise ValueError(
+                f"cannot rename the layout probe from {policy.exchange} into {staging_path}: {os.strerror(code)}"
+            )
+        try:
+            removed = _remove_probe(name, staging, probe_fd)
+        except OSError as exc:
+            raise ValueError(f"cannot remove the layout probe from {staging_path}: {exc.strerror}") from exc
+        if not removed:
+            raise ValueError("layout probe was tampered with")
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def _load_policy_with_bytes(path: Path) -> tuple[Policy, bytes]:
@@ -837,4 +1024,4 @@ def load_policy(path: Path) -> Policy:
     return _load_policy_with_bytes(path)[0]
 
 
-__all__ = ["MPIProfile", "MPISettings", "Policy", "Profile", "load_policy", "policy_document"]
+__all__ = ["MPIProfile", "MPISettings", "Policy", "Profile", "check_layout", "load_policy", "policy_document"]

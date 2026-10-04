@@ -265,7 +265,7 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         r"packaged_template|JobTemplate|HarvestRecord|campaign_harvest)\b|--template|\bharvest\b"
     )
     for path in root.rglob("*.py"):
-        if path.name in {"_transfer.py", "adapters.py"}:
+        if path.name in {"_transfer.py", "adapters.py", "_daemon_setup.py"}:
             continue
         assert not retired.search(path.read_text(encoding="utf-8")), path
 

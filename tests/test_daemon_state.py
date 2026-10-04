@@ -272,3 +272,18 @@ def test_close_marks_descriptors_closed_before_reverse_cleanup(tmp_path: Path, m
     monkeypatch.setattr(state_module.os, "close", record_close)
     ledger.close()
     assert closed == [lock_fd, directory_fd]
+
+
+def test_managers_lists_only_manager_starts_with_ledger_state(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    start = _request(2, "start_manager", profile="cpu")
+    with Ledger(state, WORKSPACE_ID, ENROLLMENT_ID, initialize=True) as ledger:
+        ledger.admit(_request(1))
+        handle = ledger.admit(start).handle
+        assert handle is not None
+        row = {"handle": handle, "profile": "cpu", "request_id": start.request_id}
+        assert ledger.managers() == [{**row, "state": "received"}]
+        ledger.begin_submission(start.request_id)
+        ledger.finish(start.request_id, _response(start, "submitted", handle=handle), job_id="7", cluster="c")
+        assert ledger.managers() == [{**row, "state": "submitted"}]

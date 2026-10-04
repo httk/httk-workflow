@@ -1026,3 +1026,92 @@ def test_a_tree_root_sealed_before_its_ledger_was_written_is_resumed(tmp_path: P
     assert not bundle.exists() and not list(source.scan_markers()) and not _open_ledgers(source)
     destination.adopt(target)
     _assert_tree_arrived(destination, [root, *children, *grandchildren])
+
+
+def test_adopt_accepts_the_exchange_staging_inbox_and_no_other_workspace_path(tmp_path: Path) -> None:
+    source, destination = _pair(tmp_path)
+    staging = transfers.exchange_staging(destination)
+    for place in (staging / "inbox", staging / "inbox" / "nested", staging, destination.root / "elsewhere"):
+        place.mkdir(parents=True, exist_ok=True)
+    markers = [source.submit(_payload(tmp_path / "payloads", tag), "jobs") for tag in ("a", "b", "c", "d")]
+    refused = [staging / "inbox" / "nested", staging, destination.root / "elsewhere"]
+    for marker, place in zip(markers, refused, strict=False):
+        moved = place / marker.job_key
+        os.rename(source.eject(marker.job_id, tmp_path / marker.job_key), moved)
+        with pytest.raises(ValueError, match="already inside the workspace"):
+            destination.adopt(moved)
+        assert moved.is_dir() and destination.find_marker_by_id(marker.job_id) is None
+    staged = staging / "inbox" / "anyname"
+    os.rename(source.eject(markers[3].job_id, tmp_path / "staged"), staged)
+    assert destination.adopt(staged).job_id == markers[3].job_id and not staged.exists()
+
+
+def test_eject_accepts_the_exchange_staging_outbox_and_no_other_workspace_path(tmp_path: Path) -> None:
+    source, _destination = _pair(tmp_path)
+    staging = transfers.exchange_staging(source)
+    for place in ("inbox", "outbox/rejected"):
+        (staging / place).mkdir(parents=True)
+    a, b, c = (source.submit(_payload(tmp_path / "payloads", tag), "jobs") for tag in ("a", "b", "c"))
+    for target in (staging / "inbox", staging / "outbox" / "rejected", staging / "named"):
+        with pytest.raises(ValueError, match="inside this workspace"):
+            eject_job(source, c.job_id, target)
+    assert source.eject(a.job_id, staging / "outbox") == staging / "outbox" / a.job_key
+    assert source.eject(b.job_id, staging / "outbox" / "named") == staging / "outbox" / "named"
+    assert validate_bundle(staging / "outbox" / "named")["job_id"] == b.job_id
+    assert source.find_marker_by_id(a.job_id) is None and source.find_marker_by_id(c.job_id) is not None
+
+
+def _loose(tmp_path: Path, tag: str = "job") -> tuple[Workspace, Path]:
+    source, destination = _pair(tmp_path)
+    marker = source.submit(_payload(tmp_path / "payloads", tag), "jobs")
+    return destination, source.eject(marker.job_id, tmp_path / "loose")
+
+
+@pytest.mark.parametrize("where", ["files", "logs", TRANSFER_DIRECTORY])
+def test_adopt_refuses_a_fifo_anywhere_without_opening_it(tmp_path: Path, where: str) -> None:
+    destination, loose = _loose(tmp_path)
+    (loose / where).mkdir(exist_ok=True)
+    os.mkfifo(loose / where / "pipe")
+    with pytest.raises(FormatError, match=f"special entry {where}/pipe"):
+        destination.adopt(loose)
+    assert (loose / where / "pipe").exists() and not list(destination.scan_markers())
+
+
+@pytest.mark.parametrize(
+    ("name", "target", "message"),
+    [
+        ("absolute", "/etc/passwd", "absolute symlink"),
+        ("climbing", "../../outside", "escaping symlink"),
+        # Lexically inside (files/back/.. is files), but files/back is the bundle root itself.
+        ("composed", "back/..", "resolves outside"),
+    ],
+)
+def test_adopt_refuses_symlinks_leaving_the_directory(tmp_path: Path, name: str, target: str, message: str) -> None:
+    destination, loose = _loose(tmp_path)
+    (loose / "logs").mkdir(exist_ok=True)
+    (loose / "files" / "back").symlink_to("..")
+    (loose / "logs" / name).symlink_to(target if name != "composed" else "../files/back/..")
+    with pytest.raises(FormatError, match=message):
+        destination.adopt(loose)
+    assert loose.is_dir() and not list(destination.scan_markers())
+
+
+def test_adopt_refuses_a_symlinked_job_directory(tmp_path: Path) -> None:
+    destination, loose = _loose(tmp_path)
+    (tmp_path / "link").symlink_to(loose)
+    with pytest.raises(FormatError, match="is not a directory"):
+        destination.adopt(tmp_path / "link")
+    assert loose.is_dir() and not list(destination.scan_markers())
+
+
+def test_adopt_accepts_a_contained_relative_symlink(tmp_path: Path) -> None:
+    source, destination = _pair(tmp_path)
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    # Submission copies a payload's links away, but a run may leave one in its workdir.
+    workdir = source.payload_path(marker.placement, marker.job_key) / "run"
+    workdir.mkdir()
+    (workdir / "alias").symlink_to("../files/runner")
+    loose = source.eject(marker.job_id, tmp_path / "loose")
+    adopted = destination.adopt(loose)
+    arrived = destination.payload_path(adopted.placement, adopted.job_key) / "run" / "alias"
+    assert os.readlink(arrived) == "../files/runner"

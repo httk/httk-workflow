@@ -927,7 +927,7 @@ def build_workspace_parser(
         group,
         "daemon",
         summary="run the confined workspace command daemon",
-        description="Run the confined workspace command daemon with protected operator policy",
+        description="Run the confined workspace command daemon for an approved exchange enrollment",
         handler=lambda arguments, _context: launch(arguments),
     )
     add_arguments(daemon)

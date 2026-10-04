@@ -35,23 +35,29 @@ def endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Endpoint:
     monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path / "data"))
     add_identity("first", "First Operator", "first@example.test")
-    workspace = tmp_path / "workspace"
-    requests = tmp_path / "requests"
-    responses = tmp_path / "responses"
-    workspace.mkdir()
-    requests.mkdir()
-    responses.mkdir()
+    exchange = tmp_path / "exchange"
+    for name in ("requests", "responses", "inbox", "outbox"):
+        (exchange / name).mkdir(parents=True)
     response_seed = _seed(tmp_path / "response.seed", 8)
     public_key = identity_public_key(response_seed)
     assert public_key is not None
-    return Endpoint(
-        workspace,
-        requests,
-        responses,
-        WORKSPACE_ID,
-        ENROLLMENT_ID,
-        public_key,
-        {"cpu": CONFIGURATION_DIGEST},
+    _write_endpoint(exchange, public_key)
+    return Endpoint(exchange, WORKSPACE_ID, ENROLLMENT_ID, public_key)
+
+
+def _write_endpoint(exchange: Path, public_key: str, **changes: object) -> None:
+    document: dict[str, object] = {
+        "format": "httk-workspace-daemon-endpoint",
+        "format_version": 2,
+        "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": public_key,
+        "configurations": {"cpu": CONFIGURATION_DIGEST},
+        "request_max_age": 3600,
+    }
+    document.update(changes)
+    (exchange / "endpoint.json").write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8"
     )
 
 
@@ -68,14 +74,10 @@ def _intent() -> Request:
 
 def _settings(endpoint: Endpoint) -> dict[str, object]:
     return {
-        "mount_root": str(endpoint.workspace),
-        "daemon_requests": str(endpoint.requests),
-        "daemon_responses": str(endpoint.responses),
+        "exchange": str(endpoint.exchange),
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
-        "daemon_public_key": endpoint.daemon_public_key,
-        "daemon_configurations": dict(endpoint.configurations),
-        "daemon_request_max_age": str(endpoint.request_max_age),
+        "daemon_public_key": endpoint.public_key,
     }
 
 
@@ -100,7 +102,7 @@ def test_prepare_request_reuses_exact_signature_without_resigning(
     cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / f"{REQUEST_ID}.json"
     envelope = json.loads(cache.read_bytes())
     assert envelope["request"] == json.loads(encode_request(first))
-    assert envelope["binding"]["daemon_public_key"] == endpoint.daemon_public_key
+    assert envelope["binding"]["daemon_public_key"] == endpoint.public_key
 
 
 def test_prepare_request_retry_is_exact_across_processes(endpoint: Endpoint, tmp_path: Path) -> None:
@@ -142,7 +144,7 @@ def test_prepare_request_refuses_changed_intent_endpoint_pin_and_signer(endpoint
     other_seed = _seed(tmp_path / "other-response.seed", 9)
     other_public = identity_public_key(other_seed)
     assert other_public is not None
-    changed_endpoint = replace(endpoint, daemon_public_key=other_public)
+    changed_endpoint = replace(endpoint, public_key=other_public)
     with pytest.raises(ValueError, match="endpoint binding conflicts"):
         prepare_request(changed_endpoint, _intent())
 
@@ -153,23 +155,42 @@ def test_prepare_request_refuses_changed_intent_endpoint_pin_and_signer(endpoint
     assert saved.operator_key is not None
 
 
-def test_prepare_request_uses_endpoint_max_age_and_catalog_selection(endpoint: Endpoint) -> None:
-    shortened = replace(endpoint, request_max_age=900)
+def test_prepare_request_uses_live_max_age(endpoint: Endpoint) -> None:
+    _write_endpoint(endpoint.exchange, endpoint.public_key, request_max_age=900)
 
-    signed = prepare_request(shortened, _intent())
+    signed = prepare_request(endpoint, _intent())
 
     assert signed.expires_at - signed.created_at == 900
 
 
-def test_catalog_reload_cannot_retarget_cached_request_id(endpoint: Endpoint) -> None:
+def test_new_start_uses_live_configuration_digest(endpoint: Endpoint) -> None:
+    changed_digest = "c" * 64
+    _write_endpoint(endpoint.exchange, endpoint.public_key, configurations={"cpu": changed_digest})
+
+    with pytest.raises(ValueError, match="does not match"):
+        prepare_request(endpoint, _intent())
+    signed = prepare_request(endpoint, replace(_intent(), configuration_digest=changed_digest))
+
+    assert signed.configuration_digest == changed_digest
+
+
+def test_prepare_request_refuses_changed_enrollment(endpoint: Endpoint) -> None:
+    _write_endpoint(endpoint.exchange, endpoint.public_key, enrollment_id="0" * 32)
+
+    with pytest.raises(ValueError, match="enrollment changed"):
+        prepare_request(endpoint, _intent())
+
+
+def test_reload_cannot_retarget_cached_request_id(endpoint: Endpoint) -> None:
     signed = prepare_request(endpoint, _intent())
     changed_digest = "c" * 64
-    reloaded = replace(endpoint, configurations={"cpu": changed_digest})
+    _write_endpoint(endpoint.exchange, endpoint.public_key, configurations={"cpu": changed_digest})
     changed_intent = replace(_intent(), configuration_digest=changed_digest)
 
-    assert encode_request(prepare_request(reloaded, _intent())) == encode_request(signed)
+    # The original intent still replays its exact cached bytes; a request under the new digest is a conflict.
+    assert encode_request(prepare_request(endpoint, _intent())) == encode_request(signed)
     with pytest.raises(ValueError, match="intent conflicts"):
-        prepare_request(reloaded, changed_intent)
+        prepare_request(endpoint, changed_intent)
 
     cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / f"{REQUEST_ID}.json"
     assert json.loads(cache.read_bytes())["request"] == json.loads(encode_request(signed))
@@ -315,12 +336,12 @@ def test_response_authentication_precedes_binding_and_cleanup(endpoint: Endpoint
     )
     signed = sign_response(unsigned, seed_path=tmp_path / "response.seed")
 
-    assert decode_matching_response(encode_response(signed), request, public_key=endpoint.daemon_public_key) == signed
+    assert decode_matching_response(encode_response(signed), request, public_key=endpoint.public_key) == signed
     with pytest.raises(ValueError, match="signature"):
         decode_matching_response(
             encode_response(replace(signed, handle="b" * 32)),
             request,
-            public_key=endpoint.daemon_public_key,
+            public_key=endpoint.public_key,
         )
     other_seed = _seed(tmp_path / "wrong.seed", 10)
     wrong_key = identity_public_key(other_seed)

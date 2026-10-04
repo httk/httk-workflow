@@ -12,6 +12,7 @@ from types import FrameType
 
 from ._daemon_activation import verify_active_snapshot
 from ._daemon_auth import check_request_time, sign_response, verify_request
+from ._daemon_exchange import ExchangeMover
 from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_policy import Policy, load_policy
@@ -22,8 +23,7 @@ from ._daemon_state import CapacityError, ConflictError, Entry, Ledger
 _LOGGER = logging.getLogger(__name__)
 _SNAPSHOT_POLICY = Path("/daemon-policy.json")
 _STATE_DIRECTORY = Path("/control")
-_REQUEST_DIRECTORY = Path("/requests")
-_RESPONSE_DIRECTORY = Path("/responses")
+_ROOT_DIRECTORY = Path("/daemon-root")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
@@ -36,6 +36,8 @@ class Broker:
     :param ledger: Locked durable daemon ledger.
     :param requests: Descriptor-anchored request mailbox.
     :param responses: Descriptor-anchored response mailbox.
+    :param exchange: Mover between the client exchange and the workspace staging area; ``None`` skips
+        the exchange pass.
     :param response_seed: Validated protected response-signing seed.
     """
 
@@ -47,6 +49,7 @@ class Broker:
         requests: MailboxDirectory,
         responses: MailboxDirectory,
         *,
+        exchange: ExchangeMover | None = None,
         response_seed: Path,
     ) -> None:
         if not isinstance(response_seed, Path):
@@ -57,6 +60,7 @@ class Broker:
         self.ledger = ledger
         self.requests = requests
         self.responses = responses
+        self.exchange = exchange
         self.response_seed = response_seed
 
     @staticmethod
@@ -257,7 +261,7 @@ class Broker:
         self._publish(publication, request, response)
 
     def process_once(self, stop: threading.Event) -> int:
-        """Process one bounded sorted mailbox snapshot.
+        """Process one bounded sorted mailbox snapshot, then run one exchange pass.
 
         :param stop: Stop admission before the next request when set.
         :return: Number of request publications considered.
@@ -284,6 +288,11 @@ class Broker:
                 self._discard_invalid(publication, "identifier_mismatch")
                 continue
             self._process(publication, request)
+        if self.exchange is not None:
+            try:
+                self.exchange.poll(self.ledger.managers())
+            except Exception:
+                _LOGGER.exception("daemon_exchange_failed")
         return processed
 
     def run(self, stop: threading.Event, *, once: bool = False) -> None:
@@ -342,12 +351,15 @@ def _run(arguments: argparse.Namespace) -> None:
             )
             verify_active_snapshot(_STATE_DIRECTORY, policy_source, policy)
             gateway.check()
+            exchange = _ROOT_DIRECTORY / policy.exchange.name
+            mover = ExchangeMover(_ROOT_DIRECTORY, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
+            requests = stack.enter_context(MailboxDirectory(exchange / "requests"))
+            responses = stack.enter_context(MailboxDirectory(exchange / "responses"))
             if arguments.check:
                 return
-            requests = stack.enter_context(MailboxDirectory(_REQUEST_DIRECTORY))
-            responses = stack.enter_context(MailboxDirectory(_RESPONSE_DIRECTORY))
             ledger.recover()
-            Broker(policy, gateway, ledger, requests, responses, response_seed=seed).run(stop, once=arguments.once)
+            broker = Broker(policy, gateway, ledger, requests, responses, exchange=mover, response_seed=seed)
+            broker.run(stop, once=arguments.once)
     finally:
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
@@ -362,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     except SchedulerError:
         _LOGGER.error("daemon_service_failed")
         return 1
-    except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
         _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
     return 0

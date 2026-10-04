@@ -16,6 +16,7 @@ from httk.core.identity import identity_public_key
 from httk.workflow import _daemon_service as service_module
 from httk.workflow._daemon_activation import activation_document
 from httk.workflow._daemon_auth import sign_request, verify_response
+from httk.workflow._daemon_exchange import ExchangeMover
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import Policy, Profile
@@ -82,12 +83,12 @@ def _policy(tmp_path: Path, *, max_records: int = 64, max_submissions: int = 8) 
     operator_key = identity_public_key(_operator_seed(tmp_path))
     assert operator_key is not None
     return Policy(
-        workspace=tmp_path / "workspace",
+        workspace=tmp_path / "site/workspace",
         workspace_id=WORKSPACE_ID,
         enrollment_id=ENROLLMENT_ID,
-        requests=tmp_path / "requests",
-        responses=tmp_path / "responses",
+        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
+        snapshots=tmp_path / "snapshots",
         bwrap=runtime / "bwrap",
         python=runtime / "python",
         sbatch=broker / "sbatch",
@@ -139,7 +140,7 @@ def _request(
 
 def _open(tmp_path: Path, policy: Policy, *, initialize: bool = True) -> tuple[ExitStack, Broker, Ledger]:
     for path in (policy.requests, policy.responses, policy.state):
-        path.mkdir(exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
     if initialize:
         initialize_response_seed(policy.state)
     stack = ExitStack()
@@ -161,9 +162,14 @@ def _open(tmp_path: Path, policy: Policy, *, initialize: bool = True) -> tuple[E
         ledger,
         requests,
         responses,
+        exchange=_mover(policy),
         response_seed=response_seed_path(policy.state),
     )
     return stack, broker, ledger
+
+
+def _mover(policy: Policy) -> ExchangeMover:
+    return ExchangeMover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
 
 
 def _publish(broker: Broker, request: Request) -> str:
@@ -275,7 +281,7 @@ def test_service_rechecks_protected_activation_after_acquiring_ledger_lock(
 ) -> None:
     policy = _policy(tmp_path)
     for path in (policy.state, policy.requests, policy.responses):
-        path.mkdir()
+        path.mkdir(parents=True)
     initialize_response_seed(policy.state)
     with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
         pass
@@ -294,6 +300,7 @@ def test_service_rechecks_protected_activation_after_acquiring_ledger_lock(
 
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
     monkeypatch.setattr(service_module, "SlurmGateway", Gateway)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
     arguments = argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False)
@@ -478,6 +485,7 @@ def test_revoked_key_cannot_replay_until_reauthorized(tmp_path: Path) -> None:
             ledger,
             broker.requests,
             broker.responses,
+            exchange=broker.exchange,
             response_seed=broker.response_seed,
         )
         publication = _publish(revoked, request)
@@ -633,11 +641,27 @@ def test_broker_validates_response_seed_before_admission(tmp_path: Path) -> None
     try:
         seed.unlink()
         with pytest.raises(FileNotFoundError):
-            Broker(policy, RecordingGateway(policy), ledger, broker.requests, broker.responses, response_seed=seed)
+            Broker(
+                policy,
+                RecordingGateway(policy),
+                ledger,
+                broker.requests,
+                broker.responses,
+                exchange=broker.exchange,
+                response_seed=seed,
+            )
         seed.write_text("bad\n", encoding="ascii")
         seed.chmod(0o600)
         with pytest.raises(ValueError, match="canonical base64"):
-            Broker(policy, RecordingGateway(policy), ledger, broker.requests, broker.responses, response_seed=seed)
+            Broker(
+                policy,
+                RecordingGateway(policy),
+                ledger,
+                broker.requests,
+                broker.responses,
+                exchange=broker.exchange,
+                response_seed=seed,
+            )
         assert ledger.lookup_request(f"{1:032x}") is None
     finally:
         stack.close()
@@ -688,5 +712,120 @@ def test_stop_is_checked_between_sorted_requests(tmp_path: Path) -> None:
         assert broker.process_once(stop) == 1
         assert _read(broker, first).outcome == "submitted"
         assert broker.requests.read(f"{second.request_id}.json") == encode_request(second)
+    finally:
+        stack.close()
+
+
+def test_each_iteration_polls_the_exchange_with_ledger_managers(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    polls: list[list[dict[str, str]]] = []
+
+    class Mover(ExchangeMover):
+        def poll(self, managers: list[dict[str, str]]) -> None:
+            polls.append(managers)
+
+    broker.exchange = Mover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    try:
+        broker.process_once(threading.Event())
+        _publish(broker, start)
+        broker.process_once(threading.Event())
+        handle = _read(broker, start).handle
+        assert handle is not None
+        assert polls == [
+            [],
+            [{"handle": handle, "profile": "cpu", "request_id": start.request_id, "state": "submitted"}],
+        ]
+    finally:
+        stack.close()
+
+
+def test_exchange_failure_is_logged_and_does_not_stop_the_loop(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    calls: list[None] = []
+
+    class Mover(ExchangeMover):
+        def poll(self, managers: list[dict[str, str]]) -> None:
+            calls.append(None)
+            raise OSError("injected exchange failure")
+
+    broker.exchange = Mover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
+    request = _request(tmp_path, 1)
+    stop = threading.Event()
+    try:
+        _publish(broker, request)
+        with caplog.at_level(logging.ERROR):
+            broker.process_once(stop)
+            broker.process_once(stop)
+        assert _read(broker, request).outcome == "ready"
+        assert len(calls) == 2
+        assert "daemon_exchange_failed" in caplog.text
+    finally:
+        stack.close()
+
+
+def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = _policy(tmp_path)
+    for path in (policy.state, policy.requests, policy.responses):
+        path.mkdir(parents=True)
+    initialize_response_seed(policy.state)
+    with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
+        pass
+    selected = tmp_path / "snapshots/selected.json"
+    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.state / "active.json").chmod(0o600)
+    opened: list[Path] = []
+    original = service_module.MailboxDirectory
+
+    def record(path: Path) -> MailboxDirectory:
+        opened.append(path)
+        return original(path)
+
+    monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
+    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured, _source: RecordingGateway(configured))
+    monkeypatch.setattr(service_module, "MailboxDirectory", record)
+    monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
+    monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+    assert opened == [policy.requests, policy.responses]
+    policy.requests.rmdir()
+    with pytest.raises(FileNotFoundError):
+        service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+
+
+def test_main_fails_closed_without_renameat2(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    def missing(_arguments: argparse.Namespace) -> None:
+        raise RuntimeError("the daemon broker requires renameat2 (Linux 3.15+, glibc 2.28+)")
+
+    monkeypatch.setattr(service_module, "_run", missing)
+    with caplog.at_level(logging.ERROR):
+        assert service_module.main(["--policy", "/daemon-policy.json", "--policy-source", "/p.json", "--check"]) == 1
+    assert "renameat2" in caplog.text
+
+
+def test_ledger_listing_failure_is_logged_and_does_not_stop_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, policy)
+
+    def corrupt() -> list[dict[str, str]]:
+        raise sqlite3.DatabaseError("invalid stored manager start")
+
+    monkeypatch.setattr(ledger, "managers", corrupt)
+    request = _request(tmp_path, 1)
+    try:
+        with caplog.at_level(logging.ERROR):
+            broker.process_once(threading.Event())
+            _publish(broker, request)
+            broker.process_once(threading.Event())
+        assert _read(broker, request).outcome == "ready"
+        assert caplog.text.count("daemon_exchange_failed") == 2
     finally:
         stack.close()

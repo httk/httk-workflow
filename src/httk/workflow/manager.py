@@ -37,6 +37,7 @@ from ._allocation import (
     parse_cpulist,
 )
 from ._durations import format_duration
+from ._exchange_staging import exchange_pass
 from ._manager_binding import (
     Inventory,
     NodeShare,
@@ -508,6 +509,8 @@ class TaskManager:
     :param allocation: The probed allocation this manager runs inside, or ``None``;
         recorded in ``manager.json``. Its capacity and end time are already folded
         into *resources* and *end_time* by the caller.
+    :param exchange: Run the workspace-daemon exchange pass (adopt staged job
+        directories, eject finished jobs, publish status) at the start of every tick.
     :raises ValueError: If a manager limit is invalid or executor configuration conflicts.
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
     """
@@ -540,6 +543,7 @@ class TaskManager:
         end_time: float | None = None,
         deadline_margin: float = 120.0,
         allocation: Allocation | None = None,
+        exchange: bool = False,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
@@ -628,6 +632,7 @@ class TaskManager:
         # what to do, and at most once per interval.
         self.gc_interval = gc_interval
         self._last_gc = 0.0
+        self.exchange = exchange
         executors = [PathRunnerExecutor(), *executors]
         self.executors = {executor.name: executor for executor in executors}
         if len(self.executors) != len(executors):
@@ -1165,6 +1170,10 @@ class TaskManager:
         started = time.monotonic()
         self.heartbeat()
         changed = False
+        if self.exchange:
+            # First, so an adopted job registers and is claimed in this same tick.
+            exchange_pass(self.workspace, now=time.time())
+            self.heartbeat()
         for step in (
             self._handle_requests,
             self._register_submissions,

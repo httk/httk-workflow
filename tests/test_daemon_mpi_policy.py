@@ -17,17 +17,27 @@ AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 def _document(tmp_path: Path) -> dict[str, Any]:
     roots = {
         name: tmp_path / name
-        for name in ("workspace", "requests", "responses", "state", "runtime", "broker", "control", "pmix", "shm")
+        for name in (
+            "site/workspace",
+            "site/exchange",
+            "state",
+            "snapshots",
+            "runtime",
+            "broker",
+            "control",
+            "pmix",
+            "shm",
+        )
     }
     return {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 1,
-        "workspace": str(roots["workspace"]),
+        "format_version": 2,
+        "workspace": str(roots["site/workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
-        "requests": str(roots["requests"]),
-        "responses": str(roots["responses"]),
+        "exchange": str(roots["site/exchange"]),
         "state": str(roots["state"]),
+        "snapshots": str(roots["snapshots"]),
         "bwrap": str(roots["broker"] / "bwrap"),
         "python": str(roots["runtime"] / "python"),
         "sbatch": str(roots["broker"] / "sbatch"),
@@ -293,12 +303,12 @@ def test_mpi_srun_must_be_in_an_approved_runtime(tmp_path: Path) -> None:
 def test_policy_can_be_constructed_directly_with_mpi(tmp_path: Path) -> None:
     mpi = MPISettings(tmp_path / "broker/srun", tmp_path / "control", shm_root=tmp_path / "shm")
     policy = Policy(
-        workspace=tmp_path / "workspace",
+        workspace=tmp_path / "site/workspace",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="0" * 32,
-        requests=tmp_path / "requests",
-        responses=tmp_path / "responses",
+        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
+        snapshots=tmp_path / "snapshots",
         bwrap=tmp_path / "broker/bwrap",
         python=tmp_path / "runtime/python",
         sbatch=tmp_path / "broker/sbatch",

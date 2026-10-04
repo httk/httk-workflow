@@ -115,7 +115,7 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: 
 class SlurmGateway:
     """Execute only the broker's fixed scheduler operations.
 
-    :param policy: Validated operator policy.
+    :param policy: Validated runtime policy snapshot.
     :param policy_path: Protected policy path visible on compute nodes.
     """
 
@@ -198,6 +198,10 @@ class SlurmGateway:
             argv.append(f"--partition={profile.partition}")
         if profile.account is not None:
             argv.append(f"--account={profile.account}")
+        if profile.gres is not None:
+            argv.append(f"--gres={profile.gres}")
+        if profile.reservation is not None:
+            argv.append(f"--reservation={profile.reservation}")
         try:
             code, output = _run(argv, self.policy, data=self._script(profile, handle))
             fields = output.decode("ascii").strip().split(";")

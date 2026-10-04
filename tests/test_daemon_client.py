@@ -41,47 +41,43 @@ def _seed(path: Path, byte: int) -> Path:
     return path
 
 
-def _endpoint(tmp_path: Path) -> Endpoint:
-    workspace = tmp_path / "workspace"
-    requests = tmp_path / "requests"
-    responses = tmp_path / "responses"
-    (workspace / ".httk-workspace").mkdir(parents=True)
-    requests.mkdir()
-    responses.mkdir()
-    (workspace / ".httk-workspace" / "format.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-filesystem",
-                "format_version": 2,
-                "workspace_id": WORKSPACE_ID,
-            }
-        ),
-        encoding="utf-8",
+def _document(public_key: str, **changes: object) -> dict[str, object]:
+    document: dict[str, object] = {
+        "format": "httk-workspace-daemon-endpoint",
+        "format_version": 2,
+        "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": public_key,
+        "configurations": {"cpu": CONFIGURATION_DIGEST},
+        "request_max_age": 3600,
+    }
+    document.update(changes)
+    return document
+
+
+def _write_endpoint(exchange: Path, document: dict[str, object]) -> None:
+    (exchange / "endpoint.json").write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8"
     )
+
+
+def _endpoint(tmp_path: Path) -> Endpoint:
+    exchange = tmp_path / "exchange"
+    for name in ("requests", "responses", "inbox", "outbox"):
+        (exchange / name).mkdir(parents=True)
     response_seed = _seed(tmp_path / "response.seed", 2)
     public_key = identity_public_key(response_seed)
     assert public_key is not None
-    return Endpoint(
-        workspace,
-        requests,
-        responses,
-        WORKSPACE_ID,
-        ENROLLMENT_ID,
-        public_key,
-        {"cpu": CONFIGURATION_DIGEST},
-    )
+    _write_endpoint(exchange, _document(public_key))
+    return Endpoint(exchange, WORKSPACE_ID, ENROLLMENT_ID, public_key)
 
 
 def _settings(endpoint: Endpoint) -> dict[str, object]:
     return {
-        "mount_root": str(endpoint.workspace),
-        "daemon_requests": str(endpoint.requests),
-        "daemon_responses": str(endpoint.responses),
+        "exchange": str(endpoint.exchange),
         "daemon_workspace_id": endpoint.workspace_id,
         "daemon_enrollment_id": endpoint.enrollment_id,
-        "daemon_public_key": endpoint.daemon_public_key,
-        "daemon_configurations": dict(endpoint.configurations),
-        "daemon_request_max_age": endpoint.request_max_age,
+        "daemon_public_key": endpoint.public_key,
     }
 
 
@@ -119,7 +115,7 @@ def _publish_response(endpoint: Endpoint, request: Request, outcome: str, **fiel
             name,
             encode_response(
                 sign_response(
-                    _response(request, outcome, **fields), seed_path=endpoint.responses.parent / "response.seed"
+                    _response(request, outcome, **fields), seed_path=endpoint.exchange.parent / "response.seed"
                 )
             ),
         )
@@ -151,59 +147,27 @@ def test_endpoint_accepts_exact_settings_and_checks_workspace(tmp_path: Path) ->
     decoded.check()
 
 
-def test_endpoint_accepts_canonical_catalog_and_age_strings(tmp_path: Path) -> None:
+def test_read_endpoint_returns_validated_live_document(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
-    settings = _settings(endpoint)
-    settings["daemon_configurations"] = json.dumps(
-        {"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    settings["daemon_request_max_age"] = "900"
+    document = _document(endpoint.public_key, configurations={"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64})
+    document["request_max_age"] = 900
+    _write_endpoint(endpoint.exchange, document)
 
-    decoded = Endpoint.from_settings(settings)
+    value = client_module.read_endpoint(endpoint.exchange)
 
-    assert dict(decoded.configurations) == {"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64}
-    assert decoded.request_max_age == 900
-
-
-@pytest.mark.parametrize(
-    "catalog",
-    [
-        [],
-        '{"cpu":"' + CONFIGURATION_DIGEST + '","cpu":"' + CONFIGURATION_DIGEST + '"}',
-        '{"cpu": "' + CONFIGURATION_DIGEST + '"}',
-        {"CPU": CONFIGURATION_DIGEST},
-        {"cpu": "B" * 64},
-        {"cpu": True},
-        {1: CONFIGURATION_DIGEST},
-    ],
-)
-def test_endpoint_refuses_malformed_configuration_catalog(tmp_path: Path, catalog: object) -> None:
-    settings = _settings(_endpoint(tmp_path))
-    settings["daemon_configurations"] = catalog
-
-    with pytest.raises(ValueError):
-        Endpoint.from_settings(settings)
-
-
-@pytest.mark.parametrize("maximum", [True, False, 0, 86_401, -1, 1.0, "03600", "1.0", ""])
-def test_endpoint_refuses_invalid_request_max_age(tmp_path: Path, maximum: object) -> None:
-    settings = _settings(_endpoint(tmp_path))
-    settings["daemon_request_max_age"] = maximum
-
-    with pytest.raises(ValueError):
-        Endpoint.from_settings(settings)
+    assert dict(value["configurations"]) == {"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64}  # type: ignore[call-overload]
+    assert value["request_max_age"] == 900
 
 
 @pytest.mark.parametrize(
     "change",
     [
         {"unknown": "x"},
-        {"mount_root": "relative"},
-        {"mount_root": "/tmp/../tmp/workspace"},
+        {"exchange": "relative"},
+        {"exchange": "/tmp/../tmp/exchange"},
         {"daemon_workspace_id": "not-a-uuid"},
         {"daemon_enrollment_id": "A" * 32},
+        {"mount_root": "/tmp/x"},
     ],
 )
 def test_endpoint_refuses_unknown_or_malformed_settings(tmp_path: Path, change: dict[str, object]) -> None:
@@ -215,58 +179,117 @@ def test_endpoint_refuses_unknown_or_malformed_settings(tmp_path: Path, change: 
         Endpoint.from_settings(settings)
 
 
-def test_endpoint_refuses_missing_and_overlapping_roots(tmp_path: Path) -> None:
+def test_endpoint_refuses_missing_setting(tmp_path: Path) -> None:
+    settings = _settings(_endpoint(tmp_path))
+    del settings["exchange"]
+
+    with pytest.raises(ValueError, match="four"):
+        Endpoint.from_settings(settings)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"configurations": []},
+        {"configurations": {"CPU": CONFIGURATION_DIGEST}},
+        {"configurations": {"cpu": "B" * 64}},
+        {"configurations": {"cpu": True}},
+        {"request_max_age": True},
+        {"request_max_age": 0},
+        {"request_max_age": 86_401},
+        {"request_max_age": "3600"},
+        {"format": "other"},
+        {"format_version": 1},
+        {"workspace_id": "not-a-uuid"},
+        {"enrollment_id": "A" * 32},
+        {"daemon_public_key": "ed25519:AAAA"},
+    ],
+)
+def test_read_endpoint_refuses_invalid_values(tmp_path: Path, change: dict[str, object]) -> None:
     endpoint = _endpoint(tmp_path)
-    missing = _settings(endpoint)
-    del missing["daemon_requests"]
-    overlap = _settings(endpoint)
-    overlap["daemon_requests"] = str(endpoint.workspace / "requests")
+    _write_endpoint(endpoint.exchange, _document(endpoint.public_key, **change))
 
-    with pytest.raises(ValueError, match="eight"):
-        Endpoint.from_settings(missing)
-    with pytest.raises(ValueError, match="disjoint"):
-        Endpoint.from_settings(overlap)
+    with pytest.raises(ValueError):
+        client_module.read_endpoint(endpoint.exchange)
 
 
-def test_endpoint_check_refuses_symlink_components_and_wrong_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["extra", "duplicate", "bom", "nonfinite"])
+def test_read_endpoint_refuses_extra_keys_duplicates_boms_and_nonfinite(tmp_path: Path, kind: str) -> None:
     endpoint = _endpoint(tmp_path)
-    linked = tmp_path / "linked"
-    linked.symlink_to(endpoint.workspace)
-    symlink_endpoint = Endpoint(
-        linked,
-        endpoint.requests,
-        endpoint.responses,
-        WORKSPACE_ID,
-        ENROLLMENT_ID,
-        endpoint.daemon_public_key,
-    )
+    path = endpoint.exchange / "endpoint.json"
+    text = path.read_text(encoding="utf-8")
+    if kind == "extra":
+        path.write_text(text[:-1] + ',"extra":1}', encoding="utf-8")
+    elif kind == "duplicate":
+        path.write_text(text[:-1] + ',"request_max_age":5}', encoding="utf-8")
+    elif kind == "bom":
+        path.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+    else:
+        path.write_text(text.replace("3600", "NaN"), encoding="utf-8")
 
-    with pytest.raises(OSError):
-        symlink_endpoint.check()
-
-    format_path = endpoint.workspace / ".httk-workspace" / "format.json"
-    value = json.loads(format_path.read_text(encoding="utf-8"))
-    value["workspace_id"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    format_path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(ValueError, match="identity"):
-        endpoint.check()
+    with pytest.raises(ValueError):
+        client_module.read_endpoint(endpoint.exchange)
 
 
 @pytest.mark.parametrize("kind", ["symlink", "fifo", "oversize"])
-def test_endpoint_check_refuses_adversarial_format_files(tmp_path: Path, kind: str) -> None:
+def test_read_endpoint_refuses_adversarial_files(tmp_path: Path, kind: str) -> None:
     endpoint = _endpoint(tmp_path)
-    path = endpoint.workspace / ".httk-workspace" / "format.json"
+    path = endpoint.exchange / "endpoint.json"
+    original = path.read_bytes()
     path.unlink()
     if kind == "symlink":
         outside = tmp_path / "outside.json"
-        outside.write_text("{}", encoding="utf-8")
+        outside.write_bytes(original)
         path.symlink_to(outside)
     elif kind == "fifo":
-        os.mkfifo(path)
+        os.mkfifo(path)  # open must not block waiting for a writer
     else:
-        path.write_bytes(b"x" * (64 * 1024 + 1))
+        path.write_bytes(b" " * (64 * 1024 + 1))
 
     with pytest.raises((OSError, ValueError)):
+        endpoint.check()
+
+
+def test_endpoint_check_accepts_exchange_and_reads_only_endpoint(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    (endpoint.exchange / "outbox" / "status.json").write_bytes(b"\xff not json")
+
+    Endpoint.from_settings(_settings(endpoint)).check()
+
+
+@pytest.mark.parametrize("name", ["requests", "responses", "inbox", "outbox"])
+def test_endpoint_check_refuses_missing_or_symlinked_subdirectory(tmp_path: Path, name: str) -> None:
+    endpoint = _endpoint(tmp_path)
+    (endpoint.exchange / name).rmdir()
+    with pytest.raises(OSError):
+        endpoint.check()
+    (endpoint.exchange / name).symlink_to(tmp_path)
+    with pytest.raises(OSError):
+        endpoint.check()
+
+
+def test_endpoint_check_refuses_symlinked_exchange(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    linked = tmp_path / "linked"
+    linked.symlink_to(endpoint.exchange)
+
+    with pytest.raises(OSError):
+        Endpoint(linked, WORKSPACE_ID, ENROLLMENT_ID, endpoint.public_key).check()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workspace_id", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        ("enrollment_id", "0" * 32),
+        ("daemon_public_key", "ed25519:" + base64.b64encode(b"\x07" * 32).decode("ascii")),
+    ],
+)
+def test_endpoint_check_refuses_changed_identity(tmp_path: Path, field: str, value: str) -> None:
+    endpoint = _endpoint(tmp_path)
+    _write_endpoint(endpoint.exchange, _document(endpoint.public_key, **{field: value}))
+
+    with pytest.raises(ValueError, match=f"{field}.*enrollment changed"):
         endpoint.check()
 
 
@@ -292,8 +315,7 @@ def test_decode_matching_response_accepts_operation_outcomes(
     )
 
     assert (
-        decode_matching_response(encode_response(response), daemon_request, public_key=endpoint.daemon_public_key)
-        == response
+        decode_matching_response(encode_response(response), daemon_request, public_key=endpoint.public_key) == response
     )
 
 
@@ -325,7 +347,7 @@ def test_decode_matching_response_refuses_every_binding_mismatch(tmp_path: Path,
     response = sign_response(Response(**values), seed_path=tmp_path / "response.seed")  # type: ignore[arg-type]
 
     with pytest.raises(ValueError):
-        decode_matching_response(encode_response(response), request, public_key=endpoint.daemon_public_key)
+        decode_matching_response(encode_response(response), request, public_key=endpoint.public_key)
 
 
 def test_decode_matching_response_refuses_health_handle(tmp_path: Path) -> None:
@@ -337,7 +359,7 @@ def test_decode_matching_response_refuses_health_handle(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="handle"):
-        decode_matching_response(encode_response(response), request, public_key=endpoint.daemon_public_key)
+        decode_matching_response(encode_response(response), request, public_key=endpoint.public_key)
 
 
 def test_cached_terminal_response_returns_without_publication_and_is_cleaned(tmp_path: Path) -> None:
@@ -572,3 +594,90 @@ def test_exchange_refuses_invalid_wait_without_publication(tmp_path: Path, wait:
     with pytest.raises(ValueError, match="wait_seconds"):
         exchange(endpoint, _signed(_request(), tmp_path), wait_seconds=wait)  # type: ignore[arg-type]
     assert not list(endpoint.requests.iterdir())
+
+
+def _passive_documents(endpoint: Endpoint) -> tuple[dict[str, object], dict[str, object]]:
+    status: dict[str, object] = {
+        "format": "httk-workspace-daemon-status",
+        "format_version": 1,
+        "workspace_id": endpoint.workspace_id,
+        "generated_at": "2026-01-01T00:00:00.000000Z",
+        "jobs": [{"job_id": "j", "job_key": "k", "state": "submitted"}],
+        "rejected": [{"name": "n", "reason": "r"}],
+        "eject_errors": [],
+        "truncated": False,
+    }
+    managers: dict[str, object] = {
+        "format": "httk-workspace-daemon-managers",
+        "format_version": 1,
+        "enrollment_id": endpoint.enrollment_id,
+        "generated_at": "2026-01-01T00:00:00.000000Z",
+        "managers": [{"handle": HANDLE, "profile": "cpu", "request_id": REQUEST_ID, "state": "RUNNING"}],
+    }
+    return status, managers
+
+
+def _publish(endpoint: Endpoint, name: str, document: object) -> Path:
+    path = endpoint.exchange / "outbox" / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_passive_status_reads_both_files_or_none(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    assert client_module.read_passive_status(endpoint) == {"status": None, "managers": None}
+    status, managers = _passive_documents(endpoint)
+    _publish(endpoint, "status.json", status)
+    assert client_module.read_passive_status(endpoint) == {"status": status, "managers": None}
+    _publish(endpoint, "managers.json", managers)
+    assert client_module.read_passive_status(endpoint) == {"status": status, "managers": managers}
+
+
+@pytest.mark.parametrize(
+    ("name", "change"),
+    [
+        ("status.json", {"format": "other"}),
+        ("status.json", {"extra": 1}),
+        ("status.json", {"format_version": 2}),
+        ("status.json", {"truncated": "no"}),
+        ("status.json", {"jobs": [{"job_id": 1, "job_key": "k", "state": "s"}]}),
+        ("status.json", {"jobs": [{"job_id": "j"}]}),
+        ("status.json", {"workspace_id": "12345678-1234-1234-1234-000000000000"}),
+        ("managers.json", {"enrollment_id": "0" * 32}),
+        ("managers.json", {"managers": [{"handle": 1, "profile": "p", "request_id": "r", "state": "s"}]}),
+        ("managers.json", {"format": "httk-workspace-daemon-status"}),
+    ],
+)
+def test_passive_status_refuses_invalid_documents(tmp_path: Path, name: str, change: dict[str, object]) -> None:
+    endpoint = _endpoint(tmp_path)
+    status, managers = _passive_documents(endpoint)
+    document = status if name == "status.json" else managers
+    document.update(change)
+    _publish(endpoint, name, document)
+    with pytest.raises(ValueError, match=name):
+        client_module.read_passive_status(endpoint)
+
+
+def test_passive_status_refuses_unsafe_files(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    outbox = endpoint.exchange / "outbox"
+    os.mkfifo(outbox / "status.json")
+    with pytest.raises(ValueError, match="status.json"):  # returns without blocking
+        client_module.read_passive_status(endpoint)
+    (outbox / "status.json").unlink()
+    (outbox / "status.json").write_text(" " * (1024 * 1024 + 1), encoding="utf-8")
+    with pytest.raises(ValueError, match="exceeds"):
+        client_module.read_passive_status(endpoint)
+    (outbox / "status.json").unlink()
+    status, _managers = _passive_documents(endpoint)
+    (tmp_path / "elsewhere.json").write_text(json.dumps(status), encoding="utf-8")
+    (outbox / "status.json").symlink_to(tmp_path / "elsewhere.json")
+    with pytest.raises(OSError):
+        client_module.read_passive_status(endpoint)
+
+
+def test_passive_status_fails_closed_when_the_enrollment_changed(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    _write_endpoint(endpoint.exchange, _document(endpoint.public_key, enrollment_id="0" * 32))
+    with pytest.raises(ValueError, match="enrollment"):
+        client_module.read_passive_status(endpoint)

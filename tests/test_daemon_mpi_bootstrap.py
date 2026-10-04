@@ -43,9 +43,8 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
     roots = {
         name: tmp_path / name
         for name in (
-            "workspace",
-            "requests",
-            "responses",
+            "site/workspace/.httk-workspace/exchange",
+            "site/exchange",
             "state",
             "runtime",
             "broker",
@@ -55,7 +54,8 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         )
     }
     for root in roots.values():
-        root.mkdir()
+        root.mkdir(parents=True)
+    roots["workspace"] = tmp_path / "site/workspace"
     record = tmp_path / "bwrap-record.json"
     bwrap = roots["broker"] / "bwrap"
     options = " ".join(REQUIRED_BWRAP_OPTIONS)
@@ -80,13 +80,13 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         _write_executable(roots["broker"] / name)
     policy: dict[str, Any] = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 1,
+        "format_version": 2,
         "workspace": str(roots["workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
-        "requests": str(roots["requests"]),
-        "responses": str(roots["responses"]),
+        "exchange": str(roots["site/exchange"]),
         "state": str(roots["state"]),
+        "snapshots": str(tmp_path / "snapshots"),
         "bwrap": str(bwrap),
         "python": str(python),
         "sbatch": str(roots["broker"] / "sbatch"),

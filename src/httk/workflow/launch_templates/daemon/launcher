@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "daemon launchers run only through 'httk workspace daemon'" >&2
+exit 2

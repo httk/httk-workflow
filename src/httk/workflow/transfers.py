@@ -63,8 +63,10 @@ __all__ = [
     "detach_job",
     "discard_staged_bundle",
     "eject_job",
+    "exchange_staging",
     "import_bundle",
     "offer_transfers",
+    "recover_interrupted_transfers",
     "recover_transfers",
     "retire_transfers",
     "select_transfer_jobs",
@@ -169,6 +171,41 @@ def _contained_symlink_target(payload: Path, entry: Path) -> str:
             )
         parts.pop()
     return target
+
+
+def _refuse_unsafe_entries(bundle: Path) -> None:
+    """Refuse a job directory holding anything but files, directories and contained symlinks.
+
+    The walk only uses ``lstat``/``readlink``, before any file of the directory
+    is opened, so a planted FIFO or device cannot hang or affect an adoption and
+    a symlink cannot lead outside it, also below the undigested ``logs/``,
+    ``attempts/`` and ``.httk-transfer/``. A relative symlink must stay inside
+    the directory both lexically and once every link on its way is resolved.
+
+    :param bundle: The job directory, which must itself be a real directory.
+    :raises httk.workflow.errors.FormatError: Naming the first refused entry.
+    :raises FileNotFoundError: If the directory does not exist.
+    """
+
+    if not stat.S_ISDIR(os.lstat(bundle).st_mode):
+        raise FormatError(f"job directory {bundle} is not a directory (a symlink or special file)")
+    real = os.path.realpath(bundle)
+    pending = [bundle]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    _contained_symlink_target(bundle, path)
+                    if os.path.commonpath([real, os.path.realpath(path)]) != real:
+                        raise FormatError(
+                            f"job directory rejects the symlink {path.relative_to(bundle)}: it resolves outside it"
+                        )
+                elif entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif not entry.is_file(follow_symlinks=False):
+                    raise FormatError(f"job directory rejects the special entry {path.relative_to(bundle)}")
 
 
 def _payload_digest(payload: Path) -> str:
@@ -2055,13 +2092,29 @@ def discard_staged_bundle(workspace: Workspace, staging: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def exchange_staging(workspace: Workspace) -> Path:
+    """Return the workspace's exchange staging directory.
+
+    It holds ``inbox`` (bundles staged for adoption), ``outbox`` (ejected
+    bundles, ``rejected``, ``status.json``) and ``records``. The workspace root
+    is canonical and every component below it is literal, so a staging directory
+    replaced by a symlink never compares equal to a resolved path.
+
+    :param workspace: The workspace whose staging directory to locate.
+    :return: ``WORKSPACE/.httk-workspace/exchange``.
+    """
+
+    return workspace.control / "exchange"
+
+
 def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job_key: str) -> Path:
     """Resolve where one job is ejected to, the way ``mv`` resolves its target.
 
     An existing directory receives the job as ``<directory>/<job_key>``; any
     other path names the new job directory itself, whose parent must exist.
     The result is never inside a workspace, where the directory would read as
-    that workspace's own sealed bundle.
+    that workspace's own sealed bundle, except directly inside this workspace's
+    exchange staging outbox, which the workspace daemon drains.
     """
 
     path = Path(target).expanduser()
@@ -2072,7 +2125,7 @@ def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job
         raise FileExistsError(f"eject destination already exists: {path}")
     if not path.parent.is_dir():
         raise ValueError(f"eject destination parent is not a directory: {path.parent}")
-    enclosing = Workspace.discover(path.parent)
+    enclosing = None if path.parent == exchange_staging(workspace) / "outbox" else Workspace.discover(path.parent)
     if enclosing is not None:
         relation = "this" if enclosing.resolve() == workspace.root.resolve() else "a"
         raise ValueError(
@@ -2304,6 +2357,20 @@ def _finish_pending_ejections(workspace: Workspace) -> list[dict[str, Any]]:
     return finished
 
 
+@receipts.serialized
+def recover_interrupted_transfers(workspace: Workspace) -> None:
+    """Finish every ejection and adoption an interrupted earlier call left unfinished.
+
+    This is the recovery :func:`eject_job` and :func:`adopt_job` run first,
+    without ejecting or adopting anything new.
+
+    :param workspace: The workspace whose interrupted transfers to finish.
+    """
+
+    _finish_pending_ejections(workspace)
+    _finish_interrupted_adoptions(workspace)
+
+
 def _eject_tree_of(workspace: Workspace, marker: Marker, waiting: Mapping[str, set[str]]) -> list[dict[str, Any]]:
     """List the bound descendants an ejected job takes along, top-down, or refuse the tree.
 
@@ -2467,24 +2534,32 @@ def adopt_job(
     was ejected in. An ejected tree brings back every member nested in it, each
     at the placement it left from, so the parent/child bindings hold again. A
     copy of a directory whose job has already passed through this workspace is
-    refused and left in place rather than resurrecting a stale job.
+    refused and left in place rather than resurrecting a stale job. Before any
+    of its files is opened, the directory is refused if it is a symlink or holds
+    anything but regular files, directories and symlinks staying inside it.
 
     :param workspace: The workspace the job joins.
     :param directory: The free-standing job directory.
     :param placement: Place the job here instead of where it was ejected from (not for a tree).
     :return: The adopted job's marker (a tree's root).
-    :raises ValueError: If the directory is inside the workspace, addressed to a workspace, or stale,
-        or a placement is given for a tree.
+    :raises ValueError: If the directory is inside the workspace (other than directly in its
+        exchange staging inbox), addressed to a workspace, or stale, or a placement is given for a tree.
     :raises FileExistsError: If the workspace already holds this job or its payload path.
-    :raises httk.workflow.errors.FormatError: If the directory or a tree member does not verify or is missing.
+    :raises FileNotFoundError: If the directory does not exist.
+    :raises httk.workflow.errors.FormatError: If the directory or a tree member does not verify, is
+        missing, or holds a special entry or an escaping symlink.
     """
 
     workspace._require_unsealed()
     _finish_interrupted_adoptions(workspace)
-    source = Path(directory).expanduser().resolve()
+    # The final component is not resolved: a symlinked job directory is refused
+    # below rather than followed.
+    absolute = Path(os.path.abspath(Path(directory).expanduser()))
+    source = absolute.parent.resolve() / absolute.name
     root = workspace.root.resolve()
-    if source == root or root in source.parents:
+    if (source == root or root in source.parents) and source.parent != exchange_staging(workspace) / "inbox":
         raise ValueError(f"{source} is already inside the workspace")
+    _refuse_unsafe_entries(source)
     manifest = validate_bundle(source)
     if manifest.get("destination_workspace_id") is not None:
         raise ValueError(

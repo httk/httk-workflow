@@ -3,16 +3,16 @@
 import argparse
 import json
 import math
-import os
-import stat
 import sys
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 from httk.core.cli import CLIContext
 
-from .._daemon_client import Endpoint, decode_matching_response, prepare_request
+from .._daemon_cli import _anchored
+from .._daemon_client import Endpoint, decode_matching_response, prepare_request, read_endpoint, read_passive_status
 from .._daemon_protocol import Request, encode_request, encode_response
 from .._util import write_json_atomic
 from ..adapters import metadata_path, read_metadata, remote_settings, resolve_remote, run_adapter
@@ -25,97 +25,24 @@ _OPERATION_NAMES = {
     "cancel": "cancel_manager",
 }
 _POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested"})
-_ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
-_ENDPOINT_FORMAT_VERSION = 1
-_MAX_ENDPOINT_BYTES = 64 * 1024
-_BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
-
-
-def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Build a JSON object while refusing duplicate decoded keys."""
-
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _reject_constant(_: str) -> object:
-    """Refuse nonfinite JSON extensions."""
-
-    raise ValueError("nonfinite JSON value")
-
-
-def _read_endpoint_export(path: Path) -> dict[str, object]:
-    """Read one bounded no-follow public endpoint export."""
-
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        information = os.fstat(descriptor)
-        if not stat.S_ISREG(information.st_mode):
-            raise ValueError("daemon endpoint export is not a regular file")
-        if information.st_size > _MAX_ENDPOINT_BYTES:
-            raise ValueError("daemon endpoint export is too large")
-        data = bytearray()
-        while len(data) <= _MAX_ENDPOINT_BYTES:
-            chunk = os.read(descriptor, _MAX_ENDPOINT_BYTES + 1 - len(data))
-            if not chunk:
-                break
-            data.extend(chunk)
-            if len(data) > _MAX_ENDPOINT_BYTES:
-                raise ValueError("daemon endpoint export is too large")
-    finally:
-        os.close(descriptor)
-    raw = bytes(data)
-    if any(raw.startswith(bom) for bom in _BOMS):
-        raise ValueError("daemon endpoint export must be UTF-8 without a BOM")
-    try:
-        value = json.loads(
-            raw.decode("utf-8", errors="strict"),
-            object_pairs_hook=_object_without_duplicates,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeError, ValueError, RecursionError) as exc:
-        raise ValueError("invalid daemon endpoint export") from exc
-    fields = {
-        "format",
-        "format_version",
-        "workspace_id",
-        "enrollment_id",
-        "daemon_public_key",
-        "configurations",
-        "request_max_age",
-    }
-    if not isinstance(value, dict) or set(value) != fields:
-        raise ValueError("invalid daemon endpoint export fields")
-    if value["format"] != _ENDPOINT_FORMAT:
-        raise ValueError("invalid daemon endpoint export format")
-    if type(value["format_version"]) is not int or value["format_version"] != _ENDPOINT_FORMAT_VERSION:
-        raise ValueError("unsupported daemon endpoint export version")
-    return value
 
 
 def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Import one trusted public endpoint export into a mount-daemon remote."""
+    """Pin the identities of a mounted daemon exchange directory into a mount-daemon remote."""
 
     target = resolve_remote(arguments.remote, project=context.cwd)
     metadata = read_metadata(target.bundle)
     if metadata.get("kind") != "mount-daemon":
         raise ValueError(f"remote {arguments.remote!r} is not a mount-daemon remote")
-    exported = _read_endpoint_export(Path(arguments.endpoint))
+    exchange = _anchored(Path(arguments.exchange), "exchange")
+    exported = read_endpoint(exchange)
     settings: dict[str, object] = {
-        "mount_root": arguments.mount_root,
-        "daemon_requests": arguments.requests,
-        "daemon_responses": arguments.responses,
+        "exchange": str(exchange),
         "daemon_workspace_id": exported["workspace_id"],
         "daemon_enrollment_id": exported["enrollment_id"],
         "daemon_public_key": exported["daemon_public_key"],
-        "daemon_configurations": exported["configurations"],
-        "daemon_request_max_age": exported["request_max_age"],
     }
-    Endpoint.from_settings(settings)
+    Endpoint.from_settings(settings).check()
     result = run_adapter(target.bundle, "configure", {"settings": settings})
     if result.get("configured") is not True:
         raise ValueError("mount-daemon adapter did not confirm endpoint configuration")
@@ -158,6 +85,18 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     :return: The status derived from the confirmed daemon outcome, or 2 when no result is acknowledged.
     """
 
+    if arguments.daemon_verb == "status" and arguments.handle is None:
+        if arguments.request_id is not None:
+            raise ValueError("--request-id is accepted only with --handle")
+        target = resolve_remote(arguments.remote, project=context.cwd)
+        if read_metadata(target.bundle).get("kind") != "mount-daemon":
+            raise ValueError(f"remote {arguments.remote!r} is not a mount-daemon remote")
+        settings = remote_settings(target.bundle)
+        if not isinstance(settings, Mapping):
+            raise ValueError("mount-daemon remote settings must be an object")
+        print(json.dumps(read_passive_status(Endpoint.from_settings(settings)), indent=2, sort_keys=True))
+        return 0
+
     wait_seconds = arguments.wait_seconds
     if (
         not isinstance(wait_seconds, (int, float))
@@ -182,9 +121,10 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     if verb == "start":
         if type(configuration) is not str:
             raise ValueError("start requires a configuration name")
-        configuration_digest = endpoint.configurations.get(configuration)
+        configurations = cast(Mapping[str, str], endpoint.live()["configurations"])
+        configuration_digest = configurations.get(configuration)
         if configuration_digest is None:
-            available = ", ".join(sorted(endpoint.configurations)) or "(none)"
+            available = ", ".join(sorted(configurations)) or "(none)"
             raise ValueError(f"unknown approved daemon configuration {configuration!r}; available: {available}")
     intent = Request(
         _request_id(arguments.request_id, required=verb in {"start", "cancel"}),
@@ -211,7 +151,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         response = decode_matching_response(
             response_data.encode("utf-8"),
             request,
-            public_key=endpoint.daemon_public_key,
+            public_key=endpoint.public_key,
         )
         returncode = _response_returncode(response.outcome)
         if result.get("returncode") != returncode or result.get("stderr", "") != "":
@@ -244,15 +184,12 @@ def build_daemon_remote_parser(
     configure = _leaf(
         daemon_subparsers,
         "configure",
-        summary="import a trusted daemon endpoint",
-        description="Configure local mounted paths from a trusted public daemon endpoint export",
+        summary="pin a mounted daemon exchange",
+        description="Pin the daemon identities published in EXCHANGE/endpoint.json of a mounted exchange directory",
         handler=handle_remote_daemon_configure,
     )
     configure.add_argument("remote", metavar="REMOTE", help="the existing mount-daemon remote")
-    configure.add_argument("--endpoint", required=True, metavar="FILE", help="trusted public endpoint export")
-    configure.add_argument("--mount-root", required=True, metavar="PATH", help="locally mounted workspace root")
-    configure.add_argument("--requests", required=True, metavar="PATH", help="locally mounted request mailbox")
-    configure.add_argument("--responses", required=True, metavar="PATH", help="locally mounted response mailbox")
+    configure.add_argument("--exchange", required=True, metavar="PATH", help="locally mounted exchange directory")
     for verb, summary in (
         ("health", "check daemon readiness"),
         ("start", "start an approved manager configuration"),
@@ -290,8 +227,14 @@ def build_daemon_remote_parser(
                 "--request-id", required=True, metavar="ID", help="32 lowercase hexadecimal request ID; reuse on retry"
             )
         elif verb == "status":
-            parser.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
-            parser.add_argument("--request-id", metavar="ID", help="optional 32 lowercase hexadecimal request ID")
+            parser.add_argument(
+                "--handle",
+                metavar="HANDLE",
+                help="broker-issued manager handle (signed request); without it, print the passive exchange status files",
+            )
+            parser.add_argument(
+                "--request-id", metavar="ID", help="optional (only with --handle) 32 lowercase hexadecimal request ID"
+            )
         else:
             parser.add_argument("--request-id", metavar="ID", help="optional 32 lowercase hexadecimal request ID")
         parser.set_defaults(daemon_verb=verb)

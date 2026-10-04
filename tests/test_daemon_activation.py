@@ -14,12 +14,12 @@ def _policy(tmp_path: Path) -> Policy:
     runtime = tmp_path / "runtime"
     broker = tmp_path / "broker"
     return Policy(
-        workspace=tmp_path / "workspace",
+        workspace=tmp_path / "site/workspace",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="1" * 32,
-        requests=tmp_path / "requests",
-        responses=tmp_path / "responses",
+        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
+        snapshots=tmp_path / "snapshots",
         bwrap=broker / "bwrap",
         python=runtime / "python",
         sbatch=broker / "sbatch",

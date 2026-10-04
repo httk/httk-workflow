@@ -31,15 +31,15 @@ def _client(path: Path, body: str) -> None:
 def policy(tmp_path: Path) -> Policy:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    for name in ("data", "requests", "responses", "state"):
-        (tmp_path / name).mkdir()
+    for name in ("site/data", "site/exchange/requests", "site/exchange/responses", "state"):
+        (tmp_path / name).mkdir(parents=True)
     return Policy(
-        workspace=tmp_path / "data",
+        workspace=tmp_path / "site/data",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="b" * 32,
-        requests=tmp_path / "requests",
-        responses=tmp_path / "responses",
+        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
+        snapshots=tmp_path / "snapshots",
         bwrap=Path("/usr/bin/bwrap"),
         python=Path(sys.executable),
         sbatch=runtime / "sbatch",
@@ -80,6 +80,20 @@ def test_submission_uses_fixed_script_stdin_and_clean_environment(
     assert "--mode payload --profile cpu --handle " + _HANDLE in script
     assert "policy with spaces.json'" in script
     assert "prelude" not in script and "/workspace" not in script
+
+
+def test_gres_and_reservation_follow_the_account_flag(policy: Policy, tmp_path: Path) -> None:
+    record = tmp_path / "call.json"
+    _client(
+        policy.sbatch, f"open({str(record)!r}, 'w').write(json.dumps(sys.argv))\nsys.stdin.read()\nprint('1;cluster')\n"
+    )
+    gateway = SlurmGateway(policy, tmp_path / "policy.json")
+    gateway.submit(Profile("gpu", account="science", gres="gpu:a100=2", reservation="maint.1"), _HANDLE)
+    argv = json.loads(record.read_text())
+    account = argv.index("--account=science")
+    assert argv[account + 1 : account + 3] == ["--gres=gpu:a100=2", "--reservation=maint.1"]
+    gateway.submit(Profile("plain"), _HANDLE)
+    assert not any(item.startswith(("--gres=", "--reservation=")) for item in json.loads(record.read_text()))
 
 
 def test_unset_resources_add_no_sbatch_flags(policy: Policy, tmp_path: Path) -> None:

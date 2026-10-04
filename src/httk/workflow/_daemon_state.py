@@ -578,6 +578,35 @@ class Ledger:
         )
         return self._entry(row)
 
+    def managers(self) -> list[dict[str, str]]:
+        """Return every manager start as ``handle``, ``profile``, ``request_id`` and ledger ``state``.
+
+        :return: Rows ordered by request identifier.
+        """
+
+        rows = (
+            self._db()
+            .execute(
+                "SELECT request_id, request, request_digest, operation, state, handle, job_id, cluster, response "
+                "FROM requests WHERE operation='start_manager' ORDER BY request_id"
+            )
+            .fetchall()
+        )
+        result: list[dict[str, str]] = []
+        for row in rows:
+            entry = self._entry(row)
+            if entry is None or entry.handle is None or entry.request.profile is None:
+                raise sqlite3.DatabaseError("invalid stored manager start")
+            result.append(
+                {
+                    "handle": entry.handle,
+                    "profile": entry.request.profile,
+                    "request_id": entry.request.request_id,
+                    "state": entry.state,
+                }
+            )
+        return result
+
     def recover(self) -> None:
         """Convert every interrupted submission intent to durable uncertainty."""
 

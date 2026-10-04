@@ -23,6 +23,27 @@ ENROLLMENT_ID = "a" * 32
 CONFIGURATION_DIGEST = "b" * 64
 
 
+def _write_exchange(exchange: Path, public_key: str, **changes: object) -> Path:
+    """Create (or rewrite the endpoint of) one exchange directory fixture."""
+
+    for name in ("requests", "responses", "inbox", "outbox"):
+        (exchange / name).mkdir(parents=True, exist_ok=True)
+    document: dict[str, object] = {
+        "format": "httk-workspace-daemon-endpoint",
+        "format_version": 2,
+        "workspace_id": WORKSPACE_ID,
+        "enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": public_key,
+        "configurations": {"serial": CONFIGURATION_DIGEST},
+        "request_max_age": 1800,
+    }
+    document.update(changes)
+    (exchange / "endpoint.json").write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    return exchange
+
+
 def _remote(project: Path) -> Path:
     bundle = add_remote("cluster", template="mount-daemon", project=project)
     path = bundle / "remote.json"
@@ -31,15 +52,12 @@ def _remote(project: Path) -> Path:
     response_seed.write_text("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n", encoding="ascii")
     public_key = identity_public_key(response_seed)
     assert public_key is not None
+    exchange = _write_exchange(project.parent / "exchange", public_key)
     metadata["settings"] = {
-        "mount_root": "/mnt/workspace/data",
-        "daemon_requests": "/mnt/workspace/requests",
-        "daemon_responses": "/mnt/workspace/responses",
+        "exchange": str(exchange),
         "daemon_workspace_id": WORKSPACE_ID,
         "daemon_enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
-        "daemon_configurations": {"serial": CONFIGURATION_DIGEST},
-        "daemon_request_max_age": 3600,
     }
     path.write_text(json.dumps(metadata), encoding="utf-8")
     return bundle
@@ -81,39 +99,20 @@ def _observed_daemon_request(observed: Mapping[str, object]) -> Mapping[str, obj
     return request
 
 
-def _endpoint_export(project: Path, **changes: object) -> dict[str, object]:
-    """Return one exact public endpoint export for the configured test remote."""
-
+def _public_key(project: Path) -> str:
     bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
-    settings = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))["settings"]
-    document: dict[str, object] = {
-        "format": "httk-workspace-daemon-endpoint",
-        "format_version": 1,
-        "workspace_id": WORKSPACE_ID,
-        "enrollment_id": ENROLLMENT_ID,
-        "daemon_public_key": settings["daemon_public_key"],
-        "configurations": {"serial": CONFIGURATION_DIGEST},
-        "request_max_age": 1800,
-    }
-    document.update(changes)
-    return document
+    return json.loads((bundle / "remote.json").read_text(encoding="utf-8"))["settings"]["daemon_public_key"]
 
 
-def _configure_args(endpoint: Path, workspace: Path, requests: Path, responses: Path) -> list[str]:
-    """Return CLI arguments for one endpoint import."""
+def _remote_settings(project: Path) -> dict[str, object]:
+    bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
+    return json.loads((bundle / "remote.json").read_text(encoding="utf-8"))["settings"]
 
-    return [
-        "configure",
-        "cluster",
-        "--endpoint",
-        str(endpoint),
-        "--mount-root",
-        str(workspace),
-        "--requests",
-        str(requests),
-        "--responses",
-        str(responses),
-    ]
+
+def _configure_args(exchange: Path | str) -> list[str]:
+    """Return CLI arguments for one exchange pin."""
+
+    return ["configure", "cluster", "--exchange", str(exchange)]
 
 
 def test_template_and_shareable_daemon_settings(project: Path) -> None:
@@ -125,14 +124,10 @@ def test_template_and_shareable_daemon_settings(project: Path) -> None:
     assert metadata["timeout_seconds"] == 130
     assert adapter == '#!/bin/sh\nexec python3 -m httk.workflow._daemon_adapter "$@"\n'
     assert {
-        "daemon_requests",
-        "daemon_responses",
+        "exchange",
         "daemon_workspace_id",
         "daemon_enrollment_id",
         "daemon_public_key",
-        "daemon_configurations",
-        "daemon_request_max_age",
-        "mount_root",
     } <= PERSISTABLE_REMOTE_SETTINGS
 
 
@@ -142,16 +137,10 @@ def test_configure_persists_only_successful_shareable_daemon_settings(
     from httk.workflow.workflow_cli import _transfer
 
     settings = {
-        "mount_root": "/mnt/w/data",
-        "daemon_requests": "/mnt/w/requests",
-        "daemon_responses": "/mnt/w/responses",
+        "exchange": "/mnt/w/exchange",
         "daemon_workspace_id": WORKSPACE_ID,
         "daemon_enrollment_id": ENROLLMENT_ID,
-        "daemon_public_key": json.loads(
-            (project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json").read_text(encoding="utf-8")
-        )["settings"]["daemon_public_key"],
-        "daemon_configurations": json.dumps({"serial": CONFIGURATION_DIGEST}, separators=(",", ":")),
-        "daemon_request_max_age": "3600",
+        "daemon_public_key": _public_key(project),
     }
     monkeypatch.setattr(_transfer, "run_adapter", lambda *_args, **_kwargs: {"returncode": 0, "ok": True})
     args = ["configure", "cluster"]
@@ -159,51 +148,44 @@ def test_configure_persists_only_successful_shareable_daemon_settings(
         args.extend(("--set", f"{key}={value}"))
     code, _stdout, _stderr = _command(project, ["remote", *args])
     assert code == 0
-    metadata = json.loads(
-        (project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json").read_text(encoding="utf-8")
-    )
-    assert metadata["settings"] == settings
+    assert _remote_settings(project) == settings
 
 
-def test_daemon_configure_imports_public_endpoint_and_validates_mounted_identity(project: Path, tmp_path: Path) -> None:
-    workspace = tmp_path / "mounted-workspace"
-    requests = tmp_path / "mounted-requests"
-    responses = tmp_path / "mounted-responses"
-    (workspace / ".httk-workspace").mkdir(parents=True)
-    requests.mkdir()
-    responses.mkdir()
-    (workspace / ".httk-workspace" / "format.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-filesystem",
-                "format_version": 2,
-                "workspace_id": WORKSPACE_ID,
-            }
-        ),
-        encoding="utf-8",
-    )
-    exported = tmp_path / "endpoint.json"
-    exported.write_text(json.dumps(_endpoint_export(project)), encoding="utf-8")
+def test_daemon_configure_pins_identities_from_exchange(project: Path, tmp_path: Path) -> None:
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
 
-    code, stdout, stderr = _invoke(project, _configure_args(exported, workspace, requests, responses))
+    code, stdout, stderr = _invoke(project, _configure_args(exchange))
 
     assert code == 0
     assert json.loads(stdout)["configured"] is True
     assert stderr == ""
-    bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
-    settings = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))["settings"]
-    assert settings == {
-        "mount_root": str(workspace),
-        "daemon_requests": str(requests),
-        "daemon_responses": str(responses),
+    assert _remote_settings(project) == {
+        "exchange": str(exchange),
         "daemon_workspace_id": WORKSPACE_ID,
         "daemon_enrollment_id": ENROLLMENT_ID,
-        "daemon_public_key": _endpoint_export(project)["daemon_public_key"],
-        "daemon_configurations": {"serial": CONFIGURATION_DIGEST},
-        "daemon_request_max_age": 1800,
+        "daemon_public_key": _public_key(project),
     }
-    assert not list(requests.iterdir())
-    assert not list(responses.iterdir())
+    assert sorted(path.name for path in exchange.iterdir()) == [
+        "endpoint.json",
+        "inbox",
+        "outbox",
+        "requests",
+        "responses",
+    ]
+    assert not list((exchange / "requests").iterdir())
+
+
+def test_daemon_configure_anchors_relative_exchange_to_cwd(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
+    monkeypatch.chdir(tmp_path)
+
+    code, _stdout, _stderr = _invoke(project, _configure_args("mounted-exchange"))
+
+    assert code == 0
+    assert _remote_settings(project)["exchange"] == str(Path(os.getcwd()) / "mounted-exchange")
+    assert exchange.is_dir()
 
 
 def test_daemon_configure_failure_does_not_change_settings(
@@ -211,17 +193,12 @@ def test_daemon_configure_failure_does_not_change_settings(
 ) -> None:
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
-    bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
-    metadata_path = bundle / "remote.json"
+    metadata_path = project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     before = metadata_path.read_bytes()
-    exported = tmp_path / "endpoint.json"
-    exported.write_text(json.dumps(_endpoint_export(project)), encoding="utf-8")
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no")))
 
-    code, stdout, stderr = _invoke(
-        project,
-        _configure_args(exported, tmp_path / "workspace", tmp_path / "requests", tmp_path / "responses"),
-    )
+    code, stdout, stderr = _invoke(project, _configure_args(exchange))
 
     assert code == 2
     assert stdout == ""
@@ -229,84 +206,48 @@ def test_daemon_configure_failure_does_not_change_settings(
     assert metadata_path.read_bytes() == before
 
 
-@pytest.mark.parametrize("change", ["format", "missing", "extra", "catalog", "age"])
-def test_daemon_configure_refuses_invalid_endpoint_shape(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
-) -> None:
-    from httk.workflow.workflow_cli import _daemon_remote as cli
-
-    document = _endpoint_export(project)
-    if change == "format":
-        document["format"] = "wrong"
-    elif change == "missing":
-        del document["enrollment_id"]
-    elif change == "extra":
-        document["private_state"] = "/secret"
-    elif change == "catalog":
-        document["configurations"] = {"serial": "A" * 64}
-    else:
-        document["request_max_age"] = True
-    exported = tmp_path / "endpoint.json"
-    exported.write_text(json.dumps(document), encoding="utf-8")
-    monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
-
-    code, stdout, _stderr = _invoke(
-        project,
-        _configure_args(exported, tmp_path / "workspace", tmp_path / "requests", tmp_path / "responses"),
-    )
-
-    assert code == 2
-    assert stdout == ""
-
-
-def test_daemon_configure_refuses_duplicate_endpoint_keys(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from httk.workflow.workflow_cli import _daemon_remote as cli
-
-    document = json.dumps(_endpoint_export(project))
-    duplicate = document.replace(
-        '"workspace_id":',
-        f'"workspace_id":"{WORKSPACE_ID}","workspace_id":',
-        1,
-    )
-    exported = tmp_path / "endpoint.json"
-    exported.write_text(duplicate, encoding="utf-8")
-    monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
-
-    code, stdout, _stderr = _invoke(
-        project,
-        _configure_args(exported, tmp_path / "workspace", tmp_path / "requests", tmp_path / "responses"),
-    )
-
-    assert code == 2
-    assert stdout == ""
-
-
-@pytest.mark.parametrize("kind", ["symlink", "fifo", "oversize"])
-def test_daemon_configure_refuses_unsafe_or_oversize_endpoint_files(
+@pytest.mark.parametrize(
+    "kind", ["missing_subdirectory", "symlink", "fifo", "oversize", "duplicate", "extra", "missing_field", "format"]
+)
+def test_daemon_configure_refuses_invalid_exchange(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
-    exported = tmp_path / "endpoint.json"
-    if kind == "symlink":
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
+    path = exchange / "endpoint.json"
+    text = path.read_text(encoding="utf-8")
+    if kind == "missing_subdirectory":
+        (exchange / "inbox").rmdir()
+    elif kind == "symlink":
         target = tmp_path / "target.json"
-        target.write_text(json.dumps(_endpoint_export(project)), encoding="utf-8")
-        exported.symlink_to(target)
+        target.write_text(text, encoding="utf-8")
+        path.unlink()
+        path.symlink_to(target)
     elif kind == "fifo":
-        os.mkfifo(exported)
+        path.unlink()
+        os.mkfifo(path)
+    elif kind == "oversize":
+        path.write_bytes(b" " * (64 * 1024 + 1))
+    elif kind == "duplicate":
+        path.write_text(text[:-1] + ',"request_max_age":5}', encoding="utf-8")
+    elif kind == "extra":
+        path.write_text(text[:-1] + ',"private_state":"/secret"}', encoding="utf-8")
+    elif kind == "missing_field":
+        document = json.loads(text)
+        del document["enrollment_id"]
+        path.write_text(json.dumps(document), encoding="utf-8")
     else:
-        exported.write_bytes(b" " * (64 * 1024 + 1))
+        path.write_text(text.replace("httk-workspace-daemon-endpoint", "wrong"), encoding="utf-8")
+    metadata_path = project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
+    before = metadata_path.read_bytes()
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    code, stdout, _stderr = _invoke(
-        project,
-        _configure_args(exported, tmp_path / "workspace", tmp_path / "requests", tmp_path / "responses"),
-    )
+    code, stdout, _stderr = _invoke(project, _configure_args(exchange))
 
     assert code == 2
     assert stdout == ""
+    assert metadata_path.read_bytes() == before
 
 
 def test_daemon_configure_refuses_wrong_remote_kind_without_persistence(
@@ -314,20 +255,15 @@ def test_daemon_configure_refuses_wrong_remote_kind_without_persistence(
 ) -> None:
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
-    bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
-    metadata_path = bundle / "remote.json"
+    metadata_path = project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["kind"] = "mount"
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     before = metadata_path.read_bytes()
-    exported = tmp_path / "endpoint.json"
-    exported.write_text(json.dumps(_endpoint_export(project)), encoding="utf-8")
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    code, stdout, stderr = _invoke(
-        project,
-        _configure_args(exported, tmp_path / "workspace", tmp_path / "requests", tmp_path / "responses"),
-    )
+    code, stdout, stderr = _invoke(project, _configure_args(exchange))
 
     assert code == 2
     assert stdout == ""
@@ -335,36 +271,59 @@ def test_daemon_configure_refuses_wrong_remote_kind_without_persistence(
     assert metadata_path.read_bytes() == before
 
 
-def test_daemon_configure_workspace_identity_failure_is_atomic(project: Path, tmp_path: Path) -> None:
-    workspace = tmp_path / "mounted-workspace"
-    requests = tmp_path / "mounted-requests"
-    responses = tmp_path / "mounted-responses"
-    (workspace / ".httk-workspace").mkdir(parents=True)
-    requests.mkdir()
-    responses.mkdir()
-    (workspace / ".httk-workspace" / "format.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-filesystem",
-                "format_version": 2,
-                "workspace_id": "87654321-4321-4876-8876-cba987654321",
-            }
-        ),
-        encoding="utf-8",
-    )
-    exported = tmp_path / "endpoint.json"
-    exported.write_text(json.dumps(_endpoint_export(project)), encoding="utf-8")
-    metadata_path = project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
-    before = metadata_path.read_bytes()
+def test_identity_change_after_configure_is_refused_before_signing(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
 
-    code, stdout, stderr = _invoke(project, _configure_args(exported, workspace, requests, responses))
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
+    assert _invoke(project, _configure_args(exchange))[0] == 0
+    _write_exchange(exchange, _public_key(project), enrollment_id="c" * 32)
+    monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
+
+    code, stdout, stderr = _invoke(project, ["health", "cluster"])
 
     assert code == 2
     assert stdout == ""
-    assert "identity" in stderr
-    assert metadata_path.read_bytes() == before
-    assert not list(requests.iterdir())
-    assert not list(responses.iterdir())
+    assert "enrollment changed" in stderr
+
+
+def test_start_uses_live_configuration_digest(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    exchange = project.parent / "exchange"
+    reloaded = "d" * 64
+    _write_exchange(exchange, _public_key(project), configurations={"serial": reloaded})
+    observed: dict[str, object] = {}
+
+    def run_adapter(_bundle, _operation, payload, *, timeout):
+        observed.update(payload=payload)
+        raise TimeoutError("stop after request construction")
+
+    monkeypatch.setattr(cli, "run_adapter", run_adapter)
+    code, _stdout, _stderr = _invoke(
+        project, ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
+    )
+
+    assert code == 2
+    assert _observed_daemon_request(observed)["configuration_digest"] == reloaded
+
+
+def test_start_after_reload_cannot_replay_cached_request_under_new_digest(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    exchange = project.parent / "exchange"
+    monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("stop")))
+    args = ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
+    assert _invoke(project, args)[0] == 2
+    _write_exchange(exchange, _public_key(project), configurations={"serial": "d" * 64})
+
+    code, _stdout, stderr = _invoke(project, args)
+
+    assert code == 2
+    assert "intent conflicts" in stderr
 
 
 def test_credentials_are_merged_for_endpoint_validation(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -372,19 +331,14 @@ def test_credentials_are_merged_for_endpoint_validation(project: Path, monkeypat
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
     bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
-    replacement_id = "87654321-4321-4876-8876-cba987654321"
-    store_credentials(bundle, {"daemon_workspace_id": replacement_id})
-    observed: dict[str, object] = {}
+    store_credentials(bundle, {"daemon_workspace_id": "87654321-4321-4876-8876-cba987654321"})
+    monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    def run_adapter(_bundle, _operation, payload, *, timeout):
-        observed.update(payload=payload)
-        raise TimeoutError("stop after endpoint construction")
-
-    monkeypatch.setattr(cli, "run_adapter", run_adapter)
     code, _stdout, stderr = _invoke(project, ["health", "cluster"])
+
     assert code == 2
-    assert _observed_daemon_request(observed)["workspace_id"] == replacement_id
-    assert "daemon request ID:" in stderr
+    assert "workspace_id" in stderr
+    assert "enrollment changed" in stderr
 
 
 def test_cli_leaves_mounted_endpoint_check_to_adapter(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -620,3 +574,39 @@ def test_cli_rejects_mismatched_response_identity(project: Path, monkeypatch: py
     assert stdout == ""
     assert "has no acknowledged result" in stderr
     assert "reuse this request ID with identical fields" in stderr
+
+
+def _passive(project: Path) -> tuple[dict[str, object], Path]:
+    settings = _remote_settings(project)
+    outbox = Path(str(settings["exchange"])) / "outbox"
+    status = {
+        "format": "httk-workspace-daemon-status",
+        "format_version": 1,
+        "workspace_id": WORKSPACE_ID,
+        "generated_at": "2026-01-01T00:00:00.000000Z",
+        "jobs": [],
+        "rejected": [],
+        "eject_errors": [],
+        "truncated": False,
+    }
+    (outbox / "status.json").write_text(json.dumps(status), encoding="utf-8")
+    return status, outbox
+
+
+def test_status_without_handle_prints_the_passive_files(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    monkeypatch.setattr(cli, "run_adapter", lambda *_a, **_k: pytest.fail("no request may be sent"))
+    status, _outbox = _passive(project)
+    code, stdout, _stderr = _invoke(project, ["status", "cluster"])
+    assert code == 0
+    assert json.loads(stdout) == {"status": status, "managers": None}
+
+
+def test_status_without_handle_refuses_bad_files_and_request_id(project: Path) -> None:
+    _status, outbox = _passive(project)
+    (outbox / "status.json").write_text("{}", encoding="utf-8")
+    code, stdout, stderr = _invoke(project, ["status", "cluster"])
+    assert (code, stdout) == (2, "") and "status.json" in stderr
+    code, stdout, stderr = _invoke(project, ["status", "cluster", "--request-id", "1" * 32])
+    assert (code, stdout) == (2, "") and "--handle" in stderr

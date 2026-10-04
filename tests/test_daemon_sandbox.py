@@ -48,13 +48,14 @@ def test_real_payload_confinement(tmp_path: Path) -> None:
         pytest.skip("Bubblewrap executable is unavailable")
     bwrap = Path(bwrap_text).resolve()
 
-    workspace = tmp_path / "workspace"
-    requests = tmp_path / "requests"
-    responses = tmp_path / "responses"
+    workspace = tmp_path / "site/workspace"
+    exchange = tmp_path / "site/exchange"
     state = tmp_path / "state"
     runtime = tmp_path / "runtime"
     broker = tmp_path / "broker"
-    for root in (workspace, requests, responses, state, runtime, broker):
+    for root in (workspace / ".httk-workspace/exchange", exchange / "requests", exchange / "responses"):
+        root.mkdir(parents=True)
+    for root in (state, runtime, broker):
         root.mkdir()
 
     # Container root-owned binaries can appear with an unmapped UID. Use an
@@ -120,13 +121,13 @@ def test_real_payload_confinement(tmp_path: Path) -> None:
                 readonly_paths.append(candidate)
         policy = {
             "format": "httk-workspace-daemon-policy",
-            "format_version": 1,
+            "format_version": 2,
             "workspace": str(workspace),
             "workspace_id": str(uuid.uuid4()),
             "enrollment_id": "2" * 32,
-            "requests": str(requests),
-            "responses": str(responses),
+            "exchange": str(exchange),
             "state": str(state),
+            "snapshots": str(tmp_path / "snapshots"),
             "bwrap": str(bwrap),
             "python": str(payload),
             "sbatch": str(broker / "sbatch"),
@@ -188,9 +189,12 @@ def test_real_mpi_ranks_share_only_allocation_shm(tmp_path: Path) -> None:
         if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
             pytest.fail("required Bubblewrap executable is unavailable")
         pytest.skip("Bubblewrap executable is unavailable")
-    roots = {name: tmp_path / name for name in ("workspace", "runtime", "broker", "control", "shm")}
+    roots = {name: tmp_path / name for name in ("site/workspace", "runtime", "broker", "control", "shm")}
     for root in roots.values():
-        root.mkdir()
+        root.mkdir(parents=True)
+    roots["workspace"] = roots["site/workspace"]
+    (roots["workspace"] / ".httk-workspace/exchange").mkdir(parents=True)
+    (tmp_path / "site/exchange").mkdir()
     trusted_bwrap = roots["broker"] / "bwrap"
     shutil.copyfile(Path(bwrap_text).resolve(), trusted_bwrap)
     trusted_bwrap.chmod(0o755)
@@ -220,13 +224,13 @@ def test_real_mpi_ranks_share_only_allocation_shm(tmp_path: Path) -> None:
     readonly += [str(path) for path in (Path("/lib"), Path("/lib64")) if path.exists()]
     policy = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 1,
+        "format_version": 2,
         "workspace": str(roots["workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "e" * 32,
-        "requests": str(tmp_path / "requests"),
-        "responses": str(tmp_path / "responses"),
+        "exchange": str(tmp_path / "site/exchange"),
         "state": str(tmp_path / "state"),
+        "snapshots": str(tmp_path / "snapshots"),
         "bwrap": str(trusted_bwrap),
         "python": str(payload),
         "sbatch": str(roots["broker"] / "sbatch"),

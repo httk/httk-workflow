@@ -1,4 +1,4 @@
-"""Trusted local approval and publication for the workspace daemon."""
+"""Trusted local enrollment and publication for the workspace daemon."""
 
 import hashlib
 import json
@@ -11,102 +11,49 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from httk.core.userdirs import data_home
 
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
+from ._daemon_launcher import DAEMON_KIND, DAEMON_LAUNCHER_NAME, DaemonSettings, parse_daemon_settings
+from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
-    _HARD_LIMIT,
     MPIProfile,
     MPISettings,
     Policy,
     Profile,
+    _check_parent_names,
     _object_without_duplicates,
+    _open_directory,
     _open_nofollow,
+    _overlap,
     _parse_float,
-    _read_policy_bytes,
     _reject_constant,
+    check_layout,
     load_policy,
     policy_document,
 )
-from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
     _authorized_keys as _runtime_authorized_keys,
 )
-from ._daemon_policy import (
-    _number as _runtime_number,
-)
 from ._daemon_state import Ledger
-from .launchers import (
-    LAUNCHER_METADATA,
-    _locate_launcher,
-    _validate_launcher_metadata,
-    valid_launcher_name,
-)
-from .workspace import _validate_settings
+from .configuration import launchers_home
+from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
 
-_OPERATOR_FORMAT = "httk-workspace-daemon-policy"
-_OPERATOR_VERSION = 2
 _ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
+_ENDPOINT_VERSION = 2
 _MAX_WORKSPACE_BYTES = 1024 * 1024
 _MAX_LAUNCHER_BYTES = 64 * 1024
 _MAX_DISCOVERY_BYTES = 64 * 1024
-_PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _CLUSTER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_CANONICAL_INTEGER = re.compile(r"[1-9][0-9]*\Z")
-_MEMORY = re.compile(r"([1-9][0-9]*)([KMGT]?)\Z")
-_CPU_LIMIT = 1024
-_MEMORY_LIMIT = 1_048_576
-_TIME_LIMIT = 10_080
-_FORCE_HINT = "; pass --force to approve it"
-_SUPPORTED_SETTINGS = frozenset(
-    {
-        "manager.workers",
-        "manager.command",
-        "environment.prelude",
-        "slurm.cpus_per_task",
-        "slurm.mem",
-        "slurm.time_limit",
-        "slurm.nodes",
-        "slurm.ntasks",
-        "slurm.ntasks_per_node",
-        "slurm.partition",
-        "slurm.account",
-        "slurm.mpi",
-    }
-)
-
-
-@dataclass(frozen=True, slots=True)
-class _OperatorPolicy:
-    workspace: Path
-    readonly_paths: tuple[Path, ...]
-    broker_paths: tuple[Path, ...]
-    authorized_keys: tuple[str, ...]
-    allowed_launchers: tuple[str, ...]
-    snapshot_root: Path
-    state: Path
-    requests: Path
-    responses: Path
-    bwrap: Path | None
-    python: Path | None
-    sbatch: Path | None
-    squeue: Path | None
-    scancel: Path | None
-    scontrol: Path | None
-    cluster: str | None
-    slurm_conf: Path | None
-    max_records: int = 4096
-    max_submissions: int = 128
-    poll_seconds: float = 1.0
-    command_timeout: float = 30.0
-    max_output_bytes: int = 65_536
-    request_max_age: int = 3600
-    mpi: Mapping[str, object] | None = None
+_DEFAULT_READONLY = ("/usr", "/bin", "/lib", "/lib64")
+_EXCHANGE_DIRECTORIES = ("requests", "responses", "inbox", "outbox", "outbox/rejected")
+_STAGING_DIRECTORIES = ("inbox", "outbox", "outbox/rejected", "records")
+_MPI_ENVIRONMENT_PREFIX = "daemon.mpi.environment."
+_DEFAULT_SLURM_CONF = Path("/etc/slurm/slurm.conf")
 
 
 def _read_bounded(path: Path, limit: int, *, protected: bool = False) -> bytes:
@@ -145,161 +92,12 @@ def _decode_object(data: bytes, *, description: str) -> dict[str, object]:
     return value
 
 
-def _path(value: object, name: str) -> Path:
-    if type(value) is not str:
-        raise ValueError(f"{name} must be a string")
-    result = Path(value)
-    if not result.is_absolute() or ".." in result.parts or "\0" in value:
-        raise ValueError(f"{name} must be an absolute path without '..' or NUL")
-    return result
-
-
-def _path_array(value: object, name: str) -> tuple[Path, ...]:
-    if not isinstance(value, list):
-        raise ValueError(f"{name} must be an array")
-    result = tuple(_path(item, f"{name} entry") for item in value)
-    if len(set(result)) != len(result):
-        raise ValueError(f"{name} entries must be unique")
-    return result
-
-
-def _authorized_keys(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("authorized_keys must be a nonempty array")
-    return _runtime_authorized_keys(tuple(value))
-
-
-def _launcher_names(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("allowed_launchers must be a nonempty array")
-    result: list[str] = []
-    for item in value:
-        if type(item) is not str:
-            raise ValueError("allowed_launchers entries must be strings")
-        try:
-            name = valid_launcher_name(item)
-        except RuntimeError as exc:
-            raise ValueError(str(exc)) from exc
-        if _PROFILE_NAME.fullmatch(name) is None:
-            raise ValueError(f"launcher name cannot be used as an approved configuration: {name!r}")
-        if name in result:
-            raise ValueError("allowed_launchers entries must be unique")
-        result.append(name)
-    return tuple(result)
-
-
-def _operator_integer(value: object, name: str) -> int:
-    if type(value) is not int:
-        raise ValueError(f"{name} must be an integer")
-    return value
-
-
-def _operator_number(value: object, name: str) -> float:
-    return _runtime_number(value, name, -sys.float_info.max, sys.float_info.max)
-
-
 def _state_default(workspace: Path) -> Path:
     digest = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()
     return data_home() / "workspace-daemons" / digest
 
 
-def _decode_operator(path: Path) -> _OperatorPolicy:
-    value = _decode_object(_read_policy_bytes(path), description="operator policy")
-    required = {
-        "format",
-        "format_version",
-        "workspace",
-        "readonly_paths",
-        "broker_paths",
-        "authorized_keys",
-        "allowed_launchers",
-    }
-    optional = {
-        "snapshot_root",
-        "state",
-        "requests",
-        "responses",
-        "bwrap",
-        "python",
-        "sbatch",
-        "squeue",
-        "scancel",
-        "scontrol",
-        "cluster",
-        "slurm_conf",
-        "max_records",
-        "max_submissions",
-        "poll_seconds",
-        "command_timeout",
-        "max_output_bytes",
-        "request_max_age",
-        "mpi",
-    }
-    if not required <= set(value) or not set(value) <= required | optional:
-        raise ValueError("operator policy fields are missing or unknown")
-    if (
-        value["format"] != _OPERATOR_FORMAT
-        or type(value["format_version"]) is not int
-        or value["format_version"] != _OPERATOR_VERSION
-    ):
-        raise ValueError("unsupported operator policy format or version")
-    workspace = _path(value["workspace"], "workspace").resolve(strict=True)
-    if not workspace.is_dir():
-        raise ValueError("workspace must be an existing directory")
-    default_prefix = workspace.name
-    if not default_prefix:
-        raise ValueError("workspace root cannot be the filesystem root")
-    snapshot_root = _path(value.get("snapshot_root", str(path.parent / f"{path.stem}.daemon")), "snapshot_root")
-    state = _path(value.get("state", str(_state_default(workspace))), "state")
-    requests = _path(value.get("requests", str(workspace.with_name(f"{default_prefix}.daemon-requests"))), "requests")
-    responses = _path(
-        value.get("responses", str(workspace.with_name(f"{default_prefix}.daemon-responses"))), "responses"
-    )
-    cluster = value.get("cluster")
-    if cluster is not None and (type(cluster) is not str or _CLUSTER_NAME.fullmatch(cluster) is None):
-        raise ValueError("invalid cluster")
-    mpi = value.get("mpi")
-    if mpi is not None and not isinstance(mpi, dict):
-        raise ValueError("mpi must be an object")
-    return _OperatorPolicy(
-        workspace=workspace,
-        readonly_paths=_path_array(value["readonly_paths"], "readonly_paths"),
-        broker_paths=_path_array(value["broker_paths"], "broker_paths"),
-        authorized_keys=_authorized_keys(value["authorized_keys"]),
-        allowed_launchers=_launcher_names(value["allowed_launchers"]),
-        snapshot_root=snapshot_root,
-        state=state,
-        requests=requests,
-        responses=responses,
-        bwrap=_path(value["bwrap"], "bwrap") if "bwrap" in value else None,
-        python=_path(value["python"], "python") if "python" in value else None,
-        sbatch=_path(value["sbatch"], "sbatch") if "sbatch" in value else None,
-        squeue=_path(value["squeue"], "squeue") if "squeue" in value else None,
-        scancel=_path(value["scancel"], "scancel") if "scancel" in value else None,
-        scontrol=_path(value["scontrol"], "scontrol") if "scontrol" in value else None,
-        cluster=cluster,
-        slurm_conf=_path(value["slurm_conf"], "slurm_conf") if "slurm_conf" in value else None,
-        mpi=mpi,
-        max_records=_operator_integer(value.get("max_records", 4096), "max_records"),
-        max_submissions=_operator_integer(value.get("max_submissions", 128), "max_submissions"),
-        poll_seconds=_operator_number(value.get("poll_seconds", 1.0), "poll_seconds"),
-        command_timeout=_operator_number(value.get("command_timeout", 30.0), "command_timeout"),
-        max_output_bytes=_operator_integer(value.get("max_output_bytes", 65_536), "max_output_bytes"),
-        request_max_age=_operator_integer(value.get("request_max_age", 3600), "request_max_age"),
-    )
-
-
-def _operator(path: Path, workspace: Path) -> _OperatorPolicy:
-    if not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts or "\0" in str(path):
-        raise ValueError("operator policy path must be absolute without '..' or NUL")
-    operator = _decode_operator(path)
-    requested = workspace.resolve(strict=True)
-    if requested != operator.workspace:
-        raise ValueError("workspace argument must exactly match the operator policy workspace")
-    return operator
-
-
-def _workspace_data(workspace: Path) -> tuple[str, dict[str, object]]:
+def _workspace_id(workspace: Path) -> str:
     path = workspace / ".httk-workspace" / "format.json"
     value = _decode_object(_read_bounded(path, _MAX_WORKSPACE_BYTES), description="workspace format")
     if value.get("format") != "httk-workflow-filesystem" or value.get("format_version") != 2:
@@ -307,242 +105,104 @@ def _workspace_data(workspace: Path) -> tuple[str, dict[str, object]]:
     workspace_id = value.get("workspace_id")
     if type(workspace_id) is not str:
         raise ValueError("workspace has no valid workspace_id")
-    settings = _validate_settings(value.get("settings", {}))
-    return workspace_id, settings
+    return workspace_id
 
 
-def _resolve_executable(value: Path | None, name: str) -> Path:
-    if value is None:
-        found = shutil.which(name)
-    else:
-        found = shutil.which(str(value))
+def _resolve_executable(value: object, name: str) -> Path:
+    found = shutil.which(name if value is None else str(value))
     if found is None:
         raise ValueError(f"required executable is unavailable on the operator PATH: {name}")
     return Path(found).absolute()
 
 
-def _positive_integer(value: object, name: str, maximum: int, hint: str = "") -> int:
-    if type(value) is int:
-        result = value
-    elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
-        result = int(value)
-    else:
-        raise ValueError(f"{name} must be a positive integer or canonical decimal string")
-    if not 1 <= result <= maximum:
-        raise ValueError(f"{name} must be from 1 through {maximum}{hint}")
-    return result
+def _running_python() -> Path:
+    # Rebase onto the resolved prefix: readonly defaults are resolved, and the sandbox binds them only there.
+    executable = Path(sys.executable).absolute()
+    try:
+        return Path(sys.prefix).resolve() / executable.relative_to(sys.prefix)
+    except ValueError:
+        return executable
 
 
-def _memory_mb(value: object, *, force: bool = False) -> int:
-    if type(value) is int:
-        result = value
-    elif type(value) is str:
-        match = _MEMORY.fullmatch(value)
-        if match is None:
-            raise ValueError("slurm.mem must be a positive integer with an optional K, M, G, or T suffix")
-        amount, suffix = int(match.group(1)), match.group(2)
-        if suffix == "K":
-            result = (amount + 1023) // 1024
-        elif suffix == "M" or not suffix:
-            result = amount
-        elif suffix == "G":
-            result = amount * 1024
-        else:
-            result = amount * 1024 * 1024
-    else:
-        raise ValueError("slurm.mem must be a positive integer with an optional K, M, G, or T suffix")
-    if not 1 <= result <= (_HARD_LIMIT if force else _MEMORY_LIMIT):
-        if result >= 1:
-            if force:
-                raise ValueError(f"slurm.mem exceeds the {_HARD_LIMIT} MiB ceiling")
-            raise ValueError(f"slurm.mem exceeds the {_MEMORY_LIMIT} MiB sanity limit{_FORCE_HINT}")
-        raise ValueError("slurm.mem must normalize to at least 1 MiB")
-    return result
+def _effective_slurm_conf(declared: Path | None) -> Path | None:
+    # The operator environment is trusted at setup; the broker sandbox later sees only this fixed file.
+    if declared is not None:
+        return declared
+    environment = os.environ.get("SLURM_CONF")
+    if environment and Path(environment).is_absolute() and os.path.isfile(environment):
+        return Path(environment)
+    return _DEFAULT_SLURM_CONF if _DEFAULT_SLURM_CONF.is_file() else None
 
 
-def _time_minutes(value: object, *, force: bool = False) -> int:
-    if type(value) is int:
-        result = value
-    elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
-        result = int(value)
-    elif type(value) is str:
-        days = 0
-        clock = value
-        if "-" in value:
-            pieces = value.split("-")
-            if len(pieces) != 2 or _CANONICAL_INTEGER.fullmatch(pieces[0]) is None:
-                raise ValueError("invalid slurm.time_limit")
-            days, clock = int(pieces[0]), pieces[1]
-        fields = clock.split(":")
-        if len(fields) not in (1, 2, 3) or any(not field.isdigit() or not field for field in fields):
-            raise ValueError("invalid slurm.time_limit")
-        numbers = [int(field) for field in fields]
-        if days:
-            if len(numbers) == 1:
-                hours, minutes, seconds = numbers[0], 0, 0
-            elif len(numbers) == 2:
-                hours, minutes, seconds = numbers[0], numbers[1], 0
-            else:
-                hours, minutes, seconds = numbers
-            if hours > 23 or minutes > 59 or seconds > 59:
-                raise ValueError("invalid slurm.time_limit")
-            total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
-        elif len(numbers) == 2:
-            minutes, seconds = numbers
-            if seconds > 59:
-                raise ValueError("invalid slurm.time_limit")
-            total_seconds = minutes * 60 + seconds
-        elif len(numbers) == 3:
-            hours, minutes, seconds = numbers
-            if minutes > 59 or seconds > 59:
-                raise ValueError("invalid slurm.time_limit")
-            total_seconds = (hours * 60 + minutes) * 60 + seconds
-        else:
-            raise ValueError("invalid slurm.time_limit")
-        result = (total_seconds + 59) // 60
-    else:
-        raise ValueError("invalid slurm.time_limit")
-    if not 1 <= result <= (_HARD_LIMIT if force else _TIME_LIMIT):
-        if result >= 1:
-            if force:
-                raise ValueError(f"slurm.time_limit exceeds the {_HARD_LIMIT} minute ceiling")
-            raise ValueError(f"slurm.time_limit exceeds the {_TIME_LIMIT} minute sanity limit{_FORCE_HINT}")
-        raise ValueError("slurm.time_limit must normalize to at least 1 minute")
-    return result
+def _site[T](site: Mapping[str, object], key: str, kind: type[T]) -> T | None:
+    value = site.get(key)
+    if value is None or isinstance(value, kind):
+        return value
+    raise ValueError(f"invalid {key}")
 
 
-def _bounded_json_at(path: Path, limit: int, description: str) -> dict[str, object]:
-    return _decode_object(_read_bounded(path, limit), description=description)
-
-
-def _configuration(
-    name: str,
-    workspace: Path,
-    workspace_settings: Mapping[str, object],
-    mpi_settings: MPISettings | None,
-    *,
-    force: bool,
-) -> Profile:
-    target = _locate_launcher(name, project=workspace)
-    root = target.bundle.resolve(strict=True)
-    metadata = _bounded_json_at(root / LAUNCHER_METADATA, _MAX_LAUNCHER_BYTES, "launcher metadata")
-    metadata = _validate_launcher_metadata(root, metadata, check_binaries=False)
-    if metadata.get("kind") != "slurm":
-        raise ValueError(f"approved launcher {name!r} must declare the stock Slurm kind")
-    launcher_settings = metadata.get("settings", {})
-    assert isinstance(launcher_settings, Mapping)
-    settings = {**workspace_settings, **_validate_settings(launcher_settings)}
-    unsupported = sorted(key for key in settings if key.startswith("slurm.") and key not in _SUPPORTED_SETTINGS)
-    if unsupported:
-        raise ValueError(f"unsupported Slurm launcher settings for {name!r}: {', '.join(unsupported)}")
-    cpus = memory_mb = time_limit = None
-    if "slurm.cpus_per_task" in settings:
-        cpus = _positive_integer(
-            settings["slurm.cpus_per_task"],
-            "slurm.cpus_per_task",
-            _HARD_LIMIT if force else _CPU_LIMIT,
-            "" if force else _FORCE_HINT,
+def _daemon_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -> DaemonSettings:
+    if type(name) is not str or DAEMON_LAUNCHER_NAME.fullmatch(name) is None:
+        raise ValueError(f"daemon launcher names must match {DAEMON_LAUNCHER_NAME.pattern}: {name!r}")
+    try:
+        bundle = (launchers_home() / name).resolve(strict=True)
+    except FileNotFoundError:
+        raise ValueError(f"unknown global daemon launcher: {name!r}") from None
+    if any(bundle.is_relative_to(path.resolve()) for path in forbidden):
+        raise ValueError(f"daemon launcher {name!r} must not lie inside the daemon parent, state or snapshots")
+    metadata = _decode_object(
+        _read_bounded(bundle / LAUNCHER_METADATA, _MAX_LAUNCHER_BYTES, protected=True), description="launcher metadata"
+    )
+    kind = metadata.get("kind")
+    if kind != DAEMON_KIND:
+        raise ValueError(
+            f"launcher {name!r} is a {kind!r} launcher; create a daemon launcher with "
+            "'httk workflow launcher add --template daemon --global'"
         )
-    if "slurm.mem" in settings:
-        memory_mb = _memory_mb(settings["slurm.mem"], force=force)
-    if "slurm.time_limit" in settings:
-        time_limit = _time_minutes(settings["slurm.time_limit"], force=force)
-    workers = _positive_integer(settings.get("manager.workers", 1), "manager.workers", 1024)
-    nodes = _positive_integer(settings.get("slurm.nodes", 1), "slurm.nodes", 4096)
-    ntasks_per_node = None
-    if "slurm.ntasks_per_node" in settings:
-        ntasks_per_node = _positive_integer(settings["slurm.ntasks_per_node"], "slurm.ntasks_per_node", 65_536)
-    if "slurm.ntasks" in settings:
-        ranks = _positive_integer(settings["slurm.ntasks"], "slurm.ntasks", 65_536)
-    else:
-        ranks = nodes * ntasks_per_node if ntasks_per_node is not None else nodes
-    if ranks < nodes or ranks > 65_536:
-        raise ValueError("slurm.ntasks must be from slurm.nodes through 65536")
-    if ntasks_per_node is not None and ranks > nodes * ntasks_per_node:
-        raise ValueError("slurm.ntasks exceeds the approved node placement")
-    mpi_mode = settings.get("slurm.mpi")
-    if mpi_mode is not None and mpi_mode != "pmix":
-        raise ValueError("slurm.mpi must be 'pmix' when set")
-    mpi = mpi_mode == "pmix" or nodes > 1 or ranks > 1
-    if mpi:
-        if mpi_settings is None:
-            raise ValueError(f"approved MPI launcher {name!r} requires operator mpi settings")
-        if workers != 1:
-            raise ValueError("MPI approved configurations require manager.workers=1")
-        geometry = MPIProfile(nodes, ranks, ntasks_per_node)
-    else:
-        if nodes != 1 or ranks != 1 or ntasks_per_node not in (None, 1):
-            raise ValueError("serial approved configurations require one node and one task")
-        geometry = None
-    partition = settings.get("slurm.partition")
-    account = settings.get("slurm.account")
-    for key, value in (("slurm.partition", partition), ("slurm.account", account)):
-        if value is not None and not isinstance(value, str):
-            raise ValueError(f"{key} must be a string")
-    assert partition is None or isinstance(partition, str)
-    assert account is None or isinstance(account, str)
-    prelude = settings.get("environment.prelude", "")
-    if type(prelude) is not str:
-        raise ValueError("environment.prelude must be a string")
-    raw_command = settings.get("manager.command")
-    manager_command: str | None = None
-    if raw_command is not None:
-        if type(raw_command) is not str or not raw_command.strip() or "\0" in raw_command:
-            raise ValueError("manager.command must be one nonempty executable string")
-        manager_command = raw_command.strip()
-    return Profile(
-        name,
-        cpus,
-        memory_mb,
-        time_limit,
-        partition,
-        account,
-        geometry,
-        workers,
-        prelude,
-        manager_command,
+    settings = _validate_launcher_metadata(bundle, metadata, check_binaries=False).get("settings", {})
+    assert isinstance(settings, Mapping)
+    return parse_daemon_settings(settings, force=force)
+
+
+def _combined_site(launchers: Mapping[str, DaemonSettings]) -> dict[str, object]:
+    site: dict[str, object] = {}
+    owners: dict[str, str] = {}
+    for name, settings in launchers.items():
+        environment = {_MPI_ENVIRONMENT_PREFIX + key: value for key, value in settings.mpi_environment.items()}
+        for key, value in (*settings.site.items(), *environment.items()):
+            if key in site and site[key] != value:
+                raise ValueError(f"daemon launchers {owners[key]!r} and {name!r} set {key} to different values")
+            site[key] = value
+            owners.setdefault(key, name)
+    return site
+
+
+def _nested_dropped(paths: set[Path]) -> tuple[Path, ...]:
+    return tuple(
+        sorted(path for path in paths if not any(path != other and path.is_relative_to(other) for other in paths))
     )
 
 
-def _mpi_settings(raw: Mapping[str, object] | None) -> MPISettings | None:
-    if raw is None:
-        return None
-    required = {"control_root"}
-    optional = {
-        "srun",
-        "pmix_roots",
-        "shm_root",
-        "devices",
-        "environment",
-        "max_steps",
-        "termination_grace",
-    }
-    if not required <= set(raw) or not set(raw) <= required | optional:
-        raise ValueError("mpi fields are missing or unknown")
-    srun = _resolve_executable(_path(raw["srun"], "mpi.srun") if "srun" in raw else None, "srun")
-    raw_pmix_roots = raw.get("pmix_roots", [])
-    raw_devices = raw.get("devices", [])
-    if not isinstance(raw_pmix_roots, list):
-        raise ValueError("mpi.pmix_roots must be an array")
-    if not isinstance(raw_devices, list):
-        raise ValueError("mpi.devices must be an array")
-    environment = raw.get("environment", {})
-    if not isinstance(environment, dict):
-        raise ValueError("mpi.environment must be an object")
-    environment_pairs: list[tuple[str, str]] = []
-    for name, setting in environment.items():
-        if type(name) is not str or type(setting) is not str:
-            raise ValueError("mpi.environment names and values must be strings")
-        environment_pairs.append((name, setting))
+def _mpi_settings(site: Mapping[str, object]) -> MPISettings:
+    control_root = _site(site, "daemon.mpi.control_root", Path)
+    if control_root is None:
+        raise ValueError("MPI daemon launchers require daemon.mpi.control_root")
+    environment = tuple(
+        (key.removeprefix(_MPI_ENVIRONMENT_PREFIX), value)
+        for key, value in sorted(site.items())
+        if key.startswith(_MPI_ENVIRONMENT_PREFIX) and isinstance(value, str)
+    )
+    grace = _site(site, "daemon.mpi.termination_grace", float)
+    steps = _site(site, "daemon.mpi.max_steps", int)
     return MPISettings(
-        srun=srun,
-        control_root=_path(raw["control_root"], "mpi.control_root"),
-        pmix_roots=tuple(_path(item, "mpi.pmix_roots entry") for item in raw_pmix_roots),
-        shm_root=_path(raw.get("shm_root", "/dev/shm"), "mpi.shm_root"),
-        devices=tuple(_path(item, "mpi.devices entry") for item in raw_devices),
-        environment=tuple(environment_pairs),
-        max_steps=_operator_integer(raw.get("max_steps", 128), "mpi.max_steps"),
-        termination_grace=_operator_number(raw.get("termination_grace", 10.0), "mpi.termination_grace"),
+        srun=_resolve_executable(site.get("daemon.mpi.srun"), "srun"),
+        control_root=control_root,
+        pmix_roots=_site(site, "daemon.mpi.pmix_roots", tuple) or (),
+        shm_root=_site(site, "daemon.mpi.shm_root", Path) or Path("/dev/shm"),
+        devices=_site(site, "daemon.mpi.devices", tuple) or (),
+        environment=environment,
+        max_steps=128 if steps is None else steps,
+        termination_grace=10.0 if grace is None else grace,
     )
 
 
@@ -615,94 +275,97 @@ def _run_scontrol(path: Path, *, slurm_conf: Path | None = None) -> bytes:
     return bytes(output)
 
 
-def _cluster(operator: _OperatorPolicy) -> str:
-    if operator.cluster is not None:
-        return operator.cluster
+def _cluster(cluster: str | None, slurm_conf: Path | None, scontrol: Path | None) -> str:
+    if cluster is not None:
+        return cluster
     environment = os.environ.get("SLURM_CLUSTER_NAME")
     if environment:
         if _CLUSTER_NAME.fullmatch(environment) is None:
             raise ValueError("SLURM_CLUSTER_NAME is invalid")
         return environment
-    if operator.slurm_conf is not None:
+    if slurm_conf is not None:
         configured = _cluster_from_text(
-            _read_bounded(operator.slurm_conf, _MAX_DISCOVERY_BYTES, protected=True),
-            str(operator.slurm_conf),
-            required=False,
+            _read_bounded(slurm_conf, _MAX_DISCOVERY_BYTES, protected=True), str(slurm_conf), required=False
         )
         if configured is not None:
             return configured
-    scontrol = _resolve_executable(operator.scontrol, "scontrol")
-    discovered = _cluster_from_text(_run_scontrol(scontrol, slurm_conf=operator.slurm_conf), "scontrol show config")
+    discovered = _cluster_from_text(
+        _run_scontrol(_resolve_executable(scontrol, "scontrol"), slurm_conf=slurm_conf), "scontrol show config"
+    )
     assert discovered is not None
     return discovered
 
 
-def _compile(operator: _OperatorPolicy, enrollment_id: str, *, force: bool = False) -> Policy:
-    workspace_id, workspace_settings = _workspace_data(operator.workspace)
-    bwrap = _resolve_executable(operator.bwrap, "bwrap")
-    python = (
-        Path(sys.executable).absolute() if operator.python is None else _resolve_executable(operator.python, "python")
-    )
-    sbatch = _resolve_executable(operator.sbatch, "sbatch")
-    squeue = _resolve_executable(operator.squeue, "squeue")
-    scancel = _resolve_executable(operator.scancel, "scancel")
-    mpi = _mpi_settings(operator.mpi)
-    profiles = tuple(
-        _configuration(
-            name,
-            operator.workspace,
-            workspace_settings,
-            mpi,
-            force=force,
-        )
-        for name in operator.allowed_launchers
-    )
+def _compile(
+    workspace: Path,
+    exchange: Path,
+    state: Path,
+    snapshots: Path,
+    enrollment_id: str,
+    launchers: Sequence[str],
+    authorized_keys: Sequence[str],
+    *,
+    force: bool,
+) -> Policy:
+    if not launchers:
+        raise ValueError("at least one daemon launcher is required")
+    if not authorized_keys:
+        raise ValueError("at least one authorized key is required")
+    parsed = {name: _daemon_launcher(name, (exchange.parent, state, snapshots), force=force) for name in launchers}
+    if len(parsed) != len(launchers):
+        raise ValueError("daemon launcher names must be unique")
+    site = _combined_site(parsed)
+    readonly = _site(site, "daemon.readonly_paths", tuple)
+    if readonly is None:
+        defaults = {Path(path).resolve() for path in _DEFAULT_READONLY if os.path.exists(path)}
+        readonly = _nested_dropped(defaults | {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
+    slurm_conf = _effective_slurm_conf(_site(site, "daemon.slurm_conf", Path))
+    broker = _site(site, "daemon.broker_paths", tuple)
+    if broker is None:
+        munge = Path("/run/munge")
+        broker = (*(() if slurm_conf is None else (slurm_conf.parent,)), *((munge,) if munge.exists() else ()))
+    python = site.get("daemon.python")
+    max_submissions = _site(site, "daemon.max_submissions", int)
     return Policy(
-        workspace=operator.workspace,
-        workspace_id=workspace_id,
+        workspace=workspace,
+        workspace_id=_workspace_id(workspace),
         enrollment_id=enrollment_id,
-        requests=operator.requests,
-        responses=operator.responses,
-        state=operator.state,
-        bwrap=bwrap,
-        python=python,
-        sbatch=sbatch,
-        squeue=squeue,
-        scancel=scancel,
-        cluster=_cluster(operator),
-        readonly_paths=operator.readonly_paths,
-        broker_paths=operator.broker_paths,
-        profiles=profiles,
-        authorized_keys=operator.authorized_keys,
-        slurm_conf=operator.slurm_conf,
-        max_records=operator.max_records,
-        max_submissions=operator.max_submissions,
-        poll_seconds=operator.poll_seconds,
-        command_timeout=operator.command_timeout,
-        max_output_bytes=operator.max_output_bytes,
-        request_max_age=operator.request_max_age,
-        mpi=mpi,
+        exchange=exchange,
+        state=state,
+        snapshots=snapshots,
+        bwrap=_resolve_executable(site.get("daemon.bwrap"), "bwrap"),
+        python=_running_python() if python is None else _resolve_executable(python, "python"),
+        sbatch=_resolve_executable(site.get("daemon.sbatch"), "sbatch"),
+        squeue=_resolve_executable(site.get("daemon.squeue"), "squeue"),
+        scancel=_resolve_executable(site.get("daemon.scancel"), "scancel"),
+        cluster=_cluster(_site(site, "daemon.cluster", str), slurm_conf, _site(site, "daemon.scontrol", Path)),
+        readonly_paths=readonly,
+        broker_paths=broker,
+        profiles=tuple(
+            Profile(
+                name,
+                settings.cpus,
+                settings.memory_mb,
+                settings.time_minutes,
+                settings.partition,
+                settings.account,
+                MPIProfile(settings.nodes, settings.ranks, settings.ntasks_per_node) if settings.mpi else None,
+                settings.workers,
+                settings.prelude,
+                settings.manager_command,
+                settings.gres,
+                settings.reservation,
+            )
+            for name, settings in parsed.items()
+        ),
+        authorized_keys=_runtime_authorized_keys(tuple(authorized_keys)),
+        slurm_conf=slurm_conf,
+        max_submissions=128 if max_submissions is None else max_submissions,
+        mpi=_mpi_settings(site) if any(settings.mpi for settings in parsed.values()) else None,
     )
 
 
-def _overlap(left: Path, right: Path) -> bool:
-    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
-
-
-def _validate_setup_roots(operator: _OperatorPolicy, operator_path: Path) -> None:
-    protected_policy = operator_path.resolve(strict=True)
-    for writable in (operator.workspace, operator.requests, operator.responses):
-        writable_resolved = writable.resolve(strict=False)
-        if protected_policy == writable_resolved or protected_policy.is_relative_to(writable_resolved):
-            raise ValueError("operator policy must be outside workspace and mailbox roots")
-    mutable = (operator.workspace, operator.requests, operator.responses, operator.state, operator.snapshot_root)
-    for index, left in enumerate(mutable):
-        for right in mutable[index + 1 :]:
-            if _overlap(left, right):
-                raise ValueError("workspace, mailboxes, state, and snapshot_root must be pairwise disjoint")
-
-
-def _mkdir_exclusive(path: Path) -> None:
+def _mkdir_exclusive(path: Path, *, exist_ok: bool = False) -> None:
     if not path.is_absolute() or ".." in path.parts or "\0" in str(path):
         raise ValueError("directory path must be absolute without '..' or NUL")
     descriptor = os.open(path.anchor or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -714,7 +377,7 @@ def _mkdir_exclusive(path: Path) -> None:
                 os.mkdir(component, 0o700, dir_fd=descriptor)
                 created = True
             except FileExistsError:
-                if final:
+                if final and not exist_ok:
                     raise
                 created = False
             next_descriptor = os.open(
@@ -723,7 +386,7 @@ def _mkdir_exclusive(path: Path) -> None:
                 dir_fd=descriptor,
             )
             information = os.fstat(next_descriptor)
-            if created:
+            if created or final and information.st_uid == os.geteuid():
                 os.fchmod(next_descriptor, 0o700)
                 information = os.fstat(next_descriptor)
             mode = stat.S_IMODE(information.st_mode)
@@ -741,25 +404,8 @@ def _mkdir_exclusive(path: Path) -> None:
         os.close(descriptor)
 
 
-def _open_directory_nofollow(path: Path) -> int:
-    descriptor = os.open(path.anchor or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    try:
-        for component in path.parts[1:]:
-            next_descriptor = os.open(
-                component,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                dir_fd=descriptor,
-            )
-            previous, descriptor = descriptor, next_descriptor
-            os.close(previous)
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
 def _validate_private_directory(path: Path) -> None:
-    descriptor = _open_directory_nofollow(path)
+    descriptor = _open_directory(path)
     try:
         information = os.fstat(descriptor)
         if information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700:
@@ -780,7 +426,7 @@ def _runtime_policy_bytes(policy: Policy) -> bytes:
 
 
 def _write_exclusive(path: Path, data: bytes) -> None:
-    directory = _open_directory_nofollow(path.parent)
+    directory = _open_directory(path.parent)
     temporary = f".{path.name}.{secrets.token_hex(16)}.tmp"
     descriptor = -1
     created = False
@@ -823,7 +469,7 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    directory = _open_directory_nofollow(path.parent)
+    directory = _open_directory(path.parent)
     temporary = f".{path.name}.{secrets.token_hex(16)}.tmp"
     descriptor = -1
     created = False
@@ -860,62 +506,129 @@ def _write_atomic(path: Path, data: bytes) -> None:
         os.close(directory)
 
 
-def _publish(operator: _OperatorPolicy, policy: Policy) -> Path:
+def _publish(policy: Policy) -> Path:
     canonical = _runtime_policy_bytes(policy)
     digest = hashlib.sha256(canonical).hexdigest()
-    snapshot = operator.snapshot_root / f"{digest}.json"
+    snapshot = policy.snapshots / f"{digest}.json"
     try:
         _write_exclusive(snapshot, canonical)
     except FileExistsError:
         if _read_bounded(snapshot, _MAX_RUNTIME_POLICY_BYTES, protected=True) != canonical:
             raise ValueError("existing immutable daemon snapshot disagrees with its digest") from None
     active = activation_document(snapshot, policy)
-    _write_atomic(operator.state / "active.json", _canonical_bytes(active))
+    _write_atomic(policy.state / "active.json", _canonical_bytes(active))
     return snapshot
 
 
-def initialize(workspace: Path, operator_path: Path, *, force: bool = False) -> Path:
-    """Compile and publish a fresh local daemon enrollment.
+def _write_endpoint(policy: Policy) -> None:
+    endpoint = {
+        "format": _ENDPOINT_FORMAT,
+        "format_version": _ENDPOINT_VERSION,
+        "workspace_id": policy.workspace_id,
+        "enrollment_id": policy.enrollment_id,
+        "daemon_public_key": response_public_key(response_seed_path(policy.state)),
+        "configurations": {profile.name: policy.configuration_digest(profile.name) for profile in policy.profiles},
+        "request_max_age": policy.request_max_age,
+    }
+    _write_atomic(policy.exchange / "endpoint.json", _canonical_bytes(endpoint))
 
-    :param workspace: Uploaded workspace root.
-    :param operator_path: Operator policy file.
+
+def _create_staging(workspace: Path) -> None:
+    for name in _STAGING_DIRECTORIES:
+        _mkdir_exclusive(workspace / ".httk-workspace" / "exchange" / name, exist_ok=True)
+
+
+def _snapshots_default(state: Path) -> Path:
+    return state.with_name(state.name + ".snapshots")
+
+
+def initialize(
+    workspace: Path,
+    *,
+    exchange: Path,
+    launchers: Sequence[str],
+    authorized_keys: Sequence[str],
+    state: Path | None = None,
+    snapshots: Path | None = None,
+    force: bool = False,
+) -> Path:
+    """Compile and publish a fresh enrollment from approved global daemon launchers.
+
+    :param workspace: Workspace data root.
+    :param exchange: Client exchange directory; a missing or empty sibling of the workspace.
+    :param launchers: Names of approved global ``daemon`` launchers, which become the profiles.
+    :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
+    :param state: Broker state directory, by default under the httk data home.
+    :param snapshots: Snapshot directory, by default ``<state>.snapshots``.
     :param force: Approve CPU, memory and time requests above the built-in sanity limits.
     :return: Path of the published runtime snapshot.
+    :raises ValueError: If a launcher, key or the layout is refused.
     """
 
-    operator = _operator(operator_path, workspace)
-    _validate_setup_roots(operator, operator_path)
-    policy = _compile(operator, secrets.token_hex(16), force=force)
+    workspace = workspace.resolve(strict=True)
+    exchange = exchange.parent.resolve(strict=True) / exchange.name
+    state = _state_default(workspace) if state is None else state
+    snapshots = _snapshots_default(state) if snapshots is None else snapshots
+    policy = _compile(
+        workspace, exchange, state, snapshots, secrets.token_hex(16), launchers, authorized_keys, force=force
+    )
+    home = data_home().resolve()
+    if _overlap(policy.root, home):
+        raise ValueError(f"daemon parent {policy.root} must be disjoint from the httk data home {home}")
     _runtime_policy_bytes(policy)
-    for root in (operator.requests, operator.responses, operator.state, operator.snapshot_root):
-        _mkdir_exclusive(root)
-    initialize_response_seed(operator.state)
+    _check_parent_names(policy, os.listdir(policy.root))
+    if os.path.lexists(exchange) and (exchange.is_symlink() or not exchange.is_dir() or os.listdir(exchange)):
+        raise ValueError(f"exchange must not exist or must be an empty directory: {exchange}")
+    leftover = [str(path) for path in (state, snapshots) if os.path.lexists(path)]
+    if leftover:
+        raise ValueError(
+            f"daemon state already exists: {', '.join(leftover)}; remove an earlier enrollment's state "
+            "or give a different --state"
+        )
+    # The probe runs while the exchange is still empty, so a refused layout can be fixed and retried.
+    _mkdir_exclusive(exchange, exist_ok=True)
+    _create_staging(workspace)
+    check_layout(policy)
+    for name in _EXCHANGE_DIRECTORIES:
+        _mkdir_exclusive(exchange / name)
+    for directory in (state, snapshots):
+        _mkdir_exclusive(directory)
+    initialize_response_seed(state)
     with Ledger(
-        operator.state,
+        state,
         policy.workspace_id,
         policy.enrollment_id,
         initialize=True,
         max_records=policy.max_records,
         max_submissions=policy.max_submissions,
     ):
-        return _publish(operator, policy)
+        snapshot = _publish(policy)
+        _write_endpoint(policy)
+        return snapshot
 
 
-def _active(operator: _OperatorPolicy) -> tuple[Path, Policy, str]:
-    snapshot, digest = read_active_snapshot(operator.state)
+def _active(workspace: Path, state: Path, snapshots: Path | None = None) -> tuple[Path, Policy, str]:
+    snapshot, digest = read_active_snapshot(state)
     policy = load_policy(snapshot)
-    verify_active_snapshot(operator.state, snapshot, policy)
-    if policy.workspace != operator.workspace:
+    verify_active_snapshot(state, snapshot, policy)
+    if policy.workspace != workspace:
         raise ValueError("active daemon enrollment belongs to a different workspace")
+    if snapshots is not None and policy.snapshots != snapshots:
+        raise ValueError(f"active daemon enrollment keeps its snapshots in {policy.snapshots}, not {snapshots}")
     return snapshot, policy, digest
 
 
-def active_policy_path(workspace: Path, operator_path: Path) -> Path:
-    """Return the saved active runtime snapshot for ordinary daemon startup."""
+def active_policy_path(workspace: Path, *, state: Path | None = None, snapshots: Path | None = None) -> Path:
+    """Return the saved active runtime snapshot for ordinary daemon startup.
 
-    operator = _operator(operator_path, workspace)
-    snapshot, _policy, _digest = _active(operator)
-    return snapshot
+    :param workspace: Workspace data root.
+    :param state: Broker state directory when not the default.
+    :param snapshots: Expected snapshot directory, checked when given.
+    :return: Path of the active runtime snapshot.
+    """
+
+    workspace = workspace.resolve(strict=True)
+    return _active(workspace, _state_default(workspace) if state is None else state, snapshots)[0]
 
 
 def _fixed_connection(old: Policy, new: Policy) -> None:
@@ -923,9 +636,9 @@ def _fixed_connection(old: Policy, new: Policy) -> None:
         "workspace",
         "workspace_id",
         "enrollment_id",
-        "requests",
-        "responses",
+        "exchange",
         "state",
+        "snapshots",
         "sbatch",
         "squeue",
         "scancel",
@@ -935,26 +648,52 @@ def _fixed_connection(old: Policy, new: Policy) -> None:
     )
     changed = [name for name in fields if getattr(old, name) != getattr(new, name)]
     if changed:
-        raise ValueError(f"reload cannot change the enrollment scheduler connection: {', '.join(changed)}")
+        raise ValueError(
+            f"reload cannot change the fixed enrollment connection: {', '.join(changed)}; a new enrollment is required"
+        )
 
 
-def reload(workspace: Path, operator_path: Path, *, force: bool = False) -> Path:
-    """Compile and atomically approve a replacement active catalog.
+def reload(
+    workspace: Path,
+    *,
+    launchers: Sequence[str] | None = None,
+    authorized_keys: Sequence[str] | None = None,
+    state: Path | None = None,
+    snapshots: Path | None = None,
+    force: bool = False,
+) -> Path:
+    """Recompile the enrollment and atomically activate the replacement snapshot.
 
-    :param workspace: Uploaded workspace root.
-    :param operator_path: Operator policy file.
+    :param workspace: Workspace data root.
+    :param launchers: Replacement launcher names, or ``None`` to keep the active profile names.
+    :param authorized_keys: Replacement authorized keys, or ``None`` to keep the active keys.
+    :param state: Broker state directory when not the default.
+    :param snapshots: Snapshot directory when not ``<state>.snapshots``.
     :param force: Approve CPU, memory and time requests above the built-in sanity limits.
-    :return: Path of the newly approved runtime snapshot.
+    :return: Path of the newly activated runtime snapshot.
+    :raises ValueError: If a launcher or key is refused or the fixed connection would change.
     """
 
-    operator = _operator(operator_path, workspace)
-    _validate_setup_roots(operator, operator_path)
-    _validate_private_directory(operator.state)
-    _validate_private_directory(operator.snapshot_root)
-    old_snapshot, old, old_digest = _active(operator)
-    new = _compile(operator, old.enrollment_id, force=force)
+    workspace = workspace.resolve(strict=True)
+    state = _state_default(workspace) if state is None else state
+    snapshots = _snapshots_default(state) if snapshots is None else snapshots
+    _validate_private_directory(state)
+    old_snapshot, old, old_digest = _active(workspace, state)
+    new = _compile(
+        workspace,
+        old.exchange,
+        state,
+        snapshots,
+        old.enrollment_id,
+        [profile.name for profile in old.profiles] if launchers is None else launchers,
+        old.authorized_keys if authorized_keys is None else authorized_keys,
+        force=force,
+    )
     _runtime_policy_bytes(new)
     _fixed_connection(old, new)
+    _validate_private_directory(snapshots)
+    _create_staging(workspace)
+    check_layout(new)
     with Ledger(
         old.state,
         old.workspace_id,
@@ -962,27 +701,13 @@ def reload(workspace: Path, operator_path: Path, *, force: bool = False) -> Path
         max_records=old.max_records,
         max_submissions=old.max_submissions,
     ):
-        current_snapshot, current_digest = read_active_snapshot(operator.state)
+        current_snapshot, current_digest = read_active_snapshot(state)
         if current_snapshot != old_snapshot or current_digest != old_digest:
             raise ValueError("active daemon approval changed while reload was waiting for its lock")
-        verify_active_snapshot(operator.state, old_snapshot, old)
-        return _publish(operator, new)
+        verify_active_snapshot(state, old_snapshot, old)
+        snapshot = _publish(new)
+        _write_endpoint(new)
+        return snapshot
 
 
-def export_endpoint(workspace: Path, operator_path: Path) -> dict[str, object]:
-    """Return the exact public endpoint and approved configuration catalog."""
-
-    operator = _operator(operator_path, workspace)
-    _snapshot, policy, _digest = _active(operator)
-    return {
-        "format": _ENDPOINT_FORMAT,
-        "format_version": 1,
-        "workspace_id": policy.workspace_id,
-        "enrollment_id": policy.enrollment_id,
-        "daemon_public_key": response_public_key(response_seed_path(policy.state)),
-        "configurations": {profile.name: policy.configuration_digest(profile.name) for profile in policy.profiles},
-        "request_max_age": policy.request_max_age,
-    }
-
-
-__all__ = ["active_policy_path", "export_endpoint", "initialize", "reload"]
+__all__ = ["active_policy_path", "initialize", "reload"]

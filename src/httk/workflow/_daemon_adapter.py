@@ -292,7 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         elif operation in {"invoke", "status", "push", "pull"}:
             _refusal(
                 operation,
-                "mount-daemon supports typed daemon controls and mounted-path native transfer only",
+                "mount-daemon supports typed daemon controls only; move jobs with "
+                "'httk job eject JOB EXCHANGE/inbox' and 'httk job adopt EXCHANGE/outbox/<job_key>'",
             )
         else:
             _refusal(operation, "unsupported mount-daemon adapter operation")

@@ -2,7 +2,6 @@
 
 import argparse
 import errno
-import json
 import os
 import sqlite3
 import sys
@@ -17,12 +16,17 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     """
 
     parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
-    parser.add_argument("--policy", required=True, type=Path, help="protected operator policy file")
+    parser.add_argument("--exchange", type=Path, help="client exchange directory, a sibling of the workspace")
+    parser.add_argument(
+        "--launcher", action="append", metavar="NAME", help="approve a global daemon launcher (repeatable)"
+    )
+    parser.add_argument("--authorize", action="append", metavar="KEY", help="authorize an Ed25519 key (repeatable)")
+    parser.add_argument("--state", type=Path, help="broker state directory when not the default")
+    parser.add_argument("--snapshots", type=Path, help="runtime snapshot directory when not <state>.snapshots")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="check the real sandbox and scheduler requirements")
-    mode.add_argument("--initialize", action="store_true", help="approve and initialize a new protected enrollment")
-    mode.add_argument("--reload", action="store_true", help="approve and activate updated local configurations")
-    mode.add_argument("--export-endpoint", action="store_true", help="print the saved public endpoint and catalog")
+    mode.add_argument("--initialize", action="store_true", help="approve and initialize a new enrollment")
+    mode.add_argument("--reload", action="store_true", help="approve and activate updated launchers or keys")
     mode.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
     parser.add_argument(
         "--force",
@@ -46,6 +50,19 @@ def _anchored(path: Path, name: str) -> Path:
     return path
 
 
+def _usage_refusal(arguments: argparse.Namespace) -> str | None:
+    setup = arguments.initialize or arguments.reload
+    if arguments.force and not setup:
+        return "--force applies only to --initialize and --reload"
+    if arguments.initialize and (arguments.exchange is None or not arguments.launcher or not arguments.authorize):
+        return "--initialize requires --exchange, at least one --launcher and at least one --authorize"
+    if arguments.reload and arguments.exchange is not None:
+        return "--reload cannot change --exchange; a new enrollment is required"
+    if not setup and (arguments.exchange is not None or arguments.launcher or arguments.authorize):
+        return "--exchange, --launcher and --authorize apply only to --initialize and --reload"
+    return None
+
+
 def _close_inherited() -> None:
     for name in os.listdir("/proc/self/fd"):
         descriptor = int(name)
@@ -64,35 +81,51 @@ def launch(arguments: argparse.Namespace) -> int:
     :return: A failure exit status if the bootstrap cannot start.
     """
 
+    refusal = _usage_refusal(arguments)
+    if refusal is not None:
+        print(f"httk workspace daemon: {refusal}", file=sys.stderr)
+        return 2
     try:
         workspace = _anchored(arguments.workspace, "workspace")
-        policy = _anchored(arguments.policy, "policy")
+        paths = {
+            name: None if getattr(arguments, name) is None else _anchored(getattr(arguments, name), name)
+            for name in ("exchange", "state", "snapshots")
+        }
     except (OSError, ValueError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2
-    if arguments.force and not (arguments.initialize or arguments.reload):
-        print("httk workspace daemon: --force applies only to --initialize and --reload", file=sys.stderr)
-        return 2
     try:
         from . import _daemon_setup
+        from ._daemon_policy import load_policy
 
-        if arguments.initialize:
-            _daemon_setup.initialize(workspace, policy, force=arguments.force)
-            return 0
-        if arguments.reload:
-            _daemon_setup.reload(workspace, policy, force=arguments.force)
-            return 0
-        if arguments.export_endpoint:
-            print(
-                json.dumps(
-                    _daemon_setup.export_endpoint(workspace, policy),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
+        if arguments.initialize or arguments.reload:
+            if arguments.initialize:
+                assert paths["exchange"] is not None
+                snapshot = _daemon_setup.initialize(
+                    workspace,
+                    exchange=paths["exchange"],
+                    launchers=arguments.launcher,
+                    authorized_keys=arguments.authorize,
+                    state=paths["state"],
+                    snapshots=paths["snapshots"],
+                    force=arguments.force,
                 )
-            )
+            else:
+                snapshot = _daemon_setup.reload(
+                    workspace,
+                    launchers=arguments.launcher,
+                    authorized_keys=arguments.authorize,
+                    state=paths["state"],
+                    snapshots=paths["snapshots"],
+                    force=arguments.force,
+                )
+            approved = load_policy(snapshot)
+            for profile in approved.profiles:
+                print(f"launcher {profile.name}")
+            for key in approved.authorized_keys:
+                print(f"authorized {key}")
             return 0
-        runtime_policy = _daemon_setup.active_policy_path(workspace, policy)
+        runtime_policy = _daemon_setup.active_policy_path(workspace, state=paths["state"], snapshots=paths["snapshots"])
         runtime_workspace = workspace.resolve(strict=True)
     except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)

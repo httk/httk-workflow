@@ -34,6 +34,7 @@ _MPI_ENVIRONMENT_LIMIT = 128
 _MPI_ENVIRONMENT_VALUE_BYTES = 4096
 _MPI_ENVIRONMENT_TOTAL_BYTES = 64 * 1024
 _CONTROL_DESTINATION = Path("/run/httk-mpi")
+_ROOT_DESTINATION = Path("/daemon-root")
 _BWRAP_OPTIONS = frozenset(
     {
         "--assert-userns-disabled",
@@ -117,13 +118,14 @@ def _policy_api() -> dict[str, Any]:
     return runpy.run_path(str(source))
 
 
-def _load_policy_once(path: Path) -> tuple[Any, bytes]:
+def _load_policy_once(path: Path) -> tuple[Any, bytes, Any]:
     api = _policy_api()
     loader: Any = api.get("_load_policy_with_bytes")
-    if not callable(loader):
-        raise RuntimeError("installed daemon policy module has no isolated loader")
+    check_layout: Any = api.get("check_layout")
+    if not callable(loader) or not callable(check_layout):
+        raise RuntimeError("installed daemon policy module has no isolated loader or layout check")
     policy, data = cast(tuple[Any, bytes], loader(path))
-    return policy, data
+    return policy, data, check_layout
 
 
 def _open_directory_nofollow(path: Path) -> int:
@@ -274,10 +276,10 @@ def _resolve_declared_path(path: Path, *, strict: bool) -> Path:
 
 
 def _resolved_roots(policy: Any, mode: str) -> _ResolvedRoots:
-    mutable = tuple(
-        _resolve_declared_path(path, strict=False)
-        for path in (policy.workspace, policy.requests, policy.responses, policy.state)
-    )
+    if any(_overlap(path, _ROOT_DESTINATION) for path in (*policy.readonly_paths, *policy.broker_paths)):
+        raise ValueError(f"approved runtime paths must not overlap the reserved destination {_ROOT_DESTINATION}")
+    # The dedicated parent holds the workspace and the exchange, and the broker binds it read-write.
+    mutable = tuple(_resolve_declared_path(path, strict=False) for path in (policy.root, policy.state))
     readonly = tuple(_resolve_declared_path(path, strict=True) for path in policy.readonly_paths)
     broker = tuple(
         _resolve_declared_path(path, strict=mode in ("broker", "allocation")) for path in policy.broker_paths
@@ -433,8 +435,7 @@ def _open_pmix_directory(policy: Any, environment: tuple[tuple[str, str], ...]) 
         raise ValueError("PMIX_SERVER_TMPDIR is outside approved PMIx roots")
     reserved_destinations = (
         Path("/workspace"),
-        Path("/requests"),
-        Path("/responses"),
+        _ROOT_DESTINATION,
         Path("/control"),
         _CONTROL_DESTINATION,
         Path("/proc"),
@@ -445,9 +446,7 @@ def _open_pmix_directory(policy: Any, environment: tuple[tuple[str, str], ...]) 
     if any(_overlap(path, destination) for destination in reserved_destinations):
         raise ValueError("PMIX_SERVER_TMPDIR overlaps a reserved sandbox destination")
     forbidden = (
-        policy.workspace,
-        policy.requests,
-        policy.responses,
+        policy.root,
         policy.state,
         policy.mpi.control_root,
         policy.mpi.shm_root,
@@ -629,9 +628,9 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
 
 
 def _prepare_sandbox(
-    arguments: argparse.Namespace, policy: Any, policy_data: bytes, policy_source: Path
+    arguments: argparse.Namespace, policy: Any, policy_data: bytes, policy_source: Path, check_layout: Any
 ) -> _PreparedSandbox:
-    mutable_roots = (policy.workspace, policy.requests, policy.responses, policy.state)
+    mutable_roots = (policy.root, policy.state)
     resolved_roots = _resolved_roots(policy, arguments.mode)
     mpi_payload = arguments.mode == "payload" and policy.profile(arguments.profile).mpi is not None
     _validate_resolved_mpi_roots(policy, resolved_roots, arguments.mode, mpi_payload=mpi_payload)
@@ -639,6 +638,8 @@ def _prepare_sandbox(
     _check_protected_file(source, mutable_roots)
     _check_protected_file(source.with_name("_daemon_policy.py"), mutable_roots)
     _check_protected_file(policy_source, mutable_roots)
+    # Every entry rechecks the layout; only the broker, which owns the exchange, runs the rename probe.
+    check_layout(policy, probe=arguments.mode == "broker")
     _check_command(policy.python, resolved_roots.readonly, resolved_roots.mutable)
     _check_command(policy.bwrap, (*resolved_roots.readonly, *resolved_roots.broker), resolved_roots.mutable)
     if arguments.mode == "broker":
@@ -661,19 +662,18 @@ def _prepare_sandbox(
     rank_environment = getattr(arguments, "rank_environment", ())
     argv = _base_bwrap_argv(policy, arguments.mode, rank_environment)
     try:
-        workspace_fd = _open_directory_nofollow(policy.workspace)
-        descriptors.append(workspace_fd)
-        writable_workspace = arguments.mode in ("payload", "mpi-rank")
-        argv += ["--bind-fd" if writable_workspace else "--ro-bind-fd", str(workspace_fd), "/workspace"]
         if arguments.mode == "broker":
-            for source_path, destination in (
-                (policy.requests, "/requests"),
-                (policy.responses, "/responses"),
-                (policy.state, "/control"),
-            ):
+            # One writable bind of the dedicated parent; the service reaches the exchange and the
+            # workspace staging area only through descriptor-anchored no-follow opens below it.
+            for source_path, destination in ((policy.root, str(_ROOT_DESTINATION)), (policy.state, "/control")):
                 descriptor = _open_directory_nofollow(source_path)
                 descriptors.append(descriptor)
                 argv += ["--dir", destination, "--bind-fd", str(descriptor), destination]
+        else:
+            workspace_fd = _open_directory_nofollow(policy.workspace)
+            descriptors.append(workspace_fd)
+            writable_workspace = arguments.mode in ("payload", "mpi-rank")
+            argv += ["--bind-fd" if writable_workspace else "--ro-bind-fd", str(workspace_fd), "/workspace"]
 
         runtime_paths = list(zip(policy.readonly_paths, resolved_roots.readonly, strict=True))
         if arguments.mode in ("broker", "allocation"):
@@ -871,9 +871,9 @@ def main(argv: list[str] | None = None) -> int:
         policy_path = Path(arguments.policy)
         if not policy_path.is_absolute():
             raise ValueError("--policy must be an absolute local path")
-        policy, policy_data = _load_policy_once(policy_path)
+        policy, policy_data, check_layout = _load_policy_once(policy_path)
         policy_source = _validate_arguments(arguments, policy)
-        prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source)
+        prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source, check_layout)
         try:
             _exec_prepared(prepared)
         finally:

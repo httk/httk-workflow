@@ -40,11 +40,11 @@ def _manager_command(policy: Policy, profile: Profile, procs: int, mem_mb: int |
     if mpi is not None:
         command += ["--worker-resource", "nodes", str(mpi.nodes), "--worker-resource", "mpi_ranks", str(mpi.ranks)]
     # Never probe an allocation inside the sandbox: the trusted bootstrap read the capacity from it beforehand.
-    return [*command, "--allocation", "none", "--idle"]
+    return [*command, "--exchange", "--allocation", "none", "--idle"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the selected prelude and manager inside the existing payload sandbox.
+    """Run the launcher and workspace preludes, then the manager, inside the payload sandbox.
 
     :param argv: Internal bootstrap arguments, or the process arguments.
     :return: A failure status if the payload does not match its enrollment.
@@ -81,9 +81,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if descriptor not in (1, 2):
             os.close(descriptor)
     os.chdir(workspace.root)
-    script = (
-        "set -e\n" + profile.prelude + "\nexec " + shlex.join(_manager_command(policy, profile, procs, mem_mb)) + "\n"
-    )
+    # The launcher's prelude, then the workspace's live one; both run confined.
+    live = workspace.read_settings().get("environment.prelude")
+    preludes = [profile.prelude, live if isinstance(live, str) else ""]
+    command = shlex.join(_manager_command(policy, profile, procs, mem_mb))
+    script = "set -e\n" + "\n".join(preludes) + "\nexec " + command + "\n"
     os.execve("/bin/bash", ["/bin/bash", "--noprofile", "--norc", "-c", script], dict(os.environ))
 
 

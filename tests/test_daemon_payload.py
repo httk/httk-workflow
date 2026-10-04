@@ -16,16 +16,16 @@ class _ExecBoundary(Exception):
 
 
 def _start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity: list[str]) -> tuple[Workspace, list[object]]:
-    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "site/workspace")
     workspace.set_setting("environment.prelude", "export TEST_PRELUDE=changed-after-approval")
     runtime = tmp_path / "runtime"
     policy = Policy(
-        workspace=tmp_path / "workspace",
+        workspace=tmp_path / "site/workspace",
         workspace_id=workspace.workspace_id,
         enrollment_id="e" * 32,
-        requests=tmp_path / "requests",
-        responses=tmp_path / "responses",
+        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
+        snapshots=tmp_path / "snapshots",
         bwrap=runtime / "bwrap",
         python=runtime / "python",
         sbatch=runtime / "sbatch",
@@ -69,11 +69,17 @@ def test_prelude_runs_in_payload_shell_before_fixed_manager(tmp_path: Path, monk
     assert isinstance(argv, list)
     assert argv[:4] == ["/bin/bash", "--noprofile", "--norc", "-c"]
     script = argv[4]
-    assert script.index("export TEST_PRELUDE=inside") < script.index("\nexec ")
-    assert "changed-after-approval" not in script
+    # The launcher's prelude first, then the workspace's live one, both after set -e.
+    assert script.startswith("set -e\n")
+    assert (
+        script.index("export TEST_PRELUDE=inside")
+        < script.index("export TEST_PRELUDE=changed-after-approval")
+        < script.index("\nexec ")
+    )
     assert "exec '/opt/approved httk' workflow manager run " in script
     assert (
-        "--count 1 --workers 3 --worker-resource procs 4 --worker-resource mem 2048 --allocation none --idle" in script
+        "--count 1 --workers 3 --worker-resource procs 4 --worker-resource mem 2048 --exchange --allocation none --idle"
+        in script
     )
     assert (workspace.control / ("daemon-manager-" + "a" * 32 + ".log")).is_file()
     assert os.getcwd() == str(workspace.root)
@@ -82,7 +88,7 @@ def test_prelude_runs_in_payload_shell_before_fixed_manager(tmp_path: Path, monk
 def test_unreported_memory_is_not_offered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _workspace, observed = _start(tmp_path, monkeypatch, ["--procs", "6"])
     script = cast(list[str], observed[1])[4]
-    assert "--worker-resource procs 6 --allocation none --idle" in script
+    assert "--worker-resource procs 6 --exchange --allocation none --idle" in script
     assert "--worker-resource mem" not in script
 
 
