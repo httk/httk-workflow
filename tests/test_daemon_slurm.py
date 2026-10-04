@@ -82,6 +82,22 @@ def test_submission_uses_fixed_script_stdin_and_clean_environment(
     assert "prelude" not in script and "/workspace" not in script
 
 
+def test_unset_resources_add_no_sbatch_flags(policy: Policy, tmp_path: Path) -> None:
+    record = tmp_path / "call.json"
+    _client(
+        policy.sbatch, f"open({str(record)!r}, 'w').write(json.dumps(sys.argv))\nsys.stdin.read()\nprint('1;cluster')\n"
+    )
+    gateway = SlurmGateway(policy, tmp_path / "policy.json")
+    gateway.submit(Profile("bare", partition="batch"), _HANDLE)
+    argv = json.loads(record.read_text())
+    assert not any(item.startswith(("--cpus-per-task=", "--mem=", "--time=")) for item in argv)
+    assert {"--nodes=1", "--ntasks=1", "--partition=batch"} <= set(argv)
+    gateway.submit(Profile("some", memory_mb=64), _HANDLE)
+    argv = json.loads(record.read_text())
+    assert "--mem=64M" in argv
+    assert not any(item.startswith(("--cpus-per-task=", "--time=")) for item in argv)
+
+
 @pytest.mark.parametrize("output", ["bad", "123;other", "123;cluster\n124;cluster", "--help", "0", "123;cluster;extra"])
 def test_unconfirmed_submission_is_uncertain(policy: Policy, output: str) -> None:
     _client(policy.sbatch, f"sys.stdin.read()\nprint({output!r})\n")

@@ -134,6 +134,8 @@ def _configuration(
         profile="parallel",
         handle=HANDLE,
         control_source="/protected/control/allocation",
+        procs="12",
+        mem_mb="2048",
     )
     return socket_path, srun, policy, profile, arguments
 
@@ -265,6 +267,15 @@ def test_fixed_commands_clean_environment_listener_order_and_nonzero_streaming(
         "--request-id",
         REQUEST_ONE,
     } <= set(application_argv)
+    assert manager_argv[manager_argv.index("--control-source") :] == [
+        "--control-source",
+        "/protected/control/allocation",
+        "--procs",
+        "12",
+        "--mem-mb",
+        "2048",
+    ]
+    assert "--procs" not in application_argv and "--mem-mb" not in application_argv
     assert "--jobid=123" in manager_argv and "--jobid=123" in application_argv
     assert "--clusters" not in " ".join(manager_argv + application_argv)
     assert "solver" not in " ".join(application_argv)
@@ -523,3 +534,44 @@ def test_explicit_shutdown_closes_client_and_reaps_both_groups(tmp_path: Path, m
     assert not thread.is_alive()
     assert errors == [] and results == [2]
     _wait_for(lambda: _process_gone(pid_path), "application survived service shutdown")
+
+
+def test_application_step_without_profile_cpus_uses_srun_default(tmp_path: Path) -> None:
+    _socket_path, _srun, policy, profile, arguments = _configuration(tmp_path)
+    profile = cast(Profile, SimpleNamespace(name="parallel", cpus=None, mpi=SimpleNamespace(nodes=2, ranks=4)))
+    arguments.mem_mb = None
+    application = service_module._command(policy, profile, arguments, REQUEST_ONE)
+    assert not any(item.startswith("--cpus-per-task") for item in application)
+    manager = service_module._command(policy, profile, arguments, None)
+    assert "--cpus-per-task=1" in manager
+    assert manager[-2:] == ["--procs", "12"]
+
+
+@pytest.mark.parametrize("procs", ["0", "012", "4x", str(2**63), " 4"])
+def test_main_refuses_malformed_capacity(
+    procs: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _socket_path, _srun, policy, profile, arguments = _configuration(tmp_path)
+    monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
+    monkeypatch.setattr(policy, "profile", lambda _name: profile, raising=False)
+    started: list[object] = []
+    monkeypatch.setattr(service_module, "_Service", lambda *args: started.append(args))
+    argv = [
+        "--policy-source",
+        arguments.policy_source,
+        "--profile",
+        "parallel",
+        "--handle",
+        HANDLE,
+        "--job-id",
+        "123",
+        "--node",
+        "node01",
+        "--control-source",
+        arguments.control_source,
+        "--procs",
+        procs,
+    ]
+    assert service_module.main(argv) == 2
+    assert "--procs" in capsys.readouterr().err
+    assert started == []

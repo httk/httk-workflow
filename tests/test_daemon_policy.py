@@ -121,6 +121,26 @@ def test_configuration_digest_covers_execution_policy_and_ignores_operations(tmp
         assert changed.configuration_digest("cpu") != digest
 
 
+def test_resources_are_optional_and_sanity_limits_are_not_a_load_concern(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    profiles = document["profiles"]
+    assert isinstance(profiles, dict)
+    profiles["bare"] = {}
+    profiles["huge"] = {"cpus": 4096, "memory_mb": 2 * 1024 * 1024, "time_minutes": 20_000}
+    policy = load_policy(_write(tmp_path, document))
+    bare = policy.profile("bare")
+    assert bare.cpus is bare.memory_mb is bare.time_minutes is None
+    assert policy.profile("huge").cpus == 4096
+    serialized = policy_document(policy)
+    serialized_profiles = serialized["profiles"]
+    assert isinstance(serialized_profiles, dict)
+    assert not {"cpus", "memory_mb", "time_minutes"} & set(serialized_profiles["bare"])
+    round_trip = tmp_path / "round-trip.json"
+    round_trip.write_text(json.dumps(serialized), encoding="utf-8")
+    assert load_policy(round_trip) == policy
+    assert policy.configuration_digest("bare") != policy.configuration_digest("cpu")
+
+
 @pytest.mark.parametrize("field", ["workspace", "workspace_id", "profiles", "bwrap", "cluster"])
 def test_required_policy_fields_cannot_be_omitted(tmp_path: Path, field: str) -> None:
     document = _document(tmp_path)
@@ -248,11 +268,11 @@ def test_authorized_keys_are_canonical_unique_ed25519_values(tmp_path: Path) -> 
     ("field", "value"),
     [
         ("cpus", 0),
-        ("cpus", 1025),
+        ("cpus", 2**31),
         ("memory_mb", 0),
-        ("memory_mb", 1048577),
+        ("memory_mb", 2**31),
         ("time_minutes", 0),
-        ("time_minutes", 10081),
+        ("time_minutes", 2**31),
         ("partition", "bad value"),
         ("account", True),
     ],

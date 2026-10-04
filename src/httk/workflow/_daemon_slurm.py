@@ -181,14 +181,15 @@ class SlurmGateway:
             f"--job-name=httk-{handle}",
             f"--nodes={profile.mpi.nodes if profile.mpi is not None else 1}",
             f"--ntasks={profile.mpi.ranks if profile.mpi is not None else 1}",
-            f"--cpus-per-task={profile.cpus}",
-            f"--mem={profile.memory_mb}M",
-            f"--time={profile.time_minutes}",
-            "--chdir=/",
-            "--input=/dev/null",
-            "--output=/dev/null",
-            "--error=/dev/null",
         ]
+        # Unset resources add no flag, so Slurm's partition and site defaults apply.
+        if profile.cpus is not None:
+            argv.append(f"--cpus-per-task={profile.cpus}")
+        if profile.memory_mb is not None:
+            argv.append(f"--mem={profile.memory_mb}M")
+        if profile.time_minutes is not None:
+            argv.append(f"--time={profile.time_minutes}")
+        argv += ["--chdir=/", "--input=/dev/null", "--output=/dev/null", "--error=/dev/null"]
         if profile.mpi is not None:
             argv.append("--no-requeue")
             if profile.mpi.ntasks_per_node is not None:

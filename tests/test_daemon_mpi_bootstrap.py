@@ -128,7 +128,7 @@ def _rewrite_policy(path: Path, policy: dict[str, Any]) -> None:
 
 
 def _allocation_environment(**updates: str) -> dict[str, str]:
-    environment = dict(os.environ)
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("SLURM_")}
     environment.update(
         {
             "SLURM_RESTART_COUNT": "0",
@@ -264,7 +264,58 @@ def test_allocation_creates_private_control_and_enters_launcher_sandbox(tmp_path
         "node001",
         "--control-source",
         str(control_source),
+        "--procs",
+        "32",
+        "--mem-mb",
+        "16384",
     ]
+
+
+@pytest.mark.parametrize(
+    ("slurm", "resources", "expected"),
+    [
+        ({"SLURM_MEM_PER_NODE": "3000"}, {}, ["--procs", "32", "--mem-mb", "6000"]),
+        ({"SLURM_MEM_PER_CPU": "100", "SLURM_CPUS_ON_NODE": "16"}, {}, ["--procs", "32", "--mem-mb", "3200"]),
+        ({"SLURM_MEM_PER_NODE": "0"}, {}, ["--procs", "32", "--mem-mb", "16384"]),
+        ({}, {"cpus": None, "memory_mb": None}, ["--procs", "8"]),
+        ({"SLURM_MEM_PER_CPU": "100"}, {"cpus": None}, ["--procs", "8", "--mem-mb", "800"]),
+        ({"SLURM_CPUS_ON_NODE": "4x"}, {}, ["--procs", "32", "--mem-mb", "16384"]),
+        (
+            {},
+            {"memory_mb": 1048576, "mpi": {"nodes": 4096, "ranks": 4096}},
+            ["--procs", "16384", "--mem-mb", str(2**32)],
+        ),
+    ],
+)
+def test_allocation_passes_trusted_capacity_to_service(
+    tmp_path: Path, slurm: dict[str, str], resources: dict[str, Any], expected: list[str]
+) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    policy["profiles"]["parallel"].update(resources)
+    _rewrite_policy(policy_path, policy)
+    result = _run(
+        tmp_path,
+        policy_path,
+        ["--mode", "allocation", "--profile", "parallel", "--handle", HANDLE],
+        _allocation_environment(**slurm),
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert argv[argv.index("--control-source") + 2 :] == expected
+
+
+def test_allocation_refuses_malformed_slurm_memory_before_creating_scratch(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    result = _run(
+        tmp_path,
+        policy_path,
+        ["--mode", "allocation", "--profile", "parallel", "--handle", HANDLE],
+        _allocation_environment(SLURM_MEM_PER_NODE="3000M"),
+    )
+    assert result.returncode == 2
+    assert "SLURM_MEM_PER_NODE" in result.stderr
+    assert list(Path(policy["mpi"]["control_root"]).iterdir()) == []
+    assert not record.exists()
 
 
 @pytest.mark.parametrize("restart", ["1", "00", "-1", "x", "1.0", ""])
@@ -360,11 +411,16 @@ def test_mpi_manager_receives_readonly_direct_control_child_and_markers(tmp_path
             HANDLE,
             "--control-source",
             str(control_source),
+            "--procs",
+            "32",
+            "--mem-mb",
+            "16384",
         ],
         dict(os.environ),
     )
     assert result.returncode == 0, result.stderr
     argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert argv[argv.index("httk.workflow._daemon_payload") + 5 :] == ["--procs", "32", "--mem-mb", "16384"]
     assert any(destination == "/run/httk-mpi" for _, destination in _pairs(argv, "--ro-bind-fd"))
     assert all(destination != "/run/httk-mpi" for _, destination in _pairs(argv, "--bind-fd"))
     environment = _set_environment(argv)
@@ -385,6 +441,19 @@ def test_serial_payload_ignores_mpi_control_root_compute_locality(tmp_path: Path
     assert result.returncode == 0, result.stderr
     argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
     assert all(destination != "/run/httk-mpi" for _, destination in _pairs(argv, "--ro-bind-fd"))
+
+
+@pytest.mark.parametrize("capacity", [[], ["--mem-mb", "1024"], ["--procs", "0"], ["--procs", "32", "--mem-mb", "1x"]])
+def test_mpi_manager_requires_canonical_capacity(tmp_path: Path, capacity: list[str]) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    control_source = Path(policy["mpi"]["control_root"]) / "private"
+    control_source.mkdir(mode=0o700)
+    arguments = ["--mode", "payload", "--profile", "parallel", "--handle", HANDLE]
+    arguments += ["--control-source", str(control_source), *capacity]
+    result = _run(tmp_path, policy_path, arguments, dict(os.environ))
+    assert result.returncode == 2
+    assert "--procs" in result.stderr or "--mem-mb" in result.stderr
+    assert not record.exists()
 
 
 @pytest.mark.parametrize("kind", ["indirect", "symlink", "permissive"])
@@ -606,6 +675,8 @@ def test_rank_refuses_unprotected_pmix_directory(tmp_path: Path, kind: str) -> N
         ["--mode", "payload", "--profile", "serial", "--handle", HANDLE, "--control-source", "/tmp/private"],
         ["--mode", "mpi-rank", "--profile", "serial", "--handle", HANDLE, "--request-id", REQUEST_ID],
         ["--mode", "mpi-rank", "--profile", "parallel", "--handle", HANDLE],
+        ["--mode", "mpi-rank", "--profile", "parallel", "--handle", HANDLE, "--request-id", REQUEST_ID, "--procs", "8"],
+        ["--mode", "allocation", "--profile", "parallel", "--handle", HANDLE, "--procs", "8"],
     ],
 )
 def test_mpi_mode_arguments_are_role_specific(tmp_path: Path, arguments: list[str]) -> None:

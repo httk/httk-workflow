@@ -37,15 +37,15 @@ def test_mpi_cli_requires_application(tmp_path: Path, tail: list[str]) -> None:
         arguments.handler(arguments, context)
 
 
-def test_mpi_manager_advertises_fixed_total_capacity() -> None:
+def test_mpi_manager_adds_fixed_geometry() -> None:
     policy: Any = SimpleNamespace(python=Path("/trusted/python"))
     profile = Profile("mpi", cpus=2, memory_mb=512, time_minutes=10, mpi=MPIProfile(nodes=2, ranks=8))
-    command = _manager_command(policy, profile)
+    command = _manager_command(policy, profile, 16, 1024)
     assert command[command.index("--workers") + 1] == "1"
     resources = {
         command[index + 1]: command[index + 2] for index, value in enumerate(command) if value == "--worker-resource"
     }
-    assert resources == {"procs": "16", "mem": "1024", "nodes": "2", "mpi_ranks": "8"}
+    assert (resources["nodes"], resources["mpi_ranks"]) == ("2", "8")
 
 
 def test_mpi_cli_reports_uncertain_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

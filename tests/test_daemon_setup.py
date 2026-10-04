@@ -195,6 +195,65 @@ def test_slurm_time_refuses_noncanonical_or_unbounded_values(value: object) -> N
         _daemon_setup._time_minutes(value)
 
 
+def test_resource_settings_are_optional(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    for key in ("slurm.cpus_per_task", "slurm.mem", "slurm.time_limit"):
+        layout.workspace.unset_setting(key)
+    layout.document["allowed_launchers"] = ["small"]
+    _write_policy(layout)
+    profile = load_policy(_daemon_setup.initialize(layout.workspace.root, layout.policy)).profile("small")
+    assert profile.cpus is profile.memory_mb is profile.time_minutes is None
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "field", "expected"),
+    [
+        ("slurm.cpus_per_task", "2048", "cpus", 2048),
+        ("slurm.mem", "2T", "memory_mb", 2 * 1024 * 1024),
+        ("slurm.time_limit", "8-0", "time_minutes", 8 * 24 * 60),
+    ],
+)
+def test_sanity_limits_apply_at_setup_unless_forced(
+    key: str, value: str, field: str, expected: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    layout.workspace.set_setting(key, value)
+    layout.document["allowed_launchers"] = ["small"]
+    _write_policy(layout)
+    with pytest.raises(ValueError, match=key.replace(".", r"\.")):
+        _daemon_setup.initialize(layout.workspace.root, layout.policy)
+    assert not _daemon_setup._state_default(layout.workspace.root).exists()
+    snapshot = _daemon_setup.initialize(layout.workspace.root, layout.policy, force=True)
+    assert getattr(load_policy(snapshot).profile("small"), field) == expected
+
+
+def test_force_on_reload_and_through_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    arguments = [str(layout.workspace.root), "--policy", str(layout.policy)]
+    assert _daemon_cli.command([*arguments, "--initialize"], program="httk") == 0
+    layout.workspace.set_setting("slurm.mem", "2T")
+    assert _daemon_cli.command([*arguments, "--reload"], program="httk") == 2
+    assert "slurm.mem" in capsys.readouterr().err
+    assert _daemon_cli.command([*arguments, "--reload", "--force"], program="httk") == 0
+    active = load_policy(_daemon_setup.active_policy_path(layout.workspace.root, layout.policy))
+    assert active.profile("small").memory_mb == 2 * 1024 * 1024
+    assert _daemon_cli.command([*arguments, "--once", "--force"], program="httk") == 2
+    assert "--force" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("key", ["slurm.mem", "slurm.time_limit", "slurm.cpus_per_task"])
+def test_force_does_not_lift_the_hard_ceiling(key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _layout(tmp_path, monkeypatch)
+    layout.workspace.set_setting(key, str(2**31))
+    layout.document["allowed_launchers"] = ["small"]
+    _write_policy(layout)
+    with pytest.raises(ValueError, match=key.replace(".", r"\.")) as refusal:
+        _daemon_setup.initialize(layout.workspace.root, layout.policy, force=True)
+    assert "--force" not in str(refusal.value)
+
+
 def test_mpi_geometry_defaults_and_explicit_placement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     layout = _layout(tmp_path, monkeypatch)
     _executable(layout.broker / "srun")

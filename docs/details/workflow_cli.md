@@ -69,7 +69,7 @@ remote workspace for execution.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workspace init [OPTIONS] PATH...` | create or adopt workspaces, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
-| `workspace daemon WORKSPACE --policy POLICY` | run the confined Slurm file-command broker | `--initialize`, `--reload`, `--export-endpoint`, `--check`, `--once` |
+| `workspace daemon WORKSPACE --policy POLICY` | run the confined Slurm file-command broker | `--initialize`, `--reload`, `--export-endpoint`, `--check`, `--once`, `--force` (with `--initialize`/`--reload`: approve resources above the sanity limits) |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |

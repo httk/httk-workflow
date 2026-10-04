@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import FrameType
 
+from ._daemon_bootstrap import _count
 from ._daemon_mpi_protocol import decode_request, encode_terminal, recv_frame, send_frame
 from ._daemon_policy import Policy, Profile, load_policy
 
@@ -37,12 +38,14 @@ def _command(policy: Policy, profile: Profile, arguments: argparse.Namespace, re
         f"--jobid={arguments.job_id}",
         f"--nodes={1 if manager else profile.mpi.nodes}",
         f"--ntasks={1 if manager else profile.mpi.ranks}",
-        f"--cpus-per-task={1 if manager else profile.cpus}",
         "--export=NONE",
         "--chdir=/",
         "--input=/dev/null",
         "--kill-on-bad-exit=1",
     ]
+    if manager or profile.cpus is not None:
+        # Without a profile value, srun's default of one CPU per task matches what sbatch allocated.
+        command.append(f"--cpus-per-task={1 if manager else profile.cpus}")
     if manager:
         command += [f"--nodelist={arguments.node}", "--output=/dev/null", "--error=/dev/null"]
     elif getattr(profile.mpi, "ntasks_per_node", None) is not None:
@@ -61,8 +64,10 @@ def _command(policy: Policy, profile: Profile, arguments: argparse.Namespace, re
         "--handle",
         arguments.handle,
     ]
-    command += ["--control-source", arguments.control_source] if manager else ["--request-id", str(request_id)]
-    return command
+    if not manager:
+        return [*command, "--request-id", str(request_id)]
+    command += ["--control-source", arguments.control_source, "--procs", arguments.procs]
+    return command if arguments.mem_mb is None else [*command, "--mem-mb", arguments.mem_mb]
 
 
 def _signal_group(process: subprocess.Popen[bytes], number: int) -> bool:
@@ -297,6 +302,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("policy-source", "profile", "handle", "job-id", "node", "control-source"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--procs", required=True)
+    parser.add_argument("--mem-mb")
     arguments = parser.parse_args(argv)
     try:
         policy = load_policy(Path("/daemon-policy.json"))
@@ -309,6 +316,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("invalid allocation job ID")
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", arguments.node) is None:
             raise ValueError("invalid allocation node")
+        _count(arguments.procs, "--procs", positive=True)
+        if arguments.mem_mb is not None:
+            _count(arguments.mem_mb, "--mem-mb", positive=True)
         service = _Service(policy, profile, arguments)
 
         def stop(_number: int, _frame: FrameType | None) -> None:

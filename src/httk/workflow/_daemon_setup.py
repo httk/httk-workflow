@@ -19,8 +19,8 @@ from httk.core.userdirs import data_home
 
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
-from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
+    _HARD_LIMIT,
     MPIProfile,
     MPISettings,
     Policy,
@@ -33,6 +33,7 @@ from ._daemon_policy import (
     load_policy,
     policy_document,
 )
+from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
     _authorized_keys as _runtime_authorized_keys,
 )
@@ -58,6 +59,10 @@ _PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _CLUSTER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _CANONICAL_INTEGER = re.compile(r"[1-9][0-9]*\Z")
 _MEMORY = re.compile(r"([1-9][0-9]*)([KMGT]?)\Z")
+_CPU_LIMIT = 1024
+_MEMORY_LIMIT = 1_048_576
+_TIME_LIMIT = 10_080
+_FORCE_HINT = "; pass --force to approve it"
 _SUPPORTED_SETTINGS = frozenset(
     {
         "manager.workers",
@@ -316,7 +321,7 @@ def _resolve_executable(value: Path | None, name: str) -> Path:
     return Path(found).absolute()
 
 
-def _positive_integer(value: object, name: str, maximum: int) -> int:
+def _positive_integer(value: object, name: str, maximum: int, hint: str = "") -> int:
     if type(value) is int:
         result = value
     elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
@@ -324,11 +329,11 @@ def _positive_integer(value: object, name: str, maximum: int) -> int:
     else:
         raise ValueError(f"{name} must be a positive integer or canonical decimal string")
     if not 1 <= result <= maximum:
-        raise ValueError(f"{name} must be from 1 through {maximum}")
+        raise ValueError(f"{name} must be from 1 through {maximum}{hint}")
     return result
 
 
-def _memory_mb(value: object) -> int:
+def _memory_mb(value: object, *, force: bool = False) -> int:
     if type(value) is int:
         result = value
     elif type(value) is str:
@@ -346,12 +351,16 @@ def _memory_mb(value: object) -> int:
             result = amount * 1024 * 1024
     else:
         raise ValueError("slurm.mem must be a positive integer with an optional K, M, G, or T suffix")
-    if not 1 <= result <= 1_048_576:
-        raise ValueError("slurm.mem must normalize to 1 through 1048576 MiB")
+    if not 1 <= result <= (_HARD_LIMIT if force else _MEMORY_LIMIT):
+        if result >= 1:
+            if force:
+                raise ValueError(f"slurm.mem exceeds the {_HARD_LIMIT} MiB ceiling")
+            raise ValueError(f"slurm.mem exceeds the {_MEMORY_LIMIT} MiB sanity limit{_FORCE_HINT}")
+        raise ValueError("slurm.mem must normalize to at least 1 MiB")
     return result
 
 
-def _time_minutes(value: object) -> int:
+def _time_minutes(value: object, *, force: bool = False) -> int:
     if type(value) is int:
         result = value
     elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
@@ -393,8 +402,12 @@ def _time_minutes(value: object) -> int:
         result = (total_seconds + 59) // 60
     else:
         raise ValueError("invalid slurm.time_limit")
-    if not 1 <= result <= 10_080:
-        raise ValueError("slurm.time_limit must normalize to 1 through 10080 minutes")
+    if not 1 <= result <= (_HARD_LIMIT if force else _TIME_LIMIT):
+        if result >= 1:
+            if force:
+                raise ValueError(f"slurm.time_limit exceeds the {_HARD_LIMIT} minute ceiling")
+            raise ValueError(f"slurm.time_limit exceeds the {_TIME_LIMIT} minute sanity limit{_FORCE_HINT}")
+        raise ValueError("slurm.time_limit must normalize to at least 1 minute")
     return result
 
 
@@ -407,6 +420,8 @@ def _configuration(
     workspace: Path,
     workspace_settings: Mapping[str, object],
     mpi_settings: MPISettings | None,
+    *,
+    force: bool,
 ) -> Profile:
     target = _locate_launcher(name, project=workspace)
     root = target.bundle.resolve(strict=True)
@@ -420,12 +435,18 @@ def _configuration(
     unsupported = sorted(key for key in settings if key.startswith("slurm.") and key not in _SUPPORTED_SETTINGS)
     if unsupported:
         raise ValueError(f"unsupported Slurm launcher settings for {name!r}: {', '.join(unsupported)}")
-    missing = [key for key in ("slurm.cpus_per_task", "slurm.mem", "slurm.time_limit") if key not in settings]
-    if missing:
-        raise ValueError(f"approved launcher {name!r} is missing required settings: {', '.join(missing)}")
-    cpus = _positive_integer(settings["slurm.cpus_per_task"], "slurm.cpus_per_task", 1024)
-    memory_mb = _memory_mb(settings["slurm.mem"])
-    time_limit = _time_minutes(settings["slurm.time_limit"])
+    cpus = memory_mb = time_limit = None
+    if "slurm.cpus_per_task" in settings:
+        cpus = _positive_integer(
+            settings["slurm.cpus_per_task"],
+            "slurm.cpus_per_task",
+            _HARD_LIMIT if force else _CPU_LIMIT,
+            "" if force else _FORCE_HINT,
+        )
+    if "slurm.mem" in settings:
+        memory_mb = _memory_mb(settings["slurm.mem"], force=force)
+    if "slurm.time_limit" in settings:
+        time_limit = _time_minutes(settings["slurm.time_limit"], force=force)
     workers = _positive_integer(settings.get("manager.workers", 1), "manager.workers", 1024)
     nodes = _positive_integer(settings.get("slurm.nodes", 1), "slurm.nodes", 4096)
     ntasks_per_node = None
@@ -616,7 +637,7 @@ def _cluster(operator: _OperatorPolicy) -> str:
     return discovered
 
 
-def _compile(operator: _OperatorPolicy, enrollment_id: str) -> Policy:
+def _compile(operator: _OperatorPolicy, enrollment_id: str, *, force: bool = False) -> Policy:
     workspace_id, workspace_settings = _workspace_data(operator.workspace)
     bwrap = _resolve_executable(operator.bwrap, "bwrap")
     python = (
@@ -632,6 +653,7 @@ def _compile(operator: _OperatorPolicy, enrollment_id: str) -> Policy:
             operator.workspace,
             workspace_settings,
             mpi,
+            force=force,
         )
         for name in operator.allowed_launchers
     )
@@ -852,12 +874,18 @@ def _publish(operator: _OperatorPolicy, policy: Policy) -> Path:
     return snapshot
 
 
-def initialize(workspace: Path, operator_path: Path) -> Path:
-    """Compile and publish a fresh local daemon enrollment."""
+def initialize(workspace: Path, operator_path: Path, *, force: bool = False) -> Path:
+    """Compile and publish a fresh local daemon enrollment.
+
+    :param workspace: Uploaded workspace root.
+    :param operator_path: Operator policy file.
+    :param force: Approve CPU, memory and time requests above the built-in sanity limits.
+    :return: Path of the published runtime snapshot.
+    """
 
     operator = _operator(operator_path, workspace)
     _validate_setup_roots(operator, operator_path)
-    policy = _compile(operator, secrets.token_hex(16))
+    policy = _compile(operator, secrets.token_hex(16), force=force)
     _runtime_policy_bytes(policy)
     for root in (operator.requests, operator.responses, operator.state, operator.snapshot_root):
         _mkdir_exclusive(root)
@@ -910,15 +938,21 @@ def _fixed_connection(old: Policy, new: Policy) -> None:
         raise ValueError(f"reload cannot change the enrollment scheduler connection: {', '.join(changed)}")
 
 
-def reload(workspace: Path, operator_path: Path) -> Path:
-    """Compile and atomically approve a replacement active catalog."""
+def reload(workspace: Path, operator_path: Path, *, force: bool = False) -> Path:
+    """Compile and atomically approve a replacement active catalog.
+
+    :param workspace: Uploaded workspace root.
+    :param operator_path: Operator policy file.
+    :param force: Approve CPU, memory and time requests above the built-in sanity limits.
+    :return: Path of the newly approved runtime snapshot.
+    """
 
     operator = _operator(operator_path, workspace)
     _validate_setup_roots(operator, operator_path)
     _validate_private_directory(operator.state)
     _validate_private_directory(operator.snapshot_root)
     old_snapshot, old, old_digest = _active(operator)
-    new = _compile(operator, old.enrollment_id)
+    new = _compile(operator, old.enrollment_id, force=force)
     _runtime_policy_bytes(new)
     _fixed_connection(old, new)
     with Ledger(

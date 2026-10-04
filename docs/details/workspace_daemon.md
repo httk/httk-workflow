@@ -185,8 +185,10 @@ do not remove them to clear an uncertain submission.
 
 ### Resources
 
-Set CPU count, memory and time in the workspace or launcher as
-`slurm.cpus_per_task`, `slurm.mem` and `slurm.time_limit`:
+Optionally set CPU count, memory and time in the workspace or launcher as
+`slurm.cpus_per_task`, `slurm.mem` and `slurm.time_limit`. A setting left unset
+adds no corresponding `sbatch` flag, so Slurm's partition and site defaults
+apply:
 
 - Memory accepts positive integer MiB or K/M/G/T suffixes; KiB rounds up to
   MiB.
@@ -194,8 +196,8 @@ Set CPU count, memory and time in the workspace or launcher as
   [Slurm time forms](https://slurm.schedmd.com/sbatch.html); seconds round up
   to minutes.
 - Zero or unlimited requests are rejected.
-- The current limits are 1024 CPUs per task, 1,048,576 MiB per node and
-  10,080 minutes.
+- Values above 1024 CPUs per task, 1,048,576 MiB per node or 10,080 minutes
+  are refused at `--initialize` and `--reload` unless `--force` is passed.
 
 Serial configurations use one Slurm task; `manager.workers` runs several
 concurrent attempts within the manager's total capacity. Each signed start
@@ -204,8 +206,10 @@ supported scheduler fields are nodes, ntasks, ntasks_per_node, partition,
 account and the MPI selector described below; other `slurm.*` fields are
 rejected. `environment.prelude` and a single executable `manager.command`
 are frozen at approval and run inside the payload sandbox. Daemon managers
-run with `--allocation none`: their capacity is the approved configuration's,
-never probed inside the sandbox.
+run with `--allocation none` and never probe inside the sandbox. The trusted
+bootstrap reads their CPU and memory capacity from the actual Slurm allocation
+before the sandbox starts, falling back to the approved settings; memory known
+from neither is not offered to jobs.
 
 ### Changing approved configurations
 

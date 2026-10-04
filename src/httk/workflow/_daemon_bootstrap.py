@@ -16,6 +16,8 @@ from typing import Any, cast
 _HANDLE = re.compile(r"[0-9a-f]{32}\Z")
 _PROFILE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _HOSTNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}\Z")
+_COUNT = re.compile(r"(?:0|[1-9][0-9]{0,18})\Z")
+_COUNT_MAX = 2**63 - 1
 _MPI_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _MPI_EXACT_ENVIRONMENT = frozenset(
     {
@@ -329,6 +331,48 @@ def _allocation_identity(policy: Any) -> _AllocationIdentity:
     return _AllocationIdentity(job_id, node)
 
 
+def _count(value: str, name: str, *, positive: bool = False) -> int:
+    if _COUNT.fullmatch(value) is None or int(value) > _COUNT_MAX or (positive and value == "0"):
+        raise ValueError(f"{name} must be a canonical decimal integer from {int(positive)} through {_COUNT_MAX}")
+    return int(value)
+
+
+def _capacity_arguments(capacity: tuple[int, int | None]) -> list[str]:
+    procs, mem_mb = capacity
+    return ["--procs", str(procs), *(() if mem_mb is None else ("--mem-mb", str(mem_mb)))]
+
+
+def _allocation_capacity(profile: Any) -> tuple[int, int | None]:
+    """Read the worker capacity of the trusted batch-job environment, before any payload runs."""
+
+    def value(name: str) -> int | None:
+        return None if name not in os.environ else _count(os.environ[name], name)
+
+    per_node, per_cpu = value("SLURM_MEM_PER_NODE"), value("SLURM_MEM_PER_CPU")
+    if profile.mpi is None:
+        nodes = 1
+        cpus = value("SLURM_CPUS_ON_NODE")
+        procs = profile.cpus if cpus is None else cpus
+        if not procs:
+            raise ValueError("Slurm did not report the allocated CPUs")
+    else:
+        # With --export=NIL the job's CPUs per task are exactly the submitted value, or Slurm's default of one.
+        nodes = profile.mpi.nodes
+        procs = (profile.cpus or 1) * profile.mpi.ranks
+    # A Slurm memory value of zero means "not reported"; fall through to the next source.
+    if per_node:
+        mem_mb = per_node * nodes
+    elif per_cpu:
+        mem_mb = per_cpu * procs
+    elif profile.memory_mb is not None:
+        mem_mb = profile.memory_mb * nodes
+    else:
+        mem_mb = None
+    if max(procs, mem_mb or 0) > _COUNT_MAX:
+        raise ValueError(f"allocation capacity exceeds {_COUNT_MAX}")
+    return procs, mem_mb
+
+
 def _capture_rank_environment(policy: Any, profile: Any) -> tuple[tuple[str, str], ...]:
     captured: list[tuple[str, str]] = []
     total = 0
@@ -532,6 +576,7 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
             arguments.profile,
             "--handle",
             arguments.handle,
+            *_capacity_arguments(arguments.capacity),
         ]
     if arguments.mode == "allocation":
         return [
@@ -551,6 +596,7 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
             arguments.allocation_identity.node,
             "--control-source",
             str(arguments.control_source),
+            *_capacity_arguments(arguments.capacity),
         ]
     if arguments.mode == "mpi-rank":
         return [
@@ -734,6 +780,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--handle")
     parser.add_argument("--control-source")
     parser.add_argument("--request-id")
+    parser.add_argument("--procs")
+    parser.add_argument("--mem-mb")
     return parser
 
 
@@ -754,6 +802,8 @@ def _validate_arguments(arguments: argparse.Namespace, policy: Any) -> Path:
             or arguments.handle is not None
             or arguments.control_source is not None
             or arguments.request_id is not None
+            or arguments.procs is not None
+            or arguments.mem_mb is not None
         ):
             raise ValueError("broker mode forbids payload arguments")
     else:
@@ -764,12 +814,18 @@ def _validate_arguments(arguments: argparse.Namespace, policy: Any) -> Path:
         profile = policy.profile(arguments.profile)
         if type(arguments.handle) is not str or _HANDLE.fullmatch(arguments.handle) is None:
             raise ValueError(f"{arguments.mode} mode requires a valid --handle")
+        # Only the protected MPI service, which already supplies --control-source, may state the capacity.
+        if (arguments.mode != "payload" or profile.mpi is None) and (
+            arguments.procs is not None or arguments.mem_mb is not None
+        ):
+            raise ValueError(f"{arguments.mode} mode forbids --procs and --mem-mb")
         if arguments.mode == "payload":
             if arguments.request_id is not None:
                 raise ValueError("payload mode forbids --request-id")
             if profile.mpi is None:
                 if arguments.control_source is not None:
                     raise ValueError("serial payload mode forbids --control-source")
+                arguments.capacity = _allocation_capacity(profile)
             else:
                 if policy.mpi is None or type(arguments.control_source) is not str:
                     raise ValueError("MPI payload mode requires --control-source")
@@ -781,12 +837,17 @@ def _validate_arguments(arguments: argparse.Namespace, policy: Any) -> Path:
                     or control_source.parent != policy.mpi.control_root
                 ):
                     raise ValueError("--control-source must be an absolute direct child of mpi.control_root")
+                if type(arguments.procs) is not str:
+                    raise ValueError("MPI payload mode requires --procs")
+                mem_mb = None if arguments.mem_mb is None else _count(arguments.mem_mb, "--mem-mb", positive=True)
+                arguments.capacity = (_count(arguments.procs, "--procs", positive=True), mem_mb)
         elif arguments.mode == "allocation":
             if profile.mpi is None or policy.mpi is None:
                 raise ValueError("allocation mode requires an MPI profile")
             if arguments.control_source is not None or arguments.request_id is not None:
                 raise ValueError("allocation mode creates its control source and forbids --request-id")
             arguments.allocation_identity = _allocation_identity(policy)
+            arguments.capacity = _allocation_capacity(profile)
         else:
             if profile.mpi is None or policy.mpi is None:
                 raise ValueError("mpi-rank mode requires an MPI profile")

@@ -7,11 +7,12 @@ import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
+from ._daemon_bootstrap import _count
 from ._daemon_policy import Policy, Profile, load_policy
 from .workspace import Workspace
 
 
-def _manager_command(policy: Policy, profile: Profile) -> list[str]:
+def _manager_command(policy: Policy, profile: Profile, procs: int, mem_mb: int | None) -> list[str]:
     mpi = profile.mpi
     executable = (
         [profile.manager_command]
@@ -32,14 +33,13 @@ def _manager_command(policy: Policy, profile: Profile) -> list[str]:
         str(profile.workers),
         "--worker-resource",
         "procs",
-        str(profile.cpus * mpi.ranks if mpi is not None else profile.cpus),
-        "--worker-resource",
-        "mem",
-        str(profile.memory_mb * mpi.nodes if mpi is not None else profile.memory_mb),
+        str(procs),
     ]
+    if mem_mb is not None:
+        command += ["--worker-resource", "mem", str(mem_mb)]
     if mpi is not None:
         command += ["--worker-resource", "nodes", str(mpi.nodes), "--worker-resource", "mpi_ranks", str(mpi.ranks)]
-    # Never probe an allocation inside the sandbox: the profile fixes the capacity.
+    # Never probe an allocation inside the sandbox: the trusted bootstrap read the capacity from it beforehand.
     return [*command, "--allocation", "none", "--idle"]
 
 
@@ -53,8 +53,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--handle", required=True)
+    parser.add_argument("--procs", required=True)
+    parser.add_argument("--mem-mb")
     arguments = parser.parse_args(argv)
     if re.fullmatch(r"[0-9a-f]{32}", arguments.handle) is None:
+        return 2
+    try:
+        procs = _count(arguments.procs, "--procs", positive=True)
+        mem_mb = None if arguments.mem_mb is None else _count(arguments.mem_mb, "--mem-mb", positive=True)
+    except ValueError:
         return 2
     policy = load_policy(Path("/daemon-policy.json"))
     profile = policy.profile(arguments.profile)
@@ -74,7 +81,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if descriptor not in (1, 2):
             os.close(descriptor)
     os.chdir(workspace.root)
-    script = "set -e\n" + profile.prelude + "\nexec " + shlex.join(_manager_command(policy, profile)) + "\n"
+    script = (
+        "set -e\n" + profile.prelude + "\nexec " + shlex.join(_manager_command(policy, profile, procs, mem_mb)) + "\n"
+    )
     os.execve("/bin/bash", ["/bin/bash", "--noprofile", "--norc", "-c", script], dict(os.environ))
 
 

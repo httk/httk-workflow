@@ -92,6 +92,8 @@ def test_client_service_rank_roundtrip(
         job_id="123",
         node="node",
         control_source=str(tmp_path / "control" / "private"),
+        procs="2",
+        mem_mb=None,
     )
     launcher = service._Service(policy, policy.profile("mpi"), arguments)
     outcomes: list[int | BaseException] = []

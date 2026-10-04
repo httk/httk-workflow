@@ -49,7 +49,9 @@ def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
     cwd = tmp_path / "site" / "data"
     cwd.mkdir(parents=True)
     calls: list[tuple[Path, Path]] = []
-    monkeypatch.setattr(_daemon_setup, "initialize", lambda workspace, policy: calls.append((workspace, policy)))
+    monkeypatch.setattr(
+        _daemon_setup, "initialize", lambda workspace, policy, *, force: calls.append((workspace, policy))
+    )
     monkeypatch.chdir(cwd)
     assert _daemon_cli.command([".", "--policy", "../../example.json", "--initialize"], program="httk") == 0
     assert _daemon_cli.command(["link/x", "--policy", "./example.json", "--initialize"], program="httk") == 0
@@ -114,12 +116,27 @@ raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--policy','/policy','-
 def test_local_approval_modes_do_not_enter_isolated_bootstrap(
     mode: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    calls: list[tuple[Path, Path]] = []
-    monkeypatch.setattr(_daemon_setup, mode, lambda workspace, policy: calls.append((workspace, policy)))
+    calls: list[tuple[Path, Path, bool]] = []
+    monkeypatch.setattr(
+        _daemon_setup, mode, lambda workspace, policy, *, force: calls.append((workspace, policy, force))
+    )
     monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("local setup must not exec"))
-    assert _daemon_cli.command(["/workspace", "--policy", "/operator.json", f"--{mode}"], program="httk") == 0
-    assert calls == [(Path("/workspace"), Path("/operator.json"))]
+    arguments = ["/workspace", "--policy", "/operator.json", f"--{mode}"]
+    assert _daemon_cli.command(arguments, program="httk") == 0
+    assert _daemon_cli.command([*arguments, "--force"], program="httk") == 0
+    assert calls == [(Path("/workspace"), Path("/operator.json"), False)] + [
+        (Path("/workspace"), Path("/operator.json"), True)
+    ]
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("mode", ["--once", "--check", "--export-endpoint"])
+def test_force_applies_only_to_local_approval(
+    mode: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("must refuse before any handoff"))
+    assert _daemon_cli.command(["/workspace", "--policy", "/operator.json", mode, "--force"], program="httk") == 2
+    assert "--force applies only" in capsys.readouterr().err
 
 
 def test_export_endpoint_prints_one_canonical_public_document(
@@ -142,7 +159,7 @@ def test_export_endpoint_prints_one_canonical_public_document(
 def test_incompatible_ledger_is_a_clean_local_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def incompatible(_workspace: Path, _policy: Path) -> None:
+    def incompatible(_workspace: Path, _policy: Path, *, force: bool) -> None:
         raise sqlite3.DatabaseError("preserve this state and initialize a new enrollment")
 
     monkeypatch.setattr(_daemon_setup, "reload", incompatible)

@@ -24,6 +24,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     mode.add_argument("--reload", action="store_true", help="approve and activate updated local configurations")
     mode.add_argument("--export-endpoint", action="store_true", help="print the saved public endpoint and catalog")
     mode.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="approve CPU, memory and time requests above the built-in sanity limits",
+    )
 
 
 def _anchored(path: Path, name: str) -> Path:
@@ -65,14 +70,17 @@ def launch(arguments: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2
+    if arguments.force and not (arguments.initialize or arguments.reload):
+        print("httk workspace daemon: --force applies only to --initialize and --reload", file=sys.stderr)
+        return 2
     try:
         from . import _daemon_setup
 
         if arguments.initialize:
-            _daemon_setup.initialize(workspace, policy)
+            _daemon_setup.initialize(workspace, policy, force=arguments.force)
             return 0
         if arguments.reload:
-            _daemon_setup.reload(workspace, policy)
+            _daemon_setup.reload(workspace, policy, force=arguments.force)
             return 0
         if arguments.export_endpoint:
             print(

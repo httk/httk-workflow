@@ -59,6 +59,9 @@ _DEVICE_EXCLUSIONS = tuple(
 _MPI_CONTROL_DESTINATION = Path("/run/httk-mpi")
 
 
+_HARD_LIMIT = 2**31 - 1
+
+
 def _integer(value: object, name: str, minimum: int, maximum: int) -> int:
     if type(value) is not int or not minimum <= value <= maximum:
         raise ValueError(f"{name} must be an integer from {minimum} through {maximum}")
@@ -237,9 +240,9 @@ class Profile:
     """Define one bounded Slurm manager profile.
 
     :param name: Profile name accepted by daemon requests.
-    :param cpus: Serial worker CPUs, or CPUs per rank for an MPI profile.
-    :param memory_mb: Memory capacity in MiB per allocated node.
-    :param time_minutes: Slurm time limit in minutes.
+    :param cpus: Serial worker CPUs, or CPUs per rank for an MPI profile, or ``None`` to leave it to Slurm's defaults.
+    :param memory_mb: Memory capacity in MiB per allocated node, or ``None`` to leave it to Slurm's defaults.
+    :param time_minutes: Slurm time limit in minutes, or ``None`` to leave it to Slurm's defaults.
     :param partition: Optional fixed Slurm partition.
     :param account: Optional fixed Slurm account.
     :param mpi: Optional fixed MPI allocation geometry.
@@ -249,9 +252,9 @@ class Profile:
     """
 
     name: str
-    cpus: int
-    memory_mb: int
-    time_minutes: int
+    cpus: int | None = None
+    memory_mb: int | None = None
+    time_minutes: int | None = None
     partition: str | None = None
     account: str | None = None
     mpi: MPIProfile | None = None
@@ -261,9 +264,9 @@ class Profile:
 
     def __post_init__(self) -> None:
         _name(self.name, "profile name", _PROFILE_NAME)
-        _integer(self.cpus, "cpus", 1, 1024)
-        _integer(self.memory_mb, "memory_mb", 1, 1_048_576)
-        _integer(self.time_minutes, "time_minutes", 1, 10_080)
+        for number, label in ((self.cpus, "cpus"), (self.memory_mb, "memory_mb"), (self.time_minutes, "time_minutes")):
+            if number is not None:
+                _integer(number, label, 1, _HARD_LIMIT)
         for field_name, value in (("partition", self.partition), ("account", self.account)):
             if value is not None:
                 _name(value, field_name, _SLURM_NAME)
@@ -561,13 +564,17 @@ def _json_path(value: object, name: str) -> Path:
 
 def _profile_document(profile: Profile) -> dict[str, object]:
     result: dict[str, object] = {
-        "cpus": profile.cpus,
-        "memory_mb": profile.memory_mb,
-        "time_minutes": profile.time_minutes,
         "workers": profile.workers,
         "prelude": profile.prelude,
         "manager_command": profile.manager_command,
     }
+    for key, number in (
+        ("cpus", profile.cpus),
+        ("memory_mb", profile.memory_mb),
+        ("time_minutes", profile.time_minutes),
+    ):
+        if number is not None:
+            result[key] = number
     if profile.partition is not None:
         result["partition"] = profile.partition
     if profile.account is not None:
@@ -699,10 +706,19 @@ def _decode_policy(data: bytes) -> Policy:
     for profile_name, raw in raw_profiles.items():
         if type(profile_name) is not str or not isinstance(raw, dict):
             raise ValueError("invalid profile entry")
-        profile_required = {"cpus", "memory_mb", "time_minutes"}
-        profile_optional = {"partition", "account", "mpi", "workers", "prelude", "manager_command"}
-        if not profile_required <= set(raw) or not set(raw) <= profile_required | profile_optional:
-            raise ValueError("profile fields are missing or unknown")
+        profile_optional = {
+            "cpus",
+            "memory_mb",
+            "time_minutes",
+            "partition",
+            "account",
+            "mpi",
+            "workers",
+            "prelude",
+            "manager_command",
+        }
+        if not set(raw) <= profile_optional:
+            raise ValueError("profile fields are unknown")
         if "mpi" in raw:
             raw_mpi_profile = raw["mpi"]
             if (
@@ -719,9 +735,9 @@ def _decode_policy(data: bytes) -> Policy:
         profiles.append(
             Profile(
                 profile_name,
-                raw["cpus"],
-                raw["memory_mb"],
-                raw["time_minutes"],
+                raw.get("cpus"),
+                raw.get("memory_mb"),
+                raw.get("time_minutes"),
                 raw.get("partition"),
                 raw.get("account"),
                 mpi_profile,

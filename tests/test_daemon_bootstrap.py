@@ -99,6 +99,7 @@ def _run(
     arguments: list[str],
     *,
     close_fds: bool = True,
+    slurm: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     hostile = tmp_path / "hostile"
     hostile.mkdir(exist_ok=True)
@@ -107,7 +108,8 @@ def _run(
     package = hostile / "httk"
     package.mkdir(exist_ok=True)
     (package / "__init__.py").write_text(f"open({str(marker)!r}, 'w').write('httk')\n", encoding="utf-8")
-    environment = dict(os.environ)
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("SLURM_")}
+    environment.update(slurm or {})
     environment.update(
         {"PYTHONPATH": str(hostile), "PYTHONSTARTUP": str(hostile / "sitecustomize.py"), "POISON": "yes"}
     )
@@ -266,7 +268,57 @@ def test_payload_excludes_broker_mounts_and_network(tmp_path: Path) -> None:
         "small",
         "--handle",
         "a" * 32,
+        "--procs",
+        "2",
+        "--mem-mb",
+        "1024",
     ]
+
+
+@pytest.mark.parametrize(
+    ("slurm", "memory_mb", "expected"),
+    [
+        ({"SLURM_CPUS_ON_NODE": "6", "SLURM_MEM_PER_NODE": "3000"}, 1024, ["--procs", "6", "--mem-mb", "3000"]),
+        ({"SLURM_CPUS_ON_NODE": "4", "SLURM_MEM_PER_CPU": "500"}, 1024, ["--procs", "4", "--mem-mb", "2000"]),
+        ({"SLURM_CPUS_ON_NODE": "4", "SLURM_MEM_PER_NODE": "0"}, 1024, ["--procs", "4", "--mem-mb", "1024"]),
+        ({}, 1024, ["--procs", "2", "--mem-mb", "1024"]),
+        ({"SLURM_CPUS_ON_NODE": "3"}, None, ["--procs", "3"]),
+    ],
+)
+def test_serial_payload_capacity_comes_from_allocation(
+    tmp_path: Path, slurm: dict[str, str], memory_mb: int | None, expected: list[str]
+) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    policy["profiles"]["small"] = {"cpus": 2, "memory_mb": memory_mb}
+    _rewrite_policy(policy_path, policy)
+    result = _run(tmp_path, policy_path, ["--mode", "payload", "--profile", "small", "--handle", "a" * 32], slurm=slurm)
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert argv[argv.index("httk.workflow._daemon_payload") + 5 :] == expected
+
+
+@pytest.mark.parametrize(
+    ("slurm", "cpus", "message"),
+    [
+        ({"SLURM_CPUS_ON_NODE": "4x"}, 2, "SLURM_CPUS_ON_NODE"),
+        ({"SLURM_CPUS_ON_NODE": "04"}, 2, "SLURM_CPUS_ON_NODE"),
+        ({"SLURM_CPUS_ON_NODE": "4", "SLURM_MEM_PER_CPU": "-1"}, 2, "SLURM_MEM_PER_CPU"),
+        ({"SLURM_CPUS_ON_NODE": str(2**63)}, 2, "SLURM_CPUS_ON_NODE"),
+        ({"SLURM_CPUS_ON_NODE": "2", "SLURM_MEM_PER_CPU": str(2**63 - 1)}, 2, "exceeds"),
+        ({"SLURM_CPUS_ON_NODE": "0"}, 2, "did not report"),
+        ({}, None, "did not report"),
+    ],
+)
+def test_serial_payload_refuses_unusable_allocation_capacity(
+    tmp_path: Path, slurm: dict[str, str], cpus: int | None, message: str
+) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    policy["profiles"]["small"] = {"cpus": cpus}
+    _rewrite_policy(policy_path, policy)
+    result = _run(tmp_path, policy_path, ["--mode", "payload", "--profile", "small", "--handle", "a" * 32], slurm=slurm)
+    assert result.returncode == 2
+    assert message in result.stderr
+    assert not record.exists()
 
 
 def test_payload_does_not_require_broker_local_paths(tmp_path: Path) -> None:
@@ -401,6 +453,9 @@ def test_group_writable_sources_are_accepted_but_world_writable_refused(target: 
         ["--mode", "payload", "--profile", "small", "--handle", "../bad"],
         ["--workspace", "/tmp", "--mode", "payload", "--profile", "small", "--handle", "a" * 32],
         ["--workspace", "/tmp", "--mode", "broker", "--", "sh"],
+        ["--mode", "payload", "--profile", "small", "--handle", "a" * 32, "--procs", "2"],
+        ["--mode", "payload", "--profile", "small", "--handle", "a" * 32, "--mem-mb", "1024"],
+        ["--workspace", "/tmp", "--mode", "broker", "--procs", "2"],
     ],
 )
 def test_role_specific_arguments_are_strict(tmp_path: Path, arguments: list[str]) -> None:
