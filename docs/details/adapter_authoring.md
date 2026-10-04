@@ -364,7 +364,7 @@ survives the adapter boundary. Failure to obtain a validated response is an
 adapter error and may leave a live request; callers must keep its id and fields
 for retry.
 
-For this kind, `configure` merges pending settings, validates the eight
+For this kind, `configure` merges pending settings, validates the four
 settings listed in {doc}`/details/remotes`, and checks mounted workspace
 identity. It publishes nothing. `install` rejects nonempty pending settings and
 sends a health request; success means the matching daemon answered `ready`. It
@@ -377,7 +377,7 @@ key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
   (`check_connectivity`, `host`, `httk_command`, `legacy_settings`, `port`,
-  `username`, the mount settings, the seven `daemon_*` settings documented in
+  `username`, the mount settings, `exchange` and the three `daemon_*` identity settings documented in
   {doc}`/details/remotes`, `vasp_command` and `vasp_pseudo_library`) are written
   into the flat `settings` object of the shareable, signable `remote.json`.
 - **Every other key** is a credential. It is written into `credentials.json`

@@ -1,17 +1,18 @@
 # Confined workspace daemon
 
-`httk workspace daemon` is an opt-in, foreground Slurm broker for a file
-command mailbox. It answers health checks, starts managers from locally
-approved named launcher configurations, and requests status or cancellation
-by opaque manager handle. Requests need an authorized *httk* identity
-signature and cannot supply commands, shell fragments, environment variables,
-paths or Slurm arguments.
+`httk workspace daemon` is an opt-in, foreground Slurm broker for a workspace
+on an HPC system. The client mounts one **exchange directory**, never the
+workspace. Through it the client sends jobs, collects finished jobs, reads
+passive status, and sends signed requests that start managers from
+operator-approved launchers, or request status or cancellation by opaque
+manager handle. Requests need an authorized *httk* identity signature and
+cannot supply commands, shell fragments, environment variables, paths or Slurm
+arguments.
 
 Serial execution supports one node and one Slurm task per submission, with
-configurable manager workers sharing its capacity. Protected MPI
-configurations add direct Slurm PMIx application steps; see
-[MPI applications](#mpi-applications). The `mount-daemon` adapter supplies
-typed client controls and native mounted-path job transfers; see
+configurable manager workers sharing its capacity. Protected MPI launchers add
+direct Slurm PMIx application steps; see [MPI applications](#mpi-applications).
+The `mount-daemon` adapter supplies the typed client controls; see
 {doc}`remotes`. The existing mount adapter and the ordinary Slurm launcher
 lack these confinement guarantees.
 
@@ -23,33 +24,74 @@ lack these confinement guarantees.
   `--ro-bind-data`, `--disable-userns` and `--assert-userns-disabled`.
 - Permitted unprivileged user namespaces.
 - Slurm 23.11.6 or later.
+- A filesystem for the workspace and exchange that supports no-replace
+  renames (see [Layout](#layout)).
 
 Startup refuses missing requirements; there is no unsandboxed fallback. The
-Python installation, its packages, the policy and the initial operator
-environment must be trusted: use a protected installation, not editable
-packages in uploaded content.
+Python installation, its packages, the global launchers and the initial
+operator environment must be trusted: use a protected installation, not
+editable packages in uploaded content.
 
-### Filesystem roots
+### Trust
 
-Provision separate roots for workspace data, requests, responses and broker
-state. Their parent directories must prevent transport writers from replacing
-these roots. Keep the policy and private state outside the writable export.
-The SQLite ledger needs a local filesystem with reliable locking and
-durability; do not store it over SSHFS or another network filesystem.
+- The remote host, its Slurm, the installed Python/*httk* and the operator's
+  global launchers are trusted.
+- The client controls the exchange and its own workspace content, including
+  everything the trusted side later moves. Payloads run confined: they cannot
+  write outside the workspace and the exchange, and cannot use scheduler
+  authority beyond the approved launchers.
+- The trusted side never parses bundle content. Bundles are verified and
+  adopted inside a payload sandbox.
+- `status.json` and `managers.json` are informational: the client parses them
+  strictly and never acts on them.
+
+### Layout
+
+The workspace and the exchange are siblings in a dedicated parent that
+contains nothing else:
+
+```text
+/proj/campaign/        dedicated parent: exactly these two entries
+  workspace/           workspace data root
+  exchange/            the only client-mounted directory
+    endpoint.json      public endpoint, written by --initialize and --reload
+    requests/ responses/   signed command mailbox
+    inbox/             the client drops job bundles here
+    outbox/            ejected jobs, rejected/, status.json, managers.json
+```
+
+- Anything else in the parent is refused, naming the entry: the broker has
+  read-write access to the parent.
+- The workspace and exchange must be on one filesystem and one mount, and the
+  filesystem must support no-replace renames. A probe checks this at
+  `--initialize` and `--reload`, and the bootstrap rechecks it before every
+  sandbox entry.
+- The parent must be disjoint from the daemon state and snapshot directories,
+  the *httk* data directory and the runtime paths.
+- Entries whose names start with `.` or that are not plain file names
+  (`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`) are ignored by the brokers.
+
+Provision the parent so transport writers cannot replace the workspace or
+exchange directories. The SQLite ledger needs a local filesystem with reliable
+locking and durability; do not store it over SSHFS or another network
+filesystem.
 
 ### Transport accounts
 
-An SSHFS mount root alone does not confine the server-side account to that
-directory; a same-UID unrestricted SFTP or SSH account could modify private
-state or trusted code outside the export. Enforce the restriction at the
-server or use a separate restricted transport identity. Local file-mode
-checks cannot verify that server configuration.
+An SSHFS mount of the exchange alone does not confine the server-side account
+to that directory; a same-UID unrestricted SFTP or SSH account could modify
+private state or trusted code outside the exchange. Enforce the restriction at
+the server or use a separate restricted transport identity. Local file-mode
+checks cannot verify that server configuration. Mount without
+`follow_symlinks`, and put the client mount point outside any local workspace.
 
 ### Sandboxes
 
 The broker enters Bubblewrap before it listens for command requests. It sees
-the workspace read-only, writable mailbox and state mounts, selected read-only
-runtime and scheduler configuration, and the host network that Slurm needs.
+the dedicated parent read-write, private state, selected read-only runtime and
+scheduler configuration, and the host network that Slurm needs. It moves
+directories between the exchange and the workspace staging area and never
+reads their content.
 
 Each submitted manager enters a separate Bubblewrap sandbox on the compute node
 before it runs its approved prelude. That sandbox has writable workspace data,
@@ -71,20 +113,52 @@ symlink resolution. Runtime roots may not contain mutable roots or replace the
 sandbox's private mounts. These checks reject broad aliases such as a selected
 runtime symlink that resolves to `/`.
 
-## Operator policy and startup
+## Setup and startup
 
-### Approved launchers
+### Daemon launchers
 
-Named Slurm launchers serve as approved manager configurations; their
-settings override workspace settings. Create several to offer different
-resources or worker counts (see {doc}`launchers`). Approval reads their
-settings without executing their launcher programs or preludes.
+Approved manager configurations are global **daemon launchers**. Create several
+to offer different resources or worker counts (see {doc}`launchers`). Setup
+reads their `launcher.json` without executing them, and never reads workspace
+settings:
 
 ```console
-httk workflow launcher add --template slurm --global small \
+httk workflow launcher add --template daemon --global small \
   --set slurm.cpus_per_task=2 --set slurm.mem=4G \
   --set slurm.time_limit=01:00:00 --set manager.workers=2
 ```
+
+Names match `[a-z][a-z0-9_-]{0,63}`. A `slurm` launcher cannot be approved.
+Unknown keys are refused when the launcher is added and again at setup.
+
+Resource keys, per launcher:
+
+| Key | Meaning |
+| --- | --- |
+| `slurm.partition`, `slurm.account`, `slurm.gres`, `slurm.reservation` | fixed `sbatch` flags when set |
+| `slurm.cpus_per_task`, `slurm.mem`, `slurm.time_limit` | optional; see [Resources](#resources) |
+| `slurm.mpi` | `pmix` selects MPI; the only MPI selector |
+| `slurm.nodes`, `slurm.ntasks`, `slurm.ntasks_per_node` | MPI geometry; a value other than 1 without `slurm.mpi=pmix` is refused |
+| `manager.workers`, `manager.command`, `environment.prelude` | manager workers, a single executable manager command, and the prelude run in the payload sandbox; MPI requires `manager.workers=1` |
+
+Site keys apply to the whole daemon. They may be omitted; approved launchers
+that set the same key must agree, otherwise setup refuses naming the key:
+
+| Key | Default when unset |
+| --- | --- |
+| `daemon.readonly_paths` | existing of `/usr`, `/bin`, `/lib`, `/lib64` plus the initializing interpreter's `sys.prefix` and `sys.base_prefix` |
+| `daemon.broker_paths` | the directory of `slurm.conf`, plus `/run/munge` when present |
+| `daemon.bwrap`, `daemon.python`, `daemon.sbatch`, `daemon.squeue`, `daemon.scancel`, `daemon.scontrol` | discovered on `PATH`; Python is the running interpreter |
+| `daemon.cluster`, `daemon.slurm_conf` | discovered, see below |
+| `daemon.max_submissions` | 128 |
+| `daemon.mpi.control_root`, `daemon.mpi.srun`, `daemon.mpi.pmix_roots`, `daemon.mpi.shm_root`, `daemon.mpi.devices`, `daemon.mpi.max_steps`, `daemon.mpi.termination_grace`, `daemon.mpi.environment.<NAME>` | MPI site settings, see [MPI applications](#mpi-applications); `daemon.mpi.control_root` is required when a launcher has `slurm.mpi=pmix` |
+
+Path lists are colon-separated absolute paths. The initial operator environment
+and `PATH` are trusted. Setup discovers `bwrap`, `sbatch`, `squeue` and
+`scancel` there and saves their absolute paths. The cluster name is taken from
+`daemon.cluster`, `SLURM_CLUSTER_NAME`, `slurm_conf` or a bounded
+`scontrol show config` call. Other broker tunables (record limit, polling,
+command timeout, request lifetime of 3600 seconds) are fixed.
 
 ### Client identities
 
@@ -96,88 +170,40 @@ httk init --name "Your Name" --email you@example.org
 python -c 'from httk.core.identity import identity_public_key; print(identity_public_key())'
 ```
 
-### Policy file
-
-An example operator policy:
-
-```json
-{
-  "format": "httk-workspace-daemon-policy",
-  "format_version": 2,
-  "workspace": "/srv/httk/example/data",
-  "readonly_paths": ["/usr", "/bin", "/lib", "/lib64", "/opt/httk"],
-  "broker_paths": ["/etc/slurm", "/run/munge"],
-  "slurm_conf": "/etc/slurm/slurm.conf",
-  "authorized_keys": ["ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY"],
-  "allowed_launchers": ["small"],
-  "request_max_age": 3600,
-  "max_records": 4096,
-  "max_submissions": 128,
-  "poll_seconds": 1.0,
-  "command_timeout": 30.0,
-  "max_output_bytes": 65536
-}
-```
-
-Runtime libraries and trusted code must stay available through
-`readonly_paths`. Scheduler configuration and authentication sockets belong in
-`broker_paths`.
-
-### Executables and cluster
-
-The initial operator environment and `PATH` are trusted. Setup discovers
-`bwrap`, `sbatch`, `squeue` and `scancel` there and saves their absolute
-paths; explicit executable paths are also supported. Python defaults to the
-running interpreter, preserving its virtual environment. Set `cluster`
-explicitly or let it be discovered from `SLURM_CLUSTER_NAME`, `slurm_conf` or
-a bounded `scontrol show config` call.
-
-### State, mailboxes and snapshots
-
-Initialization derives the workspace identity and creates a fresh enrollment.
-
-- The default mailboxes are siblings named `data.daemon-requests` and
-  `data.daemon-responses`. Override `requests` and `responses` to match the
-  site's exported layout.
-- Private state defaults to `workspace-daemons/<workspace-path-hash>` below the
-  *httk* data directory. Override `state` when that directory is on a shared
-  filesystem, because the ledger needs reliable local locking and durability.
-- Protected immutable runtime snapshots default to a directory beside the
-  operator policy named `<policy-stem>.daemon`; `snapshot_root` overrides it.
-  This directory must be visible at the same path on compute nodes. Private
-  state and mailboxes need not be.
-
-The active approval pointer lives in private state. Keep state, snapshots,
-policy and trusted code outside writable exports.
-
-The policy and trusted runtime files must be owned by you or root, and
-neither they nor the directories leading to the policy and snapshots may be
-world-writable. Group write permission is accepted, so
-anyone in a file's group is trusted like you; on a host with shared project
-groups, remove group write with `chmod g-w`.
-
 ### Initializing and running
 
 ```console
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --initialize
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --check
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --export-endpoint > endpoint.json
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json
+httk workspace daemon /proj/campaign/workspace --initialize \
+  --exchange /proj/campaign/exchange --launcher small \
+  --authorize ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY
+httk workspace daemon /proj/campaign/workspace --check
+httk workspace daemon /proj/campaign/workspace
 ```
 
-Relative paths are taken from the current directory, so from inside the
-workspace data directory `httk workspace daemon . --policy ../example.json`
-also works. `..` is accepted only at the start of a relative path. The
-workspace must be the same directory as the policy's `workspace`, and the
-policy file must be outside it.
+Pass `--launcher` and `--authorize` once per item. Setup prints the approved
+launcher and key lists. Relative paths are taken from the current directory.
 
-- `--initialize` creates the ledger and private response key, saves the
-  approved settings and publishes the active approval last. It runs no
-  scheduler or sandbox preflight.
-- `--check` enters the real broker sandbox and checks the scheduler clients,
-  without submitting work or validating compute-node execution.
+- `--initialize` requires that the exchange does not exist or is an empty
+  directory. It creates the exchange and its subdirectories, the workspace
+  staging directories, the ledger, the private response key and a fresh
+  enrollment, saves the approved settings, publishes the active approval and
+  writes `exchange/endpoint.json`. It runs no scheduler or sandbox preflight.
+- `--check` enters the real broker sandbox, rechecks the layout and checks the
+  scheduler clients, without submitting work or validating compute-node
+  execution.
 - `--once` processes one bounded scan. Normal startup polls until SIGINT or
   SIGTERM; a site service supervisor can restart the foreground daemon.
+- `--state DIR` (default: `workspace-daemons/<workspace-path-hash>` below the
+  *httk* data directory) and `--snapshots DIR` (default: `<state>.snapshots`)
+  must be repeated on later invocations when not the default. Place state on a
+  local filesystem. Snapshots hold immutable runtime copies and must be visible
+  at the same path on compute nodes; state and the exchange need not be.
+
+State, snapshots and trusted code must stay outside writable exports, be owned
+by you or root, and not be world-writable, nor may the directories leading to
+them. Group write permission is accepted, so anyone in a file's group is
+trusted like you; on a host with shared project groups, remove group write
+with `chmod g-w`.
 
 An interrupted initialization keeps its partial artifacts and refuses
 automatic replacement. Keep the ledger and keys when diagnosing failures, and
@@ -185,7 +211,7 @@ do not remove them to clear an uncertain submission.
 
 ### Resources
 
-Optionally set CPU count, memory and time in the workspace or launcher as
+Optionally set CPU count, memory and time in a launcher as
 `slurm.cpus_per_task`, `slurm.mem` and `slurm.time_limit`. A setting left unset
 adds no corresponding `sbatch` flag, so Slurm's partition and site defaults
 apply:
@@ -199,41 +225,72 @@ apply:
 - Values above 1024 CPUs per task, 1,048,576 MiB per node or 10,080 minutes
   are refused at `--initialize` and `--reload` unless `--force` is passed.
 
-Serial configurations use one Slurm task; `manager.workers` runs several
-concurrent attempts within the manager's total capacity. Each signed start
-starts exactly one manager, whatever `manager.count` says. The other
-supported scheduler fields are nodes, ntasks, ntasks_per_node, partition,
-account and the MPI selector described below; other `slurm.*` fields are
-rejected. `environment.prelude` and a single executable `manager.command`
-are frozen at approval and run inside the payload sandbox. Daemon managers
-run with `--allocation none` and never probe inside the sandbox. The trusted
+Serial launchers use one Slurm task; `manager.workers` runs several concurrent
+attempts within the manager's total capacity. Each signed start starts exactly
+one manager. `environment.prelude` and a single executable `manager.command`
+are frozen at approval and run inside the payload sandbox, followed by the
+workspace's live `environment.prelude`, also confined. Daemon managers run
+with `--allocation none` and never probe inside the sandbox. The trusted
 bootstrap reads their CPU and memory capacity from the actual Slurm allocation
 before the sandbox starts, falling back to the approved settings; memory known
 from neither is not offered to jobs.
 
-### Changing approved configurations
+### Changing approved launchers
 
-Stop the daemon, edit the operator policy or the launcher or workspace
-settings, then run:
+Stop the daemon, edit the launchers, then run:
 
 ```console
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --reload
-httk workspace daemon /srv/httk/example/data --policy /etc/httk/example.json --export-endpoint > endpoint.json
+httk workspace daemon /proj/campaign/workspace --reload
 ```
+
+`--reload` keeps the stored launcher names and authorized keys unless
+`--launcher` or `--authorize` is given; given lists replace the stored ones.
+It prints the resulting lists and rewrites `endpoint.json`. It refuses a
+change of the fixed connection (workspace, exchange, state, snapshots, Slurm
+executables, cluster, `slurm.conf` and broker paths), naming the key: that
+needs a new enrollment.
 
 Reload refuses while the daemon holds its lifetime ledger lock. Startup checks
 its chosen snapshot against the active approval after taking the same lock, so
 a startup racing with a reload cannot serve revoked keys or old approvals.
-Workspace edits alone never change approved manager settings. Re-import the
-exported catalog on clients after changing approvals.
+Clients read configuration digests live from `endpoint.json` and need no
+reconfiguration.
 
 Queued and running jobs keep their immutable snapshot, including prelude and
-resource geometry. New starts must name a currently approved configuration and
-its exact digest; a retained old snapshot does not authorize them. Reload
-preserves the enrollment, ledger, response key and old snapshots. Changing the
-scheduler connection or enrollment roots requires a separate, reconciled
-enrollment. Installed binaries and site configuration file contents remain
-operator-maintained external dependencies.
+resource geometry. New starts must name a currently approved launcher and its
+exact digest; a retained old snapshot does not authorize them. Reload
+preserves the enrollment, ledger, response key and old snapshots. Installed
+binaries and site configuration file contents remain operator-maintained
+external dependencies.
+
+## Job flow
+
+Send a job from the client with the ordinary eject verb:
+
+```console
+httk job eject JOB /mnt/cluster/exchange/inbox
+```
+
+The daemon moves each bundle in `inbox` into the workspace; a manager started
+by the daemon (`httk workflow manager run --exchange`) adopts it. A refused
+bundle appears in `outbox/rejected/<name>`, with the reason in `status.json`.
+
+A job that finishes (`succeeded`, `failed` or `cancelled`), has no parent job
+and no unfinished child work is ejected automatically about 60 seconds later to
+`outbox/<job_key>`. Fetch it:
+
+```console
+httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
+```
+
+A failed job is never retried automatically. To resume one, adopt it, fix it,
+and eject it to the `inbox` again.
+
+`outbox/status.json` lists job states, rejected bundles and eject errors, and
+`outbox/managers.json` lists the daemon's manager ledger rows. Both are
+informational and refreshed every few seconds. Read them with
+`httk workflow remote daemon status REMOTE`; add `--handle` for the scheduler
+state of one manager through a signed request.
 
 ## File command protocol
 
@@ -241,8 +298,8 @@ operator-maintained external dependencies.
 
 The internal version-3 format requires identity signatures. The maintained
 client builds and signs documents with its configured *httk* operator
-identity; an unsigned request is never executed. The policy's
-`authorized_keys` lists the allowed Ed25519 public keys, and removing a key
+identity; an unsigned request is never executed. The `--authorize` keys
+are the allowed Ed25519 public keys, and removing a key
 also stops it from replaying old results. This authorization rule is separate
 from the ordinary, optional attribution meaning of *httk* identity signatures.
 
@@ -252,8 +309,8 @@ enrollment IDs, the operation and its fields, `created_at`, `expires_at` and
 
 ### Time window
 
-Times are integer Unix seconds. The default lifetime and the policy
-`request_max_age` are 3600 seconds. The clock-skew allowance is 7800 seconds
+Times are integer Unix seconds. The default lifetime and the maximum request
+lifetime are 3600 seconds. The clock-skew allowance is 7800 seconds
 (130 minutes) in both directions, so first execution requires
 `created_at - 7800 <= now <= expires_at + 7800`, with equality accepted. With a
 one-hour lifetime the acceptance interval spans 5 hours 20 minutes in total.
@@ -335,7 +392,7 @@ bounded diagnostic and no response.
 
 ### Quotas
 
-`max_records` limits all durable request records. `max_submissions` limits
+The record limit (4096) limits all durable request records. `daemon.max_submissions` limits
 manager starts admitted over the enrollment's lifetime, including refused or
 uncertain starts. Both are cumulative quotas, not active-job counts.
 Exhaustion returns a nonpersisted `busy` response, retryable with the same
@@ -356,51 +413,43 @@ relying on this daemon for production jobs.
 
 ### Execution model
 
-MPI is opt-in through protected policy. An MPI allocation runs one manager and
+MPI is opt-in through a daemon launcher with `slurm.mpi=pmix`. An MPI allocation runs one manager and
 one application step at a time. Every rank enters Bubblewrap before reading
 its executable, arguments, environment or working directory from workspace
 data. The external step command is always a fixed `srun --mpi=pmix`
 bootstrap; `mpirun` is not used. The manager stays network-isolated; only the
 trusted allocation launcher and the MPI ranks use host networking.
 
-### MPI policy settings
+### MPI launcher settings
 
-Add the MPI site settings to the operator policy, using your site's paths:
+The MPI site settings are `daemon.mpi.*` launcher keys, shared by all approved
+launchers that set them. `daemon.mpi.control_root` is required; the others
+default as shown:
 
-```json
-{
-  "mpi": {
-    "srun": "/usr/bin/srun",
-    "control_root": "/var/tmp/httk-mpi-control",
-    "pmix_roots": ["/var/spool/slurmd"],
-    "shm_root": "/dev/shm",
-    "devices": [],
-    "environment": {},
-    "max_steps": 128,
-    "termination_grace": 10.0
-  }
-}
+| Key | Default |
+| --- | --- |
+| `daemon.mpi.control_root` | none; required |
+| `daemon.mpi.srun` | `srun` on `PATH` |
+| `daemon.mpi.pmix_roots` | none |
+| `daemon.mpi.shm_root` | `/dev/shm` |
+| `daemon.mpi.devices` | none |
+| `daemon.mpi.max_steps` | 128 |
+| `daemon.mpi.termination_grace` | 10.0 seconds |
+| `daemon.mpi.environment.NAME` | none; one key per protected variable |
+
+```console
+httk workflow launcher add --template daemon --global mpi8 \
+  --set slurm.cpus_per_task=2 --set slurm.mem=4G --set slurm.time_limit=01:00:00 \
+  --set slurm.nodes=2 --set slurm.ntasks=8 --set slurm.ntasks_per_node=4 \
+  --set slurm.mpi=pmix --set manager.workers=1 \
+  --set daemon.mpi.control_root=/var/tmp/httk-mpi-control \
+  --set daemon.mpi.pmix_roots=/var/spool/slurmd
 ```
 
 ### Launcher geometry
 
-Approve an existing launcher whose settings include, for example:
-
-```json
-{
-  "slurm.cpus_per_task": 2,
-  "slurm.mem": "4G",
-  "slurm.time_limit": "01:00:00",
-  "slurm.nodes": 2,
-  "slurm.ntasks": 8,
-  "slurm.ntasks_per_node": 4,
-  "slurm.mpi": "pmix",
-  "manager.workers": 1
-}
-```
-
-- `slurm.mpi=pmix` selects MPI even with one rank; multiple nodes or tasks
-  also select MPI.
+- `slurm.mpi=pmix` selects MPI, even with one rank. `slurm.nodes`,
+  `slurm.ntasks` or `slurm.ntasks_per_node` other than 1 are refused without it.
 - MPI requires one manager worker.
 - Nodes default to one. Without a task count, the count is nodes times
   tasks-per-node when placement is given, and one task per node otherwise. An
@@ -449,19 +498,19 @@ shared memory.
 
 ### PMIx, devices and environment
 
-`pmix_roots` bounds the Slurm-supplied `PMIX_SERVER_TMPDIR`. Only the verified
+`daemon.mpi.pmix_roots` bounds the Slurm-supplied `PMIX_SERVER_TMPDIR`. Only the verified
 per-step directory is exposed, at its original path, and the launcher does not
 fall back to mounting broad authentication or socket directories. The site's
 PMIx layout must fit this contract.
 
-`devices` can expose individually approved device paths, such as needed RDMA
+`daemon.mpi.devices` can expose individually approved device paths, such as needed RDMA
 devices; it does not establish tested RDMA or GPU support. Protected
-`environment` entries can tune the installed MPI transport. Application
+`daemon.mpi.environment.NAME` entries can tune the installed MPI transport. Application
 manifests cannot override rank or server identities.
 
 ### Control socket
 
-Provision `control_root` on the batch node so that both the batch and manager
+Provision `daemon.mpi.control_root` on the batch node so that both the batch and manager
 Slurm steps see the same directory; site mount plugins must preserve that
 visibility. The manager reaches the private socket at
 `/run/httk-mpi/control.sock`, and its requests contain only a random request
@@ -487,7 +536,7 @@ remove live allocation storage.
 - Manager exit, client disconnect and service shutdown stop the active step.
 - If local launcher termination leaves remote completion uncertain, the
   service stops accepting work, stops its manager and ends the allocation.
-- `termination_grace` is a local cleanup deadline. Slurm may forward TERM to
+- `daemon.mpi.termination_grace` is a local cleanup deadline. Slurm may forward TERM to
   tasks as KILL, so it does not promise graceful application termination.
 
 ### Service authorities

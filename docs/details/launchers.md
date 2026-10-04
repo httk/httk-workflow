@@ -136,6 +136,18 @@ scheduler values while starting managers for the same workspace. `launcher
 list`, `launcher show [--json]`, and `launcher remove` inspect and manage the
 visible bundles.
 
+## Daemon launchers
+
+The `daemon` template creates launchers that only `httk workspace daemon` reads.
+They configure the approved manager resources of the confined daemon and refuse
+to run directly:
+
+```console
+$ httk workflow launcher add --template daemon --global --set slurm.cpus_per_task=2 small
+```
+
+Names match `[a-z][a-z0-9_-]{0,63}`. See {doc}`workspace_daemon` for the keys.
+
 ## From Python
 
 The launcher helpers are in `httk.workflow.launchers`. After a workspace has

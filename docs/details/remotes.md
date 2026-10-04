@@ -4,7 +4,8 @@ A remote bundles transport, file movement and command execution: it can move a
 job or workspace tree to another machine, invoke `httk` there, and report
 status. Ordinary remotes leave scheduling to the destination workspace's
 launcher; see {doc}`launchers`. The restricted `mount-daemon` variant instead
-relays typed requests to a destination broker controlled by an operator.
+relays typed requests to a destination broker controlled by an operator, and
+exchanges jobs through one mounted exchange directory.
 
 A remote bundle contains `remote.json` and one executable named `adapter`, plus
 an optional `credentials.json` for values that should stay out of the shareable
@@ -173,59 +174,52 @@ $ httk workflow run --workspace sigma:runs --count 4
 $ httk workspace status sigma:runs
 ```
 
-## Mounted filesystem with a confined daemon (`mount-daemon`)
+## Mounted exchange with a confined daemon (`mount-daemon`)
 
-Use `mount-daemon` when files are the only channel to the destination.
+Use `mount-daemon` when files are the only channel to the destination. The
+client mounts only the daemon's exchange directory, never the workspace.
 
 ### Setting up a confined remote
 
-First provision and start {doc}`workspace_daemon` on the HPC system. Export its
-data, request and response directories through the restricted transport
-account, and keep the policy, trusted installation and private ledger outside
-that export. Obtain the public endpoint export through a trusted operator
-handoff, then map its workspace and mailbox directories to their local mounted
-paths:
+First provision and start {doc}`workspace_daemon` on the HPC system. Mount its
+`exchange` directory locally, for example with SSHFS and no `follow_symlinks`,
+through a restricted transport account. The mount point must be outside every
+local workspace. Then pin the daemon identities it publishes in
+`endpoint.json`:
 
 ```console
 $ httk workflow remote add --template mount-daemon confined
-$ httk workflow remote daemon configure confined --endpoint endpoint.json \
-      --mount-root /home/me/mounts/cluster/data \
-      --requests /home/me/mounts/cluster/requests \
-      --responses /home/me/mounts/cluster/responses
+$ httk workflow remote daemon configure confined --exchange /mnt/cluster/exchange
 $ httk workflow remote check confined
 ```
 
-The export pins the response-signing public key, destination identities,
-approved configuration digests and maximum request lifetime. It contains no
-private key. Re-import it after the operator approves changed configurations.
-Configure an httk identity whose public key the daemon authorizes; a missing
-signing key is an error. `configure` checks local paths and workspace identity
-without publishing a request. `check` sends a signed health request; it checks
-a broker response and does not establish compute-node readiness.
+The remote's settings are `exchange` and the pinned `daemon_workspace_id`,
+`daemon_enrollment_id` and `daemon_public_key`. Approved configuration digests
+and the request lifetime are read live from `endpoint.json`, so a daemon
+`--reload` needs no reconfiguration; a changed identity is refused. Configure
+an *httk* identity whose public key the daemon authorizes. `configure` publishes
+nothing. `check` sends a signed health request; it checks a broker response and
+does not establish compute-node readiness.
 
-Manual `remote configure --set` remains available for the eight endpoint
-settings: `mount_root`, `daemon_requests`, `daemon_responses`,
-`daemon_workspace_id`, `daemon_enrollment_id`, `daemon_public_key`,
-`daemon_configurations` (a JSON map of names to digests), and
-`daemon_request_max_age`. Arbitrary commands, preludes, environment or
-scheduler overrides are not endpoint settings.
+### Moving jobs and daemon requests
 
-### Transfers and daemon requests
-
-Use **absolute mounted workspace paths** for native job transfers. This
-supports the existing filesystem transfer protocol over a suitable mount:
-source fencing, sealed bundles, verified import, acknowledgement and
-retirement. It does not run the job runner or its prelude on the client. For
-example:
+Jobs move through the exchange with the ordinary `job eject` and `job adopt`:
 
 ```console
-$ httk job transfer default /home/me/mounts/cluster/data --job JOB
+$ httk job eject JOB /mnt/cluster/exchange/inbox
 $ python -c 'import secrets; print(secrets.token_hex(16))'
 $ httk workflow remote daemon start confined --configuration small --request-id REQUEST_ID
+$ httk workflow remote daemon status confined
 $ httk workflow remote daemon status confined --handle MANAGER_HANDLE
 $ httk workflow remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
-$ httk job transfer /home/me/mounts/cluster/data default --state succeeded
+$ httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
 ```
+
+Managers started by the daemon adopt bundles from `inbox`. `status` without
+`--handle` is passive: it prints the informational `status.json` and
+`managers.json` from the exchange without a request. With `--handle` it sends
+the signed `manager_status` request. See {doc}`workspace_daemon` for the job
+lifecycle, rejected bundles and trust.
 
 ### Request ids and retries
 
@@ -240,9 +234,8 @@ its id to stderr before dispatch and a validated JSON response to stdout.
 - The client stores the exact signed requests in its local httk data directory
   before publication. Retries reuse their original timestamps and signatures;
   changing the intent, signer or endpoint pin under an existing id is refused.
-- Keep the previous endpoint export when updating a catalog: retries of an old
-  configuration need its original digest, while a new configuration needs a new
-  id.
+- Retries of an old start request keep its original configuration digest; a
+  start of a changed configuration needs a new id.
 - Do not delete this local request history to resolve an uncertain operation.
 - Run only one caller per request id at a time.
 
@@ -255,8 +248,7 @@ acceptance window and replay rules.
 120 (default 10). Exit 0 means a positive protocol outcome; `refused`, `busy`,
 `uncertain` and unacknowledged calls exit 2. `UNKNOWN` is a valid status and
 does not establish completion. A cancellation acknowledgement does not confirm
-that the job has terminated. Wait for jobs to finish or quiesce before
-transferring them back.
+that the job has terminated. Finished jobs appear in the exchange `outbox` on their own.
 
 ### What is refused
 
@@ -267,18 +259,19 @@ executor as described above and does not gain confinement from this feature.
 
 ### Filesystem and trust requirements
 
-The mount must meet the workspace's atomic rename and metadata visibility
-requirements (see {doc}`taskmanager`). Root paths must be absolute, existing,
-disjoint and free of symlink components. Local descriptor checks cannot prove
-the server's layout or SSHFS cache coherence, so validate these at the site,
-including that SSHFS does not hide server symlinks by following them. Do not use
-unsupported FUSE or object-backed mounts. An uninterruptible filesystem call may
-exceed the polling or adapter timeout.
+The exchange must be a real directory on the destination (see the layout rules
+in {doc}`workspace_daemon`). Mount it without `follow_symlinks`, so SSHFS does
+not hide server symlinks by following them. Client descriptor checks cannot
+prove the server's layout or SSHFS cache coherence, so validate those at the
+site. Do not use unsupported FUSE or object-backed mounts. An uninterruptible
+filesystem call may exceed the polling or adapter timeout.
 
-Native transfer keeps its existing client trust boundary when parsing workspace
-data; this feature adds no client sandbox. The destination daemon enforces
-payload confinement independently. MPI configurations need the additional site
-configuration and acceptance described in {doc}`workspace_daemon`.
+The client controls the exchange and its own workspace content; `job adopt`
+keeps its usual client trust boundary when parsing bundles. The destination
+daemon enforces payload confinement independently. The `status.json` and
+`managers.json` files are informational and never acted on. MPI configurations
+need the additional site configuration and acceptance described in
+{doc}`workspace_daemon`.
 
 ## From Python
 

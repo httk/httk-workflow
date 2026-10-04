@@ -69,7 +69,7 @@ remote workspace for execution.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workspace init [OPTIONS] PATH...` | create or adopt workspaces, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
-| `workspace daemon WORKSPACE --policy POLICY` | run the confined Slurm file-command broker | `--initialize`, `--reload`, `--export-endpoint`, `--check`, `--once`, `--force` (with `--initialize`/`--reload`: approve resources above the sanity limits) |
+| `workspace daemon WORKSPACE` | set up or run the confined Slurm broker serving an exchange directory | `--initialize`, `--reload`, `--check`, `--once`, `--exchange`, `--launcher` (repeatable), `--authorize` (repeatable), `--state`, `--snapshots`, `--force` (approve resources above the sanity limits) |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |
@@ -722,7 +722,8 @@ member's directory nested inside it cannot be adopted on its own. Every member
 is checked before anything is imported. `job adopt` refuses a directory made by
 a transfer to a named workspace (use `httk job transfer`) and a copy of a
 directory whose job already passed through this workspace, which it leaves in
-place.
+place. It also refuses a directory that is itself a symlink (adopt its target
+instead) or that contains special files or symlinks pointing outside it.
 
 Both commands are crash-safe: an interrupted `job eject` is finished by the next
 `job eject` or transfer recovery in that workspace, and an interrupted
@@ -912,7 +913,7 @@ such greetings to stderr or guard them with a non-interactive-shell test.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--exchange` (used by the workspace daemon), `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `run` is the recommended spelling and `manager run` the advanced one. Both
 follow the binding: a local workspace uses its `manager.launch` setting (the
@@ -1045,7 +1046,7 @@ launchers are versioned bundles, resolved project-first and then globally. See
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `launcher list` | list manager launchers visible to this project | |
-| `launcher add [OPTIONS] NAME...` | create launchers from a packaged template | `--template`, `--set`, `--global`, `--non-interactive` |
+| `launcher add [OPTIONS] NAME...` | create launchers from a packaged template (`slurm`, `daemon` for {doc}`workspace_daemon`) | `--template`, `--set`, `--global`, `--non-interactive` |
 | `launcher configure --set KEY=VALUE NAME...` | update launcher settings | `--set` |
 | `launcher show [--json] NAME...` | describe launchers and their settings | |
 | `launcher check [OPTIONS] NAME...` | check a launcher's required binaries | `--launcher-timeout` |
@@ -1196,10 +1197,10 @@ unambiguous.
 | `remote import-v1 [OPTIONS] SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
-| `remote daemon configure REMOTE` | import an approved endpoint catalog | required `--endpoint`, `--mount-root`, `--requests`, `--responses` |
+| `remote daemon configure REMOTE` | pin the identities in the mounted `endpoint.json` | required `--exchange` |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
 | `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`, `--request-id`; `--wait-seconds` |
-| `remote daemon status REMOTE` | inspect a manager | required `--handle`; `--request-id`, `--wait-seconds` |
+| `remote daemon status REMOTE` | print the passive exchange status, or with `--handle` inspect a manager by signed request | `--handle`, `--request-id` (only with `--handle`), `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
 
 `remote show NAME` reports which file each setting came from, but never a
@@ -1228,21 +1229,21 @@ The module packages four maintained templates for `remote add --template`:
 - `local`: same-machine transport;
 - `ssh`: rsync plus command execution over SSH;
 - `mount`: a locally mounted remote filesystem plus a command executor;
-- `mount-daemon`: typed file requests to a confined destination broker, using a
-  separate dispatcher for its restricted file protocol.
+- `mount-daemon`: typed file requests to a confined destination broker through a mounted
+  exchange directory, using a separate dispatcher for its restricted protocol.
 
 The first three use the target workspace's `manager.launch` setting, such as a
-packaged `slurm` launcher. `mount-daemon` selects a locally approved serial or
-MPI launcher configuration through the daemon and refuses generic `REMOTE:NAME`
-operations; transfer jobs using absolute mounted workspace paths. See
+packaged `slurm` launcher. `mount-daemon` selects an operator-approved daemon launcher through the daemon
+and refuses generic `REMOTE:NAME` operations; move jobs with `job eject` and
+`job adopt` through the exchange. See
 {doc}`/details/remotes` for configuration and request-ID retry rules. Any other
 `kind` in a `remote.json` is refused rather than executed in the wrong place.
 
 ### Remote settings
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
-`check_connectivity`, `check_mount`, `exec_command`, `host`, `httk_command`,
-`legacy_settings`, `mount_root`, `port`, `prelude`, `remote_root`, `username`,
+`check_connectivity`, `check_mount`, `exec_command`, `exchange`, `host`,
+`httk_command`, `legacy_settings`, `mount_root`, `port`, `prelude`, `remote_root`, `username`,
 `vasp_command`, and `vasp_pseudo_library` in the shareable `remote.json`.
 Scheduler profile values are workspace settings: use `slurm.account`,
 `slurm.partition`, `slurm.time_limit`, `slurm.nodes`, `slurm.cpus_per_task`,
@@ -1295,7 +1296,7 @@ All three kinds implement the same six operations:
 
 `mount-daemon` supports `configure`, `install` (a health request), and the
 optional `daemon` operation, and refuses the generic operations in the table
-above. Its eight settings and typed request/result contract are in
+above. Its four settings and typed request/result contract are in
 {doc}`adapter_authoring`.
 
 ### Quoting
