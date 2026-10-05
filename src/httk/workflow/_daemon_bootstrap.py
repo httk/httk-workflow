@@ -13,6 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+# Conda-built Pythons may use glibc headers that predate O_PATH and memfd; the kernel ABI values are fixed.
+_O_PATH = getattr(os, "O_PATH", 0o10000000)
+_MFD_CLOEXEC = getattr(os, "MFD_CLOEXEC", 1)
+_MFD_ALLOW_SEALING = getattr(os, "MFD_ALLOW_SEALING", 2)
+_F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+# F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE (Linux ABI values 1, 2, 4, 8).
+_SEALS = sum(
+    getattr(fcntl, name, value)
+    for name, value in (("F_SEAL_SEAL", 1), ("F_SEAL_SHRINK", 2), ("F_SEAL_GROW", 4), ("F_SEAL_WRITE", 8))
+)
 _HANDLE = re.compile(r"[0-9a-f]{32}\Z")
 _PROFILE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _HOSTNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}\Z")
@@ -257,7 +267,7 @@ def _create_shared_memory_directory(policy: Any, handle: str) -> tuple[Path, int
 def _open_device_nofollow(path: Path) -> int:
     parent = _open_directory_nofollow(path.parent)
     try:
-        descriptor = os.open(path.name, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+        descriptor = os.open(path.name, _O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
     finally:
         os.close(parent)
     information = os.fstat(descriptor)
@@ -500,10 +510,26 @@ def _check_bwrap(path: Path) -> bool:
     return all(option in options for option in _BWRAP_USERNS_BLOCK)
 
 
+def _memfd_create(name: str) -> int:
+    if hasattr(os, "memfd_create"):
+        return os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    # Pythons built against old glibc headers lack the wrapper; the running libc usually has it.
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        function = libc.memfd_create
+    except AttributeError as exc:
+        raise RuntimeError("the daemon bootstrap requires Linux memfd support") from exc
+    descriptor = int(function(name.encode(), _MFD_CLOEXEC | _MFD_ALLOW_SEALING))
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
 def _policy_snapshot(data: bytes) -> int:
-    if not hasattr(os, "memfd_create"):
-        raise RuntimeError("the daemon bootstrap requires Linux memfd support")
-    descriptor = os.memfd_create("httk-daemon-policy", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    descriptor = _memfd_create("httk-daemon-policy")
     try:
         os.fchmod(descriptor, 0o600)
         offset = 0
@@ -513,8 +539,7 @@ def _policy_snapshot(data: bytes) -> int:
                 raise OSError("policy snapshot write made no progress")
             offset += written
         os.lseek(descriptor, 0, os.SEEK_SET)
-        seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_WRITE
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        fcntl.fcntl(descriptor, _F_ADD_SEALS, _SEALS)
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -681,7 +706,7 @@ def _prepare_sandbox(
         if arguments.mode in ("broker", "allocation"):
             runtime_paths.extend(zip(policy.broker_paths, resolved_roots.broker, strict=True))
         for runtime_path, resolved_path in runtime_paths:
-            descriptor = os.open(resolved_path, os.O_PATH | os.O_CLOEXEC)
+            descriptor = os.open(resolved_path, _O_PATH | os.O_CLOEXEC)
             descriptors.append(descriptor)
             argv += ["--ro-bind-fd", str(descriptor), str(runtime_path)]
 

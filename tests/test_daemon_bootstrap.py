@@ -536,3 +536,33 @@ def test_userns_block_follows_bwrap_capability(tmp_path: Path, mode: str, userns
         "sandboxed code can create nested user namespaces"
     )
     assert (warning in result.stderr) == (mode == "broker" and not userns)
+
+
+def test_o_path_fallback_matches_the_platform_constant() -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    if hasattr(os, "O_PATH"):
+        assert api["_O_PATH"] == os.O_PATH
+    assert api["_O_PATH"] == 0o10000000
+
+
+def test_linux_constant_fallbacks_match_the_platform() -> None:
+    import fcntl
+
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    assert (api["_MFD_CLOEXEC"], api["_MFD_ALLOW_SEALING"], api["_F_ADD_SEALS"], api["_SEALS"]) == (1, 2, 1033, 15)
+    if hasattr(fcntl, "F_ADD_SEALS"):
+        assert fcntl.F_ADD_SEALS == 1033
+        assert fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE == 15
+
+
+def test_policy_snapshot_without_the_os_memfd_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    module_os = api["os"]
+    monkeypatch.delattr(module_os, "memfd_create", raising=False)
+    descriptor = api["_policy_snapshot"](b"policy-bytes")
+    try:
+        assert os.pread(descriptor, 64, 0) == b"policy-bytes"
+        with pytest.raises(OSError):
+            os.write(descriptor, b"x")
+    finally:
+        os.close(descriptor)
