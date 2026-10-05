@@ -385,6 +385,7 @@ def _compile(
         slurm_conf=slurm_conf,
         max_submissions=128 if max_submissions is None else max_submissions,
         mpi=_mpi_settings(site) if any(settings.mpi for settings in parsed.values()) else None,
+        isolate_network=_site(site, "daemon.isolate_network", bool) is not False,
     )
 
 

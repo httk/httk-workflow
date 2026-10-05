@@ -433,6 +433,24 @@ def test_conflicting_site_settings_across_launchers_are_refused(tmp_path: Path) 
         _initialize(layout)
 
 
+def test_isolate_network_launchers_must_agree_and_false_reaches_the_policy(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    _rewrite_launcher("small", **{"daemon.isolate_network": "false"})
+    _rewrite_launcher("large", **{"daemon.isolate_network": "true"})
+    with pytest.raises(ValueError, match="set daemon.isolate_network to different values"):
+        _initialize(layout)
+    _rewrite_launcher("large", **{"daemon.isolate_network": None})
+    policy = load_policy(_initialize(layout, "small"))
+    assert policy.isolate_network is False
+    assert _daemon_policy.policy_document(policy)["isolate_network"] is False
+
+
+def test_default_enrollment_isolates_the_network_and_omits_the_key(tmp_path: Path) -> None:
+    policy = load_policy(_initialize(_layout(tmp_path)))
+    assert policy.isolate_network is True
+    assert "isolate_network" not in _daemon_policy.policy_document(policy)
+
+
 def test_mpi_launchers_require_and_use_the_site_mpi_settings(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _executable(layout.broker / "srun")

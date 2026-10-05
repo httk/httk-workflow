@@ -690,3 +690,20 @@ def test_check_layout_reports_a_missing_staging_directory(tmp_path: Path) -> Non
     (tmp_path / "site/workspace/.httk-workspace/exchange").rmdir()
     with pytest.raises(ValueError, match="staging directory .* is missing; .*--reload"):
         check_layout(policy)
+
+
+def test_isolate_network_is_written_only_when_disabled_and_binds_the_digest(tmp_path: Path) -> None:
+    policy = load_policy(_write(tmp_path, _document(tmp_path)))
+    assert policy.isolate_network is True
+    # Default documents and digests are those of enrollments made before the setting existed.
+    assert "isolate_network" not in policy_document(policy)
+    assert replace(policy, isolate_network=True).configuration_digest("cpu") == policy.configuration_digest("cpu")
+    disabled = replace(policy, isolate_network=False)
+    assert policy_document(disabled)["isolate_network"] is False
+    assert disabled.configuration_digest("cpu") != policy.configuration_digest("cpu")
+    assert load_policy(_write(tmp_path, policy_document(disabled))) == disabled
+    for value in (True, 0, "false", None):
+        with pytest.raises(ValueError, match="isolate_network may only be present as false"):
+            load_policy(_write(tmp_path, {**_document(tmp_path), "isolate_network": value}))
+    with pytest.raises(ValueError, match="isolate_network must be a boolean"):
+        replace(policy, isolate_network=0)  # type: ignore[arg-type]

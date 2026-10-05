@@ -432,6 +432,31 @@ def test_mpi_manager_receives_readonly_direct_control_child_and_markers(tmp_path
     assert "--unshare-net" in argv
 
 
+@pytest.mark.parametrize("mode", ["allocation", "payload", "mpi-rank"])
+def test_disabled_network_isolation_only_changes_the_job_sandbox(tmp_path: Path, mode: str) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    _rewrite_policy(policy_path, {**policy, "isolate_network": False})
+    control_root = Path(policy["mpi"]["control_root"])
+    arguments = ["--mode", mode, "--profile", "parallel", "--handle", HANDLE]
+    environment = _allocation_environment()
+    if mode == "payload":
+        (control_root / "private").mkdir(mode=0o700)
+        arguments += ["--control-source", str(control_root / "private"), "--procs", "32", "--mem-mb", "16384"]
+        environment = dict(os.environ)
+    elif mode == "mpi-rank":
+        pmix = Path(policy["mpi"]["pmix_roots"][0]) / "step-1234"
+        pmix.mkdir(mode=0o700)
+        arguments += ["--request-id", REQUEST_ID]
+        environment = _rank_environment(pmix)
+    result = _run(tmp_path, policy_path, arguments, environment)
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert "--unshare-net" not in argv
+    assert {"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"} <= set(argv)
+    note = "daemon bootstrap: note: job network isolation is disabled (daemon.isolate_network=false)"
+    assert (note in result.stderr) == (mode == "payload")
+
+
 def test_serial_payload_ignores_mpi_control_root_compute_locality(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
     Path(policy["mpi"]["control_root"]).rmdir()

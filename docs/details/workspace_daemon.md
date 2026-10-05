@@ -107,6 +107,10 @@ private temporary storage, isolated network, PID, IPC, UTS and user
 namespaces, no capabilities and disabled nested user namespaces. It does not
 get the host view: it sees only `daemon.readonly_paths`, the workspace and its
 private temporary storage.
+Where compute nodes disable network namespaces (`user.max_net_namespaces=0`,
+on which Bubblewrap fails with "Creating new namespace failed"), setting
+`daemon.isolate_network=false` drops only the network namespace: managers then
+share the host network but keep every other confinement above.
 
 ### Runtime mounts
 
@@ -163,6 +167,7 @@ that set the same key must agree, otherwise setup refuses naming the key:
 | `daemon.bwrap`, `daemon.python`, `daemon.sbatch`, `daemon.squeue`, `daemon.scancel`, `daemon.scontrol` | discovered on `PATH`; Python is the running interpreter |
 | `daemon.cluster`, `daemon.slurm_conf` | discovered, see below |
 | `daemon.max_submissions` | 128 |
+| `daemon.isolate_network` | true; set false where compute nodes disable network namespaces (`max_net_namespaces=0`); jobs then share the host network but stay otherwise confined |
 | `daemon.mpi.control_root`, `daemon.mpi.srun`, `daemon.mpi.pmix_roots`, `daemon.mpi.shm_root`, `daemon.mpi.devices`, `daemon.mpi.max_steps`, `daemon.mpi.termination_grace`, `daemon.mpi.environment.<NAME>` | MPI site settings, see [MPI applications](#mpi-applications); `daemon.mpi.control_root` is required when a launcher has `slurm.mpi=pmix` |
 
 Path lists are colon-separated absolute paths. The initial operator environment
@@ -446,7 +451,7 @@ MPI is opt-in through a daemon launcher with `slurm.mpi=pmix`. An MPI allocation
 one application step at a time. Every rank enters Bubblewrap before reading
 its executable, arguments, environment or working directory from workspace
 data. The external step command is always a fixed `srun --mpi=pmix`
-bootstrap; `mpirun` is not used. The manager stays network-isolated; only the
+bootstrap; `mpirun` is not used. The manager stays network-isolated (unless `daemon.isolate_network=false`); only the
 trusted allocation launcher and the MPI ranks use host networking.
 
 ### MPI launcher settings

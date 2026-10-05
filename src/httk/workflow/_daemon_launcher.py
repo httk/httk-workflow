@@ -45,6 +45,7 @@ _FIXED_KEYS = frozenset(
         "daemon.cluster",
         "daemon.slurm_conf",
         "daemon.max_submissions",
+        "daemon.isolate_network",
         "daemon.mpi.control_root",
         "daemon.mpi.srun",
         "daemon.mpi.pmix_roots",
@@ -56,7 +57,13 @@ _FIXED_KEYS = frozenset(
 )
 _PATH_LISTS = frozenset({"daemon.readonly_paths", "daemon.mpi.pmix_roots", "daemon.mpi.devices"})
 _OTHER_SITE = frozenset(
-    {"daemon.cluster", "daemon.max_submissions", "daemon.mpi.max_steps", "daemon.mpi.termination_grace"}
+    {
+        "daemon.cluster",
+        "daemon.max_submissions",
+        "daemon.isolate_network",
+        "daemon.mpi.max_steps",
+        "daemon.mpi.termination_grace",
+    }
 )
 _SINGLE_PATHS = frozenset(
     {
@@ -239,6 +246,15 @@ def _grace(value: object) -> float:
     return number
 
 
+def _flag(value: object, key: str) -> bool:
+    # Launcher settings are JSON scalars without booleans, so a flag is spelled as text or 1/0.
+    if type(value) is str and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    if type(value) is int and value in (0, 1):
+        return value == 1
+    raise ValueError(f"{key} must be 'true', 'false', 1 or 0")
+
+
 def _site_value(key: str, value: object) -> object:
     if key in _PATH_LISTS:
         return tuple(_path(entry, key) for entry in _text(value, key).split(":"))
@@ -248,6 +264,8 @@ def _site_value(key: str, value: object) -> object:
         return _pattern(value, key, _CLUSTER)
     if key == "daemon.max_submissions":
         return _positive_integer(value, key, 4096)
+    if key == "daemon.isolate_network":
+        return _flag(value, key)
     if key == "daemon.mpi.max_steps":
         return _positive_integer(value, key, 65_536)
     return _grace(value)

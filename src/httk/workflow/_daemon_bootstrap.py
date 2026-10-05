@@ -570,7 +570,7 @@ def _base_bwrap_argv(
         "--unshare-ipc",
         "--unshare-uts",
     ]
-    if mode == "payload":
+    if mode == "payload" and policy.isolate_network:
         argv.append("--unshare-net")
     if block_userns:
         argv += _BWRAP_USERNS_BLOCK
@@ -696,6 +696,12 @@ def _prepare_sandbox(
         print(
             "daemon bootstrap: warning: this Bubblewrap lacks --disable-userns (0.8.0+); "
             "sandboxed code can create nested user namespaces",
+            file=sys.stderr,
+            flush=True,
+        )
+    if arguments.mode == "payload" and not policy.isolate_network:
+        print(
+            "daemon bootstrap: note: job network isolation is disabled (daemon.isolate_network=false)",
             file=sys.stderr,
             flush=True,
         )

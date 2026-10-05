@@ -145,3 +145,12 @@ def test_mpi_environment_reserved_names_refused(name: str) -> None:
 def test_null_geometry_has_its_own_message() -> None:
     with pytest.raises(ValueError, match=r"slurm\.nodes must be a positive integer"):
         parse({"slurm.nodes": None})
+
+
+def test_isolate_network_flag_spellings() -> None:
+    for value, expected in (("false", False), ("FALSE", False), (0, False), ("true", True), ("True", True), (1, True)):
+        assert parse({"daemon.isolate_network": value}).site["daemon.isolate_network"] is expected
+    assert "daemon.isolate_network" not in parse({}).site
+    for bad in ("maybe", 2, "", "0", True, None):
+        with pytest.raises(ValueError, match=r"daemon\.isolate_network must be 'true', 'false', 1 or 0"):
+            parse({"daemon.isolate_network": bad})

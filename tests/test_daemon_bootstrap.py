@@ -306,6 +306,29 @@ def test_payload_excludes_broker_mounts_and_network(tmp_path: Path) -> None:
     ]
 
 
+NETWORK_NOTE = "daemon bootstrap: note: job network isolation is disabled (daemon.isolate_network=false)"
+
+
+@pytest.mark.parametrize("isolate", [True, False])
+@pytest.mark.parametrize("mode", ["broker", "payload"])
+def test_payload_network_isolation_follows_the_policy(tmp_path: Path, mode: str, isolate: bool) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    if not isolate:
+        _rewrite_policy(policy_path, {**policy, "isolate_network": False})
+    arguments = (
+        ["--workspace", str(policy["workspace"]), "--mode", "broker", "--check"]
+        if mode == "broker"
+        else ["--mode", "payload", "--profile", "small", "--handle", "d" * 32]
+    )
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    # Only the job sandbox ever unshares the network; every other namespace stays private.
+    assert ("--unshare-net" in argv) == (mode == "payload" and isolate)
+    assert {"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"} <= set(argv)
+    assert (NETWORK_NOTE in result.stderr) == (mode == "payload" and not isolate)
+
+
 @pytest.mark.parametrize(
     ("slurm", "memory_mb", "expected"),
     [

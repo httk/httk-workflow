@@ -321,6 +321,8 @@ class Policy:
     :param max_output_bytes: Maximum captured command output in bytes.
     :param request_max_age: Maximum signed request lifetime in seconds.
     :param mpi: Optional protected MPI launcher and containment settings.
+    :param isolate_network: Whether job sandboxes get a private network namespace; when false they share
+        the host network but stay otherwise confined.
     """
 
     workspace: Path
@@ -346,6 +348,7 @@ class Policy:
     max_output_bytes: int = 65_536
     request_max_age: int = 3600
     mpi: MPISettings | None = None
+    isolate_network: bool = True
 
     def __post_init__(self) -> None:
         mutable = tuple(
@@ -446,6 +449,8 @@ class Policy:
         _number(self.command_timeout, "command_timeout", 0.1, 600.0)
         _integer(self.max_output_bytes, "max_output_bytes", 1024, 1_048_576)
         _integer(self.request_max_age, "request_max_age", 1, 86_400)
+        if type(self.isolate_network) is not bool:
+            raise ValueError("isolate_network must be a boolean")
 
     @property
     def root(self) -> Path:
@@ -512,6 +517,9 @@ class Policy:
             "configuration": _profile_document(self.profile(name)),
             "mpi": mpi,
         }
+        # Present only when disabled, so digests of default enrollments stay unchanged.
+        if "isolate_network" in document:
+            execution["isolate_network"] = document["isolate_network"]
         canonical = json.dumps(execution, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         return hashlib.sha256(canonical).hexdigest()
 
@@ -671,6 +679,8 @@ def policy_document(policy: Policy) -> dict[str, object]:
             "max_steps": policy.mpi.max_steps,
             "termination_grace": policy.mpi.termination_grace,
         }
+    if not policy.isolate_network:
+        result["isolate_network"] = False
     return result
 
 
@@ -718,6 +728,7 @@ def _decode_policy(data: bytes) -> Policy:
         "max_output_bytes",
         "request_max_age",
         "mpi",
+        "isolate_network",
     }
     if "authorized_keys" not in value:
         raise ValueError("policy authorized_keys is required and must be a nonempty array")
@@ -729,6 +740,9 @@ def _decode_policy(data: bytes) -> Policy:
         or value["format_version"] != _FORMAT_VERSION
     ):
         raise ValueError("unsupported policy format or version")
+    # Only the non-default value is ever written, so one canonical document exists per policy.
+    if "isolate_network" in value and value["isolate_network"] is not False:
+        raise ValueError("isolate_network may only be present as false")
     for name in ("workspace_id", "enrollment_id", "cluster"):
         if type(value[name]) is not str:
             raise ValueError(f"{name} must be a string")
@@ -852,6 +866,7 @@ def _decode_policy(data: bytes) -> Policy:
         authorized_keys=_authorized_keys(tuple(raw_authorized_keys)),
         slurm_conf=_json_path(value["slurm_conf"], "slurm_conf") if "slurm_conf" in value else None,
         mpi=mpi,
+        isolate_network="isolate_network" not in value,
         **kwargs,
     )
 
