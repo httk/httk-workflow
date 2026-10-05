@@ -350,7 +350,11 @@ def _run(arguments: argparse.Namespace) -> None:
                 )
             )
             verify_active_snapshot(_STATE_DIRECTORY, policy_source, policy)
-            gateway.check()
+            try:
+                gateway.check()
+            except SchedulerError as exc:
+                # Only the clients' own --version output: safe and needed to diagnose the operator's setup.
+                raise ValueError(f"scheduler client check failed: {exc}") from exc
             exchange = _ROOT_DIRECTORY / policy.exchange.name
             requests = stack.enter_context(MailboxDirectory(exchange / "requests"))
             responses = stack.enter_context(MailboxDirectory(exchange / "responses"))

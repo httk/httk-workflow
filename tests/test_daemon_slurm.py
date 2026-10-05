@@ -326,3 +326,11 @@ def test_mpi_check_rejects_missing_direct_plugin(policy: Policy, tmp_path: Path)
     )
     with pytest.raises(SchedulerError, match="pmix"):
         SlurmGateway(policy, tmp_path / "protected.json").check()
+
+
+def test_check_failure_names_the_client_and_its_output(policy: Policy) -> None:
+    for client in (policy.sbatch, policy.scancel):
+        _client(client, "print('slurm 24.05.1')\n")
+    _client(policy.squeue, "print('wrapper says no', file=sys.stderr)\nsys.exit(3)\n")
+    with pytest.raises(SchedulerError, match=r"squeue --version exited 3 and printed 'wrapper says no'"):
+        SlurmGateway(policy, Path("/trusted/policy.json")).check()

@@ -140,7 +140,13 @@ class SlurmGateway:
             except UnicodeDecodeError:
                 match = None
             if code != 0 or match is None or tuple(int(part) for part in match.groups()) < (23, 11, 6):
-                raise SchedulerError("Slurm 23.11.6 or newer clients are required")
+                # Rerun once with stderr included: wrappers and loaders report failures there.
+                _code, combined = _run([str(executable), "--version"], self.policy, combine_output=True)
+                printed = combined.decode("utf-8", "replace").strip()[:200]
+                raise SchedulerError(
+                    f"Slurm 23.11.6 or newer clients are required: {executable} --version "
+                    f"exited {code} and printed {printed!r}"
+                )
         if self.policy.mpi is not None:
             code, output = _run([str(self.policy.mpi.srun), "--mpi=list"], self.policy, combine_output=True)
             if code != 0 or re.search(rb"(?m)^\s*pmix\s*$", output) is None:
