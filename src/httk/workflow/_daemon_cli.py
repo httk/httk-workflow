@@ -4,6 +4,7 @@ import argparse
 import errno
 import os
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -74,6 +75,58 @@ def _close_inherited() -> None:
                     raise
 
 
+_CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+
+def _bootstrap_argv(workspace: Path, *, state: Path | None, snapshots: Path | None, flag: str | None) -> list[str]:
+    """Build the isolated bootstrap command line for the active policy.
+
+    :param workspace: The anchored workspace path.
+    :param state: The broker state directory, or None for the default.
+    :param snapshots: The runtime snapshot directory, or None for the default.
+    :param flag: An extra run-mode flag such as ``--check``, or None.
+    :return: The argv that starts the broker bootstrap.
+    """
+
+    from . import _daemon_setup
+
+    policy = _daemon_setup.active_policy_path(workspace, state=state, snapshots=snapshots)
+    argv = [
+        sys.executable,
+        "-I",
+        "-S",
+        str(Path(__file__).with_name("_daemon_bootstrap.py").resolve()),
+        "--mode",
+        "broker",
+        "--workspace",
+        str(workspace.resolve(strict=True)),
+        "--policy",
+        str(policy),
+    ]
+    return argv if flag is None else [*argv, flag]
+
+
+def _check_after_setup(workspace: Path, *, state: Path | None, snapshots: Path | None) -> int:
+    # No skip option by design: a misconfiguration must surface at setup time. Setup is not rolled back.
+    try:
+        argv = _bootstrap_argv(workspace, state=state, snapshots=snapshots, flag="--check")
+        code = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, cwd="/", env=_CLEAN_ENV, close_fds=True, check=False
+        ).returncode
+    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
+        print(f"httk workspace daemon: {exc}", file=sys.stderr)
+        code = 1
+    if code == 0:
+        print("sandbox check passed")
+        return 0
+    print(
+        "httk workspace daemon: the enrollment was saved, but the sandbox check failed (see above); "
+        "fix the launcher settings and run --reload",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def launch(arguments: argparse.Namespace) -> int:
     """Replace the CLI process with the isolated installed bootstrap.
 
@@ -124,29 +177,12 @@ def launch(arguments: argparse.Namespace) -> int:
                 print(f"launcher {profile.name}")
             for key in approved.authorized_keys:
                 print(f"authorized {key}")
-            return 0
-        runtime_policy = _daemon_setup.active_policy_path(workspace, state=paths["state"], snapshots=paths["snapshots"])
-        runtime_workspace = workspace.resolve(strict=True)
+            return _check_after_setup(workspace, state=paths["state"], snapshots=paths["snapshots"])
+        flag = "--check" if arguments.check else "--once" if arguments.once else None
+        argv = _bootstrap_argv(workspace, state=paths["state"], snapshots=paths["snapshots"], flag=flag)
     except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2
-    bootstrap = Path(__file__).with_name("_daemon_bootstrap.py").resolve()
-    executable = sys.executable
-    argv = [
-        executable,
-        "-I",
-        "-S",
-        str(bootstrap),
-        "--mode",
-        "broker",
-        "--workspace",
-        str(runtime_workspace),
-        "--policy",
-        str(runtime_policy),
-    ]
-    for flag in ("check", "once"):
-        if getattr(arguments, flag):
-            argv.append("--" + flag)
     try:
         os.chdir("/")
         descriptor = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
@@ -157,7 +193,7 @@ def launch(arguments: argparse.Namespace) -> int:
             if descriptor != 0:
                 os.close(descriptor)
         _close_inherited()
-        os.execve(executable, argv, {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+        os.execve(sys.executable, argv, _CLEAN_ENV)
     except OSError:
         print("httk workspace daemon: isolated bootstrap could not start", file=sys.stderr)
         return 2
