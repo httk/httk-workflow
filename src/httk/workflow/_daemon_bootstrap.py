@@ -788,7 +788,10 @@ def _exec_prepared(prepared: _PreparedSandbox) -> None:
             except OSError:
                 pass
         for descriptor in prepared.descriptors:
-            os.set_inheritable(descriptor, True)
+            # Not os.set_inheritable: its ioctl fails with EBADF on O_PATH descriptors, and
+            # Pythons built without O_PATH also lack CPython's fcntl fallback for that.
+            flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+            fcntl.fcntl(descriptor, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
         os.execve(prepared.argv[0], prepared.argv, {})
     except BaseException:
         prepared.close()

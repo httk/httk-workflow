@@ -566,3 +566,27 @@ def test_policy_snapshot_without_the_os_memfd_wrapper(monkeypatch: pytest.Monkey
             os.write(descriptor, b"x")
     finally:
         os.close(descriptor)
+
+
+def test_exec_marks_o_path_descriptors_inheritable_without_os_set_inheritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    module_os = api["os"]
+    descriptor = os.open(tmp_path, api["_O_PATH"] | os.O_CLOEXEC)
+    observed: list[bool] = []
+
+    def refuse(*_args: object) -> None:
+        raise OSError(9, "Bad file descriptor")
+
+    def execve(*_args: object) -> None:
+        observed.append(os.get_inheritable(descriptor))
+        raise OSError("exec boundary")
+
+    monkeypatch.setattr(module_os, "set_inheritable", refuse)
+    monkeypatch.setattr(module_os, "execve", execve)
+    monkeypatch.setitem(api["_exec_prepared"].__globals__, "_open_descriptor_numbers", lambda: set())
+    prepared = api["_PreparedSandbox"](["/bin/true"], (descriptor,))
+    with pytest.raises(OSError, match="exec boundary"):
+        api["_exec_prepared"](prepared)
+    assert observed == [True]
