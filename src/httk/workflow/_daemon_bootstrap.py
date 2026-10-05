@@ -546,6 +546,24 @@ def _policy_snapshot(data: bytes) -> int:
         raise
 
 
+_MERGED_USR_LINKS = (Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin"))
+
+
+def _merged_usr_symlinks(
+    resolved_roots: tuple[Path, ...], declared: set[Path], links: tuple[Path, ...] = _MERGED_USR_LINKS
+) -> list[str]:
+    # On merged-/usr hosts /lib64 etc. are symlinks into /usr; the defaults mount only /usr, so recreate
+    # the links, or the ELF loader (/lib64/ld-linux-*.so.2) and /bin/bash are missing in the sandbox.
+    argv: list[str] = []
+    for link in links:
+        if link in declared or not link.is_symlink():
+            continue
+        target = link.resolve()
+        if any(target == root or target.is_relative_to(root) for root in resolved_roots):
+            argv += ["--symlink", os.readlink(link), str(link)]
+    return argv
+
+
 def _base_bwrap_argv(
     policy: Any, mode: str, rank_environment: tuple[tuple[str, str], ...] = (), *, block_userns: bool
 ) -> list[str]:
@@ -709,6 +727,9 @@ def _prepare_sandbox(
             descriptor = os.open(resolved_path, _O_PATH | os.O_CLOEXEC)
             descriptors.append(descriptor)
             argv += ["--ro-bind-fd", str(descriptor), str(runtime_path)]
+        argv += _merged_usr_symlinks(
+            tuple(resolved for _path, resolved in runtime_paths), {path for path, _ in runtime_paths}
+        )
 
         policy_fd = _policy_snapshot(policy_data)
         descriptors.append(policy_fd)

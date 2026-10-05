@@ -590,3 +590,19 @@ def test_exec_marks_o_path_descriptors_inheritable_without_os_set_inheritable(
     with pytest.raises(OSError, match="exec boundary"):
         api["_exec_prepared"](prepared)
     assert observed == [True]
+
+
+def test_merged_usr_links_are_recreated_inside_the_sandbox(tmp_path: Path) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    usr = tmp_path / "usr"
+    (usr / "lib64").mkdir(parents=True)
+    (usr / "bin").mkdir()
+    lib64 = tmp_path / "lib64"
+    lib64.symlink_to("usr/lib64")
+    sbin = tmp_path / "sbin"
+    sbin.symlink_to("/nowhere/sbin")
+    plain = tmp_path / "bin"
+    plain.mkdir()
+    argv = api["_merged_usr_symlinks"]((usr.resolve(),), set(), (lib64, sbin, plain))
+    assert argv == ["--symlink", "usr/lib64", str(lib64)]
+    assert api["_merged_usr_symlinks"]((usr.resolve(),), {lib64}, (lib64,)) == []
