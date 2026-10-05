@@ -504,3 +504,64 @@ def test_response_without_detail_keeps_its_version_three_encoding() -> None:
     response = decode_response(stored)
     assert response.detail is None
     assert encode_response(response) == stored
+
+
+@pytest.mark.parametrize("bundle", [None, "job-1.x_y", "A" + "a" * 127])
+def test_withdraw_round_trips_with_and_without_a_bundle(bundle: str | None) -> None:
+    request = Request(REQUEST_ID, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID, bundle=bundle)
+    fields = {} if bundle is None else {"bundle": bundle}
+    assert decode_request(_document("withdraw", **fields)) == request
+    encoded = encode_request(request)
+    assert (b'"bundle"' in encoded) is (bundle is not None)
+    assert decode_request(encoded) == request
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"bundle": None},
+        {"bundle": 1},
+        {"bundle": ""},
+        {"bundle": "-dash"},
+        {"bundle": ".hidden"},
+        {"bundle": "a/b"},
+        {"bundle": "a" * 129},
+        {"bundle": "withdrawn"},
+        {"bundle": "managers"},
+        {"bundle": "inbox"},
+        {"bundle": "status.json"},
+        {"handle": HANDLE},
+        {"configuration": "cpu"},
+    ],
+)
+def test_withdraw_refuses_invalid_reserved_or_foreign_fields(fields: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        decode_request(_document("withdraw", **fields))
+
+
+@pytest.mark.parametrize("operation", ["health", "manager_status", "start_manager"])
+def test_only_withdraw_takes_a_bundle(operation: str) -> None:
+    extra = {"health": {}, "manager_status": {"handle": HANDLE}, "start_manager": {"profile": "cpu"}}[operation]
+    with pytest.raises(ValueError, match="only withdraw"):
+        Request(REQUEST_ID, WORKSPACE_ID, operation, enrollment_id=ENROLLMENT_ID, bundle="job", **extra)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        decode_request(_document("health", bundle="job"))
+    health = encode_request(Request(REQUEST_ID, WORKSPACE_ID, "health", enrollment_id=ENROLLMENT_ID))
+    assert b'"bundle"' not in health
+
+
+def test_withdrawn_outcome_lists_names_without_a_reason() -> None:
+    for detail in (None, "job-1,job-2", "a" * 1000):
+        response = Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "withdrawn", detail=detail)
+        assert decode_response(encode_response(response)) == response
+    for fields in (
+        {"handle": HANDLE},
+        {"scheduler_state": "RUNNING"},
+        {"reason": "capacity"},
+        {"detail": "a" * 1001},
+        {"detail": "job,…"},
+    ):
+        with pytest.raises(ValueError):
+            Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "withdrawn", **fields)
+    with pytest.raises(ValueError, match="detail requires reason"):
+        Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready", detail="job")

@@ -154,3 +154,9 @@ def test_isolate_network_flag_spellings() -> None:
     for bad in ("maybe", 2, "", "0", True, None):
         with pytest.raises(ValueError, match=r"daemon\.isolate_network must be 'true', 'false', 1 or 0"):
             parse({"daemon.isolate_network": bad})
+
+
+def test_sacct_is_a_single_absolute_path() -> None:
+    assert parse({"daemon.sacct": "/opt/slurm/bin/sacct"}).site == {"daemon.sacct": Path("/opt/slurm/bin/sacct")}
+    with pytest.raises(ValueError):
+        parse({"daemon.sacct": "sacct"})

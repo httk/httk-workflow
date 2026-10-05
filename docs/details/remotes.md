@@ -218,14 +218,25 @@ $ httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
 Managers started by the daemon adopt bundles from `inbox`. `status` without
 `--handle` is passive: it prints the informational `status.json` and
 `managers.json` from the exchange without a request. With `--handle` it sends
-the signed `manager_status` request. See {doc}`workspace_daemon` for the job
-lifecycle, rejected bundles and trust.
+the signed `manager_status` request. The passive `managers.json` also reports
+each manager's outcome (scheduler state, exit code, times) and the bundles still
+waiting; once a manager's Slurm job has ended, `httk workflow remote daemon log
+confined --handle MANAGER_HANDLE` prints its published log.
+
+To give up on bundles that no manager has adopted, run `httk workflow remote
+daemon withdraw confined --request-id ID [--bundle NAME]`. It first takes your
+bundles still in `inbox` back locally, then asks the broker to return those it
+already moved into its staging area. Both end up in `outbox/withdrawn/NAME`; then
+`httk job adopt /mnt/cluster/exchange/outbox/withdrawn/NAME`. Update the broker
+before using `withdraw`: an old broker silently drops the unknown operation, and
+the client then times out. See
+{doc}`workspace_daemon` for the job lifecycle, rejected bundles and trust.
 
 ### Request ids and retries
 
 Replace `REQUEST_ID` and `ANOTHER_REQUEST_ID` with separately generated
-32-character lowercase hexadecimal ids, and keep them. Start and cancel require
-an explicit id; health and status generate one unless supplied. Each call prints
+32-character lowercase hexadecimal ids, and keep them. Start, cancel and withdraw
+require an explicit id; health and status generate one unless supplied. Each call prints
 its id to stderr before dispatch and a validated JSON response to stdout.
 
 - After a timeout, retry with **the same id and identical fields**. Never retry
@@ -244,7 +255,7 @@ acceptance window and replay rules.
 
 ### Waiting and exit codes
 
-`health`, `start`, `status` and `cancel` accept `--wait-seconds` from 0.05 to
+`health`, `start`, `status`, `cancel` and `withdraw` accept `--wait-seconds` from 0.05 to
 120 (default 10). Exit 0 means a positive protocol outcome; `refused`, `busy`,
 `uncertain` and unacknowledged calls exit 2. `UNKNOWN` is a valid status and
 does not establish completion. A cancellation acknowledgement does not confirm

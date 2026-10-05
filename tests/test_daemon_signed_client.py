@@ -135,6 +135,17 @@ def test_prepare_request_retry_is_exact_across_processes(endpoint: Endpoint, tmp
     assert first == second
 
 
+def test_withdraw_bundle_is_signed_cached_and_part_of_the_intent(endpoint: Endpoint) -> None:
+    intent = Request(REQUEST_ID, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID, bundle="alpha")
+    saved = prepare_request(endpoint, intent)
+    assert saved.bundle == "alpha" and saved.signature is not None
+    assert prepare_request(endpoint, intent) == saved
+    with pytest.raises(ValueError, match="intent conflicts"):
+        prepare_request(endpoint, replace(intent, bundle="beta"))
+    with pytest.raises(ValueError, match="intent conflicts"):
+        prepare_request(endpoint, replace(intent, bundle=None))
+
+
 def test_prepare_request_refuses_changed_intent_endpoint_pin_and_signer(endpoint: Endpoint, tmp_path: Path) -> None:
     saved = prepare_request(endpoint, _intent())
 

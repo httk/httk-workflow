@@ -259,6 +259,28 @@ def test_real_adapter_subprocess_preserves_confirmed_refusal(tmp_path: Path) -> 
     assert result["stderr"] == ""
 
 
+def test_real_adapter_subprocess_passes_withdraw_with_bundle(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    bundle = _bundle(tmp_path, endpoint)
+    request = sign_request(
+        Request("0" * 32, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID, bundle="alpha"), now=1_000_000
+    )
+    thread, errors = _broker(endpoint, "withdrawn", detail="alpha")
+    try:
+        result = run_adapter(
+            bundle,
+            "daemon",
+            {"daemon_request": json.loads(encode_request(request)), "wait_seconds": 10},
+            timeout=15,
+        )
+    finally:
+        thread.join(timeout=15)
+
+    assert errors == []
+    assert result["ok"] is True and result["returncode"] == 0
+    assert json.loads(result["stdout"])["outcome"] == "withdrawn"
+
+
 @pytest.mark.parametrize("operation", ["invoke", "status", "push", "pull"])
 def test_generic_operations_refuse_without_mutation(tmp_path: Path, operation: str) -> None:
     endpoint = _endpoint(tmp_path)

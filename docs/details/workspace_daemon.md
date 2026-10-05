@@ -61,7 +61,7 @@ contains nothing else:
     endpoint.json      public endpoint, written by --initialize and --reload
     requests/ responses/   signed command mailbox
     inbox/             the client drops job bundles here
-    outbox/            ejected jobs, rejected/, status.json, managers.json
+    outbox/            ejected jobs, rejected/, withdrawn/, managers/, status.json, managers.json
 ```
 
 - Anything else in the parent is refused, naming the entry: the broker has
@@ -165,6 +165,7 @@ that set the same key must agree, otherwise setup refuses naming the key:
 | --- | --- |
 | `daemon.readonly_paths` | job-sandbox paths: existing of `/usr`, `/bin`, `/lib`, `/lib64`, the initializing interpreter's `sys.prefix` and `sys.base_prefix`, and the directories the `httk` packages are imported from |
 | `daemon.bwrap`, `daemon.python`, `daemon.sbatch`, `daemon.squeue`, `daemon.scancel`, `daemon.scontrol` | discovered on `PATH`; Python is the running interpreter |
+| `daemon.sacct` | discovered on `PATH`; optional, used only to report how managers ended |
 | `daemon.cluster`, `daemon.slurm_conf` | discovered, see below |
 | `daemon.max_submissions` | 128 |
 | `daemon.isolate_network` | true; set false where compute nodes disable network namespaces (`max_net_namespaces=0`); jobs then share the host network but stay otherwise confined |
@@ -282,6 +283,14 @@ preserves the enrollment, ledger, response key and old snapshots. Installed
 binaries and site configuration file contents remain operator-maintained
 external dependencies.
 
+### Upgrading
+
+After updating *httk-workflow* on the remote host, stop the daemon and run
+`--reload` once, so that setup discovers `sacct` and creates
+`outbox/managers` and `outbox/withdrawn`. Update the client before or together
+with the remote host: the current client reads both versions of
+`managers.json`, an older one only version 1.
+
 ## Job flow
 
 Send a job from the client with the ordinary eject verb:
@@ -305,11 +314,43 @@ httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
 A failed job is never retried automatically. To resume one, adopt it, fix it,
 and eject it to the `inbox` again.
 
-`outbox/status.json` lists job states, rejected bundles and eject errors, and
-`outbox/managers.json` lists the daemon's manager ledger rows. Both are
-informational and refreshed every few seconds. Read them with
-`httk workflow remote daemon status REMOTE`; add `--handle` for the scheduler
-state of one manager through a signed request.
+`outbox/status.json` lists job states, rejected bundles and eject errors.
+`outbox/managers.json` (format version 2) lists the daemon's manager starts
+with their ledger state, Slurm job ID, scheduler state, exit code and start and
+end times, and the names of the bundles still waiting in `inbox` or in the
+workspace (`staged`, at most 1000, with `staged_truncated` set when more
+exist). Unknown values are `null`. Both files are informational and refreshed
+every few seconds. Read them with `httk workflow remote daemon status REMOTE`;
+add `--handle` for the scheduler state of one manager through a signed request.
+
+The daemon checks each submitted manager about once a minute: with `squeue`
+while Slurm lists it, then with `sacct` for its final state and exit code. A
+manager is final in `COMPLETED`, `FAILED`, `CANCELLED`, `TIMEOUT`,
+`OUT_OF_MEMORY`, `NODE_FAIL`, `PREEMPTED`, `BOOT_FAIL` or `DEADLINE`. With
+`sacct` configured, a final state seen only by `squeue` waits up to 30 minutes
+for accounting to add the exit code, and is then kept without one. A manager
+that neither client knows for 30 minutes, which is always the case without
+`sacct` or while accounting fails, becomes `GONE`. Once a manager is final, the last 1 MiB of its Slurm output is
+copied to `outbox/managers/<handle>.log`, and its row's `log` names that file.
+This also covers a manager that failed on its node before it ever adopted a
+job.
+
+### Withdrawing waiting jobs
+
+A bundle that no manager will run can be taken back. A signed `withdraw`
+request moves every bundle waiting in the workspace, or only the one it names,
+unchanged to `outbox/withdrawn/<name>`; adopt it from there with
+`httk job adopt`. Bundles still in `inbox` are not touched; take those back
+directly. A bundle published just before the request may reach the workspace
+right after it, so repeat the withdrawal if `managers.json` still lists it. A
+bundle that a manager adopts at the same moment is either withdrawn or
+adopted, never lost.
+
+The response's `detail` lists only what that execution moved; `outbox/withdrawn/`
+is authoritative. A retried request normally replays the recorded response, but
+after a broker restart that interrupted it, the retry may list fewer names.
+Update the remote host before using `withdraw`: an older broker discards the
+unknown operation without a response.
 
 ## File command protocol
 
@@ -375,6 +416,7 @@ operation fields are rejected. Besides health checks, the operations are:
 | `start_manager` | `configuration` and `configuration_digest`: the approved name and SHA256 digest |
 | `manager_status` | `handle`: the returned manager handle |
 | `cancel_manager` | `handle`: the returned manager handle |
+| `withdraw` | optional `bundle`: the one waiting bundle to withdraw |
 
 ### Responses
 
@@ -403,18 +445,21 @@ bounded diagnostic and no response.
 - `submitted` returns an opaque handle.
 - `uncertain` means submission may have happened. The daemon will not retry
   it, including after restart; an operator must reconcile it with Slurm.
-- `UNKNOWN` status does not mean a job finished. Accounting reconciliation is
-  not implemented.
+- `UNKNOWN` status does not mean a job finished; `managers.json` reports the
+  final state once accounting knows it.
 - `cancel_requested` means the filtered cancellation call succeeded, not that
   termination is confirmed. Cancellation filters on controller-side job name
   and user to avoid acting on a reused numeric scheduler ID.
 - `uncertain`, `refused` and `busy` responses may carry a signed `detail`
   string with the scheduler's own error, for example
   `sbatch exited 1: sbatch: error: Batch job submission failed: Invalid account …`.
+- `withdrawn` lists the moved bundles in `detail`, comma-separated and cut to
+  1000 characters with a trailing `,...`; it has no `detail` when nothing moved.
 
 The foreground daemon logs to stdout: one line per request (operation, request
-ID, outcome), each submitted Slurm job ID, every failed Slurm client call with
-its exit code and error output, and startup and check results.
+ID, outcome), each submitted Slurm job ID, every manager state change and
+published manager log, every failed Slurm client call with its exit code and
+error output, and startup and check results.
 
 While a submitted job runs, Slurm writes its output, with stderr merged in, to
 `<snapshots>/jobs/httk-<jobid>.out`, a private directory that no job sandbox

@@ -882,3 +882,37 @@ def test_launcher_metadata_must_be_protected_and_outside_daemon_roots(
         monkeypatch.setattr(_daemon_setup, "launchers_home", lambda: home)
         with pytest.raises(ValueError, match="'small' must not lie inside the daemon parent, state or snapshots"):
             _initialize(layout, "small", state=state)
+
+
+def test_report_directories_are_created_at_initialize_and_recreated_at_reload(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    _initialize(layout, "small")
+    for name in ("outbox/managers", "outbox/withdrawn"):
+        assert (layout.exchange / name).stat().st_mode & 0o777 == 0o700
+    (layout.exchange / "outbox/managers").rmdir()
+    _daemon_setup.reload(layout.workspace.root)
+    for name in ("outbox/managers", "outbox/withdrawn"):
+        assert (layout.exchange / name).stat().st_mode & 0o777 == 0o700
+
+
+def test_sacct_is_optional_discovered_or_configured_and_keeps_digests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    monkeypatch.setenv("PATH", str(layout.broker))
+    policy = load_policy(_initialize(layout, "small"))
+    assert policy.sacct is None and "sacct" not in _daemon_policy.policy_document(policy)
+    endpoint = (layout.exchange / "endpoint.json").read_bytes()
+
+    sacct = _executable(layout.broker / "sacct")
+    discovered = load_policy(_daemon_setup.reload(layout.workspace.root))
+    assert discovered.sacct == sacct
+    # Reporting only: the approved configuration digests the client pins do not change.
+    assert (layout.exchange / "endpoint.json").read_bytes() == endpoint
+
+    _rewrite_launcher("small", **{"daemon.sacct": str(tmp_path / "absent/sacct")})
+    with pytest.raises(ValueError, match="sacct"):
+        _daemon_setup.reload(layout.workspace.root)
+    configured = _executable(tmp_path / "accounting/sacct")
+    _rewrite_launcher("small", **{"daemon.sacct": str(configured)})
+    assert load_policy(_daemon_setup.reload(layout.workspace.root)).sacct == configured

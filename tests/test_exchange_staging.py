@@ -11,13 +11,14 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace, _exchange_staging, transfers, workflow_cli
+from httk.workflow._daemon_exchange import ExchangeMover
 from httk.workflow._exchange_staging import exchange_pass
 from httk.workflow._job_tree import record_spawns
 from httk.workflow._util import timestamp_seconds
 from httk.workflow.models import Marker, make_job_key
 from httk.workflow.transfers import exchange_staging
 from httk.workflow.workflow_cli import _manager
-from test_eject_adopt import _pair, _payload
+from test_eject_adopt import _pair, _payload, _tree
 
 #: A pass time well beyond the eject grace period of jobs finished in a test.
 _LATER = time.time() + 3600.0
@@ -68,6 +69,7 @@ def test_a_corrupt_bundle_is_rejected_with_a_record_until_its_name_adopts(tmp_pa
     (staging / "inbox" / "broken" / "junk").write_text("not a job", encoding="utf-8")
     exchange_pass(workspace, now=1000.0)
     assert (staging / "outbox" / "rejected" / "broken" / "junk").is_file()
+    assert not os.path.lexists(staging / "outbox" / "rejected" / ".adopting-broken")
     assert not (staging / "inbox" / "broken").exists()
     record = json.loads((staging / "records" / "rejected-broken.json").read_text(encoding="utf-8"))
     assert set(record) == {"name", "reason", "at"} and record["name"] == "broken" and record["reason"]
@@ -114,6 +116,61 @@ def test_a_staged_non_directory_is_removed_and_never_pins_its_name(tmp_path: Pat
     assert (rejected / "job").is_dir() and not os.path.lexists(inbox / "job")
 
 
+def test_a_claimed_tree_cannot_be_withdrawn_while_it_is_adopted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, workspace = _pair(tmp_path)
+    root, children, grandchildren = _tree(source, tmp_path / "runner")
+    staged = _staging(workspace) / "inbox" / root.job_key
+    os.rename(source.eject(root.job_id, tmp_path / "loose"), staged)
+    (tmp_path / "exchange" / "outbox" / "withdrawn").mkdir(parents=True)
+    mover = ExchangeMover(tmp_path, "exchange", workspace.root.name, "e" * 32)
+    adopt = workspace.adopt
+    withdrawn: list[list[str]] = []
+
+    def adopt_during_a_withdraw(directory: Path) -> Marker:
+        assert directory.name == f".adopting-{root.job_key}"
+        withdrawn.append(mover.withdraw(None))  # the client asks for its bundle back mid-adoption
+        return adopt(directory)
+
+    monkeypatch.setattr(workspace, "adopt", adopt_during_a_withdraw)
+    exchange_pass(workspace, now=1000.0)
+    assert withdrawn == [[]] and not os.listdir(tmp_path / "exchange" / "outbox" / "withdrawn")
+    for marker in (root, *children, *grandchildren):
+        assert workspace.find_marker_by_id(marker.job_id) is not None
+    assert not os.listdir(staged.parent)
+
+
+def test_a_claim_left_by_a_crashed_pass_is_adopted_next_pass(tmp_path: Path) -> None:
+    source, workspace = _pair(tmp_path)
+    marker, staged = _stage(source, workspace, tmp_path, "a")
+    os.rename(staged, staged.parent / f".adopting-{marker.job_key}")
+    junk = staged.parent / ".adopting-junk"
+    junk.mkdir()
+    exchange_pass(workspace, now=1000.0)
+    assert workspace.find_marker_by_id(marker.job_id) is not None
+    rejected = exchange_staging(workspace) / "outbox" / "rejected"
+    assert os.listdir(rejected) == ["junk"] and not os.listdir(staged.parent)
+
+
+def test_a_second_manager_skips_a_bundle_the_first_adopted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, first = _pair(tmp_path)
+    marker, staged = _stage(source, first, tmp_path, "a")
+    second = Workspace(first.root)
+    adopt = first.adopt
+
+    def adopt_after_the_second_manager(directory: Path) -> Marker:
+        # The second manager's pass runs between the first one's claim and adoption.
+        exchange_pass(second, now=1000.0)
+        return adopt(directory)
+
+    monkeypatch.setattr(first, "adopt", adopt_after_the_second_manager)
+    exchange_pass(first, now=1000.0)
+    staging = exchange_staging(first)
+    assert first.find_marker_by_id(marker.job_id) is not None and not os.listdir(staged.parent)
+    assert not os.listdir(staging / "outbox" / "rejected") and not os.listdir(staging / "records")
+
+
 def test_a_vanished_entry_is_skipped_silently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source, workspace = _pair(tmp_path)
     marker, staged = _stage(source, workspace, tmp_path, "a")
@@ -134,7 +191,7 @@ def test_a_vanished_entry_is_skipped_silently(tmp_path: Path, monkeypatch: pytes
 def test_reserved_dot_and_ill_formed_names_are_skipped(tmp_path: Path) -> None:
     _source, workspace = _pair(tmp_path)
     staging = _staging(workspace)
-    names = [".partial", "status.json", "rejected", "records", "outbox", "bad name", "-dash"]
+    names = [".partial", "status.json", "rejected", "records", "outbox", "managers", "withdrawn", "bad name", "-dash"]
     for name in names:
         (staging / "inbox" / name).mkdir()
     exchange_pass(workspace, now=1000.0)

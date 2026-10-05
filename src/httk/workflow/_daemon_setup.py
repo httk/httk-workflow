@@ -52,7 +52,8 @@ _MAX_LAUNCHER_BYTES = 64 * 1024
 _MAX_DISCOVERY_BYTES = 64 * 1024
 _CLUSTER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _DEFAULT_READONLY = ("/usr", "/bin", "/lib", "/lib64")
-_EXCHANGE_DIRECTORIES = ("requests", "responses", "inbox", "outbox", "outbox/rejected")
+_REPORT_DIRECTORIES = ("outbox/managers", "outbox/withdrawn")
+_EXCHANGE_DIRECTORIES = ("requests", "responses", "inbox", "outbox", "outbox/rejected", *_REPORT_DIRECTORIES)
 _STAGING_DIRECTORIES = ("inbox", "outbox", "outbox/rejected", "records")
 _MPI_ENVIRONMENT_PREFIX = "daemon.mpi.environment."
 _DEFAULT_SLURM_CONF = Path("/etc/slurm/slurm.conf")
@@ -349,6 +350,7 @@ def _compile(
             raise ValueError(f"readonly path {path} must be disjoint from the httk data home {home}")
     slurm_conf = _effective_slurm_conf(_site(site, "daemon.slurm_conf", Path))
     python = site.get("daemon.python")
+    sacct = site.get("daemon.sacct")
     max_submissions = _site(site, "daemon.max_submissions", int)
     return Policy(
         workspace=workspace,
@@ -386,6 +388,8 @@ def _compile(
         max_submissions=128 if max_submissions is None else max_submissions,
         mpi=_mpi_settings(site) if any(settings.mpi for settings in parsed.values()) else None,
         isolate_network=_site(site, "daemon.isolate_network", bool) is not False,
+        # Reporting only: no sacct on PATH is not an error, but a configured daemon.sacct must exist.
+        sacct=None if sacct is None and shutil.which("sacct") is None else _resolve_executable(sacct, "sacct"),
     )
 
 
@@ -713,6 +717,8 @@ def reload(
     _fixed_connection(old, new)
     _validate_private_directory(snapshots)
     _mkdir_exclusive(new.jobs, exist_ok=True)
+    for name in _REPORT_DIRECTORIES:
+        _mkdir_exclusive(new.exchange / name, exist_ok=True)
     _create_staging(workspace)
     check_layout(new)
     with Ledger(

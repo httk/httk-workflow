@@ -707,3 +707,18 @@ def test_isolate_network_is_written_only_when_disabled_and_binds_the_digest(tmp_
             load_policy(_write(tmp_path, {**_document(tmp_path), "isolate_network": value}))
     with pytest.raises(ValueError, match="isolate_network must be a boolean"):
         replace(policy, isolate_network=0)  # type: ignore[arg-type]
+
+
+def test_sacct_is_written_only_when_set_and_never_binds_the_digest(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    policy = load_policy(_write(tmp_path, document))
+    assert policy.sacct is None
+    # Documents and digests of policies without sacct are those of enrollments made before the setting existed.
+    assert "sacct" not in policy_document(policy)
+    accounting = replace(policy, sacct=Path("/usr/bin/sacct"))
+    assert policy_document(accounting) == {**policy_document(policy), "sacct": "/usr/bin/sacct"}
+    assert accounting.configuration_digest("cpu") == policy.configuration_digest("cpu")
+    assert load_policy(_write(tmp_path, policy_document(accounting))) == accounting
+    for value in ("relative/sacct", None, 1):
+        with pytest.raises(ValueError, match="sacct"):
+            load_policy(_write(tmp_path, {**document, "sacct": value}))

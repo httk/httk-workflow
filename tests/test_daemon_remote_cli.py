@@ -28,6 +28,7 @@ def _write_exchange(exchange: Path, public_key: str, **changes: object) -> Path:
 
     for name in ("requests", "responses", "inbox", "outbox"):
         (exchange / name).mkdir(parents=True, exist_ok=True)
+    (exchange / "outbox/withdrawn").mkdir(exist_ok=True)
     document: dict[str, object] = {
         "format": "httk-workspace-daemon-endpoint",
         "format_version": 2,
@@ -404,6 +405,9 @@ def test_parser_exposes_only_typed_daemon_controls(project: Path) -> None:
         (["status", "--handle", "2" * 32], "busy", 2),
         (["cancel", "--handle", "2" * 32, "--request-id", "1" * 32], "cancel_requested", 0),
         (["cancel", "--handle", "2" * 32, "--request-id", "1" * 32], "refused", 2),
+        (["withdraw", "--request-id", "1" * 32], "withdrawn", 0),
+        (["withdraw", "--bundle", "job.1", "--request-id", "1" * 32], "withdrawn", 0),
+        (["withdraw", "--request-id", "1" * 32], "refused", 2),
     ],
 )
 def test_cli_sends_exact_request_and_renders_confirmed_outcomes(
@@ -459,7 +463,7 @@ def test_cli_sends_exact_request_and_renders_confirmed_outcomes(
     assert isinstance(timeout, (int, float))
     assert isinstance(wait_seconds, (int, float))
     assert timeout == wait_seconds + 5
-    if verb_args[0] in {"start", "cancel"}:
+    if verb_args[0] in {"start", "cancel", "withdraw"}:
         expected_id = verb_args[verb_args.index("--request-id") + 1]
         assert expected_id in stderr_before_call
     if verb_args[0] == "start":
@@ -610,3 +614,208 @@ def test_status_without_handle_refuses_bad_files_and_request_id(project: Path) -
     assert (code, stdout) == (2, "") and "status.json" in stderr
     code, stdout, stderr = _invoke(project, ["status", "cluster", "--request-id", "1" * 32])
     assert (code, stdout) == (2, "") and "--handle" in stderr
+
+
+def _withdraw_adapter(project: Path, observed: dict[str, object], outcome: str = "withdrawn"):
+    from httk.workflow import _daemon_protocol as protocol
+
+    def run_adapter(_bundle, _operation, payload, *, timeout):
+        observed["request"] = payload["daemon_request"]
+        request = protocol.decode_request(json.dumps(payload["daemon_request"]).encode("utf-8"))
+        response = sign_response(
+            protocol.Response(
+                request.request_id,
+                WORKSPACE_ID,
+                ENROLLMENT_ID,
+                protocol.request_digest(request),
+                outcome,
+                reason="policy" if outcome == "refused" else None,
+            ),
+            seed_path=project / "response.seed",
+        )
+        return {
+            "returncode": 0 if outcome == "withdrawn" else 2,
+            "stdout": protocol.encode_response(response).decode("ascii"),
+            "stderr": "",
+        }
+
+    return run_adapter
+
+
+def _waiting(project: Path, *names: str) -> tuple[Path, Path]:
+    exchange = Path(str(_remote_settings(project)["exchange"]))
+    (exchange / "outbox" / "withdrawn").mkdir(exist_ok=True)
+    for name in names:
+        (exchange / "inbox" / name).mkdir()
+        (exchange / "inbox" / name / "payload").write_text(name, encoding="utf-8")
+    return exchange / "inbox", exchange / "outbox" / "withdrawn"
+
+
+def test_withdraw_takes_back_every_waiting_bundle_then_signs_the_request(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    inbox, withdrawn = _waiting(project, "alpha", "beta")
+    (inbox / ".hidden").mkdir()
+    (inbox / "records").mkdir()
+    (inbox / "plain-file").write_text("x", encoding="utf-8")
+    (withdrawn / "beta").mkdir()  # taken: left in place
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(cli, "run_adapter", _withdraw_adapter(project, observed))
+    code, stdout, _stderr = _invoke(project, ["withdraw", "cluster", "--request-id", "1" * 32])
+    assert code == 0
+    assert stdout.splitlines()[-1] == "taken back locally: alpha"
+    assert json.loads(stdout.splitlines()[0])["outcome"] == "withdrawn"
+    assert (withdrawn / "alpha" / "payload").read_text(encoding="utf-8") == "alpha"
+    assert not (inbox / "alpha").exists() and (inbox / "beta" / "payload").is_file()
+    assert (inbox / ".hidden").is_dir() and (inbox / "records").is_dir() and (inbox / "plain-file").is_file()
+    request = cast(Mapping[str, object], observed["request"])
+    assert request["operation"] == "withdraw" and "bundle" not in request and request["signature"]
+
+
+def test_withdraw_bundle_limits_the_local_take_back_and_is_signed(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    inbox, withdrawn = _waiting(project, "alpha", "beta")
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(cli, "run_adapter", _withdraw_adapter(project, observed))
+    code, stdout, _stderr = _invoke(project, ["withdraw", "cluster", "--bundle", "beta", "--request-id", "1" * 32])
+    assert code == 0 and stdout.splitlines()[-1] == "taken back locally: beta"
+    assert (inbox / "alpha").is_dir() and (withdrawn / "beta").is_dir() and not (withdrawn / "alpha").exists()
+    request = cast(Mapping[str, object], observed["request"])
+    assert request["operation"] == "withdraw" and request["bundle"] == "beta"
+
+
+def test_withdraw_of_an_already_moved_bundle_is_silent(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    _waiting(project)
+    monkeypatch.setattr(cli, "run_adapter", _withdraw_adapter(project, {}))
+    code, stdout, _stderr = _invoke(project, ["withdraw", "cluster", "--bundle", "gone", "--request-id", "1" * 32])
+    assert code == 0 and "taken back" not in stdout
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [[], ["--bundle", "records"], ["--bundle", "withdrawn"], ["--bundle", "../x"], ["--bundle", ".hid"]],
+)
+def test_withdraw_refuses_missing_request_id_and_bad_bundles(
+    project: Path, monkeypatch: pytest.MonkeyPatch, extra: list[str]
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    inbox, withdrawn = _waiting(project, "alpha")
+    monkeypatch.setattr(cli, "run_adapter", lambda *_a, **_k: pytest.fail("no request may be sent"))
+    args = ["withdraw", "cluster", *extra] + (["--request-id", "1" * 32] if extra else [])
+    code, _stdout, _stderr = _invoke(project, args)
+    assert code == 2 and (inbox / "alpha").is_dir() and not (withdrawn / "alpha").exists()
+
+
+def test_log_prints_the_published_bytes_and_refuses_errors(
+    project: Path, capsysbinary: pytest.CaptureFixture[bytes]
+) -> None:
+    exchange = Path(str(_remote_settings(project)["exchange"]))
+    (exchange / "outbox" / "managers").mkdir()
+    (exchange / "outbox" / "managers" / f"{'2' * 32}.log").write_bytes(b"out\n\xff")
+    bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
+    assert bundle.is_dir()
+    code = command(["remote", "daemon", "log", "cluster", "--handle", "2" * 32], CLIContext("httk", project))
+    assert code == 0 and capsysbinary.readouterr().out == b"out\n\xff"
+    code = command(["remote", "daemon", "log", "cluster", "--handle", "3" * 32], CLIContext("httk", project))
+    captured = capsysbinary.readouterr()
+    assert code == 2 and captured.out == b"" and b"no log has been published" in captured.err
+    code = command(["remote", "daemon", "log", "cluster", "--handle", "zz"], CLIContext("httk", project))
+    assert code == 2
+
+
+def test_status_without_handle_passes_managers_v2_through(project: Path) -> None:
+    _status, outbox = _passive(project)
+    managers = {
+        "format": "httk-workspace-daemon-managers",
+        "format_version": 2,
+        "enrollment_id": ENROLLMENT_ID,
+        "generated_at": "2026-01-01T00:00:00.000000Z",
+        "managers": [
+            {
+                "handle": "2" * 32,
+                "profile": "cpu",
+                "request_id": "3" * 32,
+                "state": "ENDED",
+                "job_id": None,
+                "scheduler_state": "COMPLETED",
+                "exit_code": "0:0",
+                "started_at": None,
+                "ended_at": None,
+                "log": f"managers/{'2' * 32}.log",
+            }
+        ],
+        "staged": [],
+        "staged_truncated": False,
+    }
+    (outbox / "managers.json").write_text(json.dumps(managers), encoding="utf-8")
+    code, stdout, _stderr = _invoke(project, ["status", "cluster"])
+    assert code == 0 and json.loads(stdout)["managers"] == managers
+
+
+def test_withdraw_takes_back_only_after_the_request_is_prepared(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    inbox, withdrawn = _waiting(project, "alpha")
+    seen: list[bool] = []
+    real = cli.prepare_request
+
+    def prepare(endpoint, intent):
+        seen.append((inbox / "alpha").is_dir())
+        return real(endpoint, intent)
+
+    monkeypatch.setattr(cli, "prepare_request", prepare)
+    monkeypatch.setattr(cli, "run_adapter", _withdraw_adapter(project, {}))
+    code, _stdout, _stderr = _invoke(project, ["withdraw", "cluster", "--request-id", "1" * 32])
+    assert code == 0 and seen == [True] and (withdrawn / "alpha").is_dir()
+
+
+def test_withdraw_skips_raced_targets_and_still_sends(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    inbox, _withdrawn = _waiting(project, "alpha", "beta")
+    real = os.rename
+
+    def rename(name, *args, **kwargs):
+        if name == "alpha":
+            raise OSError(errno.ENOTEMPTY, "raced")
+        return real(name, *args, **kwargs)
+
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(cli, "run_adapter", _withdraw_adapter(project, observed))
+    code, stdout, _stderr = _invoke(project, ["withdraw", "cluster", "--request-id", "1" * 32])
+    assert code == 0 and "request" in observed
+    assert stdout.splitlines()[-1] == "taken back locally: beta" and (inbox / "alpha").is_dir()
+
+
+def test_withdraw_reports_a_missing_withdrawn_directory(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    _inbox, withdrawn = _waiting(project, "alpha")
+    withdrawn.rmdir()
+    monkeypatch.setattr(cli, "run_adapter", lambda *_a, **_k: pytest.fail("no request may be sent"))
+    code, _stdout, stderr = _invoke(project, ["withdraw", "cluster", "--request-id", "1" * 32])
+    assert code == 2 and "no outbox/withdrawn directory" in stderr
+
+
+def test_withdraw_never_follows_or_moves_a_symlink(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    inbox, withdrawn = _waiting(project)
+    outside = project.parent / "outside"
+    outside.mkdir()
+    (inbox / "link").symlink_to(outside)
+    monkeypatch.setattr(cli, "run_adapter", _withdraw_adapter(project, {}))
+    code, stdout, _stderr = _invoke(project, ["withdraw", "cluster", "--request-id", "1" * 32])
+    assert code == 0 and "taken back" not in stdout
+    assert (inbox / "link").is_symlink() and not (withdrawn / "link").exists() and outside.is_dir()

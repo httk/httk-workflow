@@ -609,12 +609,41 @@ def _passive_documents(endpoint: Endpoint) -> tuple[dict[str, object], dict[str,
     }
     managers: dict[str, object] = {
         "format": "httk-workspace-daemon-managers",
-        "format_version": 1,
+        "format_version": 2,
         "enrollment_id": endpoint.enrollment_id,
         "generated_at": "2026-01-01T00:00:00.000000Z",
-        "managers": [{"handle": HANDLE, "profile": "cpu", "request_id": REQUEST_ID, "state": "RUNNING"}],
+        "managers": [
+            {
+                "handle": HANDLE,
+                "profile": "cpu",
+                "request_id": REQUEST_ID,
+                "state": "RUNNING",
+                "job_id": None,
+                "scheduler_state": "RUNNING",
+                "exit_code": None,
+                "started_at": "2026-01-01T00:00:00Z",
+                "ended_at": None,
+                "log": None,
+            }
+        ],
+        "staged": ["a", "b"],
+        "staged_truncated": False,
     }
     return status, managers
+
+
+_MANAGER: dict[str, object] = {
+    "handle": HANDLE,
+    "profile": "cpu",
+    "request_id": REQUEST_ID,
+    "state": "ENDED",
+    "job_id": "7",
+    "scheduler_state": "COMPLETED",
+    "exit_code": "0:0",
+    "started_at": "s",
+    "ended_at": "e",
+    "log": f"managers/{HANDLE}.log",
+}
 
 
 def _publish(endpoint: Endpoint, name: str, document: object) -> Path:
@@ -645,6 +674,15 @@ def test_passive_status_reads_both_files_or_none(tmp_path: Path) -> None:
         ("status.json", {"workspace_id": "12345678-1234-1234-1234-000000000000"}),
         ("managers.json", {"enrollment_id": "0" * 32}),
         ("managers.json", {"managers": [{"handle": 1, "profile": "p", "request_id": "r", "state": "s"}]}),
+        ("managers.json", {"format_version": 1}),
+        ("managers.json", {"extra": 1}),
+        ("managers.json", {"staged": "a"}),
+        ("managers.json", {"staged": ["a", 1]}),
+        ("managers.json", {"staged_truncated": "no"}),
+        ("managers.json", {"managers": [{**_MANAGER, "job_id": 5}]}),
+        ("managers.json", {"managers": [{**_MANAGER, "log": []}]}),
+        ("managers.json", {"managers": [{**_MANAGER, "extra": None}]}),
+        ("managers.json", {"managers": [{k: v for k, v in _MANAGER.items() if k != "log"}]}),
         ("managers.json", {"format": "httk-workspace-daemon-status"}),
     ],
 )
@@ -655,6 +693,23 @@ def test_passive_status_refuses_invalid_documents(tmp_path: Path, name: str, cha
     document.update(change)
     _publish(endpoint, name, document)
     with pytest.raises(ValueError, match=name):
+        client_module.read_passive_status(endpoint)
+
+
+def test_passive_status_accepts_managers_v1_and_refuses_other_versions(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    _status, managers = _passive_documents(endpoint)
+    v1 = {k: v for k, v in managers.items() if k not in {"staged", "staged_truncated"}}
+    v1["format_version"] = 1
+    v1["managers"] = [{k: _MANAGER[k] for k in ("handle", "profile", "request_id", "state")}]
+    _publish(endpoint, "managers.json", v1)
+    assert client_module.read_passive_status(endpoint)["managers"] == v1
+    for bad in (0, 3):
+        _publish(endpoint, "managers.json", {**managers, "format_version": bad})
+        with pytest.raises(ValueError, match="managers.json"):
+            client_module.read_passive_status(endpoint)
+    _publish(endpoint, "managers.json", {**v1, "staged": []})  # v1 with v2 fields
+    with pytest.raises(ValueError, match="managers.json"):
         client_module.read_passive_status(endpoint)
 
 
@@ -681,3 +736,45 @@ def test_passive_status_fails_closed_when_the_enrollment_changed(tmp_path: Path)
     _write_endpoint(endpoint.exchange, _document(endpoint.public_key, enrollment_id="0" * 32))
     with pytest.raises(ValueError, match="enrollment"):
         client_module.read_passive_status(endpoint)
+
+
+def _log_directory(endpoint: Endpoint) -> Path:
+    directory = endpoint.exchange / "outbox" / "managers"
+    directory.mkdir(exist_ok=True)
+    return directory
+
+
+def test_manager_log_is_returned_as_published(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    data = b"line\n\xff\x00bytes"
+    (_log_directory(endpoint) / f"{HANDLE}.log").write_bytes(data)
+    assert client_module.read_manager_log(endpoint, HANDLE) == data
+
+
+def test_manager_log_missing_and_bad_handle(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    _log_directory(endpoint)
+    with pytest.raises(ValueError, match="no log has been published for this manager yet"):
+        client_module.read_manager_log(endpoint, HANDLE)
+    for bad in ("../x", HANDLE.upper(), HANDLE[:-1], ""):
+        with pytest.raises(ValueError, match="handle"):
+            client_module.read_manager_log(endpoint, bad)
+
+
+def test_manager_log_refuses_unsafe_files(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    path = _log_directory(endpoint) / f"{HANDLE}.log"
+    (tmp_path / "elsewhere.log").write_bytes(b"x")
+    path.symlink_to(tmp_path / "elsewhere.log")
+    with pytest.raises(OSError):
+        client_module.read_manager_log(endpoint, HANDLE)
+    path.unlink()
+    os.mkfifo(path)
+    with pytest.raises(ValueError, match="regular"):  # returns without blocking
+        client_module.read_manager_log(endpoint, HANDLE)
+    path.unlink()
+    path.write_bytes(b"x" * (1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="exceeds"):
+        client_module.read_manager_log(endpoint, HANDLE)
+    path.write_bytes(b"x" * (1024 * 1024))
+    assert len(client_module.read_manager_log(endpoint, HANDLE)) == 1024 * 1024

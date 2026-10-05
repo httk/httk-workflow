@@ -15,6 +15,8 @@ from ._daemon_policy import Policy, Profile
 _VERSION = re.compile(r"slurm (\d+)\.(\d+)\.(\d+)(?:[.-][A-Za-z0-9.-]+)?\s*\Z")
 _JOB = re.compile(r"[1-9][0-9]{0,19}\Z")
 _STATE = re.compile(r"[A-Z_]{1,64}\Z")
+_EXIT_CODE = re.compile(r"[0-9]{1,3}:[0-9]{1,3}\Z")
+_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\Z")
 
 
 class SchedulerError(RuntimeError):
@@ -35,6 +37,22 @@ class Submission:
 
     job_id: str
     cluster: str
+
+
+@dataclass(frozen=True, slots=True)
+class Observation:
+    """One manager job's Slurm accounting record.
+
+    :param scheduler_state: Uppercase scheduler state, without a ``by <uid>`` suffix.
+    :param exit_code: Slurm ``exit:signal`` code.
+    :param started_at: Slurm start time as printed, or ``None`` before the job started.
+    :param ended_at: Slurm end time as printed, or ``None`` before the job ended.
+    """
+
+    scheduler_state: str
+    exit_code: str
+    started_at: str | None
+    ended_at: str | None
 
 
 def excerpt(text: str, limit: int = 500) -> str:
@@ -292,6 +310,54 @@ class SlurmGateway:
         if _STATE.fullmatch(row[3]) is None:
             raise SchedulerError("scheduler status is malformed")
         return row[3]
+
+    def accounting(self, job_id: str, cluster: str, handle: str) -> Observation | None:
+        """Read the accounting record of one recorded manager job when its identity matches.
+
+        :param job_id: Protected numeric job identifier.
+        :param cluster: Protected scheduler cluster.
+        :param handle: Protected correlation handle.
+        :return: The matching record, or ``None`` without one or without a configured ``sacct``.
+        :raises SchedulerError: If the client fails or the matching record is malformed or ambiguous.
+        """
+
+        if self.policy.sacct is None:
+            return None
+        if cluster != self.policy.cluster:
+            raise SchedulerError("recorded cluster is outside the current policy")
+        output = _checked(
+            [
+                str(self.policy.sacct),
+                f"--clusters={cluster}",
+                "-j",
+                job_id,
+                "-X",
+                "-n",
+                "-P",
+                "--format=JobID,JobName,UID,State,ExitCode,Start,End",
+            ],
+            self.policy,
+        )
+        rows = [
+            fields
+            for fields in (line.split("|") for line in output.decode("ascii", "replace").splitlines())
+            if fields[:3] == [job_id, f"httk-{handle}", self._uid] and len(fields) == 7
+        ]
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise SchedulerError("scheduler accounting is ambiguous")
+        state, exit_code, started, ended = rows[0][3:]
+        state = state.split(" ", 1)[0]  # "CANCELLED by 123"
+        if _STATE.fullmatch(state) is None or _EXIT_CODE.fullmatch(exit_code) is None:
+            raise SchedulerError("scheduler accounting is malformed")
+        # Slurm prints "Unknown" or "None" for times it does not have.
+        return Observation(
+            state,
+            exit_code,
+            started if _TIME.fullmatch(started) else None,
+            ended if _TIME.fullmatch(ended) else None,
+        )
 
     def cancel(self, job_id: str, cluster: str, handle: str) -> None:
         """Request cancellation with identity filters applied by Slurm itself.

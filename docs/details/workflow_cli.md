@@ -1202,6 +1202,8 @@ unambiguous.
 | `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`, `--request-id`; `--wait-seconds` |
 | `remote daemon status REMOTE` | print the passive exchange status, or with `--handle` inspect a manager by signed request | `--handle`, `--request-id` (only with `--handle`), `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
+| `remote daemon log REMOTE` | print a manager's published `outbox/managers/<handle>.log` as is (exit 2 until published) | required `--handle` |
+| `remote daemon withdraw REMOTE` | take your waiting bundles back from `inbox` locally, then send the signed `withdraw` request; both land in `outbox/withdrawn/<name>` | required `--request-id`; `--bundle`, `--wait-seconds` |
 
 `remote show NAME` reports which file each setting came from, but never a
 credential value: a setting stored in the manifest-excluded `credentials.json`

@@ -323,6 +323,7 @@ class Policy:
     :param mpi: Optional protected MPI launcher and containment settings.
     :param isolate_network: Whether job sandboxes get a private network namespace; when false they share
         the host network but stay otherwise confined.
+    :param sacct: Optional Slurm accounting executable, used only to report how manager jobs ended.
     """
 
     workspace: Path
@@ -349,6 +350,7 @@ class Policy:
     request_max_age: int = 3600
     mpi: MPISettings | None = None
     isolate_network: bool = True
+    sacct: Path | None = None
 
     def __post_init__(self) -> None:
         mutable = tuple(
@@ -416,6 +418,8 @@ class Policy:
             raise ValueError("python must be within readonly_paths")
         if self.slurm_conf is not None:
             _path(self.slurm_conf, "slurm_conf")
+        if self.sacct is not None:
+            _path(self.sacct, "sacct")
 
         if self.mpi is not None:
             if not isinstance(self.mpi, MPISettings):
@@ -497,6 +501,7 @@ class Policy:
         :raises ValueError: If the configuration is unknown.
         """
 
+        # sacct only reports how managers ended, so it is deliberately not bound.
         document = policy_document(self)
         mpi = document.get("mpi")
         if isinstance(mpi, dict):
@@ -681,6 +686,9 @@ def policy_document(policy: Policy) -> dict[str, object]:
         }
     if not policy.isolate_network:
         result["isolate_network"] = False
+    # Present only when set, so documents of policies without it stay unchanged.
+    if policy.sacct is not None:
+        result["sacct"] = str(policy.sacct)
     return result
 
 
@@ -729,6 +737,7 @@ def _decode_policy(data: bytes) -> Policy:
         "request_max_age",
         "mpi",
         "isolate_network",
+        "sacct",
     }
     if "authorized_keys" not in value:
         raise ValueError("policy authorized_keys is required and must be a nonempty array")
@@ -867,6 +876,7 @@ def _decode_policy(data: bytes) -> Policy:
         slurm_conf=_json_path(value["slurm_conf"], "slurm_conf") if "slurm_conf" in value else None,
         mpi=mpi,
         isolate_network="isolate_network" not in value,
+        sacct=_json_path(value["sacct"], "sacct") if "sacct" in value else None,
         **kwargs,
     )
 

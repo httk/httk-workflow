@@ -283,7 +283,7 @@ def test_managers_lists_only_manager_starts_with_ledger_state(tmp_path: Path) ->
         handle = ledger.admit(start).handle
         assert handle is not None
         row = {"handle": handle, "profile": "cpu", "request_id": start.request_id}
-        assert ledger.managers() == [{**row, "state": "received"}]
+        assert ledger.managers() == [{**row, "state": "received", "job_id": None}]
         ledger.begin_submission(start.request_id)
         ledger.finish(start.request_id, _response(start, "submitted", handle=handle), job_id="7", cluster="c")
-        assert ledger.managers() == [{**row, "state": "submitted"}]
+        assert ledger.managers() == [{**row, "state": "submitted", "job_id": "7"}]

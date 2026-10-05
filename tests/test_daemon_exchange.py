@@ -13,7 +13,7 @@ from httk.workflow import _daemon_exchange as exchange_module
 from httk.workflow._daemon_exchange import ExchangeMover
 
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
-MANAGER = {"handle": "a" * 32, "profile": "cpu", "request_id": "1" * 32, "state": "submitted"}
+MANAGER: dict[str, str | None] = {"handle": "a" * 32, "profile": "cpu", "request_id": "1" * 32, "state": "submitted"}
 
 
 def _site(tmp_path: Path) -> tuple[ExchangeMover, Path, Path]:
@@ -39,7 +39,7 @@ def _bundle(path: Path) -> Path:
     return path
 
 
-def _poll(mover: ExchangeMover, managers: list[dict[str, str]] | None = None) -> None:
+def _poll(mover: ExchangeMover, managers: list[dict[str, str | None]] | None = None) -> None:
     def expired(_signum: int, _frame: object) -> None:
         raise TimeoutError("exchange poll blocked")
 
@@ -258,10 +258,11 @@ def test_managers_document_is_rewritten_only_when_rows_change(tmp_path: Path) ->
     _poll(mover, [MANAGER])
     document = json.loads(path.read_bytes())
     assert document["format"] == "httk-workspace-daemon-managers"
-    assert document["format_version"] == 1
+    assert document["format_version"] == 2
     assert document["enrollment_id"] == ENROLLMENT_ID
     assert document["generated_at"].endswith("Z")
     assert document["managers"] == [MANAGER]
+    assert (document["staged"], document["staged_truncated"]) == ([], False)
     inode = path.stat().st_ino
     _poll(mover, [dict(MANAGER)])
     assert path.stat().st_ino == inode
@@ -284,3 +285,52 @@ def test_staging_directory_swapped_for_symlink_is_refused(tmp_path: Path) -> Non
     assert os.listdir(decoy) == []
     assert (exchange / "inbox/job").is_dir()
     assert (exchange / "outbox/done").is_dir()
+
+
+def test_managers_document_lists_waiting_names_from_both_inboxes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mover, exchange, staging = _site(tmp_path)
+    path = exchange / "outbox/managers.json"
+    (exchange / "inbox/fresh").write_text("names only: never opened", encoding="utf-8")
+    _bundle(staging / "inbox/waiting")
+    for name in (".hidden", "managers", "withdrawn", "-dash"):
+        _bundle(staging / "inbox" / name)
+    _poll(mover, [MANAGER])
+    document = json.loads(path.read_bytes())
+    assert document["staged"] == ["fresh", "waiting"] and document["staged_truncated"] is False
+    inode = path.stat().st_ino
+    _poll(mover, [MANAGER])
+    assert path.stat().st_ino == inode
+    monkeypatch.setattr(exchange_module, "_MAX_STAGED", 1)
+    _poll(mover, [MANAGER])
+    document = json.loads(path.read_bytes())
+    assert document["staged"] == ["fresh"] and document["staged_truncated"] is True
+
+
+def test_reserved_report_directories_are_never_moved(tmp_path: Path) -> None:
+    mover, exchange, staging = _site(tmp_path)
+    for name in ("managers", "withdrawn"):
+        _bundle(staging / "outbox" / name)
+        _bundle(exchange / "inbox" / name)
+    _poll(mover)
+    for name in ("managers", "withdrawn"):
+        assert (staging / "outbox" / name / "payload").is_file()
+        assert (exchange / "inbox" / name / "payload").is_file()
+        assert not (exchange / "outbox" / name).exists()
+
+
+def test_manager_log_is_published_into_a_created_directory(tmp_path: Path) -> None:
+    mover, exchange, _ = _site(tmp_path)
+    handle = "a" * 32
+    assert mover.publish_log(handle, b"first")
+    assert (exchange / f"outbox/managers/{handle}.log").read_bytes() == b"first"
+    assert (exchange / "outbox/managers").stat().st_mode & 0o777 == 0o700
+    assert mover.publish_log(handle, b"second")
+    assert os.listdir(exchange / "outbox/managers") == [f"{handle}.log"]
+    assert (exchange / f"outbox/managers/{handle}.log").read_bytes() == b"second"
+    (exchange / "outbox/managers" / f"{handle}.log").unlink()
+    (exchange / "outbox/managers").rmdir()
+    (exchange / "outbox/managers").symlink_to(_bundle(tmp_path / "decoy"), target_is_directory=True)
+    assert not mover.publish_log(handle, b"third")
+    assert os.listdir(tmp_path / "decoy") == ["payload"]

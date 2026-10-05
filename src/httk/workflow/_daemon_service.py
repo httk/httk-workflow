@@ -1,22 +1,28 @@
 """Foreground broker for the confined workspace daemon."""
 
 import argparse
+import errno
+import json
 import logging
+import os
 import re
 import signal
 import sqlite3
+import stat
 import sys
 import threading
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import FrameType
+from typing import TypedDict, cast
 
 from ._daemon_activation import verify_active_snapshot
 from ._daemon_auth import check_request_time, sign_response, verify_request
-from ._daemon_exchange import ExchangeMover
+from ._daemon_exchange import ExchangeMover, _install
 from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MailboxDirectory
-from ._daemon_policy import Policy, load_policy
+from ._daemon_policy import Policy, _open_directory, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
 from ._daemon_slurm import SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger
@@ -27,6 +33,94 @@ _STATE_DIRECTORY = Path("/tmp/control")
 _ROOT_DIRECTORY = Path("/tmp/daemon-root")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+_OBSERVATIONS = "observations.json"
+#: The least time between two scheduler checks of the submitted managers.
+_OBSERVE_SECONDS = 60.0
+#: How long a manager may be unknown to both squeue and sacct before it is reported ``GONE``.
+_GONE_SECONDS = 30 * 60.0
+_MAX_LOG_BYTES = 1024 * 1024
+_MAX_OBSERVATIONS_BYTES = 16 * 1024 * 1024
+_FINAL_STATES = frozenset(
+    {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "NODE_FAIL",
+        "PREEMPTED",
+        "BOOT_FAIL",
+        "DEADLINE",
+    }
+)
+_PUBLISHED = ("scheduler_state", "exit_code", "started_at", "ended_at", "log")
+_MAX_WARNED = 4096
+
+
+class _Observation(TypedDict):
+    job_id: str
+    cluster: str
+    scheduler_state: str
+    exit_code: str | None
+    started_at: str | None
+    ended_at: str | None
+    final: bool
+    log_published: bool
+    checked_at: float
+    unknown_since: float | None
+
+
+_OBSERVATION_TYPES: dict[str, tuple[type, ...]] = {
+    "job_id": (str,),
+    "cluster": (str,),
+    "scheduler_state": (str,),
+    "exit_code": (str, type(None)),
+    "started_at": (str, type(None)),
+    "ended_at": (str, type(None)),
+    "final": (bool,),
+    "log_published": (bool,),
+    "checked_at": (int, float),
+    "unknown_since": (int, float, type(None)),
+}
+
+
+def _read_tail(path: Path, limit: int) -> bytes:
+    """Return at most the last ``limit`` bytes of a regular file, without following or blocking on it.
+
+    A symlink raises ``OSError`` with ``ELOOP``, and any other non-regular file ``ValueError``.
+    """
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        information = os.fstat(descriptor)
+        if not stat.S_ISREG(information.st_mode):
+            raise ValueError("not a regular file")
+        os.lseek(descriptor, max(0, information.st_size - limit), os.SEEK_SET)
+        data = bytearray()
+        while len(data) < limit and (chunk := os.read(descriptor, limit - len(data))):
+            data.extend(chunk)
+        return bytes(data)
+    finally:
+        os.close(descriptor)
+
+
+def _load_observations(path: Path) -> dict[str, _Observation]:
+    """Read the derived observations; anything absent or invalid reads as unobserved."""
+
+    try:
+        value = json.loads(_read_tail(path, _MAX_OBSERVATIONS_BYTES))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        handle: cast(_Observation, entry)
+        for handle, entry in value.items()
+        if isinstance(entry, dict)
+        and set(entry) == set(_OBSERVATION_TYPES)
+        and all(type(entry[key]) in types for key, types in _OBSERVATION_TYPES.items())
+        and _JOB_ID.fullmatch(entry["job_id"]) is not None  # it names the Slurm output file read for the log
+    }
 
 
 class Broker:
@@ -40,6 +134,8 @@ class Broker:
     :param exchange: Mover between the client exchange and the workspace staging area; ``None`` skips
         the exchange pass.
     :param response_seed: Validated protected response-signing seed.
+    :param state: Protected state directory for the derived ``observations.json``; ``None`` skips following
+        manager jobs.
     """
 
     def __init__(
@@ -52,6 +148,7 @@ class Broker:
         *,
         exchange: ExchangeMover | None = None,
         response_seed: Path,
+        state: Path | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
             raise ValueError("response_seed must be a Path")
@@ -63,6 +160,11 @@ class Broker:
         self.responses = responses
         self.exchange = exchange
         self.response_seed = response_seed
+        self.state = state
+        self._observations = {} if state is None else _load_observations(state / _OBSERVATIONS)
+        self._saved: bytes | None = None
+        self._observed_at: float | None = None
+        self._warned: set[tuple[str, str]] = set()
 
     @staticmethod
     def _response(request: Request, outcome: str, **fields: str | None) -> Response:
@@ -229,10 +331,20 @@ class Broker:
         completed = self.ledger.finish(request.request_id, response)
         return self._finished_response(completed)
 
+    def _withdraw(self, request: Request) -> Response:
+        """Move waiting bundles out of the workspace staging inbox and list them in the response."""
+
+        names = [] if self.exchange is None else self.exchange.withdraw(request.bundle)
+        _LOGGER.info("daemon_withdrawn names=%s", ",".join(names))
+        detail = ",".join(names)
+        if len(detail) > 1000:
+            detail = detail[:996].rsplit(",", 1)[0] + ",..."
+        return self._response(request, "withdrawn", detail=detail or None)
+
     def _execute(self, entry: Entry) -> Response:
         request = entry.request
-        if request.operation == "health":
-            response = self._response(request, "ready")
+        if request.operation in {"health", "withdraw"}:
+            response = self._response(request, "ready") if request.operation == "health" else self._withdraw(request)
             completed = self.ledger.finish(request.request_id, response)
             return self._finished_response(completed)
         if request.operation == "start_manager":
@@ -324,10 +436,168 @@ class Broker:
             self._process(publication, request)
         if self.exchange is not None:
             try:
-                self.exchange.poll(self.ledger.managers())
+                rows = self.ledger.managers()
+                try:
+                    self._observe(rows, time.time())
+                except Exception as exc:
+                    _LOGGER.warning("daemon_manager_observation_failed reason=%s", excerpt(str(exc)))
+                self.exchange.poll(self._manager_rows(rows))
             except Exception:
                 _LOGGER.exception("daemon_exchange_failed")
         return processed
+
+    def _manager_rows(self, rows: list[dict[str, str | None]]) -> list[dict[str, str | None]]:
+        """Extend ledger manager rows, which carry the job ID, with what the scheduler last reported."""
+
+        result: list[dict[str, str | None]] = []
+        for row in rows:
+            observation = self._observations.get(str(row["handle"]))
+            if observation is None:
+                result.append({**row, **dict.fromkeys(_PUBLISHED)})
+                continue
+            result.append(
+                {
+                    **row,
+                    "scheduler_state": observation["scheduler_state"],
+                    "exit_code": observation["exit_code"],
+                    "started_at": observation["started_at"],
+                    "ended_at": observation["ended_at"],
+                    "log": f"managers/{row['handle']}.log" if observation["log_published"] else None,
+                }
+            )
+        return result
+
+    def _observe(self, rows: list[dict[str, str | None]], now: float) -> None:
+        """Follow each submitted manager job until it ends, then publish its Slurm output once.
+
+        Runs at most once per 60 seconds; a failed check is logged and retried on the next run.
+        """
+
+        if self.state is None or self.exchange is None:
+            return
+        if self._observed_at is not None and 0.0 <= now - self._observed_at < _OBSERVE_SECONDS:
+            return
+        self._observed_at = now
+        for row in rows:
+            handle = str(row["handle"])
+            observation = self._observations.get(handle)
+            if row["state"] == "submitted" and (observation is None or not observation["final"]):
+                entry = self.ledger.lookup_manager(handle)
+                if entry is None or entry.job_id is None or entry.cluster is None:
+                    raise sqlite3.DatabaseError("submitted manager has no scheduler identity")
+                try:
+                    observation = self._check(handle, entry.job_id, entry.cluster, observation, now)
+                except SchedulerError as exc:
+                    _LOGGER.warning(
+                        "daemon_manager_check_failed handle=%s job_id=%s detail=%s",
+                        handle,
+                        entry.job_id,
+                        excerpt(str(exc), 1000),
+                    )
+                    continue
+                self._observations[handle] = observation
+            if observation is not None and observation["final"] and not observation["log_published"]:
+                self._publish_log(handle, observation)
+        data = json.dumps(self._observations, sort_keys=True, separators=(",", ":")).encode("ascii")
+        if data == self._saved:
+            return
+        try:
+            directory = _open_directory(self.state)
+            try:
+                _install(directory, _OBSERVATIONS, ".observations-", data)
+            finally:
+                os.close(directory)
+        except OSError as exc:
+            _LOGGER.warning("daemon_observations_unsaved reason=%s", exc.strerror)
+            return
+        self._saved = data
+
+    def _check(self, handle: str, job_id: str, cluster: str, previous: _Observation | None, now: float) -> _Observation:
+        """Ask squeue, then sacct once squeue no longer knows the job or reports it ended."""
+
+        state = self.gateway.status(job_id, cluster, handle)
+        record = None
+        if state == "UNKNOWN" or state in _FINAL_STATES:
+            try:
+                record = self.gateway.accounting(job_id, cluster, handle)
+            except SchedulerError as exc:
+                # Treated as no record, so the GONE timer still runs while slurmdbd is down.
+                detail = excerpt(str(exc), 1000)
+                if (handle, detail) not in self._warned:
+                    # ponytail: one line per handle and error until 4096 pairs, then the memory resets.
+                    if len(self._warned) >= _MAX_WARNED:
+                        self._warned.clear()
+                    self._warned.add((handle, detail))
+                    _LOGGER.warning(
+                        "daemon_manager_accounting_failed handle=%s job_id=%s detail=%s", handle, job_id, detail
+                    )
+        exit_code, started_at, ended_at = (
+            (None, None, None)
+            if previous is None
+            else (previous["exit_code"], previous["started_at"], previous["ended_at"])
+        )
+        since = None
+        if record is not None:
+            state, exit_code, started_at, ended_at = (
+                record.scheduler_state,
+                record.exit_code,
+                record.started_at,
+                record.ended_at,
+            )
+            final = state in _FINAL_STATES
+        else:
+            if state == "UNKNOWN" and previous is not None and previous["scheduler_state"] in _FINAL_STATES:
+                state = previous["scheduler_state"]  # squeue saw it end; accounting has not caught up yet
+            # Without sacct a final squeue state is all there will be; with it, wait for the exit code.
+            final = state in _FINAL_STATES and self.policy.sacct is None
+            if state == "UNKNOWN" or not final and state in _FINAL_STATES:
+                since = now if previous is None or previous["unknown_since"] is None else previous["unknown_since"]
+                if now - since >= _GONE_SECONDS:
+                    state, final = "GONE" if state == "UNKNOWN" else state, True
+        observation: _Observation = {
+            "job_id": job_id,
+            "cluster": cluster,
+            "scheduler_state": state,
+            "exit_code": exit_code,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "final": final,
+            "log_published": False,
+            "checked_at": now,
+            "unknown_since": since,
+        }
+        if previous is None or (previous["scheduler_state"], previous["exit_code"]) != (
+            observation["scheduler_state"],
+            observation["exit_code"],
+        ):
+            _LOGGER.info(
+                "daemon_manager_state handle=%s job_id=%s state=%s exit_code=%s",
+                handle,
+                job_id,
+                observation["scheduler_state"],
+                observation["exit_code"],
+            )
+        return observation
+
+    def _publish_log(self, handle: str, observation: _Observation) -> None:
+        """Publish the tail of a finished manager's private Slurm output into the exchange outbox."""
+
+        assert self.exchange is not None
+        source = self.policy.jobs / f"httk-{observation['job_id']}.out"
+        try:
+            data = _read_tail(source, _MAX_LOG_BYTES)
+        except FileNotFoundError:
+            data = os.fsencode(f"no Slurm output was found at {source}\n")
+        except ValueError:
+            data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
+        except OSError as exc:
+            if exc.errno != errno.ELOOP:
+                _LOGGER.warning("daemon_manager_log_unread handle=%s reason=%s", handle, exc.strerror)
+                return
+            data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
+        if self.exchange.publish_log(handle, data):
+            observation["log_published"] = True
+            _LOGGER.info("daemon_manager_log handle=%s path=outbox/managers/%s.log", handle, handle)
 
     def run(self, stop: threading.Event, *, once: bool = False) -> None:
         """Run bounded scans until stopped, or one scan when requested."""
@@ -397,7 +667,9 @@ def _run(arguments: argparse.Namespace) -> None:
                 return
             mover = ExchangeMover(_ROOT_DIRECTORY, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
             ledger.recover()
-            broker = Broker(policy, gateway, ledger, requests, responses, exchange=mover, response_seed=seed)
+            broker = Broker(
+                policy, gateway, ledger, requests, responses, exchange=mover, response_seed=seed, state=_STATE_DIRECTORY
+            )
             _LOGGER.info(
                 "daemon_started workspace=%s enrollment=%s launchers=%s",
                 policy.workspace_id,

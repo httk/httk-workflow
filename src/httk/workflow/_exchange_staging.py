@@ -37,7 +37,19 @@ __all__ = ["exchange_pass"]
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _RESERVED = frozenset(
-    {"endpoint.json", "status.json", "managers.json", "rejected", "requests", "responses", "inbox", "outbox", "records"}
+    {
+        "endpoint.json",
+        "status.json",
+        "managers.json",
+        "managers",
+        "withdrawn",
+        "rejected",
+        "requests",
+        "responses",
+        "inbox",
+        "outbox",
+        "records",
+    }
 )
 _REASON_LIMIT = 1000
 _RECORD_LIMIT = 16 * 1024
@@ -113,48 +125,89 @@ def _record(workspace: Workspace, name: str, document: dict[str, str]) -> None:
     write_json_atomic(path, {**document, "at": _timestamp(None)}, durable=workspace.durable)
 
 
+#: The dot prefix a manager renames a staged directory to before adopting it:
+#: dot names are invisible to the broker, so a ``withdraw`` cannot take a tree
+#: root whose members are already adopted.
+_CLAIM = ".adopting-"
+
+
+def _eligible(name: str) -> bool:
+    return not name.startswith(".") and name not in _RESERVED and _NAME.fullmatch(name) is not None
+
+
 def _adopt_staged(workspace: Workspace) -> None:
     staging = exchange_staging(workspace)
-    inbox, rejected = staging / "inbox", staging / "outbox" / "rejected"
-    if not (_directory(inbox) and _directory(rejected) and _directory(staging / "records")):
+    inbox = staging / "inbox"
+    if not (_directory(inbox) and _directory(staging / "outbox" / "rejected") and _directory(staging / "records")):
         return
-    for name in sorted(os.listdir(inbox)):
-        if name.startswith(".") or name in _RESERVED or _NAME.fullmatch(name) is None:
+    entries = sorted(os.listdir(inbox))
+    # Claims a crashed pass left behind come first; another manager's live claim
+    # is safe too: adoption is serialized, and whoever comes second sees ENOENT.
+    for entry in entries:
+        if entry.startswith(_CLAIM) and _eligible(entry[len(_CLAIM) :]):
+            _adopt_claimed(workspace, entry[len(_CLAIM) :])
+    for name in entries:
+        if not _eligible(name) or _removed_non_directory(workspace, inbox / name, name):
             continue
-        path = inbox / name
+        claimed = inbox / f"{_CLAIM}{name}"
+        if os.path.lexists(claimed):
+            continue  # another manager is adopting this name
         try:
-            if not stat.S_ISDIR(os.lstat(path).st_mode):
-                # Never a job directory, and the broker forwards only directories,
-                # so it would pin its name in rejected/ for good.
-                path.unlink()
-                _LOGGER.warning("removed staged entry %s: not a job directory", name)
-                _record(
-                    workspace,
-                    f"rejected-{name}",
-                    {"name": name, "reason": "not a job directory (a symlink, file or special file); removed"},
-                )
-                continue
+            # ponytail: check-then-rename, not RENAME_NOREPLACE; the workspace is single-principal.
+            os.rename(inbox / name, claimed)
         except FileNotFoundError:
+            continue  # another manager or a broker withdraw took it
+        except OSError as exc:
+            _LOGGER.warning("cannot claim staged job directory %s: %s", name, exc)
             continue
-        try:
-            workspace.adopt(path)
-        except Exception as exc:
-            if not os.path.lexists(path):
-                continue  # another manager took it
-            reason = f"{type(exc).__name__}: {exc}"
-            _LOGGER.warning("refused staged job directory %s: %s", name, reason)
-            if os.path.lexists(rejected / name):
-                _LOGGER.warning("rejected/%s is still taken; %s stays in the inbox", name, name)
-            else:
-                try:
-                    # ponytail: check-then-rename, not RENAME_NOREPLACE; the workspace is single-principal.
-                    os.rename(path, rejected / name)
-                except FileNotFoundError:
-                    continue
-            _record(workspace, f"rejected-{name}", {"name": name, "reason": reason})
-        else:
-            _LOGGER.info("adopted staged job directory %s", name)
-            (staging / "records" / f"rejected-{name}.json").unlink(missing_ok=True)
+        _adopt_claimed(workspace, name)
+
+
+def _removed_non_directory(workspace: Workspace, path: Path, name: str) -> bool:
+    """Remove a staged entry that is not a directory; report whether *path* is gone."""
+
+    try:
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            return False
+        # Never a job directory, and the broker forwards only directories, so it
+        # would pin its name in rejected/ for good.
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    _LOGGER.warning("removed staged entry %s: not a job directory", name)
+    reason = "not a job directory (a symlink, file or special file); removed"
+    _record(workspace, f"rejected-{name}", {"name": name, "reason": reason})
+    return True
+
+
+def _adopt_claimed(workspace: Workspace, name: str) -> None:
+    """Adopt ``inbox/.adopting-<name>``; a refusal goes to ``outbox/rejected/<name>``."""
+
+    staging = exchange_staging(workspace)
+    path, rejected = staging / "inbox" / f"{_CLAIM}{name}", staging / "outbox" / "rejected" / name
+    if _removed_non_directory(workspace, path, name):
+        return
+    try:
+        workspace.adopt(path)
+    except Exception as exc:
+        if not os.path.lexists(path):
+            return  # another manager adopted or refused it
+        reason = f"{type(exc).__name__}: {exc}"
+        _LOGGER.warning("refused staged job directory %s: %s", name, reason)
+        # A taken rejected/<name> sends it back to inbox/<name> instead, where a
+        # broker withdraw can still return it; it stays claimed only if that is taken too.
+        target = staging / "inbox" / name if os.path.lexists(rejected) else rejected
+        if target != rejected:
+            _LOGGER.warning("rejected/%s is still taken; %s stays in the inbox", name, name)
+        if not os.path.lexists(target):
+            try:
+                os.rename(path, target)
+            except FileNotFoundError:
+                return
+        _record(workspace, f"rejected-{name}", {"name": name, "reason": reason})
+    else:
+        _LOGGER.info("adopted staged job directory %s", name)
+        (staging / "records" / f"rejected-{name}.json").unlink(missing_ok=True)
 
 
 def _ejectable(workspace: Workspace, marker: Marker, waiting: dict[str, set[str]], now: float) -> bool:

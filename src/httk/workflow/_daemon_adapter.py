@@ -18,7 +18,7 @@ _RESULT_FORMAT = "httk-computer-result"
 _METADATA_FILE = "remote.json"
 _MAX_ADAPTER_DOCUMENT_BYTES = 64 * 1024
 _COMMON_FIELDS = frozenset({"format", "format_version", "operation", "adapter_dir", "remote_settings"})
-_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested"})
+_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "withdrawn"})
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
 

@@ -41,6 +41,7 @@ _OUTCOMES = {
     "start_manager": frozenset({"submitted", "uncertain", "refused", "busy"}),
     "manager_status": frozenset({"status", "refused", "busy"}),
     "cancel_manager": frozenset({"cancel_requested", "refused", "busy"}),
+    "withdraw": frozenset({"withdrawn", "refused", "busy"}),
 }
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 _CACHE_FORMAT = "httk-workspace-daemon-request-cache"
@@ -214,6 +215,8 @@ _STRING_LISTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "managers": {"managers": ("handle", "profile", "request_id", "state")},
 }
+_MANAGER_NULLABLE = ("job_id", "scheduler_state", "exit_code", "started_at", "ended_at", "log")
+_MAX_LOG_BYTES = 1024 * 1024
 
 
 def _read_passive_file(directory: MailboxDirectory, name: str) -> object | None:
@@ -257,26 +260,38 @@ def _check_passive(name: str, value: object, kind: str, identity: tuple[str, str
     """Validate the shape and pinned identity of one passive status document."""
 
     lists = _STRING_LISTS[kind]
+    # managers.json is accepted as version 1 (older broker) or 2; status.json is version 1.
+    version = value.get("format_version") if isinstance(value, dict) else None
+    v2 = kind == "managers" and version == 2
     fields = {"format", "format_version", "generated_at", identity[0], *lists}
     if kind == "status":
         fields.add("truncated")
+    elif v2:
+        fields |= {"staged", "staged_truncated"}
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError(f"{name} has invalid fields")
     if value["format"] != f"httk-workspace-daemon-{kind}":
         raise ValueError(f"{name} has an invalid format")
-    if type(value["format_version"]) is not int or value["format_version"] != 1:
+    if type(version) is not int or version not in ((1, 2) if kind == "managers" else (1,)):
         raise ValueError(f"{name} has an unsupported version")
     if value[identity[0]] != identity[1]:
         raise ValueError(f"{name} does not belong to the pinned daemon")
-    if type(value["generated_at"]) is not str or ("truncated" in value and type(value["truncated"]) is not bool):
+    flag = "truncated" if kind == "status" else "staged_truncated"
+    if type(value["generated_at"]) is not str or (flag in value and type(value[flag]) is not bool):
         raise ValueError(f"{name} has invalid fields")
+    nullable = _MANAGER_NULLABLE if v2 else ()
     for key, keys in lists.items():
         items = value[key]
         if not isinstance(items, list) or not all(
-            isinstance(item, dict) and set(item) == set(keys) and all(type(field) is str for field in item.values())
+            isinstance(item, dict)
+            and set(item) == {*keys, *nullable}
+            and all(type(item[field]) is str for field in keys)
+            and all(item[field] is None or type(item[field]) is str for field in nullable)
             for item in items
         ):
             raise ValueError(f"{name} has an invalid {key} list")
+    if v2 and (not isinstance(value["staged"], list) or not all(type(item) is str for item in value["staged"])):
+        raise ValueError(f"{name} has an invalid staged list")
     return value
 
 
@@ -303,6 +318,45 @@ def read_passive_status(endpoint: "Endpoint") -> dict[str, object]:
             value = _read_passive_file(directory, name)
             parts[kind] = None if value is None else _check_passive(name, value, kind, identity)
     return parts
+
+
+def read_manager_log(endpoint: "Endpoint", handle: str) -> bytes:
+    """Read the published log of one manager from ``EXCHANGE/outbox/managers/<handle>.log``.
+
+    The content is untrusted: it is returned as bytes and must never be acted upon.
+
+    :param endpoint: The pinned daemon endpoint.
+    :param handle: The 32-digit lowercase hexadecimal manager handle.
+    :return: The log bytes, at most 1 MiB.
+    :raises OSError: If the exchange cannot be opened safely.
+    :raises ValueError: If the handle is invalid, no log is published, or the file is not a bounded regular file.
+    """
+
+    if type(handle) is not str or _ID_PATTERN.fullmatch(handle) is None:
+        raise ValueError("handle must be 32 lowercase hexadecimal digits")
+    endpoint.live()
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    with MailboxDirectory(endpoint.exchange / "outbox" / "managers") as directory:
+        try:
+            document = os.open(f"{handle}.log", flags | os.O_NONBLOCK, dir_fd=directory._require_open())
+        except FileNotFoundError:
+            raise ValueError(
+                "no log has been published for this manager yet; it appears after the manager's Slurm job ends"
+            ) from None
+        try:
+            if not stat.S_ISREG(os.fstat(document).st_mode):
+                raise ValueError("manager log is not a regular file")
+            data = bytearray()
+            while len(data) <= _MAX_LOG_BYTES:
+                chunk = os.read(document, _MAX_LOG_BYTES + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+        finally:
+            os.close(document)
+    if len(data) > _MAX_LOG_BYTES:
+        raise ValueError(f"manager log exceeds {_MAX_LOG_BYTES} bytes")
+    return bytes(data)
 
 
 def _cache_directory(endpoint: "Endpoint") -> Path:
@@ -473,6 +527,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         saved.profile,
         saved.handle,
         saved.configuration_digest,
+        saved.bundle,
     ) == (
         intent.request_id,
         intent.workspace_id,
@@ -481,6 +536,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         intent.profile,
         intent.handle,
         intent.configuration_digest,
+        intent.bundle,
     )
 
 

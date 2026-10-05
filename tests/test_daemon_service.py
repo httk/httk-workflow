@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -11,10 +12,13 @@ import threading
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from httk.core.identity import identity_public_key
 
+from httk.workflow import _daemon_exchange as exchange_module
 from httk.workflow import _daemon_service as service_module
 from httk.workflow._daemon_activation import activation_document
 from httk.workflow._daemon_auth import sign_request, verify_response
@@ -24,7 +28,7 @@ from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import Policy, Profile
 from httk.workflow._daemon_protocol import Request, Response, decode_response, encode_request
 from httk.workflow._daemon_service import Broker
-from httk.workflow._daemon_slurm import SchedulerError, SlurmGateway, Submission, UncertainSubmission
+from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
 from httk.workflow._daemon_state import Ledger
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
@@ -119,6 +123,7 @@ def _request(
     profile: str | None = None,
     handle: str | None = None,
     configuration_digest: str | None = None,
+    bundle: str | None = None,
 ) -> Request:
     if operation == "start_manager" and configuration_digest is None:
         configuration_digest = _policy(tmp_path).configuration_digest(profile) if profile == "cpu" else "0" * 64
@@ -130,6 +135,7 @@ def _request(
         handle=handle,
         enrollment_id=enrollment_id,
         configuration_digest=configuration_digest,
+        bundle=bundle,
     )
     return sign_request(
         request,
@@ -814,10 +820,10 @@ def test_stop_is_checked_between_sorted_requests(tmp_path: Path) -> None:
 def test_each_iteration_polls_the_exchange_with_ledger_managers(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
     stack, broker, _ = _open(tmp_path, policy)
-    polls: list[list[dict[str, str]]] = []
+    polls: list[list[dict[str, str | None]]] = []
 
     class Mover(ExchangeMover):
-        def poll(self, managers: list[dict[str, str]]) -> None:
+        def poll(self, managers: list[dict[str, str | None]]) -> None:
             polls.append(managers)
 
     broker.exchange = Mover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
@@ -828,10 +834,9 @@ def test_each_iteration_polls_the_exchange_with_ledger_managers(tmp_path: Path) 
         broker.process_once(threading.Event())
         handle = _read(broker, start).handle
         assert handle is not None
-        assert polls == [
-            [],
-            [{"handle": handle, "profile": "cpu", "request_id": start.request_id, "state": "submitted"}],
-        ]
+        unobserved = dict.fromkeys(("scheduler_state", "exit_code", "started_at", "ended_at", "log"))
+        row = {"handle": handle, "profile": "cpu", "request_id": start.request_id, "state": "submitted"}
+        assert polls == [[], [{**row, "job_id": "42", **unobserved}]]
     finally:
         stack.close()
 
@@ -844,7 +849,7 @@ def test_exchange_failure_is_logged_and_does_not_stop_the_loop(
     calls: list[None] = []
 
     class Mover(ExchangeMover):
-        def poll(self, managers: list[dict[str, str]]) -> None:
+        def poll(self, managers: list[dict[str, str | None]]) -> None:
             calls.append(None)
             raise OSError("injected exchange failure")
 
@@ -912,5 +917,505 @@ def test_ledger_listing_failure_is_logged_and_does_not_stop_the_loop(
             broker.process_once(threading.Event())
         assert _read(broker, request).outcome == "ready"
         assert caplog.text.count("daemon_exchange_failed") == 2
+    finally:
+        stack.close()
+
+
+class ScriptedGateway(RecordingGateway):
+    """Report a settable scheduler state and accounting record."""
+
+    def __init__(self, policy: Policy) -> None:
+        super().__init__(policy)
+        self.state = "PENDING"
+        self.record: Observation | None = None
+        self.accounting_error = False
+        self.accountings: list[tuple[str, str, str]] = []
+
+    def status(self, job_id: str, cluster: str, handle: str) -> str:
+        super().status(job_id, cluster, handle)
+        return self.state
+
+    def accounting(self, job_id: str, cluster: str, handle: str) -> Observation | None:
+        self.accountings.append((job_id, cluster, handle))
+        if self.accounting_error:
+            raise SchedulerError("sacct exited 1: sacct: error: slurmdbd: Connection refused")
+        return self.record
+
+
+def _observing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, initialize: bool = True, sacct: bool = False
+) -> tuple[ExitStack, Broker, ScriptedGateway, list[float]]:
+    """Open a broker that follows its managers, on a settable clock."""
+
+    policy = _policy(tmp_path)
+    if sacct:
+        policy = replace(policy, sacct=tmp_path / "broker/sacct")
+    stack, broker, ledger = _open(tmp_path, policy, initialize=initialize)
+    staging = policy.workspace / ".httk-workspace/exchange"
+    for path in (policy.exchange / "inbox", policy.exchange / "outbox/rejected", staging / "inbox", policy.jobs):
+        path.mkdir(parents=True, exist_ok=True)
+    (staging / "outbox/rejected").mkdir(parents=True, exist_ok=True)
+    gateway = ScriptedGateway(policy)
+    observing = Broker(
+        policy,
+        gateway,
+        ledger,
+        broker.requests,
+        broker.responses,
+        exchange=_mover(policy),
+        response_seed=broker.response_seed,
+        state=policy.state,
+    )
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(service_module, "time", SimpleNamespace(time=lambda: clock[0]))
+    return stack, observing, gateway, clock
+
+
+def _managers(policy: Policy) -> Any:
+    return json.loads((policy.exchange / "outbox/managers.json").read_bytes())
+
+
+def test_managers_are_followed_to_their_final_state_and_their_log_published_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
+    policy = broker.policy
+    stop = threading.Event()
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    tail = b"x" * 10 + b"y" * (1024 * 1024)
+    (policy.jobs / "httk-42.out").write_bytes(tail)
+    try:
+        _publish(broker, start)
+        with caplog.at_level(logging.INFO):
+            broker.process_once(stop)
+            handle = _read(broker, start).handle
+            assert handle is not None
+            (row,) = _managers(policy)["managers"]
+            assert row == {
+                "handle": handle,
+                "profile": "cpu",
+                "request_id": start.request_id,
+                "state": "submitted",
+                "job_id": "42",
+                "scheduler_state": "PENDING",
+                "exit_code": None,
+                "started_at": None,
+                "ended_at": None,
+                "log": None,
+            }
+            gateway.state = "RUNNING"
+            clock[0] += 30
+            broker.process_once(stop)
+            assert len(gateway.statuses) == 1  # rate-limited to once a minute
+            clock[0] += 30
+            broker.process_once(stop)
+            assert _managers(policy)["managers"][0]["scheduler_state"] == "RUNNING"
+            assert gateway.accountings == []
+            gateway.state = "UNKNOWN"
+            gateway.record = Observation("FAILED", "1:0", "2026-10-05T10:00:00", "2026-10-05T10:01:00")
+            clock[0] += 60
+            broker.process_once(stop)
+            clock[0] += 600
+            broker.process_once(stop)
+        assert len(gateway.statuses) == 3 and len(gateway.accountings) == 1
+        (row,) = _managers(policy)["managers"]
+        assert row["scheduler_state"] == "FAILED" and row["exit_code"] == "1:0"
+        assert (row["started_at"], row["ended_at"]) == ("2026-10-05T10:00:00", "2026-10-05T10:01:00")
+        assert row["log"] == f"managers/{handle}.log"
+        assert (policy.exchange / "outbox" / row["log"]).read_bytes() == tail[10:]
+        assert caplog.text.count("daemon_manager_log ") == 1
+        assert f"path=outbox/managers/{handle}.log" in caplog.text
+        states = [record.getMessage() for record in caplog.records if "daemon_manager_state" in record.getMessage()]
+        assert [message.split("state=")[1] for message in states] == [
+            "PENDING exit_code=None",
+            "RUNNING exit_code=None",
+            "FAILED exit_code=1:0",
+        ]
+        saved = json.loads((policy.state / "observations.json").read_bytes())
+        assert saved[handle]["final"] is True and saved[handle]["log_published"] is True
+    finally:
+        stack.close()
+
+    # Observations survive a restart: a final manager is neither queried nor published again.
+    (policy.exchange / "outbox/managers.json").unlink()
+    caplog.clear()
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, initialize=False)
+    try:
+        with caplog.at_level(logging.INFO):
+            broker.process_once(stop)
+        assert gateway.statuses == [] and "daemon_manager_log " not in caplog.text
+        assert _managers(policy)["managers"][0]["log"] == f"managers/{handle}.log"
+    finally:
+        stack.close()
+
+
+def test_a_manager_unknown_everywhere_for_thirty_minutes_is_gone_with_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
+    policy = broker.policy
+    stop = threading.Event()
+    gateway.state = "UNKNOWN"
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    try:
+        _publish(broker, start)
+        broker.process_once(stop)
+        handle = _read(broker, start).handle
+        clock[0] += 29 * 60
+        broker.process_once(stop)
+        row = _managers(policy)["managers"][0]
+        assert (row["scheduler_state"], row["log"]) == ("UNKNOWN", None)
+        clock[0] += 60
+        broker.process_once(stop)
+        row = _managers(policy)["managers"][0]
+        assert (row["scheduler_state"], row["exit_code"]) == ("GONE", None)
+        source = policy.jobs / "httk-42.out"
+        note = f"no Slurm output was found at {source}\n".encode()
+        assert (policy.exchange / "outbox/managers" / f"{handle}.log").read_bytes() == note
+        assert len(gateway.accountings) == 3
+        clock[0] += 3600
+        broker.process_once(stop)
+        assert len(gateway.statuses) == 3
+    finally:
+        stack.close()
+
+
+def test_scheduler_and_state_failures_are_warnings_that_never_stop_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
+    stop = threading.Event()
+    gateway.status_error = True
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    health = _request(tmp_path, 2)
+    try:
+        _publish(broker, start)
+        with caplog.at_level(logging.WARNING):
+            broker.process_once(stop)
+            assert "daemon_manager_check_failed" in caplog.text
+            # The job ID comes from the ledger, before any check has succeeded.
+            row = _managers(broker.policy)["managers"][0]
+            assert (row["job_id"], row["scheduler_state"]) == ("42", None)
+            (broker.policy.state / "observations.json").unlink()
+            (broker.policy.state / "observations.json").mkdir()
+            gateway.status_error = False
+            clock[0] += 60
+            _publish(broker, health)
+            broker.process_once(stop)
+        assert _read(broker, health).outcome == "ready"
+        assert "daemon_observations_unsaved" in caplog.text
+        assert _managers(broker.policy)["managers"][0]["scheduler_state"] == "PENDING"
+        assert not [record for record in caplog.records if record.levelno > logging.WARNING]
+    finally:
+        stack.close()
+
+
+_TRAVERSING = {
+    "job_id": "../../x",
+    "cluster": "c",
+    "scheduler_state": "FAILED",
+    "exit_code": None,
+    "started_at": None,
+    "ended_at": None,
+    "final": True,
+    "log_published": False,
+    "checked_at": 1.0,
+    "unknown_since": None,
+}
+
+
+@pytest.mark.parametrize(
+    "content", [b"not json", b'{"x": {"final": true}}', b"[]", json.dumps({"x": _TRAVERSING}).encode()]
+)
+def test_invalid_observations_read_as_unobserved(tmp_path: Path, content: bytes) -> None:
+    path = tmp_path / "observations.json"
+    path.write_bytes(content)
+    assert service_module._load_observations(path) == {}
+    assert service_module._load_observations(tmp_path / "absent.json") == {}
+
+
+def _withdrawing(tmp_path: Path, **limits: int) -> tuple[ExitStack, Broker, Path, Path]:
+    """Open a broker whose exchange and staging directories exist; return its staging inbox and withdrawn."""
+
+    policy = _policy(tmp_path, **limits)
+    stack, broker, _ = _open(tmp_path, policy)
+    staging = policy.workspace / ".httk-workspace/exchange"
+    for path in (policy.exchange / "inbox", policy.exchange / "outbox/rejected", policy.exchange / "outbox/withdrawn"):
+        path.mkdir(parents=True, exist_ok=True)
+    for path in (staging / "inbox", staging / "outbox/rejected"):
+        path.mkdir(parents=True, exist_ok=True)
+    return stack, broker, staging / "inbox", policy.exchange / "outbox/withdrawn"
+
+
+def _bundle(path: Path, content: str = "content") -> Path:
+    path.mkdir()
+    (path / "payload").write_text(content, encoding="utf-8")
+    return path
+
+
+def test_withdraw_moves_all_or_one_waiting_bundle_back_unchanged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
+    stop = threading.Event()
+    for name in ("job-a", "job-b", "job-c"):
+        _bundle(inbox / name, name)
+    for name in (".partial", "managers"):
+        _bundle(inbox / name)
+    one = _request(tmp_path, 1, "withdraw", bundle="job-b")
+    every = _request(tmp_path, 2, "withdraw")
+    try:
+        _publish(broker, one)
+        with caplog.at_level(logging.INFO):
+            broker.process_once(stop)
+        response = _read(broker, one)
+        assert (response.outcome, response.detail, response.reason, response.handle) == (
+            "withdrawn",
+            "job-b",
+            None,
+            None,
+        )
+        assert os.listdir(withdrawn) == ["job-b"] and (withdrawn / "job-b/payload").read_text() == "job-b"
+        assert "daemon_withdrawn names=job-b" in caplog.text
+        _publish(broker, every)
+        broker.process_once(stop)
+        assert _read(broker, every).detail == "job-a,job-c"
+        assert sorted(os.listdir(withdrawn)) == ["job-a", "job-b", "job-c"]
+        assert sorted(os.listdir(inbox)) == [".partial", "managers"]
+
+        # A retry with the same request ID replays the recorded response and moves nothing.
+        _bundle(inbox / "job-d")
+        _publish(broker, every)
+        broker.process_once(stop)
+        assert _read(broker, every).detail == "job-a,job-c"
+        assert (inbox / "job-d").is_dir()
+        _publish(broker, nothing := _request(tmp_path, 3, "withdraw", bundle="absent"))
+        broker.process_once(stop)
+        assert (_read(broker, nothing).outcome, _read(broker, nothing).detail) == ("withdrawn", None)
+    finally:
+        stack.close()
+
+
+def test_withdraw_leaves_the_client_inbox_to_the_client(tmp_path: Path) -> None:
+    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
+    fresh = _bundle(broker.policy.exchange / "inbox/fresh")
+    request = _request(tmp_path, 1, "withdraw")
+    try:
+        _publish(broker, request)
+        broker.process_once(threading.Event())
+        assert _read(broker, request).detail is None
+        assert os.listdir(withdrawn) == []
+        # The same pass then forwards the client's bundle: a later withdraw takes it back.
+        assert not fresh.exists() and (inbox / "fresh/payload").is_file()
+    finally:
+        stack.close()
+
+
+def test_withdraw_skips_raced_and_taken_names_and_quarantines_a_swapped_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
+    adopted, taken, swapped = _bundle(inbox / "adopted"), _bundle(inbox / "taken"), _bundle(inbox / "swapped")
+    _bundle(withdrawn / "taken", "earlier")
+    _bundle(inbox / "kept")
+    outside = _bundle(tmp_path / "outside")
+    original = exchange_module._rename
+    swaps: list[str] = []
+
+    def race(source: int, name: str, target: int, target_name: str) -> None:
+        if name == "adopted":  # a manager adopts it first
+            (adopted / "payload").unlink()
+            adopted.rmdir()
+        elif name == "swapped" and not swaps:
+            swaps.append(name)
+            (swapped / "payload").unlink()
+            swapped.rmdir()
+            swapped.symlink_to(outside, target_is_directory=True)
+        original(source, name, target, target_name)
+
+    monkeypatch.setattr(exchange_module, "_rename", race)
+    request = _request(tmp_path, 1, "withdraw")
+    try:
+        _publish(broker, request)
+        with caplog.at_level(logging.INFO):
+            broker.process_once(threading.Event())
+        assert _read(broker, request).detail == "kept"
+        assert (withdrawn / "taken/payload").read_text() == "earlier" and (taken / "payload").is_file()
+        assert "daemon_exchange_skipped direction=withdrawn name=taken reason=target_exists" in caplog.text
+        assert "daemon_exchange_quarantined direction=withdrawn name=swapped" in caplog.text
+        (quarantined,) = [name for name in os.listdir(withdrawn) if name.startswith(".quarantine-")]
+        assert (withdrawn / quarantined).is_symlink() and (outside / "payload").is_file()
+        assert "daemon_exchange_moved direction=withdrawn name=adopted" not in caplog.text
+        assert "daemon_exchange_skipped direction=withdrawn name=adopted" not in caplog.text
+    finally:
+        stack.close()
+
+
+def test_withdraw_does_not_count_towards_the_submission_quota(tmp_path: Path) -> None:
+    stack, broker, _, _ = _withdrawing(tmp_path, max_submissions=1)
+    start, withdraw = _request(tmp_path, 1, "start_manager", profile="cpu"), _request(tmp_path, 2, "withdraw")
+    try:
+        _publish(broker, start)
+        _publish(broker, withdraw)
+        broker.process_once(threading.Event())
+        assert (_read(broker, start).outcome, _read(broker, withdraw).outcome) == ("submitted", "withdrawn")
+    finally:
+        stack.close()
+
+
+def test_withdrawn_detail_is_cut_at_whole_names(tmp_path: Path) -> None:
+    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
+    names = [f"{index:03d}" + "x" * 96 for index in range(12)]
+    for name in names:
+        _bundle(inbox / name)
+    request = _request(tmp_path, 1, "withdraw")
+    try:
+        _publish(broker, request)
+        broker.process_once(threading.Event())
+        detail = _read(broker, request).detail
+        assert detail is not None and len(detail) <= 1000 and detail.endswith(",...")
+        assert detail.removesuffix(",...").split(",") == names[:9]
+        assert sorted(os.listdir(withdrawn)) == names
+    finally:
+        stack.close()
+
+
+def _start(tmp_path: Path, broker: Broker) -> str:
+    request = _request(tmp_path, 1, "start_manager", profile="cpu")
+    _publish(broker, request)
+    broker.process_once(threading.Event())
+    handle = _read(broker, request).handle
+    assert handle is not None
+    return handle
+
+
+def test_failing_accounting_still_reaches_gone_and_warns_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, sacct=True)
+    gateway.state, gateway.accounting_error = "UNKNOWN", True
+    try:
+        with caplog.at_level(logging.WARNING):
+            handle = _start(tmp_path, broker)
+            for _ in range(30):
+                clock[0] += 60
+                broker.process_once(threading.Event())
+        row = _managers(broker.policy)["managers"][0]
+        assert (row["scheduler_state"], row["log"]) == ("GONE", f"managers/{handle}.log")
+        assert caplog.text.count("daemon_manager_accounting_failed") == 1
+        assert "slurmdbd: Connection refused" in caplog.text
+        assert "daemon_manager_check_failed" not in caplog.text
+    finally:
+        stack.close()
+
+
+def test_a_final_squeue_state_waits_for_the_accounting_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, sacct=True)
+    gateway.state = "FAILED"
+    try:
+        _start(tmp_path, broker)
+        row = _managers(broker.policy)["managers"][0]
+        assert (row["scheduler_state"], row["exit_code"], row["log"]) == ("FAILED", None, None)
+        gateway.state = "UNKNOWN"  # the job left squeue before accounting caught up
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        assert _managers(broker.policy)["managers"][0]["scheduler_state"] == "FAILED"
+        gateway.record = Observation("FAILED", "2:0", None, "2026-10-05T10:01:00")
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        row = _managers(broker.policy)["managers"][0]
+        assert (row["scheduler_state"], row["exit_code"], row["ended_at"]) == ("FAILED", "2:0", "2026-10-05T10:01:00")
+        assert row["log"] is not None
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        assert len(gateway.accountings) == 3
+    finally:
+        stack.close()
+
+
+def test_a_final_squeue_state_without_any_accounting_settles_after_thirty_minutes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, sacct=True)
+    gateway.state = "COMPLETED"
+    try:
+        _start(tmp_path, broker)
+        clock[0] += 29 * 60
+        broker.process_once(threading.Event())
+        assert _managers(broker.policy)["managers"][0]["log"] is None
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        row = _managers(broker.policy)["managers"][0]
+        assert (row["scheduler_state"], row["exit_code"]) == ("COMPLETED", None) and row["log"] is not None
+    finally:
+        stack.close()
+
+
+def test_a_final_squeue_state_reads_accounting_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stack, broker, gateway, _ = _observing(tmp_path, monkeypatch, sacct=True)
+    gateway.state = "COMPLETED"
+    gateway.record = Observation("COMPLETED", "0:0", "2026-10-05T10:00:00", "2026-10-05T10:01:00")
+    try:
+        _start(tmp_path, broker)
+        row = _managers(broker.policy)["managers"][0]
+        assert (row["scheduler_state"], row["exit_code"]) == ("COMPLETED", "0:0") and row["log"] is not None
+        assert len(gateway.accountings) == 1
+    finally:
+        stack.close()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_a_non_regular_job_output_is_published_as_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    stack, broker, gateway, _ = _observing(tmp_path, monkeypatch)
+    source = broker.policy.jobs / "httk-42.out"
+    if kind == "symlink":
+        secret = tmp_path / "secret"
+        secret.write_text("private", encoding="utf-8")
+        source.symlink_to(secret)
+    else:
+        os.mkfifo(source)
+    gateway.state = "FAILED"
+    try:
+        handle = _start(tmp_path, broker)
+        published = broker.policy.exchange / "outbox/managers" / f"{handle}.log"
+        assert published.read_bytes() == f"the Slurm output at {source} is not a regular file\n".encode()
+    finally:
+        stack.close()
+
+
+def test_a_failed_log_publication_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
+    (broker.policy.jobs / "httk-42.out").write_bytes(b"output")
+    outbox = broker.policy.exchange / "outbox"
+    (outbox / "managers").write_text("not a directory", encoding="utf-8")
+    gateway.state = "FAILED"
+    try:
+        handle = _start(tmp_path, broker)
+        assert _managers(broker.policy)["managers"][0]["log"] is None
+        assert broker._observations[handle]["log_published"] is False
+        (outbox / "managers").unlink()
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        assert (outbox / "managers" / f"{handle}.log").read_bytes() == b"output"
+        assert _managers(broker.policy)["managers"][0]["log"] == f"managers/{handle}.log"
+        assert gateway.statuses == [("42", "cluster-1", handle)]
+    finally:
+        stack.close()
+
+
+def test_withdraw_creates_a_missing_withdrawn_directory(tmp_path: Path) -> None:
+    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
+    withdrawn.rmdir()  # an enrollment made before the report directories existed
+    _bundle(inbox / "job")
+    request = _request(tmp_path, 1, "withdraw")
+    try:
+        _publish(broker, request)
+        broker.process_once(threading.Event())
+        assert _read(broker, request).detail == "job"
+        assert withdrawn.stat().st_mode & 0o777 == 0o700 and (withdrawn / "job/payload").is_file()
     finally:
         stack.close()

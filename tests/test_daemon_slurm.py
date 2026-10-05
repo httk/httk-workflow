@@ -16,7 +16,7 @@ from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import Policy, Profile
 from httk.workflow._daemon_protocol import Request, decode_response, encode_request
 from httk.workflow._daemon_service import Broker
-from httk.workflow._daemon_slurm import SchedulerError, SlurmGateway, UncertainSubmission, _run
+from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, UncertainSubmission, _run
 from httk.workflow._daemon_state import Ledger
 
 _HANDLE = "a" * 32
@@ -357,3 +357,69 @@ def test_check_failure_names_the_client_and_its_output(policy: Policy) -> None:
     _client(policy.squeue, "print('wrapper says no', file=sys.stderr)\nsys.exit(3)\n")
     with pytest.raises(SchedulerError, match=r"squeue --version exited 3 and printed 'wrapper says no'"):
         SlurmGateway(policy, Path("/trusted/policy.json")).check()
+
+
+def _sacct(policy: Policy, tmp_path: Path, *rows: str) -> Policy:
+    accounting = replace(policy, sacct=tmp_path / "runtime" / "sacct")
+    assert accounting.sacct is not None
+    record = tmp_path / "sacct.json"
+    printed = "".join(f"print({row!r})\n" for row in rows)
+    _client(accounting.sacct, f"open({str(record)!r},'w').write(json.dumps([sys.argv, dict(os.environ)]))\n{printed}")
+    return accounting
+
+
+def test_accounting_reads_the_matching_row_in_the_clean_environment(policy: Policy, tmp_path: Path) -> None:
+    user = str(os.getuid())
+    name = f"httk-{_HANDLE}"
+    accounting = _sacct(
+        policy,
+        tmp_path,
+        f"123|{name}|{os.getuid() + 1}|COMPLETED|0:0|2026-10-05T10:00:00|2026-10-05T10:05:00",
+        f"123|httk-{'c' * 32}|{user}|COMPLETED|0:0|Unknown|Unknown",
+        f"456|{name}|{user}|COMPLETED|0:0|Unknown|Unknown",
+        f"123|{name}|{user}|FAILED|1:0|2026-10-05T10:00:00|2026-10-05T10:01:02",
+    )
+    gateway = SlurmGateway(accounting, Path("/trusted/policy.json"))
+    assert gateway.accounting("123", "cluster", _HANDLE) == Observation(
+        "FAILED", "1:0", "2026-10-05T10:00:00", "2026-10-05T10:01:02"
+    )
+    argv, environment = json.loads((tmp_path / "sacct.json").read_text())
+    assert argv[1:] == [
+        "--clusters=cluster",
+        "-j",
+        "123",
+        "-X",
+        "-n",
+        "-P",
+        "--format=JobID,JobName,UID,State,ExitCode,Start,End",
+    ]
+    assert environment == {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+
+
+def test_accounting_normalizes_cancellation_and_unset_times(policy: Policy, tmp_path: Path) -> None:
+    user = str(os.getuid())
+    accounting = _sacct(policy, tmp_path, f"123|httk-{_HANDLE}|{user}|CANCELLED by 1234|0:15|None|Unknown")
+    assert SlurmGateway(accounting, Path("/p.json")).accounting("123", "cluster", _HANDLE) == Observation(
+        "CANCELLED", "0:15", None, None
+    )
+
+
+def test_accounting_absent_row_or_client_is_none_and_failures_raise(policy: Policy, tmp_path: Path) -> None:
+    assert SlurmGateway(policy, Path("/p.json")).accounting("123", "cluster", _HANDLE) is None
+    user = str(os.getuid())
+    gateway = SlurmGateway(_sacct(policy, tmp_path), Path("/p.json"))
+    assert gateway.accounting("123", "cluster", _HANDLE) is None
+    for row in (f"123|httk-{_HANDLE}|{user}|lower|0:0|None|None", f"123|httk-{_HANDLE}|{user}|FAILED|x|None|None"):
+        gateway = SlurmGateway(_sacct(policy, tmp_path, row), Path("/p.json"))
+        with pytest.raises(SchedulerError, match="accounting is malformed"):
+            gateway.accounting("123", "cluster", _HANDLE)
+    row = f"123|httk-{_HANDLE}|{user}|FAILED|1:0|None|None"
+    with pytest.raises(SchedulerError, match="ambiguous"):
+        SlurmGateway(_sacct(policy, tmp_path, row, row), Path("/p.json")).accounting("123", "cluster", _HANDLE)
+    accounting = _sacct(policy, tmp_path)
+    assert accounting.sacct is not None
+    _client(accounting.sacct, "sys.stderr.write('sacct: error: Slurm accounting storage is disabled')\nsys.exit(1)\n")
+    with pytest.raises(SchedulerError, match="^sacct exited 1: sacct: error: Slurm accounting storage is disabled$"):
+        SlurmGateway(accounting, Path("/p.json")).accounting("123", "cluster", _HANDLE)
+    with pytest.raises(SchedulerError, match="outside the current policy"):
+        SlurmGateway(accounting, Path("/p.json")).accounting("123", "other", _HANDLE)

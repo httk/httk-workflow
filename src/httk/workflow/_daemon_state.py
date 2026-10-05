@@ -403,6 +403,7 @@ class Ledger:
             "start_manager": {"submitted", "uncertain", "refused"},
             "manager_status": {"status", "refused"},
             "cancel_manager": {"cancel_requested", "refused"},
+            "withdraw": {"withdrawn", "refused"},
         }[request.operation]
         if response.outcome not in permitted:
             raise error("response operation mismatch")
@@ -578,8 +579,8 @@ class Ledger:
         )
         return self._entry(row)
 
-    def managers(self) -> list[dict[str, str]]:
-        """Return every manager start as ``handle``, ``profile``, ``request_id`` and ledger ``state``.
+    def managers(self) -> list[dict[str, str | None]]:
+        """Return every manager start as ``handle``, ``profile``, ``request_id``, ledger ``state`` and ``job_id``.
 
         :return: Rows ordered by request identifier.
         """
@@ -592,7 +593,7 @@ class Ledger:
             )
             .fetchall()
         )
-        result: list[dict[str, str]] = []
+        result: list[dict[str, str | None]] = []
         for row in rows:
             entry = self._entry(row)
             if entry is None or entry.handle is None or entry.request.profile is None:
@@ -603,6 +604,7 @@ class Ledger:
                     "profile": entry.request.profile,
                     "request_id": entry.request.request_id,
                     "state": entry.state,
+                    "job_id": entry.job_id,
                 }
             )
         return result

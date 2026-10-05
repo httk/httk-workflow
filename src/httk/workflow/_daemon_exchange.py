@@ -3,14 +3,13 @@
 Every poll reopens the directories component-wise without following symlinks from the
 dedicated parent, moves eligible bundle directories with a plain same-mount ``rename`` to an
 absent target name, copies the manager-written ``status.json`` out as bounded bytes, and publishes
-``managers.json``. Bundle content is never opened.
+``managers.json`` with the names of the bundles still waiting. Bundle content is never opened.
 """
 
 import errno
 import json
 import logging
 import os
-import re
 import secrets
 import stat
 from contextlib import ExitStack
@@ -19,20 +18,55 @@ from pathlib import Path
 
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES
 from ._daemon_policy import _open_directory
+from ._daemon_protocol import _BUNDLE_NAME as _ELIGIBLE
+from ._daemon_protocol import _RESERVED_NAMES as _RESERVED
 
 _LOGGER = logging.getLogger(__name__)
 _RACED = frozenset({errno.ENOENT, errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR})
 _MAX_STATUS_BYTES = 1024 * 1024
 _MAX_REPORTED = 4096
-_ELIGIBLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_RESERVED = frozenset(
-    {"endpoint.json", "status.json", "managers.json", "rejected", "requests", "responses", "inbox", "outbox", "records"}
-)
+_MAX_STAGED = 1000
 _STAGING = Path(".httk-workspace", "exchange")
 
 
 def _rename(source: int, name: str, target: int, target_name: str) -> None:
     os.rename(name, target_name, src_dir_fd=source, dst_dir_fd=target)
+
+
+def _install(directory: int, name: str, prefix: str, data: bytes) -> None:
+    """Install ``data`` as ``name`` in ``directory`` through a fresh dot-named temporary and a rename."""
+
+    temporary = f"{prefix}{secrets.token_hex(16)}"
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory
+    )
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(descriptor, view) :]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except OSError:
+            pass
+        raise
+
+
+def _subdirectory(stack: ExitStack, parent: int, name: str) -> int:
+    """Open ``name`` below ``parent`` without following it, creating it with mode 0700 first when missing."""
+
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    descriptor = _open_directory(Path(name), parent)
+    stack.callback(os.close, descriptor)
+    return descriptor
 
 
 def _component(name: str, label: str) -> str:
@@ -60,7 +94,7 @@ class ExchangeMover:
         self._enrollment_id = enrollment_id
         self._reported: set[tuple[str, str]] = set()
         self._status: bytes | None = None
-        self._managers: list[dict[str, str]] | None = None
+        self._managers: tuple[list[dict[str, str | None]], list[str], bool] | None = None
 
     def _report(self, key: tuple[str, str], message: str, *arguments: object) -> None:
         # ponytail: one log line per key until 4096 distinct keys, then the memory resets and repeats are logged again.
@@ -80,12 +114,12 @@ class ExchangeMover:
         stack.callback(os.close, descriptor)
         return descriptor
 
-    def poll(self, managers: list[dict[str, str]]) -> None:
+    def poll(self, managers: list[dict[str, str | None]]) -> None:
         """Run one bounded exchange pass.
 
         Missing or non-directory components are logged and skip only the directions that need them.
 
-        :param managers: Ledger manager rows to publish in ``managers.json``.
+        :param managers: Manager rows to publish in ``managers.json``.
         """
 
         with ExitStack() as stack:
@@ -109,17 +143,96 @@ class ExchangeMover:
             if exchange_outbox is not None:
                 if staging_outbox is not None:
                     self._copy_status(staging_outbox, exchange_outbox)
-                self._publish_managers(exchange_outbox, managers)
+                self._publish_managers(exchange_outbox, managers, *self._staged(exchange_inbox, staging_inbox))
 
-    def _move(self, label: str, source: int | None, target: int | None) -> None:
-        if source is None or target is None:
-            return
+    def withdraw(self, bundle: str | None) -> list[str]:
+        """Move bundles waiting in the workspace staging inbox back to ``outbox/withdrawn``, unchanged.
+
+        A bundle a manager adopts first, or whose name is taken in ``withdrawn``, stays where it is.
+
+        :param bundle: The one bundle to move, or ``None`` for every eligible one.
+        :return: The names moved.
+        """
+
+        with ExitStack() as stack:
+            try:
+                root = _open_directory(self._root)
+            except OSError as exc:
+                self._report(
+                    ("open", str(self._root)), "daemon_exchange_unavailable path=%s reason=%s", self._root, exc.strerror
+                )
+                return []
+            stack.callback(os.close, root)
+            source = self._open(stack, root, self._staging / "inbox")
+            outbox = self._open(stack, root, self._exchange / "outbox")
+            if source is None or outbox is None:
+                return []
+            try:
+                # Enrollments made before the report directories existed get it on first use.
+                target = _subdirectory(stack, outbox, "withdrawn")
+            except OSError as exc:
+                self._report(
+                    ("open", "withdrawn"), "daemon_exchange_unavailable path=withdrawn reason=%s", exc.strerror
+                )
+                return []
+            return self._move("withdrawn", source, target, bundle)
+
+    def _staged(self, *directories: int | None) -> tuple[list[str], bool]:
+        """Return the sorted eligible names waiting in ``directories``, at most 1000, and whether more exist."""
+
+        names: set[str] = set()
+        truncated = False
+        for directory in directories:
+            if directory is None:
+                continue
+            try:
+                with os.scandir(directory) as entries:
+                    for count, entry in enumerate(entries):
+                        if count == MAX_DIRECTORY_ENTRIES:
+                            truncated = True
+                            break
+                        name = entry.name
+                        if not name.startswith(".") and name not in _RESERVED and _ELIGIBLE.fullmatch(name):
+                            names.add(name)
+            except OSError as exc:
+                self._report(("staged", ""), "daemon_exchange_unavailable direction=staged reason=%s", exc.strerror)
+        ordered = sorted(names)
+        return ordered[:_MAX_STAGED], truncated or len(ordered) > _MAX_STAGED
+
+    def publish_log(self, handle: str, data: bytes) -> bool:
+        """Publish one manager's Slurm output tail as ``outbox/managers/<handle>.log``.
+
+        :param handle: The manager's broker-issued handle.
+        :param data: The bytes to publish.
+        :return: Whether the file was installed; a failure is logged.
+        """
+
+        name = f"{_component(handle, 'handle')}.log"
         try:
-            with os.scandir(source) as entries:
-                names = [entry.name for _, entry in zip(range(MAX_DIRECTORY_ENTRIES), entries, strict=False)]
+            with ExitStack() as stack:
+                outbox = _open_directory(self._root / self._exchange / "outbox")
+                stack.callback(os.close, outbox)
+                _install(_subdirectory(stack, outbox, "managers"), name, ".log-", data)
         except OSError as exc:
-            self._report((label, ""), "daemon_exchange_unavailable direction=%s reason=%s", label, exc.strerror)
-            return
+            self._report(("publish", name), "daemon_exchange_publish_failed name=%s reason=%s", name, exc.strerror)
+            return False
+        return True
+
+    def _move(self, label: str, source: int | None, target: int | None, only: str | None = None) -> list[str]:
+        """Move eligible directories, or only the one named ``only``, and return the names moved."""
+
+        moved: list[str] = []
+        if source is None or target is None:
+            return moved
+        if only is not None:
+            names = [only]
+        else:
+            try:
+                with os.scandir(source) as entries:
+                    names = [entry.name for _, entry in zip(range(MAX_DIRECTORY_ENTRIES), entries, strict=False)]
+            except OSError as exc:
+                self._report((label, ""), "daemon_exchange_unavailable direction=%s reason=%s", label, exc.strerror)
+                return moved
         for name in sorted(names):
             if name.startswith(".") or name in _RESERVED:
                 continue
@@ -152,6 +265,8 @@ class ExchangeMover:
                 )
                 continue
             else:
+                if label == "withdrawn":
+                    _LOGGER.warning("daemon_exchange_skipped direction=%s name=%s reason=target_exists", label, name)
                 continue  # an existing target is retried on the next poll
             # ponytail: no-replace renames are unavailable on NFS/Lustre/GPFS. A directory rename can replace only
             # a target that is an empty directory created after the check above, so that race loses no data.
@@ -167,17 +282,19 @@ class ExchangeMover:
                         exc.strerror,
                     )
                 continue
-            self._settle(label, name, target)
+            if self._settle(label, name, target):
+                moved.append(name)
+        return moved
 
-    def _settle(self, label: str, name: str, target: int) -> None:
-        """Quarantine a moved entry that the source owner swapped for a non-directory after the check."""
+    def _settle(self, label: str, name: str, target: int) -> bool:
+        """Quarantine a moved entry swapped for a non-directory after the check; report whether a directory arrived."""
 
         try:
             if stat.S_ISDIR(os.stat(name, dir_fd=target, follow_symlinks=False).st_mode):
                 _LOGGER.info("daemon_exchange_moved direction=%s name=%s", label, name)
-                return
+                return True
         except FileNotFoundError:
-            return
+            return False
         quarantine = f".quarantine-{secrets.token_hex(16)}"
         try:
             _rename(target, name, target, quarantine)
@@ -189,7 +306,7 @@ class ExchangeMover:
                 name,
                 exc.strerror,
             )
-            return
+            return False
         self._report(
             (label, name),
             "daemon_exchange_quarantined direction=%s name=%s as=%s reason=not_directory",
@@ -197,6 +314,7 @@ class ExchangeMover:
             name,
             quarantine,
         )
+        return False
 
     def _copy_status(self, source: int, target: int) -> None:
         try:
@@ -231,43 +349,30 @@ class ExchangeMover:
         if content != self._status and self._replace(target, "status.json", ".status-", content):
             self._status = content
 
-    def _publish_managers(self, target: int, managers: list[dict[str, str]]) -> None:
-        if managers == self._managers:
+    def _publish_managers(
+        self, target: int, managers: list[dict[str, str | None]], staged: list[str], truncated: bool
+    ) -> None:
+        content = (managers, staged, truncated)
+        if content == self._managers:
             return
         document = {
             "format": "httk-workspace-daemon-managers",
-            "format_version": 1,
+            "format_version": 2,
             "enrollment_id": self._enrollment_id,
             "generated_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
             "managers": managers,
+            "staged": staged,
+            "staged_truncated": truncated,
         }
         data = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         if self._replace(target, "managers.json", ".managers-", data):
-            self._managers = managers
+            self._managers = content
 
     def _replace(self, directory: int, name: str, prefix: str, data: bytes) -> bool:
         """Install ``data`` as ``name`` through a fresh broker-owned dot-named temporary."""
 
-        temporary = f"{prefix}{secrets.token_hex(16)}"
         try:
-            descriptor = os.open(
-                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory
-            )
-            try:
-                try:
-                    view = memoryview(data)
-                    while view:
-                        view = view[os.write(descriptor, view) :]
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
-            except BaseException:
-                try:
-                    os.unlink(temporary, dir_fd=directory)
-                except OSError:
-                    pass
-                raise
+            _install(directory, name, prefix, data)
         except OSError as exc:
             self._report(("publish", name), "daemon_exchange_publish_failed name=%s reason=%s", name, exc.strerror)
             return False
