@@ -1047,7 +1047,7 @@ launchers are versioned bundles, resolved project-first and then globally. See
 | --- | --- | --- |
 | `launcher list` | list manager launchers visible to this project | |
 | `launcher add [OPTIONS] NAME...` | create launchers from a packaged template (`slurm`, `daemon` for {doc}`workspace_daemon`) | `--template`, `--set`, `--global`, `--non-interactive` |
-| `launcher configure --set KEY=VALUE NAME...` | update launcher settings | `--set` |
+| `launcher configure [OPTIONS] NAME...` | update launcher settings | `--set KEY=VALUE`, `--add-path KEY=PATH[:PATH...]` (append to a daemon launcher's path list) |
 | `launcher show [--json] NAME...` | describe launchers and their settings | |
 | `launcher check [OPTIONS] NAME...` | check a launcher's required binaries | `--launcher-timeout` |
 | `launcher remove [--force] NAME...` | remove launcher bundles | |

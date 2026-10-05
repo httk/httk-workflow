@@ -187,6 +187,7 @@ def test_default_runtime_paths_follow_the_interpreter_and_the_httk_import_roots(
         path for path in candidates if not any(path != other and path.is_relative_to(other) for other in candidates)
     }
     assert set(policy.readonly_paths) == expected
+    assert policy.readonly_paths == _daemon_setup.default_readonly_paths()
     assert editable in policy.readonly_paths and installed.parent not in policy.readonly_paths
     assert "broker_paths" not in _daemon_policy.policy_document(policy)
     assert policy.slurm_conf == slurm_conf

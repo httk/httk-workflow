@@ -201,6 +201,18 @@ print(result)
 `add_launcher`, or update an existing bundle with `configure_launcher` (the CLI
 equivalent is `httk workflow launcher configure --set KEY=VALUE NAME`).
 
+For the colon-separated path settings of a daemon launcher (`daemon.readonly_paths`,
+`daemon.mpi.pmix_roots`, `daemon.mpi.devices`), `--add-path KEY=PATH[:PATH...]`
+appends absolute paths in order without duplicates and prints the resulting value:
+
+```console
+$ httk workflow launcher configure daemon_small --add-path daemon.readonly_paths=/software
+```
+
+When `daemon.readonly_paths` is not set yet, the list starts from the default that
+daemon setup would compute, in the interpreter running this command, so adding one
+path does not drop the system directories, Python prefixes and *httk* import roots.
+
 For local debugging, bypass launcher submission and run one manager
 in-process:
 

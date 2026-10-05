@@ -7,9 +7,12 @@ from argparse import Namespace
 from collections.abc import Callable
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 
 from httk.core.cli import CLIContext
 
+from .. import _daemon_setup
+from .._daemon_launcher import _PATH_LISTS
 from ..launchers import (
     add_launcher,
     check_launcher,
@@ -91,8 +94,47 @@ def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
 
     if isinstance(arguments.name, list):
         return _launcher_batch(arguments, context, handle_launcher_configure)
-    print(configure_launcher(arguments.name, _settings(arguments.set), project=context.cwd))
+    settings = _settings(arguments.set)
+    changed = _added_paths(arguments.name, settings, arguments.add_path, context.cwd)
+    print(configure_launcher(arguments.name, {**settings, **changed}, project=context.cwd))
+    for key, value in changed.items():
+        print(f"{key}={value}")
     return 0
+
+
+def _added_paths(name: str, settings: dict[str, str], additions: list[str], project: Path) -> dict[str, str]:
+    """Return the colon-joined path lists that ``--add-path`` extends, after ``--set`` applied.
+
+    :param name: The launcher to extend.
+    :param settings: The ``--set`` settings, which apply first.
+    :param additions: The ``KEY=PATH[:PATH...]`` arguments.
+    :param project: Project directory used for launcher lookup.
+    :return: The new value of every changed key.
+    :raises ValueError: If a key is not a path list of a daemon launcher.
+    """
+
+    if not additions:
+        return {}
+    description = describe_launcher(name, project=project)
+    stored = description["settings"]
+    current: dict[str, object] = {**(stored if isinstance(stored, dict) else {}), **settings}
+    changed: dict[str, str] = {}
+    for item in additions:
+        key, separator, paths = item.partition("=")
+        if description["kind"] != "daemon" or key not in _PATH_LISTS or not separator:
+            raise ValueError(
+                "--add-path only applies to colon-separated path settings of daemon launchers "
+                f"(KEY=PATH[:PATH...]): {', '.join(sorted(_PATH_LISTS))}; got {item!r}"
+            )
+        if key in current:
+            entries = str(current[key]).split(":")
+        elif key == "daemon.readonly_paths":
+            entries = [str(path) for path in _daemon_setup.default_readonly_paths()]
+        else:
+            entries = []
+        entries += [path for path in paths.split(":") if path not in entries]
+        current[key] = changed[key] = ":".join(entries)
+    return changed
 
 
 def handle_launcher_show(arguments: Namespace, context: CLIContext) -> int:
@@ -204,6 +246,17 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         default=[],
         metavar="KEY=VALUE",
         help="one launcher setting (repeatable)",
+    )
+    configure.add_argument(
+        "--add-path",
+        action="append",
+        default=[],
+        metavar="KEY=PATH[:PATH...]",
+        help=(
+            "append absolute paths to a colon-separated path setting of a daemon launcher, skipping paths already "
+            "listed (repeatable, applied after --set); an unset daemon.readonly_paths starts from the default "
+            "computed by this interpreter"
+        ),
     )
 
     show = _leaf(

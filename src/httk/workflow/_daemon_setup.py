@@ -316,6 +316,20 @@ def _cluster(cluster: str | None, slurm_conf: Path | None, scontrol: Path | None
     return discovered
 
 
+def default_readonly_paths() -> tuple[Path, ...]:
+    """Return the read-only paths daemon setup uses when a launcher sets no ``daemon.readonly_paths``.
+
+    :return: The system directories, *httk* import roots and Python prefixes of this interpreter, nested entries dropped.
+    """
+
+    defaults = {Path(path).resolve() for path in _DEFAULT_READONLY if os.path.exists(path)}
+    # Jobs import the daemon's own code, which an editable install keeps outside the prefix.
+    imports = {Path(entry).resolve().parent for entry in httk.__path__ if os.path.isabs(entry)}
+    imports |= _editable_finder_roots()
+    prefixes = {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
+    return _nested_dropped(defaults | imports | prefixes)
+
+
 def _compile(
     workspace: Path,
     exchange: Path,
@@ -338,12 +352,7 @@ def _compile(
     readonly = _site(site, "daemon.readonly_paths", tuple)
     # Only job sandboxes use readonly_paths; the broker and allocation service see the host read-only.
     if readonly is None:
-        defaults = {Path(path).resolve() for path in _DEFAULT_READONLY if os.path.exists(path)}
-        # Jobs import the daemon's own code, which an editable install keeps outside the prefix.
-        imports = {Path(entry).resolve().parent for entry in httk.__path__ if os.path.isabs(entry)}
-        imports |= _editable_finder_roots()
-        prefixes = {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
-        readonly = _nested_dropped(defaults | imports | prefixes)
+        readonly = default_readonly_paths()
     home = data_home().resolve()
     for path in readonly:
         if _overlap(path, home):
