@@ -639,12 +639,8 @@ def _fixed_connection(old: Policy, new: Policy) -> None:
         "exchange",
         "state",
         "snapshots",
-        "sbatch",
-        "squeue",
-        "scancel",
+        # Recorded jobs are bound to the cluster; client paths, slurm.conf and broker mounts may change.
         "cluster",
-        "slurm_conf",
-        "broker_paths",
     )
     changed = [name for name in fields if getattr(old, name) != getattr(new, name)]
     if changed:

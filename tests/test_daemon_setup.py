@@ -226,7 +226,7 @@ def test_effective_slurm_configuration_precedence_drives_policy_and_broker_defau
     if source != "none":
         other = tmp_path / "slurm-other"
         other.mkdir()
-        (other / "slurm.conf").write_text(f"ClusterName={source}\n", encoding="utf-8")
+        (other / "slurm.conf").write_text(f"ClusterName=other-{source}\n", encoding="utf-8")
         monkeypatch.setenv("SLURM_CONF", str(other / "slurm.conf"))
         monkeypatch.setattr(_daemon_setup, "_DEFAULT_SLURM_CONF", other / "slurm.conf")
         if source == "declared":
@@ -234,7 +234,7 @@ def test_effective_slurm_configuration_precedence_drives_policy_and_broker_defau
             _rewrite_launcher("large", **{"daemon.slurm_conf": str(other / "slurm.conf")})
         with pytest.raises(ValueError, match="a new enrollment is required") as refusal:
             _daemon_setup.reload(layout.workspace.root)
-        assert {"slurm_conf", "broker_paths"} <= set(str(refusal.value).split(": ", 1)[1].split(";")[0].split(", "))
+        assert "cluster" in set(str(refusal.value).split(": ", 1)[1].split(";")[0].split(", "))
 
 
 def test_workspace_alias_initializes_and_hands_canonical_path_to_bootstrap(
@@ -502,19 +502,23 @@ def test_reload_replaces_launchers_and_keys_and_refuses_a_held_ledger(tmp_path: 
         _daemon_setup.reload(layout.workspace.root)
 
 
-def test_reload_refuses_fixed_connection_changes_and_keeps_the_active_snapshot(tmp_path: Path) -> None:
+def test_reload_accepts_broker_path_changes_but_refuses_fixed_connection_changes(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    active = _initialize(layout)
+    _initialize(layout)
     other = tmp_path / "other-broker"
     for name in ("sbatch", "squeue", "scancel"):
         _executable(other / name)
     _rewrite_launcher("small", **{"daemon.broker_paths": f"{layout.broker}:{other}"})
     _rewrite_launcher("large", **{"daemon.broker_paths": f"{layout.broker}:{other}"})
-    with pytest.raises(ValueError, match="a new enrollment is required") as refusal:
-        _daemon_setup.reload(layout.workspace.root)
-    assert "broker_paths" in str(refusal.value)
+    active = _daemon_setup.reload(layout.workspace.root)
+    assert other in load_policy(active).broker_paths
     with pytest.raises(ValueError, match="snapshots"):
         _daemon_setup.reload(layout.workspace.root, snapshots=tmp_path / "elsewhere")
+    _rewrite_launcher("small", **{"daemon.cluster": "another-cluster"})
+    _rewrite_launcher("large", **{"daemon.cluster": "another-cluster"})
+    with pytest.raises(ValueError, match="a new enrollment is required") as refusal:
+        _daemon_setup.reload(layout.workspace.root)
+    assert "cluster" in str(refusal.value)
     assert _daemon_setup.active_policy_path(layout.workspace.root) == active
 
 

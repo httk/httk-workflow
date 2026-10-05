@@ -250,9 +250,9 @@ httk workspace daemon /proj/campaign/workspace --reload
 `--reload` keeps the stored launcher names and authorized keys unless
 `--launcher` or `--authorize` is given; given lists replace the stored ones.
 It prints the resulting lists and rewrites `endpoint.json`. It refuses a
-change of the fixed connection (workspace, exchange, state, snapshots, Slurm
-executables, cluster, `slurm.conf` and broker paths), naming the key: that
-needs a new enrollment.
+change of the fixed connection (workspace, exchange, state, snapshots,
+cluster), naming the key: that needs a new enrollment. Slurm client paths,
+`slurm.conf` and broker paths may change on reload.
 
 Reload refuses while the daemon holds its lifetime ledger lock. Startup checks
 its chosen snapshot against the active approval after taking the same lock, so
