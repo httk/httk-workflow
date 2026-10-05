@@ -1,7 +1,6 @@
 """Strict runtime policy for the confined workspace daemon."""
 
 import base64
-import ctypes
 import errno
 import hashlib
 import json
@@ -11,7 +10,6 @@ import re
 import secrets
 import stat
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -905,21 +903,6 @@ def _check_parent_names(policy: Policy, names: list[str]) -> None:
             )
 
 
-_RENAME_NOREPLACE = 1
-
-
-def _libc_renameat2() -> Callable[[int, bytes, int, bytes, int], int]:
-    """Return the C library ``renameat2``, which the broker's exchange movers also use."""
-
-    try:
-        function = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as exc:
-        raise ValueError("renameat2 is unavailable (glibc 2.28+ and Linux 3.15+ are required)") from exc
-    function.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-    function.restype = ctypes.c_int
-    return function
-
-
 def _remove_probe(name: str, directory: int, probe: int) -> bool:
     """Unlink the probe from ``directory`` only while that name is still the probe's inode."""
 
@@ -973,7 +956,6 @@ def check_layout(policy: Policy, *, probe: bool = True) -> None:
         descriptors.append(staging)
         if not probe:
             return
-        renameat2 = _libc_renameat2()
         name = f".probe-{secrets.token_hex(16)}"
         try:
             probe_fd = os.open(
@@ -982,18 +964,16 @@ def check_layout(policy: Policy, *, probe: bool = True) -> None:
         except OSError as exc:
             raise ValueError(f"cannot create the layout probe in {policy.exchange}: {exc.strerror}") from exc
         descriptors.append(probe_fd)
-        # The probe uses the movers' exact primitive, so a filesystem without no-replace renames fails here.
-        encoded = os.fsencode(name)
-        if renameat2(exchange, encoded, staging, encoded, _RENAME_NOREPLACE) != 0:
-            code = ctypes.get_errno()
+        # The probe uses the movers' plain same-filesystem rename.
+        try:
+            os.rename(name, name, src_dir_fd=exchange, dst_dir_fd=staging)
+        except OSError as exc:
             _remove_probe(name, exchange, probe_fd)
-            if code == errno.EXDEV:
-                raise ValueError(exdev)
-            if code in (errno.EINVAL, errno.ENOSYS):
-                raise ValueError("the filesystem does not support no-replace renames required for the exchange")
+            if exc.errno == errno.EXDEV:
+                raise ValueError(exdev) from exc
             raise ValueError(
-                f"cannot rename the layout probe from {policy.exchange} into {staging_path}: {os.strerror(code)}"
-            )
+                f"cannot rename the layout probe from {policy.exchange} into {staging_path}: {exc.strerror}"
+            ) from exc
         try:
             removed = _remove_probe(name, staging, probe_fd)
         except OSError as exc:

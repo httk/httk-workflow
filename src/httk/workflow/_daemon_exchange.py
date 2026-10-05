@@ -1,12 +1,11 @@
 """Content-blind broker movers between the client exchange and the workspace staging area.
 
 Every poll reopens the directories component-wise without following symlinks from the
-dedicated parent, moves eligible bundle directories with ``renameat2(RENAME_NOREPLACE)``,
-copies the manager-written ``status.json`` out as bounded bytes, and publishes
+dedicated parent, moves eligible bundle directories with a plain same-mount ``rename`` to an
+absent target name, copies the manager-written ``status.json`` out as bounded bytes, and publishes
 ``managers.json``. Bundle content is never opened.
 """
 
-import ctypes
 import errno
 import json
 import logging
@@ -14,7 +13,6 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +21,7 @@ from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES
 from ._daemon_policy import _open_directory
 
 _LOGGER = logging.getLogger(__name__)
-_RENAME_NOREPLACE = 1
+_RACED = frozenset({errno.ENOENT, errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR})
 _MAX_STATUS_BYTES = 1024 * 1024
 _MAX_REPORTED = 4096
 _ELIGIBLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -31,6 +29,10 @@ _RESERVED = frozenset(
     {"endpoint.json", "status.json", "managers.json", "rejected", "requests", "responses", "inbox", "outbox", "records"}
 )
 _STAGING = Path(".httk-workspace", "exchange")
+
+
+def _rename(source: int, name: str, target: int, target_name: str) -> None:
+    os.rename(name, target_name, src_dir_fd=source, dst_dir_fd=target)
 
 
 def _component(name: str, label: str) -> str:
@@ -47,7 +49,6 @@ class ExchangeMover:
     :param workspace: Name of the workspace directory inside ``root``.
     :param enrollment_id: Enrollment identity published in ``managers.json``.
     :raises ValueError: If ``root`` is not absolute or a name is not a single component.
-    :raises RuntimeError: If the C library has no ``renameat2``.
     """
 
     def __init__(self, root: Path, exchange: str, workspace: str, enrollment_id: str) -> None:
@@ -57,13 +58,6 @@ class ExchangeMover:
         self._exchange = Path(_component(exchange, "exchange name"))
         self._staging = Path(_component(workspace, "workspace name")) / _STAGING
         self._enrollment_id = enrollment_id
-        try:
-            renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-        except AttributeError as exc:
-            raise RuntimeError("the daemon broker requires renameat2 (Linux 3.15+, glibc 2.28+)") from exc
-        renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-        renameat2.restype = ctypes.c_int
-        self._renameat2: Callable[[int, bytes, int, bytes, int], int] = renameat2
         self._reported: set[tuple[str, str]] = set()
         self._status: bytes | None = None
         self._managers: list[dict[str, str]] | None = None
@@ -148,19 +142,32 @@ class ExchangeMover:
                     (label, name), "daemon_exchange_skipped direction=%s name=%s reason=not_directory", label, name
                 )
                 continue
-            encoded = os.fsencode(name)
-            if self._renameat2(source, encoded, target, encoded, _RENAME_NOREPLACE) == 0:
-                self._settle(label, name, target)
-                continue
-            code = ctypes.get_errno()
-            if code not in (errno.EEXIST, errno.ENOENT):
+            try:
+                os.stat(name, dir_fd=target, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
                 self._report(
-                    (label, name),
-                    "daemon_exchange_skipped direction=%s name=%s reason=%s",
-                    label,
-                    name,
-                    os.strerror(code),
+                    (label, name), "daemon_exchange_skipped direction=%s name=%s reason=%s", label, name, exc.strerror
                 )
+                continue
+            else:
+                continue  # an existing target is retried on the next poll
+            # ponytail: no-replace renames are unavailable on NFS/Lustre/GPFS. A directory rename can replace only
+            # a target that is an empty directory created after the check above, so that race loses no data.
+            try:
+                _rename(source, name, target, name)
+            except OSError as exc:
+                if exc.errno not in _RACED:
+                    self._report(
+                        (label, name),
+                        "daemon_exchange_skipped direction=%s name=%s reason=%s",
+                        label,
+                        name,
+                        exc.strerror,
+                    )
+                continue
+            self._settle(label, name, target)
 
     def _settle(self, label: str, name: str, target: int) -> None:
         """Quarantine a moved entry that the source owner swapped for a non-directory after the check."""
@@ -172,21 +179,23 @@ class ExchangeMover:
         except FileNotFoundError:
             return
         quarantine = f".quarantine-{secrets.token_hex(16)}"
-        if self._renameat2(target, os.fsencode(name), target, os.fsencode(quarantine), _RENAME_NOREPLACE) == 0:
+        try:
+            _rename(target, name, target, quarantine)
+        except OSError as exc:
             self._report(
                 (label, name),
-                "daemon_exchange_quarantined direction=%s name=%s as=%s reason=not_directory",
+                "daemon_exchange_quarantine_failed direction=%s name=%s reason=%s",
                 label,
                 name,
-                quarantine,
+                exc.strerror,
             )
             return
         self._report(
             (label, name),
-            "daemon_exchange_quarantine_failed direction=%s name=%s reason=%s",
+            "daemon_exchange_quarantined direction=%s name=%s as=%s reason=not_directory",
             label,
             name,
-            os.strerror(ctypes.get_errno()),
+            quarantine,
         )
 
     def _copy_status(self, source: int, target: int) -> None:

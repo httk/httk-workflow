@@ -1,7 +1,6 @@
 """Policy-free enrollment, publication, and reload for the workspace daemon."""
 
 import base64
-import ctypes
 import errno
 import json
 import os
@@ -331,12 +330,11 @@ def test_cross_mount_rename_probe_failure_refuses_initialization(
 ) -> None:
     layout = _layout(tmp_path)
 
-    def cross_device(*_args: object) -> int:
-        ctypes.set_errno(errno.EXDEV)
-        return -1
+    def cross_device(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
 
     with monkeypatch.context() as patch:
-        patch.setattr(_daemon_policy, "_libc_renameat2", lambda: cross_device)
+        patch.setattr(_daemon_policy.os, "rename", cross_device)
         with pytest.raises(ValueError, match="renameable into each other"):
             _initialize(layout, "small")
     assert list(layout.exchange.iterdir()) == []

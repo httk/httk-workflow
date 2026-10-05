@@ -6,7 +6,6 @@ import os
 import signal
 import stat
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -112,17 +111,43 @@ def test_ineligible_entries_are_skipped_and_logged_once(tmp_path: Path, caplog: 
     assert not any(".hidden" in record.getMessage() for record in caplog.records)
 
 
-def test_vanished_source_is_skipped_silently(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("kind", ["nonempty", "file"])
+def test_target_appearing_after_the_check_loses_nothing(
+    tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    mover, exchange, staging = _site(tmp_path)
+    _bundle(exchange / "inbox/job")
+    original = exchange_module._rename
+
+    def appear(source: int, name: str, target: int, target_name: str) -> None:
+        if kind == "nonempty":
+            (_bundle(staging / "inbox/job") / "payload").write_text("raced", encoding="utf-8")
+        else:
+            (staging / "inbox/job").write_text("raced", encoding="utf-8")
+        original(source, name, target, target_name)
+
+    monkeypatch.setattr(exchange_module, "_rename", appear)
+    with caplog.at_level(logging.WARNING):
+        _poll(mover)
+    assert (exchange / "inbox/job/payload").read_text(encoding="utf-8") == "content"
+    raced = staging / "inbox/job" / ("payload" if kind == "nonempty" else "")
+    assert raced.read_text(encoding="utf-8") == "raced"
+    assert "daemon_exchange" not in caplog.text
+
+
+def test_vanished_source_is_skipped_silently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     mover, exchange, staging = _site(tmp_path)
     bundle = _bundle(exchange / "inbox/job")
-    original = mover._renameat2
+    original = exchange_module._rename
 
-    def vanish(source: int, name: bytes, target: int, target_name: bytes, flags: int) -> int:
+    def vanish(source: int, name: str, target: int, target_name: str) -> None:
         (bundle / "payload").unlink()
         bundle.rmdir()
-        return original(source, name, target, target_name, flags)
+        original(source, name, target, target_name)
 
-    mover._renameat2 = vanish
+    monkeypatch.setattr(exchange_module, "_rename", vanish)
     with caplog.at_level(logging.WARNING):
         _poll(mover)
     assert os.listdir(staging / "inbox") == []
@@ -131,7 +156,7 @@ def test_vanished_source_is_skipped_silently(tmp_path: Path, caplog: pytest.LogC
 
 @pytest.mark.parametrize("direction", ["inbox", "outbox"])
 def test_source_swapped_for_symlink_after_check_is_quarantined(
-    tmp_path: Path, direction: str, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, direction: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     mover, exchange, staging = _site(tmp_path)
     source, target = (
@@ -139,18 +164,18 @@ def test_source_swapped_for_symlink_after_check_is_quarantined(
     )
     bundle = _bundle(source / "job")
     outside = _bundle(tmp_path / "outside")
-    original = mover._renameat2
-    swapped: list[bytes] = []
+    original = exchange_module._rename
+    swapped: list[str] = []
 
-    def swap(source_fd: int, name: bytes, target_fd: int, target_name: bytes, flags: int) -> int:
-        if name == b"job" and not swapped:
+    def swap(source_fd: int, name: str, target_fd: int, target_name: str) -> None:
+        if name == "job" and not swapped:
             swapped.append(name)
             (bundle / "payload").unlink()
             bundle.rmdir()
             bundle.symlink_to(outside, target_is_directory=True)
-        return original(source_fd, name, target_fd, target_name, flags)
+        original(source_fd, name, target_fd, target_name)
 
-    mover._renameat2 = swap
+    monkeypatch.setattr(exchange_module, "_rename", swap)
     with caplog.at_level(logging.WARNING):
         _poll(mover)
     assert swapped
@@ -244,12 +269,6 @@ def test_managers_document_is_rewritten_only_when_rows_change(tmp_path: Path) ->
     assert path.stat().st_ino != inode
     assert json.loads(path.read_bytes())["managers"][0]["state"] == "uncertain"
     assert sorted(os.listdir(exchange / "outbox")) == ["managers.json", "rejected"]
-
-
-def test_missing_renameat2_fails_at_construction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(exchange_module.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace())
-    with pytest.raises(RuntimeError, match="renameat2"):
-        ExchangeMover(tmp_path, "exchange", "workspace", ENROLLMENT_ID)
 
 
 def test_staging_directory_swapped_for_symlink_is_refused(tmp_path: Path) -> None:

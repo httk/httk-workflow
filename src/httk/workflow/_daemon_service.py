@@ -352,11 +352,11 @@ def _run(arguments: argparse.Namespace) -> None:
             verify_active_snapshot(_STATE_DIRECTORY, policy_source, policy)
             gateway.check()
             exchange = _ROOT_DIRECTORY / policy.exchange.name
-            mover = ExchangeMover(_ROOT_DIRECTORY, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
             requests = stack.enter_context(MailboxDirectory(exchange / "requests"))
             responses = stack.enter_context(MailboxDirectory(exchange / "responses"))
             if arguments.check:
                 return
+            mover = ExchangeMover(_ROOT_DIRECTORY, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
             ledger.recover()
             broker = Broker(policy, gateway, ledger, requests, responses, exchange=mover, response_seed=seed)
             broker.run(stop, once=arguments.once)
@@ -374,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     except SchedulerError:
         _LOGGER.error("daemon_service_failed")
         return 1
-    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
+    except (OSError, ValueError, sqlite3.DatabaseError) as exc:
         _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
     return 0

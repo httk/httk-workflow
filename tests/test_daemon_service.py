@@ -799,16 +799,6 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
         service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
 
 
-def test_main_fails_closed_without_renameat2(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    def missing(_arguments: argparse.Namespace) -> None:
-        raise RuntimeError("the daemon broker requires renameat2 (Linux 3.15+, glibc 2.28+)")
-
-    monkeypatch.setattr(service_module, "_run", missing)
-    with caplog.at_level(logging.ERROR):
-        assert service_module.main(["--policy", "/daemon-policy.json", "--policy-source", "/p.json", "--check"]) == 1
-    assert "renameat2" in caplog.text
-
-
 def test_ledger_listing_failure_is_logged_and_does_not_stop_the_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

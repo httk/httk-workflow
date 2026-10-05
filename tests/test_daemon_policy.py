@@ -1,7 +1,6 @@
 """Strict validation for the confined workspace daemon policy."""
 
 import base64
-import ctypes
 import errno
 import importlib
 import json
@@ -590,56 +589,45 @@ def test_check_layout_refuses_symlinked_components(tmp_path: Path) -> None:
     assert refusal.value.errno in (errno.ELOOP, errno.ENOTDIR)
 
 
-def _failing_renameat2(code: int) -> Any:
-    def renameat2(*_args: object) -> int:
-        ctypes.set_errno(code)
-        return -1
+def _failing_rename(code: int) -> Any:
+    def rename(*_args: object, **_kwargs: object) -> None:
+        raise OSError(code, os.strerror(code))
 
-    return renameat2
+    return rename
 
 
 @pytest.mark.parametrize(
     ("code", "message"),
     [
         (errno.EXDEV, "renameable into each other"),
-        (errno.EINVAL, "does not support no-replace renames"),
-        (errno.ENOSYS, "does not support no-replace renames"),
         (errno.EACCES, "cannot rename the layout probe .*Permission denied"),
     ],
 )
-def test_check_layout_refuses_failed_no_replace_renames_and_cleans_the_probe(
+def test_check_layout_refuses_failed_renames_and_cleans_the_probe(
     code: int, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module: Any = importlib.import_module("httk.workflow._daemon_policy")
     policy = _layout_policy(tmp_path)
-    monkeypatch.setattr(module, "_libc_renameat2", lambda: _failing_renameat2(code))
+    monkeypatch.setattr(module.os, "rename", _failing_rename(code))
     with pytest.raises(ValueError, match=message):
         check_layout(policy)
     assert list((tmp_path / "site/exchange").iterdir()) == []
 
 
-def test_check_layout_requires_the_renameat2_symbol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_layout_probe_renames_once_and_leaves_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module: Any = importlib.import_module("httk.workflow._daemon_policy")
     policy = _layout_policy(tmp_path)
-    monkeypatch.setattr(module.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace())
-    with pytest.raises(ValueError, match=r"renameat2 is unavailable \(glibc 2\.28\+ and Linux 3\.15\+"):
-        check_layout(policy)
-    assert list((tmp_path / "site/exchange").iterdir()) == []
+    real = module.os.rename
+    calls: list[str] = []
 
+    def recording(source: str, destination: str, **kwargs: object) -> None:
+        calls.append(source)
+        real(source, destination, **kwargs)
 
-def test_check_layout_probe_uses_a_no_replace_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module: Any = importlib.import_module("httk.workflow._daemon_policy")
-    policy = _layout_policy(tmp_path)
-    real = module._libc_renameat2()
-    calls: list[int] = []
-
-    def recording(source: int, old: bytes, target: int, new: bytes, flags: int) -> int:
-        calls.append(flags)
-        return real(source, old, target, new, flags)
-
-    monkeypatch.setattr(module, "_libc_renameat2", lambda: recording)
+    monkeypatch.setattr(module.os, "rename", recording)
     check_layout(policy)
-    assert calls == [1]
+    assert len(calls) == 1 and calls[0].startswith(".probe-")
+    assert list((tmp_path / "site/exchange").iterdir()) == []
     assert list((tmp_path / "site/workspace/.httk-workspace/exchange").iterdir()) == []
 
 
@@ -650,20 +638,18 @@ def test_check_layout_detects_a_tampered_probe_and_never_moves_foreign_entries(
     module: Any = importlib.import_module("httk.workflow._daemon_policy")
     policy = _layout_policy(tmp_path)
     staging = tmp_path / "site/workspace/.httk-workspace/exchange"
-    real = module._libc_renameat2()
+    real = module.os.rename
     renames: list[str] = []
 
-    def rename_then_tamper(source: int, old: bytes, target: int, new: bytes, flags: int) -> int:
-        result = real(source, old, target, new, flags)
-        name = os.fsdecode(new)
-        renames.append(name)
-        (staging / name).unlink()
+    def rename_then_tamper(source: str, destination: str, **kwargs: object) -> None:
+        real(source, destination, **kwargs)
+        renames.append(destination)
+        (staging / destination).unlink()
         if tamper == "replaced":
-            (staging / name).mkdir()
-            (staging / name / "payload").touch()
-        return result
+            (staging / destination).mkdir()
+            (staging / destination / "payload").touch()
 
-    monkeypatch.setattr(module, "_libc_renameat2", lambda: rename_then_tamper)
+    monkeypatch.setattr(module.os, "rename", rename_then_tamper)
     with pytest.raises(ValueError, match="layout probe was tampered with"):
         check_layout(policy)
     assert len(renames) == 1
@@ -675,7 +661,7 @@ def test_check_layout_detects_a_tampered_probe_and_never_moves_foreign_entries(
 def test_check_layout_without_probe_still_checks_the_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module: Any = importlib.import_module("httk.workflow._daemon_policy")
     policy = _layout_policy(tmp_path)
-    monkeypatch.setattr(module, "_libc_renameat2", lambda: pytest.fail("probe must not run"))
+    monkeypatch.setattr(module.os, "rename", lambda *_args, **_kwargs: pytest.fail("probe must not run"))
     check_layout(policy, probe=False)
     (tmp_path / "site/extra").mkdir()
     with pytest.raises(ValueError, match="must contain only"):

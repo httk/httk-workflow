@@ -24,8 +24,8 @@ lack these confinement guarantees.
   `--ro-bind-data`, `--disable-userns` and `--assert-userns-disabled`.
 - Permitted unprivileged user namespaces.
 - Slurm 23.11.6 or later.
-- A filesystem for the workspace and exchange that supports no-replace
-  renames (see [Layout](#layout)).
+- The workspace and exchange on one filesystem and one mount (see
+  [Layout](#layout)).
 
 Startup refuses missing requirements; there is no unsandboxed fallback. The
 Python installation, its packages, the global launchers and the initial
@@ -62,8 +62,8 @@ contains nothing else:
 
 - Anything else in the parent is refused, naming the entry: the broker has
   read-write access to the parent.
-- The workspace and exchange must be on one filesystem and one mount, and the
-  filesystem must support no-replace renames. A probe checks this at
+- The workspace and exchange must be on one filesystem and one mount, so that
+  jobs move by a plain rename. A probe checks this at
   `--initialize` and `--reload`, and the bootstrap rechecks it before every
   sandbox entry.
 - The parent must be disjoint from the daemon state and snapshot directories,
