@@ -1,0 +1,693 @@
+"""The rank helper and inner exec of a confined launch, with the plumbing-only fake Bubblewrap."""
+
+import fcntl
+import os
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import pytest
+
+from httk.workflow import _confine_exec, _confine_rank
+from httk.workflow._confine import ConfinementUnavailableError, confine_settings, default_readonly_paths, probe_bwrap
+from httk.workflow._launch_protocol import (
+    LaunchConfinement,
+    LaunchRequest,
+    TrustedLaunch,
+    encode_request,
+    encode_trusted,
+    new_request_id,
+    request_relative_path,
+    trusted_name,
+)
+
+_FAKE_BWRAP = Path(__file__).with_name("fake_bwrap.py")
+_TIMEOUT = 60.0
+_WORKSPACE_ID = "0f6b6c2a-1d55-4c69-8d43-7c0a1b2c3d4e"
+
+
+@dataclass
+class _Launch:
+    root: Path
+    workspace: Path
+    job: Path
+    shm_root: Path
+    pmix_root: Path
+    launch_dir: Path
+    trusted: TrustedLaunch
+
+    @property
+    def request_path(self) -> Path:
+        return self.job / self.trusted.request
+
+    @property
+    def shm(self) -> Path:
+        return self.shm_root / f"httk-{self.trusted.token}"
+
+    def write(self, trusted: TrustedLaunch | None = None) -> None:
+        if trusted is not None:
+            self.trusted = trusted
+        self.launch_dir.mkdir(parents=True, exist_ok=True)
+        (self.launch_dir / "launch.json").write_bytes(encode_trusted(self.trusted))
+
+    def request(self, argv: tuple[str, ...], cwd: str = ".", environment: dict[str, str] | None = None) -> None:
+        self.request_path.parent.mkdir(parents=True, exist_ok=True)
+        request = LaunchRequest(
+            request_id=self.trusted.request_id,
+            attempt_id=self.trusted.attempt_id,
+            argv=argv,
+            cwd=cwd,
+            environment=tuple(sorted((environment or {"PATH": os.environ["PATH"]}).items())),
+        )
+        self.request_path.write_bytes(encode_request(request))
+
+
+def _fake_bwrap(directory: Path) -> Path:
+    wrapper = directory / "bwrap"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{_FAKE_BWRAP}" "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+@pytest.fixture
+def launch(tmp_path: Path) -> _Launch:
+    root = tmp_path.resolve()
+    workspace = root / "ws"
+    job = workspace / "project" / f"relax--{uuid.uuid4()}"
+    job.mkdir(parents=True)
+    shm_root = root / "shm"
+    shm_root.mkdir(mode=0o700)
+    pmix_root = root / "pmix"
+    pmix_root.mkdir()
+    bin_directory = root / "bin"
+    bin_directory.mkdir()
+    request_id = new_request_id()
+    attempt_id = str(uuid.uuid4())
+    trusted = TrustedLaunch(
+        request_id=request_id,
+        attempt_id=attempt_id,
+        workspace_id=_WORKSPACE_ID,
+        workspace_root=workspace,
+        placement="project",
+        job_key=job.name,
+        request=request_relative_path(attempt_id, request_id),
+        confine=LaunchConfinement(
+            bwrap=_fake_bwrap(bin_directory),
+            block_userns=False,
+            readonly_paths=(Path("/usr"),),
+            devices=(),
+            pmix_roots=(pmix_root,),
+            shm_root=shm_root,
+            environment=(("OMPI_MCA_btl_vader_single_copy_mechanism", "none"),),
+        ),
+        python=Path(sys.executable),
+        token=secrets.token_hex(16),
+    )
+    launch_dir = workspace / ".httk-workspace" / "managers" / "m1" / "launches" / trusted_name(attempt_id, request_id)
+    created = _Launch(root, workspace, job, shm_root, pmix_root, launch_dir, trusted)
+    created.write()
+    return created
+
+
+def _option_index(argv: list[str], *items: str) -> int:
+    for index in range(len(argv) - len(items) + 1):
+        if tuple(argv[index : index + len(items)]) == items:
+            return index
+    raise AssertionError(f"{items} not in {argv}")
+
+
+@dataclass
+class _Opened:
+    workspace: Path
+    workspace_fd: int
+    job: Path
+    job_fd: int
+    shm_fd: int
+
+
+@pytest.fixture
+def opened(launch: _Launch) -> Iterator[_Opened]:
+    trusted, workspace, workspace_fd = _confine_rank.read_launch(launch.launch_dir)
+    job, job_fd = _confine_rank.open_job(trusted, workspace)
+    shm_fd = os.open(launch.shm_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        yield _Opened(workspace, workspace_fd, job, job_fd, shm_fd)
+    finally:
+        for descriptor in (workspace_fd, job_fd, shm_fd):
+            os.close(descriptor)
+
+
+def _prepare(launch: _Launch, opened: _Opened, environ: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+    prepared, environment = _confine_rank.prepare_rank_sandbox(
+        launch.trusted,
+        workspace=opened.workspace,
+        workspace_fd=opened.workspace_fd,
+        job=opened.job,
+        job_fd=opened.job_fd,
+        shm_fd=opened.shm_fd,
+        environ=environ,
+    )
+    try:
+        for descriptor in prepared.descriptors:
+            assert not fcntl.fcntl(descriptor, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        return prepared.argv, environment
+    finally:
+        prepared.close()
+
+
+def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened: _Opened) -> None:
+    environ = {
+        "PMI_RANK": "3",
+        "PMIX_NAMESPACE": "ns",
+        "OMPI_COMM_WORLD_SIZE": "4",
+        "OPAL_PREFIX": "/opt/ompi",
+        "SLURM_PROCID": "3",
+        "SLURMD_NODENAME": "n1",
+        "SLURM_CONF": "/etc/slurm.conf",
+        "SLURM_JOB_NODELIST": "n[1-2]",
+        "FOO": "bar",
+        "HOME": "/home/u",
+    }
+    argv, environment = _prepare(launch, opened, environ)
+    assert argv[0] == str(launch.trusted.confine.bwrap)
+    assert argv[1:5] == ["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+    assert "--unshare-net" not in argv and "--disable-userns" not in argv
+    assert "--new-session" not in argv
+    _option_index(argv, "--unshare-uts", "--die-with-parent", "--cap-drop", "ALL", "--tmpfs")
+    assert "--clearenv" not in argv and "--setenv" not in argv
+    assert environment == {
+        "PMI_RANK": "3",
+        "PMIX_NAMESPACE": "ns",
+        "OMPI_COMM_WORLD_SIZE": "4",
+        "OPAL_PREFIX": "/opt/ompi",
+        "SLURM_PROCID": "3",
+        "SLURMD_NODENAME": "n1",
+        "OMPI_MCA_btl_vader_single_copy_mechanism": "none",
+        "HOME": "/tmp/home",
+        "TMPDIR": "/tmp",
+    }
+    tmpfs = _option_index(argv, "--tmpfs", "/tmp", "--dir", "/tmp/home")
+    readonly = argv.index("/usr")
+    workspace = _option_index(argv, "--ro-bind-fd", argv[argv.index(str(launch.workspace)) - 1], str(launch.workspace))
+    job = _option_index(argv, "--bind-fd", argv[argv.index(str(launch.job)) - 1], str(launch.job))
+    dev = _option_index(argv, "--proc", "/proc", "--dev", "/dev")
+    shm = argv.index("/dev/shm")
+    assert tmpfs < readonly < workspace < job < dev < shm
+    assert argv[shm - 2] == "--bind-fd"
+    separator = argv.index("--")
+    assert argv[separator - 2 : separator] == ["--chdir", str(launch.job)]
+    assert argv[separator + 1 :] == [
+        sys.executable,
+        "-I",
+        "-m",
+        "httk.workflow._confine_exec",
+        "--request",
+        str(launch.request_path),
+        "--request-id",
+        launch.trusted.request_id,
+        "--attempt-id",
+        launch.trusted.attempt_id,
+    ]
+
+
+def test_no_environment_value_appears_in_the_rank_argv(launch: _Launch, opened: _Opened) -> None:
+    step = launch.pmix_root / "pmix-secret-dir"
+    step.mkdir()
+    secrets = {
+        "PMI_RANK": "secret-rank-value",
+        "PMIX_SERVER_URI": "secret-pmix-uri",
+        "PMIX_SERVER_TMPDIR": str(step),
+        "OMPI_MCA_secret": "secret-ompi",
+        "SLURM_JOB_ID": "secret-job",
+    }
+    sensitive = ("secret-confine-value",)
+    launch.trusted = replace(
+        launch.trusted,
+        confine=replace(launch.trusted.confine, environment=(("SITE_TOKEN", sensitive[0]),)),
+    )
+    argv, environment = _prepare(launch, opened, secrets)
+    assert environment["SITE_TOKEN"] == sensitive[0] and environment["PMIX_SERVER_URI"] == "secret-pmix-uri"
+    joined = "\0".join(argv)
+    for name, value in environment.items():
+        assert name not in argv, name
+        if name != "PMIX_SERVER_TMPDIR" and value not in ("/tmp", "/tmp/home"):
+            assert value not in joined, name
+    assert argv.count(str(step)) == 1, "the PMIx directory appears only as its bind destination"
+
+
+def test_argv_blocks_user_namespaces_when_the_launch_says_so(launch: _Launch, opened: _Opened) -> None:
+    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, block_userns=True))
+    argv, _environment = _prepare(launch, opened, {})
+    _option_index(argv, "--unshare-uts", "--disable-userns", "--assert-userns-disabled", "--die-with-parent")
+
+
+def test_rank_environment_refuses_invalid_captured_variables(launch: _Launch) -> None:
+    with pytest.raises(ValueError, match="invalid rank environment name"):
+        _confine_rank.rank_environment({"PMIX_A-B": "1"}, launch.trusted)
+    with pytest.raises(ValueError, match="exceeds"):
+        _confine_rank.rank_environment({"PMI_A": "x" * (128 * 1024 + 1)}, launch.trusted)
+
+
+def test_pmix_directory_is_bound_only_below_an_approved_root(launch: _Launch, opened: _Opened) -> None:
+    step = launch.pmix_root / "spool" / "pmix.7.0"
+    step.mkdir(parents=True)
+    argv, environment = _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(step)})
+    assert environment["PMIX_SERVER_TMPDIR"] == str(step)
+    assert argv.count(str(step)) == 1
+    index = argv.index(str(step))
+    assert argv[index - 2] == "--bind-fd"
+    assert index > argv.index("/dev/shm")
+    parents = [argv[position + 1] for position in range(index - 2) if argv[position] == "--dir"]
+    assert str(step.parent) in parents and str(launch.pmix_root) in parents
+    assert parents.index(str(launch.pmix_root)) < parents.index(str(step.parent))
+
+    outside = launch.root / "elsewhere"
+    outside.mkdir()
+    with pytest.raises(ValueError, match=r"confine\.pmix_roots"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(outside)})
+    with pytest.raises(ValueError, match=r"confine\.pmix_roots"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(launch.pmix_root)})
+    with pytest.raises(ValueError, match="absolute"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": "relative/pmix"})
+    with pytest.raises(ValueError, match="unavailable"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(launch.pmix_root / "missing")})
+    link = launch.pmix_root / "link"
+    link.symlink_to(step)
+    with pytest.raises(OSError):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(link)})
+    escape = launch.pmix_root / "escape"
+    escape.symlink_to(outside)
+    with pytest.raises(ValueError, match=r"confine\.pmix_roots"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(escape)})
+
+
+def test_pmix_directory_must_not_overlap_the_workspace(launch: _Launch, opened: _Opened) -> None:
+    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, pmix_roots=(launch.root,)))
+    with pytest.raises(ValueError, match="overlaps"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(launch.job)})
+    with pytest.raises(ValueError, match="overlaps"):
+        _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(launch.shm_root)})
+
+
+def _subdirectory_device() -> Path | None:
+    for path in ("/dev/pts/ptmx", "/dev/net/tun", "/dev/dri/card0"):
+        if os.path.exists(path) and stat.S_ISCHR(os.stat(path).st_mode):
+            return Path(path)
+    return None
+
+
+def test_devices_are_bound_after_dev_with_parent_dirs(launch: _Launch, opened: _Opened) -> None:
+    devices = [Path("/dev/null")]
+    nested = _subdirectory_device()
+    if nested is not None:
+        devices.append(nested)
+    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, devices=tuple(devices)))
+    argv, _environment = _prepare(launch, opened, {})
+    dev = _option_index(argv, "--proc", "/proc", "--dev", "/dev")
+    null = argv.index("/dev/null")
+    assert argv[null - 2] == "--bind-fd" and null > dev
+    if nested is not None:
+        parent = _option_index(argv, "--dir", str(nested.parent))
+        assert dev < parent < argv.index(str(nested))
+    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, devices=(Path("/dev/shm"),)))
+    with pytest.raises(ValueError, match="not a device"):
+        _prepare(launch, opened, {})
+
+
+def test_readonly_path_inside_the_workspace_is_refused(launch: _Launch, opened: _Opened) -> None:
+    launch.trusted = replace(
+        launch.trusted, confine=replace(launch.trusted.confine, readonly_paths=(launch.workspace,))
+    )
+    with pytest.raises(ValueError, match="inside the workspace"):
+        _prepare(launch, opened, {})
+
+
+def test_read_launch_refusals(launch: _Launch) -> None:
+    with pytest.raises(ValueError, match="--launch-dir"):
+        _confine_rank.read_launch(launch.launch_dir.parent)
+    with pytest.raises(ValueError, match="--launch-dir"):
+        _confine_rank.read_launch(Path("relative") / ".httk-workspace/managers/m/launches/x")
+    # A trusted directory is named by attempt and request: neither alone is enough.
+    for other_name in (
+        trusted_name(launch.trusted.attempt_id, new_request_id()),
+        trusted_name(str(uuid.uuid4()), launch.trusted.request_id),
+        launch.trusted.request_id,
+    ):
+        other = launch.launch_dir.parent / other_name
+        shutil.copytree(launch.launch_dir, other)
+        with pytest.raises(ValueError, match="another attempt or request"):
+            _confine_rank.read_launch(other)
+
+    linked_workspace = launch.root / "linked"
+    linked_workspace.symlink_to(launch.workspace)
+    trusted, workspace, descriptor = _confine_rank.read_launch(
+        linked_workspace / launch.launch_dir.relative_to(launch.workspace)
+    )
+    os.close(descriptor)
+    assert trusted == launch.trusted and workspace == launch.workspace
+
+    managers = launch.workspace / ".httk-workspace" / "managers"
+    shutil.move(managers / "m1", launch.root / "m1")
+    (managers / "m1").symlink_to(launch.root / "m1")
+    with pytest.raises(OSError):
+        _confine_rank.read_launch(launch.launch_dir)
+    (managers / "m1").unlink()
+    shutil.move(launch.root / "m1", managers / "m1")
+
+    document = launch.launch_dir / "launch.json"
+    document.rename(launch.root / "launch.json")
+    document.symlink_to(launch.root / "launch.json")
+    with pytest.raises(ValueError, match="symlink"):
+        _confine_rank.read_launch(launch.launch_dir)
+    document.unlink()
+    (launch.root / "launch.json").rename(document)
+
+    other_workspace = launch.root / "other"
+    other_workspace.mkdir()
+    launch.write(replace(launch.trusted, workspace_root=other_workspace))
+    with pytest.raises(ValueError, match="workspace"):
+        _confine_rank.read_launch(launch.launch_dir)
+
+
+def test_open_job_refusals(launch: _Launch) -> None:
+    workspace = launch.workspace
+    with pytest.raises(ValueError, match="job key"):
+        _confine_rank.open_job(replace(launch.trusted, job_key="plain"), workspace)
+    nested = f"relax--{uuid.uuid4()}"
+    with pytest.raises(ValueError, match="job directories never nest"):
+        _confine_rank.open_job(replace(launch.trusted, placement=f"project/{nested}"), workspace)
+    with pytest.raises(ValueError, match="placement"):
+        _confine_rank.open_job(replace(launch.trusted, placement=".httk-workspace"), workspace)
+    linked = workspace / "project" / f"linked--{uuid.uuid4()}"
+    linked.symlink_to(launch.job)
+    with pytest.raises(ValueError, match="symlink"):
+        _confine_rank.open_job(replace(launch.trusted, job_key=linked.name), workspace)
+
+    # Placement directories are operator layout and followed; the job's real path is used.
+    scratch = launch.root / "scratch"
+    scratch.mkdir()
+    (workspace / "elsewhere").symlink_to(scratch)
+    moved = scratch / launch.job.name
+    moved.mkdir()
+    job, descriptor = _confine_rank.open_job(replace(launch.trusted, placement="elsewhere"), workspace)
+    os.close(descriptor)
+    assert job == moved
+
+
+def test_shared_memory_is_shared_and_removed_by_the_last_rank(launch: _Launch) -> None:
+    token = launch.trusted.token
+    first = _confine_rank.join_shared_memory(launch.shm_root, token)
+    second = _confine_rank.join_shared_memory(launch.shm_root, token)
+    assert os.path.samestat(os.fstat(first.fd), os.fstat(second.fd))
+    information = os.stat(launch.shm)
+    assert stat.S_IMODE(information.st_mode) == 0o700 and information.st_uid == os.geteuid()
+    _confine_rank.leave_shared_memory(first)
+    assert launch.shm.is_dir()
+    _confine_rank.leave_shared_memory(second)
+    assert not launch.shm.exists()
+    third = _confine_rank.join_shared_memory(launch.shm_root, token)
+    assert launch.shm.is_dir()
+    _confine_rank.leave_shared_memory(third)
+    assert not launch.shm.exists()
+
+
+def test_shared_memory_refuses_unsafe_existing_entries(launch: _Launch, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = launch.trusted.token
+    launch.shm.mkdir(mode=0o755)
+    launch.shm.chmod(0o755)
+    with pytest.raises(ValueError, match="mode 0700"):
+        _confine_rank.join_shared_memory(launch.shm_root, token)
+    launch.shm.rmdir()
+    target = launch.root / "target"
+    target.mkdir(mode=0o700)
+    launch.shm.symlink_to(target)
+    with pytest.raises(ValueError, match="not a real directory"):
+        _confine_rank.join_shared_memory(launch.shm_root, token)
+    launch.shm.unlink()
+    launch.shm.write_bytes(b"")
+    with pytest.raises(ValueError, match="not a real directory"):
+        _confine_rank.join_shared_memory(launch.shm_root, token)
+    launch.shm.unlink()
+    launch.shm.mkdir(mode=0o700)
+    (launch.shm / ".lock").symlink_to(launch.root / "elsewhere")
+    with pytest.raises(OSError):
+        _confine_rank.join_shared_memory(launch.shm_root, token)
+    (launch.shm / ".lock").unlink()
+    real_uid = os.geteuid()
+    monkeypatch.setattr(_confine_rank, "_check_shm_root", lambda _descriptor, _path: None)
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+    with pytest.raises(ValueError, match="owned by this user"):
+        _confine_rank.join_shared_memory(launch.shm_root, token)
+
+
+def test_shared_memory_root_must_be_safe(launch: _Launch) -> None:
+    launch.shm_root.chmod(0o777)
+    try:
+        with pytest.raises(ValueError, match="world-writable"):
+            _confine_rank.join_shared_memory(launch.shm_root, launch.trusted.token)
+    finally:
+        launch.shm_root.chmod(0o700)
+    linked = launch.root / "shm-link"
+    linked.symlink_to(launch.shm_root)
+    with pytest.raises(OSError):
+        _confine_rank.join_shared_memory(linked, launch.trusted.token)
+
+
+def _run_helper(
+    launch: _Launch, environ: dict[str, str] | None = None, *, wait: bool = True
+) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-m", "httk.workflow._confine_rank", "--launch-dir", str(launch.launch_dir)],
+        env={"PATH": os.environ["PATH"], **(environ or {})},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if wait:
+        process.wait(timeout=_TIMEOUT)
+    return process
+
+
+def test_end_to_end_with_fake_bwrap(launch: _Launch) -> None:
+    (launch.job / "sub").mkdir()
+    script = 'pwd; echo "$FOO|$PMI_RANK|$OMPI_MCA_btl_vader_single_copy_mechanism|$HOME|$SLURM_CONF|$X"; exit 7'
+    launch.request(("sh", "-c", script), cwd="sub", environment={"PATH": os.environ["PATH"], "FOO": "bar"})
+    process = _run_helper(launch, {"PMI_RANK": "3", "SLURM_CONF": "/etc/slurm.conf", "X": "helper"})
+    stdout, stderr = process.communicate()
+    assert process.returncode == 7, stderr
+    assert stdout.decode().splitlines() == [str(launch.job / "sub"), "bar|3|none|/tmp/home||"]
+    assert not launch.shm.exists()
+
+
+def test_helper_refuses_pmix_outside_the_roots(launch: _Launch) -> None:
+    launch.request(("true",))
+    outside = launch.root / "pmix-outside"
+    outside.mkdir()
+    process = _run_helper(launch, {"PMIX_SERVER_TMPDIR": str(outside)})
+    _stdout, stderr = process.communicate()
+    assert process.returncode == 2
+    assert b"confine.pmix_roots" in stderr
+    assert not launch.shm.exists()
+
+
+def test_helper_reports_signal_exit_and_forwards_signals(launch: _Launch) -> None:
+    launch.request(("sh", "-c", 'touch started; exec sleep 30'))
+    process = _run_helper(launch, wait=False)
+    try:
+        _wait_for(launch.job / "started", process)
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=_TIMEOUT) == 128 + signal.SIGTERM
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+    assert not launch.shm.exists()
+
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rpartition(")")[2].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return state != "Z"
+
+
+def test_helper_signal_reaches_the_whole_rank_group(launch: _Launch) -> None:
+    launch.request(("sh", "-c", 'sleep 30 & echo "$!" > bg.pid; echo "$$" > sh.pid; touch started; wait'))
+    process = _run_helper(launch, wait=False)
+    try:
+        _wait_for(launch.job / "started", process)
+        background = int((launch.job / "bg.pid").read_text())
+        shell = int((launch.job / "sh.pid").read_text())
+        assert os.getpgid(background) == os.getpgid(shell) == shell != os.getpgid(process.pid)
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=_TIMEOUT) == 128 + signal.SIGTERM
+        assert not _alive(shell) and not _alive(background)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+    assert not launch.shm.exists()
+
+
+def test_helper_keeps_shared_memory_until_the_rank_group_is_gone(launch: _Launch) -> None:
+    survivor = '(trap "" TERM; while [ ! -e release ]; do sleep 0.05; done; touch survived) &'
+    launch.request(("sh", "-c", f"{survivor} touch started; wait"))
+    process = _run_helper(launch, wait=False)
+    try:
+        _wait_for(launch.job / "started", process)
+        process.send_signal(signal.SIGTERM)
+        time.sleep(0.5)
+        assert process.poll() is None, "the helper exited while a rank process was alive"
+        assert launch.shm.is_dir()
+        (launch.job / "release").touch()
+        assert process.wait(timeout=_TIMEOUT) == 128 + signal.SIGTERM
+        assert (launch.job / "survived").exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+    assert not launch.shm.exists()
+
+
+def _wait_for(path: Path, *processes: subprocess.Popen[bytes]) -> None:
+    deadline = time.monotonic() + _TIMEOUT
+    while not path.exists():
+        for process in processes:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"helper exited with {process.returncode}: {stdout!r} {stderr!r}")
+        assert time.monotonic() < deadline, f"{path} did not appear"
+        time.sleep(0.02)
+
+
+def test_concurrent_helpers_share_shm_and_the_last_removes_it(launch: _Launch) -> None:
+    script = 'touch "started.$PMI_RANK"; while [ ! -e "release.$PMI_RANK" ]; do sleep 0.02; done'
+    launch.request(("sh", "-c", script))
+    first = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    second = _run_helper(launch, {"PMI_RANK": "1"}, wait=False)
+    try:
+        _wait_for(launch.job / "started.0", first, second)
+        _wait_for(launch.job / "started.1", first, second)
+        assert launch.shm.is_dir()
+        (launch.job / "release.0").touch()
+        assert first.wait(timeout=_TIMEOUT) == 0
+        assert launch.shm.is_dir(), "the first rank removed shared memory still in use"
+        (launch.job / "release.1").touch()
+        assert second.wait(timeout=_TIMEOUT) == 0
+        assert not launch.shm.exists()
+    finally:
+        for process in (first, second):
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+
+def _exec(launch: _Launch, monkeypatch: pytest.MonkeyPatch, **changes: str) -> int:
+    monkeypatch.chdir(launch.root)
+    arguments = {
+        "--request": str(launch.request_path),
+        "--request-id": launch.trusted.request_id,
+        "--attempt-id": launch.trusted.attempt_id,
+    } | changes
+    return _confine_exec.main([item for pair in arguments.items() for item in pair])
+
+
+def test_inner_exec_refusals(
+    launch: _Launch, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    launch.request(("/nonexistent/program",))
+    assert _exec(launch, monkeypatch, **{"--request-id": new_request_id()}) == 2
+    assert _exec(launch, monkeypatch, **{"--attempt-id": str(uuid.uuid4())}) == 2
+    assert _exec(launch, monkeypatch, **{"--attempt-id": "x"}) == 2
+    assert _exec(launch, monkeypatch, **{"--request": str(launch.job / "request.json")}) == 2
+    assert _exec(launch, monkeypatch, **{"--request": f"relative/{launch.trusted.request}"}) == 2
+    assert "refused" in capsys.readouterr().err
+
+    assert _exec(launch, monkeypatch) == 127
+    assert "cannot execute" in capsys.readouterr().err
+
+    elsewhere = launch.root / "elsewhere"
+    (elsewhere / "inner").mkdir(parents=True)
+    (launch.job / "link").symlink_to(elsewhere)
+    launch.request(("true",), cwd="link/inner")
+    assert _exec(launch, monkeypatch) == 2
+    launch.request(("true",), cwd="missing")
+    assert _exec(launch, monkeypatch) == 2
+
+    real = launch.root / "request.json"
+    launch.request_path.rename(real)
+    launch.request_path.symlink_to(real)
+    assert _exec(launch, monkeypatch) == 2
+    assert "symlink" in capsys.readouterr().err
+    launch.request_path.unlink()
+    launch.request_path.write_bytes(b" " * (1024 * 1024 + 1))
+    assert _exec(launch, monkeypatch) == 2
+    assert "exceeds" in capsys.readouterr().err
+
+    launch.request_path.unlink()
+    launch_directory = launch.request_path.parent
+    moved = launch.root / "launch-moved"
+    launch_directory.rename(moved)
+    launch_directory.symlink_to(moved)
+    launch.request(("true",))
+    assert _exec(launch, monkeypatch) == 2
+
+
+def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
+            pytest.fail("required Bubblewrap executable is unavailable")
+        pytest.skip("Bubblewrap executable is unavailable")
+    settings = confine_settings({"manager.confine": "bwrap"})
+    try:
+        block_userns = probe_bwrap(settings)
+    except ConfinementUnavailableError as exc:
+        detail = str(exc).lower()
+        if not any(
+            phrase in detail
+            for phrase in ("operation not permitted", "permission denied", "no permissions to create", "user namespace")
+        ):
+            pytest.fail(f"Bubblewrap sandbox failed unexpectedly: {exc}")
+        if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
+            pytest.fail(f"required Bubblewrap sandbox is unavailable: {exc}")
+        pytest.skip(f"Bubblewrap user namespaces are unavailable: {exc}")
+    launch.write(
+        replace(
+            launch.trusted,
+            confine=replace(
+                launch.trusted.confine,
+                bwrap=Path(bwrap).resolve(),
+                block_userns=block_userns,
+                readonly_paths=default_readonly_paths(),
+            ),
+        )
+    )
+    sibling = launch.workspace / "project" / f"other--{uuid.uuid4()}"
+    sibling.mkdir()
+    script = (
+        'for target in "$1/own" "$2/x" "$3/x" "/dev/shm/x"; do\n'
+        '  if (echo data > "$target") 2>/dev/null; then echo "writable $target"; else echo "refused $target"; fi\n'
+        "done\n"
+    )
+    launch.request(("/bin/sh", "-c", script, "sh", str(launch.job), str(sibling), str(launch.workspace)))
+    process = _run_helper(launch)
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, stderr
+    assert stdout.decode().splitlines() == [
+        f"writable {launch.job}/own",
+        f"refused {sibling}/x",
+        f"refused {launch.workspace}/x",
+        "writable /dev/shm/x",
+    ]
+    assert not (sibling / "x").exists() and not (launch.workspace / "x").exists()
+    assert not launch.shm.exists()

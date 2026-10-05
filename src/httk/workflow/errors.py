@@ -6,6 +6,7 @@
 from httk.core.project.sealing import SealedError, SealError
 
 __all__ = [
+    "ConfinementUnavailableError",
     "FormatError",
     "ResolutionMiss",
     "RunnerResolutionError",
@@ -22,6 +23,10 @@ __all__ = [
 
 class WorkflowError(RuntimeError):
     """Base class for workflow protocol failures."""
+
+
+class ConfinementUnavailableError(WorkflowError):
+    """Bubblewrap is missing or cannot build the attempt sandbox (``manager.confine=bwrap``)."""
 
 
 class ResolutionMiss(ValueError):

@@ -332,26 +332,10 @@ def test_slurm_launcher_reports_partial_submission(tmp_path: Path, monkeypatch: 
     assert "quota exceeded" in result["error"]
 
 
-def test_daemon_launcher_add_set_and_refusals(tmp_path: Path, remote: Remote) -> None:
-    bundle = add_launcher("small", template="daemon", settings={"slurm.partition": "debug"}, global_=True)
-    path = bundle / "launcher.json"
-    assert json.loads(path.read_text())["kind"] == "daemon"
-    assert subprocess.run([str(bundle / "launcher")], capture_output=True, text=True, check=False).returncode == 2
-    with pytest.raises(ValueError, match="daemon launchers run only"):
-        start_managers(
-            resolve_launcher("small"), workspace_root=tmp_path, argv=["x"], count=1, settings={}, timeout=None
-        )
-    before = path.read_text()
-    with pytest.raises(ValueError, match="slurm.ntasks=4 requires slurm.mpi=pmix"):
-        configure_launcher("small", {"slurm.ntasks": 4})
-    assert path.read_text() == before
-    configure_launcher("small", {"slurm.mem": "4G"})
-    assert json.loads(path.read_text())["settings"]["slurm.mem"] == "4G"
-    with pytest.raises(ValueError, match="names must match"):
-        add_launcher("Small", template="daemon", global_=True)
-    with pytest.raises(ValueError, match="unsupported daemon launcher setting"):
-        add_launcher("bad", template="daemon", settings={"slurm.qos": "x"}, global_=True)
-    assert not (bundle.parent / "bad").exists()
+def test_the_daemon_template_is_gone(tmp_path: Path, remote: Remote) -> None:
+    with pytest.raises(ValueError, match="unknown maintained launcher template: daemon"):
+        add_launcher("small", template="daemon", global_=True)
+    assert not (Path(os.environ["HTTK_CONFIG_HOME"]) / "launchers" / "small").exists()
 
 
 def _stored(name: str) -> dict[str, object]:
@@ -363,29 +347,29 @@ def _stored(name: str) -> dict[str, object]:
 def test_launcher_configure_add_path(
     tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from httk.workflow import _daemon_setup
+    from httk.workflow.workflow_cli import _launcher
 
-    monkeypatch.setattr(_daemon_setup, "default_readonly_paths", lambda: (Path("/usr"), Path("/opt/py")))
+    monkeypatch.setattr(_launcher, "default_readonly_paths", lambda: (Path("/usr"), Path("/opt/py")))
     project = tmp_path / "project"
     initialize_project(project, name="add-path")
     context = CLIContext("httk", project)
-    assert command(["launcher", "add", "--template", "daemon", "--global", "small"], context) == 0
+    assert command(["launcher", "add", "--template", "slurm", "--global", "small"], context) == 0
     capsys.readouterr()
     args = ["launcher", "configure", "small", "--add-path"]
-    assert command([*args, "daemon.readonly_paths=/software"], context) == 0
-    assert _stored("small")["daemon.readonly_paths"] == "/usr:/opt/py:/software"
-    assert capsys.readouterr().out.splitlines()[-1] == "daemon.readonly_paths=/usr:/opt/py:/software"
-    assert command(["launcher", "configure", "small", "--set", "daemon.readonly_paths=/a:/b"], context) == 0
-    assert command([*args, "daemon.readonly_paths=/b:/c"], context) == 0
-    assert _stored("small")["daemon.readonly_paths"] == "/a:/b:/c"
-    assert command([*args, "daemon.mpi.devices=/dev/x", "--set", "slurm.partition=p"], context) == 0
-    assert _stored("small")["daemon.mpi.devices"] == "/dev/x"
+    assert command([*args, "confine.readonly_paths=/software"], context) == 0
+    assert _stored("small")["confine.readonly_paths"] == "/usr:/opt/py:/software"
+    assert capsys.readouterr().out.splitlines()[-1] == "confine.readonly_paths=/usr:/opt/py:/software"
+    assert command(["launcher", "configure", "small", "--set", "confine.readonly_paths=/a:/b"], context) == 0
+    assert command([*args, "confine.readonly_paths=/b:/c"], context) == 0
+    assert _stored("small")["confine.readonly_paths"] == "/a:/b:/c"
+    assert command([*args, "confine.devices=/dev/x", "--set", "slurm.partition=p"], context) == 0
+    assert _stored("small")["confine.devices"] == "/dev/x"
     assert _stored("small")["slurm.partition"] == "p"
-    assert command([*args, "daemon.readonly_paths=relative"], context) != 0
+    assert command([*args, "confine.pmix_roots=/var/spool/slurmd"], context) == 0
+    assert _stored("small")["confine.pmix_roots"] == "/var/spool/slurmd"
+    assert command([*args, "confine.readonly_paths=relative"], context) != 0
     assert re.search("absolute", capsys.readouterr().err)
-    assert command([*args, "slurm.partition=x"], context) != 0
-    assert re.search("--add-path only applies.*slurm.partition", capsys.readouterr().err)
-    assert command(["launcher", "add", "--template", "slurm", "--global", "cluster"], context) == 0
-    assert command(["launcher", "configure", "cluster", "--add-path", "daemon.readonly_paths=/x"], context) != 0
-    assert re.search("--add-path only applies.*daemon.readonly_paths", capsys.readouterr().err)
-    assert _stored("small")["daemon.readonly_paths"] == "/a:/b:/c"
+    for refused in ("slurm.partition=x", "confine.bwrap=/usr/bin/bwrap", "confine.readonly_paths"):
+        assert command([*args, refused], context) != 0
+        assert re.search("--add-path only applies.*confine.readonly_paths", capsys.readouterr().err)
+    assert _stored("small")["confine.readonly_paths"] == "/a:/b:/c"

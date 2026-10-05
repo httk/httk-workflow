@@ -2,11 +2,13 @@
 
 import contextlib
 import errno
+import hashlib
 import logging
 import os
+import shutil
 import stat
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -29,6 +31,7 @@ from .models import (
     validate_resources,
     validate_step,
 )
+from .workspace import _runner_content_digest
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
 
@@ -609,8 +612,10 @@ def _stage_child(jobs: JobDirectory | None, staging: JobDirectory, job_key: str,
     return True
 
 
-def _verify_staged(staging: JobDirectory, staged: str, job_key: str, expected: str, digest: Callable[..., str]) -> None:
-    """Verify a staged child bundle.
+def _verify_staged(
+    staging: JobDirectory, staged: str, job_key: str, expected: str, digest: Callable[..., str]
+) -> JobDefinition:
+    """Verify a staged child bundle and return its job definition.
 
     A refused bundle is left in staging as evidence; the parent fails, so its
     commit is never replayed, and ``tmp_entries`` collection sweeps the entry
@@ -622,6 +627,124 @@ def _verify_staged(staging: JobDirectory, staged: str, job_key: str, expected: s
         raise FormatError("spawn job_key disagrees with child job.json")
     if staging.digest_tree(staged, skip=is_payload_private, digest=digest) != expected:
         raise FormatError("spawn child changed after outcome publication")
+    return child
+
+
+#: Where :meth:`httk.workflow.Attempt.call` stages the runners of called
+#: workflows in an outcome draft, keyed by their workspace store path.
+STAGED_RUNNERS = PurePosixPath("children/runners")
+
+_COPY_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def runner_staging_name(attempt_id: str, path: PurePosixPath) -> str:
+    """Return the deterministic staging name of one staged runner's copy.
+
+    A runner staged in a draft is copied into the manager's
+    ``.httk-workspace/tmp`` and verified and published from that copy. The name
+    is derived from the attempt and the store path (hashed, so a nested or long
+    store path still names a single bounded entry), never random, so ``gc``
+    can tell a copy of an unfinished commit from an abandoned one. A commit
+    replayed after a crash never trusts a copy left behind: it removes it and
+    copies the draft's runner again, because a copy interrupted midway is
+    incomplete. The draft holds the staged runner until the commit finishes, and
+    publication of an equal digest is a no-op, so a replay publishes the same
+    runner exactly once.
+
+    :param attempt_id: The attempt whose outcome staged the runner.
+    :param path: The runner's workspace store path.
+    :return: The staging entry name.
+    """
+
+    return f"runner.{attempt_id}.{hashlib.sha256(path.as_posix().encode()).hexdigest()[:32]}"
+
+
+def _copy_file(source: JobDirectory, relative: str | PurePosixPath, target: JobDirectory, name: str) -> None:
+    """Copy one regular file through no-follow descriptors into a new entry of *target*."""
+
+    with (
+        open(source.open_read(relative), "rb") as reader,
+        open(os.open(name, _COPY_FLAGS, 0o600, dir_fd=target.fd), "wb") as writer,
+    ):
+        shutil.copyfileobj(reader, writer)
+
+
+def _copy_staged_runner(outcome: JobDirectory, relative: PurePosixPath, staging: JobDirectory, name: str) -> None:
+    """Copy one staged runner file or tree out of the draft, refusing links and special files.
+
+    Every entry is opened without following links below the pinned draft, so a
+    symlink or special file anywhere in the staged runner is a
+    :class:`~httk.workflow._jobdir.JobDirectoryError`, never followed or read.
+    """
+
+    information = outcome.stat(relative)
+    if information is not None and stat.S_ISREG(information.st_mode):
+        _copy_file(outcome, relative, staging, name)
+        return
+    if information is None or not stat.S_ISDIR(information.st_mode):
+        raise JobDirectoryError(f"staged runner {outcome.path / relative} is a symlink or special file")
+    with outcome.directory(relative) as tree, staging.directory(name, create=True, exclusive=True, mode=0o700) as copy:
+        pending = [PurePosixPath()]
+        while pending:
+            current = pending.pop()
+            with contextlib.ExitStack() as handles:
+                source = handles.enter_context(tree.directory(current)) if current.parts else tree
+                target = handles.enter_context(copy.directory(current)) if current.parts else copy
+                for entry in sorted(os.listdir(source.fd)):
+                    entry_information = source.stat(entry)
+                    if entry_information is None:
+                        continue
+                    if stat.S_ISDIR(entry_information.st_mode):
+                        os.mkdir(entry, 0o700, dir_fd=target.fd)
+                        pending.append(current / entry)
+                    elif stat.S_ISREG(entry_information.st_mode):
+                        _copy_file(source, entry, target, entry)
+                    else:
+                        raise JobDirectoryError(f"staged runner {source.path / entry} is a symlink or special file")
+
+
+def _publish_staged_runners(
+    manager: Any, outcome: JobDirectory, staging: JobDirectory, attempt_id: str, children: Iterable[JobDefinition]
+) -> None:
+    """Publish the runners staged in a draft for the verified children that reference them.
+
+    For each workspace runner a verified child pins whose store path is staged
+    at ``children/runners/<path>`` in the draft, the staged entry is copied into
+    manager-owned staging (:func:`runner_staging_name`), the copy is digested
+    with the store's own digest rule and must equal the child's pinned
+    ``sha256``, and only then is the copy published with
+    :meth:`~httk.workflow.Workspace.publish_runner` (a no-op when the store
+    already holds that digest) and removed. Staged runners no child references
+    are ignored; a referenced runner that is not staged is left to the store,
+    where a missing one fails the child as ``runner_unavailable`` when claimed.
+    """
+
+    pinned: dict[PurePosixPath, set[str]] = {}
+    for child in children:
+        if child.runner_source == "workspace" and child.runner_sha256 is not None:
+            pinned.setdefault(child.runner_path, set()).add(child.runner_sha256)
+    for path, digests in pinned.items():
+        relative = STAGED_RUNNERS / path
+        if outcome.stat(relative) is None:
+            continue
+        if len(digests) != 1:
+            raise FormatError(f"spawned children pin staged workspace runner {path} to different digests")
+        (expected,) = digests
+        name = runner_staging_name(attempt_id, path)
+        # A copy left by an interrupted commit may be incomplete: never reuse it.
+        staging.remove_tree(name)
+        try:
+            _copy_staged_runner(outcome, relative, staging, name)
+            copied = staging.path / name
+            actual = _runner_content_digest(copied)[1]
+            if actual != expected:
+                raise FormatError(f"staged workspace runner {path} has digest {actual}, but its child pins {expected}")
+            try:
+                manager.workspace.publish_runner(copied, name=path)
+            except FileExistsError as exc:
+                raise FormatError(f"cannot publish staged workspace runner {path}: {exc}") from exc
+        finally:
+            staging.remove_tree(name)
 
 
 def register_children(
@@ -634,9 +757,12 @@ def register_children(
     record. Each child bundle is then renamed out of the job-writable draft
     into manager-owned staging (:func:`child_staging_name`), verified there —
     a real directory whose ``job.json`` names the key and whose digest is the
-    one recorded when the outcome was accepted — and only then published at
-    ``<placement>/<job_key>``. A job that keeps writing its draft after
-    publication therefore cannot change what was verified.
+    one recorded when the outcome was accepted. Runners the verified children
+    pin and the draft stages under ``children/runners/`` are then copied into
+    staging, verified against those pins and published into the workspace
+    runner store (:func:`_publish_staged_runners`), and only then is each child
+    published at ``<placement>/<job_key>``. A job that keeps writing its draft
+    after publication therefore cannot change what was verified.
 
     :param manager: The committing task manager.
     :param marker: The committing parent.
@@ -677,13 +803,23 @@ def register_children(
         jobs = (
             handles.enter_context(outcome.directory("children/jobs")) if outcome.exists_dir("children/jobs") else None
         )
+        # Every child still to publish is moved out of the draft and verified
+        # first, then the runners those verified children pin are published, and
+        # only then does any child appear: a child never exists before its
+        # staged runner, and a refused runner publishes no child.
+        verified: dict[str, JobDefinition] = {}
+        for job_key, _placement in validated:
+            staged = child_staging_name(state.attempt_id, job_key)
+            if _stage_child(jobs, staging, job_key, staged):
+                expected_digest = str(expected_digests.get(job_key, ""))
+                verified[job_key] = _verify_staged(staging, staged, job_key, expected_digest, digest)
+        _publish_staged_runners(manager, outcome, staging, state.attempt_id, verified.values())
         for job_key, placement in validated:
             expected_digest = str(expected_digests.get(job_key, ""))
             target = manager.workspace.payload_path(placement, job_key)
             staged = child_staging_name(state.attempt_id, job_key)
             published_here = False
-            if _stage_child(jobs, staging, job_key, staged):
-                _verify_staged(staging, staged, job_key, expected_digest, digest)
+            if verified.pop(job_key, None) is not None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 manager.workspace._publish_path(staging.path / staged, target)
                 published_here = True

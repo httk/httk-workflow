@@ -35,6 +35,7 @@ is exactly as consistent as it was before.
 import functools
 import logging
 import os
+import socket
 import stat
 import time
 import uuid
@@ -417,6 +418,18 @@ def _iterdir(path: Path) -> list[Path]:
         return sorted(path.iterdir())
     except OSError:
         return []
+
+
+def _holds_launch_records(manager_dir: Path, *, ignoring: frozenset[str] = frozenset()) -> bool:
+    """Return whether a manager directory keeps trusted launch records; an unreadable ``launches/`` keeps them."""
+
+    try:
+        with os.scandir(manager_dir / "launches") as entries:
+            return any(entry.name not in ignoring for entry in entries)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 def _marker_record_ref(name: str) -> str | None:
@@ -930,14 +943,16 @@ class _Collection:
             for entry in _iterdir(staging):
                 if not self._aged(entry, cutoff):
                     continue
-                if staging == self.control / "tmp" and entry.name.startswith("child."):
+                if staging == self.control / "tmp" and entry.name.startswith(("child.", "runner.")):
                     # A staged child bundle is the only copy of a child whose
                     # parent's commit was interrupted between staging and
-                    # publication; it is kept while that commit is unfinished.
+                    # publication, and a staged runner copy may be in the middle
+                    # of its verification and publication; both are kept while
+                    # that commit is unfinished.
                     if committing is None:
                         committing = self._committing_attempt_ids()
                     if committing is None or entry.name.split(".", 2)[1] in committing:
-                        self._skip("tmp_entries", f"kept staged child {entry.name} of an unfinished commit")
+                        self._skip("tmp_entries", f"kept staged entry {entry.name} of an unfinished commit")
                         continue
                 transfer_id = entry.name.removeprefix("import.")
                 if (
@@ -1066,7 +1081,13 @@ class _Collection:
         outlive its writer's segments until policy-gated collection removes it;
         clean managers remove their own directory. One whose
         ``manager.json`` cannot be read names no writer and is therefore kept:
-        it is already an anomaly, and it is a few hundred bytes.
+        it is already an anomaly, and it is a few hundred bytes. Its trusted
+        launch records are collected first when they provably describe no live
+        launch (the manager silent for its lease times the takeover grace
+        factor, and each recorded process group gone on this host or never
+        recorded); a directory whose ``launches/`` still holds a record is
+        kept, because the record may describe a confined launch that still
+        runs and is the takeover evidence of that launch.
         """
 
         cutoff = self._cutoff(self.retention.journal_days)
@@ -1079,10 +1100,25 @@ class _Collection:
                 continue
             if not self._aged(manager_dir, cutoff):
                 continue
+            dead = self._collect_dead_launch_records(manager_dir)
+            if _holds_launch_records(manager_dir, ignoring=dead if self.dry_run else frozenset()):
+                continue
             writer_id = self._writer_of(manager_dir)
             if writer_id is None or self._surviving_segments.get(writer_id, 0) > 0:
                 continue
             self._collect("manager_directories", manager_dir)
+
+    def _collect_dead_launch_records(self, manager_dir: Path) -> frozenset[str]:
+        """Collect the trusted launch records of a dead manager that describe no live launch; return their names."""
+
+        from ._manager_launches import LAUNCHES_DIRECTORY, dead_records
+        from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR
+
+        grace = self.workspace.policy.lease_seconds * DEFAULT_TAKEOVER_GRACE_FACTOR
+        names = dead_records(manager_dir, hostname=socket.gethostname(), grace_seconds=grace, now=self.now)
+        for name in names:
+            self._collect("manager_directories", manager_dir / LAUNCHES_DIRECTORY / name)
+        return frozenset(names)
 
     def collect_placement_directories(self) -> None:
         """Collect the empty placement mirrors left below every state kind.

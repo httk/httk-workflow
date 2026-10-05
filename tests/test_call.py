@@ -197,3 +197,5 @@ def test_call_references_a_packaged_workflow_by_alias_without_copying(tmp_path: 
     assert runner["source"] == "installed" and str(runner["path"]).startswith("pkg:")
     assert (child_json.parent / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     assert not (workspace.runners.exists() and list(workspace.runners.iterdir()))
+    # ...and stages no runner in the draft for the manager to publish either.
+    assert not list(attempt.control.glob("outcome.tmp.*/children/runners"))

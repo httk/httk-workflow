@@ -1,5 +1,5 @@
 /* Site-only MPI/SHM probe. Build with mpicc -O2 -Wall -Wextra -o probe probe_daemon_mpi.c -lrt.
- * Run INSIDE the configured daemon MPI wrapper: httk workflow mpi run -- ./probe TOKEN [--spawn]
+ * Run from a confined attempt through the launch prefix: $HTTK_WORKFLOW_LAUNCH ./probe TOKEN [--spawn]
  * TOKEN must be a fresh alphanumeric string shared by all ranks.
  * --spawn requires independently confirmed spare capacity. It never writes to host home paths.
  * Exit 0: communication passed (and, if requested, explicit unsupported-spawn evidence).

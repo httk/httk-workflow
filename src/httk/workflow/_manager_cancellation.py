@@ -5,6 +5,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from . import _manager_launches
 from .models import StateFrame, validate_process
 
 
@@ -24,7 +25,9 @@ def evidence(
     local = manager._running.get(attempt_id)
     if local is not None:
         exit_status = local.process.poll()
-        if exit_status is None:
+        # A launch of the attempt writes the job from its own process group,
+        # so the attempt has not stopped until every launch is reaped.
+        if exit_status is None or _manager_launches.unreaped(local):
             return None
         return {
             "verified": "process_exited",
@@ -36,7 +39,7 @@ def evidence(
     if process.get("hostname") != manager.hostname:
         return None
     group = process["process_group"]
-    if manager._process_group_alive(group):
+    if manager._process_group_alive(group) or not _manager_launches.recorded_launches_dead(manager, attempt_id):
         return None
     return {
         "verified": "process_group_absent",

@@ -1,4 +1,4 @@
-"""Strict runtime policy for the confined workspace daemon."""
+"""Strict runtime policy for the workspace daemon."""
 
 import base64
 import errno
@@ -15,48 +15,13 @@ from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 _FORMAT = "httk-workspace-daemon-policy"
-_FORMAT_VERSION = 3
+_FORMAT_VERSION = 4
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
-_PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_LAUNCHER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SLURM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_GRES = re.compile(r"[A-Za-z0-9_.:,=+-]{1,255}\Z")
-_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
-_RESERVED_ANCESTOR_TARGETS = tuple(
-    Path(path)
-    for path in (
-        "/tmp",
-        "/workspace",
-        "/proc",
-        "/dev",
-        "/daemon-policy.json",
-    )
-)
-_RESERVED_DESCENDANT_TARGETS = tuple(
-    Path(path)
-    for path in (
-        "/workspace",
-        "/proc",
-        "/dev",
-        "/daemon-policy.json",
-        "/tmp/home",
-    )
-)
-_DEVICE_EXCLUSIONS = tuple(
-    Path(path)
-    for path in (
-        "/dev/fd",
-        "/dev/pts",
-        "/dev/shm",
-        "/dev/stdin",
-        "/dev/stdout",
-        "/dev/stderr",
-    )
-)
-_MPI_CONTROL_DESTINATION = Path("/run/httk-mpi")
-
-
-_HARD_LIMIT = 2**31 - 1
+_SETTING_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _integer(value: object, name: str, minimum: int, maximum: int) -> int:
@@ -100,52 +65,6 @@ def _overlap(left: Path, right: Path) -> bool:
     return _contains(left, right) or _contains(right, left)
 
 
-def _covered(path: Path, roots: tuple[Path, ...]) -> bool:
-    return any(_contains(root, path) for root in roots)
-
-
-def _reserved_destination(path: Path, *, mpi: bool) -> Path | None:
-    for target in _RESERVED_ANCESTOR_TARGETS:
-        if _contains(path, target):
-            return target
-    for target in _RESERVED_DESCENDANT_TARGETS:
-        if _contains(target, path):
-            return target
-    return _MPI_CONTROL_DESTINATION if mpi and _overlap(path, _MPI_CONTROL_DESTINATION) else None
-
-
-def _environment(value: object) -> tuple[tuple[str, str], ...]:
-    if not isinstance(value, tuple):
-        raise ValueError("environment must be a tuple of name/value pairs")
-    if len(value) > 128:
-        raise ValueError("MPI environment has too many entries")
-    result: list[tuple[str, str]] = []
-    names: set[str] = set()
-    total_bytes = 0
-    for item in value:
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise ValueError("environment must be a tuple of name/value pairs")
-        name, setting = item
-        if type(name) is not str or _ENVIRONMENT_NAME.fullmatch(name) is None:
-            raise ValueError("invalid MPI environment name")
-        if type(setting) is not str or "\0" in setting or len(setting.encode("utf-8")) > 4096:
-            raise ValueError("invalid MPI environment value")
-        total_bytes += len(name) + len(setting.encode("utf-8"))
-        if total_bytes > 64 * 1024:
-            raise ValueError("MPI environment is too large")
-        if name in names:
-            raise ValueError("MPI environment names must be unique")
-        if name.startswith(("PMI_", "PMIX_", "SLURM_", "SLURMD_", "HTTK_DAEMON_MPI_")):
-            raise ValueError("MPI environment must not override rank or server identity")
-        if name.startswith("OMPI_") and not name.startswith("OMPI_MCA_"):
-            raise ValueError("MPI environment must not override Open MPI identity")
-        if name.startswith("OPAL_") and not name.startswith("OPAL_MCA_"):
-            raise ValueError("MPI environment must not override Open MPI identity")
-        names.add(name)
-        result.append((name, setting))
-    return tuple(result)
-
-
 def _authorized_keys(value: object) -> tuple[str, ...]:
     """Return canonical unique Ed25519 public keys from an immutable sequence."""
 
@@ -168,129 +87,45 @@ def _authorized_keys(value: object) -> tuple[str, ...]:
     return tuple(result)
 
 
-@dataclass(frozen=True, slots=True)
-class MPIProfile:
-    """Define fixed MPI geometry for one protected profile.
+type SettingValue = str | int | float | None
 
-    :param nodes: Number of allocated nodes.
-    :param ranks: Total number of MPI ranks.
-    :param ntasks_per_node: Optional fixed Slurm placement bound.
-    """
 
-    nodes: int
-    ranks: int
-    ntasks_per_node: int | None = None
-
-    def __post_init__(self) -> None:
-        _integer(self.nodes, "MPI nodes", 1, 4096)
-        _integer(self.ranks, "MPI ranks", self.nodes, 65_536)
-        if self.ntasks_per_node is not None:
-            _integer(self.ntasks_per_node, "MPI tasks per node", 1, 65_536)
-            if self.nodes * self.ntasks_per_node < self.ranks:
-                raise ValueError("MPI tasks per node cannot accommodate all ranks")
+def _setting_value(key: str, value: object) -> SettingValue:
+    if value is None or (type(value) is str and "\0" not in value) or type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise ValueError(f"launcher setting {key} must be a JSON scalar without NUL")
 
 
 @dataclass(frozen=True, slots=True)
-class MPISettings:
-    """Hold protected MPI launcher and containment settings.
+class ApprovedLauncher:
+    """Hold the frozen content of one approved global ``slurm`` launcher.
 
-    :param srun: Approved Slurm step launcher.
-    :param control_root: Host parent for private allocation control directories.
-    :param pmix_roots: Approved parents for per-step PMIx directories.
-    :param shm_root: Host shared-memory parent for private per-node directories.
-    :param devices: Explicit host device paths exposed to MPI ranks.
-    :param environment: Protected environment entries applied to MPI ranks.
-    :param max_steps: Maximum unique application requests per allocation.
-    :param termination_grace: Deadline for reaping local step launchers, in seconds.
-    """
-
-    srun: Path
-    control_root: Path
-    pmix_roots: tuple[Path, ...] = ()
-    shm_root: Path = Path("/dev/shm")
-    devices: tuple[Path, ...] = ()
-    environment: tuple[tuple[str, str], ...] = ()
-    max_steps: int = 128
-    termination_grace: float = 10.0
-
-    def __post_init__(self) -> None:
-        _path(self.srun, "mpi.srun")
-        _path(self.control_root, "mpi.control_root")
-        _path(self.shm_root, "mpi.shm_root")
-        if not isinstance(self.pmix_roots, tuple) or not isinstance(self.devices, tuple):
-            raise ValueError("mpi path collections must be tuples")
-        pmix_roots = tuple(_path(path, "mpi.pmix_roots entry") for path in self.pmix_roots)
-        devices = tuple(_path(path, "mpi.devices entry") for path in self.devices)
-        if len(set(pmix_roots)) != len(pmix_roots) or len(set(devices)) != len(devices):
-            raise ValueError("MPI path collections must not contain duplicates")
-        if Path("/") in pmix_roots or self.control_root == Path("/") or self.shm_root == Path("/"):
-            raise ValueError("MPI roots must not be the filesystem root")
-        for device in devices:
-            if device == Path("/dev") or not device.is_relative_to("/dev"):
-                raise ValueError("MPI devices must be below /dev")
-            if any(_overlap(device, excluded) for excluded in _DEVICE_EXCLUSIONS):
-                raise ValueError("MPI devices must not replace private device mounts")
-        _environment(self.environment)
-        _integer(self.max_steps, "mpi.max_steps", 1, 65_536)
-        _number(self.termination_grace, "mpi.termination_grace", 0.1, 60.0)
-
-
-@dataclass(frozen=True, slots=True)
-class Profile:
-    """Define one bounded Slurm manager profile.
-
-    :param name: Profile name accepted by daemon requests.
-    :param cpus: Serial worker CPUs, or CPUs per rank for an MPI profile, or ``None`` to leave it to Slurm's defaults.
-    :param memory_mb: Memory capacity in MiB per allocated node, or ``None`` to leave it to Slurm's defaults.
-    :param time_minutes: Slurm time limit in minutes, or ``None`` to leave it to Slurm's defaults.
-    :param partition: Optional fixed Slurm partition.
-    :param account: Optional fixed Slurm account.
-    :param mpi: Optional fixed MPI allocation geometry.
-    :param workers: Concurrent attempts in the single manager.
-    :param prelude: Frozen shell prelude run before the manager.
-    :param manager_command: Optional frozen manager executable.
-    :param gres: Optional fixed Slurm generic resources.
-    :param reservation: Optional fixed Slurm reservation.
+    :param name: Launcher name, which daemon requests use as their configuration name.
+    :param settings: The bundle's ``settings`` as sorted key/value pairs, exactly as approved.
+    :param digest: SHA-256 of the canonical bundle content: ``launcher.json`` and the launcher executable.
     """
 
     name: str
-    cpus: int | None = None
-    memory_mb: int | None = None
-    time_minutes: int | None = None
-    partition: str | None = None
-    account: str | None = None
-    mpi: MPIProfile | None = None
-    workers: int = 1
-    prelude: str = ""
-    manager_command: str | None = None
-    gres: str | None = None
-    reservation: str | None = None
+    settings: tuple[tuple[str, SettingValue], ...]
+    digest: str
 
     def __post_init__(self) -> None:
-        _name(self.name, "profile name", _PROFILE_NAME)
-        for number, label in ((self.cpus, "cpus"), (self.memory_mb, "memory_mb"), (self.time_minutes, "time_minutes")):
-            if number is not None:
-                _integer(number, label, 1, _HARD_LIMIT)
-        for field_name, value in (
-            ("partition", self.partition),
-            ("account", self.account),
-            ("reservation", self.reservation),
-        ):
-            if value is not None:
-                _name(value, field_name, _SLURM_NAME)
-        if self.gres is not None:
-            _name(self.gres, "gres", _GRES)
-        if self.mpi is not None and not isinstance(self.mpi, MPIProfile):
-            raise ValueError("mpi must be an MPIProfile")
-        _integer(self.workers, "workers", 1, 1024)
-        if self.mpi is not None and self.workers != 1:
-            raise ValueError("MPI profiles require exactly one manager worker")
-        if type(self.prelude) is not str or "\0" in self.prelude:
-            raise ValueError("prelude must be a string without NUL")
-        if self.manager_command is not None and (
-            type(self.manager_command) is not str or not self.manager_command.strip() or "\0" in self.manager_command
-        ):
-            raise ValueError("manager_command must be a nonempty string without NUL")
+        _name(self.name, "launcher name", _LAUNCHER_NAME)
+        _name(self.digest, "launcher digest", _SHA256)
+        if not isinstance(self.settings, tuple):
+            raise ValueError("launcher settings must be a tuple of key/value pairs")
+        keys: list[str] = []
+        for item in self.settings:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError("launcher settings must be a tuple of key/value pairs")
+            key, value = item
+            _name(key, "launcher setting name", _SETTING_KEY)
+            _setting_value(key, value)
+            keys.append(key)
+        if keys != sorted(set(keys)):
+            raise ValueError("launcher settings must be sorted with unique keys")
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,15 +138,13 @@ class Policy:
     :param exchange: Client exchange directory, a sibling of the workspace in a dedicated parent.
     :param state: Broker state root.
     :param snapshots: Directory of immutable runtime policy snapshots.
-    :param bwrap: Approved Bubblewrap executable, run on the host.
-    :param python: Approved Python executable visible to payloads.
+    :param bwrap: Approved Bubblewrap executable for the broker sandbox, run on the host.
+    :param python: Approved Python executable that runs the broker and the submitted managers.
     :param sbatch: Approved Slurm submission executable.
     :param squeue: Approved Slurm query executable.
     :param scancel: Approved Slurm cancellation executable.
     :param cluster: Fixed Slurm cluster name.
-    :param readonly_paths: Runtime roots mounted into payload and MPI rank sandboxes; the broker and the MPI
-        allocation service see the whole host read-only.
-    :param profiles: Allowed resource profiles.
+    :param launchers: Approved global ``slurm`` launchers, frozen at approval.
     :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
     :param slurm_conf: Optional fixed Slurm configuration path.
     :param max_records: Maximum mailbox records retained per enrollment.
@@ -320,9 +153,6 @@ class Policy:
     :param command_timeout: Slurm command timeout in seconds.
     :param max_output_bytes: Maximum captured command output in bytes.
     :param request_max_age: Maximum signed request lifetime in seconds.
-    :param mpi: Optional protected MPI launcher and containment settings.
-    :param isolate_network: Whether job sandboxes get a private network namespace; when false they share
-        the host network but stay otherwise confined.
     :param sacct: Optional Slurm accounting executable, used only to report how manager jobs ended.
     """
 
@@ -338,8 +168,7 @@ class Policy:
     squeue: Path
     scancel: Path
     cluster: str
-    readonly_paths: tuple[Path, ...]
-    profiles: tuple[Profile, ...]
+    launchers: tuple[ApprovedLauncher, ...]
     authorized_keys: tuple[str, ...] = ()
     slurm_conf: Path | None = None
     max_records: int = 4096
@@ -348,19 +177,11 @@ class Policy:
     command_timeout: float = 30.0
     max_output_bytes: int = 65_536
     request_max_age: int = 3600
-    mpi: MPISettings | None = None
-    isolate_network: bool = True
     sacct: Path | None = None
 
     def __post_init__(self) -> None:
-        mutable = tuple(
+        for name, value in (("workspace", self.workspace), ("exchange", self.exchange), ("state", self.state)):
             _path(value, name)
-            for name, value in (
-                ("workspace", self.workspace),
-                ("exchange", self.exchange),
-                ("state", self.state),
-            )
-        )
         snapshots = _path(self.snapshots, "snapshots")
         if self.exchange.parent != self.workspace.parent or self.exchange == self.workspace:
             raise ValueError("workspace and exchange must be siblings in a dedicated directory")
@@ -382,70 +203,26 @@ class Policy:
             raise ValueError("invalid workspace_id") from exc
         _name(self.enrollment_id, "enrollment_id", _HEX_ID)
         _name(self.cluster, "cluster", _SLURM_NAME)
-
-        commands = tuple(
+        for name, value in (
+            ("bwrap", self.bwrap),
+            ("python", self.python),
+            ("sbatch", self.sbatch),
+            ("squeue", self.squeue),
+            ("scancel", self.scancel),
+        ):
             _path(value, name)
-            for name, value in (
-                ("bwrap", self.bwrap),
-                ("python", self.python),
-                ("sbatch", self.sbatch),
-                ("squeue", self.squeue),
-                ("scancel", self.scancel),
-            )
-        )
-        if not isinstance(self.readonly_paths, tuple):
-            raise ValueError("readonly_paths must be a tuple")
-        readonly = tuple(_path(value, "readonly_paths entry") for value in self.readonly_paths)
-        if len(set(readonly)) != len(readonly):
-            raise ValueError("approved path lists must not contain duplicates")
-        if Path("/") in readonly:
-            raise ValueError("the filesystem root cannot be an approved runtime path")
-        for runtime in readonly:
-            target = _reserved_destination(runtime, mpi=self.mpi is not None)
-            if target is not None:
-                raise ValueError(
-                    "approved runtime paths must not overlap reserved sandbox destinations: "
-                    f"{runtime} overlaps the reserved destination {target}"
-                )
-            if _overlap(root, runtime):
-                raise ValueError(f"daemon parent {root} must be disjoint from runtime path {runtime}")
-            for name, value in (("state", self.state), ("snapshots", snapshots)):
-                if _overlap(runtime, value):
-                    raise ValueError(f"runtime path {runtime} must be disjoint from {name} {value}")
-
-        python = commands[1]
-        if not _covered(python, readonly):
-            raise ValueError("python must be within readonly_paths")
         if self.slurm_conf is not None:
             _path(self.slurm_conf, "slurm_conf")
         if self.sacct is not None:
             _path(self.sacct, "sacct")
 
-        if self.mpi is not None:
-            if not isinstance(self.mpi, MPISettings):
-                raise ValueError("mpi must be MPISettings")
-            mpi = self.mpi
-            protected_roots = (mpi.control_root, *mpi.pmix_roots, mpi.shm_root)
-            for root in protected_roots:
-                if any(_overlap(root, item) for item in mutable):
-                    raise ValueError("MPI roots must be disjoint from mutable roots")
-                if any(_overlap(root, item) for item in readonly):
-                    raise ValueError("MPI roots must be disjoint from approved runtime paths")
-            for index, left in enumerate(protected_roots):
-                for right in protected_roots[index + 1 :]:
-                    if _overlap(left, right):
-                        raise ValueError("MPI roots must be pairwise disjoint")
-            for device in mpi.devices:
-                if any(_overlap(device, item) for item in mutable):
-                    raise ValueError("MPI devices must be disjoint from mutable roots")
-
-        if not isinstance(self.profiles, tuple) or not all(isinstance(profile, Profile) for profile in self.profiles):
-            raise ValueError("profiles must be a tuple of Profile values")
-        names = [profile.name for profile in self.profiles]
+        if not isinstance(self.launchers, tuple) or not all(
+            isinstance(launcher, ApprovedLauncher) for launcher in self.launchers
+        ):
+            raise ValueError("launchers must be a tuple of ApprovedLauncher values")
+        names = [launcher.name for launcher in self.launchers]
         if len(set(names)) != len(names):
-            raise ValueError("profile names must be unique")
-        if any(profile.mpi is not None for profile in self.profiles) and self.mpi is None:
-            raise ValueError("MPI profiles require policy MPI settings")
+            raise ValueError("launcher names must be unique")
         _authorized_keys(self.authorized_keys)
         _integer(self.max_records, "max_records", 1, 100_000)
         _integer(self.max_submissions, "max_submissions", 1, self.max_records)
@@ -453,8 +230,6 @@ class Policy:
         _number(self.command_timeout, "command_timeout", 0.1, 600.0)
         _integer(self.max_output_bytes, "max_output_bytes", 1024, 1_048_576)
         _integer(self.request_max_age, "request_max_age", 1, 86_400)
-        if type(self.isolate_network) is not bool:
-            raise ValueError("isolate_network must be a boolean")
 
     @property
     def root(self) -> Path:
@@ -464,7 +239,7 @@ class Policy:
 
     @property
     def jobs(self) -> Path:
-        """Private directory of Slurm batch job output, which no job sandbox mounts."""
+        """Private directory of Slurm batch job output, outside the workspace."""
 
         return self.snapshots / "jobs"
 
@@ -480,51 +255,38 @@ class Policy:
 
         return self.exchange / "responses"
 
-    def profile(self, name: str) -> Profile:
-        """Return the named profile.
+    def launcher(self, name: str) -> ApprovedLauncher:
+        """Return the named approved launcher.
 
-        :param name: Profile name.
-        :return: Matching profile.
-        :raises ValueError: If the profile is unknown.
+        :param name: Launcher name.
+        :return: Matching approved launcher.
+        :raises ValueError: If the launcher is not approved.
         """
 
-        for profile in self.profiles:
-            if profile.name == name:
-                return profile
-        raise ValueError(f"unknown daemon profile: {name!r}")
+        for launcher in self.launchers:
+            if launcher.name == name:
+                return launcher
+        raise ValueError(f"unknown daemon launcher: {name!r}")
 
     def configuration_digest(self, name: str) -> str:
         """Return the digest of one complete execution configuration.
 
-        :param name: Approved configuration name.
+        :param name: Approved launcher name.
         :return: Lowercase SHA-256 hexadecimal digest.
-        :raises ValueError: If the configuration is unknown.
+        :raises ValueError: If the launcher is not approved.
         """
 
-        # sacct only reports how managers ended, so it is deliberately not bound.
-        document = policy_document(self)
-        mpi = document.get("mpi")
-        if isinstance(mpi, dict):
-            mpi = {key: value for key, value in mpi.items() if key != "max_steps"}
+        # sacct only reports how managers ended, and the other Slurm clients only query or cancel.
         execution = {
-            "workspace": document["workspace"],
-            "workspace_id": document["workspace_id"],
-            "bwrap": document["bwrap"],
-            "python": document["python"],
-            "bootstrap": str(Path(__file__).with_name("_daemon_bootstrap.py")),
-            "sbatch": document["sbatch"],
-            "squeue": document["squeue"],
-            "scancel": document["scancel"],
-            "cluster": document["cluster"],
-            "slurm_conf": document.get("slurm_conf"),
-            "readonly_paths": document["readonly_paths"],
+            "launcher_digest": self.launcher(name).digest,
+            "workspace": str(self.workspace),
+            "workspace_id": self.workspace_id,
+            "python": str(self.python),
+            "sbatch": str(self.sbatch),
+            "cluster": self.cluster,
+            "slurm_conf": None if self.slurm_conf is None else str(self.slurm_conf),
             "configuration_name": name,
-            "configuration": _profile_document(self.profile(name)),
-            "mpi": mpi,
         }
-        # Present only when disabled, so digests of default enrollments stay unchanged.
-        if "isolate_network" in document:
-            execution["isolate_network"] = document["isolate_network"]
         canonical = json.dumps(execution, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         return hashlib.sha256(canonical).hexdigest()
 
@@ -609,36 +371,6 @@ def _json_path(value: object, name: str) -> Path:
     return _path(Path(value), name)
 
 
-def _profile_document(profile: Profile) -> dict[str, object]:
-    result: dict[str, object] = {
-        "workers": profile.workers,
-        "prelude": profile.prelude,
-        "manager_command": profile.manager_command,
-    }
-    for key, number in (
-        ("cpus", profile.cpus),
-        ("memory_mb", profile.memory_mb),
-        ("time_minutes", profile.time_minutes),
-    ):
-        if number is not None:
-            result[key] = number
-    if profile.partition is not None:
-        result["partition"] = profile.partition
-    if profile.account is not None:
-        result["account"] = profile.account
-    if profile.gres is not None:
-        result["gres"] = profile.gres
-    if profile.reservation is not None:
-        result["reservation"] = profile.reservation
-    if profile.mpi is not None:
-        result["mpi"] = {
-            "nodes": profile.mpi.nodes,
-            "ranks": profile.mpi.ranks,
-            "ntasks_per_node": profile.mpi.ntasks_per_node,
-        }
-    return result
-
-
 def policy_document(policy: Policy) -> dict[str, object]:
     """Return the complete canonicalizable runtime policy document.
 
@@ -661,8 +393,10 @@ def policy_document(policy: Policy) -> dict[str, object]:
         "squeue": str(policy.squeue),
         "scancel": str(policy.scancel),
         "cluster": policy.cluster,
-        "readonly_paths": [str(path) for path in policy.readonly_paths],
-        "profiles": {profile.name: _profile_document(profile) for profile in policy.profiles},
+        "launchers": {
+            launcher.name: {"settings": dict(launcher.settings), "digest": launcher.digest}
+            for launcher in policy.launchers
+        },
         "authorized_keys": list(policy.authorized_keys),
         "max_records": policy.max_records,
         "max_submissions": policy.max_submissions,
@@ -673,23 +407,18 @@ def policy_document(policy: Policy) -> dict[str, object]:
     }
     if policy.slurm_conf is not None:
         result["slurm_conf"] = str(policy.slurm_conf)
-    if policy.mpi is not None:
-        result["mpi"] = {
-            "srun": str(policy.mpi.srun),
-            "control_root": str(policy.mpi.control_root),
-            "pmix_roots": [str(path) for path in policy.mpi.pmix_roots],
-            "shm_root": str(policy.mpi.shm_root),
-            "devices": [str(path) for path in policy.mpi.devices],
-            "environment": dict(policy.mpi.environment),
-            "max_steps": policy.mpi.max_steps,
-            "termination_grace": policy.mpi.termination_grace,
-        }
-    if not policy.isolate_network:
-        result["isolate_network"] = False
-    # Present only when set, so documents of policies without it stay unchanged.
     if policy.sacct is not None:
         result["sacct"] = str(policy.sacct)
     return result
+
+
+def _decode_launcher(name: object, raw: object) -> ApprovedLauncher:
+    if type(name) is not str or not isinstance(raw, dict) or set(raw) != {"settings", "digest"}:
+        raise ValueError("launcher entries must hold exactly settings and digest")
+    settings = raw["settings"]
+    if not isinstance(settings, dict):
+        raise ValueError("launcher settings must be an object")
+    return ApprovedLauncher(name, tuple(sorted(settings.items())), raw["digest"])
 
 
 def _decode_policy(data: bytes) -> Policy:
@@ -723,8 +452,7 @@ def _decode_policy(data: bytes) -> Policy:
         "squeue",
         "scancel",
         "cluster",
-        "readonly_paths",
-        "profiles",
+        "launchers",
         "authorized_keys",
     }
     optional = {
@@ -735,8 +463,6 @@ def _decode_policy(data: bytes) -> Policy:
         "command_timeout",
         "max_output_bytes",
         "request_max_age",
-        "mpi",
-        "isolate_network",
         "sacct",
     }
     if "authorized_keys" not in value:
@@ -749,102 +475,15 @@ def _decode_policy(data: bytes) -> Policy:
         or value["format_version"] != _FORMAT_VERSION
     ):
         raise ValueError("unsupported policy format or version")
-    # Only the non-default value is ever written, so one canonical document exists per policy.
-    if "isolate_network" in value and value["isolate_network"] is not False:
-        raise ValueError("isolate_network may only be present as false")
     for name in ("workspace_id", "enrollment_id", "cluster"):
         if type(value[name]) is not str:
             raise ValueError(f"{name} must be a string")
-    if not isinstance(value["readonly_paths"], list):
-        raise ValueError("readonly_paths must be an array")
-    raw_profiles = value["profiles"]
-    if not isinstance(raw_profiles, dict):
-        raise ValueError("profiles must be an object")
-    profiles: list[Profile] = []
-    for profile_name, raw in raw_profiles.items():
-        if type(profile_name) is not str or not isinstance(raw, dict):
-            raise ValueError("invalid profile entry")
-        profile_optional = {
-            "cpus",
-            "memory_mb",
-            "time_minutes",
-            "partition",
-            "account",
-            "gres",
-            "reservation",
-            "mpi",
-            "workers",
-            "prelude",
-            "manager_command",
-        }
-        if not set(raw) <= profile_optional:
-            raise ValueError("profile fields are unknown")
-        if "mpi" in raw:
-            raw_mpi_profile = raw["mpi"]
-            if (
-                not isinstance(raw_mpi_profile, dict)
-                or not {"nodes", "ranks"} <= set(raw_mpi_profile)
-                or not set(raw_mpi_profile) <= {"nodes", "ranks", "ntasks_per_node"}
-            ):
-                raise ValueError("MPI profile fields are missing or unknown")
-            mpi_profile = MPIProfile(
-                raw_mpi_profile["nodes"], raw_mpi_profile["ranks"], raw_mpi_profile.get("ntasks_per_node")
-            )
-        else:
-            mpi_profile = None
-        profiles.append(
-            Profile(
-                profile_name,
-                raw.get("cpus"),
-                raw.get("memory_mb"),
-                raw.get("time_minutes"),
-                raw.get("partition"),
-                raw.get("account"),
-                mpi_profile,
-                raw.get("workers", 1),
-                raw.get("prelude", ""),
-                raw.get("manager_command"),
-                raw.get("gres"),
-                raw.get("reservation"),
-            )
-        )
+    raw_launchers = value["launchers"]
+    if not isinstance(raw_launchers, dict):
+        raise ValueError("launchers must be an object")
     raw_authorized_keys = value["authorized_keys"]
     if not isinstance(raw_authorized_keys, list) or not raw_authorized_keys:
         raise ValueError("policy authorized_keys must be a nonempty array")
-    mpi: MPISettings | None
-    if "mpi" not in value:
-        mpi = None
-    else:
-        raw_mpi = value["mpi"]
-        if not isinstance(raw_mpi, dict):
-            raise ValueError("mpi must be an object")
-        mpi_required = {"srun", "control_root"}
-        mpi_optional = {
-            "pmix_roots",
-            "shm_root",
-            "devices",
-            "environment",
-            "max_steps",
-            "termination_grace",
-        }
-        if not mpi_required <= set(raw_mpi) or not set(raw_mpi) <= mpi_required | mpi_optional:
-            raise ValueError("MPI settings fields are missing or unknown")
-        for name in ("pmix_roots", "devices"):
-            if name in raw_mpi and not isinstance(raw_mpi[name], list):
-                raise ValueError(f"mpi.{name} must be an array")
-        raw_environment = raw_mpi.get("environment", {})
-        if not isinstance(raw_environment, dict):
-            raise ValueError("mpi.environment must be an object")
-        mpi = MPISettings(
-            srun=_json_path(raw_mpi["srun"], "mpi.srun"),
-            control_root=_json_path(raw_mpi["control_root"], "mpi.control_root"),
-            pmix_roots=tuple(_json_path(item, "mpi.pmix_roots entry") for item in raw_mpi.get("pmix_roots", [])),
-            shm_root=_json_path(raw_mpi.get("shm_root", "/dev/shm"), "mpi.shm_root"),
-            devices=tuple(_json_path(item, "mpi.devices entry") for item in raw_mpi.get("devices", [])),
-            environment=tuple(raw_environment.items()),
-            max_steps=raw_mpi.get("max_steps", 128),
-            termination_grace=raw_mpi.get("termination_grace", 10.0),
-        )
     kwargs = {
         name: value[name]
         for name in (
@@ -870,12 +509,9 @@ def _decode_policy(data: bytes) -> Policy:
         squeue=_json_path(value["squeue"], "squeue"),
         scancel=_json_path(value["scancel"], "scancel"),
         cluster=value["cluster"],
-        readonly_paths=tuple(_json_path(item, "readonly_paths entry") for item in value["readonly_paths"]),
-        profiles=tuple(profiles),
+        launchers=tuple(_decode_launcher(name, raw) for name, raw in raw_launchers.items()),
         authorized_keys=_authorized_keys(tuple(raw_authorized_keys)),
         slurm_conf=_json_path(value["slurm_conf"], "slurm_conf") if "slurm_conf" in value else None,
-        mpi=mpi,
-        isolate_network="isolate_network" not in value,
         sacct=_json_path(value["sacct"], "sacct") if "sacct" in value else None,
         **kwargs,
     )
@@ -924,7 +560,7 @@ def _remove_probe(name: str, directory: int, probe: int) -> bool:
     if (found.st_dev, found.st_ino) != (mine.st_dev, mine.st_ino):
         return False
     # ponytail: a same-principal swap between this stat and the unlink can drop one foreign name inside the
-    # workspace or exchange; the payload already owns both, and nothing is ever moved out of the workspace.
+    # workspace or exchange; client content already owns both, and nothing is ever moved out of the workspace.
     os.unlink(name, dir_fd=directory)
     return True
 
@@ -1014,4 +650,4 @@ def load_policy(path: Path) -> Policy:
     return _load_policy_with_bytes(path)[0]
 
 
-__all__ = ["MPIProfile", "MPISettings", "Policy", "Profile", "check_layout", "load_policy", "policy_document"]
+__all__ = ["ApprovedLauncher", "Policy", "check_layout", "load_policy", "policy_document"]

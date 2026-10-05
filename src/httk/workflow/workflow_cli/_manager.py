@@ -21,6 +21,7 @@ from .._allocation import (
     probe_allocation,
     split_allocation,
 )
+from .._confine import CONFINE_PREFIX, confine_settings, is_override_key
 from .._durations import format_duration, parse_slurm_duration
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._scheduler import detect_scheduler
@@ -30,7 +31,7 @@ from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, sp
 from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, NotIdleError, TaskManager
 from ..models import WORKSPACE_DIRECTORY, validate_capacity
 from ..registry import WorkspaceBinding
-from ..workspace import Workspace
+from ..workspace import Workspace, _validate_setting_key, _validate_setting_value
 from ._common import (
     _LOGGER,
     _add_adapter_timeout,
@@ -52,6 +53,7 @@ _ALLOCATION_HELP = (
     "where this manager learns its nodes, processors and devices: auto, none, slurm, host, or exec:PATH (default: auto)"
 )
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
+_SETTING_KEYS = "manager.confine, manager.launch_template, manager.bind_cpus or confine.*"
 
 
 class _LauncherOption(argparse.Action):
@@ -192,6 +194,41 @@ def _add_worker_resource_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _setting_override(text: str) -> str:
+    """Validate one ``--setting KEY=VALUE`` pinned override and return it unchanged."""
+
+    key, separator, value = text.partition("=")
+    if not separator or not is_override_key(key):
+        raise argparse.ArgumentTypeError(f"KEY=VALUE needs KEY {_SETTING_KEYS}: {text!r}")
+    try:
+        _validate_setting_key(key)
+        _validate_setting_value(key, value)
+        if key == "manager.confine" or key.startswith(CONFINE_PREFIX):
+            confine_settings({key: value})
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return text
+
+
+def _add_setting_argument(parser: argparse.ArgumentParser) -> None:
+    # Hidden: launchers pin their confinement settings on the managers they start with it.
+    parser.add_argument("--setting", type=_setting_override, action="append", help=argparse.SUPPRESS)
+
+
+def _pinned_settings(arguments: argparse.Namespace) -> dict[str, str]:
+    """Return the manager's pinned ``--setting`` overrides; the last occurrence of a key wins.
+
+    :param arguments: The parsed manager arguments.
+    :return: The pinned settings, which override workspace settings for the manager's lifetime.
+    """
+
+    pinned: dict[str, str] = {}
+    for item in getattr(arguments, "setting", []):
+        key, _separator, value = item.partition("=")
+        pinned[key] = value
+    return pinned
+
+
 # ---------------------------------------------------------------------------
 # manager
 # ---------------------------------------------------------------------------
@@ -214,6 +251,7 @@ def manager_option_defaults() -> dict[str, object]:
         "placement_prefix": [],
         "workers": None,
         "worker_resource": [],
+        "setting": [],
         "allocation": "auto",
         "count": None,
         "launcher": None,
@@ -286,6 +324,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="attempts to run at once, locally, or workers per submitted remote manager (default: 1)",
     )
     _add_worker_resource_argument(parser)
+    _add_setting_argument(parser)
     parser.add_argument(
         "--lease-seconds",
         type=float,
@@ -436,6 +475,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="attempts to run at once, locally, or workers per submitted remote manager (default: 1)",
     )
     _add_worker_resource_argument(parser)
+    _add_setting_argument(parser)
     parser.add_argument("--log-level", choices=LOG_LEVELS, help="log level for the manager log and console")
     parser.add_argument(
         "--count",
@@ -579,6 +619,8 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--deadline-margin", str(arguments.deadline_margin)]
     if getattr(arguments, "gc_interval", None) is not None:
         argv += ["--gc-interval", str(arguments.gc_interval)]
+    for key, value in _pinned_settings(arguments).items():
+        argv += ["--setting", f"{key}={value}"]
     if getattr(arguments, "exchange", False):
         argv.append("--exchange")
     if getattr(arguments, "log_level", None) is not None:
@@ -699,13 +741,18 @@ def _run_in_process_manager(
     """Run one manager in this process using resolved workspace defaults."""
 
     workspace = Workspace(root, durable=_durable(arguments))
+    # Pinned overrides win over workspace settings for this manager's lifetime; a malformed
+    # confinement setting refuses the start.
+    pinned = _pinned_settings(arguments)
+    effective = {**settings, **pinned}
+    confine_settings(effective)
     configure_logging(
         level=getattr(arguments, "log_level", None) or "warning", json_logs=getattr(arguments, "json_logs", False)
     )
     # After configure_logging so its warnings are formatted; managers.log only
     # attaches inside TaskManager, which needs the end time first.
     allocation = probe_allocation(
-        getattr(arguments, "allocation", "auto"), os.environ, cpu_slots=bind_cpus_setting(settings)
+        getattr(arguments, "allocation", "auto"), os.environ, cpu_slots=bind_cpus_setting(effective)
     )
     capacity = _manager_capacity(arguments, allocation)
     # A probe without an end still honours the enclosing scheduler allocation.
@@ -748,6 +795,7 @@ def _run_in_process_manager(
         end_time=end_time,
         deadline_margin=deadline_margin,
         allocation=allocation,
+        setting_overrides=pinned,
     ) as manager:
         ends = "" if end_time is None else f", ends={format_duration(max(0, int(end_time - time.time())))}"
         if allocation is not None:

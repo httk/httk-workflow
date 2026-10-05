@@ -12,6 +12,8 @@ that is still heartbeating — are crafted in place, and everything is aged with
 import json
 import os
 import shutil
+import socket
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -749,6 +751,65 @@ def test_manager_directory_selection_also_checks_surviving_journal_segments(tmp_
     assert (workspace.control / "journal" / writer_id).is_dir()
     assert report.category("journal_segments").skipped is False
     assert report.category("manager_directories").removed == 0
+
+
+def test_a_dead_manager_directory_holding_launch_records_is_kept(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"journal_days": 30.0}})
+    recorded = _manager_directory(workspace, str(uuid.uuid4()), live=False, days=60)
+    launch = recorded / "launches" / ("a" * 32)
+    launch.mkdir(parents=True)
+    (launch / "process.json").write_text('{"pid": 1, "hostname": "test", "attempt_id": "x"}', encoding="utf-8")
+    _age(recorded, 60)
+    live = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        running = _manager_directory(workspace, str(uuid.uuid4()), live=False, days=60)
+        running_launch = running / "launches" / ("b" * 32)
+        running_launch.mkdir(parents=True)
+        record = {"pid": live.pid, "hostname": socket.gethostname(), "attempt_id": "x"}
+        (running_launch / "process.json").write_text(json.dumps(record), encoding="utf-8")
+        _age(running, 60)
+        emptied = _manager_directory(workspace, str(uuid.uuid4()), live=False, days=60)
+        (emptied / "launches").mkdir()
+        _age(emptied, 60)
+
+        report = workspace.collect_garbage(categories=("manager_directories",))
+    finally:
+        live.kill()
+        live.wait()
+
+    # Records of launches that may still run (on another host, or a live group here) keep their manager.
+    assert (launch / "process.json").is_file()
+    assert (running_launch / "process.json").is_file()
+    assert not emptied.exists()
+    assert report.category("manager_directories").removed == 1
+
+
+def test_provably_dead_launch_records_of_a_dead_manager_are_collected_with_it(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"journal_days": 30.0}})
+    manager_dir = _manager_directory(workspace, str(uuid.uuid4()), live=False, days=60)
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    exited = manager_dir / "launches" / ("a" * 32)
+    exited.mkdir(parents=True)
+    record = {"pid": gone.pid, "hostname": socket.gethostname(), "attempt_id": "x"}
+    (exited / "process.json").write_text(json.dumps(record), encoding="utf-8")
+    # A start the manager never recorded a process for, and a record nothing can read.
+    unrecorded = manager_dir / "launches" / ("b" * 32)
+    unrecorded.mkdir()
+    (unrecorded / "launch.json").write_text("{}", encoding="utf-8")
+    (manager_dir / "launches" / ("c" * 32)).mkdir()
+    _age(manager_dir, 60)
+
+    dry = workspace.collect_garbage(categories=("manager_directories",), dry_run=True)
+    assert exited.is_dir()
+    assert dry.category("manager_directories").candidates == 4
+
+    report = workspace.collect_garbage(categories=("manager_directories",))
+
+    assert not manager_dir.exists()
+    assert report.category("manager_directories").removed == 4
 
 
 def test_manager_gc_frames_use_its_writer_and_clean_idle_removes_empty_writer(tmp_path: Path) -> None:

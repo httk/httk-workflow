@@ -742,7 +742,7 @@ raise SystemExit(run.main())
 
 
 def test_call_scaffolds_another_workflow_and_registers_it_as_a_child(tmp_path: Path) -> None:
-    Workspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     src = str(Path(__file__).parents[1] / "src")
     sub = tmp_path / "sub_runner.py"
     sub.write_text(_CALL_SUB_RUNNER.format(src=src), encoding="utf-8")
@@ -769,10 +769,14 @@ step_finish() {{ httk_workflow_succeed; }}""",
     assert completed.stdout.split("\n")[0] == job_key
     child_dir = ready / "children" / "jobs" / job_key
     child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
-    # The child runs the *other* workflow's own runner, from a runner file the
-    # call published into the workspace store, with the staged file in its payload.
+    # The child runs the *other* workflow's own runner, a workspace store entry
+    # the call staged into the draft for the manager to publish at commit, with
+    # the staged file in its payload; the step itself never wrote the store.
     assert child["workflow"] == "tests.sub"
     assert child["runner"]["source"] == "workspace"
+    staged = ready / "children" / "runners" / child["runner"]["path"]
+    assert staged.read_bytes() == sub.read_bytes()
+    assert not workspace.runner_store_path(child["runner"]["path"]).exists()
     assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
     assert fixture.outcome()["join"]["condition"] == "all_succeeded"
 

@@ -1210,10 +1210,18 @@ class Attempt:
 
         A registered packaged workflow is referenced through the reserved
         ``pkg:`` form, so nothing is copied into the workspace runner store; a
-        runner file of your own is published into that store instead, which is
-        content-addressed and idempotent — spawning the same runner twice
-        publishes nothing the second time. Both need the workspace root reachable
-        from where this step runs, exactly as :attr:`children` does.
+        runner file or workflow directory of your own is referenced as a
+        workspace store entry instead. A running step never writes that store:
+        the runner is staged into this attempt's outcome, and the manager
+        publishes it — content-addressed and idempotent, so calling the same
+        runner twice publishes nothing the second time — when it commits the
+        outcome, before the child exists. A different runner already published
+        under the same store name is refused here, as when publishing it;
+        one published by another job only after this call fails this job's
+        commit as ``protocol_error`` instead, and since every child of an
+        outcome is verified before any is published, one refused child or
+        runner publishes none of its siblings. Both need the workspace root
+        reachable from where this step runs, exactly as :attr:`children` does.
 
         :param workflow: Select the workflow, runner file, package, or document to call; for a
             job whose workflow declares ``[workflow.calls]``, one of those aliases or references.
@@ -1233,26 +1241,46 @@ class Attempt:
         :return: The reference to the registered child.
         :raises ValueError: If the workflow is undeclared or invalid, or the label, inputs, or job
             settings are invalid.
+        :raises FileExistsError: If the workspace runner store already holds a different runner file
+            under the called runner's store name (a different workflow tree raises :class:`ValueError`).
         """
 
         self._reject_published()
         validate_label(label, "child label")
         workflow = self._declared_call(workflow)
         # Resolving here decides only how the runner is referenced: a packaged
-        # workflow is pinned through ``pkg:`` and copies nothing, a runner file of
-        # your own is published into the workspace store.
-        from .scaffold import resolve_workflow, scaffold_job
+        # workflow is pinned through ``pkg:`` and copies nothing, a runner of
+        # your own is staged into this attempt's outcome draft at
+        # children/runners/<store name>, which the manager publishes into the
+        # workspace store when it commits the outcome. A running step never
+        # writes the store itself.
+        from .scaffold import _build_payload, _prepare, resolve_workflow
         from .workspace import Workspace
 
         resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
         publish: Literal["workspace", "installed"] = "installed" if resolved.packaged is not None else "workspace"
+        runners = self._require_draft().root / "children" / "runners"
+        staged_before = set(os.listdir(runners)) if runners.is_dir() else set()
         staging = self.control / f"call.{uuid.uuid4()}"
         staging.mkdir(parents=True, exist_ok=False)
+        succeeded = False
         try:
-            scaffold_job(
-                Workspace(self.workspace, durable=self.context.durable),
+            workspace = Workspace(self.workspace, durable=self.context.durable)
+            prepared = _prepare(
+                workspace,
                 # A git URI was fetched once above; its canonical, pinned URI is a cache hit.
                 (resolved.registration_id or workflow) if os.fspath(workflow).startswith("git+") else workflow,
+                publish=publish,
+                step=step,
+                workflow_id=workflow_id,
+                data_mode=data_mode,
+                format=None,
+                runner_name=None,
+                runner_stage=runners,
+            )
+            _build_payload(
+                workspace,
+                prepared,
                 staging,
                 inputs=inputs,
                 files=files,
@@ -1261,10 +1289,6 @@ class Attempt:
                 tag=tag if tag is not None else label,
                 priority=priority,
                 workdir_mode=workdir_mode,
-                data_mode=data_mode,
-                publish=publish,
-                step=step,
-                workflow_id=workflow_id,
                 name=name,
                 maxtime_cap=self.context.resources.get("maxtime"),
             )
@@ -1272,8 +1296,11 @@ class Attempt:
             # (OutcomeDraft._register_child), so the staging directory is
             # disposable the moment spawn returns.
             reference = self.spawn(staging, label=label, placement=placement)
+            succeeded = True
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+            if not succeeded:
+                self._unstage_runners(runners, staged_before)
         _LOGGER.debug("called workflow %s as %s (%s)", resolved.workflow_id, label, reference.job_key)
         return reference
 
@@ -1443,6 +1470,26 @@ class Attempt:
 
         if self._published is not None:
             raise RuntimeError(f"this attempt already published its {self._action} outcome")
+
+    @staticmethod
+    def _unstage_runners(runners: Path, keep: set[str]) -> None:
+        """Remove what a failed call staged, so the draft holds only runners its children reference."""
+
+        if not runners.is_dir():
+            return
+        for entry in os.listdir(runners):
+            if entry in keep:
+                continue
+            path = runners / entry
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        for directory in (runners, runners.parent):
+            try:
+                directory.rmdir()
+            except OSError:
+                break
 
     def _require_draft(self) -> OutcomeDraft:
         """Return this attempt's outcome draft, creating it on first use."""

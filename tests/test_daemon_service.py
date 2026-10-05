@@ -25,7 +25,7 @@ from httk.workflow._daemon_auth import sign_request, verify_response
 from httk.workflow._daemon_exchange import ExchangeMover
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
-from httk.workflow._daemon_policy import Policy, Profile
+from httk.workflow._daemon_policy import ApprovedLauncher, Policy
 from httk.workflow._daemon_protocol import Request, Response, decode_response, encode_request
 from httk.workflow._daemon_service import Broker
 from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
@@ -40,8 +40,7 @@ class RecordingGateway(SlurmGateway):
 
     def __init__(self, policy: Policy) -> None:
         self.policy = policy
-        self.policy_path = Path("/policy.json")
-        self.submissions: list[tuple[Profile, str]] = []
+        self.submissions: list[tuple[ApprovedLauncher, str]] = []
         self.statuses: list[tuple[str, str, str]] = []
         self.cancellations: list[tuple[str, str, str]] = []
         self.submit_error = False
@@ -52,8 +51,8 @@ class RecordingGateway(SlurmGateway):
     def check(self) -> None:
         pass
 
-    def submit(self, profile: Profile, handle: str) -> Submission:
-        self.submissions.append((profile, handle))
+    def submit(self, launcher: ApprovedLauncher, handle: str) -> Submission:
+        self.submissions.append((launcher, handle))
         if self.stop is not None:
             self.stop.set()
         if self.submit_error:
@@ -101,8 +100,7 @@ def _policy(tmp_path: Path, *, max_records: int = 64, max_submissions: int = 8) 
         squeue=broker / "squeue",
         scancel=broker / "scancel",
         cluster="cluster-1",
-        readonly_paths=(runtime,),
-        profiles=(Profile("cpu", 2, 1024, 10),),
+        launchers=(ApprovedLauncher("cpu", (("manager.confine", "bwrap"), ("slurm.cpus_per_task", "2")), "d" * 64),),
         authorized_keys=(operator_key,),
         max_records=max_records,
         max_submissions=max_submissions,
@@ -214,7 +212,7 @@ def test_health_start_status_and_cancel_use_protected_identities(tmp_path: Path)
         broker.process_once(threading.Event())
         submitted = _read(broker, start)
         assert submitted.outcome == "submitted" and submitted.handle is not None
-        assert gateway.submissions[0][0] == policy.profile("cpu")
+        assert gateway.submissions[0][0] == policy.launcher("cpu")
 
         status = _request(tmp_path, 3, "manager_status", handle=submitted.handle)
         _publish(broker, status)
@@ -246,7 +244,7 @@ def test_completed_old_configuration_replays_but_new_and_received_old_starts_ref
         assert original_response.outcome == "submitted"
         assert len(gateway.submissions) == 1
 
-        current_policy = replace(old_policy, profiles=(replace(old_policy.profile("cpu"), cpus=4),))
+        current_policy = replace(old_policy, launchers=(replace(old_policy.launcher("cpu"), digest="e" * 64),))
         broker.policy = current_policy
         gateway.policy = current_policy
         _publish(broker, completed)
@@ -299,7 +297,7 @@ def test_service_rechecks_protected_activation_after_acquiring_ledger_lock(
     checks: list[None] = []
 
     class Gateway(RecordingGateway):
-        def __init__(self, configured: Policy, _source: Path) -> None:
+        def __init__(self, configured: Policy) -> None:
             super().__init__(configured)
 
         def check(self) -> None:
@@ -682,7 +680,7 @@ def test_scheduler_failure_detail_is_signed_logged_and_replayed(
     stack, broker, _ = _open(tmp_path, policy)
     message = "sbatch exited 1: sbatch: error: Invalid account or account/partition combination"
 
-    def refuse(_profile: Profile, _handle: str) -> Submission:
+    def refuse(_launcher: ApprovedLauncher, _handle: str) -> Submission:
         raise UncertainSubmission(message)
 
     monkeypatch.setattr(broker.gateway, "submit", refuse)
@@ -778,7 +776,7 @@ def test_service_logs_check_and_startup(
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
     monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
-    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured, _source: RecordingGateway(configured))
+    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
     with caplog.at_level(logging.INFO, logger="httk.workflow"):
@@ -888,7 +886,7 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
     monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
-    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured, _source: RecordingGateway(configured))
+    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "MailboxDirectory", record)
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)

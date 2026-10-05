@@ -1,4 +1,4 @@
-"""Strict validation for the confined workspace daemon policy."""
+"""Strict validation for the workspace daemon policy."""
 
 import base64
 import errno
@@ -12,9 +12,10 @@ from typing import Any
 
 import pytest
 
-from httk.workflow._daemon_policy import Policy, Profile, check_layout, load_policy, policy_document
+from httk.workflow._daemon_policy import ApprovedLauncher, Policy, check_layout, load_policy, policy_document
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
+DIGEST = "0123456789abcdef" * 4
 
 
 def _document(tmp_path: Path) -> dict[str, object]:
@@ -22,7 +23,7 @@ def _document(tmp_path: Path) -> dict[str, object]:
     broker = tmp_path / "broker"
     return {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 3,
+        "format_version": 4,
         "workspace": str(tmp_path / "site/workspace"),
         "workspace_id": "12345678-1234-1234-1234-123456789abc",
         "enrollment_id": "0123456789abcdef0123456789abcdef",
@@ -35,16 +36,22 @@ def _document(tmp_path: Path) -> dict[str, object]:
         "squeue": str(broker / "bin/squeue"),
         "scancel": str(broker / "bin/scancel"),
         "cluster": "cluster-1",
-        "readonly_paths": [str(runtime)],
         "authorized_keys": [AUTHORIZED_KEY],
-        "profiles": {
-            "cpu": {"cpus": 8, "memory_mb": 16384, "time_minutes": 60},
+        "launchers": {
+            "cpu": {
+                "settings": {"manager.confine": "bwrap", "slurm.cpus_per_task": "8", "slurm.mem": "16G"},
+                "digest": DIGEST,
+            },
             "long-1": {
-                "cpus": 2,
-                "memory_mb": 4096,
-                "time_minutes": 1440,
-                "partition": "compute.1",
-                "account": "project_1",
+                "settings": {
+                    "manager.confine": "bwrap",
+                    "slurm.partition": "compute.1",
+                    "slurm.time_limit": 1440,
+                    "environment.prelude": "module load approved\nexport SITE=yes",
+                    "manager.workers": None,
+                    "confine.isolate_network": 0.0,
+                },
+                "digest": "f" * 64,
             },
         },
     }
@@ -63,6 +70,7 @@ def test_policy_loads_exact_fields_and_defaults(tmp_path: Path) -> None:
     assert policy.root == tmp_path / "site"
     assert policy.requests == tmp_path / "site/exchange/requests"
     assert policy.responses == tmp_path / "site/exchange/responses"
+    assert policy.jobs == tmp_path / "snapshots/jobs"
     assert policy.max_records == 4096
     assert policy.max_submissions == 128
     assert policy.poll_seconds == 1.0
@@ -70,35 +78,30 @@ def test_policy_loads_exact_fields_and_defaults(tmp_path: Path) -> None:
     assert policy.max_output_bytes == 65536
     assert policy.request_max_age == 3600
     assert policy.authorized_keys == (AUTHORIZED_KEY,)
-    assert policy.profile("cpu") == Profile("cpu", 8, 16384, 60)
-    assert policy.profile("long-1").partition == "compute.1"
-    with pytest.raises(ValueError, match="unknown daemon profile"):
-        policy.profile("missing")
-
-
-def test_runtime_policy_document_round_trips_frozen_configuration(tmp_path: Path) -> None:
-    document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict) and isinstance(profiles["cpu"], dict)
-    profiles["cpu"].update(
-        workers=4,
-        prelude="module load approved\nexport SITE=yes",
-        manager_command="approved-httk",
+    assert policy.launcher("cpu") == ApprovedLauncher(
+        "cpu", (("manager.confine", "bwrap"), ("slurm.cpus_per_task", "8"), ("slurm.mem", "16G")), DIGEST
     )
-    policy = load_policy(_write(tmp_path, document))
+    assert dict(policy.launcher("long-1").settings)["manager.workers"] is None
+    with pytest.raises(ValueError, match="unknown daemon launcher"):
+        policy.launcher("missing")
+
+
+def test_runtime_policy_document_round_trips_frozen_launchers(tmp_path: Path) -> None:
+    policy = load_policy(_write(tmp_path, _document(tmp_path)))
     serialized = policy_document(policy)
+    assert serialized["format_version"] == 4
     round_trip = tmp_path / "round-trip.json"
     round_trip.write_text(json.dumps(serialized), encoding="utf-8")
     assert load_policy(round_trip) == policy
-    assert policy.profile("cpu").workers == 4
-    assert policy.profile("cpu").prelude == "module load approved\nexport SITE=yes"
-    assert policy.profile("cpu").manager_command == "approved-httk"
+    settings = dict(policy.launcher("long-1").settings)
+    assert settings["environment.prelude"] == "module load approved\nexport SITE=yes"
+    assert settings["slurm.time_limit"] == 1440 and settings["confine.isolate_network"] == 0.0
 
 
-def test_configuration_digest_covers_execution_policy_and_ignores_operations(tmp_path: Path) -> None:
+def test_configuration_digest_binds_the_launcher_and_the_submission_identity(tmp_path: Path) -> None:
     policy = load_policy(_write(tmp_path, _document(tmp_path)))
     digest = policy.configuration_digest("cpu")
-    assert len(digest) == 64
+    assert len(digest) == 64 and digest != policy.configuration_digest("long-1")
     assert (
         replace(
             policy,
@@ -109,43 +112,64 @@ def test_configuration_digest_covers_execution_policy_and_ignores_operations(tmp
             command_timeout=15.0,
             max_output_bytes=32768,
             request_max_age=7200,
+            bwrap=policy.bwrap.with_name("other-bwrap"),
+            squeue=policy.squeue.with_name("other-squeue"),
+            scancel=policy.scancel.with_name("other-scancel"),
+            sacct=Path("/usr/bin/sacct"),
+            launchers=(policy.launcher("cpu"),),
         ).configuration_digest("cpu")
         == digest
     )
+    other_launcher = replace(policy.launcher("cpu"), digest="e" * 64)
     for changed in (
         replace(policy, workspace_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-        replace(policy, bwrap=policy.bwrap.with_name("other-bwrap")),
-        replace(policy, readonly_paths=(policy.readonly_paths[0], tmp_path / "extra-runtime")),
-        replace(policy, profiles=(replace(policy.profile("cpu"), workers=2), *policy.profiles[1:])),
-        replace(policy, profiles=(replace(policy.profile("cpu"), prelude="module load other"), *policy.profiles[1:])),
-        replace(
-            policy, profiles=(replace(policy.profile("cpu"), manager_command="approved-httk"), *policy.profiles[1:])
-        ),
+        replace(policy, python=policy.python.with_name("other-python")),
+        replace(policy, sbatch=policy.sbatch.with_name("other-sbatch")),
+        replace(policy, cluster="cluster-2"),
+        replace(policy, slurm_conf=Path("/etc/slurm/slurm.conf")),
+        replace(policy, launchers=(other_launcher, policy.launcher("long-1"))),
     ):
         assert changed.configuration_digest("cpu") != digest
+    renamed = replace(policy, launchers=(replace(policy.launcher("cpu"), name="cpu2"),))
+    assert renamed.configuration_digest("cpu2") != digest
 
 
-def test_resources_are_optional_and_sanity_limits_are_not_a_load_concern(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ({"settings": {}}, "exactly settings and digest"),
+        ({"settings": {}, "digest": DIGEST, "extra": 1}, "exactly settings and digest"),
+        ({"settings": [], "digest": DIGEST}, "settings must be an object"),
+        ({"settings": {}, "digest": "ABC"}, "invalid launcher digest"),
+        ({"settings": {"bad key": "x"}, "digest": DIGEST}, "invalid launcher setting name"),
+        ({"settings": {"slurm.mem": True}, "digest": DIGEST}, "JSON scalar"),
+        ({"settings": {"slurm.mem": ["4G"]}, "digest": DIGEST}, "JSON scalar"),
+        ({"settings": {"slurm.mem": "4\u0000G"}, "digest": DIGEST}, "JSON scalar"),
+    ],
+)
+def test_launcher_entries_are_strict(tmp_path: Path, entry: object, message: str) -> None:
     document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict)
-    profiles["bare"] = {}
-    profiles["huge"] = {"cpus": 4096, "memory_mb": 2 * 1024 * 1024, "time_minutes": 20_000}
-    policy = load_policy(_write(tmp_path, document))
-    bare = policy.profile("bare")
-    assert bare.cpus is bare.memory_mb is bare.time_minutes is None
-    assert policy.profile("huge").cpus == 4096
-    serialized = policy_document(policy)
-    serialized_profiles = serialized["profiles"]
-    assert isinstance(serialized_profiles, dict)
-    assert not {"cpus", "memory_mb", "time_minutes"} & set(serialized_profiles["bare"])
-    round_trip = tmp_path / "round-trip.json"
-    round_trip.write_text(json.dumps(serialized), encoding="utf-8")
-    assert load_policy(round_trip) == policy
-    assert policy.configuration_digest("bare") != policy.configuration_digest("cpu")
+    document["launchers"] = {"cpu": entry}
+    with pytest.raises(ValueError, match=message):
+        load_policy(_write(tmp_path, document))
 
 
-@pytest.mark.parametrize("field", ["workspace", "workspace_id", "profiles", "bwrap", "cluster"])
+def test_launcher_names_are_daemon_configuration_names(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    launchers = document["launchers"]
+    assert isinstance(launchers, dict)
+    launchers["Bad Name"] = launchers.pop("cpu")
+    with pytest.raises(ValueError, match="invalid launcher name"):
+        load_policy(_write(tmp_path, document))
+    with pytest.raises(ValueError, match="sorted with unique keys"):
+        ApprovedLauncher("cpu", (("slurm.mem", "1G"), ("manager.confine", "bwrap")), DIGEST)
+    with pytest.raises(ValueError, match="sorted with unique keys"):
+        ApprovedLauncher("cpu", (("slurm.mem", "1G"), ("slurm.mem", "2G")), DIGEST)
+    with pytest.raises(ValueError, match="key/value pairs"):
+        ApprovedLauncher("cpu", (("slurm.mem",),), DIGEST)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["workspace", "workspace_id", "launchers", "bwrap", "cluster"])
 def test_required_policy_fields_cannot_be_omitted(tmp_path: Path, field: str) -> None:
     document = _document(tmp_path)
     del document[field]
@@ -184,9 +208,9 @@ def test_unknown_and_duplicate_keys_are_refused(tmp_path: Path) -> None:
         ("format_version", True),
         ("format_version", 1),
         ("format_version", 2),
+        ("format_version", 3),
         ("workspace_id", 7),
-        ("readonly_paths", "runtime"),
-        ("profiles", []),
+        ("launchers", []),
         ("poll_seconds", True),
         ("max_records", 1.0),
     ],
@@ -271,68 +295,6 @@ def test_authorized_keys_are_canonical_unique_ed25519_values(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("cpus", 0),
-        ("cpus", 2**31),
-        ("memory_mb", 0),
-        ("memory_mb", 2**31),
-        ("time_minutes", 0),
-        ("time_minutes", 2**31),
-        ("partition", "bad value"),
-        ("account", True),
-    ],
-)
-def test_profile_types_names_and_bounds_are_enforced(tmp_path: Path, field: str, value: object) -> None:
-    document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict)
-    cpu = profiles["cpu"]
-    assert isinstance(cpu, dict)
-    cpu[field] = value
-    with pytest.raises(ValueError):
-        load_policy(_write(tmp_path, document))
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("workers", 0),
-        ("workers", True),
-        ("workers", 1025),
-        ("prelude", 1),
-        ("prelude", "bad\0prelude"),
-        ("manager_command", ""),
-        ("manager_command", "  \t"),
-        ("manager_command", "bad\0command"),
-    ],
-)
-def test_compiled_manager_fields_are_strict(tmp_path: Path, field: str, value: object) -> None:
-    document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict) and isinstance(profiles["cpu"], dict)
-    profiles["cpu"][field] = value
-    with pytest.raises(ValueError):
-        load_policy(_write(tmp_path, document))
-
-
-def test_profile_names_and_members_are_strict(tmp_path: Path) -> None:
-    document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict)
-    profiles["Bad Name"] = profiles.pop("cpu")
-    with pytest.raises(ValueError, match="profile name"):
-        load_policy(_write(tmp_path, document))
-
-    document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict) and isinstance(profiles["cpu"], dict)
-    profiles["cpu"]["command"] = "sh"
-    with pytest.raises(ValueError, match="profile fields"):
-        load_policy(_write(tmp_path, document))
-
-
-@pytest.mark.parametrize(
     ("field", "value", "message"),
     [
         ("exchange", "elsewhere/exchange", "siblings in a dedicated directory"),
@@ -357,92 +319,34 @@ def test_daemon_parent_cannot_be_the_filesystem_root(tmp_path: Path) -> None:
         load_policy(_write(tmp_path, document))
 
 
-@pytest.mark.parametrize("runtime", ["site", "site/lib", "site/workspace/lib"])
-def test_daemon_parent_must_be_disjoint_from_runtime_paths(tmp_path: Path, runtime: str) -> None:
-    document = _document(tmp_path)
-    document["readonly_paths"] = [str(tmp_path / runtime), *document["readonly_paths"]]  # type: ignore[misc]
-    with pytest.raises(ValueError, match="daemon parent .* runtime path"):
-        load_policy(_write(tmp_path, document))
-
-
-@pytest.mark.parametrize(
-    ("runtime", "message"),
-    [
-        ("site/workspace/escape", "daemon parent .* runtime path"),
-        ("state/escape", "runtime path .* must be disjoint from state"),
-        ("snapshots/escape", "runtime path .* must be disjoint from snapshots"),
-        ("/", "filesystem root"),
-    ],
-)
-def test_runtime_roots_cannot_overlap_mutable_roots_or_be_root(tmp_path: Path, runtime: str, message: str) -> None:
-    document = _document(tmp_path)
-    document["readonly_paths"] = [*document["readonly_paths"], str(tmp_path / runtime)]  # type: ignore[misc]
-    with pytest.raises(ValueError, match=message):
-        load_policy(_write(tmp_path, document))
-
-
-def test_policy_has_no_broker_paths(tmp_path: Path) -> None:
+def test_policy_has_no_broker_paths_or_job_sandbox_settings(tmp_path: Path) -> None:
     document = _document(tmp_path)
     policy = load_policy(_write(tmp_path, document))
-    assert "broker_paths" not in policy_document(policy)
-    assert policy_document(policy)["format_version"] == 3
-    assert not hasattr(policy, "broker_paths")
-    document["broker_paths"] = [str(tmp_path / "broker")]
-    with pytest.raises(ValueError, match="fields are missing or unknown"):
-        load_policy(_write(tmp_path, document))
+    for field in ("broker_paths", "readonly_paths", "isolate_network", "mpi", "profiles"):
+        assert field not in policy_document(policy)
+        assert not hasattr(policy, field)
+        with pytest.raises(ValueError, match="fields are missing or unknown"):
+            load_policy(_write(tmp_path, {**document, field: []}))
 
 
-def test_overlapping_roots_within_shared_readonly_role_are_allowed(tmp_path: Path) -> None:
+def test_broker_executables_need_no_approved_runtime_roots(tmp_path: Path) -> None:
+    # The broker sees the host read-only and managers run unconfined, so no tool is tied to a mount list.
     document = _document(tmp_path)
-    readonly = tmp_path / "runtime"
-    document["readonly_paths"] = [str(readonly), str(readonly / "bin")]
-    policy = load_policy(_write(tmp_path, document))
-    assert policy.readonly_paths == (readonly, readonly / "bin")
-
-
-@pytest.mark.parametrize("reserved", ["/tmp", "/workspace/child", "/proc/self", "/tmp/home/cache"])
-def test_runtime_roots_cannot_overlap_reserved_sandbox_destinations(tmp_path: Path, reserved: str) -> None:
-    document = _document(tmp_path)
-    document["readonly_paths"] = [reserved]
-    document["python"] = str(Path(reserved) / "python")
-    with pytest.raises(ValueError, match="reserved sandbox destinations"):
-        load_policy(_write(tmp_path, document))
-
-
-def test_only_python_must_be_covered_by_readonly_paths(tmp_path: Path) -> None:
-    document = _document(tmp_path)
-    document["python"] = str(tmp_path / "unapproved/python")
-    with pytest.raises(ValueError, match="python must be within readonly_paths"):
-        load_policy(_write(tmp_path, document))
-    # The broker and allocation service see the host read-only; bwrap runs on the host.
-    document = _document(tmp_path)
-    for field in ("sbatch", "squeue", "scancel", "bwrap"):
+    for field in ("python", "sbatch", "squeue", "scancel", "bwrap"):
         document[field] = str(tmp_path / "unapproved" / field)
     document["slurm_conf"] = str(tmp_path / "unapproved/slurm.conf")
-    assert load_policy(_write(tmp_path, document)).sbatch == tmp_path / "unapproved/sbatch"
+    assert load_policy(_write(tmp_path, document)).python == tmp_path / "unapproved/python"
 
 
-def test_slurm_commands_may_use_a_shared_readonly_runtime(tmp_path: Path) -> None:
-    document = _document(tmp_path)
-    readonly_paths = document["readonly_paths"]
-    assert isinstance(readonly_paths, list) and isinstance(readonly_paths[0], str)
-    runtime = Path(readonly_paths[0])
-    document["sbatch"] = str(runtime / "bin/sbatch")
-    document["squeue"] = str(runtime / "bin/squeue")
-    document["scancel"] = str(runtime / "bin/scancel")
-    policy = load_policy(_write(tmp_path, document))
-    assert policy.sbatch == runtime / "bin/sbatch"
-
-
-@pytest.mark.parametrize("field", ["workspace", "python", "readonly_paths"])
+@pytest.mark.parametrize("field", ["workspace", "python", "slurm_conf"])
 def test_paths_must_be_absolute_strings_without_parent_segments(tmp_path: Path, field: str) -> None:
     document = _document(tmp_path)
-    document[field] = ["/safe/../bad"] if field == "readonly_paths" else "/safe/../bad"
+    document[field] = "/safe/../bad"
     with pytest.raises(ValueError, match="absolute path"):
         load_policy(_write(tmp_path, document))
 
     document = _document(tmp_path)
-    document[field] = [7] if field == "readonly_paths" else 7
+    document[field] = 7
     with pytest.raises(ValueError, match="string"):
         load_policy(_write(tmp_path, document))
 
@@ -523,7 +427,7 @@ def test_policy_walk_closes_file_after_final_parent_close_error(monkeypatch: pyt
 
 def test_direct_dataclasses_enforce_the_same_invariants(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        Profile("bad name", 1, 1, 1)
+        ApprovedLauncher("bad name", (), DIGEST)
     with pytest.raises(ValueError, match="siblings"):
         Policy(
             workspace=tmp_path / "site/workspace",
@@ -538,26 +442,11 @@ def test_direct_dataclasses_enforce_the_same_invariants(tmp_path: Path) -> None:
             squeue=tmp_path / "broker/squeue",
             scancel=tmp_path / "broker/scancel",
             cluster="cluster",
-            readonly_paths=(tmp_path / "runtime",),
-            profiles=(),
+            launchers=(),
         )
-
-
-def test_gres_and_reservation_round_trip_only_when_set(tmp_path: Path) -> None:
-    document = _document(tmp_path)
-    profiles = document["profiles"]
-    assert isinstance(profiles, dict)
-    profiles["gpu"] = {"gres": "gpu:a100=2", "reservation": "maint.1"}
-    policy = load_policy(_write(tmp_path, document))
-    assert (policy.profile("gpu").gres, policy.profile("gpu").reservation) == ("gpu:a100=2", "maint.1")
-    rendered = policy_document(policy)["profiles"]
-    assert isinstance(rendered, dict)
-    assert "gres" not in rendered["cpu"] and "reservation" not in rendered["cpu"]
-    assert load_policy(_write(tmp_path, policy_document(policy))) == policy
-    with pytest.raises(ValueError, match="invalid gres"):
-        Profile("gpu", gres="gpu a100")
-    with pytest.raises(ValueError, match="invalid reservation"):
-        Profile("gpu", reservation="-bad")
+    policy = load_policy(_write(tmp_path, _document(tmp_path)))
+    with pytest.raises(ValueError, match="launcher names must be unique"):
+        replace(policy, launchers=(policy.launcher("cpu"), policy.launcher("cpu")))
 
 
 def _layout_policy(tmp_path: Path) -> Policy:
@@ -670,43 +559,11 @@ def test_check_layout_without_probe_still_checks_the_parent(tmp_path: Path, monk
         check_layout(policy, probe=False)
 
 
-@pytest.mark.parametrize("destination", ["/daemon-policy.json", "/workspace/lib", "/tmp", "/"])
-def test_runtime_paths_cannot_overlap_payload_destinations(tmp_path: Path, destination: str) -> None:
-    document = _document(tmp_path)
-    document["readonly_paths"] = [*document["readonly_paths"], destination]  # type: ignore[misc]
-    with pytest.raises(ValueError, match="reserved sandbox destinations|filesystem root"):
-        load_policy(_write(tmp_path, document))
-
-
-@pytest.mark.parametrize("destination", ["/daemon-root", "/control/lib"])
-def test_former_broker_destinations_are_no_longer_reserved(tmp_path: Path, destination: str) -> None:
-    document = _document(tmp_path)
-    document["readonly_paths"] = [*document["readonly_paths"], destination]  # type: ignore[misc]
-    assert Path(destination) in load_policy(_write(tmp_path, document)).readonly_paths
-
-
 def test_check_layout_reports_a_missing_staging_directory(tmp_path: Path) -> None:
     policy = _layout_policy(tmp_path)
     (tmp_path / "site/workspace/.httk-workspace/exchange").rmdir()
     with pytest.raises(ValueError, match="staging directory .* is missing; .*--reload"):
         check_layout(policy)
-
-
-def test_isolate_network_is_written_only_when_disabled_and_binds_the_digest(tmp_path: Path) -> None:
-    policy = load_policy(_write(tmp_path, _document(tmp_path)))
-    assert policy.isolate_network is True
-    # Default documents and digests are those of enrollments made before the setting existed.
-    assert "isolate_network" not in policy_document(policy)
-    assert replace(policy, isolate_network=True).configuration_digest("cpu") == policy.configuration_digest("cpu")
-    disabled = replace(policy, isolate_network=False)
-    assert policy_document(disabled)["isolate_network"] is False
-    assert disabled.configuration_digest("cpu") != policy.configuration_digest("cpu")
-    assert load_policy(_write(tmp_path, policy_document(disabled))) == disabled
-    for value in (True, 0, "false", None):
-        with pytest.raises(ValueError, match="isolate_network may only be present as false"):
-            load_policy(_write(tmp_path, {**_document(tmp_path), "isolate_network": value}))
-    with pytest.raises(ValueError, match="isolate_network must be a boolean"):
-        replace(policy, isolate_network=0)  # type: ignore[arg-type]
 
 
 def test_sacct_is_written_only_when_set_and_never_binds_the_digest(tmp_path: Path) -> None:

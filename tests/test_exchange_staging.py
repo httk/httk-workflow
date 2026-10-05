@@ -10,10 +10,11 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
-from httk.workflow import TaskManager, Workspace, _exchange_staging, transfers, workflow_cli
+from httk.workflow import TaskManager, Workspace, _confine, _exchange_staging, transfers, workflow_cli
 from httk.workflow._daemon_exchange import ExchangeMover
 from httk.workflow._exchange_staging import exchange_pass
 from httk.workflow._job_tree import record_spawns
+from httk.workflow._sandbox import PreparedSandbox
 from httk.workflow._util import timestamp_seconds
 from httk.workflow.models import Marker, make_job_key
 from httk.workflow.transfers import exchange_staging
@@ -415,7 +416,13 @@ def test_a_manager_with_exchange_adopts_runs_and_ejects_a_job(tmp_path: Path, mo
     monkeypatch.setattr(_exchange_staging, "_EJECT_GRACE_SECONDS", 0.0)
     monkeypatch.setattr(_exchange_staging, "_STEP_INTERVAL", 0.0)
     marker, _staged = _stage(source, workspace, tmp_path, "a")
-    with TaskManager(workspace, heartbeat_interval=0.01, exchange=True) as manager:
+    # A daemon-staged workspace is normally enrolled, so its manager is confined
+    # as it would be there; the sandbox is a pass-through here (see
+    # test_manager_confinement.py).
+    monkeypatch.setattr(_confine, "probe_bwrap", lambda _settings: True)
+    monkeypatch.setattr(_confine, "prepare_attempt_sandbox", lambda _settings, **_arguments: PreparedSandbox([], ()))
+    pins = {"manager.confine": "bwrap", "confine.bwrap": "/usr/bin/bwrap"}
+    with TaskManager(workspace, heartbeat_interval=0.01, exchange=True, setting_overrides=pins) as manager:
         manager.run_until_idle(timeout=120.0)
         manager.tick()
     bundle = exchange_staging(workspace) / "outbox" / marker.job_key

@@ -5,22 +5,38 @@ on:
     branches: [main, develop]
     paths:
       - "src/httk/workflow/_daemon_*.py"
+      - "src/httk/workflow/_sandbox.py"
+      - "src/httk/workflow/_confine*.py"
+      - "src/httk/workflow/_launch_*.py"
+      - "src/httk/workflow/_manager_launches.py"
       - "tests/test_daemon_bootstrap.py"
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
-      - "tests/test_daemon_mpi_policy.py"
-      - "tests/test_daemon_mpi_bootstrap.py"
+      - "tests/test_confine_*.py"
+      - "tests/test_launch_client.py"
+      - "tests/test_launch_protocol.py"
+      - "tests/test_manager_confinement.py"
+      - "tests/test_manager_launches.py"
+      - "tests/test_call_staging.py"
       - "tools/probe_daemon_mpi.c"
       - ".github/workflows/daemon-sandbox.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "src/httk/workflow/_daemon_*.py"
+      - "src/httk/workflow/_sandbox.py"
+      - "src/httk/workflow/_confine*.py"
+      - "src/httk/workflow/_launch_*.py"
+      - "src/httk/workflow/_manager_launches.py"
       - "tests/test_daemon_bootstrap.py"
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
-      - "tests/test_daemon_mpi_policy.py"
-      - "tests/test_daemon_mpi_bootstrap.py"
+      - "tests/test_confine_*.py"
+      - "tests/test_launch_client.py"
+      - "tests/test_launch_protocol.py"
+      - "tests/test_manager_confinement.py"
+      - "tests/test_manager_launches.py"
+      - "tests/test_call_staging.py"
       - "tools/probe_daemon_mpi.c"
       - ".github/workflows/daemon-sandbox.yml"
   workflow_dispatch:
@@ -47,13 +63,13 @@ jobs:
           sudo sysctl -w kernel.unprivileged_userns_clone=1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: Compile the site probe (cluster execution is a separate acceptance check)
+      - name: Compile the site probe (running it as $HTTK_WORKFLOW_LAUNCH ./probe is a separate cluster acceptance check)
         run: mpicc -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/httk-mpi-probe" tools/probe_daemon_mpi.c -lrt
 
       - name: Install trusted package and development dependencies
         run: python -m pip install -e ".[dev]"
 
-      - name: Require the daemon policy and sandbox gates
+      - name: Require the daemon broker and attempt confinement sandbox gates
         env:
           HTTK_REQUIRE_DAEMON_SANDBOX: "1"
           HTTK_TEST_PROFILE: extended
@@ -63,5 +79,11 @@ jobs:
           tests/test_daemon_policy.py
           tests/test_daemon_bootstrap.py
           tests/test_daemon_sandbox.py
-          tests/test_daemon_mpi_policy.py
-          tests/test_daemon_mpi_bootstrap.py
+          tests/test_confine_settings.py
+          tests/test_confine_sandbox.py
+          tests/test_confine_rank.py
+          tests/test_launch_protocol.py
+          tests/test_launch_client.py
+          tests/test_manager_confinement.py
+          tests/test_manager_launches.py
+          tests/test_call_staging.py

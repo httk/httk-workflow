@@ -1,6 +1,7 @@
 """Filesystem workflow task manager for the current core profile."""
 
 import contextlib
+import dataclasses
 import logging
 import math
 import os
@@ -17,14 +18,16 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
 from httk.core.digests import tree_digest
 
 from . import (
+    _confine,
     _manager_cancellation,
     _manager_commit,
     _manager_joins,
+    _manager_launches,
     _manager_requests,
     _manager_runners,
     _manager_scheduling,
@@ -38,8 +41,9 @@ from ._allocation import (
     parse_cpulist,
 )
 from ._durations import format_duration
-from ._exchange_staging import exchange_pass
+from ._exchange_staging import ENROLLMENT_MARKER, exchange_pass
 from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
+from ._launch_protocol import LaunchConfinement
 from ._manager_binding import (
     Inventory,
     NodeShare,
@@ -50,6 +54,8 @@ from ._manager_binding import (
     release,
     render_launch,
 )
+from ._manager_launches import AttemptLaunches, LaunchContext
+from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
 from ._util import (
     interpreter_first_path,
     json_bytes,
@@ -60,6 +66,7 @@ from ._util import (
 )
 from .codes import code_environment
 from .errors import (
+    ConfinementUnavailableError,
     FormatError,
     RunnerResolutionError,
     TransitionLostError,
@@ -70,6 +77,9 @@ from .executors import AttemptLaunch, PathRunnerExecutor, RunnerExecutor
 from .gc import ALWAYS_SAFE_CATEGORIES
 from .journal import SEGMENT_HEADER, parse_record_ref
 from .manifests import read_maintenance_lock
+from .models import (
+    _MARKER_PATTERN as MARKER_PATTERN,
+)
 from .models import (
     _MAXIMUM_JOB_DOCUMENT_BYTES as MAXIMUM_JOB_DOCUMENT_BYTES,
 )
@@ -84,6 +94,7 @@ from .models import (
     Marker,
     StateFrame,
     canonical_uuid,
+    check_job_placement,
     normalize_placement,
     validate_attempt_control,
     validate_capacity,
@@ -139,6 +150,34 @@ _CANCELLING_MEMBERS = (
     "request_id",
 )
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
+#: How long a failed Bubblewrap probe stands before the manager probes again.
+CONFINE_REPROBE_SECONDS = 60.0
+#: The most entries a check for jobs nested below a job directory visits per state kind.
+_NESTED_SCAN_ENTRIES = 4096
+_ENROLLED_MESSAGE = (
+    "this workspace is enrolled with a workspace daemon (.httk-workspace/exchange/enrollment.json exists), so "
+    "every manager "
+    "on it must confine its attempts: set manager.confine=bwrap as a workspace setting or pin it with "
+    "--setting manager.confine=bwrap"
+)
+
+
+class _ConfinementBlocked(Exception):
+    """A host or operator condition prevents confined attempts; the message names it."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Confinement:
+    """The checked confinement of attempts started now.
+
+    :param settings: The validated settings, or ``None`` for unconfined attempts.
+    :param block_userns: Whether sandboxes block nested user namespaces.
+    :param launch: The rank sandbox settings of confined launches, or ``None`` when unconfined.
+    """
+
+    settings: _confine.ConfineSettings | None
+    block_userns: bool
+    launch: LaunchConfinement | None
 
 
 def _write_marker(descriptor: int, line: str, job_key: str) -> None:
@@ -210,8 +249,10 @@ class WorkCensus:
     ``ready_blocked`` groups the ready and unregisterable-submitted jobs this
     manager cannot progress by the requirement it lacks — ``executor``, ``pool``,
     ``capability``, ``requirements`` (an unmet ``requires`` entry of the job, checked in
-    this manager's environment), ``resources``, or ``time`` (a ``mintime`` beyond the
-    time left before this manager's drain start, or ``drain_point`` once it has passed) — mapping each requirement to the count of jobs it would
+    this manager's environment), ``resources``, ``time`` (a ``mintime`` beyond the
+    time left before this manager's drain start, or ``drain_point`` once it has passed), or
+    ``confinement`` (every claimable job while a host or operator condition holds back
+    confined attempts) — mapping each requirement to the count of jobs it would
     turn away. Every such job is attributed to exactly one requirement, so the
     grouped counts sum to :attr:`ready_blocked_total`.
 
@@ -254,13 +295,14 @@ class WorkCensus:
 
     def _blocked_groups(self) -> list[str]:
         groups: list[str] = []
-        for kind in ("executor", "pool", "capability", "requirements", "calls", "resources", "time"):
+        for kind in ("executor", "pool", "capability", "requirements", "calls", "resources", "time", "confinement"):
             for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
                 label = {
                     "resources": f"resource={name}",
                     "requirements": f"requires {name}",
                     "calls": name,
                     "time": "past the drain point" if name == "drain_point" else f"{name} beyond the time left",
+                    "confinement": "confinement unavailable",
                 }.get(kind, f"{kind}={name}")
                 groups.append(f"{label}: {count}")
         return groups
@@ -435,6 +477,9 @@ class RunningAttempt:
     :param sweep_kill_at: Escalate an untracked (fenced or orphaned) attempt that
         outlives its ``SIGTERM`` to ``SIGKILL`` at this monotonic time, or
         ``None`` before the first ``SIGTERM``.
+    :param confined: Mark an attempt started inside the attempt sandbox.
+    :param launches: The confined launches of a confined attempt, or ``None``
+        for an unconfined one; the attempt stays tracked until all are reaped.
     """
 
     marker: Marker
@@ -462,6 +507,8 @@ class RunningAttempt:
     interrupted: bool = False
     placement: Placement | None = None
     sweep_kill_at: float | None = None
+    confined: bool = False
+    launches: AttemptLaunches | None = None
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
@@ -500,8 +547,16 @@ class TaskManager:
         into *resources* and *end_time* by the caller.
     :param exchange: Run the workspace-daemon exchange pass (adopt staged job
         directories, eject finished jobs, publish status) at the start of every tick.
-    :raises ValueError: If a manager limit is invalid or executor configuration conflicts.
+    :param setting_overrides: Pinned ``manager.confine``, ``manager.launch_template``,
+        ``manager.bind_cpus`` and ``confine.*`` settings that win over the
+        workspace settings for this manager's lifetime.
+    :raises ValueError: If a manager limit, a pinned setting or the effective
+        confinement settings are invalid, or executor configuration conflicts.
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
+    :raises httk.workflow.errors.ConfinementUnavailableError: If the effective
+        ``manager.confine`` is ``bwrap`` and Bubblewrap cannot build the attempt
+        sandbox here, or the workspace is enrolled with a workspace daemon and the
+        effective ``manager.confine`` is not ``bwrap``.
     """
 
     def __init__(
@@ -533,6 +588,7 @@ class TaskManager:
         deadline_margin: float = 120.0,
         allocation: Allocation | None = None,
         exchange: bool = False,
+        setting_overrides: Mapping[str, str] | None = None,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
@@ -564,7 +620,28 @@ class TaskManager:
             raise UnsupportedExtensionError(
                 f"cannot serve a {workspace.core_profile!r} workspace: this manager writes {CORE_PROFILE!r}"
             )
+        overrides = dict(setting_overrides or {})
+        for key, value in overrides.items():
+            if not isinstance(key, str) or not _confine.is_override_key(key) or not isinstance(value, str):
+                raise ValueError(
+                    f"a pinned setting must be manager.confine, manager.launch_template, manager.bind_cpus "
+                    f"or confine.* with a string value: {key!r}"
+                )
         self.workspace = workspace
+        #: Pinned settings that win over the workspace settings for this manager's lifetime.
+        self.setting_overrides: dict[str, str] = overrides
+        # The functional Bubblewrap probe per probed sandbox (executable,
+        # network isolation, user-namespace block): whether attempts block
+        # nested user namespaces, or why confinement is unavailable, and when
+        # it was probed. A manager started confined probes before it attaches,
+        # so an unusable host refuses the start; a workspace switched to bwrap
+        # later is probed at its next claim pass, and a failed probe is
+        # repeated at most every CONFINE_REPROBE_SECONDS.
+        self._bwrap_probes: dict[tuple[Path, bool, tuple[str, ...]], tuple[bool | str, float]] = {}
+        # The confinement settings last validated, keyed by the confinement
+        # keys of the effective settings, or why they are invalid.
+        self._confine_checked: tuple[tuple[tuple[str, str], ...], _confine.ConfineSettings | str] | None = None
+        self._confinement(self._effective_settings(), at_start=True)
         self.uid = os.getuid()
         # Ordered roots for jobs whose runner.source is installed, plus the
         # module prefixes the reserved pkg: form may name. Both are deployment
@@ -639,6 +716,9 @@ class TaskManager:
         self._manager_dir = workspace.control / "managers" / self.manager_id
         self._manager_dir.mkdir(parents=True, exist_ok=False)
         self._running: dict[str, RunningAttempt] = {}
+        # The monotonic time of the last scan of the confined attempts' launch
+        # directories; scans are rate limited, launch supervision is not.
+        self._last_launch_scan = -math.inf
         # Attempts reaped just before their running marker became committing.
         # This distinguishes a local process exit from an inherited commit;
         # entries live only until the commit cleanup decision is made.
@@ -835,6 +915,15 @@ class TaskManager:
     def _remove_manager_directory(self) -> None:
         """Remove this manager's metadata directory after its writer closes."""
 
+        try:
+            (self._manager_dir / _manager_launches.LAUNCHES_DIRECTORY).rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            # A trusted launch directory left behind may record a live launch:
+            # it is takeover evidence, so the whole manager record stays.
+            _LOGGER.warning("manager directory %s keeps launch records: %s", self._manager_dir, exc)
+            return
         for name in ("heartbeat.json", "manager.json"):
             try:
                 (self._manager_dir / name).unlink(missing_ok=True)
@@ -1175,6 +1264,9 @@ class TaskManager:
             self._evaluate_joins,
             self._enforce_deadlines,
             self._poll_running,
+            # Right after the running pass, so a launch is stopped in the tick
+            # that observed its attempt stop.
+            self._supervise_launches,
             self._recover_abandoned_claims,
         ):
             changed |= step()
@@ -1229,6 +1321,10 @@ class TaskManager:
     def _claim_pass(self, changed: bool) -> bool:
         """Claim and launch eligible work within this manager's worker budget."""
 
+        if not self._draining and len(self._running) < self.maximum_workers and self._confinement_blocked():
+            # A host or operator condition is not the jobs' fault: they stay
+            # ready rather than failing one by one.
+            return changed
         return _manager_scheduling.claim_pass(self, changed, _LOGGER)
 
     def _maintenance_paused(self) -> bool:
@@ -1496,6 +1592,8 @@ class TaskManager:
 
         signalled = 0
         for attempt in list(self._running.values()):
+            # Launches are stopped with their attempt, also one whose own process already exited.
+            _manager_launches.signal_all(self, attempt, signal_number, "the manager is draining")
             if attempt.process.poll() is not None:
                 continue
             self._terminate_process(attempt.process.pid, signal_number)
@@ -1594,7 +1692,17 @@ class TaskManager:
             self._draining = False
 
     def _work_census(self) -> WorkCensus:
-        return _manager_scheduling.work_census(self)
+        census = _manager_scheduling.work_census(self)
+        if not census.ready_claimable or self._draining or self._confinement_blocked() is None:
+            return census
+        # Held back by a host or operator condition, the ready jobs are not
+        # this manager's work until it clears, and are reported as such.
+        return dataclasses.replace(
+            census,
+            ready_claimable=0,
+            ready_blocked={**census.ready_blocked, "confinement": {"manager.confine": census.ready_claimable}},
+            actionable_count=census.actionable_count - census.ready_claimable,
+        )
 
     def _load_job_and_state(self, marker: Marker, pass_name: str) -> tuple[JobDefinition, StateFrame] | None:
         """Load one job and its state frame, skipping and reporting damage.
@@ -1744,11 +1852,16 @@ class TaskManager:
             release(self._inventory, placement)
 
     def _drop_running(self, attempt_id: str) -> RunningAttempt | None:
-        """Stop tracking one local attempt, returning its placement to the inventory."""
+        """Stop tracking one local attempt, returning its placement to the inventory.
+
+        Callers drop an attempt only once its launches are reaped; their trusted
+        launch directories, kept until now as takeover evidence, are removed.
+        """
 
         local = self._running.pop(attempt_id, None)
         if local is not None:
             self._release_placement(local.placement)
+            _manager_launches.forget(self, local)
         return local
 
     def _claim_and_launch(self, marker: Marker) -> bool:
@@ -1831,6 +1944,9 @@ class TaskManager:
             return True
         try:
             self._launch_claimed(claimed, job, state)
+        except _ConfinementBlocked as exc:
+            self._release_claim(claimed, "confinement_unavailable")
+            self._report_confinement_blocked(str(exc))
         except TransitionLostError:
             raise
         except (WorkflowError, OSError) as exc:
@@ -1940,6 +2056,15 @@ class TaskManager:
         control_name = claimed_state.attempt_control
         if attempt_id is None or control_name is None:
             raise FormatError("a claimed frame must name its attempt and attempt control directory")
+        # The manager decides by its effective settings (workspace settings with
+        # its pinned overrides), and the runner sees the same mapping. A host or
+        # operator confinement condition releases the claim before anything is
+        # created for the attempt.
+        settings = self._effective_settings()
+        checked = self._confinement(settings)
+        confinement = checked.settings
+        confined = confinement is not None
+        block_userns = checked.block_userns
         # Same manager and inputs as the claim, so this equals the claimed
         # frame's ``reservation``.
         requirement = _manager_scheduling.effective_requirement(
@@ -1970,7 +2095,8 @@ class TaskManager:
         # A symlinked workdir, or a symlinked component above it, is refused.
         job_dir.directory(workdir_name, create=True).close()
         workdir = payload.joinpath(*workdir_name.parts)
-        settings = self.workspace.read_settings()
+        if confined:
+            self._check_confinement_start(marker)
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
         deadline = self._attempt_deadline(requirement)
         binding, binding_environment, pin = (
@@ -1978,6 +2104,24 @@ class TaskManager:
             if placement is None
             else self._attempt_binding(placement, control, settings, requirement.get("mem"), control_dir=control_dir)
         )
+        launch_context: LaunchContext | None = None
+        if confined and "HTTK_WORKFLOW_LAUNCH" in binding_environment:
+            # A rendered prefix would start ranks outside the sandbox: a
+            # confined attempt gets the launch client instead, and the manager
+            # renders each launch from this in-memory context, never from the
+            # job-writable nodefile or binding.json.
+            assert placement is not None and self.allocation is not None and checked.launch is not None
+            template = settings.get("manager.launch_template")
+            launch_context = LaunchContext(
+                placement=placement,
+                template=template if isinstance(template, str) else None,
+                kind=self.allocation.kind,
+                gpus_present=self.resources.get("gpus", 0) > 0,
+                cpus_per_proc=self.allocation.cpus_per_proc,
+                mem=requirement.get("mem"),
+                confinement=checked.launch,
+            )
+            binding_environment["HTTK_WORKFLOW_LAUNCH"] = _manager_launches.client_prefix()
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
@@ -2098,6 +2242,7 @@ class TaskManager:
         process: subprocess.Popen[bytes] | None = None
         running: Marker | None = None
         payload_runner_sha256: str | None = None
+        sandbox: PreparedSandbox | None = None
         try:
             logs = handles.enter_context(job_dir.directory(LOGS_DIRECTORY, create=True))
             stdio_fd = logs.open_append("stdio.out")
@@ -2160,24 +2305,38 @@ class TaskManager:
                 },
                 marker.job_key,
             )
+            if confinement is not None:
+                # The filtered environment is the launcher's env, which Bubblewrap
+                # passes through to the sandboxed command; it never appears on
+                # Bubblewrap's world-readable argv.
+                environment = _confine.filtered_attempt_environment(environment)
+                sandbox = self._prepare_sandbox(confinement, job_dir, workdir, environment, block_userns)
             process = subprocess.Popen(
                 [
                     sys.executable,
                     str(Path(__file__).with_name("_launcher.py")),
                     str(gate_read),
                     "--",
+                    # The gate stays outside the sandbox: the launcher execs
+                    # Bubblewrap, which keeps the launcher's process group.
+                    *(sandbox.argv if sandbox is not None else ()),
                     *runner_command,
                 ],
                 cwd=workdir,
                 env=environment,
+                # A confined attempt gets no terminal input to inject into.
+                stdin=subprocess.DEVNULL if confined else None,
                 stdout=stdio_fd,
                 stderr=stdio_fd,
                 start_new_session=True,
                 pass_fds=(
                     gate_read,
                     *([verified.fd] if verified and verified.fd is not None else []),
+                    *(sandbox.descriptors if sandbox is not None else ()),
                 ),
             )
+            if sandbox is not None:
+                sandbox.close()
             os.close(stdio_fd)
             stdio_fd = -1
             os.close(gate_read)
@@ -2261,6 +2420,8 @@ class TaskManager:
                 os.close(gate_write)
             if verified is not None and verified.fd is not None:
                 os.close(verified.fd)
+            if sandbox is not None:
+                sandbox.close()
         assert process is not None
         assert running is not None
         self._running[attempt_id] = RunningAttempt(
@@ -2273,8 +2434,12 @@ class TaskManager:
             requirement.get("maxtime"),
             owner_uid=self.uid,
             placement=self._unlaunched.pop(attempt_id, None),
+            confined=confined,
+            launches=AttemptLaunches(control_name, launch_context) if confined else None,
         )
         launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
+        if confined:
+            launch_fields["confined"] = True
         if job.runner_source == "payload":
             # A payload-source runner lives in the mutable payload, so record the
             # payload digest at launch: it makes post-hoc mutation of the runner
@@ -2431,6 +2596,7 @@ class TaskManager:
                 local.timeout_kill_at = now + self.cancel_grace_seconds
                 if local.process.poll() is None:
                     self._terminate_process(local.process.pid)
+                _manager_launches.stop_all(self, local, "the attempt exceeded its maxtime")
                 _LOGGER.warning(
                     "attempt %s of %s exceeded its maxtime %s; terminating it",
                     local.attempt_id,
@@ -2526,6 +2692,11 @@ class TaskManager:
         if local is not None:
             return_code = local.process.poll()
             if return_code is None:
+                return False
+            if _manager_launches.unreaped(local):
+                # The attempt is not finished while a launch of it runs: its
+                # exit is handled once every launch is reaped.
+                _manager_launches.stop_all(self, local, "the attempt process exited")
                 return False
             self._write_attempt_end(local, return_code)
             local.reaped = True
@@ -2701,11 +2872,17 @@ class TaskManager:
                 )
             if not exited:
                 self._stop_untracked_attempt(local)
+            _manager_launches.stop_all(
+                self,
+                local,
+                "the attempt's outcome is committed" if local.fenced else "the attempt no longer owns a running marker",
+            )
             return_code = local.process.poll()
-            if return_code is None:
+            if return_code is None or _manager_launches.unreaped(local):
                 # A signal sent successfully is not proof that the process has
-                # exited. Keep tracking it until poll() supplies its returncode;
-                # in particular, never clean a control tree before that point.
+                # exited. Keep tracking it until poll() supplies its returncode
+                # and every launch of it is reaped; in particular, never clean a
+                # control tree before that point.
                 continue
             self._write_attempt_end(local, return_code)
             local.reaped = True
@@ -2821,6 +2998,215 @@ class TaskManager:
         control.write_atomic(_ENVIRONMENT_MARKER, json_bytes(recorded) + b"\n", durable=self.workspace.durable)
         return True
 
+    def _effective_settings(self) -> dict[str, Any]:
+        """Return the settings this manager decides by: the workspace's, with its pinned overrides applied.
+
+        Workspace values are read live; pinned keys are fixed for the manager's
+        lifetime. Nothing a job carries — its parameters, declared environment
+        or spawned children — enters this mapping.
+
+        :return: The effective settings.
+        """
+
+        return {**self.workspace.read_settings(), **self.setting_overrides}
+
+    @staticmethod
+    def _confine_mode(settings: Mapping[str, Any]) -> Literal["none", "bwrap"]:
+        """Return the effective ``manager.confine`` mode without validating the ``confine.*`` settings.
+
+        :param settings: The effective settings.
+        :return: ``none`` (the default) or ``bwrap``.
+        :raises ValueError: If ``manager.confine`` has another value.
+        """
+
+        raw = settings.get("manager.confine")
+        if raw is None or raw == "none":
+            return "none"
+        if raw == "bwrap":
+            return "bwrap"
+        raise ValueError(f"setting manager.confine must be none or bwrap: {raw!r}")
+
+    def _enrolled(self) -> bool:
+        """Return whether the workspace is enrolled with a workspace daemon.
+
+        Only daemon setup writes the enrollment marker; the exchange staging
+        directory itself is also created by any ``--exchange`` manager and
+        proves nothing. Anything at the marker's name counts, so a replaced
+        marker fails closed.
+        """
+
+        return os.path.lexists(self.workspace.control / "exchange" / ENROLLMENT_MARKER)
+
+    def _confinement(self, settings: Mapping[str, Any], *, at_start: bool = False) -> _Confinement:
+        """Check how attempts started now are confined, validating and probing only what changed.
+
+        ``manager.confine`` is parsed first; the ``confine.*`` settings are
+        validated only in ``bwrap`` mode, and again only when they change. An
+        enrolled workspace requires ``bwrap``.
+
+        :param settings: The effective settings.
+        :param at_start: Whether this is the manager's start, which refuses a
+            condition instead of reporting it.
+        :return: The checked confinement.
+        :raises ValueError: At start, if a confinement setting is invalid.
+        :raises httk.workflow.errors.ConfinementUnavailableError: At start, if
+            Bubblewrap is unusable or an enrolled workspace is not confined.
+        :raises _ConfinementBlocked: After start, for any of those conditions.
+        """
+
+        try:
+            mode = self._confine_mode(settings)
+        except ValueError as exc:
+            if at_start:
+                raise
+            raise _ConfinementBlocked(f"invalid confinement setting: {exc}") from exc
+        if mode == "none":
+            if self._enrolled():
+                if at_start:
+                    raise ConfinementUnavailableError(f"refusing to start: {_ENROLLED_MESSAGE}")
+                raise _ConfinementBlocked(_ENROLLED_MESSAGE)
+            return _Confinement(None, False, None)
+        key = tuple(
+            sorted(
+                (name, repr(value))
+                for name, value in settings.items()
+                if name == "manager.confine" or name.startswith(_confine.CONFINE_PREFIX)
+            )
+        )
+        if self._confine_checked is None or self._confine_checked[0] != key:
+            try:
+                validated: _confine.ConfineSettings | str = _confine.confine_settings(settings)
+            except ValueError as exc:
+                if at_start:
+                    raise
+                validated = f"invalid confinement setting: {exc}"
+            self._confine_checked = (key, validated)
+        validated = self._confine_checked[1]
+        if isinstance(validated, str):
+            raise _ConfinementBlocked(validated)
+        block_userns = self._bwrap_block_userns(validated, at_start=at_start)
+        try:
+            launch = _manager_launches.launch_confinement(validated, block_userns=block_userns)
+        except ValueError as exc:
+            if at_start:
+                raise
+            raise _ConfinementBlocked(f"invalid confinement setting for confined launches: {exc}") from exc
+        return _Confinement(validated, block_userns, launch)
+
+    def _bwrap_block_userns(self, confinement: _confine.ConfineSettings, *, at_start: bool = False) -> bool:
+        """Probe the attempt sandbox once and return whether attempts block nested user namespaces.
+
+        Results are cached per Bubblewrap executable, network isolation and
+        user-namespace block options; a failed probe is repeated at most every
+        :data:`CONFINE_REPROBE_SECONDS`.
+
+        :param confinement: The effective confinement settings, in ``bwrap`` mode.
+        :param at_start: Whether this is the manager's start, where an unusable
+            Bubblewrap refuses the start instead of holding back claims.
+        :return: Whether attempts block nested user namespaces.
+        :raises httk.workflow.errors.ConfinementUnavailableError: At start, if Bubblewrap is unusable.
+        :raises _ConfinementBlocked: After start, if Bubblewrap is unusable.
+        """
+
+        key = (confinement.bwrap or Path(), confinement.isolate_network, tuple(BWRAP_USERNS_BLOCK))
+        cached = self._bwrap_probes.get(key)
+        now = time.monotonic()
+        if cached is None or (isinstance(cached[0], str) and now - cached[1] >= CONFINE_REPROBE_SECONDS):
+            result: bool | str
+            try:
+                result = _confine.probe_bwrap(confinement)
+            except ConfinementUnavailableError as exc:
+                if at_start:
+                    raise
+                result = str(exc)
+            cached = (result, now)
+            self._bwrap_probes[key] = cached
+            if isinstance(result, bool):
+                _LOGGER.info(
+                    "attempts are confined with Bubblewrap %s%s",
+                    confinement.bwrap,
+                    "" if result else " without blocking nested user namespaces",
+                )
+        if isinstance(cached[0], str):
+            raise _ConfinementBlocked(f"Bubblewrap is unusable (manager.confine=bwrap): {cached[0]}")
+        return cached[0]
+
+    def _report_confinement_blocked(self, reason: str) -> None:
+        """Report once that claims are held back by a confinement condition."""
+
+        self._report_anomaly(
+            "confinement",
+            f"not claiming work until confinement is available: {reason}",
+            self._event("confinement_unavailable", reason=reason),
+        )
+
+    def _confinement_blocked(self) -> str | None:
+        """Return why attempts cannot be started with the effective confinement now, reporting it, or ``None``."""
+
+        try:
+            self._confinement(self._effective_settings())
+        except _ConfinementBlocked as exc:
+            reason = str(exc)
+        except (WorkflowError, OSError) as exc:
+            reason = f"cannot read the effective settings: {exc}"
+        else:
+            if self._reported.pop("confinement", None) is not None:
+                _LOGGER.info(
+                    "confinement is available again; claiming work", extra=self._event("confinement_available")
+                )
+            return None
+        self._report_confinement_blocked(reason)
+        return reason
+
+    def _nested_marker(self, directory: Path) -> str | None:
+        """Return a marker-shaped entry anywhere below *directory*, or ``None``; bounded and without following links.
+
+        :param directory: A state directory mirroring a job directory.
+        :return: The entry's path relative to *directory*, or a description of
+            why the directory cannot be shown to hold no marker.
+        """
+
+        visited = 0
+        failed: list[OSError] = []
+        for root, directories, files in os.walk(directory, onerror=failed.append):
+            for name in (*files, *directories):
+                visited += 1
+                if visited > _NESTED_SCAN_ENTRIES:
+                    return f"more than {_NESTED_SCAN_ENTRIES} entries"
+                if MARKER_PATTERN.fullmatch(name) is not None:
+                    return os.path.relpath(os.path.join(root, name), directory)
+        if any(not isinstance(error, FileNotFoundError) for error in failed):
+            return f"unreadable: {failed[0]}"
+        return None
+
+    def _check_confinement_start(self, marker: Marker) -> None:
+        """Refuse to confine a job whose directory is not a disjoint job directory.
+
+        A placement component that parses as a job key, or another job placed
+        below this job's directory, would put a second job inside the
+        directory the sandbox makes writable. A state directory below the job
+        directory counts only when it holds a marker; empty mirrors are left
+        behind by garbage collection's later pruning.
+
+        :param marker: The claimed job.
+        :raises httk.workflow.errors.FormatError: If the placement violates the
+            rule or the job directory contains another job.
+        """
+
+        check_job_placement(marker.placement)
+        nested = marker.placement / marker.job_key
+        for kind in sorted(STATE_KINDS):
+            directory = self.workspace.state_directory(kind, nested)
+            if not directory.is_dir():
+                continue
+            found = self._nested_marker(directory)
+            if found is None:
+                continue
+            raise FormatError(
+                f"cannot confine {marker.job_key}: its job directory contains another job "
+                f"({kind} state below placement {nested.as_posix()}: {found}); job directories must not nest"
+            )
+
     def _job_directory(self, marker: Marker) -> JobDirectory:
         """Open one job's directory without following any link below the workspace root."""
 
@@ -2882,6 +3268,46 @@ class TaskManager:
 
         with self._open_attempt_control(marker, state) as control:
             return control.path / "outcome.ready" if control.exists_dir("outcome.ready") else None
+
+    def _prepare_sandbox(
+        self,
+        confinement: _confine.ConfineSettings,
+        job_dir: JobDirectory,
+        workdir: Path,
+        environment: Mapping[str, str],
+        block_userns: bool,
+    ) -> PreparedSandbox:
+        """Build one attempt's Bubblewrap sandbox from the pinned workspace root and job directory.
+
+        :param confinement: The effective confinement settings.
+        :param job_dir: The job directory, pinned without following links.
+        :param workdir: The attempt's working directory.
+        :param environment: The filtered attempt environment.
+        :param block_userns: Whether to block nested user namespaces.
+        :return: The sandbox; the caller closes it after the spawn.
+        :raises httk.workflow.errors.FormatError: If the sandbox cannot be built
+            for this job, for instance when its directory is not inside the
+            workspace's real path.
+        """
+
+        workspace_fd = os.open(self.workspace.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            return _confine.prepare_attempt_sandbox(
+                confinement,
+                workspace_root=self.workspace.root,
+                workspace_fd=workspace_fd,
+                job_path=job_dir.path,
+                job_fd=job_dir.fd,
+                workdir=workdir,
+                environment=environment,
+                block_userns=block_userns,
+            )
+        except ValueError as exc:
+            raise FormatError(f"cannot confine the attempt: {exc}") from exc
+        except ConfinementUnavailableError as exc:
+            raise FormatError(f"cannot confine the attempt: {exc}") from exc
+        finally:
+            os.close(workspace_fd)
 
     def _hash_payload_runner(self, job_dir: JobDirectory, job: JobDefinition) -> str | None:
         """Hash a payload runner through a no-follow, non-blocking descriptor.
@@ -2992,7 +3418,15 @@ class TaskManager:
     def _resume_committing(self) -> bool:
         return _manager_commit.resume(self, _LOGGER)
 
+    def _supervise_launches(self) -> bool:
+        return _manager_launches.supervise(self)
+
     def _process_committing(self, marker: Marker) -> None:
+        if _manager_launches.holds_commit(self, marker):
+            # Auto-seal and the exchange's eject follow the commit, so neither
+            # happens while ranks of the attempt may still write the job.
+            _LOGGER.debug("deferring the commit of %s until its launches are reaped", marker.job_key)
+            return
         _manager_commit.process_committing(self, marker)
 
     def _declared_runner_steps(self, marker: Marker, outcome: Mapping[str, Any]) -> list[str] | None:
@@ -3147,7 +3581,9 @@ class TaskManager:
         try:
             os.kill(cast(int, process["pid"]), 0)
         except ProcessLookupError:
-            return True
+            # Ranks of a confined launch write the job too, from their own
+            # process groups: each recorded launch must be gone as well.
+            return _manager_launches.recorded_launches_dead(self, state.attempt_id or "")
         except PermissionError:
             return False
         return False
@@ -3455,7 +3891,10 @@ class TaskManager:
             local.fenced = True
             if local.process.poll() is None:
                 self._terminate_process(local.process.pid, signal_number)
+            _manager_launches.signal_all(self, local, signal_number, "the attempt is being cancelled")
             return
+        # Launches a dead manager left behind are stopped with the attempt.
+        _manager_launches.signal_recorded(self, state.attempt_id or "", signal_number)
         process = validate_process(state.members.get("process"))
         if process is None or process["hostname"] != self.hostname:
             return
@@ -3478,6 +3917,10 @@ class TaskManager:
 
     @staticmethod
     def _terminate_process(process_group: int, signal_number: int = signal.SIGTERM) -> None:
+        # killpg is load-bearing: a confined attempt is the launcher exec'ing
+        # Bubblewrap, whose namespace init and command share this process
+        # group. Signalling the outer pid alone (Popen.terminate/kill) would
+        # leave them running, so every stop goes through the process group.
         try:
             os.killpg(process_group, signal_number)
         except ProcessLookupError:

@@ -232,6 +232,138 @@ def _marker_shaped(name: str) -> bool:
     return not name.startswith(".") and _MARKER_SHAPE_PATTERN.search(name) is not None
 
 
+def _runner_content_digest(source: Path) -> tuple[bool, str, Callable[[str], bool] | None]:
+    """Classify a runner source and return the digest it is published under.
+
+    This is the one digest rule of the workspace runner store: a runner file is
+    hashed by its bytes, and a directory by its source tree with the build
+    artifacts its manifest declares left out, because those are never
+    published. :meth:`Workspace.publish_runner`, the runner staging of
+    :meth:`httk.workflow.Attempt.call`, and the manager that publishes a staged
+    runner at commit all hash through it, so a staged runner verifies against
+    exactly the digest its publication will report.
+
+    :param source: The runner file or directory.
+    :return: Whether the source is a directory, its digest, and the build-artifact
+        excluder of a directory whose manifest declares a build (otherwise ``None``).
+    :raises httk.workflow.errors.FormatError: If the source is a symlink, neither a
+        regular file nor a directory, or a tree with an invalid build manifest,
+        a symlink, or a special file.
+    """
+
+    if source.is_symlink():
+        raise FormatError(f"a published runner must be a regular file or directory: {source}")
+    if source.is_dir():
+        from .packages import artifact_excluder, read_build_spec, source_tree_digest
+
+        try:
+            build = read_build_spec(source)
+            digest = source_tree_digest(source)
+        except ValueError as exc:
+            raise FormatError(f"invalid build manifest for {source}: {exc}") from exc
+        return True, digest, artifact_excluder(build) if build is not None else None
+    if not source.is_file():
+        raise FormatError(f"a published runner must be a regular file or directory: {source}")
+    try:
+        return False, sha256_file(source), None
+    except ValueError as exc:
+        raise FormatError(f"a published runner must be a regular file or directory: {source}: {exc}") from exc
+
+
+def _existing_runner_digest(target: Path, is_directory: bool) -> str:
+    """Return the digest of an existing runner entry of the expected kind."""
+
+    if target.is_symlink() or is_directory != target.is_dir():
+        raise FormatError(f"workspace runner store entry type does not match the published runner: {target}")
+    if is_directory:
+        return tree_digest(target)
+    if not target.is_file():
+        raise FormatError(f"workspace runner store entry is not a regular file: {target}")
+    return sha256_file(target)
+
+
+def _artifact_ignore(
+    source: Path, exclude: Callable[[str], bool] | None
+) -> Callable[[str, list[str]], set[str]] | None:
+    """Return a :func:`shutil.copytree` ignore callable leaving out excluded build artifacts."""
+
+    if exclude is None:
+        return None
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        return {
+            name for name in names if exclude(PurePosixPath(os.path.relpath(Path(directory) / name, source)).as_posix())
+        }
+
+    return ignore
+
+
+def _stage_runner(
+    source: str | os.PathLike[str], stage: Path, name: str | PurePosixPath, *, store: Path | None = None
+) -> dict[str, object]:
+    """Copy a runner into a staging directory instead of publishing it to the store.
+
+    This is :meth:`Workspace.publish_runner` for a caller that must not write
+    the workspace runner store: :meth:`httk.workflow.Attempt.call` stages the
+    runner of a called workflow into its outcome draft, and the trusted manager
+    publishes it when it commits the outcome. The copy at ``stage/<name>`` holds
+    exactly what publication would install (no symlinks, no declared build
+    artifacts), it is verified against the source digest after copying, and the
+    returned reference is the one publication will return. Staging the same
+    content under the same name again is a no-op.
+
+    *store* is the store entry the runner will be published at. The store is
+    readable where the caller runs, so a different runner already published
+    under *name* is refused here, early and catchable, exactly as
+    :meth:`Workspace.publish_runner` would refuse it; the manager's check at
+    commit stays the authority, since another job may publish meanwhile.
+
+    :param source: The runner file or directory.
+    :param stage: The staging directory, the store root of the staged copies.
+    :param name: The store name the runner will be published under.
+    :param store: The workspace store entry for *name*, checked when given.
+    :return: The workspace runner reference ``{source, path, sha256}``.
+    :raises FileExistsError: If the store already holds, or the stage already
+        holds, different content under *name*.
+    :raises httk.workflow.errors.FormatError: If the source or *name* is invalid,
+        or the source changed while it was copied.
+    """
+
+    source_path = Path(source).expanduser()
+    is_directory, digest, exclude = _runner_content_digest(source_path)
+    relative = validate_runner_path(str(PurePosixPath(name)), "workspace")
+    if store is not None and (store.exists() or store.is_symlink()):
+        published = _existing_runner_digest(store, is_directory)
+        if published != digest:
+            raise FileExistsError(
+                f"workspace runner {relative.as_posix()} already holds a different digest {published}"
+            )
+    target = stage.joinpath(*relative.parts)
+    if target.exists() or target.is_symlink():
+        existing = _existing_runner_digest(target, is_directory)
+        if existing != digest:
+            raise FileExistsError(f"staged runner {relative.as_posix()} already holds a different digest {existing}")
+        return {"source": "workspace", "path": relative.as_posix(), "sha256": digest}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / f".{target.name}.{uuid.uuid4()}.tmp"
+    try:
+        if is_directory:
+            shutil.copytree(source_path, temporary, symlinks=True, ignore=_artifact_ignore(source_path, exclude))
+        else:
+            shutil.copy2(source_path, temporary, follow_symlinks=False)
+        # The digest pins what was copied: a source changed meanwhile is refused here.
+        copied = _runner_content_digest(temporary)[1]
+        if copied != digest:
+            raise FormatError(f"runner {source_path} changed while it was staged")
+        os.replace(temporary, target)
+    finally:
+        if temporary.is_dir() and not temporary.is_symlink():
+            shutil.rmtree(temporary)
+        else:
+            temporary.unlink(missing_ok=True)
+    return {"source": "workspace", "path": relative.as_posix(), "sha256": digest}
+
+
 class Workspace:
     """Attach to one self-contained httk workflow filesystem workspace.
 
@@ -762,24 +894,7 @@ class Workspace:
 
         self._require_unsealed()
         source_path = Path(source).expanduser()
-        if source_path.is_symlink():
-            raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
-        is_directory = source_path.is_dir()
-        if not is_directory and not source_path.is_file():
-            raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
-        exclude: Callable[[str], bool] | None = None
-        if is_directory:
-            from .packages import artifact_excluder, read_build_spec, source_tree_digest
-
-            try:
-                build = read_build_spec(source_path)
-                digest = source_tree_digest(source_path)
-            except ValueError as exc:
-                raise FormatError(f"invalid build manifest for {source_path}: {exc}") from exc
-            if build is not None:
-                exclude = artifact_excluder(build)
-        else:
-            digest = sha256_file(source_path)
+        is_directory, digest, exclude = _runner_content_digest(source_path)
         target = self.runner_store_path(name if name is not None else source_path.name)
         if not is_directory and target.name == RUNNER_TREE_ENTRY and target.parent != self.runners:
             raise FormatError(
@@ -787,14 +902,7 @@ class Workspace:
                 "that name is reserved for directory runner entry points"
             )
         if target.exists() or target.is_symlink():
-            if target.is_symlink() or is_directory != target.is_dir():
-                raise FormatError(f"workspace runner store entry type does not match the published runner: {target}")
-            if is_directory:
-                existing = tree_digest(target)
-            elif not target.is_file():
-                raise FormatError(f"workspace runner store entry is not a regular file: {target}")
-            else:
-                existing = sha256_file(target)
+            existing = _existing_runner_digest(target, is_directory)
             if existing == digest:
                 _LOGGER.debug("workspace runner %s already holds digest %s", target, digest)
             elif not replace:
@@ -843,19 +951,7 @@ class Workspace:
         old: Path | None = None
         try:
             try:
-                copy_ignore: Callable[[str, list[str]], set[str]] | None = None
-                if exclude is not None:
-
-                    def build_ignore(directory: str, names: list[str]) -> set[str]:
-                        return {
-                            name
-                            for name in names
-                            if exclude(PurePosixPath(os.path.relpath(Path(directory) / name, source)).as_posix())
-                        }
-
-                    copy_ignore = build_ignore
-
-                shutil.copytree(source, staging, symlinks=False, ignore=copy_ignore)
+                shutil.copytree(source, staging, symlinks=False, ignore=_artifact_ignore(source, exclude))
                 for entry in sorted(staging.rglob("*")):
                     entry.chmod(0o555)
                 # Linux requires write permission on a directory itself to rename it;

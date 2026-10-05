@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import sys
 import threading
 from contextlib import ExitStack
@@ -13,10 +14,17 @@ import pytest
 from httk.workflow._daemon_auth import sign_request
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key
 from httk.workflow._daemon_mailbox import MailboxDirectory
-from httk.workflow._daemon_policy import Policy, Profile
+from httk.workflow._daemon_policy import ApprovedLauncher, Policy
 from httk.workflow._daemon_protocol import Request, decode_response, encode_request
 from httk.workflow._daemon_service import Broker
-from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, UncertainSubmission, _run
+from httk.workflow._daemon_slurm import (
+    Observation,
+    SchedulerError,
+    SlurmGateway,
+    UncertainSubmission,
+    _run,
+    manager_argv,
+)
 from httk.workflow._daemon_state import Ledger
 
 _HANDLE = "a" * 32
@@ -46,12 +54,25 @@ def policy(tmp_path: Path) -> Policy:
         squeue=runtime / "squeue",
         scancel=runtime / "scancel",
         cluster="cluster",
-        readonly_paths=(runtime, Path(sys.prefix), Path("/usr")),
-        profiles=(Profile("cpu", 2, 512, 5, partition="batch", account="science"),),
+        launchers=(_launcher("cpu", **CPU),),
     )
 
 
-def test_submission_uses_fixed_script_stdin_and_filtered_environment(
+CPU: dict[str, str | int | None] = {
+    "manager.confine": "bwrap",
+    "slurm.cpus_per_task": "2",
+    "slurm.mem": "512M",
+    "slurm.time_limit": 5,
+    "slurm.partition": "batch",
+    "slurm.account": "science",
+}
+
+
+def _launcher(name: str, **settings: str | int | None) -> ApprovedLauncher:
+    return ApprovedLauncher(name, tuple(sorted(settings.items())), "c" * 64)
+
+
+def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
     policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = tmp_path / "call.json"
@@ -64,77 +85,125 @@ def test_submission_uses_fixed_script_stdin_and_filtered_environment(
         monkeypatch.setenv(name, "untrusted")
     monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
     monkeypatch.setenv("LANG", "sv_SE.UTF-8")
-    gateway = SlurmGateway(policy, tmp_path / "policy with spaces.json")
-    result = gateway.submit(policy.profile("cpu"), _HANDLE)
+    result = SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
     assert (result.job_id, result.cluster) == ("123", "cluster")
     argv, environment, script = json.loads(record.read_text())
-    assert "--export=NIL" in argv
-    assert "--chdir=/" in argv
-    assert {"--input=/dev/null", f"--output={tmp_path / 'snapshots/jobs/httk-%j.out'}"} <= set(argv)
-    assert not any(item.startswith("--error") for item in argv)
-    assert {"--nodes=1", "--ntasks=1", "--cpus-per-task=2", "--mem=512M", "--time=5"} <= set(argv)
-    assert "--job-name=httk-" + _HANDLE in argv
-    assert "--partition=batch" in argv and "--account=science" in argv
-    assert all(not item.endswith(".sbatch") for item in argv)
+    assert argv[1:] == [
+        "--parsable",
+        "--export=NIL",
+        "--no-requeue",
+        "--input=/dev/null",
+        "--clusters=cluster",
+        f"--job-name=httk-{_HANDLE}",
+        f"--output={tmp_path / 'snapshots/jobs/httk-%j.out'}",
+    ]
     assert environment["NSC_RESOURCE_NAME"] == "tetralith"
     assert environment["LANG"] == environment["LC_ALL"] == "C"
     assert not {"SBATCH_WRAP", "SBATCH_PARTITION", "SLURM_CLUSTERS", "PYTHONPATH", "BASH_ENV", "LD_PRELOAD"} & set(
         environment
     )
-    assert script.startswith("#!/bin/sh\nexec ")
-    assert " -I -S " in script and "_daemon_bootstrap.py" in script
-    assert "--mode payload --profile cpu --handle " + _HANDLE in script
-    assert "policy with spaces.json'" in script
-    assert "prelude" not in script and "/workspace" not in script
+    lines = script.splitlines()
+    assert lines[0] == "#!/bin/bash -l"
+    directives = [line for line in lines if line.startswith("#SBATCH")]
+    assert directives == [
+        "#SBATCH --account=science",
+        "#SBATCH --partition=batch",
+        "#SBATCH --time=5",
+        "#SBATCH --cpus-per-task=2",
+        "#SBATCH --mem=512M",
+        f"#SBATCH --chdir={policy.workspace}",
+    ]
+    # Nothing in the script names the job or writes its output into the workspace.
+    assert "--job-name" not in script and "--output" not in script and "--error" not in script
+    exec_line = lines[-1]
+    assert shlex.split(exec_line) == [
+        "exec",
+        *manager_argv(policy),
+        "--allocation",
+        "slurm",
+        "--setting",
+        "manager.confine=bwrap",
+    ]
+    assert manager_argv(policy) == [
+        sys.executable,
+        "-I",
+        "-m",
+        "httk.core.cli",
+        "workflow",
+        "manager",
+        "run",
+        "--by-path",
+        "--workspace",
+        str(policy.workspace),
+        "--exchange",
+        "--idle",
+    ]
+    assert not (policy.workspace / ".httk-workspace").exists()
 
 
-def test_gres_and_reservation_follow_the_account_flag(policy: Policy, tmp_path: Path) -> None:
+def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_path: Path) -> None:
     record = tmp_path / "call.json"
-    _client(
-        policy.sbatch, f"open({str(record)!r}, 'w').write(json.dumps(sys.argv))\nsys.stdin.read()\nprint('1;cluster')\n"
+    _client(policy.sbatch, f"open({str(record)!r}, 'w').write(sys.stdin.read())\nprint('1')\n")
+    launcher = _launcher(
+        "site",
+        **{
+            "manager.confine": "bwrap",
+            "manager.workers": "4",
+            "manager.allocation": "host",
+            "manager.command": "site-httk",
+            "environment.prelude": "module load httk",
+            "confine.readonly_paths": "/usr:/software",
+            "slurm.gres": "gpu:a100=2",
+            "slurm.reservation": "maint.1",
+            "slurm.nodes": "2",
+        },
     )
-    gateway = SlurmGateway(policy, tmp_path / "policy.json")
-    gateway.submit(Profile("gpu", account="science", gres="gpu:a100=2", reservation="maint.1"), _HANDLE)
-    argv = json.loads(record.read_text())
-    account = argv.index("--account=science")
-    assert argv[account + 1 : account + 3] == ["--gres=gpu:a100=2", "--reservation=maint.1"]
-    gateway.submit(Profile("plain"), _HANDLE)
-    assert not any(item.startswith(("--gres=", "--reservation=")) for item in json.loads(record.read_text()))
+    assert SlurmGateway(policy).submit(launcher, _HANDLE).job_id == "1"
+    script = record.read_text()
+    assert "#SBATCH --gres=gpu:a100=2" in script and "#SBATCH --reservation=maint.1" in script
+    assert "#SBATCH --nodes=2" in script
+    assert script.splitlines()[-2] == "module load httk"
+    command = shlex.split(script.splitlines()[-1])
+    # After a prelude, the launcher's manager command replaces the isolated interpreter.
+    assert command[:2] == ["exec", "site-httk"]
+    assert command[2:10] == manager_argv(policy)[4:]
+    assert command[10:] == [
+        "--workers",
+        "4",
+        "--allocation",
+        "host",
+        "--setting",
+        "confine.readonly_paths=/usr:/software",
+        "--setting",
+        "manager.confine=bwrap",
+    ]
 
 
-def test_unset_resources_add_no_sbatch_flags(policy: Policy, tmp_path: Path) -> None:
-    record = tmp_path / "call.json"
-    _client(
-        policy.sbatch, f"open({str(record)!r}, 'w').write(json.dumps(sys.argv))\nsys.stdin.read()\nprint('1;cluster')\n"
-    )
-    gateway = SlurmGateway(policy, tmp_path / "policy.json")
-    gateway.submit(Profile("bare", partition="batch"), _HANDLE)
-    argv = json.loads(record.read_text())
-    assert not any(item.startswith(("--cpus-per-task=", "--mem=", "--time=")) for item in argv)
-    assert {"--nodes=1", "--ntasks=1", "--partition=batch"} <= set(argv)
-    gateway.submit(Profile("some", memory_mb=64), _HANDLE)
-    argv = json.loads(record.read_text())
-    assert "--mem=64M" in argv
-    assert not any(item.startswith(("--cpus-per-task=", "--time=")) for item in argv)
+def test_unexpressible_frozen_setting_fails_before_sbatch_runs(policy: Policy, tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    _client(policy.sbatch, f"open({str(marker)!r}, 'w').close()\nprint('1')\n")
+    with pytest.raises(SchedulerError, match="cannot build the submission: .*control characters"):
+        SlurmGateway(policy).submit(_launcher("bad", **{"slurm.partition": "a\nb"}), _HANDLE)
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("output", ["bad", "123;other", "123;cluster\n124;cluster", "--help", "0", "123;cluster;extra"])
 def test_unconfirmed_submission_is_uncertain(policy: Policy, output: str) -> None:
     _client(policy.sbatch, f"sys.stdin.read()\nprint({output!r})\n")
     with pytest.raises(UncertainSubmission):
-        SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
 
 
 def test_nonzero_submission_reports_the_client_error(policy: Policy) -> None:
     _client(policy.sbatch, "sys.stdin.read()\nprint('sbatch: error: Invalid account',file=sys.stderr)\nsys.exit(1)\n")
     with pytest.raises(UncertainSubmission, match="^sbatch exited 1: sbatch: error: Invalid account$"):
-        SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
 
 
 def test_unconfirmed_submission_reports_its_stdout(policy: Policy) -> None:
     _client(policy.sbatch, "sys.stdin.read()\nprint('Submitted batch job 12')\n")
     with pytest.raises(UncertainSubmission, match="^sbatch exited 0 without a confirmed job: Submitted batch job 12$"):
-        SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
 
 
 def test_client_error_excerpt_is_printable_and_bounded(policy: Policy) -> None:
@@ -143,7 +212,7 @@ def test_client_error_excerpt_is_printable_and_bounded(policy: Policy) -> None:
         "sys.stderr.buffer.write(b'bad\\x1b[31m\\tline\\r\\n\\xc3\\xa5\\xff\\x00 ' + b'x' * 2000)\nsys.exit(2)\n",
     )
     with pytest.raises(SchedulerError) as error:
-        SlurmGateway(policy, Path("/trusted/policy.json")).status("1", "cluster", _HANDLE)
+        SlurmGateway(policy).status("1", "cluster", _HANDLE)
     message = str(error.value)
     assert message.startswith("squeue exited 2: bad [31m line ?? x")
     assert len(message) == len("squeue exited 2: ") + 500
@@ -152,7 +221,7 @@ def test_client_error_excerpt_is_printable_and_bounded(policy: Policy) -> None:
 
 def test_unstartable_client_is_named(policy: Policy) -> None:
     with pytest.raises(SchedulerError, match="^scancel could not start: .*No such file"):
-        SlurmGateway(policy, Path("/trusted/policy.json")).cancel("1", "cluster", _HANDLE)
+        SlurmGateway(policy).cancel("1", "cluster", _HANDLE)
 
 
 @pytest.mark.parametrize(
@@ -161,7 +230,7 @@ def test_unstartable_client_is_named(policy: Policy) -> None:
 def test_controller_filter_version_requirement(policy: Policy, version: str, valid: bool) -> None:
     for client in (policy.sbatch, policy.squeue, policy.scancel):
         _client(client, f"assert sys.argv[1:]==['--version']\nprint('slurm {version}')\n")
-    gateway = SlurmGateway(policy, Path("/trusted/policy.json"))
+    gateway = SlurmGateway(policy)
     if valid:
         gateway.check()
     else:
@@ -170,7 +239,7 @@ def test_controller_filter_version_requirement(policy: Policy, version: str, val
 
 
 def test_status_matches_identity_and_absence_is_unknown(policy: Policy) -> None:
-    gateway = SlurmGateway(policy, Path("/trusted/policy.json"))
+    gateway = SlurmGateway(policy)
     row = f"123|httk-{_HANDLE}|{os.getuid()}|RUNNING"
     _client(policy.squeue, f"print('CLUSTER: cluster')\nprint({row!r})\n")
     assert gateway.status("123", "cluster", _HANDLE) == "RUNNING"
@@ -183,7 +252,7 @@ def test_status_matches_identity_and_absence_is_unknown(policy: Policy) -> None:
 def test_cancel_sends_identity_filters_to_controller_without_lookup(policy: Policy, tmp_path: Path) -> None:
     record = tmp_path / "cancel.json"
     _client(policy.scancel, f"open({str(record)!r},'w').write(json.dumps(sys.argv))\n")
-    SlurmGateway(policy, Path("/trusted/policy.json")).cancel("123", "cluster", _HANDLE)
+    SlurmGateway(policy).cancel("123", "cluster", _HANDLE)
     assert json.loads(record.read_text())[1:] == [
         "--ctld",
         "--clusters=cluster",
@@ -257,7 +326,7 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
             requests.replace(start.request_id + ".json", encode_request(start))
             Broker(
                 policy,
-                SlurmGateway(policy, tmp_path / "policy.json"),
+                SlurmGateway(policy),
                 ledger,
                 requests,
                 responses,
@@ -273,7 +342,7 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
             ledger.recover()
             broker = Broker(
                 policy,
-                SlurmGateway(policy, tmp_path / "policy.json"),
+                SlurmGateway(policy),
                 ledger,
                 requests,
                 responses,
@@ -305,72 +374,12 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
     ]
 
 
-def _mpi_policy(policy: Policy, tmp_path: Path) -> Policy:
-    from httk.workflow._daemon_policy import MPIProfile, MPISettings
-
-    settings = MPISettings(
-        srun=policy.sbatch.with_name("srun"),
-        control_root=tmp_path / "mpi-control",
-        pmix_roots=(tmp_path / "pmix",),
-    )
-    profile = replace(policy.profiles[0], mpi=MPIProfile(nodes=2, ranks=4, ntasks_per_node=2))
-    return replace(policy, profiles=(profile,), mpi=settings)
-
-
-def test_mpi_submission_has_fixed_geometry_and_forbids_requeue(policy: Policy, tmp_path: Path) -> None:
-    policy = _mpi_policy(policy, tmp_path)
-    record = tmp_path / "mpi-submit.json"
-    _client(
-        policy.sbatch,
-        f"open({str(record)!r}, 'w').write(json.dumps([sys.argv, sys.stdin.read()]))\nprint('123;cluster')\n",
-    )
-    SlurmGateway(policy, tmp_path / "protected.json").submit(policy.profiles[0], _HANDLE)
-    argv, script = json.loads(record.read_text())
-    assert {
-        "--nodes=2",
-        "--ntasks=4",
-        "--ntasks-per-node=2",
-        "--cpus-per-task=2",
-        "--mem=512M",
-        "--no-requeue",
-    } <= set(argv)
-    assert "--mode allocation --profile cpu --handle " + _HANDLE in script
-    assert " -I -S " in script
-
-
-@pytest.mark.parametrize("stream", ["stdout", "stderr"])
-def test_mpi_check_accepts_pmix_listing_on_either_stream(policy: Policy, tmp_path: Path, stream: str) -> None:
-    policy = _mpi_policy(policy, tmp_path)
-    assert policy.mpi is not None
-    for client in (policy.sbatch, policy.squeue, policy.scancel):
-        _client(client, "print('slurm 23.11.6')\n")
-    _client(
-        policy.mpi.srun,
-        "if sys.argv[1:] == ['--version']: print('slurm 23.11.6')\n"
-        f"else: print('MPI plugin types are...\\n    none\\n    pmix', file=sys.{stream})\n",
-    )
-    SlurmGateway(policy, tmp_path / "protected.json").check()
-
-
-def test_mpi_check_rejects_missing_direct_plugin(policy: Policy, tmp_path: Path) -> None:
-    policy = _mpi_policy(policy, tmp_path)
-    assert policy.mpi is not None
-    for client in (policy.sbatch, policy.squeue, policy.scancel):
-        _client(client, "print('slurm 23.11.6')\n")
-    _client(
-        policy.mpi.srun,
-        "print('slurm 23.11.6' if sys.argv[1:] == ['--version'] else 'none\\npmi2')\n",
-    )
-    with pytest.raises(SchedulerError, match="pmix"):
-        SlurmGateway(policy, tmp_path / "protected.json").check()
-
-
 def test_check_failure_names_the_client_and_its_output(policy: Policy) -> None:
     for client in (policy.sbatch, policy.scancel):
         _client(client, "print('slurm 24.05.1')\n")
     _client(policy.squeue, "print('wrapper says no', file=sys.stderr)\nsys.exit(3)\n")
     with pytest.raises(SchedulerError, match=r"squeue --version exited 3 and printed 'wrapper says no'"):
-        SlurmGateway(policy, Path("/trusted/policy.json")).check()
+        SlurmGateway(policy).check()
 
 
 def _sacct(policy: Policy, tmp_path: Path, *rows: str) -> Policy:
@@ -393,7 +402,7 @@ def test_accounting_reads_the_matching_row_in_the_c_locale(policy: Policy, tmp_p
         f"456|{name}|{user}|COMPLETED|0:0|Unknown|Unknown",
         f"123|{name}|{user}|FAILED|1:0|2026-10-05T10:00:00|2026-10-05T10:01:02",
     )
-    gateway = SlurmGateway(accounting, Path("/trusted/policy.json"))
+    gateway = SlurmGateway(accounting)
     assert gateway.accounting("123", "cluster", _HANDLE) == Observation(
         "FAILED", "1:0", "2026-10-05T10:00:00", "2026-10-05T10:01:02"
     )
@@ -413,27 +422,27 @@ def test_accounting_reads_the_matching_row_in_the_c_locale(policy: Policy, tmp_p
 def test_accounting_normalizes_cancellation_and_unset_times(policy: Policy, tmp_path: Path) -> None:
     user = str(os.getuid())
     accounting = _sacct(policy, tmp_path, f"123|httk-{_HANDLE}|{user}|CANCELLED by 1234|0:15|None|Unknown")
-    assert SlurmGateway(accounting, Path("/p.json")).accounting("123", "cluster", _HANDLE) == Observation(
+    assert SlurmGateway(accounting).accounting("123", "cluster", _HANDLE) == Observation(
         "CANCELLED", "0:15", None, None
     )
 
 
 def test_accounting_absent_row_or_client_is_none_and_failures_raise(policy: Policy, tmp_path: Path) -> None:
-    assert SlurmGateway(policy, Path("/p.json")).accounting("123", "cluster", _HANDLE) is None
+    assert SlurmGateway(policy).accounting("123", "cluster", _HANDLE) is None
     user = str(os.getuid())
-    gateway = SlurmGateway(_sacct(policy, tmp_path), Path("/p.json"))
+    gateway = SlurmGateway(_sacct(policy, tmp_path))
     assert gateway.accounting("123", "cluster", _HANDLE) is None
     for row in (f"123|httk-{_HANDLE}|{user}|lower|0:0|None|None", f"123|httk-{_HANDLE}|{user}|FAILED|x|None|None"):
-        gateway = SlurmGateway(_sacct(policy, tmp_path, row), Path("/p.json"))
+        gateway = SlurmGateway(_sacct(policy, tmp_path, row))
         with pytest.raises(SchedulerError, match="accounting is malformed"):
             gateway.accounting("123", "cluster", _HANDLE)
     row = f"123|httk-{_HANDLE}|{user}|FAILED|1:0|None|None"
     with pytest.raises(SchedulerError, match="ambiguous"):
-        SlurmGateway(_sacct(policy, tmp_path, row, row), Path("/p.json")).accounting("123", "cluster", _HANDLE)
+        SlurmGateway(_sacct(policy, tmp_path, row, row)).accounting("123", "cluster", _HANDLE)
     accounting = _sacct(policy, tmp_path)
     assert accounting.sacct is not None
     _client(accounting.sacct, "sys.stderr.write('sacct: error: Slurm accounting storage is disabled')\nsys.exit(1)\n")
     with pytest.raises(SchedulerError, match="^sacct exited 1: sacct: error: Slurm accounting storage is disabled$"):
-        SlurmGateway(accounting, Path("/p.json")).accounting("123", "cluster", _HANDLE)
+        SlurmGateway(accounting).accounting("123", "cluster", _HANDLE)
     with pytest.raises(SchedulerError, match="outside the current policy"):
-        SlurmGateway(accounting, Path("/p.json")).accounting("123", "other", _HANDLE)
+        SlurmGateway(accounting).accounting("123", "other", _HANDLE)

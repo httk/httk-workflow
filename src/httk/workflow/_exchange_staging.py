@@ -36,6 +36,10 @@ _LOGGER = logging.getLogger(__name__)
 
 __all__ = ["exchange_pass"]
 
+#: The enrollment marker in the exchange staging directory. Only workspace daemon setup writes it; a
+#: manager on a workspace that has it must confine its attempts. The staging directories themselves
+#: are created by any ``--exchange`` pass and do not enroll a workspace.
+ENROLLMENT_MARKER = "enrollment.json"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _RESERVED = frozenset(
     {
@@ -50,6 +54,7 @@ _RESERVED = frozenset(
         "inbox",
         "outbox",
         "records",
+        ENROLLMENT_MARKER,
     }
 )
 _REASON_LIMIT = 1000

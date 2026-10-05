@@ -1,6 +1,7 @@
 """Trusted local enrollment and publication for the workspace daemon."""
 
 import hashlib
+import importlib.resources
 import json
 import os
 import re
@@ -12,21 +13,19 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from httk.core.userdirs import data_home
 
-import httk
-
+from ._confine import confine_settings
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
-from ._daemon_launcher import DAEMON_KIND, DAEMON_LAUNCHER_NAME, DaemonSettings, parse_daemon_settings
-from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
-    MPIProfile,
-    MPISettings,
+    _LAUNCHER_NAME,
+    ApprovedLauncher,
     Policy,
-    Profile,
     _check_parent_names,
     _object_without_duplicates,
     _open_directory,
@@ -38,12 +37,15 @@ from ._daemon_policy import (
     load_policy,
     policy_document,
 )
+from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
     _authorized_keys as _runtime_authorized_keys,
 )
+from ._daemon_slurm import submission
 from ._daemon_state import Ledger
+from ._exchange_staging import ENROLLMENT_MARKER
 from .configuration import launchers_home
-from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
+from .launchers import LAUNCHER_EXECUTABLE, LAUNCHER_METADATA, _validate_launcher_metadata
 
 _ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
 _ENDPOINT_VERSION = 2
@@ -51,12 +53,51 @@ _MAX_WORKSPACE_BYTES = 1024 * 1024
 _MAX_LAUNCHER_BYTES = 64 * 1024
 _MAX_DISCOVERY_BYTES = 64 * 1024
 _CLUSTER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_DEFAULT_READONLY = ("/usr", "/bin", "/lib", "/lib64")
 _REPORT_DIRECTORIES = ("outbox/managers", "outbox/withdrawn")
 _EXCHANGE_DIRECTORIES = ("requests", "responses", "inbox", "outbox", "outbox/rejected", *_REPORT_DIRECTORIES)
 _STAGING_DIRECTORIES = ("inbox", "outbox", "outbox/rejected", "records")
-_MPI_ENVIRONMENT_PREFIX = "daemon.mpi.environment."
+_ENROLLMENT_FORMAT = "httk-workspace-daemon-enrollment"
+_ENROLLMENT_VERSION = 1
 _DEFAULT_SLURM_CONF = Path("/etc/slurm/slurm.conf")
+_DEFAULT_MAX_SUBMISSIONS = 128
+_CANONICAL_INTEGER = re.compile(r"[1-9][0-9]*\Z")
+_MEMORY = re.compile(r"([1-9][0-9]*)([KMGT]?)\Z")
+_CPU_LIMIT = 1024
+_MEMORY_LIMIT = 1_048_576
+_TIME_LIMIT = 10_080
+_HARD_LIMIT = 2**31 - 1
+_FORCE_HINT = "; pass --force to approve it"
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOptions:
+    """Broker configuration given to daemon setup; each unset value is discovered or kept.
+
+    ``--initialize`` discovers unset values (executables on ``PATH``, the running interpreter, the effective
+    Slurm configuration and its cluster, 128 submissions); ``--reload`` keeps the enrollment's stored values.
+
+    :param bwrap: Bubblewrap executable for the broker sandbox.
+    :param python: Python executable that runs the broker and the submitted managers.
+    :param sbatch: Slurm submission executable.
+    :param squeue: Slurm query executable.
+    :param scancel: Slurm cancellation executable.
+    :param sacct: Optional Slurm accounting executable.
+    :param scontrol: Slurm control executable, used only to discover the cluster name.
+    :param cluster: Fixed Slurm cluster name.
+    :param slurm_conf: Fixed Slurm configuration file.
+    :param max_submissions: Maximum accepted manager submissions of the enrollment.
+    """
+
+    bwrap: Path | None = None
+    python: Path | None = None
+    sbatch: Path | None = None
+    squeue: Path | None = None
+    scancel: Path | None = None
+    sacct: Path | None = None
+    scontrol: Path | None = None
+    cluster: str | None = None
+    slurm_conf: Path | None = None
+    max_submissions: int | None = None
 
 
 def _read_bounded(path: Path, limit: int, *, protected: bool = False) -> bytes:
@@ -68,14 +109,14 @@ def _read_bounded(path: Path, limit: int, *, protected: bool = False) -> bytes:
         if protected and information.st_mode & 0o002:
             raise ValueError(f"protected file must not be world-writable: {path}")
         if information.st_size > limit:
-            raise ValueError(f"JSON document is too large: {path}")
+            raise ValueError(f"file is too large: {path}")
         data = bytearray()
         while len(data) <= limit:
             chunk = os.read(descriptor, limit + 1 - len(data))
             if not chunk:
                 return bytes(data)
             data.extend(chunk)
-        raise ValueError(f"JSON document is too large: {path}")
+        raise ValueError(f"file is too large: {path}")
     finally:
         os.close(descriptor)
 
@@ -119,7 +160,7 @@ def _resolve_executable(value: object, name: str) -> Path:
 
 
 def _running_python() -> Path:
-    # Rebase onto the resolved prefix: readonly defaults are resolved, and the sandbox binds them only there.
+    # Rebase onto the resolved prefix, the path that compute nodes share with this host.
     executable = Path(sys.executable).absolute()
     try:
         return Path(sys.prefix).resolve() / executable.relative_to(sys.prefix)
@@ -137,92 +178,147 @@ def _effective_slurm_conf(declared: Path | None) -> Path | None:
     return _DEFAULT_SLURM_CONF if _DEFAULT_SLURM_CONF.is_file() else None
 
 
-def _site[T](site: Mapping[str, object], key: str, kind: type[T]) -> T | None:
-    value = site.get(key)
-    if value is None or isinstance(value, kind):
-        return value
-    raise ValueError(f"invalid {key}")
+def _positive_integer(value: object, name: str, maximum: int, hint: str = "") -> int:
+    if type(value) is int:
+        result = value
+    elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
+        result = int(value)
+    else:
+        raise ValueError(f"{name} must be a positive integer or canonical decimal string")
+    if not 1 <= result <= maximum:
+        raise ValueError(f"{name} must be from 1 through {maximum}{hint}")
+    return result
 
 
-def _daemon_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -> DaemonSettings:
-    if type(name) is not str or DAEMON_LAUNCHER_NAME.fullmatch(name) is None:
-        raise ValueError(f"daemon launcher names must match {DAEMON_LAUNCHER_NAME.pattern}: {name!r}")
+def _memory_mb(value: object, *, force: bool = False) -> int:
+    if type(value) is int:
+        result = value
+    elif type(value) is str:
+        match = _MEMORY.fullmatch(value)
+        if match is None:
+            raise ValueError("slurm.mem must be a positive integer with an optional K, M, G, or T suffix")
+        amount, suffix = int(match.group(1)), match.group(2)
+        if suffix == "K":
+            result = (amount + 1023) // 1024
+        elif suffix == "M" or not suffix:
+            result = amount
+        elif suffix == "G":
+            result = amount * 1024
+        else:
+            result = amount * 1024 * 1024
+    else:
+        raise ValueError("slurm.mem must be a positive integer with an optional K, M, G, or T suffix")
+    if not 1 <= result <= (_HARD_LIMIT if force else _MEMORY_LIMIT):
+        if result >= 1:
+            if force:
+                raise ValueError(f"slurm.mem exceeds the {_HARD_LIMIT} MiB ceiling")
+            raise ValueError(f"slurm.mem exceeds the {_MEMORY_LIMIT} MiB sanity limit{_FORCE_HINT}")
+        raise ValueError("slurm.mem must normalize to at least 1 MiB")
+    return result
+
+
+def _time_minutes(value: object, *, force: bool = False) -> int:
+    if type(value) is int:
+        result = value
+    elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
+        result = int(value)
+    elif type(value) is str:
+        days = 0
+        clock = value
+        if "-" in value:
+            pieces = value.split("-")
+            if len(pieces) != 2 or _CANONICAL_INTEGER.fullmatch(pieces[0]) is None:
+                raise ValueError("invalid slurm.time_limit")
+            days, clock = int(pieces[0]), pieces[1]
+        fields = clock.split(":")
+        if len(fields) not in (1, 2, 3) or any(not field.isdigit() or not field for field in fields):
+            raise ValueError("invalid slurm.time_limit")
+        numbers = [int(field) for field in fields]
+        if days:
+            if len(numbers) == 1:
+                hours, minutes, seconds = numbers[0], 0, 0
+            elif len(numbers) == 2:
+                hours, minutes, seconds = numbers[0], numbers[1], 0
+            else:
+                hours, minutes, seconds = numbers
+            if hours > 23 or minutes > 59 or seconds > 59:
+                raise ValueError("invalid slurm.time_limit")
+            total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+        elif len(numbers) == 2:
+            minutes, seconds = numbers
+            if seconds > 59:
+                raise ValueError("invalid slurm.time_limit")
+            total_seconds = minutes * 60 + seconds
+        elif len(numbers) == 3:
+            hours, minutes, seconds = numbers
+            if minutes > 59 or seconds > 59:
+                raise ValueError("invalid slurm.time_limit")
+            total_seconds = (hours * 60 + minutes) * 60 + seconds
+        else:
+            raise ValueError("invalid slurm.time_limit")
+        result = (total_seconds + 59) // 60
+    else:
+        raise ValueError("invalid slurm.time_limit")
+    if not 1 <= result <= (_HARD_LIMIT if force else _TIME_LIMIT):
+        if result >= 1:
+            if force:
+                raise ValueError(f"slurm.time_limit exceeds the {_HARD_LIMIT} minute ceiling")
+            raise ValueError(f"slurm.time_limit exceeds the {_TIME_LIMIT} minute sanity limit{_FORCE_HINT}")
+        raise ValueError("slurm.time_limit must normalize to at least 1 minute")
+    return result
+
+
+def _check_resources(settings: Mapping[str, object], *, force: bool) -> None:
+    cpus = settings.get("slurm.cpus_per_task")
+    if cpus is not None:
+        _positive_integer(
+            cpus, "slurm.cpus_per_task", _HARD_LIMIT if force else _CPU_LIMIT, "" if force else _FORCE_HINT
+        )
+    memory = settings.get("slurm.mem")
+    if memory is not None:
+        _memory_mb(memory, force=force)
+    time_limit = settings.get("slurm.time_limit")
+    if time_limit is not None:
+        _time_minutes(time_limit, force=force)
+
+
+def _packaged_slurm_launcher() -> bytes:
+    source = importlib.resources.files("httk.workflow").joinpath("launch_templates", "slurm", LAUNCHER_EXECUTABLE)
+    return source.read_bytes()
+
+
+def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -> ApprovedLauncher:
+    """Read one global ``slurm`` launcher bundle and freeze its approved content; never execute it."""
+
+    if type(name) is not str or _LAUNCHER_NAME.fullmatch(name) is None:
+        raise ValueError(f"daemon launcher names must match {_LAUNCHER_NAME.pattern}: {name!r}")
     try:
         bundle = (launchers_home() / name).resolve(strict=True)
     except FileNotFoundError:
-        raise ValueError(f"unknown global daemon launcher: {name!r}") from None
+        raise ValueError(f"unknown global launcher: {name!r}") from None
     if any(bundle.is_relative_to(path.resolve()) for path in forbidden):
         raise ValueError(f"daemon launcher {name!r} must not lie inside the daemon parent, state or snapshots")
     metadata = _decode_object(
         _read_bounded(bundle / LAUNCHER_METADATA, _MAX_LAUNCHER_BYTES, protected=True), description="launcher metadata"
     )
     kind = metadata.get("kind")
-    if kind != DAEMON_KIND:
+    if kind != "slurm":
         raise ValueError(
-            f"launcher {name!r} is a {kind!r} launcher; create a daemon launcher with "
-            "'httk workflow launcher add --template daemon --global'"
+            f"launcher {name!r} is a {kind!r} launcher; the workspace daemon approves only global slurm launchers "
+            "('httk workflow launcher add --template slurm --global')"
         )
     settings = _validate_launcher_metadata(bundle, metadata, check_binaries=False).get("settings", {})
     assert isinstance(settings, Mapping)
-    return parse_daemon_settings(settings, force=force)
-
-
-def _combined_site(launchers: Mapping[str, DaemonSettings]) -> dict[str, object]:
-    site: dict[str, object] = {}
-    owners: dict[str, str] = {}
-    for name, settings in launchers.items():
-        environment = {_MPI_ENVIRONMENT_PREFIX + key: value for key, value in settings.mpi_environment.items()}
-        for key, value in (*settings.site.items(), *environment.items()):
-            if key in site and site[key] != value:
-                raise ValueError(f"daemon launchers {owners[key]!r} and {name!r} set {key} to different values")
-            site[key] = value
-            owners.setdefault(key, name)
-    return site
-
-
-def _nested_dropped(paths: set[Path]) -> tuple[Path, ...]:
-    return tuple(
-        sorted(path for path in paths if not any(path != other and path.is_relative_to(other) for other in paths))
-    )
-
-
-def _editable_finder_roots() -> set[Path]:
-    # Setuptools finder-hook editable installs appear in httk.__path__ only as hook sentinels; their
-    # MAPPING gives each package's source directory, whose import root is above the dotted name.
-    roots: set[Path] = set()
-    for name, module in list(sys.modules.items()):
-        mapping = getattr(module, "MAPPING", None) if name.startswith("__editable___") else None
-        if not isinstance(mapping, dict):
-            continue
-        for package, location in mapping.items():
-            if isinstance(package, str) and isinstance(location, str) and package.split(".")[0] == "httk":
-                root = Path(location)
-                for _part in package.split("."):
-                    root = root.parent
-                roots.add(root.resolve())
-    return roots
-
-
-def _mpi_settings(site: Mapping[str, object]) -> MPISettings:
-    control_root = _site(site, "daemon.mpi.control_root", Path)
-    if control_root is None:
-        raise ValueError("MPI daemon launchers require daemon.mpi.control_root")
-    environment = tuple(
-        (key.removeprefix(_MPI_ENVIRONMENT_PREFIX), value)
-        for key, value in sorted(site.items())
-        if key.startswith(_MPI_ENVIRONMENT_PREFIX) and isinstance(value, str)
-    )
-    grace = _site(site, "daemon.mpi.termination_grace", float)
-    steps = _site(site, "daemon.mpi.max_steps", int)
-    return MPISettings(
-        srun=_resolve_executable(site.get("daemon.mpi.srun"), "srun"),
-        control_root=control_root,
-        pmix_roots=_site(site, "daemon.mpi.pmix_roots", tuple) or (),
-        shm_root=_site(site, "daemon.mpi.shm_root", Path) or Path("/dev/shm"),
-        devices=_site(site, "daemon.mpi.devices", tuple) or (),
-        environment=environment,
-        max_steps=128 if steps is None else steps,
-        termination_grace=10.0 if grace is None else grace,
+    executable = _read_bounded(bundle / LAUNCHER_EXECUTABLE, _MAX_LAUNCHER_BYTES, protected=True)
+    if executable != _packaged_slurm_launcher():
+        raise ValueError(f"launcher {name!r} must keep the packaged slurm launcher executable unchanged")
+    if settings.get("manager.confine") != "bwrap":
+        raise ValueError(f"launcher {name!r} must set manager.confine=bwrap: the daemon starts only confined managers")
+    confine_settings(settings)
+    _check_resources(settings, force=force)
+    content = {"launcher_json": metadata, "launcher_sha256": hashlib.sha256(executable).hexdigest()}
+    return ApprovedLauncher(
+        name, tuple(sorted(settings.items())), hashlib.sha256(_canonical_bytes(content)).hexdigest()
     )
 
 
@@ -316,18 +412,52 @@ def _cluster(cluster: str | None, slurm_conf: Path | None, scontrol: Path | None
     return discovered
 
 
-def default_readonly_paths() -> tuple[Path, ...]:
-    """Return the read-only paths daemon setup uses when a launcher sets no ``daemon.readonly_paths``.
+class _BrokerFields(TypedDict):
+    bwrap: Path
+    python: Path
+    sbatch: Path
+    squeue: Path
+    scancel: Path
+    sacct: Path | None
+    cluster: str
+    slurm_conf: Path | None
+    max_submissions: int
 
-    :return: The system directories, *httk* import roots and Python prefixes of this interpreter, nested entries dropped.
-    """
 
-    defaults = {Path(path).resolve() for path in _DEFAULT_READONLY if os.path.exists(path)}
-    # Jobs import the daemon's own code, which an editable install keeps outside the prefix.
-    imports = {Path(entry).resolve().parent for entry in httk.__path__ if os.path.isabs(entry)}
-    imports |= _editable_finder_roots()
-    prefixes = {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
-    return _nested_dropped(defaults | imports | prefixes)
+def _broker_fields(options: BrokerOptions, stored: Policy | None) -> _BrokerFields:
+    """Resolve the enrollment-held broker configuration: given values win, then stored ones, then discovery."""
+
+    if stored is not None:
+        slurm_conf = stored.slurm_conf if options.slurm_conf is None else options.slurm_conf
+        # Only a new cluster or Slurm configuration rediscovers the cluster, which reload refuses to change.
+        rediscover = options.cluster is not None or options.slurm_conf is not None
+        cluster = _cluster(options.cluster, slurm_conf, options.scontrol) if rediscover else stored.cluster
+        return {
+            "bwrap": stored.bwrap if options.bwrap is None else _resolve_executable(options.bwrap, "bwrap"),
+            "python": stored.python if options.python is None else _resolve_executable(options.python, "python"),
+            "sbatch": stored.sbatch if options.sbatch is None else _resolve_executable(options.sbatch, "sbatch"),
+            "squeue": stored.squeue if options.squeue is None else _resolve_executable(options.squeue, "squeue"),
+            "scancel": stored.scancel if options.scancel is None else _resolve_executable(options.scancel, "scancel"),
+            "sacct": stored.sacct if options.sacct is None else _resolve_executable(options.sacct, "sacct"),
+            "cluster": cluster,
+            "slurm_conf": slurm_conf,
+            "max_submissions": stored.max_submissions if options.max_submissions is None else options.max_submissions,
+        }
+    slurm_conf = _effective_slurm_conf(options.slurm_conf)
+    return {
+        "bwrap": _resolve_executable(options.bwrap, "bwrap"),
+        "python": _running_python() if options.python is None else _resolve_executable(options.python, "python"),
+        "sbatch": _resolve_executable(options.sbatch, "sbatch"),
+        "squeue": _resolve_executable(options.squeue, "squeue"),
+        "scancel": _resolve_executable(options.scancel, "scancel"),
+        # Reporting only: no sacct on PATH is not an error, but a given --sacct must exist.
+        "sacct": None
+        if options.sacct is None and shutil.which("sacct") is None
+        else _resolve_executable(options.sacct, "sacct"),
+        "cluster": _cluster(options.cluster, slurm_conf, options.scontrol),
+        "slurm_conf": slurm_conf,
+        "max_submissions": _DEFAULT_MAX_SUBMISSIONS if options.max_submissions is None else options.max_submissions,
+    }
 
 
 def _compile(
@@ -339,67 +469,35 @@ def _compile(
     launchers: Sequence[str],
     authorized_keys: Sequence[str],
     *,
+    options: BrokerOptions,
+    stored: Policy | None = None,
     force: bool,
 ) -> Policy:
     if not launchers:
         raise ValueError("at least one daemon launcher is required")
     if not authorized_keys:
         raise ValueError("at least one authorized key is required")
-    parsed = {name: _daemon_launcher(name, (exchange.parent, state, snapshots), force=force) for name in launchers}
-    if len(parsed) != len(launchers):
+    if len(set(launchers)) != len(launchers):
         raise ValueError("daemon launcher names must be unique")
-    site = _combined_site(parsed)
-    readonly = _site(site, "daemon.readonly_paths", tuple)
-    # Only job sandboxes use readonly_paths; the broker and allocation service see the host read-only.
-    if readonly is None:
-        readonly = default_readonly_paths()
-    home = data_home().resolve()
-    for path in readonly:
-        if _overlap(path, home):
-            raise ValueError(f"readonly path {path} must be disjoint from the httk data home {home}")
-    slurm_conf = _effective_slurm_conf(_site(site, "daemon.slurm_conf", Path))
-    python = site.get("daemon.python")
-    sacct = site.get("daemon.sacct")
-    max_submissions = _site(site, "daemon.max_submissions", int)
-    return Policy(
+    # In name order, the order of the canonical snapshot document.
+    approved = tuple(
+        _approved_launcher(name, (exchange.parent, state, snapshots), force=force) for name in sorted(launchers)
+    )
+    policy = Policy(
         workspace=workspace,
         workspace_id=_workspace_id(workspace),
         enrollment_id=enrollment_id,
         exchange=exchange,
         state=state,
         snapshots=snapshots,
-        bwrap=_resolve_executable(site.get("daemon.bwrap"), "bwrap"),
-        python=_running_python() if python is None else _resolve_executable(python, "python"),
-        sbatch=_resolve_executable(site.get("daemon.sbatch"), "sbatch"),
-        squeue=_resolve_executable(site.get("daemon.squeue"), "squeue"),
-        scancel=_resolve_executable(site.get("daemon.scancel"), "scancel"),
-        cluster=_cluster(_site(site, "daemon.cluster", str), slurm_conf, _site(site, "daemon.scontrol", Path)),
-        readonly_paths=readonly,
-        profiles=tuple(
-            Profile(
-                name,
-                settings.cpus,
-                settings.memory_mb,
-                settings.time_minutes,
-                settings.partition,
-                settings.account,
-                MPIProfile(settings.nodes, settings.ranks, settings.ntasks_per_node) if settings.mpi else None,
-                settings.workers,
-                settings.prelude,
-                settings.manager_command,
-                settings.gres,
-                settings.reservation,
-            )
-            for name, settings in parsed.items()
-        ),
+        launchers=approved,
         authorized_keys=_runtime_authorized_keys(tuple(authorized_keys)),
-        slurm_conf=slurm_conf,
-        max_submissions=128 if max_submissions is None else max_submissions,
-        mpi=_mpi_settings(site) if any(settings.mpi for settings in parsed.values()) else None,
-        isolate_network=_site(site, "daemon.isolate_network", bool) is not False,
-        # Reporting only: no sacct on PATH is not an error, but a configured daemon.sacct must exist.
-        sacct=None if sacct is None and shutil.which("sacct") is None else _resolve_executable(sacct, "sacct"),
+        **_broker_fields(options, stored),
     )
+    for launcher in approved:
+        # Build each submission once now, so a setting the packaged dispatcher refuses fails at approval.
+        submission(policy, launcher, "0" * 32)
+    return policy
 
 
 def _mkdir_exclusive(path: Path, *, exist_ok: bool = False) -> None:
@@ -564,7 +662,7 @@ def _write_endpoint(policy: Policy) -> None:
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
         "daemon_public_key": response_public_key(response_seed_path(policy.state)),
-        "configurations": {profile.name: policy.configuration_digest(profile.name) for profile in policy.profiles},
+        "configurations": {launcher.name: policy.configuration_digest(launcher.name) for launcher in policy.launchers},
         "request_max_age": policy.request_max_age,
     }
     _write_atomic(policy.exchange / "endpoint.json", _canonical_bytes(endpoint))
@@ -573,6 +671,21 @@ def _write_endpoint(policy: Policy) -> None:
 def _create_staging(workspace: Path) -> None:
     for name in _STAGING_DIRECTORIES:
         _mkdir_exclusive(workspace / ".httk-workspace" / "exchange" / name, exist_ok=True)
+
+
+def _write_enrollment(workspace: Path, policy: Policy, *, replace: bool = True) -> None:
+    """Mark the workspace enrolled; with *replace* false, only when the marker is missing."""
+
+    marker = workspace / ".httk-workspace" / "exchange" / ENROLLMENT_MARKER
+    if not replace and os.path.lexists(marker):
+        return
+    document = {
+        "format": _ENROLLMENT_FORMAT,
+        "format_version": _ENROLLMENT_VERSION,
+        "enrollment_id": policy.enrollment_id,
+        "workspace_id": policy.workspace_id,
+    }
+    _write_atomic(marker, _canonical_bytes(document))
 
 
 def _snapshots_default(state: Path) -> Path:
@@ -588,16 +701,18 @@ def initialize(
     state: Path | None = None,
     snapshots: Path | None = None,
     force: bool = False,
+    broker: BrokerOptions | None = None,
 ) -> Path:
-    """Compile and publish a fresh enrollment from approved global daemon launchers.
+    """Compile and publish a fresh enrollment from approved global ``slurm`` launchers.
 
     :param workspace: Workspace data root.
     :param exchange: Client exchange directory; a missing or empty sibling of the workspace.
-    :param launchers: Names of approved global ``daemon`` launchers, which become the profiles.
+    :param launchers: Names of the approved global ``slurm`` launchers, which become the configurations.
     :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
     :param state: Broker state directory, by default under the httk data home.
     :param snapshots: Snapshot directory, by default ``<state>.snapshots``.
     :param force: Approve CPU, memory and time requests above the built-in sanity limits.
+    :param broker: Broker configuration; unset values are discovered.
     :return: Path of the published runtime snapshot.
     :raises ValueError: If a launcher, key or the layout is refused.
     """
@@ -607,7 +722,15 @@ def initialize(
     state = _state_default(workspace) if state is None else state
     snapshots = _snapshots_default(state) if snapshots is None else snapshots
     policy = _compile(
-        workspace, exchange, state, snapshots, secrets.token_hex(16), launchers, authorized_keys, force=force
+        workspace,
+        exchange,
+        state,
+        snapshots,
+        secrets.token_hex(16),
+        launchers,
+        authorized_keys,
+        options=BrokerOptions() if broker is None else broker,
+        force=force,
     )
     home = data_home().resolve()
     if _overlap(policy.root, home):
@@ -641,6 +764,9 @@ def initialize(
     ):
         snapshot = _publish(policy)
         _write_endpoint(policy)
+        # Last: a failed --initialize leaves no enrolled workspace without a daemon. From here on every
+        # manager of the workspace must be confined.
+        _write_enrollment(workspace, policy)
         return snapshot
 
 
@@ -676,7 +802,7 @@ def _fixed_connection(old: Policy, new: Policy) -> None:
         "exchange",
         "state",
         "snapshots",
-        # Recorded jobs are bound to the cluster; client paths and slurm.conf may change.
+        # Recorded jobs are bound to the cluster; Slurm client paths and slurm.conf may change.
         "cluster",
     )
     changed = [name for name in fields if getattr(old, name) != getattr(new, name)]
@@ -694,15 +820,19 @@ def reload(
     state: Path | None = None,
     snapshots: Path | None = None,
     force: bool = False,
+    broker: BrokerOptions | None = None,
 ) -> Path:
     """Recompile the enrollment and atomically activate the replacement snapshot.
 
+    Every approved launcher is read and frozen again, so edits to a bundle take effect only here.
+
     :param workspace: Workspace data root.
-    :param launchers: Replacement launcher names, or ``None`` to keep the active profile names.
+    :param launchers: Replacement launcher names, or ``None`` to keep the active launcher names.
     :param authorized_keys: Replacement authorized keys, or ``None`` to keep the active keys.
     :param state: Broker state directory when not the default.
     :param snapshots: Snapshot directory when not ``<state>.snapshots``.
     :param force: Approve CPU, memory and time requests above the built-in sanity limits.
+    :param broker: Replacement broker configuration; unset values keep the active ones.
     :return: Path of the newly activated runtime snapshot.
     :raises ValueError: If a launcher or key is refused or the fixed connection would change.
     """
@@ -718,8 +848,10 @@ def reload(
         state,
         snapshots,
         old.enrollment_id,
-        [profile.name for profile in old.profiles] if launchers is None else launchers,
+        [launcher.name for launcher in old.launchers] if launchers is None else launchers,
         old.authorized_keys if authorized_keys is None else authorized_keys,
+        options=BrokerOptions() if broker is None else broker,
+        stored=old,
         force=force,
     )
     _runtime_policy_bytes(new)
@@ -730,6 +862,7 @@ def reload(
         _mkdir_exclusive(new.exchange / name, exist_ok=True)
     _create_staging(workspace)
     check_layout(new)
+    _write_enrollment(workspace, new, replace=False)
     with Ledger(
         old.state,
         old.workspace_id,
@@ -746,4 +879,4 @@ def reload(
         return snapshot
 
 
-__all__ = ["active_policy_path", "initialize", "reload"]
+__all__ = ["BrokerOptions", "active_policy_path", "initialize", "reload"]

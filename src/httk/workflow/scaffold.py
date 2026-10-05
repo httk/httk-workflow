@@ -89,7 +89,7 @@ from .models import (
     validate_step,
 )
 from .runtime_builders import JobSpec, prepare_job_payload
-from .workspace import Workspace
+from .workspace import Workspace, _stage_runner
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1625,11 +1625,18 @@ def _prepare(
     data_mode: DataMode | None,
     format: str | None,
     runner_name: str | PurePosixPath | None,
+    runner_stage: Path | None = None,
 ) -> _Prepared:
     """Resolve one workflow and make its runner referenceable, exactly once.
 
     ``publish`` is ignored for language workflows because their realization
-    supplies the runner reference and payload members.
+    supplies the runner reference and payload members. With *runner_stage*,
+    ``publish="workspace"`` stages the runner there instead of publishing it
+    into the workspace store (:func:`~httk.workflow.workspace._stage_runner`):
+    :meth:`httk.workflow.Attempt.call` stages into its outcome draft, and the
+    manager publishes at commit. The reference is the same either way, and an
+    instantiate hook runs from the staged copy, so a store that does not hold
+    the runner yet is never consulted.
     """
 
     resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode, format=format)
@@ -1694,11 +1701,18 @@ def _prepare(
         reference = _packaged_runner_reference(provider)
     else:
         try:
-            reference = workspace.publish_runner(resolved.source, name=runner_name or resolved.store_name)
+            if runner_stage is None:
+                reference = workspace.publish_runner(resolved.source, name=runner_name or resolved.store_name)
+            else:
+                name = runner_name or resolved.store_name
+                reference = _stage_runner(resolved.source, runner_stage, name, store=workspace.runner_store_path(name))
         except FileExistsError as exc:
             if resolved.directory is None:
                 raise
+            # A staged call checks the store first, so an existing store entry is the conflict.
             target = workspace.runner_store_path(resolved.store_name)
+            if runner_stage is not None and not target.exists():
+                target = runner_stage / resolved.store_name
             actual = tree_digest(target)
             from .packages import source_tree_digest
 
@@ -1712,18 +1726,20 @@ def _prepare(
     if resolved.directory is not None and resolved.instantiate_file is not None:
         from .packages import _tree_hook
 
+        # The hook runs from the tree just published or staged, pinned to its digest.
+        runner_tree = (
+            workspace.runner_store_path(str(reference["path"]))
+            if runner_stage is None
+            else runner_stage.joinpath(*PurePosixPath(str(reference["path"])).parts)
+        )
         if resolved.instantiate_exec is not None:
             instantiate = None
-            instantiate_exec = (
-                workspace.runner_store_path(str(reference["path"])),
-                runner_sha256,
-                resolved.instantiate_exec,
-            )
+            instantiate_exec = (runner_tree, runner_sha256, resolved.instantiate_exec)
         else:
             instantiate = cast(
                 Callable[[InstantiateContext], object],
                 _tree_hook(
-                    workspace.runner_store_path(str(reference["path"])),
+                    runner_tree,
                     runner_sha256,
                     resolved.instantiate_file,
                     "instantiate",

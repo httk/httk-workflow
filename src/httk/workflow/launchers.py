@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ._allocation import argv_allocation, half_physical_memory_mb, split_allocation
-from ._daemon_launcher import DAEMON_KIND, DAEMON_LAUNCHER_NAME, parse_daemon_settings
+from ._confine import confine_settings
 from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
@@ -102,8 +102,9 @@ def _validate_launcher_metadata(
     if not isinstance(settings, Mapping):
         raise ValueError("manager launcher settings must be an object")
     _validate_settings(settings)
-    if metadata.get("kind") == DAEMON_KIND:
-        parse_daemon_settings(settings, force=True)
+    if metadata.get("kind") == "slurm":
+        # Pinned on every manager this bundle starts; refuse a bad value before any submission.
+        confine_settings(settings)
     timeout = metadata.get("timeout_seconds", 60.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("launcher timeout_seconds must be positive")
@@ -238,12 +239,8 @@ def add_launcher(
     configured_settings = _validate_settings({} if settings is None else settings)
     if name == PROCESS_LAUNCHER:
         raise ValueError("the launcher name 'process' is reserved for the built-in process launcher")
-    if template not in ("slurm", DAEMON_KIND):
+    if template != "slurm":
         raise ValueError(f"unknown maintained launcher template: {template}")
-    if template == DAEMON_KIND:
-        if DAEMON_LAUNCHER_NAME.fullmatch(name) is None:
-            raise ValueError(f"daemon launcher names must match {DAEMON_LAUNCHER_NAME.pattern}: {name!r}")
-        parse_daemon_settings(configured_settings, force=True)
     if global_:
         destination = launchers_home() / name
     else:
@@ -475,8 +472,6 @@ def start_managers(
         raise ValueError("manager argv must be a nonempty string array")
     root = Path(workspace_root).expanduser().resolve()
     metadata = validate_launcher_bundle(target.bundle)
-    if metadata.get("kind") == DAEMON_KIND:
-        raise ValueError("daemon launchers run only through 'httk workspace daemon'")
     launcher_settings = metadata.get("settings", {})
     if not isinstance(launcher_settings, Mapping):
         raise ValueError("launcher settings must be an object")

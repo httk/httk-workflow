@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from httk.workflow._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
-from httk.workflow._daemon_policy import Policy, Profile
+from httk.workflow._daemon_policy import ApprovedLauncher, Policy
 
 
 def _policy(tmp_path: Path) -> Policy:
@@ -26,8 +26,7 @@ def _policy(tmp_path: Path) -> Policy:
         squeue=broker / "squeue",
         scancel=broker / "scancel",
         cluster="cluster",
-        readonly_paths=(runtime,),
-        profiles=(Profile("cpu", 2, 1024, 10, workers=2, prelude="module load approved"),),
+        launchers=(ApprovedLauncher("cpu", (("environment.prelude", "module load approved"),), "a" * 64),),
     )
 
 
@@ -57,7 +56,9 @@ def test_activation_document_round_trips_and_verifies_exact_policy(tmp_path: Pat
     with pytest.raises(ValueError, match="stale or mismatched"):
         verify_active_snapshot(state, tmp_path / "snapshots/other.json", policy)
     with pytest.raises(ValueError, match="stale or mismatched"):
-        verify_active_snapshot(state, snapshot, replace(policy, profiles=(replace(policy.profiles[0], cpus=3),)))
+        verify_active_snapshot(
+            state, snapshot, replace(policy, launchers=(replace(policy.launchers[0], digest="b" * 64),))
+        )
 
 
 @pytest.mark.parametrize(

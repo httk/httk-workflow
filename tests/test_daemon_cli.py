@@ -12,7 +12,8 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import _daemon_cli, _daemon_setup, workflow_cli
-from httk.workflow._daemon_policy import Policy, Profile, policy_document
+from httk.workflow._daemon_policy import ApprovedLauncher, Policy, policy_document
+from httk.workflow._daemon_setup import BrokerOptions
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
@@ -32,8 +33,7 @@ def _snapshot(tmp_path: Path) -> Path:
         squeue=runtime / "squeue",
         scancel=runtime / "scancel",
         cluster="cluster",
-        readonly_paths=(runtime,),
-        profiles=(Profile("small"),),
+        launchers=(ApprovedLauncher("small", (("manager.confine", "bwrap"),), "a" * 64),),
         authorized_keys=(AUTHORIZED_KEY,),
     )
     path = tmp_path / "snapshot.json"
@@ -145,8 +145,6 @@ raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--once'], program='htt
     assert "SBATCH_ACCOUNT" not in observed["env"] and observed["env"]["NSC_RESOURCE_NAME"] == "x"
     assert observed["env"]["PATH"] == os.environ["PATH"]
     assert observed["argv"][1:] == [
-        "--mode",
-        "broker",
         "--workspace",
         str(workspace),
         "--policy",
@@ -183,10 +181,44 @@ def test_local_setup_modes_print_approved_launchers_and_keys_without_exec(
     }
     if mode == "initialize":
         expected["exchange"] = Path("/exchange")
-    assert calls == [{**expected, "force": False}, {**expected, "force": True}]
-    runtime = tmp_path / "runtime"
-    printed = f"launcher small\nauthorized {AUTHORIZED_KEY}\nreadonly {runtime}\nsandbox check passed\n"
+    broker = {"broker": BrokerOptions()}
+    assert calls == [{**expected, "force": False, **broker}, {**expected, "force": True, **broker}]
+    printed = f"launcher small\nauthorized {AUTHORIZED_KEY}\nsandbox check passed\n"
     assert capsys.readouterr().out == printed * 2
+
+
+@pytest.mark.parametrize("mode", ["initialize", "reload"])
+def test_broker_options_reach_setup_anchored(mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def setup(_workspace: Path, **options: object) -> Path:
+        calls.append(options)
+        return _snapshot(tmp_path)
+
+    monkeypatch.setattr(_daemon_setup, mode, setup)
+    monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
+    monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
+    monkeypatch.chdir(tmp_path)
+    arguments = ["/workspace", f"--{mode}"]
+    if mode == "initialize":
+        arguments += ["--exchange", "/exchange", "--launcher", "small", "--authorize", AUTHORIZED_KEY]
+    for name in ("bwrap", "python", "sbatch", "squeue", "scancel", "sacct", "scontrol", "slurm-conf"):
+        arguments += [f"--{name}", f"tools/{name}"]
+    arguments += ["--cluster", "c1", "--max-submissions", "5"]
+    assert _daemon_cli.command(arguments, program="httk") == 0
+    tools = tmp_path / "tools"
+    assert calls[0]["broker"] == BrokerOptions(
+        bwrap=tools / "bwrap",
+        python=tools / "python",
+        sbatch=tools / "sbatch",
+        squeue=tools / "squeue",
+        scancel=tools / "scancel",
+        sacct=tools / "sacct",
+        scontrol=tools / "scontrol",
+        cluster="c1",
+        slurm_conf=tools / "slurm-conf",
+        max_submissions=5,
+    )
 
 
 def test_reload_without_lists_keeps_the_stored_launchers_and_keys(
@@ -203,7 +235,14 @@ def test_reload_without_lists_keeps_the_stored_launchers_and_keys(
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
     assert _daemon_cli.command(["/workspace", "--reload", "--state", "/state"], program="httk") == 0
     assert calls == [
-        {"launchers": None, "authorized_keys": None, "state": Path("/state"), "snapshots": None, "force": False}
+        {
+            "launchers": None,
+            "authorized_keys": None,
+            "state": Path("/state"),
+            "snapshots": None,
+            "force": False,
+            "broker": BrokerOptions(),
+        }
     ]
 
 
@@ -220,6 +259,8 @@ def test_reload_without_lists_keeps_the_stored_launchers_and_keys(
         (["--once", "--exchange", "/x"], "apply only to --initialize and --reload"),
         (["--check", "--launcher", "a"], "apply only to --initialize and --reload"),
         (["--authorize", "k"], "apply only to --initialize and --reload"),
+        (["--once", "--cluster", "c"], "broker configuration options apply only to --initialize and --reload"),
+        (["--sacct", "/usr/bin/sacct"], "broker configuration options apply only"),
     ],
 )
 def test_cli_argument_matrix_is_refused_before_any_setup(
@@ -300,7 +341,7 @@ def test_setup_runs_one_clean_sandbox_check_and_reports_success(
     assert setups == [mode]
     assert len(argvs) == 1 and runs[-1] == {"status": 0}
     argv = argvs[0]
-    assert isinstance(argv, list) and argv[-1] == "--check" and argv[argv.index("--mode") + 1] == "broker"
+    assert isinstance(argv, list) and argv[-1] == "--check" and "--mode" not in argv
     assert argv == _daemon_cli._bootstrap_argv(tmp_path / "ws", state=None, snapshots=None, flag="--check")
     environment = runs[0].pop("env")
     assert runs[0] == {"stdin": subprocess.DEVNULL, "cwd": "/", "close_fds": True, "check": False}

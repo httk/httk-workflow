@@ -11,6 +11,18 @@ from pathlib import Path
 
 from ._daemon_bootstrap import _operator_environment
 
+_BROKER_PATHS = (
+    ("bwrap", "Bubblewrap executable of the broker sandbox"),
+    ("python", "Python executable of the broker and the submitted managers"),
+    ("sbatch", "Slurm submission executable"),
+    ("squeue", "Slurm query executable"),
+    ("scancel", "Slurm cancellation executable"),
+    ("sacct", "Slurm accounting executable, optional"),
+    ("scontrol", "Slurm control executable, used to discover the cluster name"),
+    ("slurm_conf", "Slurm configuration file"),
+)
+_BROKER_OPTIONS = (*(name for name, _kind in _BROKER_PATHS), "cluster", "max_submissions")
+
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare the explicit local daemon arguments.
@@ -21,7 +33,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
     parser.add_argument("--exchange", type=Path, help="client exchange directory, a sibling of the workspace")
     parser.add_argument(
-        "--launcher", action="append", metavar="NAME", help="approve a global daemon launcher (repeatable)"
+        "--launcher",
+        action="append",
+        metavar="NAME",
+        help="approve a global slurm launcher that sets manager.confine=bwrap (repeatable)",
     )
     parser.add_argument("--authorize", action="append", metavar="KEY", help="authorize an Ed25519 key (repeatable)")
     parser.add_argument("--state", type=Path, help="broker state directory when not the default")
@@ -35,6 +50,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--force",
         action="store_true",
         help="approve CPU, memory and time requests above the built-in sanity limits",
+    )
+    broker = parser.add_argument_group(
+        "broker configuration",
+        "used by --initialize and --reload; --initialize discovers what is not given, --reload keeps the stored value",
+    )
+    for name, kind in _BROKER_PATHS:
+        broker.add_argument(f"--{name.replace('_', '-')}", type=Path, metavar="PATH", help=f"the {kind}")
+    broker.add_argument("--cluster", metavar="NAME", help="the fixed Slurm cluster name")
+    broker.add_argument(
+        "--max-submissions", type=int, metavar="N", help="maximum manager submissions of the enrollment"
     )
 
 
@@ -63,6 +88,8 @@ def _usage_refusal(arguments: argparse.Namespace) -> str | None:
         return "--reload cannot change --exchange; a new enrollment is required"
     if not setup and (arguments.exchange is not None or arguments.launcher or arguments.authorize):
         return "--exchange, --launcher and --authorize apply only to --initialize and --reload"
+    if not setup and any(getattr(arguments, name) is not None for name in _BROKER_OPTIONS):
+        return "broker configuration options apply only to --initialize and --reload"
     return None
 
 
@@ -104,8 +131,6 @@ def _bootstrap_argv(workspace: Path, *, state: Path | None, snapshots: Path | No
         "-I",
         "-S",
         str(Path(__file__).with_name("_daemon_bootstrap.py").resolve()),
-        "--mode",
-        "broker",
         "--workspace",
         str(workspace.resolve(strict=True)),
         "--policy",
@@ -129,7 +154,7 @@ def _check_after_setup(workspace: Path, *, state: Path | None, snapshots: Path |
         return 0
     print(
         "httk workspace daemon: the enrollment was saved, but the sandbox check failed (see above); "
-        "fix the launcher settings and run --reload",
+        "fix the broker configuration or the launchers and run --reload",
         file=sys.stderr,
     )
     return 2
@@ -150,7 +175,7 @@ def launch(arguments: argparse.Namespace) -> int:
         workspace = _anchored(arguments.workspace, "workspace")
         paths = {
             name: None if getattr(arguments, name) is None else _anchored(getattr(arguments, name), name)
-            for name in ("exchange", "state", "snapshots")
+            for name in ("exchange", "state", "snapshots", *(name for name, _kind in _BROKER_PATHS))
         }
     except (OSError, ValueError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
@@ -160,6 +185,18 @@ def launch(arguments: argparse.Namespace) -> int:
         from ._daemon_policy import load_policy
 
         if arguments.initialize or arguments.reload:
+            broker = _daemon_setup.BrokerOptions(
+                bwrap=paths["bwrap"],
+                python=paths["python"],
+                sbatch=paths["sbatch"],
+                squeue=paths["squeue"],
+                scancel=paths["scancel"],
+                sacct=paths["sacct"],
+                scontrol=paths["scontrol"],
+                cluster=arguments.cluster,
+                slurm_conf=paths["slurm_conf"],
+                max_submissions=arguments.max_submissions,
+            )
             if arguments.initialize:
                 assert paths["exchange"] is not None
                 snapshot = _daemon_setup.initialize(
@@ -170,6 +207,7 @@ def launch(arguments: argparse.Namespace) -> int:
                     state=paths["state"],
                     snapshots=paths["snapshots"],
                     force=arguments.force,
+                    broker=broker,
                 )
             else:
                 snapshot = _daemon_setup.reload(
@@ -179,14 +217,13 @@ def launch(arguments: argparse.Namespace) -> int:
                     state=paths["state"],
                     snapshots=paths["snapshots"],
                     force=arguments.force,
+                    broker=broker,
                 )
             approved = load_policy(snapshot)
-            for profile in approved.profiles:
-                print(f"launcher {profile.name}")
+            for launcher in approved.launchers:
+                print(f"launcher {launcher.name}")
             for key in approved.authorized_keys:
                 print(f"authorized {key}")
-            for path in approved.readonly_paths:
-                print(f"readonly {path}")
             return _check_after_setup(workspace, state=paths["state"], snapshots=paths["snapshots"])
         flag = "--check" if arguments.check else "--once" if arguments.once else None
         argv = _bootstrap_argv(workspace, state=paths["state"], snapshots=paths["snapshots"], flag=flag)

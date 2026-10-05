@@ -233,7 +233,7 @@ class Broker:
         if entry.handle is None or request.profile is None:
             raise sqlite3.DatabaseError("invalid admitted manager start")
         try:
-            profile = self.policy.profile(request.profile)
+            launcher = self.policy.launcher(request.profile)
         except ValueError:
             return self._finish_refused(entry, "invalid_configuration")
         if request.configuration_digest != self.policy.configuration_digest(request.profile):
@@ -248,7 +248,7 @@ class Broker:
         if submitting.handle is None:
             raise sqlite3.DatabaseError("submission intent has no manager handle")
         try:
-            submission = self.gateway.submit(profile, submitting.handle)
+            submission = self.gateway.submit(launcher, submitting.handle)
             if (
                 type(submission) is not Submission
                 or _JOB_ID.fullmatch(submission.job_id) is None
@@ -625,7 +625,7 @@ def _run(arguments: argparse.Namespace) -> None:
     if not policy_source.is_absolute() or ".." in policy_source.parts:
         raise ValueError("policy source must be an absolute path without '..'")
     policy = load_policy(arguments.policy)
-    gateway = SlurmGateway(policy, policy_source)
+    gateway = SlurmGateway(policy)
 
     seed = response_seed_path(_STATE_DIRECTORY)
     try:
@@ -674,7 +674,7 @@ def _run(arguments: argparse.Namespace) -> None:
                 "daemon_started workspace=%s enrollment=%s launchers=%s",
                 policy.workspace_id,
                 policy.enrollment_id,
-                ",".join(profile.name for profile in policy.profiles),
+                ",".join(launcher.name for launcher in policy.launchers),
             )
             broker.run(stop, once=arguments.once)
     finally:

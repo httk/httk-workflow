@@ -1,9 +1,8 @@
-"""Fixed Slurm operations for the confined workspace broker."""
+"""Fixed Slurm operations for the workspace daemon broker."""
 
 import os
 import re
 import selectors
-import shlex
 import signal
 import subprocess
 import time
@@ -11,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._daemon_bootstrap import _operator_environment
-from ._daemon_policy import Policy, Profile
+from ._daemon_policy import ApprovedLauncher, Policy
+from .launch_runtime import SubmissionIdentity, slurm_submission
 
 _VERSION = re.compile(r"slurm (\d+)\.(\d+)\.(\d+)(?:[.-][A-Za-z0-9.-]+)?\s*\Z")
 _JOB = re.compile(r"[1-9][0-9]{0,19}\Z")
@@ -162,16 +162,63 @@ def _checked(argv: list[str], policy: Policy, *, data: bytes = b"") -> bytes:
     return stdout
 
 
+def manager_argv(policy: Policy) -> list[str]:
+    """Return the manager command of every daemon submission, before the launcher's own additions.
+
+    :param policy: Validated runtime policy.
+    :return: The approved interpreter running an exchange manager on the real workspace path.
+    """
+
+    return [
+        str(policy.python),
+        "-I",
+        "-m",
+        "httk.core.cli",
+        "workflow",
+        "manager",
+        "run",
+        "--by-path",
+        "--workspace",
+        str(policy.workspace),
+        "--exchange",
+        "--idle",
+    ]
+
+
+def submission(policy: Policy, launcher: ApprovedLauncher, handle: str) -> tuple[list[str], bytes]:
+    """Build the ``sbatch`` command and script of one manager from the frozen launcher content.
+
+    The packaged ``slurm`` launcher logic runs in this process; the bundle itself is never executed.
+
+    :param policy: Validated runtime policy.
+    :param launcher: The approved launcher, whose frozen settings alone shape the script.
+    :param handle: The broker's opaque manager handle, which names the job.
+    :return: The ``sbatch`` argument vector and the script bytes for its standard input.
+    :raises ValueError: If a frozen setting cannot be expressed in the script.
+    """
+
+    argv, script = slurm_submission(
+        settings=dict(launcher.settings),
+        argv=manager_argv(policy),
+        workspace=str(policy.workspace),
+        identity=SubmissionIdentity(
+            job_name=f"httk-{handle}",
+            sbatch=policy.sbatch,
+            cluster=policy.cluster,
+            output=str(policy.jobs / "httk-%j.out"),
+        ),
+    )
+    return argv, script.encode("utf-8")
+
+
 class SlurmGateway:
     """Execute only the broker's fixed scheduler operations.
 
     :param policy: Validated runtime policy snapshot.
-    :param policy_path: Protected policy path visible on compute nodes.
     """
 
-    def __init__(self, policy: Policy, policy_path: Path) -> None:
+    def __init__(self, policy: Policy) -> None:
         self.policy = policy
-        self.policy_path = policy_path
         self._uid = str(os.getuid())
 
     def check(self) -> None:
@@ -180,10 +227,7 @@ class SlurmGateway:
         :raises SchedulerError: If a client fails or its version is unsupported.
         """
 
-        executables = [self.policy.sbatch, self.policy.squeue, self.policy.scancel]
-        if self.policy.mpi is not None:
-            executables.append(self.policy.mpi.srun)
-        for executable in executables:
+        for executable in (self.policy.sbatch, self.policy.squeue, self.policy.scancel):
             code, output, errors = _run([str(executable), "--version"], self.policy)
             try:
                 match = _VERSION.fullmatch(output.decode("ascii"))
@@ -196,70 +240,22 @@ class SlurmGateway:
                     f"Slurm 23.11.6 or newer clients are required: {executable} --version "
                     f"exited {code} and printed {printed!r}"
                 )
-        if self.policy.mpi is not None:
-            code, output, errors = _run([str(self.policy.mpi.srun), "--mpi=list"], self.policy)
-            if code != 0 or re.search(rb"(?m)^\s*pmix\s*$", output + errors) is None:
-                raise SchedulerError("Slurm direct-launch pmix plugin is required")
 
-    def _script(self, profile: Profile, handle: str) -> bytes:
-        bootstrap = Path(__file__).with_name("_daemon_bootstrap.py")
-        command = [
-            str(self.policy.python),
-            "-I",
-            "-S",
-            str(bootstrap),
-            "--policy",
-            str(self.policy_path),
-            "--mode",
-            "allocation" if profile.mpi is not None else "payload",
-            "--profile",
-            profile.name,
-            "--handle",
-            handle,
-        ]
-        return ("#!/bin/sh\nexec " + shlex.join(command) + "\n").encode("utf-8")
+    def submit(self, launcher: ApprovedLauncher, handle: str) -> Submission:
+        """Submit one manager through the frozen launcher content, under the handle's job name.
 
-    def submit(self, profile: Profile, handle: str) -> Submission:
-        """Submit one fixed manager bootstrap from trusted script bytes.
-
-        :param profile: An approved resource profile.
+        :param launcher: An approved launcher.
         :param handle: The broker's newly reserved opaque handle.
         :return: The confirmed scheduler job identity.
         :raises UncertainSubmission: If acceptance cannot be confirmed.
         """
 
-        argv = [
-            str(self.policy.sbatch),
-            "--parsable",
-            "--export=NIL",
-            f"--clusters={self.policy.cluster}",
-            f"--job-name=httk-{handle}",
-            f"--nodes={profile.mpi.nodes if profile.mpi is not None else 1}",
-            f"--ntasks={profile.mpi.ranks if profile.mpi is not None else 1}",
-        ]
-        # Unset resources add no flag, so Slurm's partition and site defaults apply.
-        if profile.cpus is not None:
-            argv.append(f"--cpus-per-task={profile.cpus}")
-        if profile.memory_mb is not None:
-            argv.append(f"--mem={profile.memory_mb}M")
-        if profile.time_minutes is not None:
-            argv.append(f"--time={profile.time_minutes}")
-        # Without --error Slurm merges stderr into this private file; the bootstrap copies its tail into the workspace.
-        argv += ["--chdir=/", "--input=/dev/null", f"--output={self.policy.jobs / 'httk-%j.out'}"]
-        if profile.mpi is not None:
-            argv.append("--no-requeue")
-            if profile.mpi.ntasks_per_node is not None:
-                argv.append(f"--ntasks-per-node={profile.mpi.ntasks_per_node}")
-        if profile.partition is not None:
-            argv.append(f"--partition={profile.partition}")
-        if profile.account is not None:
-            argv.append(f"--account={profile.account}")
-        if profile.gres is not None:
-            argv.append(f"--gres={profile.gres}")
-        if profile.reservation is not None:
-            argv.append(f"--reservation={profile.reservation}")
         try:
-            output = _checked(argv, self.policy, data=self._script(profile, handle))
+            argv, script = submission(self.policy, launcher, handle)
+        except ValueError as exc:
+            raise SchedulerError(f"cannot build the submission: {exc}") from exc
+        try:
+            output = _checked(argv, self.policy, data=script)
             fields = output.decode("ascii", "replace").strip().split(";")
             if (
                 len(fields) not in (1, 2)

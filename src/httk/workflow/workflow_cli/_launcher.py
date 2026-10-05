@@ -11,8 +11,7 @@ from pathlib import Path
 
 from httk.core.cli import CLIContext
 
-from .. import _daemon_setup
-from .._daemon_launcher import _PATH_LISTS
+from .._confine import default_readonly_paths
 from ..launchers import (
     add_launcher,
     check_launcher,
@@ -102,6 +101,9 @@ def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
     return 0
 
 
+_PATH_LISTS = ("confine.devices", "confine.pmix_roots", "confine.readonly_paths")
+
+
 def _added_paths(name: str, settings: dict[str, str], additions: list[str], project: Path) -> dict[str, str]:
     """Return the colon-joined path lists that ``--add-path`` extends, after ``--set`` applied.
 
@@ -110,7 +112,7 @@ def _added_paths(name: str, settings: dict[str, str], additions: list[str], proj
     :param additions: The ``KEY=PATH[:PATH...]`` arguments.
     :param project: Project directory used for launcher lookup.
     :return: The new value of every changed key.
-    :raises ValueError: If a key is not a path list of a daemon launcher.
+    :raises ValueError: If a key is not a confinement path list of a slurm launcher.
     """
 
     if not additions:
@@ -121,15 +123,15 @@ def _added_paths(name: str, settings: dict[str, str], additions: list[str], proj
     changed: dict[str, str] = {}
     for item in additions:
         key, separator, paths = item.partition("=")
-        if description["kind"] != "daemon" or key not in _PATH_LISTS or not separator:
+        if description["kind"] != "slurm" or key not in _PATH_LISTS or not separator:
             raise ValueError(
-                "--add-path only applies to colon-separated path settings of daemon launchers "
-                f"(KEY=PATH[:PATH...]): {', '.join(sorted(_PATH_LISTS))}; got {item!r}"
+                "--add-path only applies to colon-separated path settings of slurm launchers "
+                f"(KEY=PATH[:PATH...]): {', '.join(_PATH_LISTS)}; got {item!r}"
             )
-        if key in current:
+        if current.get(key) is not None:
             entries = str(current[key]).split(":")
-        elif key == "daemon.readonly_paths":
-            entries = [str(path) for path in _daemon_setup.default_readonly_paths()]
+        elif key == "confine.readonly_paths":
+            entries = [str(path) for path in default_readonly_paths()]
         else:
             entries = []
         entries += [path for path in paths.split(":") if path not in entries]
@@ -253,9 +255,9 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         default=[],
         metavar="KEY=PATH[:PATH...]",
         help=(
-            "append absolute paths to a colon-separated path setting of a daemon launcher, skipping paths already "
-            "listed (repeatable, applied after --set); an unset daemon.readonly_paths starts from the default "
-            "computed by this interpreter"
+            "append absolute paths to a colon-separated confine.* path setting of a slurm launcher, skipping paths "
+            "already listed (repeatable, applied after --set); an unset confine.readonly_paths starts from the "
+            "default computed by this interpreter"
         ),
     )
 
