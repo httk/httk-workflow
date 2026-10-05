@@ -17,6 +17,7 @@ _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _PROFILE_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
 _REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
 _OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy"})
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
@@ -275,6 +276,7 @@ class Response:
     :param handle: Identify a broker-issued manager handle when applicable.
     :param scheduler_state: Give a bounded normalized scheduler state.
     :param reason: Give a bounded normalized reason code.
+    :param detail: Explain ``reason`` in at most 1000 printable ASCII characters.
     :raises ValueError: If a field is invalid or conflicts with the outcome.
     """
 
@@ -286,6 +288,7 @@ class Response:
     handle: str | None = None
     scheduler_state: str | None = None
     reason: str | None = None
+    detail: str | None = None
     operator_key: str | None = field(default=None, kw_only=True)
     signature: str | None = field(default=None, kw_only=True)
 
@@ -315,6 +318,10 @@ class Response:
             raise ValueError("invalid scheduler_state")
         if self.reason is not None and (type(self.reason) is not str or _REASON_PATTERN.fullmatch(self.reason) is None):
             raise ValueError("invalid reason")
+        if self.detail is not None and (type(self.detail) is not str or _DETAIL_PATTERN.fullmatch(self.detail) is None):
+            raise ValueError("invalid detail")
+        if self.detail is not None and self.reason is None:
+            raise ValueError("detail requires reason")
         if self.operator_key is not None and type(self.operator_key) is not str:
             raise ValueError("invalid operator_key")
         if self.signature is not None and type(self.signature) is not str:
@@ -356,6 +363,8 @@ def _response_fields(response: Response) -> dict[str, object]:
         fields["scheduler_state"] = response.scheduler_state
     if response.reason is not None:
         fields["reason"] = response.reason
+    if response.detail is not None:
+        fields["detail"] = response.detail
     return fields
 
 
@@ -384,7 +393,7 @@ def decode_response(data: bytes) -> Response:
         "operator_key",
         "signature",
     }
-    optional = {"handle", "scheduler_state", "reason"}
+    optional = {"handle", "scheduler_state", "reason", "detail"}
     if not keys <= set(value) or not set(value) <= keys | optional:
         raise ValueError("invalid response fields")
     if any(name in value and value[name] is None for name in optional):
@@ -399,6 +408,7 @@ def decode_response(data: bytes) -> Response:
             handle=value.get("handle"),  # type: ignore[arg-type]
             scheduler_state=value.get("scheduler_state"),  # type: ignore[arg-type]
             reason=value.get("reason"),  # type: ignore[arg-type]
+            detail=value.get("detail"),  # type: ignore[arg-type]
             operator_key=value["operator_key"],  # type: ignore[arg-type]
             signature=value["signature"],  # type: ignore[arg-type]
         )

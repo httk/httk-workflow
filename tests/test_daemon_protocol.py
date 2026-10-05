@@ -1,10 +1,14 @@
 """Strict request codec and validation tests for the workspace daemon."""
 
+import base64
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 
 import pytest
+from httk.core.identity import identity_public_key
 
+from httk.workflow._daemon_auth import sign_response, verify_response
 from httk.workflow._daemon_protocol import (
     Request,
     Response,
@@ -379,6 +383,8 @@ def test_request_requires_enrollment_on_wire_and_refuses_unknown_fields() -> Non
         ("refused", {"reason": "policy_refused"}),
         ("refused", {"handle": HANDLE, "reason": "policy_refused"}),
         ("busy", {"reason": "capacity"}),
+        ("uncertain", {"handle": HANDLE, "reason": "submission_unconfirmed", "detail": "sbatch exited 1: no"}),
+        ("refused", {"reason": "scheduler_unavailable", "detail": '"\\ ~' * 250}),
     ],
 )
 def test_response_outcomes_round_trip(outcome: str, fields: dict[str, str]) -> None:
@@ -406,6 +412,7 @@ def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
     assert b'"handle"' not in encoded
     assert b'"scheduler_state"' not in encoded
     assert b'"reason"' not in encoded
+    assert b'"detail"' not in encoded
 
 
 @pytest.mark.parametrize(
@@ -429,6 +436,14 @@ def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
         {"outcome": "uncertain", "handle": None, "reason": "timeout"},
         {"outcome": "busy", "reason": None},
         {"outcome": "ready", "reason": "ok"},
+        {"outcome": "ready", "detail": "no reason"},
+        {"outcome": "status", "handle": HANDLE, "scheduler_state": "UNKNOWN", "detail": "no reason"},
+        {"outcome": "busy", "reason": "capacity", "detail": ""},
+        {"outcome": "busy", "reason": "capacity", "detail": "a" * 1001},
+        {"outcome": "busy", "reason": "capacity", "detail": "line\nbreak"},
+        {"outcome": "busy", "reason": "capacity", "detail": "\x7f"},
+        {"outcome": "busy", "reason": "capacity", "detail": "caf\u00e9"},
+        {"outcome": "busy", "reason": "capacity", "detail": 1},
     ],
 )
 def test_response_constructor_rejects_invalid_fields(kwargs: dict[str, object]) -> None:
@@ -451,6 +466,7 @@ def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
         valid.replace(b'"format_version":3', b'"format_version":true'),
         valid[:-1] + b',"old_field":1}',
         valid[:-1] + b',"handle":null}',
+        valid[:-1] + b',"detail":"no reason"}',
         valid.replace(b'"request_id":', b'"request_id":"' + REQUEST_ID.encode() + b'","request_id":'),
         valid.replace(b'"outcome":"ready"', b'"outcome":"ready","outcome":"busy"'),
         valid.replace(b'"outcome":"ready"', b'"outcome":NaN'),
@@ -462,3 +478,29 @@ def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
     for invalid in invalid_documents:
         with pytest.raises(ValueError):
             decode_response(invalid)
+
+
+def test_response_signature_covers_a_maximal_detail(tmp_path: Path) -> None:
+    seed = tmp_path / "response.seed"
+    seed.write_text(base64.b64encode(bytes([3]) * 32).decode("ascii") + "\n", encoding="ascii")
+    seed.chmod(0o600)
+    public_key = identity_public_key(seed)
+    assert public_key is not None
+    unsigned = Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "refused", HANDLE, None, "a" * 64)
+    response = sign_response(replace(unsigned, detail='"' * 1000), seed_path=seed)
+    assert decode_response(encode_response(response)) == response
+    verify_response(response, public_key)
+    with pytest.raises(ValueError, match="signature"):
+        verify_response(replace(response, detail="'" * 1000), public_key)
+
+
+def test_response_without_detail_keeps_its_version_three_encoding() -> None:
+    stored = (
+        b'{"enrollment_id":"' + ENROLLMENT_ID.encode() + b'","format":"httk-workspace-response","format_version":3,'
+        b'"handle":"' + HANDLE.encode() + b'","operator_key":null,"outcome":"uncertain",'
+        b'"reason":"submission_unconfirmed","request_digest":"' + REQUEST_DIGEST.encode() + b'",'
+        b'"request_id":"' + REQUEST_ID.encode() + b'","signature":null,"workspace_id":"' + WORKSPACE_ID.encode() + b'"}'
+    )
+    response = decode_response(stored)
+    assert response.detail is None
+    assert encode_response(response) == stored

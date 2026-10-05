@@ -403,6 +403,13 @@ bounded diagnostic and no response.
 - `cancel_requested` means the filtered cancellation call succeeded, not that
   termination is confirmed. Cancellation filters on controller-side job name
   and user to avoid acting on a reused numeric scheduler ID.
+- `uncertain`, `refused` and `busy` responses may carry a signed `detail`
+  string with the scheduler's own error, for example
+  `sbatch exited 1: sbatch: error: Batch job submission failed: Invalid account …`.
+
+The foreground daemon logs to stdout: one line per request (operation, request
+ID, outcome), each submitted Slurm job ID, every failed Slurm client call with
+its exit code and error output, and startup and check results.
 
 ### Quotas
 

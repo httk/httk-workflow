@@ -5,6 +5,8 @@ import base64
 import json
 import logging
 import sqlite3
+import subprocess
+import sys
 import threading
 from contextlib import ExitStack
 from dataclasses import replace
@@ -22,7 +24,7 @@ from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import Policy, Profile
 from httk.workflow._daemon_protocol import Request, Response, decode_response, encode_request
 from httk.workflow._daemon_service import Broker
-from httk.workflow._daemon_slurm import SchedulerError, SlurmGateway, Submission
+from httk.workflow._daemon_slurm import SchedulerError, SlurmGateway, Submission, UncertainSubmission
 from httk.workflow._daemon_state import Ledger
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
@@ -415,15 +417,16 @@ def test_status_cancel_failure_contracts_and_unknown_manager(tmp_path: Path) -> 
         status = _request(tmp_path, 3, "manager_status", handle=handle)
         _publish(broker, status)
         broker.process_once(threading.Event())
-        assert _read(broker, status).scheduler_state == "UNKNOWN"
+        assert (_read(broker, status).scheduler_state, _read(broker, status).detail) == ("UNKNOWN", None)
 
         gateway.cancel_error = True
         cancel = _request(tmp_path, 4, "cancel_manager", handle=handle)
         _publish(broker, cancel)
         broker.process_once(threading.Event())
-        assert (_read(broker, cancel).outcome, _read(broker, cancel).reason) == (
+        assert (_read(broker, cancel).outcome, _read(broker, cancel).reason, _read(broker, cancel).detail) == (
             "refused",
             "scheduler_unavailable",
+            "test cancel failure",
         )
     finally:
         stack.close()
@@ -666,34 +669,115 @@ def test_broker_validates_response_seed_before_admission(tmp_path: Path) -> None
         stack.close()
 
 
-def test_main_reports_state_recovery_guidance_but_hides_scheduler_details(
+def test_scheduler_failure_detail_is_signed_logged_and_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    message = "sbatch exited 1: sbatch: error: Invalid account or account/partition combination"
+
+    def refuse(_profile: Profile, _handle: str) -> Submission:
+        raise UncertainSubmission(message)
+
+    monkeypatch.setattr(broker.gateway, "submit", refuse)
+    try:
+        start = _request(tmp_path, 1, "start_manager", profile="cpu")
+        with caplog.at_level(logging.INFO, logger="httk.workflow"):
+            _publish(broker, start)
+            broker.process_once(threading.Event())
+        response = _read(broker, start)
+        assert (response.outcome, response.reason, response.detail) == ("uncertain", "submission_unconfirmed", message)
+        failures = [
+            record
+            for record in caplog.records
+            if record.name == service_module.__name__ and record.levelno == logging.WARNING
+        ]
+        assert len(failures) == 1 and message in failures[0].getMessage()
+        assert f"daemon_request request_id={start.request_id} operation=start_manager outcome=uncertain" in caplog.text
+        _publish(broker, start)
+        broker.process_once(threading.Event())
+        assert _read(broker, start) == response
+    finally:
+        stack.close()
+
+
+def test_requests_and_confirmed_submissions_are_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    try:
+        health = _request(tmp_path, 1)
+        start = _request(tmp_path, 2, "start_manager", profile="cpu")
+        with caplog.at_level(logging.INFO, logger="httk.workflow"):
+            _publish(broker, health)
+            _publish(broker, start)
+            broker.process_once(threading.Event())
+        handle = _read(broker, start).handle
+        assert f"daemon_submitted handle={handle} job_id=42 cluster=cluster-1" in caplog.text
+        assert (
+            f"daemon_request request_id={health.request_id} operation=health outcome=ready reason=None handle=None"
+            in caplog.text
+        )
+        assert (
+            f"daemon_request request_id={start.request_id} operation=start_manager outcome=submitted "
+            f"reason=None handle={handle}" in caplog.text
+        )
+    finally:
+        stack.close()
+
+
+def test_main_reports_state_recovery_guidance_and_scheduler_reasons(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    message = "preserve this state, reconcile outstanding work, and initialize a new enrollment"
-    monkeypatch.setattr(
-        service_module, "_run", lambda _arguments: (_ for _ in ()).throw(sqlite3.DatabaseError(message))
-    )
-    with caplog.at_level(logging.ERROR):
-        assert (
-            service_module.main(
-                ["--policy", "/tmp/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
+    for error in (
+        sqlite3.DatabaseError("preserve this state, reconcile outstanding work, and initialize a new enrollment"),
+        SchedulerError("squeue timed out: slurm_load_jobs error: Unable to contact slurm controller"),
+    ):
+        caplog.clear()
+        monkeypatch.setattr(service_module, "_run", lambda _arguments, error=error: (_ for _ in ()).throw(error))
+        with caplog.at_level(logging.ERROR):
+            assert (
+                service_module.main(
+                    ["--policy", "/tmp/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
+                )
+                == 1
             )
-            == 1
-        )
-    assert message in caplog.text
+        assert f"daemon_service_failed reason={error}" in caplog.text
 
-    caplog.clear()
-    secret = "scheduler raw output must stay hidden"
-    monkeypatch.setattr(service_module, "_run", lambda _arguments: (_ for _ in ()).throw(SchedulerError(secret)))
-    with caplog.at_level(logging.ERROR):
-        assert (
-            service_module.main(
-                ["--policy", "/tmp/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
-            )
-            == 1
-        )
-    assert "daemon_service_failed" in caplog.text
-    assert secret not in caplog.text
+
+def test_service_entry_point_logs_to_stdout() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", "-m", "httk.workflow._daemon_service", "--policy", "/x", "--policy-source", "/y"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 1 and result.stderr == ""
+    assert " ERROR daemon_service_failed reason=service policy must be /tmp/daemon-policy.json" in result.stdout
+
+
+def test_service_logs_check_and_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    for path in (policy.state, policy.requests, policy.responses, policy.workspace):
+        path.mkdir(parents=True)
+    initialize_response_seed(policy.state)
+    with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
+        pass
+    selected = tmp_path / "snapshots/selected.json"
+    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.state / "active.json").chmod(0o600)
+    monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
+    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured, _source: RecordingGateway(configured))
+    monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
+    monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    with caplog.at_level(logging.INFO, logger="httk.workflow"):
+        service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=False, once=True))
+    assert f"daemon_check_passed workspace={WORKSPACE_ID} cluster=cluster-1" in caplog.text
+    assert f"daemon_started workspace={WORKSPACE_ID} enrollment={ENROLLMENT_ID} launchers=cpu" in caplog.text
 
 
 def test_service_uses_the_host_view_tmp_destinations() -> None:

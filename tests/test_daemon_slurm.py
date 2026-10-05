@@ -118,10 +118,34 @@ def test_unconfirmed_submission_is_uncertain(policy: Policy, output: str) -> Non
         SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
 
 
-def test_nonzero_submission_does_not_echo_client_errors(policy: Policy) -> None:
-    _client(policy.sbatch, "sys.stdin.read()\nprint('private-token',file=sys.stderr)\nsys.exit(1)\n")
-    with pytest.raises(UncertainSubmission, match="^submission acceptance is unknown$"):
+def test_nonzero_submission_reports_the_client_error(policy: Policy) -> None:
+    _client(policy.sbatch, "sys.stdin.read()\nprint('sbatch: error: Invalid account',file=sys.stderr)\nsys.exit(1)\n")
+    with pytest.raises(UncertainSubmission, match="^sbatch exited 1: sbatch: error: Invalid account$"):
         SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+
+
+def test_unconfirmed_submission_reports_its_stdout(policy: Policy) -> None:
+    _client(policy.sbatch, "sys.stdin.read()\nprint('Submitted batch job 12')\n")
+    with pytest.raises(UncertainSubmission, match="^sbatch exited 0 without a confirmed job: Submitted batch job 12$"):
+        SlurmGateway(policy, Path("/trusted/policy.json")).submit(policy.profile("cpu"), _HANDLE)
+
+
+def test_client_error_excerpt_is_printable_and_bounded(policy: Policy) -> None:
+    _client(
+        policy.squeue,
+        "sys.stderr.buffer.write(b'bad\\x1b[31m\\tline\\r\\n\\xc3\\xa5\\xff\\x00 ' + b'x' * 2000)\nsys.exit(2)\n",
+    )
+    with pytest.raises(SchedulerError) as error:
+        SlurmGateway(policy, Path("/trusted/policy.json")).status("1", "cluster", _HANDLE)
+    message = str(error.value)
+    assert message.startswith("squeue exited 2: bad [31m line ?? x")
+    assert len(message) == len("squeue exited 2: ") + 500
+    assert all(" " <= character <= "~" for character in message)
+
+
+def test_unstartable_client_is_named(policy: Policy) -> None:
+    with pytest.raises(SchedulerError, match="^scancel could not start: .*No such file"):
+        SlurmGateway(policy, Path("/trusted/policy.json")).cancel("1", "cluster", _HANDLE)
 
 
 @pytest.mark.parametrize(
@@ -165,7 +189,7 @@ def test_cancel_sends_identity_filters_to_controller_without_lookup(policy: Poli
 
 def test_combined_output_is_bounded(policy: Policy) -> None:
     _client(policy.squeue, "sys.stdout.write('a'*800)\nsys.stdout.flush()\nsys.stderr.write('b'*800)\n")
-    with pytest.raises(SchedulerError, match="output exceeded"):
+    with pytest.raises(SchedulerError, match="^squeue output exceeded its limit"):
         _run([str(policy.squeue)], replace(policy, max_output_bytes=1024))
 
 
@@ -173,7 +197,7 @@ def test_combined_output_is_bounded(policy: Policy) -> None:
 def test_client_timeout_kills_process(policy: Policy, tmp_path: Path) -> None:
     record = tmp_path / "pid"
     _client(policy.squeue, f"open({str(record)!r},'w').write(str(os.getpid()))\ntime.sleep(10)\n")
-    with pytest.raises(SchedulerError, match="timed out"):
+    with pytest.raises(SchedulerError, match="^squeue timed out$"):
         _run([str(policy.squeue)], replace(policy, command_timeout=1.0))
     with pytest.raises(ProcessLookupError):
         os.kill(int(record.read_text()), 0)
@@ -182,8 +206,8 @@ def test_client_timeout_kills_process(policy: Policy, tmp_path: Path) -> None:
 def test_protected_slurm_conf_is_the_only_extra_environment(policy: Policy, tmp_path: Path) -> None:
     _client(policy.squeue, "print(os.environ['SLURM_CONF'])\n")
     policy = replace(policy, slurm_conf=tmp_path / "broker" / "slurm.conf")
-    code, output = _run([str(policy.squeue)], policy)
-    assert code == 0 and output.decode().strip() == str(policy.slurm_conf)
+    code, output, errors = _run([str(policy.squeue)], policy)
+    assert code == 0 and output.decode().strip() == str(policy.slurm_conf) and errors == b""
 
 
 def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Policy, tmp_path: Path) -> None:

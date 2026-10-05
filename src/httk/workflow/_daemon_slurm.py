@@ -37,8 +37,27 @@ class Submission:
     cluster: str
 
 
-def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: bool = False) -> tuple[int, bytes]:
-    """Run one trusted client with bounded input, output and lifetime."""
+def excerpt(text: str, limit: int = 500) -> str:
+    """Return printable single-line ASCII from untrusted client text.
+
+    :param text: Decoded client output or an error message.
+    :param limit: Largest returned length in characters.
+    :return: The text with non-ASCII as ``?``, controls as spaces, whitespace collapsed and cut to ``limit``.
+    """
+
+    ascii_text = text.encode("ascii", "replace").decode("ascii")
+    return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", ascii_text).split())[:limit]
+
+
+def _failure(argv: list[str], what: str, detail: bytes | str) -> SchedulerError:
+    """Describe one failed client call by basename, failure and output excerpt."""
+
+    text = excerpt(detail.decode("utf-8", "replace") if isinstance(detail, bytes) else detail)
+    return SchedulerError(f"{Path(argv[0]).name} {what}" + (f": {text}" if text else ""))
+
+
+def _run(argv: list[str], policy: Policy, *, data: bytes = b"") -> tuple[int, bytes, bytes]:
+    """Run one trusted client with bounded input, output and lifetime; return code, stdout and stderr."""
 
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
     if policy.slurm_conf is not None:
@@ -55,10 +74,10 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: 
             close_fds=True,
         )
     except OSError as exc:
-        raise SchedulerError("scheduler client could not start") from exc
+        raise _failure(argv, "could not start", str(exc)) from exc
 
     deadline = time.monotonic() + policy.command_timeout
-    output = bytearray()
+    output = {"stdout": bytearray(), "stderr": bytearray()}
     total = 0
     written = 0
     try:
@@ -73,7 +92,7 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: 
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise SchedulerError("scheduler client timed out")
+                    raise _failure(argv, "timed out", bytes(output["stderr"]))
                 for key, _ in selector.select(remaining):
                     if key.data == "stdin":
                         try:
@@ -91,15 +110,16 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: 
                             continue
                         total += len(chunk)
                         if total > policy.max_output_bytes:
-                            raise SchedulerError("scheduler output exceeded its limit")
-                        if key.data == "stdout" or combine_output:
-                            output.extend(chunk)
+                            raise _failure(argv, "output exceeded its limit", bytes(output["stderr"]))
+                        output[key.data].extend(chunk)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise SchedulerError("scheduler client timed out")
-            return process.wait(timeout=remaining), bytes(output)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SchedulerError("scheduler client failed") from exc
+                raise _failure(argv, "timed out", bytes(output["stderr"]))
+            return process.wait(timeout=remaining), bytes(output["stdout"]), bytes(output["stderr"])
+    except subprocess.TimeoutExpired as exc:
+        raise _failure(argv, "timed out", bytes(output["stderr"])) from exc
+    except OSError as exc:
+        raise _failure(argv, "failed", str(exc)) from exc
     finally:
         # Clients may leave a helper holding a pipe after their leader exits.
         try:
@@ -110,6 +130,15 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"", combine_output: 
         for closing_stream in (process.stdin, process.stdout, process.stderr):
             if closing_stream is not None:
                 closing_stream.close()
+
+
+def _checked(argv: list[str], policy: Policy, *, data: bytes = b"") -> bytes:
+    """Run one client, refuse a nonzero exit with its stderr excerpt, and return stdout."""
+
+    code, stdout, stderr = _run(argv, policy, data=data)
+    if code != 0:
+        raise _failure(argv, f"exited {code}", stderr)
+    return stdout
 
 
 class SlurmGateway:
@@ -134,22 +163,21 @@ class SlurmGateway:
         if self.policy.mpi is not None:
             executables.append(self.policy.mpi.srun)
         for executable in executables:
-            code, output = _run([str(executable), "--version"], self.policy)
+            code, output, errors = _run([str(executable), "--version"], self.policy)
             try:
                 match = _VERSION.fullmatch(output.decode("ascii"))
             except UnicodeDecodeError:
                 match = None
             if code != 0 or match is None or tuple(int(part) for part in match.groups()) < (23, 11, 6):
-                # Rerun once with stderr included: wrappers and loaders report failures there.
-                _code, combined = _run([str(executable), "--version"], self.policy, combine_output=True)
-                printed = combined.decode("utf-8", "replace").strip()[:200]
+                # Wrappers and loaders report failures on stderr.
+                printed = (output + errors).decode("utf-8", "replace").strip()[:200]
                 raise SchedulerError(
                     f"Slurm 23.11.6 or newer clients are required: {executable} --version "
                     f"exited {code} and printed {printed!r}"
                 )
         if self.policy.mpi is not None:
-            code, output = _run([str(self.policy.mpi.srun), "--mpi=list"], self.policy, combine_output=True)
-            if code != 0 or re.search(rb"(?m)^\s*pmix\s*$", output) is None:
+            code, output, errors = _run([str(self.policy.mpi.srun), "--mpi=list"], self.policy)
+            if code != 0 or re.search(rb"(?m)^\s*pmix\s*$", output + errors) is None:
                 raise SchedulerError("Slurm direct-launch pmix plugin is required")
 
     def _script(self, profile: Profile, handle: str) -> bytes:
@@ -209,18 +237,17 @@ class SlurmGateway:
         if profile.reservation is not None:
             argv.append(f"--reservation={profile.reservation}")
         try:
-            code, output = _run(argv, self.policy, data=self._script(profile, handle))
-            fields = output.decode("ascii").strip().split(";")
+            output = _checked(argv, self.policy, data=self._script(profile, handle))
+            fields = output.decode("ascii", "replace").strip().split(";")
             if (
-                code != 0
-                or len(fields) not in (1, 2)
+                len(fields) not in (1, 2)
                 or _JOB.fullmatch(fields[0]) is None
                 or (len(fields) == 2 and fields[1] != self.policy.cluster)
             ):
-                raise SchedulerError("submission output did not confirm the job")
+                raise _failure(argv, "exited 0 without a confirmed job", output)
             return Submission(fields[0], self.policy.cluster)
-        except (SchedulerError, UnicodeDecodeError) as exc:
-            raise UncertainSubmission("submission acceptance is unknown") from exc
+        except SchedulerError as exc:
+            raise UncertainSubmission(str(exc)) from exc
 
     def status(self, job_id: str, cluster: str, handle: str) -> str:
         """Read active status only when the recorded job identity matches.
@@ -234,7 +261,7 @@ class SlurmGateway:
 
         if cluster != self.policy.cluster:
             raise SchedulerError("recorded cluster is outside the current policy")
-        code, output = _run(
+        output = _checked(
             [
                 str(self.policy.squeue),
                 "--noheader",
@@ -246,8 +273,6 @@ class SlurmGateway:
             ],
             self.policy,
         )
-        if code != 0:
-            raise SchedulerError("scheduler status is unavailable")
         try:
             lines = [line.strip() for line in output.decode("ascii").splitlines() if line.strip()]
         except UnicodeDecodeError as exc:
@@ -278,7 +303,7 @@ class SlurmGateway:
 
         if cluster != self.policy.cluster:
             raise SchedulerError("recorded cluster is outside the current policy")
-        code, _ = _run(
+        _checked(
             [
                 str(self.policy.scancel),
                 "--ctld",
@@ -289,5 +314,3 @@ class SlurmGateway:
             ],
             self.policy,
         )
-        if code != 0:
-            raise SchedulerError("scheduler cancellation request failed")

@@ -5,6 +5,7 @@ import logging
 import re
 import signal
 import sqlite3
+import sys
 import threading
 from contextlib import ExitStack
 from pathlib import Path
@@ -17,7 +18,7 @@ from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_policy import Policy, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
-from ._daemon_slurm import SchedulerError, SlurmGateway, Submission
+from ._daemon_slurm import SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class Broker:
         self.response_seed = response_seed
 
     @staticmethod
-    def _response(request: Request, outcome: str, **fields: str) -> Response:
+    def _response(request: Request, outcome: str, **fields: str | None) -> Response:
         return Response(
             request.request_id,
             request.workspace_id,
@@ -79,6 +80,14 @@ class Broker:
 
         signed = sign_response(response, seed_path=self.response_seed)
         self.responses.replace(f"{request.request_id}.json", encode_response(signed))
+        _LOGGER.info(
+            "daemon_request request_id=%s operation=%s outcome=%s reason=%s handle=%s",
+            request.request_id,
+            request.operation,
+            response.outcome,
+            response.reason,
+            response.handle,
+        )
         try:
             self.requests.remove(publication)
         except FileNotFoundError:
@@ -96,6 +105,20 @@ class Broker:
         handle = entry.handle if request.operation == "start_manager" else request.handle
         response = self._response(request, "refused", reason=reason, **({"handle": handle} if handle else {}))
         return self._finished_response(self.ledger.finish(request.request_id, response))
+
+    @staticmethod
+    def _scheduler_failed(request: Request, handle: str, exc: SchedulerError) -> str | None:
+        """Log one failed scheduler call and return its bounded response detail."""
+
+        detail = excerpt(str(exc), 1000) or None
+        _LOGGER.warning(
+            "daemon_scheduler_failed request_id=%s operation=%s handle=%s detail=%s",
+            request.request_id,
+            request.operation,
+            handle,
+            detail,
+        )
+        return detail
 
     @staticmethod
     def _finished_response(entry: Entry) -> Response:
@@ -131,16 +154,20 @@ class Broker:
                 or submission.cluster != self.policy.cluster
             ):
                 raise SchedulerError("invalid protected submission identity")
-        except SchedulerError:
+        except SchedulerError as exc:
             response = self._response(
                 request,
                 "uncertain",
                 handle=submitting.handle,
                 reason="submission_unconfirmed",
+                detail=self._scheduler_failed(request, submitting.handle, exc),
             )
             completed = self.ledger.finish(request.request_id, response)
             return self._finished_response(completed)
 
+        _LOGGER.info(
+            "daemon_submitted handle=%s job_id=%s cluster=%s", submitting.handle, submission.job_id, submission.cluster
+        )
         response = self._response(request, "submitted", handle=submitting.handle)
         completed = self.ledger.finish(
             request.request_id,
@@ -174,7 +201,9 @@ class Broker:
                     handle=request.handle,
                     scheduler_state=scheduler_state,
                 )
-            except SchedulerError:
+            except SchedulerError as exc:
+                # A status outcome carries no reason, so the detail is only logged.
+                self._scheduler_failed(request, request.handle, exc)
                 response = self._response(
                     request,
                     "status",
@@ -185,12 +214,13 @@ class Broker:
             try:
                 self.gateway.cancel(manager.job_id, manager.cluster, request.handle)
                 response = self._response(request, "cancel_requested", handle=request.handle)
-            except SchedulerError:
+            except SchedulerError as exc:
                 response = self._response(
                     request,
                     "refused",
                     handle=request.handle,
                     reason="scheduler_unavailable",
+                    detail=self._scheduler_failed(request, request.handle, exc),
                 )
         completed = self.ledger.finish(request.request_id, response)
         return self._finished_response(completed)
@@ -355,6 +385,7 @@ def _run(arguments: argparse.Namespace) -> None:
             except SchedulerError as exc:
                 # Only the clients' own --version output: safe and needed to diagnose the operator's setup.
                 raise ValueError(f"scheduler client check failed: {exc}") from exc
+            _LOGGER.info("daemon_check_passed workspace=%s cluster=%s", policy.workspace_id, policy.cluster)
             exchange = _ROOT_DIRECTORY / policy.exchange.name
             requests = stack.enter_context(MailboxDirectory(exchange / "requests"))
             responses = stack.enter_context(MailboxDirectory(exchange / "responses"))
@@ -363,6 +394,12 @@ def _run(arguments: argparse.Namespace) -> None:
             mover = ExchangeMover(_ROOT_DIRECTORY, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
             ledger.recover()
             broker = Broker(policy, gateway, ledger, requests, responses, exchange=mover, response_seed=seed)
+            _LOGGER.info(
+                "daemon_started workspace=%s enrollment=%s launchers=%s",
+                policy.workspace_id,
+                policy.enrollment_id,
+                ",".join(profile.name for profile in policy.profiles),
+            )
             broker.run(stop, once=arguments.once)
     finally:
         signal.signal(signal.SIGINT, previous_int)
@@ -370,15 +407,14 @@ def _run(arguments: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the fixed daemon service command and return a process status."""
+    """Run the fixed daemon service command, logging to stdout, and return a process status."""
 
+    # The service entry point owns the process; library modules stay handler-free.
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         arguments = _parser().parse_args(argv)
         _run(arguments)
-    except SchedulerError:
-        _LOGGER.error("daemon_service_failed")
-        return 1
-    except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+    except (OSError, ValueError, sqlite3.DatabaseError, SchedulerError) as exc:
         _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
     return 0
