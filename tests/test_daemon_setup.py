@@ -264,14 +264,20 @@ def test_workspace_alias_initializes_and_hands_canonical_path_to_bootstrap(
     assert argv[argv.index("--policy") + 1] == str(snapshot)
 
 
+def _pass_sandbox_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Setup now ends with the real sandboxed check, which needs user namespaces this host lacks.
+    monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0))
+
+
 def test_relative_cli_paths_initialize_from_inside_the_workspace_and_print_the_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     layout = _layout(tmp_path)
+    _pass_sandbox_check(monkeypatch)
     monkeypatch.chdir(layout.workspace.root)
     arguments = [".", "--initialize", "--exchange", "../exchange", "--launcher", "large", "--authorize", AUTHORIZED_KEY]
     assert _daemon_cli.command(arguments, program="httk") == 0
-    assert capsys.readouterr().out == f"launcher large\nauthorized {AUTHORIZED_KEY}\n"
+    assert capsys.readouterr().out == f"launcher large\nauthorized {AUTHORIZED_KEY}\nsandbox check passed\n"
     assert (layout.exchange / "endpoint.json").is_file()
 
 
@@ -449,8 +455,11 @@ def test_force_does_not_lift_the_hard_ceiling(key: str, tmp_path: Path) -> None:
     assert "--force" not in str(refusal.value)
 
 
-def test_force_on_reload_and_through_the_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_force_on_reload_and_through_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     layout = _layout(tmp_path)
+    _pass_sandbox_check(monkeypatch)
     workspace = str(layout.workspace.root)
     setup = ["--launcher", "small", "--authorize", AUTHORIZED_KEY]
     initialize = [workspace, "--initialize", "--exchange", str(layout.exchange), *setup]
