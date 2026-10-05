@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._daemon_bootstrap import _operator_environment
 from ._daemon_policy import Policy, Profile
 
 _VERSION = re.compile(r"slurm (\d+)\.(\d+)\.(\d+)(?:[.-][A-Za-z0-9.-]+)?\s*\Z")
@@ -77,7 +78,9 @@ def _failure(argv: list[str], what: str, detail: bytes | str) -> SchedulerError:
 def _run(argv: list[str], policy: Policy, *, data: bytes = b"") -> tuple[int, bytes, bytes]:
     """Run one trusted client with bounded input, output and lifetime; return code, stdout and stderr."""
 
-    environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    # Inside the broker os.environ is the filtered operator environment with a private HOME; the C locale
+    # keeps the parsed client output stable.
+    environment = {"PATH": "/usr/bin:/bin", **_operator_environment(os.environ), "LANG": "C", "LC_ALL": "C"}
     if policy.slurm_conf is not None:
         environment["SLURM_CONF"] = str(policy.slurm_conf)
     try:

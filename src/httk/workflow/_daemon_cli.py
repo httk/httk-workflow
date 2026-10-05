@@ -9,6 +9,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from ._daemon_bootstrap import _operator_environment
+
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare the explicit local daemon arguments.
@@ -78,6 +80,12 @@ def _close_inherited() -> None:
 _CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
 
+def _launch_environment() -> dict[str, str]:
+    """Return the filtered trusted operator environment, with the clean defaults as fallbacks."""
+
+    return _CLEAN_ENV | _operator_environment(os.environ)
+
+
 def _bootstrap_argv(workspace: Path, *, state: Path | None, snapshots: Path | None, flag: str | None) -> list[str]:
     """Build the isolated bootstrap command line for the active policy.
 
@@ -111,7 +119,7 @@ def _check_after_setup(workspace: Path, *, state: Path | None, snapshots: Path |
     try:
         argv = _bootstrap_argv(workspace, state=state, snapshots=snapshots, flag="--check")
         code = subprocess.run(
-            argv, stdin=subprocess.DEVNULL, cwd="/", env=_CLEAN_ENV, close_fds=True, check=False
+            argv, stdin=subprocess.DEVNULL, cwd="/", env=_launch_environment(), close_fds=True, check=False
         ).returncode
     except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
@@ -195,7 +203,7 @@ def launch(arguments: argparse.Namespace) -> int:
             if descriptor != 0:
                 os.close(descriptor)
         _close_inherited()
-        os.execve(sys.executable, argv, _CLEAN_ENV)
+        os.execve(sys.executable, argv, _launch_environment())
     except OSError:
         print("httk workspace daemon: isolated bootstrap could not start", file=sys.stderr)
         return 2

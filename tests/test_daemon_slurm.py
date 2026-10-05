@@ -51,7 +51,7 @@ def policy(tmp_path: Path) -> Policy:
     )
 
 
-def test_submission_uses_fixed_script_stdin_and_clean_environment(
+def test_submission_uses_fixed_script_stdin_and_filtered_environment(
     policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = tmp_path / "call.json"
@@ -60,8 +60,10 @@ def test_submission_uses_fixed_script_stdin_and_clean_environment(
         f"open({str(record)!r}, 'w').write(json.dumps([sys.argv, dict(os.environ), sys.stdin.read()]))\n"
         "print('123;cluster')\n",
     )
-    for name in ("SBATCH_WRAP", "SLURM_CLUSTERS", "PYTHONPATH", "BASH_ENV", "SSH_AUTH_SOCK", "LD_PRELOAD"):
+    for name in ("SBATCH_WRAP", "SBATCH_PARTITION", "SLURM_CLUSTERS", "PYTHONPATH", "BASH_ENV", "LD_PRELOAD"):
         monkeypatch.setenv(name, "untrusted")
+    monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
+    monkeypatch.setenv("LANG", "sv_SE.UTF-8")
     gateway = SlurmGateway(policy, tmp_path / "policy with spaces.json")
     result = gateway.submit(policy.profile("cpu"), _HANDLE)
     assert (result.job_id, result.cluster) == ("123", "cluster")
@@ -74,7 +76,11 @@ def test_submission_uses_fixed_script_stdin_and_clean_environment(
     assert "--job-name=httk-" + _HANDLE in argv
     assert "--partition=batch" in argv and "--account=science" in argv
     assert all(not item.endswith(".sbatch") for item in argv)
-    assert environment == {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    assert environment["NSC_RESOURCE_NAME"] == "tetralith"
+    assert environment["LANG"] == environment["LC_ALL"] == "C"
+    assert not {"SBATCH_WRAP", "SBATCH_PARTITION", "SLURM_CLUSTERS", "PYTHONPATH", "BASH_ENV", "LD_PRELOAD"} & set(
+        environment
+    )
     assert script.startswith("#!/bin/sh\nexec ")
     assert " -I -S " in script and "_daemon_bootstrap.py" in script
     assert "--mode payload --profile cpu --handle " + _HANDLE in script
@@ -204,11 +210,19 @@ def test_client_timeout_kills_process(policy: Policy, tmp_path: Path) -> None:
         os.kill(int(record.read_text()), 0)
 
 
-def test_protected_slurm_conf_is_the_only_extra_environment(policy: Policy, tmp_path: Path) -> None:
-    _client(policy.squeue, "print(os.environ['SLURM_CONF'])\n")
+def test_protected_slurm_conf_overrides_the_operator_environment(
+    policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _client(policy.squeue, "print(json.dumps(dict(os.environ)))\n")
+    monkeypatch.setenv("SLURM_CONF", "/operator/slurm.conf")
+    monkeypatch.setenv("SBATCH_PARTITION", "other")
+    monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
     policy = replace(policy, slurm_conf=tmp_path / "broker" / "slurm.conf")
     code, output, errors = _run([str(policy.squeue)], policy)
-    assert code == 0 and output.decode().strip() == str(policy.slurm_conf) and errors == b""
+    assert code == 0 and errors == b""
+    environment = json.loads(output)
+    assert environment["SLURM_CONF"] == str(policy.slurm_conf) and environment["NSC_RESOURCE_NAME"] == "tetralith"
+    assert environment["LANG"] == environment["LC_ALL"] == "C" and "SBATCH_PARTITION" not in environment
 
 
 def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Policy, tmp_path: Path) -> None:
@@ -368,7 +382,7 @@ def _sacct(policy: Policy, tmp_path: Path, *rows: str) -> Policy:
     return accounting
 
 
-def test_accounting_reads_the_matching_row_in_the_clean_environment(policy: Policy, tmp_path: Path) -> None:
+def test_accounting_reads_the_matching_row_in_the_c_locale(policy: Policy, tmp_path: Path) -> None:
     user = str(os.getuid())
     name = f"httk-{_HANDLE}"
     accounting = _sacct(
@@ -393,7 +407,7 @@ def test_accounting_reads_the_matching_row_in_the_clean_environment(policy: Poli
         "-P",
         "--format=JobID,JobName,UID,State,ExitCode,Start,End",
     ]
-    assert environment == {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    assert environment["LANG"] == environment["LC_ALL"] == "C" and "SLURM_CONF" not in environment
 
 
 def test_accounting_normalizes_cancellation_and_unset_times(policy: Policy, tmp_path: Path) -> None:

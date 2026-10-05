@@ -119,7 +119,14 @@ def _run(
     environment = {name: value for name, value in os.environ.items() if not name.startswith("SLURM_")}
     environment.update(slurm or {})
     environment.update(
-        {"PYTHONPATH": str(hostile), "PYTHONSTARTUP": str(hostile / "sitecustomize.py"), "POISON": "yes"}
+        {
+            "PYTHONPATH": str(hostile),
+            "PYTHONSTARTUP": str(hostile / "sitecustomize.py"),
+            "POISON": "yes",
+            "NSC_RESOURCE_NAME": "tetralith",
+            "SBATCH_ACCOUNT": "other",
+            "XDG_RUNTIME_DIR": "/run/user/1",
+        }
     )
     result = subprocess.run(
         [sys.executable, "-I", "-S", str(BOOTSTRAP), "--policy", str(policy_path), *arguments],
@@ -184,6 +191,56 @@ def test_descriptor_cleanup_is_idempotent_and_closes_new_fd_after_close_error(
     assert closed == [10, 11]
 
 
+def test_operator_environment_drops_submission_interpreter_and_malformed_variables(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    operator_environment = runpy.run_path(str(BOOTSTRAP))["_operator_environment"]
+    dropped = {
+        **{f"{prefix}X": "1" for prefix in ("SBATCH_", "SALLOC_", "SRUN_", "SLURM_", "PYTHON")},
+        **dict.fromkeys(("BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH", "1BAD", "BAD-NAME", "A=B", ""), "1"),
+        "NUL": "a\0b",
+    }
+    kept = {"NSC_RESOURCE_NAME": "tetralith", "MODULEPATH": "/software/modules", "SLURM_CONF": "/etc/s.conf"}
+    assert operator_environment({**dropped, **kept}) == dict(sorted(kept.items()))
+    assert capsys.readouterr().err == ""
+
+    many = {f"V{index:04d}": "x" for index in range(600)}
+    assert list(operator_environment(many)) == sorted(many)[:512]
+    assert capsys.readouterr().err.count("was dropped from V0512") == 1
+    large = {f"V{index}": "x" * 100 * 1024 for index in range(3)}
+    assert list(operator_environment(large)) == ["V0", "V1"]
+    assert "was dropped from V2" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["payload", "allocation", "mpi-rank"])
+def test_job_and_allocation_sandboxes_keep_the_fixed_environment(
+    mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
+    monkeypatch.setenv("SBATCH_ACCOUNT", "other")
+    policy = SimpleNamespace(
+        bwrap=Path("/usr/bin/bwrap"),
+        isolate_network=True,
+        slurm_conf=tmp_path / "slurm.conf",
+        mpi=SimpleNamespace(environment={}),
+    )
+    argv = api["_base_bwrap_argv"](policy, mode, block_userns=True)
+    assert (
+        _set_environment(argv)
+        == api["_FIXED_ENVIRONMENT"]
+        == {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/tmp/home",
+            "TMPDIR": "/tmp",
+            "LANG": "C.UTF-8",
+        }
+    )
+    assert argv.count("--setenv") == 4 and "/tmp/home/.cache" not in argv
+    broker = _set_environment(api["_base_bwrap_argv"](policy, "broker", block_userns=True))
+    assert broker["NSC_RESOURCE_NAME"] == "tetralith" and broker["SLURM_CONF"] == str(policy.slurm_conf)
+
+
 def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
     leak = tmp_path / "inherited-secret"
@@ -212,12 +269,13 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     ):
         assert option in argv
     assert argv[argv.index("--cap-drop") + 1] == "ALL"
-    assert _set_environment(argv) == {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/tmp/home",
-        "TMPDIR": "/tmp",
-        "LANG": "C.UTF-8",
-    }
+    environment = _set_environment(argv)
+    assert environment["NSC_RESOURCE_NAME"] == "tetralith" and environment["POISON"] == "yes"
+    assert environment["HOME"] == "/tmp/home" and environment["XDG_CACHE_HOME"] == "/tmp/home/.cache"
+    assert environment["TMPDIR"] == "/tmp" and environment["PATH"] == os.environ["PATH"]
+    assert not {"SBATCH_ACCOUNT", "XDG_RUNTIME_DIR", "PYTHONPATH", "PYTHONSTARTUP"} & set(environment)
+    assert not any(name.startswith("SBATCH_") for name in environment)
+    assert "/tmp/home/.cache" in [argv[index + 1] for index, item in enumerate(argv) if item == "--dir"]
     # The broker sees the host read-only; every directory it adds lies on its private /tmp.
     mounts = argv.index("--ro-bind")
     assert argv[mounts : mounts + 10] == [

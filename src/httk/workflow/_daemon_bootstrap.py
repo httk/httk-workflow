@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -76,6 +77,47 @@ _FIXED_ENVIRONMENT = {
     "TMPDIR": "/tmp",
     "LANG": "C.UTF-8",
 }
+# The trusted operator environment reaches the broker; scheduler input variables would change submissions,
+# and interpreter or loader variables would change the broker's Python or the host Slurm clients.
+_OPERATOR_DROPPED_PREFIXES = ("SBATCH_", "SALLOC_", "SRUN_", "SLURM_", "PYTHON")
+_OPERATOR_DROPPED = frozenset({"BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH"})
+_OPERATOR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_OPERATOR_LIMIT = 512
+_OPERATOR_BYTES = 256 * 1024
+# The broker's home and cache lie on its private /tmp: the host view, including the passwd home, is read-only.
+_BROKER_ENVIRONMENT = {"HOME": "/tmp/home", "XDG_CACHE_HOME": "/tmp/home/.cache", "TMPDIR": "/tmp"}
+_BROKER_UNSET = ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME")
+
+
+def _operator_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """Filter the trusted operator environment passed to the broker and its Slurm clients.
+
+    :param environ: The operator environment, usually ``os.environ``.
+    :return: The kept variables in name order, bounded in count and size.
+    """
+
+    kept: dict[str, str] = {}
+    total = 0
+    for name in sorted(environ):
+        value = environ[name]
+        if (
+            (name.startswith(_OPERATOR_DROPPED_PREFIXES) and name != "SLURM_CONF")
+            or name in _OPERATOR_DROPPED
+            or not _OPERATOR_NAME.match(name)
+            or "\0" in value
+        ):
+            continue
+        total += len(os.fsencode(name)) + len(os.fsencode(value)) + 2
+        # ponytail: a full bound drops the alphabetically last variables; rank them if a site ever hits it.
+        if len(kept) == _OPERATOR_LIMIT or total > _OPERATOR_BYTES:
+            print(
+                f"httk workspace daemon: operator environment beyond {_OPERATOR_LIMIT} variables or "
+                f"{_OPERATOR_BYTES} bytes was dropped from {name}",
+                file=sys.stderr,
+            )
+            break
+        kept[name] = value
+    return kept
 
 
 @dataclass(slots=True)
@@ -581,7 +623,14 @@ def _base_bwrap_argv(
         "--die-with-parent",
         "--clearenv",
     ]
-    for name, value in _FIXED_ENVIRONMENT.items():
+    environment = dict(_FIXED_ENVIRONMENT)
+    if mode == "broker":
+        environment |= _operator_environment(os.environ) | _BROKER_ENVIRONMENT
+        for name in _BROKER_UNSET:
+            environment.pop(name, None)
+        if policy.slurm_conf is not None:
+            environment["SLURM_CONF"] = str(policy.slurm_conf)
+    for name, value in environment.items():
         argv += ["--setenv", name, value]
     if mode == "mpi-rank":
         assert policy.mpi is not None
@@ -589,11 +638,11 @@ def _base_bwrap_argv(
         environment.update(policy.mpi.environment)
         for name, value in environment.items():
             argv += ["--setenv", name, value]
-    if mode == "broker" and policy.slurm_conf is not None:
-        argv += ["--setenv", "SLURM_CONF", str(policy.slurm_conf)]
     if mode in _HOST_VIEW_MODES:
         # Recursive, so host submounts (/software, /etc, the munge socket) come in read-only as well.
         argv += ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home"]
+        if mode == "broker":
+            argv += ["--dir", "/tmp/home/.cache"]
         return argv
     # Payload sandboxes start from Bubblewrap's own empty tmpfs root; only these private paths
     # and the descriptor-backed mounts below are then added to it.

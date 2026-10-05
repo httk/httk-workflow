@@ -97,7 +97,14 @@ whole host filesystem read-only: Slurm clients and site wrappers, `slurm.conf`,
 munge, the user database (`/etc/passwd`, SSSD) and DNS work without
 configuration. It can write only the dedicated parent and its private state,
 and has the host network that Slurm needs. It moves directories between the
-exchange and the workspace staging area and never reads their content. The MPI
+exchange and the workspace staging area and never reads their content.
+The broker and its Slurm clients inherit the environment the daemon was
+started in, so site wrappers find their module and site variables; only
+`SBATCH_*`, `SALLOC_*`, `SRUN_*` and `SLURM_*` (except `SLURM_CONF`),
+`PYTHON*`, `BASH_ENV`, `ENV`, `LD_PRELOAD` and `LD_LIBRARY_PATH` are dropped.
+`HOME` and `XDG_CACHE_HOME` point at a writable private `/tmp/home`, and the
+clients whose output the broker parses run in the C locale; job sandboxes keep
+a fixed minimal environment. The MPI
 allocation service (see [MPI applications](#mpi-applications)) runs the same
 way, writing only its control directory.
 
@@ -147,6 +154,7 @@ httk workflow launcher add --template daemon --global small \
 
 Names match `[a-z][a-z0-9_-]{0,63}`. A `slurm` launcher cannot be approved.
 Unknown keys are refused when the launcher is added and again at setup.
+Extend a path list such as `daemon.readonly_paths` without restating its computed default with `launcher configure --add-path daemon.readonly_paths=/software NAME`.
 
 Resource keys, per launcher:
 

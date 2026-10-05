@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -127,7 +128,7 @@ from httk.workflow import _daemon_setup
 _daemon_setup.active_policy_path = lambda workspace, **_: __import__('pathlib').Path('/active/runtime.json')
 fd = os.open({str(outside)!r}, os.O_RDONLY)
 os.set_inheritable(fd, True)
-os.environ.update(PYTHONPATH={str(untrusted)!r}, BASH_ENV='untrusted', SSH_AUTH_SOCK='untrusted')
+os.environ.update(PYTHONPATH={str(untrusted)!r}, BASH_ENV='untrusted', SBATCH_ACCOUNT='other', NSC_RESOURCE_NAME='x')
 os.chdir({str(untrusted)!r})
 raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--once'], program='httk workspace daemon'))
 """
@@ -141,7 +142,8 @@ raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--once'], program='htt
     assert str(outside) not in observed["targets"]
     assert not trap.exists()
     assert "PYTHONPATH" not in observed["env"] and "BASH_ENV" not in observed["env"]
-    assert "SSH_AUTH_SOCK" not in observed["env"]
+    assert "SBATCH_ACCOUNT" not in observed["env"] and observed["env"]["NSC_RESOURCE_NAME"] == "x"
+    assert observed["env"]["PATH"] == os.environ["PATH"]
     assert observed["argv"][1:] == [
         "--mode",
         "broker",
@@ -276,6 +278,8 @@ def _setup_with_check(
             raise outcome
         return subprocess.CompletedProcess(argv, outcome)
 
+    monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
+    monkeypatch.setenv("SBATCH_ACCOUNT", "other")
     monkeypatch.setattr(_daemon_setup, mode, setup)
     monkeypatch.setattr(_daemon_setup, "active_policy_path", lambda *_a, **_k: tmp_path / "active.json")
     monkeypatch.setattr(_daemon_cli.subprocess, "run", run)
@@ -298,13 +302,10 @@ def test_setup_runs_one_clean_sandbox_check_and_reports_success(
     argv = argvs[0]
     assert isinstance(argv, list) and argv[-1] == "--check" and argv[argv.index("--mode") + 1] == "broker"
     assert argv == _daemon_cli._bootstrap_argv(tmp_path / "ws", state=None, snapshots=None, flag="--check")
-    assert runs[0] == {
-        "stdin": subprocess.DEVNULL,
-        "cwd": "/",
-        "env": {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-        "close_fds": True,
-        "check": False,
-    }
+    environment = runs[0].pop("env")
+    assert runs[0] == {"stdin": subprocess.DEVNULL, "cwd": "/", "close_fds": True, "check": False}
+    assert isinstance(environment, dict) and environment == _daemon_cli._launch_environment()
+    assert environment["NSC_RESOURCE_NAME"] == "tetralith" and "SBATCH_ACCOUNT" not in environment
     assert capsys.readouterr().out.endswith("sandbox check passed\n")
 
 
@@ -329,10 +330,16 @@ def test_run_mode_and_setup_check_share_the_bootstrap_argv(tmp_path: Path, monke
         raise OSError("stop")
 
     monkeypatch.setattr(_daemon_cli.os, "execve", execve)
+    monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
+    monkeypatch.setenv("SBATCH_ACCOUNT", "other")
+    monkeypatch.delenv("PATH")
     monkeypatch.setattr(_daemon_cli.os, "chdir", lambda _p: None)
     monkeypatch.setattr(_daemon_cli, "_close_inherited", lambda: None)
     monkeypatch.setattr(_daemon_cli.os, "dup2", lambda *_a, **_k: 0)
     monkeypatch.setattr(_daemon_cli.os, "set_inheritable", lambda *_a: None)
     assert _daemon_cli.command([str(tmp_path), "--check"], program="httk") == 2
     expected = _daemon_cli._bootstrap_argv(tmp_path, state=None, snapshots=None, flag="--check")
-    assert execs == [(sys.executable, expected, {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})]
+    assert [(path, argv) for path, argv, _ in execs] == [(sys.executable, expected)]
+    environment = execs[0][2]
+    assert environment["NSC_RESOURCE_NAME"] == "tetralith" and "SBATCH_ACCOUNT" not in environment
+    assert environment["PATH"] == "/usr/bin:/bin" and environment["LANG"] == os.environ.get("LANG", "C.UTF-8")
