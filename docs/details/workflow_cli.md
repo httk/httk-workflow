@@ -132,7 +132,7 @@ tunes scheduling (see [below](#policy-integrity-and-locks)). They are edited by
 name:
 
 ```console
-httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" my-workspace
+httk workspace settings set --key vasp.command --value vasp_std my-workspace
 httk workspace settings show my-workspace
 httk workspace settings unset --key vasp.command my-workspace
 ```
@@ -842,7 +842,7 @@ httk workflow remote configure \
 httk workflow remote check kappa
 httk workspace init kappa:/scratch/rar/httk/runs
 httk workspace settings set --key slurm.partition --value batch kappa:runs
-httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
+httk workspace settings set --key vasp.command --value vasp_std kappa:runs
 httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 httk job transfer --job JOB-ID default kappa:runs
 httk workflow run --workspace kappa:runs --workers 8

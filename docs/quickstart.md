@@ -58,8 +58,9 @@ $ httk collect --into results.sqlite --id-base httk.quickstart
 $ httk workflow postprocess --script relaxation-plot
 ```
 
-On a VASP machine, set `vasp.command` to a command such as
-`"srun -n 32 vasp_std"` instead. If the machine needs shell setup first — a
+On a VASP machine, set `vasp.command` to the bare program, such as
+`vasp_std`, instead; the parallel start (`srun` or `mpirun`) comes from the
+attempt's launch prefix, not from the command. If the machine needs shell setup first — a
 `module load`, a `source activate` — put it in a prelude rather than in
 `vasp.command`; see [Environment preludes](workspaces.md#environment-preludes).
 
@@ -97,7 +98,9 @@ silicon--0c4f…	/…/jobs/silicon--0c4f…
 **`settings set`** stored workspace state that travels with the job wherever it
 runs. The manager exports scalar settings into each attempt environment, so
 `vasp.command` becomes `HTTK_VASP_COMMAND`; a real VASP machine can set it to
-`"srun -n 32 vasp_std"`. A real environment variable remains a deployment
+`vasp_std`. The setting names only the program; the manager supplies the
+parallel start through the attempt's launch prefix, and the process count comes
+from the job's resources. A real environment variable remains a deployment
 override and wins over the workspace setting.
 
 **`run`** ran a task manager until nothing was ready, driving the job through

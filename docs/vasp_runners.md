@@ -28,7 +28,7 @@ job. Once installed, the short name selects it:
 
 ```console
 httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" default
+httk workspace settings set --key vasp.command --value vasp_std default
 httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 httk workflow run
 httk collect
@@ -43,6 +43,13 @@ The VASP command is the `vasp.command` application setting, resolved most
 specific first: a job's own `vasp.command` parameter, then `HTTK_VASP_COMMAND`
 in the environment, then the workspace setting. The pseudopotential library
 resolves the same way as `vasp.pseudo_library` (`HTTK_VASP_PSEUDO_LIBRARY`).
+The command names only the program: the parallel start comes from the attempt's
+launch prefix (`HTTK_WORKFLOW_LAUNCH`), which the manager renders from its
+placement (the `manager.launch_template` setting when set, for any allocation
+kind; otherwise the built-in `srun` prefix inside a Slurm allocation; outside an
+allocation without a template there is none), and `run_vasp` prepends it. A command that
+itself starts with `srun` or `mpirun` is refused when a prefix applies; see
+{doc}`details/taskmanager`.
 See {doc}`sdks/sdk_parity` for the resolution table. The workflows default to
 `data.mode="none"`: the persistent `run/` workdir is the result; pass
 `--data-mode transactional` to `job new` to also publish a curated copy into

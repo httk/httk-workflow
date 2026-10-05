@@ -39,7 +39,7 @@ A workspace carries a flat map of *application settings*, small values a
 runner resolves at run time, such as the VASP command:
 
 ```console
-httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" default
+httk workspace settings set --key vasp.command --value vasp_std default
 httk workspace settings show default
 ```
 

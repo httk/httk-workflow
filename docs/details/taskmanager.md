@@ -50,7 +50,7 @@ httk workflow launcher add --template slurm --global cluster
 httk workspace init --name runs /scratch/rar/httk/runs
 httk workspace settings set --key manager.launch --value cluster runs
 httk workspace settings set --key slurm.partition --value batch runs
-httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" runs
+httk workspace settings set --key vasp.command --value vasp_std runs
 httk workflow run --workspace runs --count 4
 ```
 
@@ -107,7 +107,7 @@ pseudopotential library. The manager launch profile is also a workspace
 setting, so each workspace carries its own scheduler requirements.
 
 ```console
-httk workspace settings set --key vasp.command --value '"srun -n 32 vasp_std"' WORKSPACE
+httk workspace settings set --key vasp.command --value vasp_std WORKSPACE
 httk workspace settings show WORKSPACE
 ```
 
@@ -724,6 +724,18 @@ httk workspace settings set --key manager.launch_template \
 A template naming any other placeholder fails the attempt's preparation with
 `protocol_error`. Outside Slurm and without a template there is no launch
 prefix.
+
+The code run helpers (`run_vasp`, `run_pw`, `run_cp2k`, `run_abinit`,
+`run_lammps`, the mdrun step of `run_gromacs`, and the `httk_<code>_run` Bash
+functions and `<code>-run` bridge verbs) prepend this prefix themselves, so a
+code command setting names only the program (`vasp.command = "vasp_std"`,
+`qe.command = "pw.x"`) and the process count comes from the job's resources,
+not from the command. `launch=False` (`--no-launch`) runs the command as given,
+and ORCA gets no prefix by default because it starts its own MPI. A code command
+that itself starts with a launcher such as `srun` or `mpirun` is refused when a
+prefix applies, with a message to set the bare program and configure
+`manager.launch_template`. The generic `run` verb, `Attempt.run` and
+`httk_workflow_run` are not code-aware and never prepend the prefix.
 
 An attempt placed on one node that is the manager's own host is executed
 locally, so the manager also binds it to its devices. The `host` probe's node

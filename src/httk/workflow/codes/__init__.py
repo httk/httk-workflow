@@ -30,6 +30,10 @@ state-directory, and JSON helpers of the runtime, promoted to one public home,
 plus the registry view of the installed codes.
 """
 
+import os
+import shlex
+from collections.abc import Sequence
+
 from httk.core.register import CodeSupport, code_support, known_codes
 
 from .._util import read_json, utc_now, write_json_atomic
@@ -58,6 +62,7 @@ __all__ = [
     "SourceEvent",
     "code_environment",
     "installed_codes",
+    "launch_command",
     "read_json",
     "utc_now",
     "write_json_atomic",
@@ -65,6 +70,37 @@ __all__ = [
 
 #: The shell bridge's uniform "legitimately absent" exit code.
 BRIDGE_ABSENT: int = 1
+
+
+#: Parallel-start programs a code command must not name itself.
+_LAUNCHERS = frozenset({"srun", "mpirun", "mpiexec", "mpiexec.hydra", "orterun", "mpprun", "aprun", "jsrun", "ibrun"})
+
+
+def launch_command(argv: Sequence[str], *, launch: bool = True) -> list[str]:
+    """Return ``argv`` with the attempt's launch prefix prepended.
+
+    The prefix is the shell-quoted argv in ``HTTK_WORKFLOW_LAUNCH``, set by the
+    workflow manager; it is absent or blank when the attempt has none.
+
+    :param argv: The code command, naming only the program (for example ``["vasp_std"]``).
+    :param launch: Whether to apply the launch prefix; ``False`` returns ``argv`` as given.
+    :return: The command to run.
+    :raises ValueError: If ``argv`` is empty, or starts with a parallel launcher
+        while a launch prefix would be prepended.
+    """
+
+    if not argv:
+        raise ValueError("empty command")
+    prefix = os.environ.get("HTTK_WORKFLOW_LAUNCH", "").strip() if launch else ""
+    if not prefix:
+        return list(argv)
+    if os.path.basename(argv[0]) in _LAUNCHERS:
+        raise ValueError(
+            f"the command starts with the launcher {argv[0]!r}, but this attempt already has a launch prefix; "
+            "set the command to the bare program (for example 'vasp_std') and configure the parallel start "
+            "in the manager.launch_template setting"
+        )
+    return [*shlex.split(prefix), *argv]
 
 
 def installed_codes() -> tuple[CodeSupport, ...]:

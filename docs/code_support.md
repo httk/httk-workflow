@@ -110,7 +110,22 @@ home, so a package never imports private *httk-workflow* modules:
 - {py:func}`~httk.workflow.codes.installed_codes` and
   {py:func}`~httk.workflow.codes.code_environment` — the installed codes as
   `CodeSupport` records, and the `HTTK_WORKFLOW_<CODE>_BASH_API` variables the
-  manager exports for them.
+  manager exports for them;
+- {py:func}`~httk.workflow.codes.launch_command` — prepend the attempt's launch
+  prefix to a code command (see below).
+
+Code commands name the program, not the parallel start: `vasp.command =
+"vasp_std"`, never `mpirun -np 4 vasp_std`. The parallel start is the attempt's
+launch prefix, the shell-quoted argv in `HTTK_WORKFLOW_LAUNCH`, which the
+manager sets from `manager.launch_template` (or the built-in Slurm prefix) and
+leaves unset when there is none. A code's run helper calls `launch_command`,
+prepending the prefix by default; it takes a per-call `launch=False` (and the
+bridge verb `--no-launch`) to run the command as given. When a prefix would be
+prepended and the command already starts with a launcher such as `srun` or
+`mpirun`, `launch_command` raises `ValueError` rather than launch twice. The check compares
+only the program name of the command's first word (exact names), so a wrapped
+launcher such as `env srun …` or `time mpirun …` is not detected and would start
+twice: name the program alone.
 
 List what is installed with:
 
