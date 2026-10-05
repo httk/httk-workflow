@@ -20,8 +20,12 @@ lack these confinement guarantees.
 
 ### Host requirements
 
-- Linux with Bubblewrap 0.9.0 or later supporting `--bind-fd`,
-  `--ro-bind-data`, `--disable-userns` and `--assert-userns-disabled`.
+- Linux with a Bubblewrap that supports `--bind-fd`, `--ro-bind-fd`,
+  `--ro-bind-data` and `--clearenv` (0.6 or later). With Bubblewrap 0.8.0 or
+  later the sandboxes also pass `--disable-userns`, which stops sandboxed code
+  from creating nested user namespaces; with older versions that block is
+  absent, which `--check` and startup report. Confinement does not depend
+  on it; it reduces kernel attack surface.
 - Permitted unprivileged user namespaces.
 - Slurm 23.11.6 or later.
 - The workspace and exchange on one filesystem and one mount (see

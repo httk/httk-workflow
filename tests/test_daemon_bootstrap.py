@@ -36,7 +36,9 @@ def _write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
     path.chmod(0o755)
 
 
-def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
+def _layout(
+    tmp_path: Path, help_options: tuple[str, ...] = REQUIRED_BWRAP_OPTIONS
+) -> tuple[Path, dict[str, Any], Path]:
     roots = {name: tmp_path / name for name in ("site/workspace", "site/exchange", "state", "runtime", "broker")}
     for directory in (
         roots["site/workspace"] / ".httk-workspace/exchange",
@@ -49,14 +51,12 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         directory.mkdir(parents=True)
     record = tmp_path / "bwrap-record.json"
     bwrap = roots["broker"] / "bwrap"
-    options = " ".join(REQUIRED_BWRAP_OPTIONS)
+    options = " ".join(help_options)
     _write_executable(
         bwrap,
         "#!/usr/bin/python3\n"
         "import json, os, sys\n"
-        "if sys.argv[1:] == ['--version']:\n"
-        "    print('bubblewrap 0.9.0')\n"
-        "elif sys.argv[1:] == ['--help']:\n"
+        "if sys.argv[1:] == ['--help']:\n"
         f"    print({options!r})\n"
         "else:\n"
         "    fds = {}\n"
@@ -508,11 +508,31 @@ def test_role_specific_arguments_are_strict(tmp_path: Path, arguments: list[str]
 def test_missing_bwrap_feature_is_refused(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
     bwrap = Path(policy["bwrap"])
-    _write_executable(
-        bwrap,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.8.0'; else echo --bind-fd; fi\n",
-    )
+    options = " ".join(option for option in REQUIRED_BWRAP_OPTIONS if option not in ("--bind-fd", "--clearenv"))
+    _write_executable(bwrap, f"#!/bin/sh\necho 'usage: bwrap [OPTIONS...]' {options}\n")
     result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--mode", "broker"])
     assert result.returncode == 2
-    assert "0.9.0 or newer" in result.stderr
+    assert "lacks required confinement features: --bind-fd, --clearenv" in result.stderr
     assert not record.exists()
+
+
+@pytest.mark.parametrize("userns", [True, False])
+@pytest.mark.parametrize("mode", ["broker", "payload"])
+def test_userns_block_follows_bwrap_capability(tmp_path: Path, mode: str, userns: bool) -> None:
+    blocking = ("--disable-userns", "--assert-userns-disabled")
+    help_options = tuple(option for option in REQUIRED_BWRAP_OPTIONS if userns or option not in blocking)
+    policy_path, policy, record = _layout(tmp_path, help_options)
+    arguments = (
+        ["--workspace", str(policy["workspace"]), "--mode", "broker", "--check"]
+        if mode == "broker"
+        else ["--mode", "payload", "--profile", "small", "--handle", "c" * 32]
+    )
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert all((option in argv) == userns for option in blocking)
+    warning = (
+        "daemon bootstrap: warning: this Bubblewrap lacks --disable-userns (0.8.0+); "
+        "sandboxed code can create nested user namespaces"
+    )
+    assert (warning in result.stderr) == (mode == "broker" and not userns)

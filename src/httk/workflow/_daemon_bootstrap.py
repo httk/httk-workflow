@@ -35,12 +35,10 @@ _MPI_ENVIRONMENT_VALUE_BYTES = 4096
 _MPI_ENVIRONMENT_TOTAL_BYTES = 64 * 1024
 _CONTROL_DESTINATION = Path("/run/httk-mpi")
 _ROOT_DESTINATION = Path("/daemon-root")
-_BWRAP_OPTIONS = frozenset(
+_BWRAP_REQUIRED = frozenset(
     {
-        "--assert-userns-disabled",
         "--bind-fd",
         "--clearenv",
-        "--disable-userns",
         "--new-session",
         "--ro-bind-data",
         "--ro-bind-fd",
@@ -51,6 +49,7 @@ _BWRAP_OPTIONS = frozenset(
         "--unshare-uts",
     }
 )
+_BWRAP_USERNS_BLOCK = ("--disable-userns", "--assert-userns-disabled")
 _FIXED_ENVIRONMENT = {
     "PATH": "/usr/bin:/bin",
     "HOME": "/tmp/home",
@@ -477,18 +476,10 @@ def _check_command(path: Path, approved: tuple[Path, ...], mutable_roots: tuple[
         raise ValueError(f"trusted command has unprotected ownership or mode: {path}")
 
 
-def _check_bwrap(path: Path) -> None:
-    environment = dict(_FIXED_ENVIRONMENT)
+def _check_bwrap(path: Path) -> bool:
+    """Check the Bubblewrap options from its help text; return whether it can block nested user namespaces."""
+
     try:
-        version = subprocess.run(
-            [str(path), "--version"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=environment,
-        )
         help_result = subprocess.run(
             [str(path), "--help"],
             stdin=subprocess.DEVNULL,
@@ -496,16 +487,17 @@ def _check_bwrap(path: Path) -> None:
             text=True,
             timeout=10,
             check=False,
-            env=environment,
+            env=dict(_FIXED_ENVIRONMENT),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Bubblewrap feature check failed") from exc
-    match = re.search(r"(?:bubblewrap\s+)?(\d+)\.(\d+)(?:\.(\d+))?", version.stdout)
-    if version.returncode != 0 or match is None or tuple(int(item or 0) for item in match.groups()) < (0, 9, 0):
-        raise ValueError("Bubblewrap 0.9.0 or newer is required")
-    help_text = help_result.stdout + help_result.stderr
-    if help_result.returncode != 0 or any(option not in help_text for option in _BWRAP_OPTIONS):
-        raise ValueError("Bubblewrap lacks required confinement features")
+    if help_result.returncode != 0:
+        raise ValueError("Bubblewrap feature check failed")
+    options = set(re.findall(r"--[A-Za-z0-9-]+", help_result.stdout + help_result.stderr))
+    missing = sorted(_BWRAP_REQUIRED - options)
+    if missing:
+        raise ValueError(f"Bubblewrap lacks required confinement features: {', '.join(missing)}")
+    return all(option in options for option in _BWRAP_USERNS_BLOCK)
 
 
 def _policy_snapshot(data: bytes) -> int:
@@ -529,7 +521,9 @@ def _policy_snapshot(data: bytes) -> int:
         raise
 
 
-def _base_bwrap_argv(policy: Any, mode: str, rank_environment: tuple[tuple[str, str], ...] = ()) -> list[str]:
+def _base_bwrap_argv(
+    policy: Any, mode: str, rank_environment: tuple[tuple[str, str], ...] = (), *, block_userns: bool
+) -> list[str]:
     argv = [
         str(policy.bwrap),
         "--unshare-user",
@@ -539,9 +533,9 @@ def _base_bwrap_argv(policy: Any, mode: str, rank_environment: tuple[tuple[str, 
     ]
     if mode == "payload":
         argv.append("--unshare-net")
+    if block_userns:
+        argv += _BWRAP_USERNS_BLOCK
     argv += [
-        "--disable-userns",
-        "--assert-userns-disabled",
         "--cap-drop",
         "ALL",
         "--new-session",
@@ -656,11 +650,19 @@ def _prepare_sandbox(
     if arguments.mode == "allocation":
         assert policy.mpi is not None
         _check_command(policy.mpi.srun, (*resolved_roots.readonly, *resolved_roots.broker), resolved_roots.mutable)
-    _check_bwrap(policy.bwrap)
+    block_userns = _check_bwrap(policy.bwrap)
+    if not block_userns and arguments.mode == "broker":
+        # Mounts stay locked either way; only nested user namespaces (kernel attack surface) remain open.
+        print(
+            "daemon bootstrap: warning: this Bubblewrap lacks --disable-userns (0.8.0+); "
+            "sandboxed code can create nested user namespaces",
+            file=sys.stderr,
+            flush=True,
+        )
 
     descriptors: list[int] = []
     rank_environment = getattr(arguments, "rank_environment", ())
-    argv = _base_bwrap_argv(policy, arguments.mode, rank_environment)
+    argv = _base_bwrap_argv(policy, arguments.mode, rank_environment, block_userns=block_userns)
     try:
         if arguments.mode == "broker":
             # One writable bind of the dedicated parent; the service reaches the exchange and the

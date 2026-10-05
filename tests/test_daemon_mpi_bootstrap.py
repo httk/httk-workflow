@@ -63,9 +63,7 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         bwrap,
         "#!/usr/bin/python3\n"
         "import json, os, sys\n"
-        "if sys.argv[1:] == ['--version']:\n"
-        "    print('bubblewrap 0.9.0')\n"
-        "elif sys.argv[1:] == ['--help']:\n"
+        "if sys.argv[1:] == ['--help']:\n"
         f"    print({options!r})\n"
         "else:\n"
         "    fds = {}\n"
