@@ -57,6 +57,7 @@ from .models import (
     StateFrame,
     WorkspacePolicy,
     canonical_uuid,
+    check_job_placement,
     is_payload_private,
     job_digest,
     make_job_key,
@@ -138,6 +139,7 @@ __all__ = [
     "WorkspacePolicy",
     "WorkspaceUnavailableError",
     "canonical_uuid",
+    "check_job_placement",
     # -- journal records and references ----------------------------------
     "encode_record_ref",
     "is_payload_private",

@@ -24,6 +24,7 @@ import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
 from conftest import configure_identity
 from httk.workflow import TaskManager, Workspace, _manager_requests
+from httk.workflow._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory
 from httk.workflow._logging import reset_logging
 from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.manager import RunningAttempt
@@ -977,12 +978,15 @@ def test_environment_log_clear_wins_the_reconciliation_toctou(tmp_path: Path, mo
         attempt_id=attempt_id,
     )
     marker_path = control / ".httk-environment-resolution.json"
-    real_read_json = manager_module.read_json
+    # The manager reads the marker through its no-follow job-directory handle.
+    real_read_json = JobDirectory.read_json
     reads = 0
 
-    def clear_after_first_read(path: Path) -> dict[str, Any]:
+    def clear_after_first_read(
+        self: JobDirectory, relative: Any, limit: int = CONTROL_DOCUMENT_LIMIT
+    ) -> dict[str, Any]:
         nonlocal reads
-        result = real_read_json(path)
+        result = real_read_json(self, relative, limit)
         reads += 1
         if reads == 1:
             cleared = dict(result)
@@ -991,7 +995,7 @@ def test_environment_log_clear_wins_the_reconciliation_toctou(tmp_path: Path, mo
             real_write(json.dumps(cleared), encoding="utf-8")
         return result
 
-    monkeypatch.setattr(manager_module, "read_json", clear_after_first_read)
+    monkeypatch.setattr(JobDirectory, "read_json", clear_after_first_read)
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         state_frame = manager._read_frame(marker)
         assert manager._environment_log_ready(marker, state_frame)
@@ -1918,13 +1922,13 @@ def test_a_registered_child_bundle_is_not_hashed_again_after_it_is_published(
 
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
-    published = [path for path in hashed if "outcome.ready" in path]
-    registered = [path for path in hashed if "outcome.ready" not in path]
-    # Once to record the expected digest before the outcome is accepted, once to
-    # verify the bundle has not changed since. The destination of the
-    # publication rename is the very tree just verified and is never rehashed.
-    assert len(published) == 2, hashed
-    assert registered == [], hashed
+    # Once in the draft to record the expected digest before the outcome is
+    # accepted, once in the manager's staging to verify the bundle has not
+    # changed since. Both are hashed through no-follow descriptors (their
+    # ``/dev/fd`` aliases). The destination of the publication rename is the very
+    # tree just verified and is never rehashed.
+    assert len(hashed) == 2, hashed
+    assert all(path.startswith("/dev/fd/") for path in hashed), hashed
 
 
 def test_marker_ownership_filters_scheduling_and_recovery(tmp_path: Path) -> None:

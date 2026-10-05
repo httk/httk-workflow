@@ -4,29 +4,45 @@ Re-registration leaves prior generations on disk. Reclaim a tag directory only
 when no managers are running.
 """
 
+import hashlib
+import json
 import os
+import re
 import shlex
 import shutil
+import signal
 import stat
+import subprocess
 import uuid
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from httk.core.building import (
+    DEFAULT_TAG,
     BuildError,
     BuildSpec,
     execute_build,
     registered_generation,
     write_generation,
 )
-from httk.core.building import platform_tag as _core_platform_tag
 from httk.core.digests import tree_digest
 
-from .errors import RunnerResolutionError
+from .errors import FormatError, RunnerResolutionError
+from .models import _read_regular_file
 from .packages import read_build_spec
 from .registry import list_workspaces
 from .workspace import Workspace
 
 BUILD_DIRECTORY = "runner-builds"
+# The stamp format :func:`register_build` writes and resolution accepts.
+_STAMP_FORMAT = "httk-workflow-runner-build"
+# How long a platform probe may run, in seconds, before resolution gives up on it.
+_PLATFORM_PROBE_TIMEOUT = 30.0
+# The largest registration pointer or build stamp a resolver reads.
+_REGISTRATION_DOCUMENT_BYTES = 1024 * 1024
+# The tail of a failed probe's standard error quoted in its failure.
+_PROBE_STDERR_TAIL = 1024
+_PLATFORM_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
 
 
 # The one workflow variable a build sees: the installed language SDK directory.
@@ -45,12 +61,114 @@ def _environment() -> dict[str, str]:
 
 
 def platform_tag(spec: BuildSpec) -> str:
-    """Return the local platform tag declared by a build specification."""
+    """Return the local platform tag declared by a build specification.
 
+    The probe runs exactly as :func:`httk.core.building.platform_tag` runs it,
+    with the same build environment and the same tag derivation, so it selects
+    the registration a build made, but bounded: standard input is
+    ``/dev/null``, the working directory is ``/``, and a probe still running
+    after 30 seconds is killed with its process group. Tags are memoized per
+    probe command and environment.
+
+    :param spec: The build specification naming the probe.
+    :return: The sanitized platform tag (``any`` without a probe).
+    :raises httk.workflow.errors.RunnerResolutionError: ``runner_build_failed`` if the probe cannot
+        run or fails, ``runner_not_built`` if it does not finish in time.
+    """
+
+    if spec.platform is None:
+        return DEFAULT_TAG
+    environment = _environment()
+    cache_key = (spec.platform, tuple(sorted(environment.items())))
+    cached = _PLATFORM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     try:
-        return _core_platform_tag(spec.platform, env=_environment())[0]
-    except BuildError as exc:
-        raise RunnerResolutionError(exc.code, exc.message or str(exc)) from exc
+        argv = shlex.split(spec.platform)
+        if not argv:
+            raise ValueError("empty command")
+        with subprocess.Popen(
+            argv,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd="/",
+            text=True,
+            start_new_session=True,
+        ) as process:
+            try:
+                raw, stderr = process.communicate(timeout=_PLATFORM_PROBE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                process.wait()
+                raise RunnerResolutionError(
+                    "runner_not_built",
+                    f"platform probe {spec.platform!r} did not finish within {_PLATFORM_PROBE_TIMEOUT:g} s "
+                    "and was killed; no build registration can be selected without its tag",
+                ) from None
+    except (OSError, ValueError) as exc:
+        raise RunnerResolutionError("runner_build_failed", f"platform probe {spec.platform!r} failed: {exc}") from exc
+    if process.returncode != 0:
+        tail = stderr[-_PROBE_STDERR_TAIL:].strip()
+        detail = f"; stderr: {tail}" if tail else ""
+        raise RunnerResolutionError(
+            "runner_build_failed",
+            f"platform probe {spec.platform!r} failed with exit code {process.returncode}{detail}",
+        )
+    # The tag derivation of httk.core.building.platform_tag, which named the
+    # registration directory when the build was registered.
+    value = raw.strip()
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    tag = re.sub(r"[^A-Za-z0-9._-]", "-", value)
+    tag = "h" + digest[:16] if not tag or tag in {".", ".."} or len(tag) > 64 else f"{tag}.{digest[:8]}"
+    _PLATFORM_CACHE[cache_key] = tag
+    return tag
+
+
+def registered_platforms(workspace: Workspace, store_relative: PurePosixPath) -> list[dict[str, Any]]:
+    """Return the build stamps of the current registrations of one runner store entry.
+
+    One stamp is returned per platform-tag directory whose ``current.json``
+    names a generation with a ``build.json`` stamp of the runner-build format.
+    Nothing is executed: the documents are read bounded, without following a
+    symlink, and unreadable or malformed registrations are skipped.
+
+    :param workspace: The workspace whose registrations to list.
+    :param store_relative: The runner store entry, relative to the store.
+    :return: The stamps, in tag-directory order.
+    """
+
+    if store_relative.is_absolute() or any(part in {"", ".", ".."} for part in store_relative.parts):
+        return []
+    root = workspace.runner_builds.joinpath(*store_relative.parts)
+    stamps: list[dict[str, Any]] = []
+    try:
+        with os.scandir(root) as scan:
+            tags = sorted(entry.name for entry in scan if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        return []
+    for tag in tags:
+        try:
+            pointer = json.loads(_read_regular_file(root / tag / "current.json", _REGISTRATION_DOCUMENT_BYTES))
+            generation = pointer.get("generation") if isinstance(pointer, dict) else None
+            if (
+                not isinstance(generation, str)
+                or not generation.startswith("gen-")
+                or Path(generation).name != generation
+            ):
+                continue
+            if not stat.S_ISDIR(os.lstat(root / tag / generation).st_mode):
+                continue
+            stamp = json.loads(_read_regular_file(root / tag / generation / "build.json", _REGISTRATION_DOCUMENT_BYTES))
+        except (OSError, FormatError, UnicodeError, json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(stamp, dict) and stamp.get("format") == _STAMP_FORMAT and stamp.get("format_version") == 2:
+            stamps.append(stamp)
+    return stamps
 
 
 def workspace_build_command(workspace: Workspace, store_relative: PurePosixPath) -> str:
@@ -84,7 +202,7 @@ def registered_artifacts(
         workspace.runner_builds,
         store_relative.as_posix(),
         tag,
-        format_name="httk-workflow-runner-build",
+        format_name=_STAMP_FORMAT,
         expected_source_sha256=expected_source_sha256,
     )
 

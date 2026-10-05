@@ -1,5 +1,6 @@
 """Filesystem workflow task manager for the current core profile."""
 
+import contextlib
 import logging
 import math
 import os
@@ -18,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from types import FrameType
 from typing import Any, Self, cast
 
-from httk.core.digests import sha256_file, tree_digest
+from httk.core.digests import tree_digest
 
 from . import (
     _manager_cancellation,
@@ -38,6 +39,7 @@ from ._allocation import (
 )
 from ._durations import format_duration
 from ._exchange_staging import exchange_pass
+from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
 from ._manager_binding import (
     Inventory,
     NodeShare,
@@ -69,6 +71,9 @@ from .gc import ALWAYS_SAFE_CATEGORIES
 from .journal import SEGMENT_HEADER, parse_record_ref
 from .manifests import read_maintenance_lock
 from .models import (
+    _MAXIMUM_JOB_DOCUMENT_BYTES as MAXIMUM_JOB_DOCUMENT_BYTES,
+)
+from .models import (
     ATTEMPTS_DIRECTORY,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
@@ -84,7 +89,6 @@ from .models import (
     validate_capacity,
     validate_process,
 )
-from .runtime_builders import RunLog
 from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -137,32 +141,6 @@ _CANCELLING_MEMBERS = (
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
 
 
-def _real_directory(path: Path, *, missing_ok: bool = False) -> Path:
-    """Return *path* when it is a directory recorded without following links."""
-
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError as exc:
-        if missing_ok:
-            return path
-        raise FormatError(f"attempt directory is missing: {path}") from exc
-    if not stat.S_ISDIR(mode):
-        raise FormatError(f"attempt directory is not a real directory: {path}")
-    return path
-
-
-def _attempt_container(payload: Path) -> Path:
-    """Return a payload's real attempt container, allowing its first creation."""
-
-    return _real_directory(payload / ATTEMPTS_DIRECTORY, missing_ok=True)
-
-
-def _logs_container(payload: Path) -> Path:
-    """Return a payload's real log container, allowing its first creation."""
-
-    return _real_directory(payload / LOGS_DIRECTORY, missing_ok=True)
-
-
 def _write_marker(descriptor: int, line: str, job_key: str) -> None:
     """Write one evidence marker, retaining launch progress on ordinary errors."""
 
@@ -172,42 +150,49 @@ def _write_marker(descriptor: int, line: str, job_key: str) -> None:
         _LOGGER.warning("cannot append an evidence marker for %s: %s", job_key, exc)
 
 
-def _append_log_line(payload: Path, line: str, *, job_key: str | None = None) -> None:
-    """Append one complete evidence line to the job's stdio chronicle."""
+def _append_log_line(job_dir: JobDirectory, line: str, *, job_key: str) -> None:
+    """Append one complete evidence line to the job's stdio chronicle.
 
-    name = job_key or payload.name
+    The chronicle is opened through the job directory without following a
+    symlink or blocking on a FIFO the job may have planted; such a chronicle is
+    skipped with a warning, never written through.
+    """
+
     descriptor = -1
     try:
-        logs = _logs_container(payload)
-        logs.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(logs / "stdio.out", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        _write_marker(descriptor, line, name)
+        with job_dir.directory(LOGS_DIRECTORY, create=True) as logs:
+            descriptor = logs.open_append("stdio.out")
+        _write_marker(descriptor, line, job_key)
     except Exception as exc:
-        _LOGGER.warning("cannot append the stdio chronicle for %s: %s", name, exc)
+        _LOGGER.warning("cannot append the stdio chronicle for %s: %s", job_key, exc)
     finally:
         if descriptor >= 0:
             try:
                 os.close(descriptor)
             except Exception as exc:
-                _LOGGER.warning("cannot close the stdio chronicle for %s: %s", name, exc)
+                _LOGGER.warning("cannot close the stdio chronicle for %s: %s", job_key, exc)
 
 
-def _attempt_outcome_action(control: Path) -> str:
-    """Return an attempt's published action, or ``none`` while it is absent."""
+def _attempt_outcome_action(job_dir: JobDirectory, control_name: str) -> str:
+    """Return an attempt's published action, or ``none`` while it is absent or unreadable."""
 
     try:
-        outcome = read_json(control / "outcome.ready" / "outcome.json")
+        outcome = job_dir.read_json(f"{control_name}/outcome.ready/outcome.json", CONTROL_DOCUMENT_LIMIT)
     except (FormatError, OSError):
         return "none"
     action = outcome.get("action")
     return action if isinstance(action, str) else "none"
 
 
-def _append_attempt_event(path: Path, record: Mapping[str, object], job_key: str) -> None:
-    """Append the manager's attempt evidence without affecting launch progress."""
+def _append_attempt_event(logs: JobDirectory, record: Mapping[str, object], job_key: str) -> None:
+    """Append the manager's attempt evidence without affecting launch progress.
+
+    The line is exactly what :meth:`~httk.workflow.runtime_builders.RunLog.append_record`
+    writes, appended through the pinned log directory with one write.
+    """
 
     try:
-        RunLog.append_record(path, record)
+        logs.append("runlog.jsonl", json_bytes(record) + b"\n")
     except Exception as exc:
         _LOGGER.warning("cannot append the attempt runlog event for %s: %s", job_key, exc)
 
@@ -447,6 +432,9 @@ class RunningAttempt:
     :param placement: The nodes and slots this attempt was given, or ``None``
         when the manager has no node inventory; returned to the inventory when
         the attempt stops being tracked.
+    :param sweep_kill_at: Escalate an untracked (fenced or orphaned) attempt that
+        outlives its ``SIGTERM`` to ``SIGKILL`` at this monotonic time, or
+        ``None`` before the first ``SIGTERM``.
     """
 
     marker: Marker
@@ -473,6 +461,7 @@ class RunningAttempt:
     timed_out: bool = False
     interrupted: bool = False
     placement: Placement | None = None
+    sweep_kill_at: float | None = None
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
@@ -899,13 +888,15 @@ class TaskManager:
         """Append the end marker for a locally reaped attempt."""
 
         try:
-            payload = self.workspace.payload_path(attempt.marker.placement, attempt.marker.job_key)
-            _append_log_line(
-                payload,
-                f"=== httk attempt {attempt.attempt_id} ended {utc_now()} exit {return_code} "
-                f"outcome {attempt.outcome_action or _attempt_outcome_action(attempt.control)}\n",
-                job_key=attempt.marker.job_key,
-            )
+            with self._job_directory(attempt.marker) as job_dir:
+                action = attempt.outcome_action or _attempt_outcome_action(
+                    job_dir, f"{ATTEMPTS_DIRECTORY}/{attempt.attempt_id}"
+                )
+                _append_log_line(
+                    job_dir,
+                    f"=== httk attempt {attempt.attempt_id} ended {utc_now()} exit {return_code} outcome {action}\n",
+                    job_key=attempt.marker.job_key,
+                )
         except Exception as exc:
             _LOGGER.warning("cannot append the end marker for %s: %s", attempt.marker.job_key, exc)
 
@@ -976,19 +967,22 @@ class TaskManager:
             marker = self.workspace.find_marker_at(job_key, normalize_placement(placement))
             if marker is None or marker.kind != "committing":
                 return
-            control = self._attempt_control_path(marker, self._read_frame(marker))
-            control.mkdir(parents=True, exist_ok=True)
-            write_json_atomic(
-                control / "commit-wedge.json",
-                {
-                    "format": "httk-workflow-commit-wedge",
-                    "format_version": 2,
-                    "error": text,
-                    "manager_id": self.manager_id,
-                    "recorded_at": utc_now(),
-                },
-                durable=self.workspace.durable,
-            )
+            control_name = self._attempt_control_name(self._read_frame(marker))
+            with self._job_directory(marker) as job_dir, job_dir.directory(control_name, create=True) as control:
+                control.write_atomic(
+                    "commit-wedge.json",
+                    json_bytes(
+                        {
+                            "format": "httk-workflow-commit-wedge",
+                            "format_version": 2,
+                            "error": text,
+                            "manager_id": self.manager_id,
+                            "recorded_at": utc_now(),
+                        }
+                    )
+                    + b"\n",
+                    durable=self.workspace.durable,
+                )
         except (FormatError, WorkflowError, OSError) as exc:
             _LOGGER.debug("cannot record the commit wedge of %s: %s", job_key, exc)
             return
@@ -1074,12 +1068,9 @@ class TaskManager:
                 return False
             job_path = payload / "job.json"
             job_stat = job_path.lstat()
-            if stat.S_ISLNK(job_stat.st_mode) or not stat.S_ISREG(job_stat.st_mode):
-                _LOGGER.debug(
-                    "skipping job %s: job.json is not an owned regular file (marker/payload ownership mismatch)",
-                    marker.job_key,
-                )
-                return False
+            # A symlink or special file this uid planted as job.json in its own
+            # payload is not foreign: the job is this manager's, and loading its
+            # refused definition fails it instead of hiding it forever.
             if payload_stat.st_uid != marker_stat.st_uid or job_stat.st_uid != marker_stat.st_uid:
                 _LOGGER.debug(
                     "skipping job %s: marker, payload, and job.json ownership mismatch",
@@ -1617,6 +1608,28 @@ class TaskManager:
 
         try:
             job = self.workspace.load_job(marker)
+        except FormatError as exc:
+            refusal = self._refused_job_document(marker)
+            if refusal is not None:
+                # A job.json the job replaced by a symlink, FIFO or oversized
+                # file never becomes readable again: fail the job instead of
+                # skipping it forever.
+                self._fail_unloadable_job(marker, f"{refusal}: {exc}")
+                return None
+            self._report_anomaly(
+                f"{pass_name}:{marker.job_key}",
+                f"skipping {marker.kind} job {marker.job_key} during {pass_name}: {exc}",
+                self._event("job_unusable", marker, pass_name=pass_name),
+            )
+            return None
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                f"{pass_name}:{marker.job_key}",
+                f"skipping {marker.kind} job {marker.job_key} during {pass_name}: {exc}",
+                self._event("job_unusable", marker, pass_name=pass_name),
+            )
+            return None
+        try:
             state = StateFrame.from_mapping(self.workspace.read_state(marker))
         except (WorkflowError, OSError) as exc:
             self._report_anomaly(
@@ -1627,6 +1640,76 @@ class TaskManager:
             return None
         self._reported.pop(f"{pass_name}:{marker.job_key}", None)
         return job, state
+
+    def _refused_job_document(self, marker: Marker) -> str | None:
+        """Say why a job's ``job.json`` is refused for good, or ``None`` when it may be transient.
+
+        Only what the bounded no-follow read refuses by kind counts: a symlink,
+        a FIFO or other special file, or a document over the size bound. A
+        missing file (a race with removal or transfer) or a malformed document
+        keeps being reported and skipped as before.
+        """
+
+        try:
+            with self._job_directory(marker) as job_dir:
+                information = job_dir.stat("job.json")
+        except (FormatError, OSError):
+            return None
+        if information is None:
+            return None
+        if stat.S_ISLNK(information.st_mode):
+            return "job.json is a symlink"
+        if not stat.S_ISREG(information.st_mode):
+            return "job.json is not a regular file"
+        if information.st_size > MAXIMUM_JOB_DOCUMENT_BYTES:
+            return f"job.json is larger than {MAXIMUM_JOB_DOCUMENT_BYTES} bytes"
+        return None
+
+    def _fail_unloadable_job(self, marker: Marker, message: str) -> None:
+        """Record ``protocol_error`` for a job whose definition is refused, without its definition.
+
+        A ready, waiting or paused job is failed by any manager. A claimed,
+        running or committing one is failed only by its own manager, or once
+        its manager's lease has expired; a local attempt of it stays tracked, so
+        the orphan sweep stops and reaps its process.
+        """
+
+        anomaly = f"unloadable:{marker.job_key}"
+        try:
+            state = self._read_frame(marker)
+            if marker.kind in {"claimed", "running", "committing"} and state.manager_id != self.manager_id:
+                lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
+                if self._manager_alive(state.manager_id, lease_seconds=lease_seconds):
+                    self._report_anomaly(
+                        anomaly,
+                        f"leaving {marker.kind} job {marker.job_key} to its manager: {message}",
+                        self._event("job_unusable", marker),
+                    )
+                    return
+            if marker.kind not in {"ready", "claimed", "running", "committing", "waiting", "paused"}:
+                self._report_anomaly(
+                    anomaly,
+                    f"cannot fail {marker.kind} job {marker.job_key}: {message}",
+                    self._event("job_unusable", marker),
+                )
+                return
+            failed = StateFrame.replace(
+                state.carried(), failure=self._failure("protocol_error", message), reason="protocol_error"
+            )
+            if "process" in state.members:
+                failed = StateFrame.replace(failed, process=state.members["process"])
+            _LOGGER.error(
+                "failing %s: %s", marker.job_key, message, extra=self._event("job_definition_refused", marker)
+            )
+            self._transition(marker, "failed", failed)
+        except TransitionLostError:
+            _LOGGER.debug("failure record for %s was lost to another actor", marker.job_key)
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                anomaly,
+                f"cannot record the protocol_error failure of {marker.job_key}: {exc}",
+                self._event("failure_error", marker, failure_code="protocol_error"),
+            )
 
     def _read_frame(self, marker: Marker) -> StateFrame:
         """Return the typed state frame one marker references."""
@@ -1817,6 +1900,27 @@ class TaskManager:
         job: JobDefinition,
         previous_state: StateFrame,
     ) -> None:
+        # Every directory and file descriptor the launch pins in the job
+        # directory is closed when the launch returns, however it returns.
+        with contextlib.ExitStack() as handles:
+            self._launch_attempt(handles, marker, job, previous_state)
+
+    def _launch_attempt(
+        self,
+        handles: contextlib.ExitStack,
+        marker: Marker,
+        job: JobDefinition,
+        previous_state: StateFrame,
+    ) -> None:
+        """Prepare and launch one claimed attempt through the pinned job directory.
+
+        The attempt container, the attempt-control directory, the workdir, the
+        logs and the payload runner are all reached through descriptors opened
+        without following links, so a job that planted a symlink, FIFO or other
+        special file on one of them fails with ``protocol_error`` instead of
+        redirecting a manager write or blocking the manager.
+        """
+
         claimed_state = self._read_frame(marker)
         try:
             launch_job = self.workspace.load_job(marker)
@@ -1851,26 +1955,28 @@ class TaskManager:
             self._unlaunched[attempt_id] = placement
         payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control = payload / control_name
-        attempts = _attempt_container(payload)
-        attempts.mkdir(parents=True, exist_ok=True)
-        control.mkdir(exist_ok=False)
+        job_dir = handles.enter_context(self._job_directory(marker))
+        # The attempt container is created when missing, but the attempt's own
+        # control directory must be new: a pre-existing one was not made here.
+        control_dir = handles.enter_context(job_dir.directory(control_name, create=True, exclusive=True))
         runner = payload.joinpath(*job.runner_path.parts)
         verified: _manager_runners.VerifiedRunner | None = None
         if job.workdir_mode == "persistent":
-            workdir = payload.joinpath(*job.workdir_path.parts)
-            workdir_reused = workdir.exists()
+            workdir_name = job.workdir_path
+            workdir_reused = job_dir.exists_dir(workdir_name)
         else:
-            base = payload.joinpath(*job.workdir_path.parts)
-            workdir = base.parent / f"{base.name}.{attempt_id}"
+            workdir_name = job.workdir_path.parent / f"{job.workdir_path.name}.{attempt_id}"
             workdir_reused = False
-        workdir.mkdir(parents=True, exist_ok=True)
+        # A symlinked workdir, or a symlinked component above it, is refused.
+        job_dir.directory(workdir_name, create=True).close()
+        workdir = payload.joinpath(*workdir_name.parts)
         settings = self.workspace.read_settings()
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
         deadline = self._attempt_deadline(requirement)
         binding, binding_environment, pin = (
             (None, {}, None)
             if placement is None
-            else self._attempt_binding(placement, control, settings, requirement.get("mem"))
+            else self._attempt_binding(placement, control, settings, requirement.get("mem"), control_dir=control_dir)
         )
         context = {
             "format": "httk-workflow-attempt-context",
@@ -1991,10 +2097,15 @@ class TaskManager:
         gate_write = -1
         process: subprocess.Popen[bytes] | None = None
         running: Marker | None = None
+        payload_runner_sha256: str | None = None
         try:
-            logs = _logs_container(payload)
-            logs.mkdir(parents=True, exist_ok=True)
-            stdio_fd = os.open(logs / "stdio.out", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            logs = handles.enter_context(job_dir.directory(LOGS_DIRECTORY, create=True))
+            stdio_fd = logs.open_append("stdio.out")
+            if job.runner_source == "payload":
+                # The manager hashes the payload runner through a no-follow,
+                # non-blocking descriptor; the attempt still executes it by its
+                # path, so ``$0`` and ``__file__`` name the real runner.
+                payload_runner_sha256 = self._hash_payload_runner(job_dir, job)
             start_marker = (
                 f"=== httk attempt {attempt_id} step {context['step']} ordinal {context['attempt_ordinal']} "
                 f"started {utc_now()}\n"
@@ -2012,22 +2123,20 @@ class TaskManager:
                         runner=runner,
                         workflow_prelude=workflow_prelude,
                         command=verified.command if verified is not None else None,
+                        control_writer=lambda name, data: self._write_control_file(control_dir, name, data),
                     )
                 )
             )
             if not runner_command:
                 raise FormatError(f"runner executor {job.runner_executor!r} returned an empty command")
             gate_read, gate_write = os.pipe()
+            runner_sha256: str | None
             if verified is not None:
                 runner_sha256 = verified.sha256
             else:
-                try:
-                    runner_sha256 = job.runner_sha256 or sha256_file(runner)
-                except Exception as exc:
-                    runner_sha256 = None
-                    _LOGGER.warning("cannot hash the runner for %s: %s", marker.job_key, exc)
+                runner_sha256 = job.runner_sha256 or payload_runner_sha256
             _append_attempt_event(
-                logs / "runlog.jsonl",
+                logs,
                 {
                     "format": "httk-workflow-runlog-event",
                     "format_version": 2,
@@ -2038,7 +2147,9 @@ class TaskManager:
                     "activation_id": claimed_state.activation_id,
                     "step": context["step"],
                     "runner_source": job.runner_source,
-                    "runner_path": str(verified.path if verified is not None else runner),
+                    "runner_path": str(
+                        verified.path if verified is not None else payload.joinpath(*job.runner_path.parts)
+                    ),
                     "runner_sha256": runner_sha256,
                     **(
                         {"runner_command": list(verified.command)}
@@ -2062,7 +2173,10 @@ class TaskManager:
                 stdout=stdio_fd,
                 stderr=stdio_fd,
                 start_new_session=True,
-                pass_fds=(gate_read, *([verified.fd] if verified and verified.fd is not None else [])),
+                pass_fds=(
+                    gate_read,
+                    *([verified.fd] if verified and verified.fd is not None else []),
+                ),
             )
             os.close(stdio_fd)
             stdio_fd = -1
@@ -2123,7 +2237,7 @@ class TaskManager:
                 self._reap_launcher(process)
             reason = str(exc).replace("\n", "\\n")
             _append_log_line(
-                payload,
+                job_dir,
                 f"=== httk attempt {attempt_id} ended {utc_now()} launch-failed {reason}\n",
                 job_key=marker.job_key,
             )
@@ -2167,7 +2281,9 @@ class TaskManager:
             # at least visible in the journal.
             # ponytail: full payload tree digest per payload launch; cache or cap
             # if payload launches ever dominate the manager's cost.
-            launch_fields["payload_digest"] = self.workspace.payload_digest(running)
+            payload_digest = self._launch_payload_digest(running)
+            if payload_digest is not None:
+                launch_fields["payload_digest"] = payload_digest
         _LOGGER.info(
             "launched attempt %s for %s as pid %d in %s",
             attempt_id,
@@ -2192,12 +2308,38 @@ class TaskManager:
         return (share, node) if node.local or same else None
 
     def _attempt_binding(
-        self, placement: Placement, control: Path, settings: Mapping[str, Any], mem: int | None
+        self,
+        placement: Placement,
+        control: Path,
+        settings: Mapping[str, Any],
+        mem: int | None,
+        *,
+        control_dir: JobDirectory | None = None,
     ) -> tuple[dict[str, Any], dict[str, str], set[int] | None]:
-        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs."""
+        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs.
 
+        Both files are written through *control_dir*, the pinned attempt-control
+        directory, when the launch supplies it; otherwise *control* is opened as
+        the anchor.
+        """
+
+        with contextlib.ExitStack() as handles:
+            if control_dir is None:
+                control_dir = handles.enter_context(JobDirectory.at(control))
+            return self._write_attempt_binding(placement, control, control_dir, settings, mem)
+
+    def _write_attempt_binding(
+        self,
+        placement: Placement,
+        control: Path,
+        control_dir: JobDirectory,
+        settings: Mapping[str, Any],
+        mem: int | None,
+    ) -> tuple[dict[str, Any], dict[str, str], set[int] | None]:
         nodefile = control / "nodefile"
-        nodefile.write_text("".join(f"{host}\n" for host in nodefile_lines(placement)), encoding="utf-8")
+        control_dir.write_atomic(
+            "nodefile", "".join(f"{host}\n" for host in nodefile_lines(placement)).encode("utf-8"), mode=0o666
+        )
         template = settings.get("manager.launch_template")
         if template is not None and not isinstance(template, str):
             raise FormatError("workspace setting manager.launch_template must be a string")
@@ -2221,7 +2363,7 @@ class TaskManager:
             full["launch"] = launch
         # The per-slot cpulists and GPU ids can be large, so the context keeps
         # only the counts and points at the full binding.
-        write_json_atomic(control / "binding.json", full)
+        control_dir.write_atomic("binding.json", json_bytes(full) + b"\n")
         binding = {
             **full,
             "nodes": [{key: value for key, value in node.items() if key not in ("cpus", "gpu_ids")} for node in nodes],
@@ -2355,9 +2497,11 @@ class TaskManager:
             try:
                 changed |= self._poll_one_running(marker, job, state, current_by_attempt)
             except FormatError as exc:
-                # A frame whose attempt identity cannot be used is a protocol
-                # violation of whatever wrote it, recorded against that job
-                # alone rather than allowed to stop the pass.
+                # A frame whose attempt identity cannot be used, or an attempt
+                # directory the job tampered with (JobDirectoryError, which also
+                # covers a tree a digest cannot describe), is a protocol
+                # violation of that job, recorded against it alone rather than
+                # allowed to stop the pass.
                 self._handle_attempt_failure(marker, job, "protocol_error", f"running state is unusable: {exc}")
                 changed = True
         unreadable.update(self._indeterminate_ownership)
@@ -2375,8 +2519,8 @@ class TaskManager:
 
         attempt_id = state.attempt_id or ""
         current_by_attempt[attempt_id] = marker
-        outcome_path = self._outcome_path(marker, state)
-        if outcome_path.is_dir():
+        outcome_path = self._published_outcome(marker, state)
+        if outcome_path is not None:
             return self._commit_published_outcome(marker, job, state, outcome_path)
         local = self._running.get(attempt_id)
         if local is not None:
@@ -2392,7 +2536,8 @@ class TaskManager:
                 return_code,
                 extra=self._event("attempt_exit", marker, attempt_id=attempt_id, exit_status=return_code),
             )
-            if outcome_path.is_dir():
+            outcome_path = self._published_outcome(marker, state)
+            if outcome_path is not None:
                 self._reaped_attempts.add(attempt_id)
                 self._commit_published_outcome(marker, job, state, outcome_path)
             elif local.timed_out and local.maxtime is not None:
@@ -2539,24 +2684,23 @@ class TaskManager:
                 continue
             exited = local.process.poll() is not None
             if local.fenced:
-                if not exited:
+                if not exited and local.sweep_kill_at is None:
                     _LOGGER.debug(
                         "terminating fenced attempt %s of %s after its outcome was committed",
                         attempt_id,
                         local.marker.job_key,
                     )
-                    self._terminate_process(local.process.pid)
-                else:
+                elif exited:
                     _LOGGER.debug("reaped fenced attempt %s of %s", attempt_id, local.marker.job_key)
-            else:
+            elif local.sweep_kill_at is None:
                 _LOGGER.warning(
                     "attempt %s of %s no longer owns a running marker; terminating it",
                     attempt_id,
                     local.marker.job_key,
                     extra=self._event("attempt_orphaned", local.marker, attempt_id=attempt_id),
                 )
-                if not exited:
-                    self._terminate_process(local.process.pid)
+            if not exited:
+                self._stop_untracked_attempt(local)
             return_code = local.process.poll()
             if return_code is None:
                 # A signal sent successfully is not proof that the process has
@@ -2567,6 +2711,31 @@ class TaskManager:
             local.reaped = True
             self._finish_attempt_cleanup(local)
             self._drop_running(attempt_id)
+
+    def _stop_untracked_attempt(self, local: RunningAttempt) -> None:
+        """Signal an attempt no running marker names: ``SIGTERM``, then ``SIGKILL`` after the grace.
+
+        A fenced attempt has published its outcome and may keep running, and
+        writing its job directory, for as long as it likes after ``SIGTERM``;
+        once ``cancel_grace_seconds`` have passed since the first ``SIGTERM``
+        its process group is killed.
+        """
+
+        now = time.monotonic()
+        if local.sweep_kill_at is None:
+            local.sweep_kill_at = now + self.cancel_grace_seconds
+            self._terminate_process(local.process.pid)
+        elif now >= local.sweep_kill_at:
+            _LOGGER.warning(
+                "attempt %s of %s outlived the %.1fs grace after SIGTERM; killing its process group",
+                local.attempt_id,
+                local.marker.job_key,
+                self.cancel_grace_seconds,
+                extra=self._event("attempt_sweep_kill", local.marker, attempt_id=local.attempt_id),
+            )
+            # One kill is enough; the attempt stays tracked until it is reaped.
+            local.sweep_kill_at = math.inf
+            self._terminate_process(local.process.pid, signal.SIGKILL)
 
     def _commit_published_outcome(
         self,
@@ -2582,15 +2751,17 @@ class TaskManager:
                 return False
             local = self._running.get(state.attempt_id or "")
             if local is not None:
-                action = read_json(outcome_path / "outcome.json").get("action")
+                with self._open_attempt_control(marker, state) as control:
+                    action = control.read_json("outcome.ready/outcome.json", CONTROL_DOCUMENT_LIMIT).get("action")
                 if isinstance(action, str):
                     local.outcome_action = action
             self._begin_commit(marker, state, outcome_path)
         except TransitionLostError:
             return True
         except FormatError as exc:
-            # A malformed outcome is a protocol violation of the runner, never a
-            # reason to stop the manager.
+            # A malformed or tampered outcome, or an undescribable child bundle
+            # (JobDirectoryError from a digest), is a protocol violation of the
+            # runner, never a reason to stop the manager.
             self._handle_attempt_failure(marker, job, "protocol_error", f"published outcome is unusable: {exc}")
         except (WorkflowError, OSError) as exc:
             self._report_anomaly(
@@ -2601,69 +2772,194 @@ class TaskManager:
         return True
 
     def _environment_log_ready(self, marker: Marker, state: StateFrame) -> bool:
-        """Report whether a published outcome may be committed this tick."""
+        """Report whether a published outcome may be committed this tick.
 
-        marker_path = self._attempt_control_path(marker, state) / _ENVIRONMENT_MARKER
-        if not marker_path.is_file():
-            return True
-        try:
-            recorded = read_json(marker_path)
-        except (FormatError, OSError):
-            return True
-        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
-            return True
-        deadline = recorded.get("log_deadline")
-        deadline_expired = (
-            isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and time.time() >= deadline
-        )
-        if not self._attempt_writer_dead(state) and not deadline_expired:
-            return False
-        return self._reconcile_environment_log_absence(marker_path)
+        :param marker: The running job whose outcome is published.
+        :param state: Its running state frame.
+        :return: Whether the commit may begin now.
+        :raises JobDirectoryError: If the environment-resolution marker is a
+            symlink, special file, or oversized.
+        """
 
-    def _reconcile_environment_log_absence(self, marker_path: Path) -> bool:
+        with self._open_attempt_control(marker, state) as control:
+            information = control.stat(_ENVIRONMENT_MARKER)
+            if information is None:
+                return True
+            if not stat.S_ISREG(information.st_mode):
+                raise JobDirectoryError(f"{control.path / _ENVIRONMENT_MARKER} is not a regular file")
+            try:
+                recorded = control.read_json(_ENVIRONMENT_MARKER, CONTROL_DOCUMENT_LIMIT)
+            except JobDirectoryError:
+                raise
+            except (FormatError, OSError):
+                return True
+            if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
+                return True
+            deadline = recorded.get("log_deadline")
+            deadline_expired = (
+                isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and time.time() >= deadline
+            )
+            if not self._attempt_writer_dead(state) and not deadline_expired:
+                return False
+            return self._reconcile_environment_log_absence(control)
+
+    def _reconcile_environment_log_absence(self, control: JobDirectory) -> bool:
         """Clear pending logging after writer death or its persisted grace."""
 
         # Re-read immediately before the atomic update so a runner that won the
         # race to clear the handshake is never overwritten by stale state.
         try:
-            recorded = read_json(marker_path)
+            recorded = control.read_json(_ENVIRONMENT_MARKER, CONTROL_DOCUMENT_LIMIT)
+        except JobDirectoryError:
+            raise
         except (FormatError, OSError):
             return True
         if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
             return True
         recorded["log_pending"] = False
         recorded["log_absent"] = True
-        write_json_atomic(marker_path, recorded, durable=self.workspace.durable)
+        control.write_atomic(_ENVIRONMENT_MARKER, json_bytes(recorded) + b"\n", durable=self.workspace.durable)
         return True
 
-    def _attempt_control_path(self, marker: Marker, state: StateFrame) -> Path:
-        """Return the attempt-control directory one frame names.
+    def _job_directory(self, marker: Marker) -> JobDirectory:
+        """Open one job's directory without following any link below the workspace root."""
 
-        The component is validated before it is joined, so a damaged or hostile
+        return JobDirectory.open(self.workspace.root, marker.placement, marker.job_key)
+
+    @staticmethod
+    def _attempt_control_name(state: StateFrame) -> str:
+        """Return the validated attempt-control path one frame names, relative to the payload.
+
+        The component is validated before it is used, so a damaged or hostile
         frame is a protocol error of that job rather than a path that reaches
         outside its payload.
         """
 
-        payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control_name = state.attempt_control
         if control_name is None:
             attempt_id = state.attempt_id
             if attempt_id is None:
                 raise FormatError("state frame names neither an attempt control directory nor an attempt")
             control_name = validate_attempt_control(f"{ATTEMPTS_DIRECTORY}/{attempt_id}")
-        _attempt_container(payload)
-        return _real_directory(payload / control_name)
+        return control_name
+
+    def _open_attempt_control(self, marker: Marker, state: StateFrame) -> JobDirectory:
+        """Open the attempt-control directory one frame names, through no-follow descriptors.
+
+        :param marker: The job whose attempt control is opened.
+        :param state: The frame naming the attempt.
+        :return: The pinned attempt-control directory; the caller closes it.
+        :raises httk.workflow.errors.FormatError: If the directory is missing, or
+            it or a component above it is a symlink or not a directory.
+        """
+
+        control_name = self._attempt_control_name(state)
+        try:
+            with self._job_directory(marker) as job_dir:
+                return job_dir.directory(control_name)
+        except FileNotFoundError as exc:
+            missing = self.workspace.payload_path(marker.placement, marker.job_key) / control_name
+            raise FormatError(f"attempt directory is missing: {missing}") from exc
+
+    def _attempt_control_path(self, marker: Marker, state: StateFrame) -> Path:
+        """Return the attempt-control directory one frame names, once it is verified to be real."""
+
+        with self._open_attempt_control(marker, state) as control:
+            return control.path
 
     def _outcome_path(self, marker: Marker, state: StateFrame) -> Path:
         return self._attempt_control_path(marker, state) / "outcome.ready"
 
+    def _published_outcome(self, marker: Marker, state: StateFrame) -> Path | None:
+        """Return the published outcome directory of a running attempt, or ``None`` before it publishes.
+
+        :param marker: The running job.
+        :param state: Its running state frame.
+        :return: The ``outcome.ready`` path, or ``None``.
+        :raises JobDirectoryError: If ``outcome.ready`` is a symlink or not a
+            real directory, which no runner publishes.
+        """
+
+        with self._open_attempt_control(marker, state) as control:
+            return control.path / "outcome.ready" if control.exists_dir("outcome.ready") else None
+
+    def _hash_payload_runner(self, job_dir: JobDirectory, job: JobDefinition) -> str | None:
+        """Hash a payload runner through a no-follow, non-blocking descriptor.
+
+        The runner is only hashed when the job does not pin its digest, but it
+        is always checked: a symlink or special file planted at the runner path
+        is the job's protocol error. A runner the manager cannot read (an
+        execute-only file) or cannot open for another ordinary reason is still
+        launched by its path, as before, just without a recorded digest.
+
+        :param job_dir: The pinned job directory.
+        :param job: The job whose payload runner is hashed.
+        :return: The runner's SHA-256, or ``None`` when it is pinned or unreadable.
+        :raises JobDirectoryError: If the runner or a directory above it is a
+            symlink, or the runner is not a regular file.
+        """
+
+        try:
+            descriptor = job_dir.open_read(job.runner_path)
+        except JobDirectoryError:
+            raise
+        except PermissionError as exc:
+            _LOGGER.debug("cannot read the runner of %s to hash it: %s", job.job_key, exc)
+            return None
+        except OSError as exc:
+            _LOGGER.warning("cannot hash the runner for %s: %s", job.job_key, exc)
+            return None
+        try:
+            return None if job.runner_sha256 else _manager_runners._hash_fd(descriptor)
+        except OSError as exc:
+            _LOGGER.warning("cannot hash the runner for %s: %s", job.job_key, exc)
+            return None
+        finally:
+            os.close(descriptor)
+
+    def _launch_payload_digest(self, marker: Marker) -> str | None:
+        """Digest a payload at launch for the journal, or ``None`` when it cannot be described.
+
+        The digest is informational. A payload that legitimately holds a
+        contained symlink (a previous attempt may leave one in a persistent
+        workdir), or that the job made undescribable, is logged and the launch
+        proceeds without it.
+
+        :param marker: The launched job.
+        :return: The payload digest, or ``None``.
+        """
+
+        try:
+            return self.workspace.payload_digest(marker)
+        except (ValueError, OSError) as exc:
+            _LOGGER.warning(
+                "cannot record the launch payload digest of %s: %s",
+                marker.job_key,
+                exc,
+                extra=self._event("payload_digest_unavailable", marker),
+            )
+            return None
+
+    @staticmethod
+    def _write_control_file(control_dir: JobDirectory, name: str, data: bytes) -> Path:
+        """Create one new file in the pinned attempt-control directory for an executor."""
+
+        control_dir.create_exclusive(name, data, mode=0o666)
+        return control_dir.path / name
+
     def _begin_commit(self, marker: Marker, state: StateFrame, outcome_path: Path) -> None:
-        outcome = self._read_outcome(outcome_path / "outcome.json", marker, state)
-        child_digests = self._child_digests(outcome_path)
-        # The spawn set is validated before the marker leaves running, so a
-        # missing or ambiguous child label is a protocol error of the published
-        # outcome rather than a commit failure of an accepted one.
-        child_labels = self._spawn_labels(outcome_path)
+        # The published draft is read through descriptors pinned without
+        # following links; *outcome_path* only names it.
+        with (
+            self._open_attempt_control(marker, state) as control,
+            _manager_commit._open_draft(control) as draft,
+        ):
+            outcome = self._read_outcome(draft, marker, state)
+            child_digests = self._child_digests(draft)
+            # The spawn set is validated before the marker leaves running, so a
+            # missing or ambiguous child label is a protocol error of the published
+            # outcome rather than a commit failure of an accepted one.
+            child_labels = self._spawn_labels(draft)
         attempt_id = state.attempt_id
         attempt_control = state.attempt_control
         if attempt_id is None or attempt_control is None:
@@ -2702,20 +2998,20 @@ class TaskManager:
     def _declared_runner_steps(self, marker: Marker, outcome: Mapping[str, Any]) -> list[str] | None:
         return _manager_commit.declared_runner_steps(marker, outcome, _LOGGER)
 
-    def _read_outcome(self, path: Path, marker: Marker, state: StateFrame) -> dict[str, Any]:
-        return _manager_commit.read_outcome(path, marker, state)
+    def _read_outcome(self, source: Path | JobDirectory, marker: Marker, state: StateFrame) -> dict[str, Any]:
+        return _manager_commit.read_outcome(source, marker, state)
 
-    def _child_digests(self, outcome_path: Path) -> dict[str, str]:
-        return _manager_commit.child_digests(outcome_path, tree_digest)
+    def _child_digests(self, outcome: JobDirectory) -> dict[str, str]:
+        return _manager_commit.child_digests(outcome, tree_digest)
 
-    def _spawn_labels(self, outcome_path: Path) -> dict[str, str]:
-        return _manager_commit.spawn_labels(outcome_path)
+    def _spawn_labels(self, outcome: JobDirectory) -> dict[str, str]:
+        return _manager_commit.spawn_labels(outcome)
 
-    def _labeled_join(self, join: Mapping[str, Any], outcome_path: Path) -> dict[str, object]:
-        return _manager_commit.labeled_join(join, outcome_path)
+    def _labeled_join(self, join: Mapping[str, Any], outcome: JobDirectory) -> dict[str, object]:
+        return _manager_commit.labeled_join(join, outcome)
 
-    def _register_children(self, marker: Marker, state: StateFrame, outcome_path: Path) -> None:
-        _manager_commit.register_children(self, marker, state, outcome_path, tree_digest)
+    def _register_children(self, marker: Marker, state: StateFrame, outcome: JobDirectory) -> None:
+        _manager_commit.register_children(self, marker, state, outcome, tree_digest)
 
     def _advance(
         self,

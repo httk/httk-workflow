@@ -1,23 +1,29 @@
 """Private outcome and commit decisions used by the task manager."""
 
+import contextlib
 import errno
 import logging
+import os
+import stat
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import gc as _gc
 from ._job_tree import record_spawns
-from ._util import read_json, require_int, require_string
+from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
+from ._util import require_int, require_string
 from .errors import FormatError, TransactionError, UnsupportedExtensionError
 from .models import (
+    ATTEMPTS_DIRECTORY,
     Failure,
     JobDefinition,
     Marker,
     StateFrame,
+    check_job_placement,
     is_payload_private,
     normalize_placement,
+    parse_job_key,
     validate_failure,
     validate_label,
     validate_resources,
@@ -27,15 +33,19 @@ from .models import (
 _LOGGER = logging.getLogger("httk.workflow.manager")
 
 
-def _remove_attempt_control_tree(control: Path, job_key: str) -> None:
-    """Best-effort remove one validated attempt-control tree and its container."""
+def _remove_attempt_control_tree(job_dir: JobDirectory, control_name: str, job_key: str) -> None:
+    """Remove one validated attempt-control tree and its emptied container through descriptors.
 
-    attempts = control.parent
-    removed = _gc._remove_tree(control)
-    if not removed and control.exists():
-        raise OSError(f"attempt control tree remains: {control}")
+    The tree is removed with the descriptor-based :meth:`JobDirectory.remove_tree`,
+    so a symlink the job planted inside it, or in place of it, is unlinked and
+    never followed.
+    """
+
+    job_dir.remove_tree(control_name)
+    if job_dir.stat(control_name) is not None:
+        raise OSError(f"attempt control tree remains: {job_dir.path / control_name}")
     try:
-        attempts.rmdir()
+        os.rmdir(ATTEMPTS_DIRECTORY, dir_fd=job_dir.fd)
     except FileNotFoundError:
         pass
     except OSError as exc:
@@ -65,8 +75,8 @@ def _remove_committed_attempt_control(manager: Any, marker: Marker, state: State
         # manager, so the evidence remains for the collector.
         return
     try:
-        control = manager._attempt_control_path(marker, state)
-        _remove_attempt_control_tree(control, marker.job_key)
+        with manager._job_directory(marker) as job_dir:
+            _remove_attempt_control_tree(job_dir, manager._attempt_control_name(state), marker.job_key)
     except Exception as exc:
         _LOGGER.warning("cannot remove committed attempt control for %s: %s", marker.job_key, exc)
     finally:
@@ -130,11 +140,36 @@ _ASSEMBLY_REMEDY = (
 )
 
 
-def read_outcome(path: Path, marker: Marker, state: StateFrame) -> dict[str, Any]:
+def _draft_digest(directory: JobDirectory, name: str, digest: Callable[..., str]) -> str:
+    """Digest one child bundle of a draft, anchored at its no-follow descriptor."""
+
+    return directory.digest_tree(name, skip=is_payload_private, digest=digest)
+
+
+def read_outcome(source: Path | JobDirectory, marker: Marker, state: StateFrame) -> dict[str, Any]:
+    """Read and check one published outcome document.
+
+    :param source: The pinned ``outcome.ready`` directory, or the path of an
+        ``outcome.json`` (whose directory is then the trusted anchor).
+    :param marker: The committing job.
+    :param state: Its state frame, naming the attempt.
+    :return: The outcome document.
+    :raises httk.workflow.errors.FormatError: If the outcome is unreadable,
+        malformed, foreign, a symlink, special file, or oversized.
+    """
+
     try:
-        outcome = read_json(path)
+        if isinstance(source, JobDirectory):
+            outcome = source.read_json("outcome.json", CONTROL_DOCUMENT_LIMIT)
+        else:
+            with JobDirectory.at(source.parent) as directory:
+                outcome = directory.read_json(source.name, CONTROL_DOCUMENT_LIMIT)
+    except JobDirectoryError:
+        raise
     except FormatError as exc:
         raise FormatError(f"{exc}{_ASSEMBLY_REMEDY}") from exc
+    except OSError as exc:
+        raise FormatError(f"cannot read JSON object {source}: {exc}{_ASSEMBLY_REMEDY}") from exc
     if outcome.get("format") != "httk-workflow-outcome" or outcome.get("format_version") != 2:
         raise FormatError(f"outcome must use httk-workflow-outcome version 2{_ASSEMBLY_REMEDY}")
     for key, expected in (
@@ -149,18 +184,54 @@ def read_outcome(path: Path, marker: Marker, state: StateFrame) -> dict[str, Any
     return outcome
 
 
-def child_digests(outcome_path: Path, digest: Callable[..., str]) -> dict[str, str]:
-    jobs_dir = outcome_path / "children" / "jobs"
-    if not jobs_dir.is_dir():
+def child_digests(outcome: JobDirectory, digest: Callable[..., str]) -> dict[str, str]:
+    """Digest every child bundle a draft publishes, through no-follow descriptors.
+
+    :param outcome: The pinned ``outcome.ready`` directory.
+    :param digest: The tree-digest function.
+    :return: Child job key to bundle digest.
+    :raises JobDirectoryError: If a path to a bundle, or an entry in one, is a
+        symlink or special file.
+    """
+
+    if not outcome.exists_dir("children/jobs"):
         return {}
-    return {path.name: digest(path, skip=is_payload_private) for path in sorted(jobs_dir.iterdir()) if path.is_dir()}
+    digests: dict[str, str] = {}
+    with outcome.directory("children/jobs") as jobs:
+        for name in sorted(os.listdir(jobs.fd)):
+            information = jobs.stat(name)
+            if information is None or stat.S_ISREG(information.st_mode):
+                continue
+            if not stat.S_ISDIR(information.st_mode):
+                raise JobDirectoryError(f"child bundle {jobs.path / name} is a symlink or special file")
+            digests[name] = _draft_digest(jobs, name, digest)
+    return digests
 
 
-def spawn_labels(outcome_path: Path) -> dict[str, str]:
-    spawn_path = outcome_path / "children" / "spawn.json"
-    if not spawn_path.is_file():
+def _spawn_document(outcome: JobDirectory) -> dict[str, Any] | None:
+    """Return the draft's ``children/spawn.json``, or ``None`` when it publishes none."""
+
+    information = outcome.stat("children/spawn.json")
+    if information is None:
+        return None
+    if not stat.S_ISREG(information.st_mode):
+        raise JobDirectoryError(f"{outcome.path / 'children' / 'spawn.json'} is not a regular file")
+    return outcome.read_json("children/spawn.json", CONTROL_DOCUMENT_LIMIT)
+
+
+def spawn_labels(outcome: JobDirectory) -> dict[str, str]:
+    """Return the label of every spawned child, checking that the labels are unique.
+
+    :param outcome: The pinned ``outcome.ready`` directory.
+    :return: Child job key to label.
+    :raises httk.workflow.errors.FormatError: If the spawn set is malformed, or
+        ``spawn.json`` is a symlink, special file, or oversized.
+    """
+
+    spawn = _spawn_document(outcome)
+    if spawn is None:
         return {}
-    entries = read_json(spawn_path).get("children")
+    entries = spawn.get("children")
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         raise FormatError("spawn children must be an array")
     labels: dict[str, str] = {}
@@ -177,8 +248,16 @@ def spawn_labels(outcome_path: Path) -> dict[str, str]:
     return labels
 
 
-def labeled_join(join: Mapping[str, Any], outcome_path: Path) -> dict[str, object]:
-    labels = spawn_labels(outcome_path)
+def labeled_join(join: Mapping[str, Any], outcome: JobDirectory) -> dict[str, object]:
+    """Return a join whose child references carry the labels of the spawn set.
+
+    :param join: The outcome's join object.
+    :param outcome: The pinned ``outcome.ready`` directory.
+    :return: The join with labels filled in.
+    :raises httk.workflow.errors.FormatError: If the spawn set is malformed or tampered with.
+    """
+
+    labels = spawn_labels(outcome)
     children = join.get("children")
     if not isinstance(children, Sequence) or isinstance(children, (str, bytes)):
         return dict(join)
@@ -238,31 +317,53 @@ def _auto_seal_succeeded(manager: Any, destination: Marker) -> None:
         )
 
 
+def _open_draft(control: JobDirectory) -> JobDirectory:
+    """Open a committing attempt's published ``outcome.ready`` without following links."""
+
+    try:
+        return control.directory("outcome.ready")
+    except FileNotFoundError as exc:
+        raise FormatError(f"published outcome is missing: {control.path / 'outcome.ready'}") from exc
+
+
 def process_committing(manager: Any, marker: Marker) -> None:
     """Apply a validated committing outcome through the manager's effects."""
 
     state = manager._read_frame(marker)
     job = manager.workspace.load_job(marker)
-    outcome_path = manager._outcome_path(marker, state)
-    outcome = manager._read_outcome(outcome_path / "outcome.json", marker, state)
-    data_generation = state.data_generation
-    transaction_path = outcome_path / "transaction"
-    if transaction_path.is_dir():
-        if job.data_mode != "transactional" or data_generation is None:
-            raise TransactionError("transaction published by a nontransactional job")
-        if outcome.get("expected_data_generation") != data_generation:
-            raise TransactionError("outcome expected_data_generation is stale")
-        from .transactions import replay_transaction
+    # The draft is reached only through descriptors pinned without following
+    # links, so whatever the job planted in it cannot redirect the commit.
+    with (
+        manager._open_attempt_control(marker, state) as control,
+        manager._job_directory(marker) as job_dir,
+        _open_draft(control) as draft,
+    ):
+        outcome_path = draft.path
+        outcome = manager._read_outcome(draft, marker, state)
+        data_generation = state.data_generation
+        if draft.exists_dir("transaction"):
+            if job.data_mode != "transactional" or data_generation is None:
+                raise TransactionError("transaction published by a nontransactional job")
+            if outcome.get("expected_data_generation") != data_generation:
+                raise TransactionError("outcome expected_data_generation is stale")
+            from .transactions import _replay_pinned
 
-        changed_data = replay_transaction(
-            transaction_path,
-            manager.workspace.payload_path(marker.placement, marker.job_key) / "data",
-            expected_generation=data_generation,
-            durable=manager.workspace.durable,
+            with draft.directory("transaction") as transaction, job_dir.directory("data", create=True) as data:
+                changed_data = _replay_pinned(
+                    transaction,
+                    data,
+                    expected_generation=data_generation,
+                    durable=manager.workspace.durable,
+                )
+            if changed_data:
+                data_generation += 1
+        manager._register_children(marker, state, draft)
+        joined = outcome.get("join")
+        labeled = (
+            manager._labeled_join(joined, draft)
+            if outcome["action"] == "wait" and isinstance(joined, Mapping)
+            else None
         )
-        if changed_data:
-            data_generation += 1
-    manager._register_children(marker, state, outcome_path)
     executor = manager._executor_for(job)
     if executor is None:
         return
@@ -310,8 +411,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
         _remove_committed_attempt_control(manager, marker, state, destination)
     elif action == "wait":
         next_step = validate_step(outcome.get("next_step"), "next_step")
-        join = outcome.get("join")
-        if not isinstance(join, Mapping):
+        if labeled is None:
             raise FormatError("wait outcome requires a join object")
         destination = manager._transition(
             marker,
@@ -320,7 +420,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
                 progress,
                 next_step=next_step,
                 resources=next_resources,
-                join=manager._labeled_join(join, outcome_path),
+                join=labeled,
                 reason="waiting_for_children",
             ),
             priority=next_priority,
@@ -454,65 +554,156 @@ def retry(
     return manager._transition(marker, "ready", retried, priority=priority)
 
 
+def child_staging_name(attempt_id: str, job_key: str) -> str:
+    """Return the deterministic staging name of one spawned child bundle.
+
+    A child bundle is renamed out of the job-writable draft into the manager's
+    ``.httk-workspace/tmp`` before it is verified and published. The name is
+    derived from the attempt and the child key, never random, so a commit
+    replayed after a crash between that rename and the publication finds the
+    bundle again in staging rather than missing from the draft.
+
+    :param attempt_id: The attempt whose outcome spawned the child.
+    :param job_key: The child's job key.
+    :return: The staging entry name.
+    """
+
+    return f"child.{attempt_id}.{job_key}"
+
+
+def _validated_spawn_entries(manager: Any, entries: Sequence[Mapping[str, object]]) -> list[tuple[str, PurePosixPath]]:
+    """Validate every spawn entry, before anything durable is written for any of them."""
+
+    validated: list[tuple[str, PurePosixPath]] = []
+    for raw in entries:
+        job_key = require_string(raw.get("job_key"), "spawn child job_key")
+        parse_job_key(job_key)
+        placement = normalize_placement(str(raw.get("placement", "")))
+        check_job_placement(placement)
+        if raw.get("workspace_id", manager.workspace.workspace_id) != manager.workspace.workspace_id:
+            raise UnsupportedExtensionError("cross-workspace spawn children are not supported")
+        validated.append((job_key, placement))
+    return validated
+
+
+def _stage_child(jobs: JobDirectory | None, staging: JobDirectory, job_key: str, staged: str) -> bool:
+    """Move a child bundle out of the draft into staging; report whether one is staged.
+
+    A bundle already in staging (from a commit interrupted after this rename)
+    takes precedence: whatever the job put back in the draft since is ignored.
+    """
+
+    present = staging.stat(staged)
+    if present is not None:
+        if not stat.S_ISDIR(present.st_mode):
+            raise JobDirectoryError(f"staged child {staging.path / staged} is not a real directory")
+        return True
+    if jobs is None:
+        return False
+    information = jobs.stat(job_key)
+    if information is None:
+        return False
+    if not stat.S_ISDIR(information.st_mode):
+        raise JobDirectoryError(f"child bundle {jobs.path / job_key} is a symlink or not a directory")
+    jobs.rename_out(job_key, staging.fd, staged)
+    return True
+
+
+def _verify_staged(staging: JobDirectory, staged: str, job_key: str, expected: str, digest: Callable[..., str]) -> None:
+    """Verify a staged child bundle.
+
+    A refused bundle is left in staging as evidence; the parent fails, so its
+    commit is never replayed, and ``tmp_entries`` collection sweeps the entry
+    once it has aged and the parent is no longer committing.
+    """
+
+    child = JobDefinition.from_path(staging.path / staged / "job.json")
+    if child.job_key != job_key:
+        raise FormatError("spawn job_key disagrees with child job.json")
+    if staging.digest_tree(staged, skip=is_payload_private, digest=digest) != expected:
+        raise FormatError("spawn child changed after outcome publication")
+
+
 def register_children(
-    manager: Any, marker: Marker, state: StateFrame, outcome_path: Path, digest: Callable[..., str]
+    manager: Any, marker: Marker, state: StateFrame, outcome: JobDirectory, digest: Callable[..., str]
 ) -> None:
-    children_dir = outcome_path / "children"
-    if not children_dir.is_dir():
+    """Register the children one committed outcome spawned.
+
+    Every spawn entry is validated (job key, placement rule, workspace) before
+    the parent's durable spawn record is written, so a refused spawn leaves no
+    record. Each child bundle is then renamed out of the job-writable draft
+    into manager-owned staging (:func:`child_staging_name`), verified there —
+    a real directory whose ``job.json`` names the key and whose digest is the
+    one recorded when the outcome was accepted — and only then published at
+    ``<placement>/<job_key>``. A job that keeps writing its draft after
+    publication therefore cannot change what was verified.
+
+    :param manager: The committing task manager.
+    :param marker: The committing parent.
+    :param state: The parent's committing frame.
+    :param outcome: The pinned ``outcome.ready`` directory.
+    :param digest: The tree-digest function.
+    :raises httk.workflow.errors.FormatError: If the spawn set or a child bundle
+        is malformed, tampered with, or changed since the outcome was accepted.
+    :raises httk.workflow.errors.UnsupportedExtensionError: If a child names another workspace.
+    """
+
+    if not outcome.exists_dir("children"):
         return
-    spawn = read_json(children_dir / "spawn.json")
+    spawn = _spawn_document(outcome)
+    if spawn is None:
+        raise FormatError(f"cannot read JSON object {outcome.path / 'children' / 'spawn.json'}: it is missing")
     entries = spawn.get("children")
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         raise FormatError("spawn children must be an array")
-    manager._spawn_labels(outcome_path)
+    manager._spawn_labels(outcome)
     expected_digests = state.child_digests
     if expected_digests is None and state.has("child_digests"):
         raise FormatError("committing child_digests must be an object")
     expected_digests = {} if expected_digests is None else expected_digests
     if not all(isinstance(raw, Mapping) for raw in entries):
         raise FormatError("spawn child must be an object")
+    if not state.attempt_id:
+        raise FormatError("a committing frame that registers children must name its attempt")
+    validated = _validated_spawn_entries(manager, entries)
     # The parent's durable record of its children precedes every child it names,
     # so a child can never exist without its parent knowing it (tree transfers
     # rely on this); a replay must find the record byte-identical.
-    if not state.attempt_id:
-        raise FormatError("a committing frame that registers children must name its attempt")
-    record_spawns(
-        manager.workspace.payload_path(marker.placement, marker.job_key),
-        state.attempt_id,
-        entries,
-        durable=manager.workspace.durable,
-    )
-    for raw in entries:
-        if not isinstance(raw, Mapping):
-            raise FormatError("spawn child must be an object")
-        job_key = str(raw.get("job_key", ""))
-        placement = normalize_placement(str(raw.get("placement", "")))
-        if raw.get("workspace_id", manager.workspace.workspace_id) != manager.workspace.workspace_id:
-            raise UnsupportedExtensionError("cross-workspace spawn children are not supported")
-        source = children_dir / "jobs" / job_key
-        expected_digest = str(expected_digests.get(job_key, ""))
-        target = manager.workspace.payload_path(placement, job_key)
-        published_here = False
-        if source.is_dir():
-            child = JobDefinition.from_mapping(read_json(source / "job.json"))
-            if child.job_key != job_key:
-                raise FormatError("spawn job_key disagrees with child job.json")
-            if digest(source, skip=is_payload_private) != expected_digest:
-                raise FormatError("spawn child changed after outcome publication")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            manager.workspace._publish_path(source, target)
-            published_here = True
-        if not target.is_dir():
-            raise FormatError(f"registered child bundle does not match: {job_key}")
-        if manager.workspace.find_marker_at(job_key, placement) is not None:
-            continue
-        if not published_here and digest(target, skip=is_payload_private) != expected_digest:
-            raise FormatError(f"registered child bundle does not match: {job_key}")
-        child = JobDefinition.from_mapping(read_json(target / "job.json"))
-        temporary = manager.workspace.control / "tmp" / f"child-marker.{uuid.uuid4()}"
-        temporary.touch(exist_ok=False)
-        destination = manager.workspace.marker_path("submitted", placement, job_key, child.priority, 0, "init")
-        manager.workspace._publish_path(temporary, destination)
+    with manager._job_directory(marker) as job_dir:
+        record_spawns(job_dir, state.attempt_id, entries, durable=manager.workspace.durable)
+    staging_path = manager.workspace.control / "tmp"
+    staging_path.mkdir(parents=True, exist_ok=True)
+    with JobDirectory.at(staging_path) as staging, contextlib.ExitStack() as handles:
+        jobs = (
+            handles.enter_context(outcome.directory("children/jobs")) if outcome.exists_dir("children/jobs") else None
+        )
+        for job_key, placement in validated:
+            expected_digest = str(expected_digests.get(job_key, ""))
+            target = manager.workspace.payload_path(placement, job_key)
+            staged = child_staging_name(state.attempt_id, job_key)
+            published_here = False
+            if _stage_child(jobs, staging, job_key, staged):
+                _verify_staged(staging, staged, job_key, expected_digest, digest)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                manager.workspace._publish_path(staging.path / staged, target)
+                published_here = True
+            if not target.is_dir():
+                raise FormatError(f"registered child bundle does not match: {job_key}")
+            if manager.workspace.find_marker_at(job_key, placement) is not None:
+                continue
+            if not published_here:
+                try:
+                    with JobDirectory.open(manager.workspace.root, placement, job_key) as published:
+                        published_digest = published.digest_tree(skip=is_payload_private, digest=digest)
+                except FileNotFoundError as exc:
+                    raise FormatError(f"registered child bundle does not match: {job_key}") from exc
+                if published_digest != expected_digest:
+                    raise FormatError(f"registered child bundle does not match: {job_key}")
+            child = JobDefinition.from_path(target / "job.json")
+            temporary = manager.workspace.control / "tmp" / f"child-marker.{uuid.uuid4()}"
+            temporary.touch(exist_ok=False)
+            destination = manager.workspace.marker_path("submitted", placement, job_key, child.priority, 0, "init")
+            manager.workspace._publish_path(temporary, destination)
 
 
 def handle_attempt_failure(
@@ -563,8 +754,6 @@ def handle_attempt_failure(
 
 def resume(manager: Any, logger: Any) -> bool:
     from .errors import (
-        FormatError,
-        TransactionError,
         TransitionLostError,
         WorkflowError,
     )
@@ -586,6 +775,10 @@ def resume(manager: Any, logger: Any) -> bool:
         except TransitionLostError:
             pass
         except (FormatError, TransactionError) as exc:
+            # FormatError covers JobDirectoryError: a symlink or special file the
+            # job planted in its draft or data, or draft content a digest cannot
+            # describe, is the job's own protocol violation, never a reason to
+            # stop the manager.
             # A replay that fails midway is transaction corruption; a manifest or
             # outcome the manager cannot parse is a protocol violation of the
             # runner. Both used to be reported as corruption, which lied about a

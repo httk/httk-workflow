@@ -32,8 +32,10 @@ workspace state, so a collector that is killed halfway leaves a workspace that
 is exactly as consistent as it was before.
 """
 
+import functools
 import logging
 import os
+import stat
 import time
 import uuid
 from collections import Counter
@@ -44,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._jobdir import JobDirectory
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
 from .journal import JournalWriter, iter_record_chain, parse_record_ref
@@ -54,7 +57,7 @@ from .models import (
     TERMINAL_KINDS,
     Marker,
 )
-from .removal import REMOVABLE_KINDS, _is_real_directory, join_child_parents
+from .removal import REMOVABLE_KINDS, join_child_parents
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
@@ -284,7 +287,13 @@ def _owned_by_current_user(path: Path) -> bool:
         return False
 
 
-def _remove_tree(path: Path, *, dry_run: bool = False, on_foreign: Callable[[], None] | None = None) -> bool:
+def _remove_tree(
+    path: Path,
+    *,
+    dry_run: bool = False,
+    on_foreign: Callable[[], None] | None = None,
+    remover: Callable[[], None] | None = None,
+) -> bool:
     """Remove one entry bottom-up, reporting whether it is gone afterwards.
 
     A killed collection must leave a workspace no less consistent than it found
@@ -292,6 +301,11 @@ def _remove_tree(path: Path, *, dry_run: bool = False, on_foreign: Callable[[], 
     entry that another process removed first. Nothing here is renamed and no
     state is rewritten, which is what makes an interrupted removal harmless:
     the partial remains are scratch that the next run collects again.
+
+    A *remover* replaces the path-based removal once the (read-only) ownership
+    preflight has passed. Collection inside a job directory passes a
+    descriptor-anchored one, so an entry the job swaps for a symlink between
+    the preflight and the removal is unlinked rather than followed.
     """
 
     def foreign() -> None:
@@ -320,6 +334,8 @@ def _remove_tree(path: Path, *, dry_run: bool = False, on_foreign: Callable[[], 
             foreign()
         if failed or dry_run:
             return not failed
+        if remover is not None:
+            return _run_remover(path, remover)
 
         def remove(entry: Path) -> bool:
             if not _owned_by_current_user(entry):
@@ -351,11 +367,24 @@ def _remove_tree(path: Path, *, dry_run: bool = False, on_foreign: Callable[[], 
         return remove(path)
     if dry_run:
         return True
+    if remover is not None:
+        return _run_remover(path, remover)
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
         _LOGGER.debug("cannot remove %s: %s", path, exc)
     return not path.exists()
+
+
+def _run_remover(path: Path, remover: Callable[[], None]) -> bool:
+    """Run a descriptor-anchored removal, reporting whether it succeeded."""
+
+    try:
+        remover()
+    except (OSError, FormatError) as exc:
+        _LOGGER.debug("cannot remove %s: %s", path, exc)
+        return False
+    return True
 
 
 def _mtime(path: Path) -> float | None:
@@ -365,6 +394,20 @@ def _mtime(path: Path) -> float | None:
         return path.lstat().st_mtime
     except OSError:
         return None
+
+
+def _directory_names(directory: JobDirectory) -> list[str]:
+    """List the real subdirectories of one pinned directory, without following links."""
+
+    names: list[str] = []
+    try:
+        with os.scandir(directory.fd) as listing:
+            for entry in listing:
+                if stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
+                    names.append(entry.name)
+    except OSError:
+        return []
+    return sorted(names)
 
 
 def _iterdir(path: Path) -> list[Path]:
@@ -569,7 +612,9 @@ class _Collection:
         modified = _mtime(path)
         return modified is not None and modified <= cutoff
 
-    def _collect(self, category: str, path: Path, *, size: int | None = None) -> bool:
+    def _collect(
+        self, category: str, path: Path, *, size: int | None = None, remover: Callable[[], None] | None = None
+    ) -> bool:
         """Account for one collectable entry and, unless dry, remove it."""
 
         self._account_candidate(category, path, size=size)
@@ -579,7 +624,7 @@ class _Collection:
             nonlocal foreign
             foreign += 1
 
-        removed = _remove_tree(path, dry_run=self.dry_run, on_foreign=count_foreign)
+        removed = _remove_tree(path, dry_run=self.dry_run, on_foreign=count_foreign, remover=remover)
         if foreign:
             self._skipped_foreign[category] = self._skipped_foreign.get(category, 0) + foreign
             _LOGGER.debug("skipping %s foreign entries below %s", foreign, path)
@@ -633,25 +678,42 @@ class _Collection:
             if marker.kind not in QUIESCENT_KINDS:
                 continue
             payload = self.workspace.payload_path(marker.placement, marker.job_key)
-            controls: list[tuple[float, str, Path]] = []
-            attempts = payload / ATTEMPTS_DIRECTORY
-            if not _is_real_directory(attempts):
+            # The job wrote its own directory, so the attempt container is
+            # reached and listed through no-follow descriptors and every
+            # removal is anchored on them.
+            try:
+                with JobDirectory.open(self.workspace.root, marker.placement, marker.job_key) as job_dir:
+                    attempts = job_dir.directory(ATTEMPTS_DIRECTORY)
+            except (FormatError, OSError):
                 continue
-            for entry in _iterdir(attempts):
-                if entry.is_symlink() or not _is_real_directory(entry):
-                    continue
-                modified = _mtime(entry)
-                if modified is not None:
-                    controls.append((modified, entry.name, entry))
-            if marker.kind in {"failed", "cancelled"} and len(controls) < 2:
+            with attempts:
+                self._collect_attempt_controls(marker, payload / ATTEMPTS_DIRECTORY, attempts, cutoff, lease_cutoff)
+
+    def _collect_attempt_controls(
+        self, marker: Marker, container: Path, attempts: JobDirectory, cutoff: float, lease_cutoff: float
+    ) -> None:
+        """Collect the aged attempt-control directories of one pinned attempt container."""
+
+        controls: list[tuple[float, str, Path]] = []
+        try:
+            with os.scandir(attempts.fd) as listing:
+                entries = sorted(listing, key=lambda entry: entry.name)
+            for listed in entries:
+                information = listed.stat(follow_symlinks=False)
+                if stat.S_ISDIR(information.st_mode):
+                    controls.append((information.st_mtime, listed.name, container / listed.name))
+        except OSError:
+            return
+        if marker.kind in {"failed", "cancelled"} and len(controls) < 2:
+            return
+        controls.sort()
+        retained = controls[-1:] if marker.kind in {"failed", "cancelled"} else ()
+        for control in controls:
+            modified, name, entry = control
+            if control in retained:
                 continue
-            controls.sort()
-            retained = controls[-1:] if marker.kind in {"failed", "cancelled"} else ()
-            for modified, _name, entry in controls:
-                if entry in retained:
-                    continue
-                if self._aged(entry, cutoff) and (marker.kind in {"failed", "cancelled"} or modified <= lease_cutoff):
-                    self._collect("attempt_control", entry)
+            if modified <= cutoff and (marker.kind in {"failed", "cancelled"} or modified <= lease_cutoff):
+                self._collect("attempt_control", entry, remover=functools.partial(attempts.remove_tree, name))
 
     def _join_child_parents(self) -> dict[str, set[str]] | None:
         """Return non-terminal parents that reference each child job id.
@@ -766,26 +828,53 @@ class _Collection:
         for marker in self.markers():
             if marker.kind not in QUIESCENT_KINDS:
                 continue
-            payload = self.workspace.payload_path(marker.placement, marker.job_key)
-            attempts = payload / ATTEMPTS_DIRECTORY
-            if not _is_real_directory(attempts):
+            # The trash lives in the job-written draft, so it is reached, listed
+            # and removed only through no-follow descriptors: a symlink planted
+            # anywhere on the way is skipped, never followed.
+            try:
+                with JobDirectory.open(self.workspace.root, marker.placement, marker.job_key) as job_dir:
+                    attempts = job_dir.directory(ATTEMPTS_DIRECTORY)
+            except (FormatError, OSError):
                 continue
-            for control in _iterdir(attempts):
-                if control.is_symlink() or not _is_real_directory(control):
+            with attempts:
+                for control in _directory_names(attempts):
+                    try:
+                        transaction = attempts.directory(f"{control}/outcome.ready/transaction")
+                    except (FormatError, OSError):
+                        continue
+                    with transaction:
+                        self._collect_trash(transaction)
+
+    def _collect_trash(self, transaction: JobDirectory) -> None:
+        """Collect the aged entries of one pinned transaction's trash, then the emptied trash."""
+
+        cutoff = self._cutoff(self.retention.trash_days)
+        assert cutoff is not None
+        try:
+            trash = transaction.directory("trash")
+        except (FormatError, OSError):
+            return
+        with trash:
+            for name in sorted(os.listdir(trash.fd)):
+                information = trash.stat(name)
+                if information is None or information.st_mtime > cutoff:
                     continue
-                outcome_ready = control / "outcome.ready"
-                transaction = outcome_ready / "transaction"
-                trash = transaction / "trash"
-                if (
-                    not _is_real_directory(outcome_ready)
-                    or not _is_real_directory(transaction)
-                    or not _is_real_directory(trash)
-                ):
-                    continue
-                for entry in _iterdir(trash):
-                    if self._aged(entry, cutoff):
-                        self._collect("transaction_trash", entry)
-                self._rmdir(trash, "transaction_trash")
+                self._collect(
+                    "transaction_trash", trash.path / name, remover=functools.partial(trash.remove_tree, name)
+                )
+        information = transaction.stat("trash")
+        if information is None or not stat.S_ISDIR(information.st_mode):
+            return
+        if information.st_uid != os.getuid():
+            self._skipped_foreign["transaction_trash"] = self._skipped_foreign.get("transaction_trash", 0) + 1
+            _LOGGER.debug("skipping foreign transaction_trash directory %s", transaction.path / "trash")
+            return
+        if self.dry_run:
+            return
+        try:
+            os.rmdir("trash", dir_fd=transaction.fd)
+        except OSError:
+            return
 
     def collect_retired_bundles(self) -> None:
         """Collect the transfer bundles a completed handover left behind.
@@ -836,10 +925,20 @@ class _Collection:
         from .transfers import _adoption_intent_path, _staging_path
 
         cutoff = self.now - TMP_MAXIMUM_AGE_SECONDS
+        committing: set[str] | None = None
         for staging in (self.control / "tmp", self.control / "requests" / "tmp"):
             for entry in _iterdir(staging):
                 if not self._aged(entry, cutoff):
                     continue
+                if staging == self.control / "tmp" and entry.name.startswith("child."):
+                    # A staged child bundle is the only copy of a child whose
+                    # parent's commit was interrupted between staging and
+                    # publication; it is kept while that commit is unfinished.
+                    if committing is None:
+                        committing = self._committing_attempt_ids()
+                    if committing is None or entry.name.split(".", 2)[1] in committing:
+                        self._skip("tmp_entries", f"kept staged child {entry.name} of an unfinished commit")
+                        continue
                 transfer_id = entry.name.removeprefix("import.")
                 if (
                     entry.name != transfer_id
@@ -853,6 +952,21 @@ class _Collection:
                     )
                     continue
                 self._collect("tmp_entries", entry)
+
+    def _committing_attempt_ids(self) -> set[str] | None:
+        """Return the attempt ids of committing jobs, or ``None`` when one cannot be read."""
+
+        attempts: set[str] = set()
+        for marker in self.markers():
+            if marker.kind != "committing":
+                continue
+            try:
+                attempt_id = self.workspace.read_state(marker).get("attempt_id")
+            except (WorkflowError, OSError):
+                return None
+            if isinstance(attempt_id, str):
+                attempts.add(attempt_id)
+        return attempts
 
     def collect_retired_requests(self) -> None:
         """Collect month-old request leftovers: claimed by the dead, and retired.

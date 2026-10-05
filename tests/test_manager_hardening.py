@@ -161,7 +161,8 @@ def test_unpreparable_attempt_fails_only_its_own_job(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     blocked_payload, blocked_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="blocked")
     # A regular file where the persistent workdir belongs makes attempt
-    # preparation fail after the claim has already been committed.
+    # preparation fail after the claim has already been committed; the job
+    # put it on a control path, so it is the job's protocol error.
     (blocked_payload / "run").write_text("not a directory", encoding="utf-8")
     healthy_payload, healthy_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="healthy")
     workspace.submit(blocked_payload, "project/blocked")
@@ -172,7 +173,7 @@ def test_unpreparable_attempt_fails_only_its_own_job(tmp_path: Path) -> None:
 
     blocked = workspace.find_marker_by_id(blocked_id)
     assert blocked is not None and blocked.kind == "failed"
-    assert workspace.read_state(blocked)["failure"]["code"] == "process_failure"
+    assert workspace.read_state(blocked)["failure"]["code"] == "protocol_error"
     finished = workspace.find_marker_by_id(healthy_id)
     assert finished is not None and finished.kind == "succeeded"
 

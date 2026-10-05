@@ -43,6 +43,7 @@ from .models import (
     JobDefinition,
     Marker,
     WorkspacePolicy,
+    check_job_placement,
     is_payload_private,
     marker_basename,
     normalize_placement,
@@ -1483,9 +1484,14 @@ class Workspace:
     def load_job(self, marker: Marker) -> JobDefinition:
         """Load and validate the job definition referenced by a marker.
 
+        ``job.json`` is read bounded and without following a symlink or
+        blocking on a special file (:meth:`~httk.workflow.protocol.JobDefinition.from_path`), so a job
+        that replaces its own definition fails instead of stalling the reader.
+
         :param marker: Identify the job payload to load.
         :return: The validated job definition.
-        :raises httk.workflow.errors.FormatError: If the payload identity disagrees with the marker.
+        :raises httk.workflow.errors.FormatError: If ``job.json`` is unreadable, a symlink, not a
+            regular file, too large or invalid, or its identity disagrees with the marker.
         """
         path = self.payload_path(marker.placement, marker.job_key) / "job.json"
         job = JobDefinition.from_path(path)
@@ -1722,12 +1728,25 @@ class Workspace:
         :raises FileExistsError: If the target payload already exists.
         :raises httk.workflow.workspace.WorkspaceOperationError: If a move crosses filesystems.
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+        :raises httk.workflow.errors.FormatError: If the placement is invalid or names a job
+            directory (:func:`~httk.workflow.protocol.check_job_placement`), or ``job.json`` is invalid,
+            or, for a move, a symlink or not a regular file.
         """
 
         self._require_unsealed()
-        source_path = Path(source).resolve()
-        job = JobDefinition.from_path(source_path / "job.json")
         normalized_placement = normalize_placement(placement)
+        check_job_placement(normalized_placement)
+        source_path = Path(source).resolve()
+        definition = source_path / "job.json"
+        if move and definition.is_symlink():
+            # A moved payload keeps the link, and the manager never follows one.
+            raise FormatError(
+                f"cannot move {source_path} into the workspace: its job.json is a symlink; "
+                "replace it with the file, or submit a copy instead"
+            )
+        # The source is the user's own directory, which a copy dereferences, so
+        # a symlinked job.json there is followed unless the payload is moved.
+        job = JobDefinition.from_path(definition, follow_symlinks=not move)
         target = self.payload_path(normalized_placement, job.job_key)
         if target.exists():
             raise FileExistsError(target)

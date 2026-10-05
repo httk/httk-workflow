@@ -14,13 +14,16 @@ diverging record is refused rather than merged. ``detached.json`` marks a child
 an operator has made independent of its parent.
 """
 
+import contextlib
 import json
+import logging
 import os
-import tempfile
-from collections.abc import Mapping, Sequence
+import stat
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from ._util import fsync_directory, fsync_file, json_bytes, read_json, utc_now, write_json_atomic
+from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
+from ._util import json_bytes, utc_now
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .models import (
     CORE_STATE_KINDS,
@@ -32,6 +35,8 @@ from .models import (
 )
 from .workspace import Workspace
 
+_LOGGER = logging.getLogger(__name__)
+
 TREE_DIRECTORY = "tree"
 SPAWNS_DIRECTORY = "spawns"
 DETACHED_FILE = "detached.json"
@@ -41,22 +46,44 @@ _FRAGMENT_MEMBERS = ("job_id", "job_key", "label", "placement", "spawn_id")
 # What the protocol requires of every spawn entry; the job id follows from the
 # key, and a spawn id, which a hand-written outcome may omit, is recorded as null.
 _REQUIRED_MEMBERS = ("job_key", "label", "placement")
+# The tree records below a payload, as no-follow control paths.
+_TREE_PARTS = (JOB_STATE_DIRECTORY, TREE_DIRECTORY)
+_SPAWNS = PurePosixPath(*_TREE_PARTS, SPAWNS_DIRECTORY)
+_DETACHED = PurePosixPath(*_TREE_PARTS, DETACHED_FILE)
 
 
 def tree_directory(payload: Path) -> Path:
     """Return the reserved tree-metadata directory of one payload."""
 
-    return payload / JOB_STATE_DIRECTORY / TREE_DIRECTORY
+    return payload.joinpath(*_TREE_PARTS)
 
 
-def record_spawns(payload: Path, attempt_id: str, entries: Sequence[Mapping[str, object]], *, durable: bool) -> None:
+@contextlib.contextmanager
+def _job_handle(payload: Path | JobDirectory) -> Iterator[JobDirectory]:
+    """Yield a pinned handle of *payload*, opening (and closing) one for a path.
+
+    A path is trusted as the anchor, as its caller computed it; the tree
+    records below it are reached without following links.
+    """
+
+    if isinstance(payload, JobDirectory):
+        yield payload
+        return
+    with JobDirectory.at(payload) as handle:
+        yield handle
+
+
+def record_spawns(
+    payload: Path | JobDirectory, attempt_id: str, entries: Sequence[Mapping[str, object]], *, durable: bool
+) -> None:
     """Publish the children one outcome spawns, before any child is registered.
 
-    :param payload: The spawning job's payload directory.
+    :param payload: The spawning job's payload directory, as a path or a pinned handle.
     :param attempt_id: The attempt whose outcome spawned the children.
     :param entries: The outcome's ``spawn.json`` child entries.
     :param durable: Whether to synchronize the fragment and its directories.
-    :raises httk.workflow.errors.FormatError: If an entry lacks its key, label, or placement.
+    :raises httk.workflow.errors.FormatError: If an entry lacks its key, label, or
+        placement, or a tree-record path is a symlink, special file, or oversized.
     :raises httk.workflow.errors.WorkspaceCorruptionError: If a replay finds a different fragment.
     """
 
@@ -76,70 +103,90 @@ def record_spawns(payload: Path, attempt_id: str, entries: Sequence[Mapping[str,
         )
     document = {"format": SPAWNS_FORMAT, "format_version": 1, "children": children}
     content = json_bytes(document) + b"\n"
-    directory = tree_directory(payload) / SPAWNS_DIRECTORY
-    path = directory / f"{attempt_id}.json"
-    if path.is_file():
-        existing = path.read_bytes()
-        if existing == content:
-            if durable:
-                # An earlier writer may have died between its rename and its syncs.
-                fsync_file(path)
-                fsync_directory(directory)
-            return
-        try:
-            json.loads(existing)
-        except ValueError:
-            # A torn write of the non-durable profile: nothing was published from
-            # it, so the deterministic content simply replaces it.
-            pass
-        else:
-            raise WorkspaceCorruptionError(f"spawn record {path} disagrees with the outcome being committed")
-    created = _make_directories(payload, directory)
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.tmp.", dir=directory)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            if durable:
-                os.fsync(handle.fileno())
+    name = f"{attempt_id}.json"
+    with _job_handle(payload) as job_dir:
+        existing = _existing_record(job_dir, _SPAWNS / name)
+        if existing is not None:
+            if existing == content:
+                if durable:
+                    # An earlier writer may have died between its rename and its syncs.
+                    with job_dir.directory(_SPAWNS) as directory:
+                        descriptor = directory.open_read(name)
+                        try:
+                            os.fsync(descriptor)
+                        finally:
+                            os.close(descriptor)
+                        os.fsync(directory.fd)
+                return
+            try:
+                json.loads(existing)
+            except ValueError:
+                # A torn write of the non-durable profile: nothing was published from
+                # it, so the deterministic content simply replaces it.
+                pass
+            else:
+                raise WorkspaceCorruptionError(
+                    f"spawn record {job_dir.path / _SPAWNS / name} disagrees with the outcome being committed"
+                )
         # A concurrent replay publishes the same bytes, so either rename wins.
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    if durable:
-        for synchronized in (directory, *created):
-            fsync_directory(synchronized)
+        with _make_directories(job_dir, _SPAWNS.parts, durable=durable) as directory:
+            directory.write_atomic(name, content, durable=durable)
 
 
-def _make_directories(payload: Path, directory: Path) -> list[Path]:
-    """Create *directory* below *payload*; return the parents whose entries changed."""
+def _existing_record(job_dir: JobDirectory, relative: PurePosixPath) -> bytes | None:
+    """Return the bytes of an existing tree record, or ``None`` when there is none."""
 
-    changed: list[Path] = []
-    current = payload
-    for part in directory.relative_to(payload).parts:
-        current = current / part
-        if not current.is_dir():
-            current.mkdir(exist_ok=True)
-            changed.append(current.parent)
-    return changed
+    if not _existing_record_status(job_dir, relative):
+        return None
+    return job_dir.read(relative, CONTROL_DOCUMENT_LIMIT)
 
 
-def spawned_children(payload: Path) -> list[dict[str, str | None]]:
-    """Return every child the recorded outcomes of *payload* spawned, once each.
+def _make_directories(job_dir: JobDirectory, parts: Sequence[str], *, durable: bool) -> JobDirectory:
+    """Open *parts* below *job_dir*, creating what is missing without following links.
 
-    :param payload: The parent job's payload directory.
-    :return: Child entries, grouped by fragment (ordered by attempt id) in spawn order.
-    :raises httk.workflow.errors.FormatError: If a spawn record is malformed.
+    When *durable*, every directory whose entries changed is synchronized after
+    the entry it gained.
     """
 
-    directory = tree_directory(payload) / SPAWNS_DIRECTORY
-    if not directory.is_dir():
+    opened: list[JobDirectory] = []
+    try:
+        parent = job_dir
+        for part in parts:
+            created = not parent.exists_dir(part)
+            child = parent.directory(part, create=True)
+            opened.append(child)
+            if created and durable:
+                os.fsync(parent.fd)
+            parent = child
+        return opened.pop()
+    finally:
+        for handle in opened:
+            handle.close()
+
+
+def spawned_children(payload: Path | JobDirectory) -> list[dict[str, str | None]]:
+    """Return every child the recorded outcomes of *payload* spawned, once each.
+
+    :param payload: The parent job's payload directory, as a path or a pinned handle.
+    :return: Child entries, grouped by fragment (ordered by attempt id) in spawn order.
+    :raises httk.workflow.errors.FormatError: If a spawn record is malformed, or
+        a tree-record path is a symlink, special file, or oversized.
+    """
+
+    try:
+        with _job_handle(payload) as job_dir:
+            if not job_dir.exists_dir(_SPAWNS):
+                return []
+            with job_dir.directory(_SPAWNS) as directory:
+                names = sorted(name for name in os.listdir(directory.fd) if name.endswith(".json"))
+                documents = [
+                    (directory.path / name, directory.read_json(name, CONTROL_DOCUMENT_LIMIT)) for name in names
+                ]
+    except FileNotFoundError:
         return []
     seen: set[str] = set()
     children: list[dict[str, str | None]] = []
-    for path in sorted(directory.glob("*.json")):
-        document = read_json(path)
+    for path, document in documents:
         if document.get("format") != SPAWNS_FORMAT or document.get("format_version") != 1:
             raise FormatError(f"unsupported spawn record {path}")
         entries = document.get("children")
@@ -158,33 +205,53 @@ def spawned_children(payload: Path) -> list[dict[str, str | None]]:
     return children
 
 
-def is_detached(payload: Path) -> bool:
-    """Report whether the job at *payload* was detached from its parent."""
+def is_detached(payload: Path | JobDirectory) -> bool:
+    """Report whether the job at *payload* was detached from its parent.
 
-    return (tree_directory(payload) / DETACHED_FILE).is_file()
+    Only a regular ``detached.json`` in real directories is a detachment; a
+    symlink or special file planted on that path is not one and is never
+    followed.
+
+    :param payload: The job's payload directory, as a path or a pinned handle.
+    :return: Whether the job is detached.
+    """
+
+    try:
+        with _job_handle(payload) as job_dir:
+            information = job_dir.stat(_DETACHED)
+    except (FileNotFoundError, JobDirectoryError) as exc:
+        _LOGGER.debug("no usable detachment record below %s: %s", payload, exc)
+        return False
+    return information is not None and stat.S_ISREG(information.st_mode)
 
 
-def mark_detached(payload: Path, *, operator: str | None, durable: bool) -> bool:
+def mark_detached(payload: Path | JobDirectory, *, operator: str | None, durable: bool) -> bool:
     """Detach the job at *payload* from its parent, permanently.
 
-    :param payload: The child job's payload directory.
+    :param payload: The child job's payload directory, as a path or a pinned handle.
     :param operator: The operator identity recorded with the detachment.
     :param durable: Whether to synchronize the record and its directories.
     :return: Whether this call detached the job (``False`` when it already was).
+    :raises httk.workflow.errors.FormatError: If a tree-record path is a symlink or special file.
     """
 
-    path = tree_directory(payload) / DETACHED_FILE
-    if path.is_file():
+    with _job_handle(payload) as job_dir:
+        if _existing_record_status(job_dir, _DETACHED):
+            return False
+        document = {"format": DETACHED_FORMAT, "format_version": 1, "detached_at": utc_now(), "operator": operator}
+        with _make_directories(job_dir, _DETACHED.parent.parts, durable=durable) as directory:
+            directory.write_atomic(DETACHED_FILE, json_bytes(document) + b"\n", durable=durable)
+    return True
+
+
+def _existing_record_status(job_dir: JobDirectory, relative: PurePosixPath) -> bool:
+    """Report whether a regular tree record exists, refusing anything else on its path."""
+
+    information = job_dir.stat(relative)
+    if information is None:
         return False
-    created = _make_directories(payload, path.parent)
-    write_json_atomic(
-        path,
-        {"format": DETACHED_FORMAT, "format_version": 1, "detached_at": utc_now(), "operator": operator},
-        durable=durable,
-    )
-    if durable:
-        for synchronized in created:
-            fsync_directory(synchronized)
+    if not stat.S_ISREG(information.st_mode):
+        raise JobDirectoryError(f"{job_dir.path / relative} is not a regular file")
     return True
 
 

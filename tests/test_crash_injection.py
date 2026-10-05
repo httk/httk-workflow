@@ -332,8 +332,8 @@ def _kill_at_transaction_operation(monkeypatch: pytest.MonkeyPatch, ordinal: int
     calls = [0]
 
     def hooked(
-        source: Path,
-        destination: Path,
+        source: transactions_module._Location,
+        destination: transactions_module._Location,
         *,
         replace: bool = False,
         attempts: int = 7,

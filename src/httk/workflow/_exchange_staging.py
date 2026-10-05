@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from ._util import json_bytes, timestamp_seconds, write_json_atomic
-from .errors import WorkflowError
+from .errors import FormatError, WorkflowError
 from .models import STATE_KINDS, TERMINAL_KINDS, Marker
 from .transfers import (
+    _check_eject_placements,
     _eject_tree_of,
     _require_tree_boundary,
     _unresolved_join_reference,
@@ -215,6 +216,9 @@ def _ejectable(workspace: Workspace, marker: Marker, waiting: dict[str, set[str]
 
     The terminal frame's ``created_at`` dates the transition: a marker is moved
     by rename, which keeps its mtime from whenever the file was first written.
+    The one exception is a job (or tree member) whose placement breaks the
+    placement rule: it can never leave, which is warned about once and kept in
+    its eject-error record.
     """
 
     try:
@@ -227,8 +231,19 @@ def _ejectable(workspace: Workspace, marker: Marker, waiting: dict[str, set[str]
         if _unresolved_join_reference(workspace, marker, waiting):
             return False
         _require_tree_boundary(workspace, marker, with_tree=True)
-        _eject_tree_of(workspace, marker, waiting)
+        tree = _eject_tree_of(workspace, marker, waiting)
     except ValueError:
+        return False
+    try:
+        _check_eject_placements(marker, tree)
+    except FormatError as exc:
+        # A placement from before the placement rule never ejects; say so once
+        # and keep the reason in the job's eject-error record for status.json.
+        reason = f"{type(exc).__name__}: {exc}"
+        existing = _read_record(exchange_staging(workspace) / "records" / f"eject-{marker.job_id}.json")
+        if existing is None or existing.get("reason") != reason[:_REASON_LIMIT]:
+            _LOGGER.warning("finished job %s is never ejected: %s", marker.job_key, reason)
+            _record(workspace, f"eject-{marker.job_id}", {"job_id": marker.job_id, "reason": reason})
         return False
     return True
 

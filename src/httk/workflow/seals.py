@@ -21,6 +21,7 @@ this tree, and was it made by a key this project trusts — and reports both.
 import hashlib
 import logging
 import os
+import stat
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -40,10 +41,14 @@ from httk.core.project.sealing import (
     diff_records,
     read_seal,
     resolve_seal_keys,
+    sign_seal_body,
     verify_seal,
+    verify_signed_body,
     write_seal,
 )
 
+from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
+from ._util import json_bytes
 from .errors import FormatError, SealedError, SealError
 from .manifests import payload_file_records
 from .models import JOB_STATE_DIRECTORY, WORKSPACE_DIRECTORY, JobDefinition, Marker
@@ -83,6 +88,9 @@ __all__ = [
 ]
 
 _LOGGER = logging.getLogger(__name__)
+_SEAL_NAME = "seal.json"
+#: The job seal as a no-follow control path below the payload.
+_JOB_SEAL = PurePosixPath(JOB_STATE_DIRECTORY, _SEAL_NAME)
 
 # -- locations ---------------------------------------------------------------
 
@@ -98,7 +106,7 @@ def job_seal_path(payload: str | os.PathLike[str]) -> Path:
     :return: The job seal path.
     """
 
-    return Path(payload) / JOB_STATE_DIRECTORY / "seal.json"
+    return Path(payload) / JOB_STATE_DIRECTORY / _SEAL_NAME
 
 
 def workspace_seal_path(workspace: Workspace) -> Path:
@@ -124,11 +132,23 @@ def project_seal_path(project_root: str | os.PathLike[str]) -> Path:
 def is_job_sealed(payload: str | os.PathLike[str]) -> bool:
     """Return whether one job payload carries a seal.
 
+    Only a regular ``seal.json`` in a real ``.httk-job`` directory is a seal.
+    The check never follows a link: a symlinked ``.httk-job`` or ``seal.json``,
+    or a special file there, is not a seal anybody wrote, so it reads as no
+    seal rather than as an error. The job could equally delete its own seal,
+    and raising here would let it fail every transition of its own marker.
+
     :param payload: The job payload directory.
-    :return: Whether the job seal file exists.
+    :return: Whether a regular job seal file exists.
     """
 
-    return job_seal_path(payload).is_file()
+    try:
+        with JobDirectory.at(payload) as job_dir:
+            information = job_dir.stat(_JOB_SEAL)
+    except (FileNotFoundError, NotADirectoryError, JobDirectoryError) as exc:
+        _LOGGER.debug("no usable job seal below %s: %s", payload, exc)
+        return False
+    return information is not None and stat.S_ISREG(information.st_mode)
 
 
 def is_workspace_sealed(workspace: Workspace) -> bool:
@@ -196,8 +216,54 @@ def _job_subject(marker: Marker) -> dict[str, object]:
     return {"job_id": marker.job_id, "job_key": marker.job_key}
 
 
+def _job_seal_present(job_dir: JobDirectory) -> bool:
+    """Report whether a pinned payload holds a seal, refusing a non-regular one."""
+
+    information = job_dir.stat(_JOB_SEAL)
+    if information is None:
+        return False
+    if not stat.S_ISREG(information.st_mode):
+        raise JobDirectoryError(f"{job_dir.path / _JOB_SEAL} is not a regular file")
+    return True
+
+
+def _read_job_seal(job_dir: JobDirectory) -> Seal:
+    """Read and validate the seal of a pinned payload through a no-follow descriptor.
+
+    The seal is opened without following a link, checked to be a regular file
+    of bounded size, and parsed by :func:`read_seal` through the descriptor's
+    ``/dev/fd`` alias, so a swapped entry is never read.
+    """
+
+    shown = job_dir.path / _JOB_SEAL
+    descriptor = job_dir.open_read(_JOB_SEAL, limit=CONTROL_DOCUMENT_LIMIT)
+    alias = f"/dev/fd/{descriptor}"
+    try:
+        seal = read_seal(alias)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace(alias, str(shown))) from exc
+    finally:
+        os.close(descriptor)
+    return replace(seal, path=shown)
+
+
+def _job_seal_digest(workspace: Workspace, placement: PurePosixPath, job_key: str) -> str | None:
+    """Return the SHA-256 of one job's seal document, or ``None`` when it has none."""
+
+    try:
+        with JobDirectory.open(workspace.root, placement, job_key) as job_dir:
+            if not _job_seal_present(job_dir):
+                return None
+            return hashlib.sha256(job_dir.read(_JOB_SEAL, CONTROL_DOCUMENT_LIMIT)).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
 def seal_job(workspace: Workspace, marker: Marker, *, keys: SealKeys | None = None) -> Path:
     """Seal one job's payload, or keep an identical existing seal.
+
+    The seal is read and written through the job directory without following
+    a symlinked ``.httk-job`` or ``seal.json``.
 
     :param workspace: The workspace holding the job.
     :param marker: The marker locating the job payload.
@@ -205,19 +271,28 @@ def seal_job(workspace: Workspace, marker: Marker, *, keys: SealKeys | None = No
     :return: The job seal path.
     :raises httk.workflow.errors.SealError: If no signing key is available.
     :raises httk.workflow.errors.SealedError: If a seal with different records already exists.
+    :raises httk.workflow.errors.FormatError: If the seal path is a symlink or special file.
     """
 
     payload = workspace.payload_path(marker.placement, marker.job_key)
     records = payload_file_records(payload)
     path = job_seal_path(payload)
-    if path.is_file():
-        existing = read_seal(path)
-        if list(existing.records) == records:
-            return path
-        raise SealedError(f"job {marker.job_key} is already sealed with different contents; unseal it first")
-    resolved = keys if keys is not None else default_workspace_keys(workspace)
-    body = build_seal_body("job", _job_subject(marker), records)
-    return write_seal(path, body, resolved.keys)
+    with JobDirectory.open(workspace.root, marker.placement, marker.job_key) as job_dir:
+        if _job_seal_present(job_dir):
+            existing = _read_job_seal(job_dir)
+            if list(existing.records) == records:
+                return path
+            raise SealedError(f"job {marker.job_key} is already sealed with different contents; unseal it first")
+        resolved = keys if keys is not None else default_workspace_keys(workspace)
+        body = build_seal_body("job", _job_subject(marker), records)
+        if not resolved.keys:
+            raise SealError(f"no signing key is available to seal the {body.get('kind')}")
+        # The document write_seal produces, written through the pinned payload.
+        body_sha256, signatures = sign_seal_body(body, resolved.keys)
+        document = {**body, "body_sha256": body_sha256, "signatures": signatures}
+        with job_dir.directory(JOB_STATE_DIRECTORY, create=True) as state:
+            state.write_atomic(_SEAL_NAME, json_bytes(document) + b"\n", durable=True)
+    return path
 
 
 def unseal_job(workspace: Workspace, marker: Marker) -> None:
@@ -226,11 +301,16 @@ def unseal_job(workspace: Workspace, marker: Marker) -> None:
     :param workspace: The workspace holding the job.
     :param marker: The marker locating the job.
     :raises httk.workflow.errors.SealedError: If the enclosing workspace is sealed.
+    :raises httk.workflow.errors.FormatError: If ``.httk-job`` is a symlink or not a directory.
     """
 
     if is_workspace_sealed(workspace):
         raise SealedError("cannot unseal a job while its workspace is sealed; unseal the workspace first")
-    job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).unlink(missing_ok=True)
+    try:
+        with JobDirectory.open(workspace.root, marker.placement, marker.job_key) as job_dir:
+            job_dir.unlink(_JOB_SEAL, missing_ok=True)
+    except FileNotFoundError:
+        return
 
 
 # -- workspace seals ---------------------------------------------------------
@@ -271,8 +351,9 @@ def seal_workspace(workspace: Workspace, *, keys: SealKeys | None = None) -> Pat
         raise SealError(f"cannot seal the workspace while these jobs are unsealed: {listing}")
     records: list[dict[str, object]] = []
     for marker in _workspace_job_markers(workspace):
-        seal_path = job_seal_path(workspace.payload_path(marker.placement, marker.job_key))
-        digest = hashlib.sha256(seal_path.read_bytes()).hexdigest()
+        digest = _job_seal_digest(workspace, marker.placement, marker.job_key)
+        if digest is None:
+            raise SealError(f"cannot seal the workspace while job {marker.job_id} is unsealed")
         records.append(
             {
                 "job_id": marker.job_id,
@@ -323,12 +404,31 @@ def verify_job_seal(
     :param payload: The job payload directory.
     :param trusted_keys: Trust anchors to classify the signers against.
     :param expected_roles: Signing roles the seal is expected to carry.
-    :return: The verdict, including any payload discrepancies.
+    :return: The verdict, including any payload discrepancies; a symlinked or
+        special ``.httk-job`` or ``seal.json`` is an ``invalid`` discrepancy.
     """
 
     payload = Path(payload)
     path = job_seal_path(payload)
-    if not path.is_file():
+    seal: Seal | None = None
+    try:
+        with JobDirectory.at(payload) as job_dir:
+            if _job_seal_present(job_dir):
+                seal = _read_job_seal(job_dir)
+    except FileNotFoundError:
+        seal = None
+    except JobDirectoryError as exc:
+        # A symlinked or special .httk-job or seal.json is never followed, and
+        # is no seal (as for is_job_sealed); here it is reported, not raised.
+        return SealVerification(
+            False,
+            INVALID,
+            f"job seal is not a regular file in a real directory: {path} ({exc})",
+            (),
+            tuple(expected_roles),
+            (Discrepancy(payload.name, "invalid"),),
+        )
+    if seal is None:
         return SealVerification(
             False,
             INVALID,
@@ -337,8 +437,10 @@ def verify_job_seal(
             tuple(expected_roles),
             (Discrepancy(payload.name, "missing"),),
         )
-    base = verify_seal(path, trusted_keys=trusted_keys, expected_roles=expected_roles)
-    seal = read_seal(path)
+    # verify_seal's signature check, on the seal read once through the descriptor.
+    base = verify_signed_body(
+        seal.body_bytes, seal.body_sha256, seal.signatures, trusted_keys=trusted_keys, expected_roles=expected_roles
+    )
     return _combine(base, diff_records(list(seal.records), payload_file_records(payload)))
 
 
@@ -370,10 +472,10 @@ def verify_workspace_seal(
             discrepancies.append(Discrepancy(job_key, "unsealed"))
         else:
             placement = PurePosixPath(str(recorded[job_key]["placement"]))
-            path = job_seal_path(workspace.payload_path(placement, job_key))
-            if not path.is_file():
+            digest = _job_seal_digest(workspace, placement, job_key)
+            if digest is None:
                 discrepancies.append(Discrepancy(job_key, "missing"))
-            elif hashlib.sha256(path.read_bytes()).hexdigest() != recorded[job_key]["seal_sha256"]:
+            elif digest != recorded[job_key]["seal_sha256"]:
                 discrepancies.append(Discrepancy(job_key, "mismatch"))
     return _combine(base, discrepancies)
 

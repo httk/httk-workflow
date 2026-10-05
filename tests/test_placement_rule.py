@@ -1,0 +1,201 @@
+"""Job directories never nest: no placement component may parse as a job key."""
+
+import json
+import uuid
+from pathlib import Path, PurePosixPath
+
+import pytest
+
+from conftest import configure_identity
+from httk.workflow import Workspace
+from httk.workflow.errors import FormatError
+from httk.workflow.models import Marker, check_job_placement, normalize_placement
+from httk.workflow.transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST, adopt_job, validate_bundle
+from test_eject_adopt import _payload
+
+# Fixed, so parametrized test ids agree between xdist workers.
+_JOB_ID = "1b4e28ba-2fa1-41d2-883f-0016d3cca427"
+
+
+@pytest.fixture(params=[_JOB_ID, f"parent--{_JOB_ID}"], ids=["bare", "tagged"])
+def nesting(request: pytest.FixtureRequest) -> str:
+    """A placement whose middle component names a job directory."""
+
+    return f"project/{request.param}/children"
+
+
+def test_check_job_placement_refuses_a_job_key_component_and_names_the_rule(nesting: str) -> None:
+    component = PurePosixPath(nesting).parts[1]
+    with pytest.raises(FormatError, match="must not name a job directory") as refused:
+        check_job_placement(PurePosixPath(nesting))
+    assert repr(component) in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "project/children",
+        "jobs",
+        # Near misses: not a UUID, an uppercase UUID, a single-dash separator.
+        "project/parent--not-a-uuid",
+        f"project/{_JOB_ID.upper()}",
+        f"project/tag-{_JOB_ID}",
+    ],
+)
+def test_check_job_placement_accepts_ordinary_placements(placement: str) -> None:
+    check_job_placement(PurePosixPath(placement))
+
+
+def test_submit_refuses_a_nesting_placement_before_copying_anything(tmp_path: Path, nesting: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        workspace.submit(_payload(tmp_path / "payloads"), nesting)
+    assert not list(workspace.scan_markers())
+    assert not (workspace.root / "project").exists()
+    assert not list((workspace.control / "tmp").glob("submit.*"))
+
+
+def test_submit_and_job_new_still_accept_ordinary_placements(tmp_path: Path) -> None:
+    from httk.workflow.scaffold import new_job
+    from test_runner_builds import _compiled_package
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    marker = workspace.submit(_payload(tmp_path / "payloads"), "project/children")
+    assert marker.placement == PurePosixPath("project/children")
+    package = _compiled_package(tmp_path)
+    job = new_job(workspace, package, placement="project/children")
+    assert workspace.find_marker_by_id(job.job_id) is not None
+
+
+def test_job_new_refuses_a_nesting_placement(tmp_path: Path, nesting: str) -> None:
+    from httk.workflow.scaffold import new_job
+    from test_runner_builds import _compiled_package
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        new_job(workspace, _compiled_package(tmp_path), placement=nesting)
+    assert not list(workspace.scan_markers())
+
+
+def test_import_refuses_a_bundle_whose_destination_placement_nests(tmp_path: Path, nesting: str) -> None:
+    configure_identity()
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    bundle = source.detach(marker.job_id, destination_workspace_id=destination.workspace_id)
+    # The source refuses to seal such a placement itself, so it is written into the manifest.
+    manifest_path = bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["destination_placement"] = nesting
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        destination.import_bundle(bundle)
+    assert not list(destination.scan_markers())
+    assert not (destination.root / "project").exists()
+    # The bundle is untouched and still verifies.
+    assert validate_bundle(bundle)["job_id"] == marker.job_id
+
+
+def _ejected(tmp_path: Path) -> tuple[Workspace, Path, str]:
+    configure_identity()
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    return destination, source.eject(marker.job_id, tmp_path / "loose"), marker.job_id
+
+
+def test_adopt_refuses_a_nesting_manifest_placement_and_leaves_the_directory(tmp_path: Path, nesting: str) -> None:
+    destination, loose, _job_id = _ejected(tmp_path)
+    manifest_path = loose / TRANSFER_DIRECTORY / TRANSFER_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["destination_placement"] = nesting
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        destination.adopt(loose)
+    assert loose.is_dir() and validate_bundle(loose)["destination_placement"] == nesting
+    assert not list(destination.scan_markers())
+    assert not list((destination.control / "transfers").rglob("*.json"))
+
+
+def test_adopt_refuses_a_nesting_placement_override(tmp_path: Path, nesting: str) -> None:
+    destination, loose, _job_id = _ejected(tmp_path)
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        adopt_job(destination, loose, placement=nesting)
+    assert loose.is_dir()
+    assert not list(destination.scan_markers())
+
+
+def test_adopt_accepts_an_ordinary_placement_override(tmp_path: Path) -> None:
+    destination, loose, job_id = _ejected(tmp_path)
+    adopted = adopt_job(destination, loose, placement="project/children")
+    assert adopted.job_id == job_id and adopted.placement == PurePosixPath("project/children")
+
+
+def test_existing_markers_with_nesting_placements_still_parse(tmp_path: Path, nesting: str) -> None:
+    # normalize_placement does not apply the rule, so a workspace that placed
+    # jobs this way before the rule existed keeps reading its markers.
+    assert normalize_placement(nesting) == PurePosixPath(nesting)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job_key = f"child--{uuid.uuid4()}"
+    marker_path = workspace.marker_path("submitted", PurePosixPath(nesting), job_key, 500, 0, "init")
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.touch()
+    marker = Marker.from_path(workspace.control / "state", marker_path)
+    assert marker.placement == PurePosixPath(nesting) and marker.job_key == job_key
+    assert [found.job_key for found in workspace.scan_markers(("submitted",))] == [job_key]
+
+
+def test_detach_refuses_a_nesting_destination_placement_before_fencing(tmp_path: Path, nesting: str) -> None:
+    configure_identity()
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        source.detach(marker.job_id, destination_workspace_id=destination.workspace_id, destination_placement=nesting)
+    # Nothing was fenced or sealed: the job is still where and as it was.
+    assert source.find_marker_by_id(marker.job_id) == marker
+    assert not list(source.scan_markers(("transferring",)))
+    assert not (source.payload_path(marker.placement, marker.job_key) / TRANSFER_DIRECTORY).exists()
+
+
+def _legacy_finished(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nesting: str) -> tuple[Workspace, Marker]:
+    """A finished job placed, as before the placement rule, inside a job-key component."""
+
+    from test_exchange_staging import _finish
+
+    configure_identity()
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with monkeypatch.context() as patch:
+        patch.setattr("httk.workflow.workspace.check_job_placement", lambda placement: None)
+        marker = workspace.submit(_payload(tmp_path / "payloads"), nesting)
+    return workspace, _finish(workspace, marker)
+
+
+def test_eject_refuses_a_legacy_nesting_placement_before_fencing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nesting: str
+) -> None:
+    workspace, marker = _legacy_finished(tmp_path, monkeypatch, nesting)
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        workspace.eject(marker.job_id, tmp_path / "loose")
+    assert workspace.find_marker_by_id(marker.job_id) == marker
+    assert not (tmp_path / "loose").exists()
+
+
+def test_the_exchange_records_and_warns_once_about_a_job_that_can_never_eject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, nesting: str
+) -> None:
+    from httk.workflow._exchange_staging import exchange_pass
+    from test_exchange_staging import _LATER, _staging, _status
+
+    workspace, marker = _legacy_finished(tmp_path, monkeypatch, nesting)
+    staging = _staging(workspace)
+    with caplog.at_level("WARNING", logger="httk.workflow._exchange_staging"):
+        exchange_pass(workspace, now=_LATER)
+        exchange_pass(workspace, now=_LATER + 10)
+    warnings = [record for record in caplog.records if "is never ejected" in record.getMessage()]
+    assert len(warnings) == 1 and marker.job_key in warnings[0].getMessage()
+    record = json.loads((staging / "records" / f"eject-{marker.job_id}.json").read_text(encoding="utf-8"))
+    assert record["job_id"] == marker.job_id and "must not name a job directory" in record["reason"]
+    assert _status(workspace)["eject_errors"] == [{"job_id": marker.job_id, "reason": record["reason"]}]
+    assert workspace.find_marker_by_id(marker.job_id) == marker
+    assert not (staging / "outbox" / marker.job_key).exists()

@@ -10,6 +10,7 @@ directory into any workspace. A job tree travels as one such directory.
 
 import errno
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -34,9 +35,12 @@ from .models import (
     STATE_KINDS,
     TERMINAL_KINDS,
     TRANSFER_DIRECTORY,
+    WORKSPACE_DIRECTORY,
     JobDefinition,
     Marker,
+    _read_regular_file,
     canonical_uuid,
+    check_job_placement,
     is_payload_private,
     normalize_placement,
     parse_job_key,
@@ -85,6 +89,14 @@ TRANSFER_FORMAT_VERSION = 2
 #: Domain separation of the payload digest, so a digest computed by an older
 #: rule can never collide with one computed by the current rule.
 _PAYLOAD_DIGEST_DOMAIN = b"httk-workflow-transfer-payload-v2\0"
+
+# The largest transfer manifest a reader accepts; a manifest is small.
+_MANIFEST_BYTES = 1024 * 1024
+# The bounds of the walk that vets a job directory before it is adopted.
+_ADOPT_MAX_ENTRIES = 1_000_000
+_ADOPT_MAX_DEPTH = 256
+# How deep recovery looks for sealed bundles below the workspace root.
+_RECOVERY_MAX_DEPTH = 64
 
 #: The format of what ``tasks offer`` prints and ``tasks fetch`` consumes.
 TRANSFER_OFFER_FORMAT = "httk-workflow-transfer-offer"
@@ -181,20 +193,29 @@ def _refuse_unsafe_entries(bundle: Path) -> None:
     a symlink cannot lead outside it, also below the undigested ``logs/``,
     ``attempts/`` and ``.httk-transfer/``. A relative symlink must stay inside
     the directory both lexically and once every link on its way is resolved.
+    A regular file with more than one link is refused too: its other name may
+    sit anywhere on the filesystem, so adopting it would hand the job a file
+    that something outside the directory still writes or reads. The walk is
+    bounded to 1,000,000 entries and a nesting depth of 256.
 
     :param bundle: The job directory, which must itself be a real directory.
-    :raises httk.workflow.errors.FormatError: Naming the first refused entry.
+    :raises httk.workflow.errors.FormatError: Naming the first refused entry, or if the directory
+        exceeds the walk bounds.
     :raises FileNotFoundError: If the directory does not exist.
     """
 
     if not stat.S_ISDIR(os.lstat(bundle).st_mode):
         raise FormatError(f"job directory {bundle} is not a directory (a symlink or special file)")
     real = os.path.realpath(bundle)
-    pending = [bundle]
+    pending = [(bundle, 1)]
+    visited = 0
     while pending:
-        directory = pending.pop()
+        directory, depth = pending.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
+                visited += 1
+                if visited > _ADOPT_MAX_ENTRIES:
+                    raise FormatError(f"job directory {bundle} holds more than {_ADOPT_MAX_ENTRIES} entries")
                 path = Path(entry.path)
                 if entry.is_symlink():
                     _contained_symlink_target(bundle, path)
@@ -203,9 +224,63 @@ def _refuse_unsafe_entries(bundle: Path) -> None:
                             f"job directory rejects the symlink {path.relative_to(bundle)}: it resolves outside it"
                         )
                 elif entry.is_dir(follow_symlinks=False):
-                    pending.append(path)
+                    if depth >= _ADOPT_MAX_DEPTH:
+                        raise FormatError(
+                            f"job directory rejects {path.relative_to(bundle)}: "
+                            f"it nests deeper than {_ADOPT_MAX_DEPTH} levels"
+                        )
+                    pending.append((path, depth + 1))
                 elif not entry.is_file(follow_symlinks=False):
                     raise FormatError(f"job directory rejects the special entry {path.relative_to(bundle)}")
+                elif entry.stat(follow_symlinks=False).st_nlink > 1:
+                    raise FormatError(
+                        f"job directory rejects the hard-linked file {path.relative_to(bundle)}: "
+                        "hard links are not accepted in bundles"
+                    )
+
+
+def _read_manifest(bundle: Path) -> dict[str, Any]:
+    """Read a bundle's transfer manifest, bounded and without following a symlink.
+
+    Both ``.httk-transfer`` and its ``manifest.json`` must be real (a directory
+    and a regular file of at most 1 MiB), so a manifest planted as a symlink,
+    FIFO or oversized file is refused instead of followed, blocked on or loaded.
+
+    :param bundle: The bundle directory.
+    :return: The manifest object, not yet validated.
+    :raises httk.workflow.errors.FormatError: If the manifest cannot be read or is not a JSON object.
+    """
+
+    transfer_dir = bundle / TRANSFER_DIRECTORY
+    path = transfer_dir / TRANSFER_MANIFEST
+    try:
+        if not stat.S_ISDIR(os.lstat(transfer_dir).st_mode):
+            raise FormatError(f"cannot read JSON object {path}: {TRANSFER_DIRECTORY} is not a directory")
+        value = json.loads(_read_regular_file(path, _MANIFEST_BYTES).decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise FormatError(f"cannot read JSON object {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise FormatError(f"expected JSON object in {path}")
+    return value
+
+
+def _transfer_directory(payload: Path) -> Path:
+    """Create or reuse a payload's ``.httk-transfer`` without following a symlink.
+
+    :param payload: The job payload being sealed.
+    :return: The transfer directory, a real directory.
+    :raises httk.workflow.errors.FormatError: If ``.httk-transfer`` is a symlink or not a directory.
+    """
+
+    transfer_dir = payload / TRANSFER_DIRECTORY
+    try:
+        os.mkdir(transfer_dir)
+    except FileExistsError:
+        if not stat.S_ISDIR(os.lstat(transfer_dir).st_mode):
+            raise FormatError(
+                f"cannot seal {payload}: its {TRANSFER_DIRECTORY} is a symlink or not a directory"
+            ) from None
+    return transfer_dir
 
 
 def _payload_digest(payload: Path) -> str:
@@ -425,8 +500,7 @@ def _require_tree_boundary(workspace: Workspace, marker: Marker, *, with_tree: b
 
 def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path:
     payload = workspace.payload_path(marker.placement, marker.job_key)
-    transfer_dir = payload / TRANSFER_DIRECTORY
-    transfer_dir.mkdir(exist_ok=True)
+    transfer_dir = _transfer_directory(payload)
     transfer_id = canonical_uuid(state.get("transfer_id"), "transfer_id")
     destination_workspace_id = (
         None
@@ -469,8 +543,8 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         if name in state:
             manifest[name] = state[name]
     manifest_path = transfer_dir / TRANSFER_MANIFEST
-    if manifest_path.exists():
-        existing = read_json(manifest_path)
+    if os.path.lexists(manifest_path):
+        existing = _read_manifest(payload)
         if existing != manifest:
             raise WorkspaceCorruptionError(f"conflicting transfer manifest: {manifest_path}")
     else:
@@ -591,6 +665,8 @@ def _detach_job(
         raise ValueError("job participates in an unresolved join and cannot transfer")
     _require_tree_boundary(workspace, marker, with_tree=with_tree)
     target_placement = normalize_placement(destination_placement or marker.placement)
+    # Refused here, before the job is fenced, rather than by the destination's import.
+    check_job_placement(target_placement)
     prior_state = workspace.read_state(marker)
     _finish_incoming_receipt(workspace, marker, prior_state)
     fields: dict[str, object] = {"transfer_id": identifier}
@@ -646,11 +722,12 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
     :param bundle: Locate the sealed transfer bundle.
     :return: The validated transfer manifest.
-    :raises httk.workflow.errors.FormatError: If the bundle format, digest, marker, or runner is invalid.
+    :raises httk.workflow.errors.FormatError: If the manifest is not a regular file of at most 1 MiB
+        in a real ``.httk-transfer`` directory, or the bundle format, digest, marker, or runner is invalid.
     """
 
     payload = Path(bundle).expanduser().resolve()
-    manifest = read_json(payload / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+    manifest = _read_manifest(payload)
     if manifest.get("format") != TRANSFER_FORMAT or manifest.get("core_profile") != CORE_PROFILE:
         raise FormatError("unsupported detached transfer manifest")
     if manifest.get("format_version") != TRANSFER_FORMAT_VERSION:
@@ -836,7 +913,8 @@ def _import_bundle(
     :param placement: Place the job here instead of at the manifest's destination placement.
     :param move: Move the bundle in rather than copy it.
     :return: The destination acknowledgement.
-    :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation.
+    :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation, or
+        its placement names a job directory.
     :raises ValueError: If the bundle names another destination workspace.
     """
 
@@ -852,6 +930,10 @@ def _import_bundle(
         return existing_ack
     if manifest["destination_workspace_id"] not in (None, workspace.workspace_id):
         raise ValueError("bundle names a different destination workspace")
+    if placement is None:
+        placement = normalize_placement(str(manifest["destination_placement"]))
+    # A placement naming a job directory would nest this job inside another.
+    check_job_placement(placement)
     # Signing the acknowledgement is refused for an ambiguous operator
     # identity (2+ configured identities and no default). Resolve it now,
     # before any state mutation, so that refusal cannot leave a runner
@@ -872,8 +954,6 @@ def _import_bundle(
         if provenance.get("payload_sha256") != digest:
             raise WorkspaceCorruptionError("imported marker transfer digest mismatch")
         return _acknowledge_arrival(workspace, duplicate, transfer_id, str(manifest["source_workspace_id"]), digest)
-    if placement is None:
-        placement = normalize_placement(str(manifest["destination_placement"]))
     target = workspace.payload_path(placement, str(manifest["job_key"]))
     if target.exists():
         if validate_bundle(target).get("payload_sha256") != digest:
@@ -1312,9 +1392,87 @@ def _acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, ob
     return _retire_sealed_bundle(workspace, transfer_id, provenance={"acknowledgement": dict(acknowledgement)})
 
 
+def _sealed_bundle_candidates(workspace: Workspace) -> list[Path]:
+    """Return every job directory of the workspace that carries a transfer manifest.
+
+    A sealed bundle in a workspace is always a job directory
+    ``<placement>/<job_key>``. The walk starts at the workspace root and
+    descends only through directories whose names do not parse as job keys
+    (placement components), to a depth of 64, skipping every
+    ``.httk-workspace`` and ``.httk-transfer``. A placement component may be an
+    operator's symlink to a directory (``project -> /scratch/project``) and is
+    followed; each directory is entered once, by device and inode, so a link
+    loop ends and an alias adds nothing, and routes without symlinks are walked
+    first, so a bundle is reported by its plain path when it has one. A job-key
+    directory must be a real directory; only its own
+    ``.httk-transfer/manifest.json`` is checked, and it is never entered. The
+    placement rule (:func:`~httk.workflow.protocol.check_job_placement`) thus
+    holds for every candidate by construction, and a manifest a job plants
+    anywhere inside its own directory is never visited. Members gathered into
+    an ejected tree root's envelope are inside that root, so they are not
+    visited either: they have left as far as this workspace is concerned.
+
+    :param workspace: The workspace to search.
+    :return: The candidate bundle directories, in path order, one per real directory.
+    """
+
+    try:
+        root = os.stat(workspace.root)
+    except OSError:
+        return []
+    visited: set[tuple[int, int]] = set()
+    # Routes through no symlink are drained before any route through one, and a
+    # directory is marked visited when it is walked, so its plain route wins.
+    plain: list[tuple[Path, int, tuple[int, int]]] = [(workspace.root, 0, (root.st_dev, root.st_ino))]
+    linked: list[tuple[Path, int, tuple[int, int]]] = []
+    candidates: dict[str, Path] = {}
+    while plain or linked:
+        through_link = not plain
+        directory, depth, identity = plain.pop() if plain else linked.pop()
+        if identity in visited:
+            continue
+        visited.add(identity)
+        try:
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda item: item.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in {TRANSFER_DIRECTORY, WORKSPACE_DIRECTORY}:
+                continue
+            path = Path(entry.path)
+            try:
+                parse_job_key(entry.name)
+            except FormatError:
+                # A placement component: descend, real or symlinked, within the depth bound.
+                if depth + 1 >= _RECOVERY_MAX_DEPTH:
+                    continue
+                try:
+                    if not entry.is_dir():
+                        continue
+                    information = entry.stat()
+                    via_link = through_link or entry.is_symlink()
+                except OSError:
+                    continue
+                child = (information.st_dev, information.st_ino)
+                if child not in visited:
+                    (linked if via_link else plain).append((path, depth + 1, child))
+                continue
+            try:
+                is_job_directory = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_job_directory and os.path.lexists(path / TRANSFER_DIRECTORY / TRANSFER_MANIFEST):
+                candidates.setdefault(os.path.realpath(path), path)
+    return sorted(candidates.values())
+
+
 @receipts.serialized
 def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
     """Finish source sealing and inventory every retained bundle.
+
+    Retained bundles are found by a pruned walk that never enters a job
+    directory, so a manifest planted inside one is never examined.
 
     :param workspace: Provide the workspace whose transfers to recover.
     :return: The recovered and retained transfer records.
@@ -1331,14 +1489,7 @@ def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
         state = workspace.read_state(marker)
         bundle = _seal_transferring(workspace, marker, state)
         results.append({"transfer_id": state["transfer_id"], "status": "sealed", "bundle": str(bundle)})
-    for manifest_path in workspace.root.rglob(f"{TRANSFER_DIRECTORY}/{TRANSFER_MANIFEST}"):
-        if workspace.control in manifest_path.parents:
-            continue
-        bundle = manifest_path.parent.parent
-        if TRANSFER_DIRECTORY in bundle.relative_to(workspace.root).parts:
-            # A member already gathered into its ejected tree root's directory
-            # has left as far as this workspace is concerned.
-            continue
+    for bundle in _sealed_bundle_candidates(workspace):
         try:
             manifest = validate_bundle(bundle)
         except (FormatError, OSError) as exc:
@@ -1410,7 +1561,7 @@ def _settle_leftover_envelope(workspace: Workspace, bundle: Path, problem: Excep
     transfer_id: str | None = None
     arrival = None
     try:
-        manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+        manifest = _read_manifest(bundle)
         transfer_id = canonical_uuid(manifest.get("transfer_id"), "transfer_id")
         arrival = _arrival(workspace, canonical_uuid(manifest.get("job_id"), "job_id"))
     except (WorkflowError, OSError, ValueError):
@@ -1534,7 +1685,7 @@ def select_transfer_jobs(
         manifest: Mapping[str, Any] | None = None
         problem: str | None = None
         try:
-            manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+            manifest = _read_manifest(bundle)
         except (FormatError, OSError) as exc:
             problem = str(exc)
         if manifest is not None:
@@ -1987,7 +2138,7 @@ def offer_transfers(
                 extra={"event": "transfer_offer_skipped", "job_key": candidate.job_key},
             )
             continue
-        manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+        manifest = _read_manifest(bundle)
         offers[str(manifest["transfer_id"])] = _offer_record(manifest, bundle, candidate.tree_root)
     if sealing_errors:
         details = "; ".join(sealing_errors)
@@ -2398,6 +2549,23 @@ def _eject_tree_of(workspace: Workspace, marker: Marker, waiting: Mapping[str, s
     ]
 
 
+def _check_eject_placements(marker: Marker, tree: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse an ejection whose root or any tree member sits at a placement naming a job directory.
+
+    Such placements predate the placement rule; a sealed bundle recording one
+    could never be adopted anywhere, so the job is refused before any member
+    is fenced rather than left half-ejected.
+
+    :param marker: The tree root's marker.
+    :param tree: The members :func:`_eject_tree_of` listed.
+    :raises httk.workflow.errors.FormatError: If a placement breaks the placement rule.
+    """
+
+    check_job_placement(marker.placement)
+    for entry in tree:
+        check_job_placement(normalize_placement(str(entry["placement"])))
+
+
 @receipts.serialized
 def eject_job(
     workspace: Workspace,
@@ -2425,6 +2593,8 @@ def eject_job(
     :raises ValueError: If the job or its tree cannot leave its workspace or the target is unusable.
     :raises FileExistsError: If the target job directory already exists.
     :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+    :raises httk.workflow.errors.FormatError: If the job or a tree member sits at a placement naming
+        a job directory (:func:`~httk.workflow.protocol.check_job_placement`).
     """
 
     _finish_pending_ejections(workspace)
@@ -2435,6 +2605,7 @@ def eject_job(
     destination = _eject_destination(workspace, target, marker.job_key)
     waiting = _waiting_parent_map(workspace)
     tree = _eject_tree_of(workspace, marker, waiting)
+    _check_eject_placements(marker, tree)
     transfer_id = str(uuid.uuid4())
     _detach_job(
         workspace,
@@ -2499,6 +2670,7 @@ def _adoption_needed(
 
     :raises ValueError: If the bundle is a stale copy.
     :raises FileExistsError: If its job or its payload path is already taken here.
+    :raises httk.workflow.errors.FormatError: If its placement names a job directory.
     """
 
     transfer_id = str(manifest["transfer_id"])
@@ -2511,9 +2683,9 @@ def _adoption_needed(
         )
     if workspace.find_marker_by_id(str(manifest["job_id"])) is not None:
         raise FileExistsError(f"this workspace already holds job {manifest['job_id']}; {bundle} was left in place")
-    target = workspace.payload_path(
-        placement or normalize_placement(str(manifest["destination_placement"])), str(manifest["job_key"])
-    )
+    effective = placement or normalize_placement(str(manifest["destination_placement"]))
+    check_job_placement(effective)
+    target = workspace.payload_path(effective, str(manifest["job_key"]))
     if (target.exists() or target.is_symlink()) and not _holds_bundle(target, transfer_id):
         raise FileExistsError(f"payload path {target} is already taken; {bundle} was left in place")
     return True
@@ -2536,7 +2708,9 @@ def adopt_job(
     copy of a directory whose job has already passed through this workspace is
     refused and left in place rather than resurrecting a stale job. Before any
     of its files is opened, the directory is refused if it is a symlink or holds
-    anything but regular files, directories and symlinks staying inside it.
+    anything but regular files with a single link, directories and symlinks
+    staying inside it. A placement, recorded or given, must not name a job
+    directory (:func:`~httk.workflow.protocol.check_job_placement`).
 
     :param workspace: The workspace the job joins.
     :param directory: The free-standing job directory.
@@ -2547,7 +2721,8 @@ def adopt_job(
     :raises FileExistsError: If the workspace already holds this job or its payload path.
     :raises FileNotFoundError: If the directory does not exist.
     :raises httk.workflow.errors.FormatError: If the directory or a tree member does not verify, is
-        missing, or holds a special entry or an escaping symlink.
+        missing, holds a special entry, a hard-linked file or an escaping symlink, or would be placed
+        inside a job directory.
     """
 
     workspace._require_unsealed()

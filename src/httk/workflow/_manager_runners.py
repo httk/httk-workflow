@@ -191,15 +191,41 @@ def _close_fd(fd: int | None) -> None:
 
 
 def _registered_runner_artifacts(manager: Any, job: JobDefinition, source: Path) -> Path | None:
+    """Return the registered build artifacts of a workspace runner tree, if it declares a build.
+
+    A workspace runner tree may have arrived in a transfer bundle, so its
+    ``[workflow.build].platform`` probe is imported content: it is run only
+    when an operator's ``httk workflow build`` already registered a build of
+    exactly this source whose stamp records the identical probe command. Without
+    such a registration the job fails ``runner_not_built`` before anything runs.
+
+    :param manager: The manager resolving the runner.
+    :param job: The job pinning the runner.
+    :param source: The verified runner tree in the workspace store.
+    :return: The registered artifact directory, or ``None`` when the runner declares no build.
+    :raises httk.workflow.errors.RunnerResolutionError: If the build is not registered here, the
+        probe fails or times out, or the runner manifest is malformed.
+    """
+
     if job.runner_source != "workspace" or not source.is_dir():
         return None
-    from ._runner_builds import platform_tag, registered_artifacts, workspace_build_command
+    from ._runner_builds import platform_tag, registered_artifacts, registered_platforms, workspace_build_command
     from .packages import read_build_spec
 
     try:
         spec = read_build_spec(source)
         if spec is None:
             return None
+        if spec.platform is not None and not any(
+            stamp.get("source_sha256") == job.runner_sha256 and stamp.get("platform") == spec.platform
+            for stamp in registered_platforms(manager.workspace, job.runner_path)
+        ):
+            raise RunnerResolutionError(
+                "runner_not_built",
+                f"workflow package {job.runner_path.as_posix()} is not built on this machine: no build "
+                f"registration of this source ran its platform probe {spec.platform!r}; run: "
+                f"{workspace_build_command(manager.workspace, job.runner_path)}",
+            )
         tag = platform_tag(spec)
         artifacts = registered_artifacts(
             manager.workspace,

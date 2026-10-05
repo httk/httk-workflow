@@ -3,7 +3,9 @@
 import dataclasses
 import hashlib
 import json
+import os
 import re
+import stat
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -94,6 +96,9 @@ MAXIMUM_ENVIRONMENT_BYTES = 262144
 # workflow announced, so a later precheck can consume it. Same allowance, same
 # reason — it describes one job rather than carrying bulk content.
 MAXIMUM_DECLARED_BYTES = 262144
+# The largest stored ``job.json`` a reader accepts. The document is read on
+# every manager poll, so its size is bounded before it is parsed.
+_MAXIMUM_JOB_DOCUMENT_BYTES = 1024 * 1024
 
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
@@ -773,6 +778,59 @@ def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
         if len(part.encode()) > 255:
             raise FormatError(f"placement component is too long: {part!r}")
     return placement
+
+
+def check_job_placement(placement: PurePosixPath) -> None:
+    """Refuse a placement that names a job directory, so job directories never nest.
+
+    Every job directory is ``<placement>/<job_key>``. A placement none of whose
+    components parses as a job key therefore never places one job inside
+    another's directory, without any lock or index. New jobs are held to this
+    rule wherever they enter a workspace; :func:`~httk.workflow.protocol.normalize_placement` does not
+    apply it, so markers of jobs placed before the rule keep parsing.
+
+    :param placement: The normalized placement to check.
+    :raises httk.workflow.errors.FormatError: If a component of the placement parses as a job key.
+    """
+
+    for part in placement.parts:
+        try:
+            parse_job_key(part)
+        except FormatError:
+            continue
+        raise FormatError(
+            f"placement {placement.as_posix()!r} has the component {part!r}, which parses as a job key: "
+            "a placement must not name a job directory, so job directories never nest"
+        )
+
+
+def _read_regular_file(path: Path, limit: int, *, follow_symlinks: bool = False) -> bytes:
+    """Read one bounded regular file without blocking on it or, by default, following a symlink.
+
+    The file is opened ``O_NONBLOCK`` and checked with ``fstat`` before any
+    read, so a FIFO or device in its place cannot hang or feed the reader.
+
+    :param path: The file to read.
+    :param limit: The largest accepted size in bytes.
+    :param follow_symlinks: Follow a symlink at the final component instead of refusing it.
+    :return: The file content.
+    :raises OSError: If the file cannot be opened or read; a refused symlink raises ``ELOOP``.
+    :raises httk.workflow.errors.FormatError: If the file is not a regular file or exceeds *limit*.
+    """
+
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (0 if follow_symlinks else os.O_NOFOLLOW)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise FormatError(f"cannot read {path}: not a regular file")
+        data = bytearray()
+        while chunk := os.read(descriptor, limit + 1 - len(data)):
+            data.extend(chunk)
+            if len(data) > limit:
+                raise FormatError(f"cannot read {path}: larger than {limit} bytes")
+        return bytes(data)
+    finally:
+        os.close(descriptor)
 
 
 def make_job_key(job_id: str, tag: str | None) -> str:
@@ -1621,16 +1679,23 @@ class JobDefinition:
         return dataclasses.replace(job, stored_digest=job_digest(data))
 
     @classmethod
-    def from_path(cls, path: Path) -> "JobDefinition":
+    def from_path(cls, path: Path, *, follow_symlinks: bool = False) -> "JobDefinition":
         """Read one stored ``job.json``, pinning the normative job digest.
 
+        The document must be a regular file of at most 1 MiB; it is opened
+        without blocking, so a
+        FIFO or special file fails the read instead of hanging it, and a
+        symlink is refused unless *follow_symlinks* is set.
+
         :param path: The path of the stored job document.
+        :param follow_symlinks: Follow a symlinked ``job.json``, for a source directory supplied by the user.
         :return: The parsed job definition.
-        :raises httk.workflow.errors.FormatError: If the file cannot be read or is invalid.
+        :raises httk.workflow.errors.FormatError: If the file cannot be read, is a symlink, is not a
+            regular file, is too large, or is invalid.
         """
 
         try:
-            data = path.read_bytes()
+            data = _read_regular_file(path, _MAXIMUM_JOB_DOCUMENT_BYTES, follow_symlinks=follow_symlinks)
         except OSError as exc:
             raise FormatError(f"cannot read JSON object {path}: {exc}") from exc
         return cls.from_bytes(data, name=str(path))
