@@ -411,6 +411,14 @@ The foreground daemon logs to stdout: one line per request (operation, request
 ID, outcome), each submitted Slurm job ID, every failed Slurm client call with
 its exit code and error output, and startup and check results.
 
+While a submitted job runs, Slurm writes its output, with stderr merged in, to
+`<snapshots>/jobs/httk-<jobid>.out`, a private directory that no job sandbox
+mounts; the `daemon_submitted` log line names this path. When the job ends,
+even on a refusal before its sandbox starts, the last 1 MiB is copied to
+`WORKSPACE/.httk-workspace/daemon-job-<handle>.log`, replacing whatever is at
+that name. The original stays in the `jobs` directory for the operator to
+inspect and clean up.
+
 ### Quotas
 
 The record limit (4096) limits all durable request records. `daemon.max_submissions` limits

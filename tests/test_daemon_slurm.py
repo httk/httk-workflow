@@ -68,7 +68,8 @@ def test_submission_uses_fixed_script_stdin_and_clean_environment(
     argv, environment, script = json.loads(record.read_text())
     assert "--export=NIL" in argv
     assert "--chdir=/" in argv
-    assert {"--input=/dev/null", "--output=/dev/null", "--error=/dev/null"} <= set(argv)
+    assert {"--input=/dev/null", f"--output={tmp_path / 'snapshots/jobs/httk-%j.out'}"} <= set(argv)
+    assert not any(item.startswith("--error") for item in argv)
     assert {"--nodes=1", "--ntasks=1", "--cpus-per-task=2", "--mem=512M", "--time=5"} <= set(argv)
     assert "--job-name=httk-" + _HANDLE in argv
     assert "--partition=batch" in argv and "--account=science" in argv

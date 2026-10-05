@@ -70,7 +70,7 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         "    for name in os.listdir('/proc/self/fd'):\n"
         "        try: fds[name] = os.readlink('/proc/self/fd/' + name)\n"
         "        except OSError: pass\n"
-        f"    open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps({{'argv': sys.argv, 'env': dict(os.environ), 'fds': fds}}))\n",
+        f"    open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps({{'argv': sys.argv, 'env': dict(os.environ), 'fds': fds, 'ppid': os.getppid()}}))\n",
     )
     python = roots["runtime"] / "python"
     _write_executable(python)
@@ -738,3 +738,34 @@ def test_rank_rejects_non_device_approved_path(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert not record.exists()
+
+
+def _job_output(policy: dict[str, Any]) -> Path:
+    jobs = Path(policy["snapshots"]) / "jobs"
+    jobs.mkdir(parents=True, mode=0o700)
+    output = jobs / "httk-1234.out"
+    output.write_text("allocation output\n", encoding="utf-8")
+    return Path(policy["workspace"]) / ".httk-workspace" / f"daemon-job-{HANDLE}.log"
+
+
+def test_allocation_runs_bwrap_as_a_child_and_copies_the_job_log(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    log = _job_output(policy)
+    arguments = ["--mode", "allocation", "--profile", "parallel", "--handle", HANDLE]
+    result = _run(tmp_path, policy_path, arguments, _allocation_environment())
+    assert result.returncode == 0, result.stderr
+    assert json.loads(record.read_text(encoding="utf-8"))["ppid"] != os.getpid()
+    assert log.read_text(encoding="utf-8") == "allocation output\n"
+
+
+def test_mpi_manager_step_still_execs_and_copies_nothing(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    log = _job_output(policy)
+    control_source = Path(policy["mpi"]["control_root"]) / "private"
+    control_source.mkdir(mode=0o700)
+    arguments = ["--mode", "payload", "--profile", "parallel", "--handle", HANDLE]
+    arguments += ["--control-source", str(control_source), "--procs", "32"]
+    result = _run(tmp_path, policy_path, arguments, _allocation_environment())
+    assert result.returncode == 0, result.stderr
+    assert json.loads(record.read_text(encoding="utf-8"))["ppid"] == os.getpid()
+    assert not log.exists()

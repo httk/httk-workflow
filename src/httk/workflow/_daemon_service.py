@@ -166,7 +166,11 @@ class Broker:
             return self._finished_response(completed)
 
         _LOGGER.info(
-            "daemon_submitted handle=%s job_id=%s cluster=%s", submitting.handle, submission.job_id, submission.cluster
+            "daemon_submitted handle=%s job_id=%s cluster=%s log=%s",
+            submitting.handle,
+            submission.job_id,
+            submission.cluster,
+            self.policy.jobs / f"httk-{submission.job_id}.out",
         )
         response = self._response(request, "submitted", handle=submitting.handle)
         completed = self.ledger.finish(

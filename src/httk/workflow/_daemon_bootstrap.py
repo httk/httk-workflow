@@ -6,6 +6,7 @@ import os
 import re
 import runpy
 import secrets
+import signal
 import stat
 import subprocess
 import sys
@@ -27,6 +28,8 @@ _HANDLE = re.compile(r"[0-9a-f]{32}\Z")
 _PROFILE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _HOSTNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}\Z")
 _COUNT = re.compile(r"(?:0|[1-9][0-9]{0,18})\Z")
+_JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
+_JOB_LOG_BYTES = 1024 * 1024
 _COUNT_MAX = 2**63 - 1
 _MPI_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _MPI_EXACT_ENVIRONMENT = frozenset(
@@ -329,7 +332,7 @@ def _allocation_identity(policy: Any) -> _AllocationIdentity:
     if restart != "0":
         raise ValueError("allocation mode refuses a malformed or nonzero SLURM_RESTART_COUNT")
     job_id = os.environ.get("SLURM_JOB_ID")
-    if job_id is None or re.fullmatch(r"[1-9][0-9]{0,19}", job_id) is None:
+    if job_id is None or _JOB_ID.fullmatch(job_id) is None:
         raise ValueError("allocation mode requires a numeric SLURM_JOB_ID")
     node = os.environ.get("SLURMD_NODENAME")
     if node is None or _HOSTNAME.fullmatch(node) is None:
@@ -417,10 +420,7 @@ def _capture_rank_environment(policy: Any, profile: Any) -> tuple[tuple[str, str
         raise ValueError("SLURM_LOCALID is outside the protected MPI profile")
     if not 0 <= int(numeric["SLURM_NODEID"]) < nodes:
         raise ValueError("SLURM_NODEID is outside the protected MPI profile")
-    if (
-        re.fullmatch(r"[1-9][0-9]{0,19}", numeric["SLURM_JOB_ID"]) is None
-        or _HOSTNAME.fullmatch(values["SLURMD_NODENAME"]) is None
-    ):
+    if _JOB_ID.fullmatch(numeric["SLURM_JOB_ID"]) is None or _HOSTNAME.fullmatch(values["SLURMD_NODENAME"]) is None:
         raise ValueError("MPI rank Slurm identity is invalid")
     cluster = os.environ.get("SLURM_CLUSTER_NAME")
     if cluster is not None and cluster != policy.cluster:
@@ -797,6 +797,14 @@ def _open_descriptor_numbers() -> set[int]:
         raise RuntimeError("cannot enumerate inherited descriptors through /proc/self/fd") from exc
 
 
+def _make_inheritable(descriptors: tuple[int, ...]) -> None:
+    for descriptor in descriptors:
+        # Not os.set_inheritable: its ioctl fails with EBADF on O_PATH descriptors, and
+        # Pythons built without O_PATH also lack CPython's fcntl fallback for that.
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        fcntl.fcntl(descriptor, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+
+
 def _exec_prepared(prepared: _PreparedSandbox) -> None:
     try:
         preserved = {0, 1, 2, *prepared.descriptors}
@@ -805,15 +813,70 @@ def _exec_prepared(prepared: _PreparedSandbox) -> None:
                 os.close(descriptor)
             except OSError:
                 pass
-        for descriptor in prepared.descriptors:
-            # Not os.set_inheritable: its ioctl fails with EBADF on O_PATH descriptors, and
-            # Pythons built without O_PATH also lack CPython's fcntl fallback for that.
-            flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
-            fcntl.fcntl(descriptor, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+        _make_inheritable(prepared.descriptors)
         os.execve(prepared.argv[0], prepared.argv, {})
     except BaseException:
         prepared.close()
         raise
+
+
+def _run_prepared(prepared: _PreparedSandbox) -> int:
+    """Run Bubblewrap as a child that keeps the descriptor numbers, forwarding SIGTERM and SIGINT to it."""
+
+    _make_inheritable(prepared.descriptors)
+    process = subprocess.Popen(prepared.argv, env={}, pass_fds=prepared.descriptors, close_fds=True)
+    # ponytail: a signal before these handlers exist takes the default action; --die-with-parent then ends
+    # Bubblewrap and that job's log stays uncopied, so block signals across the spawn if that ever matters.
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda received, _frame: process.send_signal(received))
+    status = process.wait()
+    return 128 - status if status < 0 else status
+
+
+def _copy_job_log(policy: Any, handle: str) -> None:
+    """Copy the bounded tail of this batch job's private Slurm output into the workspace, replacing any entry."""
+
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if job_id is None or _JOB_ID.fullmatch(job_id) is None or _HANDLE.fullmatch(handle) is None:
+        return
+    try:
+        source = os.open(policy.jobs / f"httk-{job_id}.out", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            information = os.fstat(source)
+            if not stat.S_ISREG(information.st_mode):
+                raise ValueError("job output is not a regular file")
+            data = os.pread(source, _JOB_LOG_BYTES, max(0, information.st_size - _JOB_LOG_BYTES))
+        finally:
+            os.close(source)
+        workspace = _open_directory_nofollow(policy.workspace)
+        try:
+            directory = os.open(
+                ".httk-workspace", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=workspace
+            )
+        finally:
+            os.close(workspace)
+        try:
+            temporary = f".daemon-job-{secrets.token_hex(16)}"
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory
+            )
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                    stream.write(data)
+                # The payload may still race on this directory; rename replaces, and never follows, a planted entry.
+                os.rename(temporary, f"daemon-job-{handle}.log", src_dir_fd=directory, dst_dir_fd=directory)
+            except BaseException:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except OSError:
+                    pass
+                raise
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(directory)
+    except (OSError, ValueError) as exc:
+        print(f"daemon bootstrap: could not copy the job log into the workspace: {exc}", file=sys.stderr, flush=True)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -908,13 +971,20 @@ def _validate_arguments(arguments: argparse.Namespace, policy: Any) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Validate policy and replace this process with Bubblewrap.
+    """Validate policy and enter Bubblewrap.
+
+    The Slurm batch-script modes, serial ``payload`` and ``allocation``, run Bubblewrap as a child and
+    afterwards copy the job's Slurm output tail into the workspace; every other mode replaces this process.
 
     :param argv: Bootstrap arguments, or process arguments when omitted.
-    :return: Two on a validation or startup refusal; success replaces the process.
+    :return: Bubblewrap's exit status in a batch-script mode, or two on a validation or startup refusal.
     """
 
     arguments = _parser().parse_args(sys.argv[1:] if argv is None else argv)
+    # MPI payload managers are srun steps with a --control-source; only the batch script itself copies a log.
+    batch_script = arguments.mode in ("payload", "allocation") and arguments.control_source is None
+    policy = None
+    status = 2
     try:
         policy_path = Path(arguments.policy)
         if not policy_path.is_absolute():
@@ -923,13 +993,17 @@ def main(argv: list[str] | None = None) -> int:
         policy_source = _validate_arguments(arguments, policy)
         prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source, check_layout)
         try:
-            _exec_prepared(prepared)
+            if batch_script:
+                status = _run_prepared(prepared)
+            else:
+                _exec_prepared(prepared)
         finally:
             prepared.close()
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"daemon bootstrap: {exc}", file=sys.stderr)
-        return 2
-    return 2
+        print(f"daemon bootstrap: {exc}", file=sys.stderr, flush=True)
+    if batch_script and policy is not None and type(arguments.handle) is str:
+        _copy_job_log(policy, arguments.handle)
+    return status
 
 
 if __name__ == "__main__":

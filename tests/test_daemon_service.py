@@ -712,7 +712,8 @@ def test_requests_and_confirmed_submissions_are_logged(tmp_path: Path, caplog: p
             _publish(broker, start)
             broker.process_once(threading.Event())
         handle = _read(broker, start).handle
-        assert f"daemon_submitted handle={handle} job_id=42 cluster=cluster-1" in caplog.text
+        log = tmp_path / "snapshots/jobs/httk-42.out"
+        assert f"daemon_submitted handle={handle} job_id=42 cluster=cluster-1 log={log}" in caplog.text
         assert (
             f"daemon_request request_id={health.request_id} operation=health outcome=ready reason=None handle=None"
             in caplog.text

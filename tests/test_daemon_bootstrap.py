@@ -4,8 +4,10 @@ import base64
 import json
 import os
 import runpy
+import signal
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,7 +65,7 @@ def _layout(
         "    for name in os.listdir('/proc/self/fd'):\n"
         "        try: fds[name] = os.readlink('/proc/self/fd/' + name)\n"
         "        except OSError: pass\n"
-        f"    open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps({{'argv': sys.argv, 'env': dict(os.environ), 'fds': fds}}))\n",
+        f"    open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps({{'argv': sys.argv, 'env': dict(os.environ), 'fds': fds, 'ppid': os.getppid()}}))\n",
     )
     python = roots["runtime"] / "python"
     _write_executable(python)
@@ -127,6 +129,7 @@ def _run(
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
     assert not marker.exists()
     return result
@@ -279,6 +282,13 @@ def test_payload_excludes_broker_mounts_and_network(tmp_path: Path) -> None:
     assert {destination for _, destination in _pairs(argv, "--ro-bind-fd")} == set(policy["readonly_paths"])
     assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/daemon-policy.json"]
     assert "/tmp/daemon-root" not in argv and "/tmp/control" not in argv
+    # Bubblewrap runs as a child that still sees the prepared descriptor numbers.
+    assert observed["ppid"] != os.getpid()
+    workspace_fd = next(source for source, destination in _pairs(argv, "--bind-fd") if destination == "/workspace")
+    assert observed["fds"][workspace_fd] == policy["workspace"]
+    # Without SLURM_JOB_ID there is no job log to copy, and no complaint about it.
+    assert "job log" not in result.stderr
+    assert not list((Path(policy["workspace"]) / ".httk-workspace").glob("*daemon-job*"))
     separator = argv.index("--")
     assert argv[separator + 1 :] == [
         policy["python"],
@@ -634,3 +644,92 @@ def test_merged_usr_links_are_recreated_inside_the_sandbox(tmp_path: Path) -> No
     argv = api["_merged_usr_symlinks"]((usr.resolve(),), set(), (lib64, sbin, plain))
     assert argv == ["--symlink", "usr/lib64", str(lib64)]
     assert api["_merged_usr_symlinks"]((usr.resolve(),), {lib64}, (lib64,)) == []
+
+
+def _job_output(policy: dict[str, Any], job_id: str = "123") -> Path:
+    jobs = Path(policy["snapshots"]) / "jobs"
+    jobs.mkdir(parents=True, mode=0o700, exist_ok=True)
+    return jobs / f"httk-{job_id}.out"
+
+
+def test_serial_payload_returns_bwrap_status_and_replaces_planted_job_log(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    bwrap = Path(policy["bwrap"])
+    bwrap.write_text(bwrap.read_text(encoding="utf-8") + "    sys.exit(3)\n", encoding="utf-8")
+    content = b"head" + b"x" * (1024 * 1024) + b"slurm said: failed\n"
+    _job_output(policy).write_bytes(content)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched", encoding="utf-8")
+    log = Path(policy["workspace"]) / ".httk-workspace" / f"daemon-job-{'a' * 32}.log"
+    log.symlink_to(outside)
+    arguments = ["--mode", "payload", "--profile", "small", "--handle", "a" * 32]
+    result = _run(tmp_path, policy_path, arguments, slurm={"SLURM_JOB_ID": "123"})
+    assert result.returncode == 3, result.stderr
+    assert json.loads(record.read_text(encoding="utf-8"))["ppid"] != os.getpid()
+    assert not log.is_symlink() and log.stat().st_mode & 0o777 == 0o600
+    assert log.read_bytes() == content[-1024 * 1024 :]
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert [path.name for path in log.parent.glob(".daemon-job-*")] == []
+
+
+def test_refused_serial_payload_still_copies_the_job_log(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    _job_output(policy).write_text("refusal context\n", encoding="utf-8")
+    arguments = ["--mode", "payload", "--profile", "small", "--handle", "a" * 32]
+    result = _run(tmp_path, policy_path, arguments, slurm={"SLURM_JOB_ID": "123", "SLURM_CPUS_ON_NODE": "4x"})
+    assert result.returncode == 2
+    assert "SLURM_CPUS_ON_NODE" in result.stderr
+    assert not record.exists()
+    log = Path(policy["workspace"]) / ".httk-workspace" / f"daemon-job-{'a' * 32}.log"
+    assert log.read_text(encoding="utf-8") == "refusal context\n"
+
+
+def test_job_log_source_must_be_a_regular_file(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    os.mkfifo(_job_output(policy))
+    arguments = ["--mode", "payload", "--profile", "small", "--handle", "a" * 32]
+    result = _run(tmp_path, policy_path, arguments, slurm={"SLURM_JOB_ID": "123"})
+    assert result.returncode == 0, result.stderr
+    assert record.exists()
+    assert "could not copy the job log" in result.stderr and "not a regular file" in result.stderr
+    assert not list((Path(policy["workspace"]) / ".httk-workspace").glob("*daemon-job*"))
+
+
+def test_serial_payload_forwards_sigterm_to_bwrap(tmp_path: Path) -> None:
+    policy_path, policy, _ = _layout(tmp_path)
+    ready, received = tmp_path / "bwrap-ready", tmp_path / "bwrap-received"
+    _write_executable(
+        Path(policy["bwrap"]),
+        "#!/usr/bin/python3\n"
+        "import signal, sys, time\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        f"    print({' '.join(REQUIRED_BWRAP_OPTIONS)!r})\n"
+        "    sys.exit()\n"
+        "def handler(signum, _frame):\n"
+        f"    open({str(received)!r}, 'w').write(str(signum))\n"
+        "    sys.exit(7)\n"
+        "signal.signal(signal.SIGTERM, handler)\n"
+        f"open({str(ready)!r}, 'w').close()\n"
+        "time.sleep(60)\n"
+        "sys.exit(9)\n",
+    )
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("SLURM_")}
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", str(BOOTSTRAP), "--policy", str(policy_path)]
+        + ["--mode", "payload", "--profile", "small", "--handle", "a" * 32],
+        env=environment,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=30) == 7
+    finally:
+        process.kill()
+        process.wait()
+        if process.stderr is not None:
+            process.stderr.close()
+    assert received.read_text(encoding="utf-8") == str(int(signal.SIGTERM))

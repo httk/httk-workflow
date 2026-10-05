@@ -454,6 +454,12 @@ class Policy:
         return self.exchange.parent
 
     @property
+    def jobs(self) -> Path:
+        """Private directory of Slurm batch job output, which no job sandbox mounts."""
+
+        return self.snapshots / "jobs"
+
+    @property
     def requests(self) -> Path:
         """Signed request mailbox inside the exchange."""
 

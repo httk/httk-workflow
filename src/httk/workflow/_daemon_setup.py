@@ -614,7 +614,7 @@ def initialize(
     check_layout(policy)
     for name in _EXCHANGE_DIRECTORIES:
         _mkdir_exclusive(exchange / name)
-    for directory in (state, snapshots):
+    for directory in (state, snapshots, policy.jobs):
         _mkdir_exclusive(directory)
     initialize_response_seed(state)
     with Ledger(
@@ -711,6 +711,7 @@ def reload(
     _runtime_policy_bytes(new)
     _fixed_connection(old, new)
     _validate_private_directory(snapshots)
+    _mkdir_exclusive(new.jobs, exist_ok=True)
     _create_staging(workspace)
     check_layout(new)
     with Ledger(

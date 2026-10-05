@@ -123,8 +123,9 @@ def test_initialize_compiles_daemon_launchers_and_publishes_the_endpoint(tmp_pat
     assert policy.authorized_keys == (AUTHORIZED_KEY,)
     assert policy.max_submissions == 128
     assert policy.python.is_relative_to(Path(sys.prefix).resolve())
-    for directory in (policy.state, policy.snapshots, layout.exchange):
+    for directory in (policy.state, policy.snapshots, policy.jobs, layout.exchange):
         assert directory.stat().st_mode & 0o777 == 0o700
+    assert policy.jobs == policy.snapshots / "jobs"
     for name in ("requests", "responses", "inbox", "outbox", "outbox/rejected"):
         assert (layout.exchange / name).is_dir()
     for name in ("inbox", "outbox", "outbox/rejected", "records"):
@@ -785,14 +786,17 @@ def test_leftover_state_is_refused_before_the_exchange_is_touched(tmp_path: Path
     assert load_policy(_initialize(layout, "small", state=fresh)).state == fresh
 
 
-def test_reload_recreates_deleted_workspace_staging_directories(tmp_path: Path) -> None:
+def test_reload_recreates_deleted_staging_and_job_output_directories(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _initialize(layout, "small")
     staging = layout.workspace.root / ".httk-workspace" / "exchange"
     shutil.rmtree(staging)
+    jobs = _state(layout).with_name(_state(layout).name + ".snapshots") / "jobs"
+    jobs.rmdir()
     _daemon_setup.reload(layout.workspace.root)
     for name in ("inbox", "outbox", "outbox/rejected", "records"):
         assert (staging / name).is_dir()
+    assert jobs.stat().st_mode & 0o777 == 0o700
 
 
 def test_max_submissions_flows_into_the_policy_and_the_ledger_quota(tmp_path: Path) -> None:

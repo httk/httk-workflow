@@ -223,7 +223,8 @@ class SlurmGateway:
             argv.append(f"--mem={profile.memory_mb}M")
         if profile.time_minutes is not None:
             argv.append(f"--time={profile.time_minutes}")
-        argv += ["--chdir=/", "--input=/dev/null", "--output=/dev/null", "--error=/dev/null"]
+        # Without --error Slurm merges stderr into this private file; the bootstrap copies its tail into the workspace.
+        argv += ["--chdir=/", "--input=/dev/null", f"--output={self.policy.jobs / 'httk-%j.out'}"]
         if profile.mpi is not None:
             argv.append("--no-requeue")
             if profile.mpi.ntasks_per_node is not None:
