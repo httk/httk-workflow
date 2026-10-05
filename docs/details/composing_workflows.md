@@ -67,11 +67,16 @@ manifest and may call anything.
 
 Where the child's runner lives depends on what it is. A registered packaged
 workflow is referenced through the reserved `pkg:` form, so nothing is copied
-into the workspace runner store. A runner file of your own is published into
-that store, which is content-addressed and idempotent: calling the same runner
-twice publishes nothing the second time. The child's `job.json` pins the
-runner by digest, so an upgrade underneath a queued job cannot change what
-runs.
+into the workspace runner store. A runner file or workflow directory of your
+own is published into that store, which is content-addressed and idempotent:
+calling the same runner twice publishes nothing the second time. The running
+step never writes the store itself: `call` stages the runner in its outcome,
+and the manager publishes it when it commits that outcome, before the child
+exists. A different runner already stored under the same name is refused by
+`call` itself; one that another job publishes under that name only after the
+call fails this job's commit with `protocol_error`, and then none of the
+outcome's children is published. The child's `job.json` pins the runner by
+digest, so an upgrade underneath a queued job cannot change what runs.
 
 ## A worked example
 
@@ -239,18 +244,22 @@ in the gathering step.
 
 ## Requirements and limits
 
-- **Workspace reachability.** `call` scaffolds the child, and publishes a
-  runner file, into the workspace the calling step runs in, so the workspace
+- **Workspace reachability.** `call` scaffolds the child, and stages a
+  runner of your own, in the calling attempt's outcome, and the manager
+  publishes both into the workspace the calling step runs in, so the workspace
   root must be reachable from where the step executes, as
   {py:attr}`~httk.workflow.Attempt.children` also requires. For a packaged
-  workflow only the `pkg:` reference is written, but the child payload is
-  still built in the workspace.
+  workflow only the `pkg:` reference is written. This also works in a
+  confined attempt, which can write only its own job directory.
 - **Unrestricted nesting.** A called workflow is just another job, so it may
   call further workflows; the depth is not capped.
 - **Workspace and placement are inherited.** Like every spawned child, a
   called child is created in the calling job's workspace and placement (unless
   you pass `placement=`), so the whole tree below a root stays where the root
-  was assigned, which {doc}`../campaigns` relies on.
+  was assigned, which {doc}`../campaigns` relies on. A `placement=` must not
+  contain a component that parses as a job key, since job directories never
+  nest; see the
+  [placement rules](workflow_filesystem_api.md#placement-rules).
 
 ## Where to go next
 

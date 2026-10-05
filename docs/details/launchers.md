@@ -53,10 +53,11 @@ $ httk workflow run --count 4 --workspace default
 | `manager.launch` | Launcher name; the built-in `process` launcher is the default. |
 | `manager.count` | Default number of managers; `--count N` overrides it for one invocation. |
 | `manager.workers` | Default number of workers per manager; `--workers N` overrides it. |
-| `manager.command` | The manager interpreter/command used after `environment.prelude`; without a prelude, the launching Python interpreter is used. |
+| `manager.command` | The manager interpreter/command used after `environment.prelude`; without a prelude, the launching Python interpreter is used (for a daemon submission, the enrollment's `--python`). |
 | `manager.allocation` | The `--allocation` probe a launcher passes its managers: `auto`, `none`, `slurm`, `host` or `exec:PATH`; the Slurm launcher's default is `slurm`. |
 | `manager.launch_template` | Argv template for the attempt launch prefix; placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}` `{cpus_per_proc}`. |
 | `manager.bind_cpus` | `true`, `1` or `yes` pins locally executed attempts to the CPUs of their processor slots; off by default. |
+| `manager.confine`, `confine.*` | Attempt confinement; see [Confinement](#confinement). |
 | `slurm.account` | Slurm account directive. |
 | `slurm.partition` | Slurm partition directive. |
 | `slurm.time_limit` | Slurm time limit directive. |
@@ -136,17 +137,69 @@ scheduler values while starting managers for the same workspace. `launcher
 list`, `launcher show [--json]`, and `launcher remove` inspect and manage the
 visible bundles.
 
-## Daemon launchers
+## Confinement
 
-The `daemon` template creates launchers that only `httk workspace daemon` reads.
-They configure the approved manager resources of the confined daemon and refuse
-to run directly:
+A manager with `manager.confine=bwrap` starts every attempt in a Bubblewrap
+sandbox in which the workspace is read-only and only the attempt's own job
+directory is writable; parallel launches go through the trusted manager. The
+manager itself stays unconfined. {doc}`taskmanager` describes the sandbox, and
+{doc}`workspace_daemon` the deployment that requires it. Set the keys on a
+launcher or as workspace settings:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `manager.confine` | `none` | `none` runs attempts unconfined; `bwrap` confines each attempt. |
+| `confine.readonly_paths` | existing of `/usr`, `/bin`, `/lib`, `/lib64`, `/etc`, the manager's resolved `sys.prefix` and `sys.base_prefix`, and the directories the `httk` packages are imported from, nested entries dropped | Colon-separated absolute paths bound read-only at their own paths into attempts and ranks. Must not cover `/`, `/tmp`, `/tmp/home`, `/proc` or `/dev`, nor lie inside the workspace. |
+| `confine.isolate_network` | `true` | `true` or `false` (also `1`, `0`): give attempts a private network namespace. Ranks of a confined launch always use the host network. |
+| `confine.bwrap` | `bwrap` on `PATH` | Absolute path of the Bubblewrap executable. |
+| `confine.devices` | none | Colon-separated device nodes below `/dev` bound into attempts and ranks, such as GPU or InfiniBand devices. |
+| `confine.pmix_roots` | none | Colon-separated approved parents of the per-step PMIx directory exposed to ranks. |
+| `confine.shm_root` | `/dev/shm` | Node-local parent of the per-launch shared-memory directories. |
+| `confine.environment.<NAME>` | none | A variable set in rank sandboxes, such as site MPI tuning; `NAME` is a portable identifier outside `HTTK_*`, the value at most 4096 bytes. |
+
+Values are strings; an unknown `confine.*` key or a malformed value refuses the
+manager's start, and is refused already by `launcher add` and
+`launcher configure` for a `slurm` launcher. With `bwrap`, a manager probes
+Bubblewrap once when it starts and refuses to start if it cannot build the
+sandbox. If confinement becomes unavailable later, for example after a
+workspace setting changes, the manager stops claiming work and reports the
+reason until it is available again.
+
+### Pinned settings
+
+A `slurm` launcher pins its own values of `manager.confine`,
+`manager.launch_template`, `manager.bind_cpus` and every `confine.*` key on each
+manager it starts: they are passed as `--setting KEY=VALUE`, appended after any
+`--setting` given on the command line, and the last occurrence of a key wins.
+Pinned values override the workspace setting of the same key and stay fixed
+for the manager's lifetime. Every other workspace setting, and any of these
+keys the launcher does not set, is read live at each claim. The process
+launcher has no bundle and pins nothing; set the keys as workspace settings,
+or pass `--setting` to `httk workflow run` or `manager run` yourself (the
+option is not shown in `--help` and accepts only these keys). Job parameters
+and declared job environment never reach these keys.
 
 ```console
-$ httk workflow launcher add --template daemon --global --set slurm.cpus_per_task=2 small
+$ httk workflow launcher add --template slurm --global --set manager.confine=bwrap confined
+$ httk workflow run --workspace default --launcher confined --count 2
 ```
 
-Names match `[a-z][a-z0-9_-]{0,63}`. See {doc}`workspace_daemon` for the keys.
+### Extending path lists
+
+For the colon-separated path settings of a `slurm` launcher
+(`confine.readonly_paths`, `confine.devices`, `confine.pmix_roots`),
+`launcher configure --add-path KEY=PATH[:PATH...]` appends absolute paths in
+order without duplicates, after any `--set`, and prints the resulting value:
+
+```console
+$ httk workflow launcher configure confined --add-path confine.readonly_paths=/software:/opt/modules
+```
+
+When `confine.readonly_paths` is not set yet, the list starts from the default
+computed by the interpreter running this command, so adding one path does not
+drop the system directories, Python prefixes and *httk* import roots. List
+everything a prelude or code needs at run time there: module trees, conda or
+virtual-environment prefixes, code binaries and installed runner search paths.
 
 ## From Python
 
@@ -200,18 +253,6 @@ print(result)
 `check_launcher` runs its environment check. Pass a `settings` mapping to
 `add_launcher`, or update an existing bundle with `configure_launcher` (the CLI
 equivalent is `httk workflow launcher configure --set KEY=VALUE NAME`).
-
-For the colon-separated path settings of a daemon launcher (`daemon.readonly_paths`,
-`daemon.mpi.pmix_roots`, `daemon.mpi.devices`), `--add-path KEY=PATH[:PATH...]`
-appends absolute paths in order without duplicates and prints the resulting value:
-
-```console
-$ httk workflow launcher configure daemon_small --add-path daemon.readonly_paths=/software
-```
-
-When `daemon.readonly_paths` is not set yet, the list starts from the default that
-daemon setup would compute, in the interpreter running this command, so adding one
-path does not drop the system directories, Python prefixes and *httk* import roots.
 
 For local debugging, bypass launcher submission and run one manager
 in-process:

@@ -132,14 +132,33 @@ manager `count`, the workspace `settings` mapping, and the bundle's
 `launcher_settings` mapping. The maintained Slurm kind merges them, with bundle
 settings taking precedence over workspace settings for the keys the kind
 consumes; custom launchers define their own merge. Workspace settings are not
-copied into the bundle. The settings fall into three groups:
+copied into the bundle. The settings fall into four groups:
 
 - scheduler settings: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
   `slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
   `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation`;
 - `manager.workers` and `manager.allocation`, which belong to the manager
   command;
+- the manager's pinned settings `manager.confine`, `manager.launch_template`,
+  `manager.bind_cpus` and `confine.*`, which the manager itself reads (see
+  [confinement](launchers.md#confinement));
 - `environment.prelude`, shell setup such as module loads.
+
+The manager reads its own settings from the workspace at each claim, so a
+bundle value of a key the manager reads reaches it only through the manager
+command. The maintained Slurm kind appends `--setting KEY=VALUE` for each
+bundle value of a pinned setting, after any `--setting` already in the argv;
+the last occurrence of a key wins, so bundle values win, and they stay fixed
+for the manager's lifetime. Workspace values of those keys are never copied
+into `--setting`: the manager reads them live. A custom launcher that should
+pin confinement must forward its values the same way.
+
+`environment.prelude` runs before the manager, outside any attempt sandbox,
+and the environment it leaves is the manager's. A confined attempt inherits
+that environment without the `SLURM_*`, `SRUN_*`, `SBATCH_*`, `SALLOC_*`,
+`PMI_*` and `PMIX_*` variables, and can use only what `confine.readonly_paths`
+exposes, so list the directories the prelude adds (module trees, software
+prefixes) there.
 
 A launcher may use other settings, but should keep its interpretation explicit.
 
@@ -152,7 +171,8 @@ first under `set -e`, and the manager command is resolved on the resulting
 Python interpreter argv is preserved. Unless the argv already has one, the
 dispatcher appends `--allocation` with the `manager.allocation` setting
 (default `slurm`), so each manager probes its job's nodes; see
-[allocation probes](#allocation-probes). A successful result contains the parsed
+[allocation probes](#allocation-probes). It then appends the bundle's pinned
+`--setting` values. A successful result contains the parsed
 Slurm job IDs and the script path. If submission fails after some jobs were
 accepted, the refusal includes `submitted` and `job_ids` so the operator can
 cancel those jobs.

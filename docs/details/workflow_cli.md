@@ -30,7 +30,6 @@ httk workflow run        [--workspace WORKSPACE]  (the recommended spelling of `
 httk workflow manager    run
 httk workflow launcher   list | add | configure | show | check | remove
 httk workflow monitor    [--workspace NAME ...] [--refresh SECONDS]
-httk workflow mpi        run -- APPLICATION ARG...
 httk workflow postprocess
 httk workflow v1         collect
 httk workflow remote     list | add | configure | check | import-v1 | show | remove | daemon
@@ -69,7 +68,7 @@ remote workspace for execution.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workspace init [OPTIONS] PATH...` | create or adopt workspaces, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
-| `workspace daemon WORKSPACE` | set up or run the confined Slurm broker serving an exchange directory | `--initialize`, `--reload`, `--check`, `--once`, `--exchange`, `--launcher` (repeatable), `--authorize` (repeatable), `--state`, `--snapshots`, `--force` (approve resources above the sanity limits) |
+| `workspace daemon WORKSPACE` | set up or run the confined Slurm broker serving an exchange directory | `--initialize`, `--reload`, `--check`, `--once`, `--exchange`, `--launcher` (repeatable; a global `slurm` launcher that sets `manager.confine=bwrap`), `--authorize` (repeatable), `--state`, `--snapshots`, `--force` (approve resources above the sanity limits); broker configuration for `--initialize` and `--reload`: `--bwrap`, `--python`, `--sbatch`, `--squeue`, `--scancel`, `--sacct`, `--scontrol`, `--cluster`, `--slurm-conf`, `--max-submissions` |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |
@@ -723,7 +722,11 @@ is checked before anything is imported. `job adopt` refuses a directory made by
 a transfer to a named workspace (use `httk job transfer`) and a copy of a
 directory whose job already passed through this workspace, which it leaves in
 place. It also refuses a directory that is itself a symlink (adopt its target
-instead) or that contains special files or symlinks pointing outside it.
+instead) or that contains special files, symlinks pointing outside it, or
+regular files with more than one hard link (a same-filesystem adoption keeps
+inodes, so a hard link could alias a file outside the job). The adoption walk
+is bounded to 1,000,000 entries and a nesting depth of 256. An adopted job's
+placement must satisfy the [placement rule](workflow_filesystem_api.md#placement-rules).
 
 Both commands are crash-safe: an interrupted `job eject` is finished by the next
 `job eject` or transfer recovery in that workspace, and an interrupted
@@ -913,10 +916,15 @@ such greetings to stderr or guard them with a non-interactive-shell test.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--exchange` (used by the workspace daemon), `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--exchange` (used by the workspace daemon), `--setting KEY=VALUE` (repeatable), `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `run` is the recommended spelling and `manager run` the advanced one. Both
-follow the binding: a local workspace uses its `manager.launch` setting (the
+also take `--setting KEY=VALUE` (repeatable, not shown in `--help`), which pins
+`manager.confine`, `manager.launch_template`, `manager.bind_cpus` or a
+`confine.*` key on the managers for their lifetime, over the workspace setting;
+the last occurrence of a key wins, any other key is refused, and a `slurm`
+launcher appends its own values of these keys last (see
+{doc}`launchers`). Both follow the binding: a local workspace uses its `manager.launch` setting (the
 built-in `process` launcher by default), and a remote workspace invokes the same
 command on its owner. Both run until idle by default; `--idle` keeps serving.
 
@@ -1046,8 +1054,8 @@ launchers are versioned bundles, resolved project-first and then globally. See
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `launcher list` | list manager launchers visible to this project | |
-| `launcher add [OPTIONS] NAME...` | create launchers from a packaged template (`slurm`, `daemon` for {doc}`workspace_daemon`) | `--template`, `--set`, `--global`, `--non-interactive` |
-| `launcher configure [OPTIONS] NAME...` | update launcher settings | `--set KEY=VALUE`, `--add-path KEY=PATH[:PATH...]` (append to a daemon launcher's path list) |
+| `launcher add [OPTIONS] NAME...` | create launchers from the packaged `slurm` template | `--template`, `--set`, `--global`, `--non-interactive` |
+| `launcher configure [OPTIONS] NAME...` | update launcher settings | `--set KEY=VALUE`, `--add-path KEY=PATH[:PATH...]` (append to `confine.readonly_paths`, `confine.devices` or `confine.pmix_roots` of a `slurm` launcher; an unset `confine.readonly_paths` starts from its default) |
 | `launcher show [--json] NAME...` | describe launchers and their settings | |
 | `launcher check [OPTIONS] NAME...` | check a launcher's required binaries | `--launcher-timeout` |
 | `launcher remove [--force] NAME...` | remove launcher bundles | |
@@ -1059,17 +1067,6 @@ launchers are versioned bundles, resolved project-first and then globally. See
 | `workflow monitor` | open the curses workspace monitor | `--workspace NAME` (repeatable), `--refresh SECONDS`, `--adapter-timeout SECONDS`, `--non-interactive` |
 
 See {doc}`monitor` for the panes, keys, and read budget.
-
-### `workflow mpi run`
-
-`httk workflow mpi run -- APPLICATION ARG...` executes one application through
-the current daemon MPI allocation. The approved configuration fixes nodes,
-ranks, and CPUs; there are no caller-supplied Slurm options. The wrapper
-requires an active daemon MPI manager, streams stdout and stderr, uses
-`/dev/null` for stdin, and returns the step status. A connection failure
-produces an uncertain result without resubmission. See
-{doc}`/details/workspace_daemon` for policy, containment, and shared-memory
-requirements.
 
 ## Collecting results
 
@@ -1235,7 +1232,8 @@ The module packages four maintained templates for `remote add --template`:
   exchange directory, using a separate dispatcher for its restricted protocol.
 
 The first three use the target workspace's `manager.launch` setting, such as a
-packaged `slurm` launcher. `mount-daemon` selects an operator-approved daemon launcher through the daemon
+packaged `slurm` launcher. `mount-daemon` selects one of the operator-approved
+`slurm` launchers through the daemon (`remote daemon start --configuration NAME`)
 and refuses generic `REMOTE:NAME` operations; move jobs with `job eject` and
 `job adopt` through the exchange. See
 {doc}`/details/remotes` for configuration and request-ID retry rules. Any other

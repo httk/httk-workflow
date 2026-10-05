@@ -632,6 +632,13 @@ failed platform probe, build, or artifact collection with
 `runner_build_failed`. Both are terminal unless the job opts into `retry_on`,
 for example `retry_on = ["runner_not_built"]`.
 
+A workspace store tree can arrive with an imported or adopted job, so the
+manager treats its `platform` command as untrusted content: it runs the probe
+only when a registration of the same source digest already recorded the same
+probe command, that is, after an operator's `httk workflow build` ran it.
+Otherwise the job fails with `runner_not_built`, naming the build command,
+without executing anything.
+
 `workflow precheck` reports a missing unqualified registration (`platform`
 omitted) as a problem. Platform-specific builds are indeterminate, because a
 local precheck cannot stand in for the manager's machine, which probes its own

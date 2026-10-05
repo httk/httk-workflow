@@ -127,6 +127,12 @@ only the program name of the command's first word (exact names), so a wrapped
 launcher such as `env srun …` or `time mpirun …` is not detected and would start
 twice: name the program alone.
 
+In an attempt confined with `manager.confine=bwrap`, `HTTK_WORKFLOW_LAUNCH` is a
+launch client that has the trusted manager start the ranks, each in its own
+sandbox, so run helpers need no change. ORCA, which starts its own MPI
+without the prefix, is supported on one node only there, and its run helper
+refuses a multi-node binding; see {doc}`details/taskmanager`.
+
 List what is installed with:
 
 ```python

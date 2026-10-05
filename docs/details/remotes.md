@@ -215,7 +215,11 @@ $ httk workflow remote daemon cancel confined --handle MANAGER_HANDLE --request-
 $ httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
 ```
 
-Managers started by the daemon adopt bundles from `inbox`. `status` without
+`--configuration` names one of the global `slurm` launchers the operator
+approved for the daemon (each sets `manager.confine=bwrap`); `endpoint.json`
+lists them with their digests. Managers started by the daemon adopt bundles
+from `inbox` and run every job attempt confined to its own job directory.
+`status` without
 `--handle` is passive: it prints the informational `status.json` and
 `managers.json` from the exchange without a request. With `--handle` it sends
 the signed `manager_status` request. The passive `managers.json` also reports
@@ -279,10 +283,12 @@ filesystem call may exceed the polling or adapter timeout.
 
 The client controls the exchange and its own workspace content; `job adopt`
 keeps its usual client trust boundary when parsing bundles. The destination
-daemon enforces payload confinement independently. The `status.json` and
-`managers.json` files are informational and never acted on. MPI configurations
-need the additional site configuration and acceptance described in
-{doc}`workspace_daemon`.
+confines each job attempt independently: its managers run every attempt, and
+every rank of a parallel launch, in a sandbox that can write only that job's
+directory. The `status.json` and `managers.json` files are informational and
+never acted on. Parallel launches need the site configuration and acceptance
+described in {doc}`workspace_daemon`. Postprocess scripts are never run by the
+destination: run `httk workflow postprocess` on the adopted job locally.
 
 ## From Python
 

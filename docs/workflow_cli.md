@@ -16,7 +16,7 @@ httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
 httk workflow launcher   list | add | configure | check | show | remove
 httk workflow remote     list | add | configure | check | show | remove | import-v1 | daemon
-httk workflow config | v1 | mpi
+httk workflow config | v1
 httk workflow transfer   receive | offer | retire      (hidden protocol; remote peers invoke it by exact name)
 ```
 

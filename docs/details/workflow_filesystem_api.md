@@ -293,6 +293,21 @@ component must fit the filesystem's filename limit. A workspace MAY set policy
 limits on depth and total relative path length; these are operational limits,
 not a sharding scheme.
 
+Job directories never nest. Because every job directory is
+`<placement>/<job-key>`, a placement component that parses as a job key would
+put one job inside another's directory, so a new job's placement MUST NOT
+contain such a component. Submission, import and adoption (including every
+member of a transferred tree) refuse it, and a spawn that names it fails the
+parent attempt with `protocol_error`, checked before any spawn record is
+written. Markers of jobs placed before this rule keep parsing; a manager
+refuses to confine an attempt whose placement violates the rule or whose job
+directory contains another job.
+
+Placement directories are operator layout and may be symlinks; job
+directories MUST NOT be. A manager follows placement directories as the
+workspace does, but opens the job directory and everything below it without
+following symlinks.
+
 Empty placement directories have no meaning and may be pruned under the rules
 in “State-marker rename.”
 
@@ -1562,7 +1577,12 @@ HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 member and carries it. `HTTK_WORKFLOW_NODELIST` (the comma-separated hosts),
 `HTTK_WORKFLOW_NODEFILE` (the nodefile path) and, when the binding has a
 `launch` prefix, `HTTK_WORKFLOW_LAUNCH` (that prefix, shell-quoted) are set
-exactly when the context has a `binding` member. When the binding is one node
+exactly when the context has a `binding` member. In an attempt confined with
+`manager.confine=bwrap`, `HTTK_WORKFLOW_LAUNCH` is instead the shell-quoted
+launch client that asks the manager to start the launch, and
+`HTTK_WORKFLOW_CONFINED` is `1`; the binding's `launch` member keeps the
+rendered prefix as information only, since it cannot start ranks from inside
+the sandbox. When the binding is one node
 on the manager's own host with GPUs of known ids, the variable those ids came
 from (`CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` or `ZE_AFFINITY_MASK`) is
 set to exactly them, comma-separated. A local attempt that requests no GPUs on
@@ -1674,7 +1694,10 @@ within its size limit. The built-in Slurm prefix starts with
 only; the runner environment does not carry it. The binding is advice to a
 well-behaved runner; the manager does not confine the attempt to it, except
 that a locally executed attempt sees only its GPUs and, with the
-`manager.bind_cpus` setting, is pinned to its CPUs.
+`manager.bind_cpus` setting, is pinned to its CPUs. Under confinement, launches
+are rendered from the placement in the manager's memory and a manager-owned
+nodefile; the nodefile and `binding.json` in the attempt control directory are
+never read back by the manager.
 
 ### Executable workflow-hook wire formats
 
@@ -2081,7 +2104,11 @@ rename, or across filesystems a copy verified before the directory is removed),
 imports it like an addressed bundle, and keeps the individual acknowledgement
 as its replay receipt. An adoption intent record written before the move lets
 recovery publish a job whose directory is already gone. A second directory
-with the same transfer id whose job has since left is refused as stale.
+with the same transfer id whose job has since left is refused as stale. Before
+opening any file of the directory, adoption walks it without following links
+and refuses special files, symlinks that leave the bundle, and regular files
+with more than one hard link, within a bound of 1,000,000 entries and a
+nesting depth of 256.
 
 A tree root ejects with its bound descendants, which must all be paused or
 terminal. Its manifest lists them top-down in `eject_tree`, each with its
@@ -2883,6 +2910,12 @@ or batch-scheduler boundary. Managers additionally MUST:
   journal directly;
 - for transactional jobs, additionally prevent direct writes to committed
   `data/`. Writes to the declared application workdir are allowed.
+
+The maintained manager provides such a boundary with `manager.confine=bwrap`:
+each attempt, and each rank it launches through `HTTK_WORKFLOW_LAUNCH`, runs in
+a Bubblewrap sandbox that can write only its own job directory, while the
+manager stays trusted and treats everything a job leaves in its directory as
+hostile input. See {doc}`taskmanager` for the sandbox and its settings.
 
 ## Persistent VASP restart example
 

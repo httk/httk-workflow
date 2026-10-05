@@ -193,6 +193,13 @@ httk job submit --workspace WORKSPACE --placement project-a/00/17 PAYLOAD
 Submission copies by default; `--move` does a same-filesystem rename and
 consumes the source directory.
 
+Job directories never nest: no placement component may itself parse as a job
+key (`<name>--<uuid>`), so a placement can never put one job inside another's
+directory. Submission, import, adoption and spawned children all refuse such a
+placement; a spawn that names one fails the parent attempt with
+`protocol_error`. Jobs placed before this rule keep working, but a confined
+attempt refuses to start in a job directory that contains another job.
+
 ### Sharing one runner between many jobs
 
 A partitioned campaign should publish its runner once into the workspace runner
@@ -306,6 +313,15 @@ A task manager claims and runs only jobs whose marker, payload directory and
 Child jobs belong to the manager's account; imported jobs belong to the
 importing account.
 
+A job directory is written by the job it holds, so the manager treats it as
+hostile between attempts. It never follows a symlink on its control paths
+below the job directory (logs, attempt control, the outcome, transaction
+replay, seals), and a symlink, FIFO or other special file there, or an
+oversized control document, fails that job with `protocol_error` instead of
+redirecting a manager write or stalling the manager. An attempt that keeps
+running after its outcome was committed gets `SIGTERM` and, after the
+cancellation grace, `SIGKILL`.
+
 A manager claims work under the workspace's `lease_seconds` unless
 `--lease-seconds` overrides it for that manager. By default it runs until idle,
 which suits batch invocations and tests; pass `--idle` to keep serving.
@@ -334,6 +350,16 @@ shape the launch:
   executed attempt to the CPUs of its processor slots; anything else, or no
   value, leaves CPU affinity alone; set it before the manager starts (see
   [placement and binding](#placement-and-binding)).
+- `manager.confine` and `confine.*`: attempt confinement; see
+  [confining attempts](#confining-attempts).
+
+A `slurm` launcher pins its own values of `manager.confine`,
+`manager.launch_template`, `manager.bind_cpus` and `confine.*` on the managers
+it starts with the manager option `--setting KEY=VALUE` (not shown in `--help`;
+the last occurrence of a key wins). Pinned values override the workspace
+settings and stay fixed for the manager's lifetime; all other workspace
+settings are read live at each claim. See
+[launchers](launchers.md#pinned-settings).
 
 `--inline` runs one manager in the current process, ignoring the workspace
 launcher, and combines only with `--count 1`. `--detach` starts the managers
@@ -355,6 +381,45 @@ the launcher resolves `manager.command` on the resulting `PATH`; without one, it
 keeps the caller's Python interpreter command. A module-loaded environment can
 thus select the intended `httk`, while direct process launches stay faithful to
 the invoking interpreter.
+
+### Confining attempts
+
+With `manager.confine=bwrap` the manager, which stays trusted and unconfined,
+starts each attempt inside a Bubblewrap sandbox:
+
+- the workspace is visible read-only at its real path, so cross-job reads,
+  `stage_input` and `Attempt.parent` keep working, and the attempt's own job
+  directory is writable at its real path, so every `HTTK_WORKFLOW_*_DIR` path
+  is unchanged; the attempt cannot write the workspace root,
+  `.httk-workspace/` or another job;
+- the paths of `confine.readonly_paths` are read-only, `/tmp` is private, with
+  `HOME=/tmp/home` and `TMPDIR=/tmp`, and `/proc` and a minimal `/dev` with
+  a private `/dev/shm` and the `confine.devices` nodes are the sandbox's own;
+- user, PID, IPC and UTS namespaces are private, the network is too unless
+  `confine.isolate_network=false`, capabilities are dropped, and nested user
+  namespaces are blocked when Bubblewrap supports it (a warning is logged
+  otherwise);
+- standard input is `/dev/null`; the environment is the attempt environment
+  without `SLURM_*`, `SRUN_*`, `SBATCH_*`, `SALLOC_*`, `PMI_*` and `PMIX_*`,
+  with `HTTK_WORKFLOW_CONFINED=1`.
+
+The workflow prelude runs inside the sandbox, while `environment.prelude` runs
+before the manager. Whatever either makes a job depend on (module trees, conda
+or virtual-environment prefixes, code binaries, installed runner search paths)
+must be listed in `confine.readonly_paths`. Job directories must not be
+symlinks; placement directories may be, but a job reached through a placement
+symlink pointing outside the workspace cannot be confined and its attempt
+fails. Timeouts, draining, pausing and cancellation reach the sandboxed runner
+as they reach an unconfined one, and parallel programs start through the
+[launch prefix](#placement-and-binding). The keys and their defaults are in
+{doc}`launchers`; {doc}`workspace_daemon` builds on this feature.
+
+A manager probes Bubblewrap when it starts and refuses to start if it cannot
+build the sandbox or a confinement setting is malformed. If confinement becomes
+unavailable after it started, it stops claiming work, logs the reason and
+reports the ready jobs under `ready_blocked["confinement"]` until confinement is
+available again. A workspace enrolled with {doc}`workspace_daemon` requires
+`manager.confine=bwrap` of every manager.
 
 ### Startup banner and idle summary
 
@@ -613,7 +678,7 @@ Launchers choose the probe for the managers they start: the Slurm launcher
 passes `--allocation slurm` (or its `manager.allocation` setting), the process
 launcher passes `host` for one manager and `none` for several, foreground
 `--count` children get `none`, and [daemon](workspace_daemon.md) managers get
-`none`. A single detached process-launched manager therefore probes this host:
+their approved launcher's `manager.allocation` (default `slurm`). A single detached process-launched manager therefore probes this host:
 it advertises `nodes=1`, GPUs from `CUDA_VISIBLE_DEVICES`,
 `ROCR_VISIBLE_DEVICES` or `ZE_AFFINITY_MASK`, and `procs` from its CPU
 affinity. An explicit `--allocation` (either `--allocation SPEC` or
@@ -737,6 +802,35 @@ prefix applies, with a message to set the bare program and configure
 `manager.launch_template`. The generic `run` verb, `Attempt.run` and
 `httk_workflow_run` are not code-aware and never prepend the prefix.
 
+In a [confined attempt](#confining-attempts) the rendered prefix would start
+ranks outside the sandbox, so `HTTK_WORKFLOW_LAUNCH` is set instead to a launch
+client, used the same way (`$HTTK_WORKFLOW_LAUNCH vasp_std`); it stays unset
+when no prefix applies. The client asks the trusted manager to start the
+launch, and the manager runs `<rendered launch template> <rank helper>`,
+rendered from the placement in its memory with its own nodefile for
+`{nodefile}` and `SLURM_HOSTFILE`; the nodefile and `binding.json` in the
+attempt control directory stay informational and are never read back. On
+every node the rank helper starts each rank in its own sandbox: the job
+directory writable and the workspace read-only, host networking, a per-launch
+shared-memory directory below `confine.shm_root` at `/dev/shm`, the step's PMIx
+directory only when it lies below `confine.pmix_roots`, the `confine.devices`
+nodes, and the `confine.environment.<NAME>` variables. Rank standard output
+and standard error stay separate, and the client exits with the launch's exit
+status. One launch runs at a time per attempt; further requests wait. A
+launch is stopped when its attempt is cancelled, times out, is drained or
+publishes its outcome, and a client stopped with `SIGTERM`, for instance by a
+code helper's timeout, returns only after the ranks are gone (a helper that
+then kills the client can return about a second before ranks ignoring
+`SIGTERM` are reaped). A launch counts as finished when the launcher's local
+process group (such as `srun`) is gone; remote tasks of a killed `srun` end
+when Slurm cleans up the step. The attempt keeps
+its placement until every launch is reaped. The client needs `flock` on the
+workspace filesystem (on Lustre, mount with `flock` or `localflock`). ORCA,
+which starts its own MPI, is supported on one node only under confinement.
+Each launch style needs site acceptance, and stale shared-memory directories
+after a node failure are a site cleanup item; see
+[parallel launches](workspace_daemon.md#parallel-launches).
+
 An attempt placed on one node that is the manager's own host is executed
 locally, so the manager also binds it to its devices. The `host` probe's node
 and the Slurm batch host (the node named by `SLURMD_NODENAME`) are the
@@ -772,7 +866,8 @@ own attempts on its own inventory. Accepted limitations:
 
 - The binding is information for well-behaved runners; the manager neither
   confines an attempt to its nodes nor, beyond the local binding above, sets
-  CPU affinity or GPU visibility.
+  CPU affinity or GPU visibility. [Confinement](#confining-attempts) restricts
+  what an attempt can write, not which nodes it uses.
 - There is no backfill or reservation: a `nodes=N` or other wide attempt can
   wait behind a stream of small attempts that keep every node partly busy.
 - Device identity (`gpu_ids` and pinned CPUs) holds only for attempts
@@ -1079,7 +1174,11 @@ inherits a commit leaves the tree for GC.
 A manager is never required to run policy-gated cleanup, so it can disappear
 between any two instructions. It runs always-safe cleanup at startup and the
 full policy-gated collection at a clean exit. A clean manager removes its own
-metadata directory; a crash leaves it for `journal_days` collection.
+metadata directory; a crash leaves it for `journal_days` collection
+(`manager_directories`). The trusted launch records of confined launches in
+it are removed first, once the manager has been silent for its lease times the
+takeover grace factor and each recorded process group is provably gone; a
+directory still holding a record is kept as takeover evidence.
 
 On a quota'd HPC filesystem, what remains to manage is failed and cancelled
 attempt evidence, retained journal history, interrupted transaction trash and

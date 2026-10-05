@@ -28,7 +28,9 @@ Declared **inputs** are files or entries the workflow stages into the payload
 (`--input structure=POSCAR`); **parameters** are plain values
 (`--parameter encut=520`). `--tag` gives the job a readable key, and
 `--placement project/screening` puts it in a subtree of the workspace that
-managers and collects can address on its own. `httk workflow describe NAME`
+managers and collects can address on its own; job directories never nest, so
+no placement component may look like a job key (`name--uuid`).
+`httk workflow describe NAME`
 shows what a workflow declares before anything is created, and
 `httk workflow precheck` reports whether the workspace can run it.
 
@@ -76,6 +78,18 @@ requirements leaves it for another manager and says why in its idle summary.
 
 Running against a remote workspace starts the managers on the owning machine,
 through that workspace's own launcher and preludes.
+
+To keep jobs from writing anything but their own job directory, confine them:
+
+```console
+httk workspace settings set --key manager.confine --value bwrap default
+```
+
+Each attempt then runs in a Bubblewrap sandbox that sees the workspace
+read-only and the software listed in `confine.readonly_paths`; the manager
+itself stays unconfined, and parallel programs still start through the launch
+prefix. {doc}`details/taskmanager` describes the sandbox and
+{doc}`details/launchers` its settings.
 
 ## Inspecting and controlling jobs
 
