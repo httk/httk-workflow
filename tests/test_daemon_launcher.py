@@ -95,7 +95,10 @@ def test_site_paths() -> None:
     }
     for bad in ("", "rel/x", "/usr::/opt", "/a/../b", "/a:", "/a\0b"):
         with pytest.raises(ValueError):
-            parse({"daemon.broker_paths": bad})
+            parse({"daemon.readonly_paths": bad})
+    # The broker and allocation service see the host read-only, so the former broker-only mounts are gone.
+    with pytest.raises(ValueError):
+        parse({"daemon.broker_paths": "/opt/slurm"})
     with pytest.raises(ValueError):
         parse({"daemon.python": "python"})
     with pytest.raises(ValueError):

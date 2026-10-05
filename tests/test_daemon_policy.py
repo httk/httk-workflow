@@ -22,7 +22,7 @@ def _document(tmp_path: Path) -> dict[str, object]:
     broker = tmp_path / "broker"
     return {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 2,
+        "format_version": 3,
         "workspace": str(tmp_path / "site/workspace"),
         "workspace_id": "12345678-1234-1234-1234-123456789abc",
         "enrollment_id": "0123456789abcdef0123456789abcdef",
@@ -36,7 +36,6 @@ def _document(tmp_path: Path) -> dict[str, object]:
         "scancel": str(broker / "bin/scancel"),
         "cluster": "cluster-1",
         "readonly_paths": [str(runtime)],
-        "broker_paths": [str(broker)],
         "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {
             "cpu": {"cpus": 8, "memory_mb": 16384, "time_minutes": 60},
@@ -184,6 +183,7 @@ def test_unknown_and_duplicate_keys_are_refused(tmp_path: Path) -> None:
     [
         ("format_version", True),
         ("format_version", 1),
+        ("format_version", 2),
         ("workspace_id", 7),
         ("readonly_paths", "runtime"),
         ("profiles", []),
@@ -365,32 +365,30 @@ def test_daemon_parent_must_be_disjoint_from_runtime_paths(tmp_path: Path, runti
         load_policy(_write(tmp_path, document))
 
 
-@pytest.mark.parametrize("kind", ["readonly_paths", "broker_paths"])
-def test_runtime_roots_cannot_overlap_mutable_roots_or_be_root(tmp_path: Path, kind: str) -> None:
+@pytest.mark.parametrize(
+    ("runtime", "message"),
+    [
+        ("site/workspace/escape", "daemon parent .* runtime path"),
+        ("state/escape", "runtime path .* must be disjoint from state"),
+        ("snapshots/escape", "runtime path .* must be disjoint from snapshots"),
+        ("/", "filesystem root"),
+    ],
+)
+def test_runtime_roots_cannot_overlap_mutable_roots_or_be_root(tmp_path: Path, runtime: str, message: str) -> None:
     document = _document(tmp_path)
-    document[kind] = [str(tmp_path / "site/workspace/escape")]
-    with pytest.raises(ValueError, match="disjoint"):
+    document["readonly_paths"] = [*document["readonly_paths"], str(tmp_path / runtime)]  # type: ignore[misc]
+    with pytest.raises(ValueError, match=message):
         load_policy(_write(tmp_path, document))
 
-    document = _document(tmp_path)
-    document[kind] = ["/"]
-    with pytest.raises(ValueError, match="filesystem root"):
-        load_policy(_write(tmp_path, document))
 
-
-@pytest.mark.parametrize("readonly_inside_broker", [False, True])
-def test_readonly_and_broker_roots_must_be_lexically_disjoint(tmp_path: Path, readonly_inside_broker: bool) -> None:
+def test_policy_has_no_broker_paths(tmp_path: Path) -> None:
     document = _document(tmp_path)
-    if readonly_inside_broker:
-        broker = tmp_path / "broker"
-        document["readonly_paths"] = [str(broker / "shared")]
-        document["python"] = str(broker / "shared/python")
-    else:
-        readonly = tmp_path / "runtime"
-        document["broker_paths"] = [str(readonly / "private")]
-        for command in ("sbatch", "squeue", "scancel"):
-            document[command] = str(readonly / "private" / command)
-    with pytest.raises(ValueError, match="pairwise disjoint"):
+    policy = load_policy(_write(tmp_path, document))
+    assert "broker_paths" not in policy_document(policy)
+    assert policy_document(policy)["format_version"] == 3
+    assert not hasattr(policy, "broker_paths")
+    document["broker_paths"] = [str(tmp_path / "broker")]
+    with pytest.raises(ValueError, match="fields are missing or unknown"):
         load_policy(_write(tmp_path, document))
 
 
@@ -411,12 +409,17 @@ def test_runtime_roots_cannot_overlap_reserved_sandbox_destinations(tmp_path: Pa
         load_policy(_write(tmp_path, document))
 
 
-def test_commands_must_be_covered_by_their_approved_roots(tmp_path: Path) -> None:
-    for field in ("python", "sbatch", "squeue", "scancel", "bwrap"):
-        document = _document(tmp_path)
+def test_only_python_must_be_covered_by_readonly_paths(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    document["python"] = str(tmp_path / "unapproved/python")
+    with pytest.raises(ValueError, match="python must be within readonly_paths"):
+        load_policy(_write(tmp_path, document))
+    # The broker and allocation service see the host read-only; bwrap runs on the host.
+    document = _document(tmp_path)
+    for field in ("sbatch", "squeue", "scancel", "bwrap"):
         document[field] = str(tmp_path / "unapproved" / field)
-        with pytest.raises(ValueError, match="within"):
-            load_policy(_write(tmp_path, document))
+    document["slurm_conf"] = str(tmp_path / "unapproved/slurm.conf")
+    assert load_policy(_write(tmp_path, document)).sbatch == tmp_path / "unapproved/sbatch"
 
 
 def test_slurm_commands_may_use_a_shared_readonly_runtime(tmp_path: Path) -> None:
@@ -536,7 +539,6 @@ def test_direct_dataclasses_enforce_the_same_invariants(tmp_path: Path) -> None:
             scancel=tmp_path / "broker/scancel",
             cluster="cluster",
             readonly_paths=(tmp_path / "runtime",),
-            broker_paths=(tmp_path / "broker",),
             profiles=(),
         )
 
@@ -668,12 +670,19 @@ def test_check_layout_without_probe_still_checks_the_parent(tmp_path: Path, monk
         check_layout(policy, probe=False)
 
 
-@pytest.mark.parametrize("destination", ["/daemon-root", "/daemon-root/lib", "/"])
-def test_runtime_paths_cannot_overlap_the_broker_root_destination(tmp_path: Path, destination: str) -> None:
+@pytest.mark.parametrize("destination", ["/daemon-policy.json", "/workspace/lib", "/tmp", "/"])
+def test_runtime_paths_cannot_overlap_payload_destinations(tmp_path: Path, destination: str) -> None:
     document = _document(tmp_path)
-    document["broker_paths"] = [*document["broker_paths"], destination]  # type: ignore[misc]
+    document["readonly_paths"] = [*document["readonly_paths"], destination]  # type: ignore[misc]
     with pytest.raises(ValueError, match="reserved sandbox destinations|filesystem root"):
         load_policy(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize("destination", ["/daemon-root", "/control/lib"])
+def test_former_broker_destinations_are_no_longer_reserved(tmp_path: Path, destination: str) -> None:
+    document = _document(tmp_path)
+    document["readonly_paths"] = [*document["readonly_paths"], destination]  # type: ignore[misc]
+    assert Path(destination) in load_policy(_write(tmp_path, document)).readonly_paths
 
 
 def test_check_layout_reports_a_missing_staging_directory(tmp_path: Path) -> None:

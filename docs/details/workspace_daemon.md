@@ -91,20 +91,30 @@ checks cannot verify that server configuration. Mount without
 
 ### Sandboxes
 
-The broker enters Bubblewrap before it listens for command requests. It sees
-the dedicated parent read-write, private state, selected read-only runtime and
-scheduler configuration, and the host network that Slurm needs. It moves
-directories between the exchange and the workspace staging area and never
-reads their content.
+The broker enters Bubblewrap before it listens for command requests. It runs
+only *httk* code and the fixed Slurm clients, never client code, so it sees the
+whole host filesystem read-only: Slurm clients and site wrappers, `slurm.conf`,
+munge, the user database (`/etc/passwd`, SSSD) and DNS work without
+configuration. It can write only the dedicated parent and its private state,
+and has the host network that Slurm needs. It moves directories between the
+exchange and the workspace staging area and never reads their content. The MPI
+allocation service (see [MPI applications](#mpi-applications)) runs the same
+way, writing only its control directory.
 
 Each submitted manager enters a separate Bubblewrap sandbox on the compute node
 before it runs its approved prelude. That sandbox has writable workspace data,
 private temporary storage, isolated network, PID, IPC, UTS and user
-namespaces, no capabilities and disabled nested user namespaces. It receives no
-broker-only mounts.
+namespaces, no capabilities and disabled nested user namespaces. It does not
+get the host view: it sees only `daemon.readonly_paths`, the workspace and its
+private temporary storage.
 
 ### Runtime mounts
 
+`daemon.readonly_paths` lists what job sandboxes may read. The default covers
+`/usr` (with the `/bin`, `/lib`, `/lib64` and `/sbin` links of merged-`/usr`
+systems), the Python installation and the directories *httk* itself is
+imported from, so the daemon's own code always runs. Add the software your jobs
+use, for example a module system or `/software`, by setting the full list.
 Mount only trusted runtime directories and required files. Do not expose home
 directories, credentials, arbitrary Unix sockets or broad system configuration
 trees to payloads. Read-only mounts can still contain sockets that grant host
@@ -112,9 +122,8 @@ services; file permissions do not disable them. Confinement also depends on a
 correctly maintained host kernel and Bubblewrap. Resource and disk exhaustion
 are separate operational concerns.
 
-Shared runtime roots and broker-only roots must be disjoint, also after
-symlink resolution. Runtime roots may not contain mutable roots or replace the
-sandbox's private mounts. These checks reject broad aliases such as a selected
+Runtime roots may not contain mutable roots or replace the sandbox's private
+mounts, also after symlink resolution. These checks reject broad aliases such as a selected
 runtime symlink that resolves to `/`.
 
 ## Setup and startup
@@ -150,8 +159,7 @@ that set the same key must agree, otherwise setup refuses naming the key:
 
 | Key | Default when unset |
 | --- | --- |
-| `daemon.readonly_paths` | existing of `/usr`, `/bin`, `/lib`, `/lib64` plus the initializing interpreter's `sys.prefix` and `sys.base_prefix` |
-| `daemon.broker_paths` | the directory of `slurm.conf`, plus `/run/munge` when present |
+| `daemon.readonly_paths` | job-sandbox paths: existing of `/usr`, `/bin`, `/lib`, `/lib64`, the initializing interpreter's `sys.prefix` and `sys.base_prefix`, and the directories the `httk` packages are imported from |
 | `daemon.bwrap`, `daemon.python`, `daemon.sbatch`, `daemon.squeue`, `daemon.scancel`, `daemon.scontrol` | discovered on `PATH`; Python is the running interpreter |
 | `daemon.cluster`, `daemon.slurm_conf` | discovered, see below |
 | `daemon.max_submissions` | 128 |
@@ -191,7 +199,9 @@ launcher and key lists. Relative paths are taken from the current directory.
   directory. It creates the exchange and its subdirectories, the workspace
   staging directories, the ledger, the private response key and a fresh
   enrollment, saves the approved settings, publishes the active approval and
-  writes `exchange/endpoint.json`. It runs no scheduler or sandbox preflight.
+  writes `exchange/endpoint.json`. It then runs the same check as `--check`;
+  if that fails, the enrollment is kept and printed guidance says to fix the
+  launcher settings and run `--reload`, which checks again.
 - `--check` enters the real broker sandbox, rechecks the layout and checks the
   scheduler clients, without submitting work or validating compute-node
   execution.
@@ -252,7 +262,7 @@ httk workspace daemon /proj/campaign/workspace --reload
 It prints the resulting lists and rewrites `endpoint.json`. It refuses a
 change of the fixed connection (workspace, exchange, state, snapshots,
 cluster), naming the key: that needs a new enrollment. Slurm client paths,
-`slurm.conf` and broker paths may change on reload.
+`slurm.conf` and runtime paths may change on reload.
 
 Reload refuses while the daemon holds its lifetime ledger lock. Startup checks
 its chosen snapshot against the active approval after taking the same lock, so

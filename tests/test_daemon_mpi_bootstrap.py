@@ -78,7 +78,7 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         _write_executable(roots["broker"] / name)
     policy: dict[str, Any] = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 2,
+        "format_version": 3,
         "workspace": str(roots["workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
@@ -92,7 +92,6 @@ def _layout(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
         "scancel": str(roots["broker"] / "scancel"),
         "cluster": "test-cluster",
         "readonly_paths": [str(roots["runtime"])],
-        "broker_paths": [str(roots["broker"])],
         "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {
             "serial": {"cpus": 2, "memory_mb": 1024, "time_minutes": 10},
@@ -237,10 +236,16 @@ def test_allocation_creates_private_control_and_enters_launcher_sandbox(tmp_path
         "--new-session",
     ):
         assert option in argv
-    readonly = _pairs(argv, "--ro-bind-fd")
-    assert (next(source for source, destination in readonly if destination == "/workspace"), "/workspace") in readonly
-    assert set(policy["broker_paths"]).issubset({destination for _, destination in readonly})
-    control_fd = next(source for source, destination in _pairs(argv, "--bind-fd") if destination == "/run/httk-mpi")
+    # The allocation service sees the host read-only, like the broker, and writes only its control directory.
+    mounts = argv.index("--ro-bind")
+    assert argv[mounts : mounts + 9] == ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    assert "--ro-bind-fd" not in argv
+    assert all(argv[index + 1].startswith("/tmp/") for index, item in enumerate(argv) if item == "--dir")
+    assert not {"/workspace", "/run", "/run/httk-mpi", "/daemon-policy.json"} & set(argv)
+    assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/tmp/daemon-policy.json"]
+    writable = _pairs(argv, "--bind-fd")
+    assert [destination for _, destination in writable] == ["/tmp/httk-mpi"]
+    control_fd = writable[0][0]
     control_source = Path(observed["fds"][control_fd])
     assert control_source.parent == Path(policy["mpi"]["control_root"])
     assert stat.S_IMODE(control_source.stat().st_mode) == 0o700
@@ -375,10 +380,10 @@ def test_broker_validates_configured_srun_as_protected_command(tmp_path: Path) -
 
 def test_allocation_validates_resolved_slurm_configuration(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
-    outside = tmp_path / "outside-slurm.conf"
-    outside.write_text("ClusterName=test-cluster\n", encoding="utf-8")
-    slurm_conf = Path(policy["broker_paths"][0]) / "slurm.conf"
-    slurm_conf.symlink_to(outside)
+    mutable = Path(policy["state"]) / "slurm.conf"
+    mutable.write_text("ClusterName=test-cluster\n", encoding="utf-8")
+    slurm_conf = tmp_path / "broker" / "slurm.conf"
+    slurm_conf.symlink_to(mutable)
     policy["slurm_conf"] = str(slurm_conf)
     _rewrite_policy(policy_path, policy)
     result = _run(
@@ -388,7 +393,7 @@ def test_allocation_validates_resolved_slurm_configuration(tmp_path: Path) -> No
         _allocation_environment(),
     )
     assert result.returncode == 2
-    assert "configuration resolves outside" in result.stderr
+    assert "configuration resolves across a mutable root" in result.stderr
     assert list(Path(policy["mpi"]["control_root"]).iterdir()) == []
     assert not record.exists()
 

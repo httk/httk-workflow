@@ -17,7 +17,7 @@ from ._daemon_bootstrap import _count
 from ._daemon_mpi_protocol import decode_request, encode_terminal, recv_frame, send_frame
 from ._daemon_policy import Policy, Profile, load_policy
 
-_SOCKET = Path("/run/httk-mpi/control.sock")
+_SOCKET = Path("/tmp/httk-mpi/control.sock")
 _IO_TIMEOUT = 5.0
 
 
@@ -306,7 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--mem-mb")
     arguments = parser.parse_args(argv)
     try:
-        policy = load_policy(Path("/daemon-policy.json"))
+        policy = load_policy(Path("/tmp/daemon-policy.json"))
         profile = policy.profile(arguments.profile)
         if policy.mpi is None or profile.mpi is None:
             raise ValueError("MPI service requires a protected MPI profile")

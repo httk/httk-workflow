@@ -32,7 +32,6 @@ def _snapshot(tmp_path: Path) -> Path:
         scancel=runtime / "scancel",
         cluster="cluster",
         readonly_paths=(runtime,),
-        broker_paths=(),
         profiles=(Profile("small"),),
         authorized_keys=(AUTHORIZED_KEY,),
     )
@@ -183,7 +182,9 @@ def test_local_setup_modes_print_approved_launchers_and_keys_without_exec(
     if mode == "initialize":
         expected["exchange"] = Path("/exchange")
     assert calls == [{**expected, "force": False}, {**expected, "force": True}]
-    assert capsys.readouterr().out == (f"launcher small\nauthorized {AUTHORIZED_KEY}\nsandbox check passed\n") * 2
+    runtime = tmp_path / "runtime"
+    printed = f"launcher small\nauthorized {AUTHORIZED_KEY}\nreadonly {runtime}\nsandbox check passed\n"
+    assert capsys.readouterr().out == printed * 2
 
 
 def test_reload_without_lists_keeps_the_stored_launchers_and_keys(

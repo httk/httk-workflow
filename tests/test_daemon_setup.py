@@ -7,11 +7,13 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import httk
 from httk.workflow import _daemon_cli, _daemon_launcher, _daemon_policy, _daemon_setup
 from httk.workflow._daemon_keys import response_public_key, response_seed_path
 from httk.workflow._daemon_policy import Policy, load_policy
@@ -72,7 +74,6 @@ def _layout(tmp_path: Path) -> Layout:
     workspace = Workspace.initialize(tmp_path / "site" / "workspace")
     site = {
         "daemon.readonly_paths": f"{runtime}:{Path(sys.prefix).resolve()}",
-        "daemon.broker_paths": str(broker),
         "daemon.bwrap": str(runtime / "bwrap"),
         "daemon.sbatch": str(broker / "sbatch"),
         "daemon.squeue": str(broker / "squeue"),
@@ -154,34 +155,76 @@ def test_workspace_settings_are_never_read(tmp_path: Path) -> None:
     assert policy.profile("small") == _daemon_policy.Profile("small", workers=3, partition="short")
 
 
-def test_default_runtime_paths_follow_the_interpreter_and_the_slurm_configuration(tmp_path: Path) -> None:
+def test_default_runtime_paths_follow_the_interpreter_and_the_httk_import_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     layout = _layout(tmp_path)
     slurm_conf = layout.broker / "slurm.conf"
     slurm_conf.write_text("ClusterName=test-cluster\n", encoding="utf-8")
     _executable(layout.broker / "bwrap")
+    # An editable checkout outside the prefix, a regular install under it, and an editable-finder hook entry.
+    editable = tmp_path / "checkout" / "src"
+    (editable / "httk").mkdir(parents=True)
+    installed = Path(sys.prefix).resolve() / "lib" / "site-packages" / "httk"
+    monkeypatch.setattr(
+        httk, "__path__", [str(editable / "httk"), str(installed), "__editable__.x.finder.__path_hook__"]
+    )
+    hooked = tmp_path / "hooked" / "src"
+    monkeypatch.setattr(_daemon_setup, "_editable_finder_roots", lambda: {hooked})
     _rewrite_launcher(
         "small",
         **{
             "daemon.readonly_paths": None,
-            "daemon.broker_paths": None,
             "daemon.bwrap": str(layout.broker / "bwrap"),
             "daemon.slurm_conf": str(slurm_conf),
         },
     )
     policy = load_policy(_initialize(layout, "small"))
     candidates = {Path(path).resolve() for path in ("/usr", "/bin", "/lib", "/lib64") if os.path.exists(path)}
-    candidates |= {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
+    candidates |= {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(), editable, hooked}
     expected = {
         path for path in candidates if not any(path != other and path.is_relative_to(other) for other in candidates)
     }
     assert set(policy.readonly_paths) == expected
-    munge = (Path("/run/munge"),) if Path("/run/munge").exists() else ()
-    assert policy.broker_paths == (layout.broker, *munge)
+    assert editable in policy.readonly_paths and installed.parent not in policy.readonly_paths
+    assert "broker_paths" not in _daemon_policy.policy_document(policy)
     assert policy.slurm_conf == slurm_conf
 
 
+def test_editable_finder_hooks_yield_their_import_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    finder = types.ModuleType("__editable___fake_1_0_finder")
+    finder.MAPPING = {  # type: ignore[attr-defined]
+        "httk.codes": "/checkout/src/httk/codes",
+        "httk.registry.codes": "/checkout/src/httk/registry/codes",
+        "other": "/elsewhere/other",
+    }
+    monkeypatch.setitem(sys.modules, finder.__name__, finder)
+    roots = _daemon_setup._editable_finder_roots()
+    assert Path("/checkout/src").resolve() in roots
+    assert not any(root.is_relative_to("/elsewhere") for root in roots)
+
+
+def test_readonly_path_overlapping_the_data_home_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _layout(tmp_path)
+    home = layout.runtime / "data-home"
+    home.mkdir()
+    monkeypatch.setattr(_daemon_setup, "data_home", lambda: home)
+    with pytest.raises(ValueError, match="must be disjoint from the httk data home"):
+        _initialize(layout, "small")
+    assert not _state(layout).exists()
+
+
+def test_httk_import_root_inside_daemon_roots_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _layout(tmp_path)
+    monkeypatch.setattr(httk, "__path__", [str(tmp_path / "site" / "lib" / "httk")])
+    _rewrite_launcher("small", **{"daemon.readonly_paths": None})
+    with pytest.raises(ValueError, match="must be disjoint from runtime path"):
+        _initialize(layout, "small")
+    assert not _state(layout).exists()
+
+
 @pytest.mark.parametrize("source", ["declared", "environment", "default", "none"])
-def test_effective_slurm_configuration_precedence_drives_policy_and_broker_default(
+def test_effective_slurm_configuration_precedence_drives_policy(
     source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = _layout(tmp_path)
@@ -193,7 +236,7 @@ def test_effective_slurm_configuration_precedence_drives_policy_and_broker_defau
         configurations[name].write_text(f"ClusterName={name}\n", encoding="utf-8")
     monkeypatch.setenv("SLURM_CONF", str(configurations["environment"]))
     monkeypatch.setattr(_daemon_setup, "_DEFAULT_SLURM_CONF", configurations["default"])
-    settings: dict[str, str | None] = {"daemon.broker_paths": None, "daemon.cluster": None}
+    settings: dict[str, str | None] = {"daemon.cluster": None}
     if source == "declared":
         settings["daemon.slurm_conf"] = str(configurations["declared"])
     elif source == "default":
@@ -204,22 +247,12 @@ def test_effective_slurm_configuration_precedence_drives_policy_and_broker_defau
         settings["daemon.cluster"] = "test-cluster"
     _rewrite_launcher("small", **settings)
     _rewrite_launcher("large", **settings)
-    # The test Slurm clients live in the declared broker root, so keep it as a readonly root here.
-    _rewrite_launcher(
-        "small", **{"daemon.readonly_paths": f"{layout.runtime}:{layout.broker}:{Path(sys.prefix).resolve()}"}
-    )
-    _rewrite_launcher(
-        "large", **{"daemon.readonly_paths": f"{layout.runtime}:{layout.broker}:{Path(sys.prefix).resolve()}"}
-    )
     policy = load_policy(_initialize(layout))
-    munge = (Path("/run/munge"),) if Path("/run/munge").exists() else ()
     if source == "none":
         assert policy.slurm_conf is None
-        assert policy.broker_paths == munge
         assert policy.cluster == "test-cluster"
     else:
         assert policy.slurm_conf == configurations[source]
-        assert policy.broker_paths == (configurations[source].parent, *munge)
         assert policy.cluster == source
     digests = {name: policy.configuration_digest(name) for name in ("small", "large")}
     assert json.loads((layout.exchange / "endpoint.json").read_text(encoding="utf-8"))["configurations"] == digests
@@ -277,7 +310,13 @@ def test_relative_cli_paths_initialize_from_inside_the_workspace_and_print_the_a
     monkeypatch.chdir(layout.workspace.root)
     arguments = [".", "--initialize", "--exchange", "../exchange", "--launcher", "large", "--authorize", AUTHORIZED_KEY]
     assert _daemon_cli.command(arguments, program="httk") == 0
-    assert capsys.readouterr().out == f"launcher large\nauthorized {AUTHORIZED_KEY}\nsandbox check passed\n"
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:2] == ["launcher large", f"authorized {AUTHORIZED_KEY}"]
+    assert lines[2:-1] == [
+        f"readonly {path}"
+        for path in load_policy(_daemon_setup.active_policy_path(layout.workspace.root)).readonly_paths
+    ]
+    assert lines[-1] == "sandbox check passed"
     assert (layout.exchange / "endpoint.json").is_file()
 
 
@@ -511,16 +550,16 @@ def test_reload_replaces_launchers_and_keys_and_refuses_a_held_ledger(tmp_path: 
         _daemon_setup.reload(layout.workspace.root)
 
 
-def test_reload_accepts_broker_path_changes_but_refuses_fixed_connection_changes(tmp_path: Path) -> None:
+def test_reload_accepts_slurm_client_changes_but_refuses_fixed_connection_changes(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _initialize(layout)
     other = tmp_path / "other-broker"
     for name in ("sbatch", "squeue", "scancel"):
         _executable(other / name)
-    _rewrite_launcher("small", **{"daemon.broker_paths": f"{layout.broker}:{other}"})
-    _rewrite_launcher("large", **{"daemon.broker_paths": f"{layout.broker}:{other}"})
+    _rewrite_launcher("small", **{"daemon.sbatch": str(other / "sbatch")})
+    _rewrite_launcher("large", **{"daemon.sbatch": str(other / "sbatch")})
     active = _daemon_setup.reload(layout.workspace.root)
-    assert other in load_policy(active).broker_paths
+    assert load_policy(active).sbatch == other / "sbatch"
     with pytest.raises(ValueError, match="snapshots"):
         _daemon_setup.reload(layout.workspace.root, snapshots=tmp_path / "elsewhere")
     _rewrite_launcher("small", **{"daemon.cluster": "another-cluster"})

@@ -15,7 +15,7 @@ from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 _FORMAT = "httk-workspace-daemon-policy"
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SLURM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
@@ -27,8 +27,6 @@ _RESERVED_ANCESTOR_TARGETS = tuple(
     for path in (
         "/tmp",
         "/workspace",
-        "/daemon-root",
-        "/control",
         "/proc",
         "/dev",
         "/daemon-policy.json",
@@ -38,8 +36,6 @@ _RESERVED_DESCENDANT_TARGETS = tuple(
     Path(path)
     for path in (
         "/workspace",
-        "/daemon-root",
-        "/control",
         "/proc",
         "/dev",
         "/daemon-policy.json",
@@ -307,14 +303,14 @@ class Policy:
     :param exchange: Client exchange directory, a sibling of the workspace in a dedicated parent.
     :param state: Broker state root.
     :param snapshots: Directory of immutable runtime policy snapshots.
-    :param bwrap: Approved Bubblewrap executable.
+    :param bwrap: Approved Bubblewrap executable, run on the host.
     :param python: Approved Python executable visible to payloads.
     :param sbatch: Approved Slurm submission executable.
     :param squeue: Approved Slurm query executable.
     :param scancel: Approved Slurm cancellation executable.
     :param cluster: Fixed Slurm cluster name.
-    :param readonly_paths: Runtime roots mounted into both sandbox roles.
-    :param broker_paths: Privileged runtime roots for the broker and MPI allocation launcher.
+    :param readonly_paths: Runtime roots mounted into payload and MPI rank sandboxes; the broker and the MPI
+        allocation service see the whole host read-only.
     :param profiles: Allowed resource profiles.
     :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
     :param slurm_conf: Optional fixed Slurm configuration path.
@@ -340,7 +336,6 @@ class Policy:
     scancel: Path
     cluster: str
     readonly_paths: tuple[Path, ...]
-    broker_paths: tuple[Path, ...]
     profiles: tuple[Profile, ...]
     authorized_keys: tuple[str, ...] = ()
     slurm_conf: Path | None = None
@@ -393,52 +388,41 @@ class Policy:
                 ("scancel", self.scancel),
             )
         )
-        if not isinstance(self.readonly_paths, tuple) or not isinstance(self.broker_paths, tuple):
-            raise ValueError("readonly_paths and broker_paths must be tuples")
+        if not isinstance(self.readonly_paths, tuple):
+            raise ValueError("readonly_paths must be a tuple")
         readonly = tuple(_path(value, "readonly_paths entry") for value in self.readonly_paths)
-        broker = tuple(_path(value, "broker_paths entry") for value in self.broker_paths)
-        if len(set(readonly)) != len(readonly) or len(set(broker)) != len(broker):
+        if len(set(readonly)) != len(readonly):
             raise ValueError("approved path lists must not contain duplicates")
-        if Path("/") in {*readonly, *broker}:
+        if Path("/") in readonly:
             raise ValueError("the filesystem root cannot be an approved runtime path")
-        for runtime in (*readonly, *broker):
+        for runtime in readonly:
             target = _reserved_destination(runtime, mpi=self.mpi is not None)
             if target is not None:
                 raise ValueError(
                     "approved runtime paths must not overlap reserved sandbox destinations: "
                     f"{runtime} overlaps the reserved destination {target}"
                 )
-        if any(_overlap(readonly_root, broker_root) for readonly_root in readonly for broker_root in broker):
-            raise ValueError("readonly_paths and broker_paths must be pairwise disjoint")
-        for runtime in (*readonly, *broker):
             if _overlap(root, runtime):
                 raise ValueError(f"daemon parent {root} must be disjoint from runtime path {runtime}")
-            if any(_overlap(runtime, item) for item in mutable):
-                raise ValueError("runtime paths must be disjoint from mutable roots")
+            for name, value in (("state", self.state), ("snapshots", snapshots)):
+                if _overlap(runtime, value):
+                    raise ValueError(f"runtime path {runtime} must be disjoint from {name} {value}")
 
-        bwrap, python, sbatch, squeue, scancel = commands
+        python = commands[1]
         if not _covered(python, readonly):
             raise ValueError("python must be within readonly_paths")
-        if not _covered(bwrap, (*readonly, *broker)):
-            raise ValueError("bwrap must be within an approved runtime path")
-        if any(not _covered(command, (*readonly, *broker)) for command in (sbatch, squeue, scancel)):
-            raise ValueError("Slurm commands must be within an approved runtime path")
         if self.slurm_conf is not None:
-            slurm_conf = _path(self.slurm_conf, "slurm_conf")
-            if not _covered(slurm_conf, broker):
-                raise ValueError("slurm_conf must be within broker_paths")
+            _path(self.slurm_conf, "slurm_conf")
 
         if self.mpi is not None:
             if not isinstance(self.mpi, MPISettings):
                 raise ValueError("mpi must be MPISettings")
             mpi = self.mpi
-            if not _covered(mpi.srun, (*readonly, *broker)):
-                raise ValueError("mpi.srun must be within an approved runtime path")
             protected_roots = (mpi.control_root, *mpi.pmix_roots, mpi.shm_root)
             for root in protected_roots:
                 if any(_overlap(root, item) for item in mutable):
                     raise ValueError("MPI roots must be disjoint from mutable roots")
-                if any(_overlap(root, item) for item in (*readonly, *broker)):
+                if any(_overlap(root, item) for item in readonly):
                     raise ValueError("MPI roots must be disjoint from approved runtime paths")
             for index, left in enumerate(protected_roots):
                 for right in protected_roots[index + 1 :]:
@@ -518,7 +502,6 @@ class Policy:
             "cluster": document["cluster"],
             "slurm_conf": document.get("slurm_conf"),
             "readonly_paths": document["readonly_paths"],
-            "broker_paths": document["broker_paths"],
             "configuration_name": name,
             "configuration": _profile_document(self.profile(name)),
             "mpi": mpi,
@@ -660,7 +643,6 @@ def policy_document(policy: Policy) -> dict[str, object]:
         "scancel": str(policy.scancel),
         "cluster": policy.cluster,
         "readonly_paths": [str(path) for path in policy.readonly_paths],
-        "broker_paths": [str(path) for path in policy.broker_paths],
         "profiles": {profile.name: _profile_document(profile) for profile in policy.profiles},
         "authorized_keys": list(policy.authorized_keys),
         "max_records": policy.max_records,
@@ -718,7 +700,6 @@ def _decode_policy(data: bytes) -> Policy:
         "scancel",
         "cluster",
         "readonly_paths",
-        "broker_paths",
         "profiles",
         "authorized_keys",
     }
@@ -745,9 +726,8 @@ def _decode_policy(data: bytes) -> Policy:
     for name in ("workspace_id", "enrollment_id", "cluster"):
         if type(value[name]) is not str:
             raise ValueError(f"{name} must be a string")
-    for name in ("readonly_paths", "broker_paths"):
-        if not isinstance(value[name], list):
-            raise ValueError(f"{name} must be an array")
+    if not isinstance(value["readonly_paths"], list):
+        raise ValueError("readonly_paths must be an array")
     raw_profiles = value["profiles"]
     if not isinstance(raw_profiles, dict):
         raise ValueError("profiles must be an object")
@@ -862,7 +842,6 @@ def _decode_policy(data: bytes) -> Policy:
         scancel=_json_path(value["scancel"], "scancel"),
         cluster=value["cluster"],
         readonly_paths=tuple(_json_path(item, "readonly_paths entry") for item in value["readonly_paths"]),
-        broker_paths=tuple(_json_path(item, "broker_paths entry") for item in value["broker_paths"]),
         profiles=tuple(profiles),
         authorized_keys=_authorized_keys(tuple(raw_authorized_keys)),
         slurm_conf=_json_path(value["slurm_conf"], "slurm_conf") if "slurm_conf" in value else None,

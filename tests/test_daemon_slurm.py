@@ -47,7 +47,6 @@ def policy(tmp_path: Path) -> Policy:
         scancel=runtime / "scancel",
         cluster="cluster",
         readonly_paths=(runtime, Path(sys.prefix), Path("/usr")),
-        broker_paths=(),
         profiles=(Profile("cpu", 2, 512, 5, partition="batch", account="science"),),
     )
 
@@ -182,8 +181,7 @@ def test_client_timeout_kills_process(policy: Policy, tmp_path: Path) -> None:
 
 def test_protected_slurm_conf_is_the_only_extra_environment(policy: Policy, tmp_path: Path) -> None:
     _client(policy.squeue, "print(os.environ['SLURM_CONF'])\n")
-    broker_root = tmp_path / "broker"
-    policy = replace(policy, broker_paths=(broker_root,), slurm_conf=broker_root / "slurm.conf")
+    policy = replace(policy, slurm_conf=tmp_path / "broker" / "slurm.conf")
     code, output = _run([str(policy.squeue)], policy)
     assert code == 0 and output.decode().strip() == str(policy.slurm_conf)
 

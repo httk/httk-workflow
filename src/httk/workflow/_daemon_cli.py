@@ -177,6 +177,8 @@ def launch(arguments: argparse.Namespace) -> int:
                 print(f"launcher {profile.name}")
             for key in approved.authorized_keys:
                 print(f"authorized {key}")
+            for path in approved.readonly_paths:
+                print(f"readonly {path}")
             return _check_after_setup(workspace, state=paths["state"], snapshots=paths["snapshots"])
         flag = "--check" if arguments.check else "--once" if arguments.once else None
         argv = _bootstrap_argv(workspace, state=paths["state"], snapshots=paths["snapshots"], flag=flag)

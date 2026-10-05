@@ -96,7 +96,6 @@ def _policy(tmp_path: Path, *, max_records: int = 64, max_submissions: int = 8) 
         scancel=broker / "scancel",
         cluster="cluster-1",
         readonly_paths=(runtime,),
-        broker_paths=(broker,),
         profiles=(Profile("cpu", 2, 1024, 10),),
         authorized_keys=(operator_key,),
         max_records=max_records,
@@ -677,7 +676,7 @@ def test_main_reports_state_recovery_guidance_but_hides_scheduler_details(
     with caplog.at_level(logging.ERROR):
         assert (
             service_module.main(
-                ["--policy", "/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
+                ["--policy", "/tmp/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
             )
             == 1
         )
@@ -689,12 +688,23 @@ def test_main_reports_state_recovery_guidance_but_hides_scheduler_details(
     with caplog.at_level(logging.ERROR):
         assert (
             service_module.main(
-                ["--policy", "/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
+                ["--policy", "/tmp/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
             )
             == 1
         )
     assert "daemon_service_failed" in caplog.text
     assert secret not in caplog.text
+
+
+def test_service_uses_the_host_view_tmp_destinations() -> None:
+    assert (service_module._SNAPSHOT_POLICY, service_module._STATE_DIRECTORY, service_module._ROOT_DIRECTORY) == (
+        Path("/tmp/daemon-policy.json"),
+        Path("/tmp/control"),
+        Path("/tmp/daemon-root"),
+    )
+    arguments = argparse.Namespace(policy=Path("/daemon-policy.json"), policy_source=Path("/protected-policy.json"))
+    with pytest.raises(ValueError, match="service policy must be /tmp/daemon-policy.json"):
+        service_module._run(arguments)
 
 
 def test_stop_is_checked_between_sorted_requests(tmp_path: Path) -> None:

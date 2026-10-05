@@ -16,6 +16,8 @@ from pathlib import Path
 
 from httk.core.userdirs import data_home
 
+import httk
+
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from ._daemon_launcher import DAEMON_KIND, DAEMON_LAUNCHER_NAME, DaemonSettings, parse_daemon_settings
@@ -125,7 +127,7 @@ def _running_python() -> Path:
 
 
 def _effective_slurm_conf(declared: Path | None) -> Path | None:
-    # The operator environment is trusted at setup; the broker sandbox later sees only this fixed file.
+    # The operator environment is trusted at setup; the broker later uses only this fixed file.
     if declared is not None:
         return declared
     environment = os.environ.get("SLURM_CONF")
@@ -181,6 +183,23 @@ def _nested_dropped(paths: set[Path]) -> tuple[Path, ...]:
     return tuple(
         sorted(path for path in paths if not any(path != other and path.is_relative_to(other) for other in paths))
     )
+
+
+def _editable_finder_roots() -> set[Path]:
+    # Setuptools finder-hook editable installs appear in httk.__path__ only as hook sentinels; their
+    # MAPPING gives each package's source directory, whose import root is above the dotted name.
+    roots: set[Path] = set()
+    for name, module in list(sys.modules.items()):
+        mapping = getattr(module, "MAPPING", None) if name.startswith("__editable___") else None
+        if not isinstance(mapping, dict):
+            continue
+        for package, location in mapping.items():
+            if isinstance(package, str) and isinstance(location, str) and package.split(".")[0] == "httk":
+                root = Path(location)
+                for _part in package.split("."):
+                    root = root.parent
+                roots.add(root.resolve())
+    return roots
 
 
 def _mpi_settings(site: Mapping[str, object]) -> MPISettings:
@@ -316,14 +335,19 @@ def _compile(
         raise ValueError("daemon launcher names must be unique")
     site = _combined_site(parsed)
     readonly = _site(site, "daemon.readonly_paths", tuple)
+    # Only job sandboxes use readonly_paths; the broker and allocation service see the host read-only.
     if readonly is None:
         defaults = {Path(path).resolve() for path in _DEFAULT_READONLY if os.path.exists(path)}
-        readonly = _nested_dropped(defaults | {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
+        # Jobs import the daemon's own code, which an editable install keeps outside the prefix.
+        imports = {Path(entry).resolve().parent for entry in httk.__path__ if os.path.isabs(entry)}
+        imports |= _editable_finder_roots()
+        prefixes = {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
+        readonly = _nested_dropped(defaults | imports | prefixes)
+    home = data_home().resolve()
+    for path in readonly:
+        if _overlap(path, home):
+            raise ValueError(f"readonly path {path} must be disjoint from the httk data home {home}")
     slurm_conf = _effective_slurm_conf(_site(site, "daemon.slurm_conf", Path))
-    broker = _site(site, "daemon.broker_paths", tuple)
-    if broker is None:
-        munge = Path("/run/munge")
-        broker = (*(() if slurm_conf is None else (slurm_conf.parent,)), *((munge,) if munge.exists() else ()))
     python = site.get("daemon.python")
     max_submissions = _site(site, "daemon.max_submissions", int)
     return Policy(
@@ -340,7 +364,6 @@ def _compile(
         scancel=_resolve_executable(site.get("daemon.scancel"), "scancel"),
         cluster=_cluster(_site(site, "daemon.cluster", str), slurm_conf, _site(site, "daemon.scontrol", Path)),
         readonly_paths=readonly,
-        broker_paths=broker,
         profiles=tuple(
             Profile(
                 name,
@@ -639,7 +662,7 @@ def _fixed_connection(old: Policy, new: Policy) -> None:
         "exchange",
         "state",
         "snapshots",
-        # Recorded jobs are bound to the cluster; client paths, slurm.conf and broker mounts may change.
+        # Recorded jobs are bound to the cluster; client paths and slurm.conf may change.
         "cluster",
     )
     changed = [name for name in fields if getattr(old, name) != getattr(new, name)]

@@ -121,7 +121,7 @@ def test_real_payload_confinement(tmp_path: Path) -> None:
                 readonly_paths.append(candidate)
         policy = {
             "format": "httk-workspace-daemon-policy",
-            "format_version": 2,
+            "format_version": 3,
             "workspace": str(workspace),
             "workspace_id": str(uuid.uuid4()),
             "enrollment_id": "2" * 32,
@@ -135,7 +135,6 @@ def test_real_payload_confinement(tmp_path: Path) -> None:
             "scancel": str(broker / "scancel"),
             "cluster": "sandbox-test",
             "readonly_paths": [str(path) for path in readonly_paths],
-            "broker_paths": [str(broker)],
             "authorized_keys": [AUTHORIZED_KEY],
             "profiles": {"small": {"cpus": 1, "memory_mb": 128, "time_minutes": 1}},
         }
@@ -224,7 +223,7 @@ def test_real_mpi_ranks_share_only_allocation_shm(tmp_path: Path) -> None:
     readonly += [str(path) for path in (Path("/lib"), Path("/lib64")) if path.exists()]
     policy = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 2,
+        "format_version": 3,
         "workspace": str(roots["workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "e" * 32,
@@ -238,7 +237,6 @@ def test_real_mpi_ranks_share_only_allocation_shm(tmp_path: Path) -> None:
         "scancel": str(roots["broker"] / "scancel"),
         "cluster": "sandbox-test",
         "readonly_paths": readonly,
-        "broker_paths": [str(roots["broker"])],
         "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {"mpi": {"cpus": 1, "memory_mb": 128, "time_minutes": 1, "mpi": {"nodes": 1, "ranks": 2}}},
         "mpi": {

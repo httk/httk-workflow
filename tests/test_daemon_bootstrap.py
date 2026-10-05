@@ -71,7 +71,7 @@ def _layout(
         _write_executable(roots["broker"] / name)
     policy: dict[str, Any] = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 2,
+        "format_version": 3,
         "workspace": str(roots["site/workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
@@ -85,7 +85,6 @@ def _layout(
         "scancel": str(roots["broker"] / "scancel"),
         "cluster": "test-cluster",
         "readonly_paths": [str(roots["runtime"])],
-        "broker_paths": [str(roots["broker"])],
         "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {"small": {"cpus": 2, "memory_mb": 1024, "time_minutes": 10}},
     }
@@ -216,17 +215,28 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "TMPDIR": "/tmp",
         "LANG": "C.UTF-8",
     }
-    assert argv[argv.index("--tmpfs") + 1] == "/tmp"
-    assert "/proc" in argv and "/dev" in argv
-    assert "/daemon-policy.json" in argv
+    # The broker sees the host read-only; every directory it adds lies on its private /tmp.
+    mounts = argv.index("--ro-bind")
+    assert argv[mounts : mounts + 10] == [
+        "--ro-bind",
+        *("/", "/"),
+        *("--proc", "/proc"),
+        *("--dev", "/dev"),
+        *("--tmpfs", "/tmp"),
+        "--dir",
+    ]
+    assert argv.count("--ro-bind") == 1 and "--ro-bind-fd" not in argv
+    assert all(argv[index + 1].startswith("/tmp/") for index, item in enumerate(argv) if item == "--dir")
+    assert not {"/workspace", "/run", "/daemon-root", "/control", "/daemon-policy.json"} & set(argv)
+    assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/tmp/daemon-policy.json"]
     assert "POISON" not in observed["env"]
     assert str(leak) not in observed["fds"].values()
-    readonly_destinations = {destination for _, destination in _pairs(argv, "--ro-bind-fd")}
-    assert readonly_destinations == {*policy["readonly_paths"], *policy["broker_paths"]}
     writable = _pairs(argv, "--bind-fd")
-    assert sorted(destination for _, destination in writable) == ["/control", "/daemon-root"]
-    root_fd = next(source for source, destination in writable if destination == "/daemon-root")
+    assert sorted(destination for _, destination in writable) == ["/tmp/control", "/tmp/daemon-root"]
+    root_fd = next(source for source, destination in writable if destination == "/tmp/daemon-root")
     assert observed["fds"][root_fd] == str(tmp_path / "site")
+    state_fd = next(source for source, destination in writable if destination == "/tmp/control")
+    assert observed["fds"][state_fd] == policy["state"]
     separator = argv.index("--")
     assert argv[separator + 1 :] == [
         policy["python"],
@@ -234,7 +244,7 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "-m",
         "httk.workflow._daemon_service",
         "--policy",
-        "/daemon-policy.json",
+        "/tmp/daemon-policy.json",
         "--policy-source",
         str(policy_path),
         "--once",
@@ -264,9 +274,11 @@ def test_payload_excludes_broker_mounts_and_network(tmp_path: Path) -> None:
     observed = json.loads(record.read_text(encoding="utf-8"))
     argv = observed["argv"]
     assert "--unshare-net" in argv
+    assert "--ro-bind" not in argv
     assert {destination for _, destination in _pairs(argv, "--bind-fd")} == {"/workspace"}
-    destinations = {destination for _, destination in _pairs(argv, "--bind-fd") + _pairs(argv, "--ro-bind-fd")}
-    assert not {"/requests", "/responses", "/control", str(Path(policy["broker_paths"][0]))} & destinations
+    assert {destination for _, destination in _pairs(argv, "--ro-bind-fd")} == set(policy["readonly_paths"])
+    assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/daemon-policy.json"]
+    assert "/tmp/daemon-root" not in argv and "/tmp/control" not in argv
     separator = argv.index("--")
     assert argv[separator + 1 :] == [
         policy["python"],
@@ -346,16 +358,15 @@ def test_payload_does_not_require_broker_local_paths(tmp_path: Path) -> None:
     assert record.exists()
 
 
-def test_payload_does_not_require_declared_broker_root_or_slurm_clients(tmp_path: Path) -> None:
+def test_payload_does_not_require_slurm_clients(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
     runtime = Path(policy["readonly_paths"][0])
-    original_broker = Path(policy["broker_paths"][0])
+    original_broker = Path(policy["bwrap"]).parent
     bwrap = runtime / "bwrap"
     bwrap.write_bytes(Path(policy["bwrap"]).read_bytes())
     bwrap.chmod(0o755)
     policy["bwrap"] = str(bwrap)
     missing_broker = tmp_path / "compute-node-absent-broker"
-    policy["broker_paths"] = [str(missing_broker)]
     for field in ("sbatch", "squeue", "scancel"):
         policy[field] = str(missing_broker / field)
     for child in original_broker.iterdir():
@@ -387,20 +398,16 @@ def test_aliases_within_shared_readonly_roots_are_allowed(tmp_path: Path) -> Non
     assert record.exists()
 
 
-@pytest.mark.parametrize("alias_target", ["root", "workspace_ancestor", "broker"])
+@pytest.mark.parametrize("alias_target", ["root", "workspace_ancestor"])
 def test_resolved_runtime_roots_cannot_escape_role_boundaries(tmp_path: Path, alias_target: str) -> None:
     policy_path, policy, record = _layout(tmp_path)
     alias = tmp_path / "runtime-alias"
     if alias_target == "root":
         target = Path("/")
         python = alias / "usr/bin/python3"
-    elif alias_target == "workspace_ancestor":
+    else:
         target = tmp_path
         python = alias / "runtime/python"
-    else:
-        target = Path(policy["broker_paths"][0])
-        python = alias / "python"
-        _write_executable(target / "python")
     alias.symlink_to(target, target_is_directory=True)
     policy["readonly_paths"] = [str(alias)]
     policy["python"] = str(python)
@@ -414,14 +421,35 @@ def test_resolved_runtime_roots_cannot_escape_role_boundaries(tmp_path: Path, al
     assert not record.exists()
 
 
-def test_runtime_path_overlapping_root_destination_is_refused(tmp_path: Path) -> None:
+def test_runtime_path_overlapping_payload_destination_is_refused(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
-    policy["readonly_paths"].append("/daemon-root/runtime")
+    policy["readonly_paths"].append("/workspace/runtime")
     _rewrite_policy(policy_path, policy)
     result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--mode", "broker", "--once"])
     assert result.returncode == 2
-    assert "reserved destination /daemon-root" in result.stderr
+    assert "reserved destination /workspace" in result.stderr
     assert not record.exists()
+
+
+@pytest.mark.parametrize("defect", ["world_writable", "foreign_owner", "mutable_root"])
+def test_slurm_client_outside_readonly_paths_keeps_ownership_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    _, policy, _ = _layout(tmp_path)
+    sbatch = Path(policy["sbatch"])
+    mutable = (Path(policy["state"]), tmp_path / "site")
+    # The fixture's Slurm clients lie outside every readonly path; the broker sees them through its host view.
+    api["_check_command"](sbatch, mutable)
+    if defect == "world_writable":
+        sbatch.chmod(0o757)
+    elif defect == "foreign_owner":
+        monkeypatch.setattr(api["os"], "geteuid", lambda: sbatch.stat().st_uid + 1)
+    else:
+        sbatch = Path(policy["state"]) / "sbatch"
+        _write_executable(sbatch)
+    with pytest.raises(ValueError, match="unprotected ownership or mode|across a mutable root"):
+        api["_check_command"](sbatch, mutable)
 
 
 @pytest.mark.parametrize("mode", ["root", "workspace", "exchange", "state"])

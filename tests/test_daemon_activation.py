@@ -27,7 +27,6 @@ def _policy(tmp_path: Path) -> Policy:
         scancel=broker / "scancel",
         cluster="cluster",
         readonly_paths=(runtime,),
-        broker_paths=(broker,),
         profiles=(Profile("cpu", 2, 1024, 10, workers=2, prelude="module load approved"),),
     )
 

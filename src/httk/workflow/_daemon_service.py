@@ -21,9 +21,9 @@ from ._daemon_slurm import SchedulerError, SlurmGateway, Submission
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger
 
 _LOGGER = logging.getLogger(__name__)
-_SNAPSHOT_POLICY = Path("/daemon-policy.json")
-_STATE_DIRECTORY = Path("/control")
-_ROOT_DIRECTORY = Path("/daemon-root")
+_SNAPSHOT_POLICY = Path("/tmp/daemon-policy.json")
+_STATE_DIRECTORY = Path("/tmp/control")
+_ROOT_DIRECTORY = Path("/tmp/daemon-root")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
@@ -316,7 +316,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _run(arguments: argparse.Namespace) -> None:
     if arguments.policy != _SNAPSHOT_POLICY:
-        raise ValueError("service policy must be /daemon-policy.json")
+        raise ValueError(f"service policy must be {_SNAPSHOT_POLICY}")
     policy_source: Path = arguments.policy_source
     if not policy_source.is_absolute() or ".." in policy_source.parts:
         raise ValueError("policy source must be an absolute path without '..'")

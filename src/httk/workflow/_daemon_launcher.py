@@ -36,7 +36,6 @@ _FIXED_KEYS = frozenset(
         "manager.command",
         "environment.prelude",
         "daemon.readonly_paths",
-        "daemon.broker_paths",
         "daemon.bwrap",
         "daemon.python",
         "daemon.sbatch",
@@ -55,7 +54,7 @@ _FIXED_KEYS = frozenset(
         "daemon.mpi.termination_grace",
     }
 )
-_PATH_LISTS = frozenset({"daemon.readonly_paths", "daemon.broker_paths", "daemon.mpi.pmix_roots", "daemon.mpi.devices"})
+_PATH_LISTS = frozenset({"daemon.readonly_paths", "daemon.mpi.pmix_roots", "daemon.mpi.devices"})
 _OTHER_SITE = frozenset(
     {"daemon.cluster", "daemon.max_submissions", "daemon.mpi.max_steps", "daemon.mpi.termination_grace"}
 )

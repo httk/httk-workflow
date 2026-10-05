@@ -44,7 +44,14 @@ _MPI_ENVIRONMENT_LIMIT = 128
 _MPI_ENVIRONMENT_VALUE_BYTES = 4096
 _MPI_ENVIRONMENT_TOTAL_BYTES = 64 * 1024
 _CONTROL_DESTINATION = Path("/run/httk-mpi")
-_ROOT_DESTINATION = Path("/daemon-root")
+_POLICY_DESTINATION = "/daemon-policy.json"
+# The broker and the MPI allocation service run only trusted code, so they see the host read-only;
+# their writable mounts and policy data sit on the private /tmp, since a read-only / takes no new directories.
+_HOST_VIEW_MODES = ("broker", "allocation")
+_HOST_ROOT_DESTINATION = "/tmp/daemon-root"
+_HOST_STATE_DESTINATION = "/tmp/control"
+_HOST_CONTROL_DESTINATION = "/tmp/httk-mpi"
+_HOST_POLICY_DESTINATION = "/tmp/daemon-policy.json"
 _BWRAP_REQUIRED = frozenset(
     {
         "--bind-fd",
@@ -86,7 +93,6 @@ class _PreparedSandbox:
 class _ResolvedRoots:
     mutable: tuple[Path, ...]
     readonly: tuple[Path, ...]
-    broker: tuple[Path, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,22 +290,16 @@ def _resolve_declared_path(path: Path, *, strict: bool) -> Path:
         raise ValueError(f"approved runtime path is unavailable: {path}") from exc
 
 
-def _resolved_roots(policy: Any, mode: str) -> _ResolvedRoots:
-    if any(_overlap(path, _ROOT_DESTINATION) for path in (*policy.readonly_paths, *policy.broker_paths)):
-        raise ValueError(f"approved runtime paths must not overlap the reserved destination {_ROOT_DESTINATION}")
+def _resolved_roots(policy: Any) -> _ResolvedRoots:
     # The dedicated parent holds the workspace and the exchange, and the broker binds it read-write.
     mutable = tuple(_resolve_declared_path(path, strict=False) for path in (policy.root, policy.state))
+    # Only payload and rank sandboxes mount these; every mode resolves them so a broker check reports them early.
     readonly = tuple(_resolve_declared_path(path, strict=True) for path in policy.readonly_paths)
-    broker = tuple(
-        _resolve_declared_path(path, strict=mode in ("broker", "allocation")) for path in policy.broker_paths
-    )
-    if Path("/") in {*readonly, *broker}:
+    if Path("/") in readonly:
         raise ValueError("approved runtime paths must not resolve to the filesystem root")
-    if any(_overlap(runtime_root, mutable_root) for runtime_root in (*readonly, *broker) for mutable_root in mutable):
+    if any(_overlap(runtime_root, mutable_root) for runtime_root in readonly for mutable_root in mutable):
         raise ValueError("resolved runtime paths must be disjoint from mutable roots")
-    if any(_overlap(readonly_root, broker_root) for readonly_root in readonly for broker_root in broker):
-        raise ValueError("resolved readonly and broker roots must be pairwise disjoint")
-    return _ResolvedRoots(mutable, readonly, broker)
+    return _ResolvedRoots(mutable, readonly)
 
 
 def _validate_resolved_mpi_roots(
@@ -316,9 +316,7 @@ def _validate_resolved_mpi_roots(
     for root in mpi_paths:
         if root == Path("/"):
             raise ValueError("MPI roots must not resolve to the filesystem root")
-        if any(
-            _overlap(root, item) for item in (*resolved_roots.mutable, *resolved_roots.readonly, *resolved_roots.broker)
-        ):
+        if any(_overlap(root, item) for item in (*resolved_roots.mutable, *resolved_roots.readonly)):
             raise ValueError("resolved MPI roots must be disjoint from daemon and runtime roots")
     for index, left in enumerate(mpi_paths):
         for right in mpi_paths[index + 1 :]:
@@ -444,12 +442,10 @@ def _open_pmix_directory(policy: Any, environment: tuple[tuple[str, str], ...]) 
         raise ValueError("PMIX_SERVER_TMPDIR is outside approved PMIx roots")
     reserved_destinations = (
         Path("/workspace"),
-        _ROOT_DESTINATION,
-        Path("/control"),
         _CONTROL_DESTINATION,
         Path("/proc"),
         Path("/dev"),
-        Path("/daemon-policy.json"),
+        Path(_POLICY_DESTINATION),
         Path("/tmp/home"),
     )
     if any(_overlap(path, destination) for destination in reserved_destinations):
@@ -460,7 +456,6 @@ def _open_pmix_directory(policy: Any, environment: tuple[tuple[str, str], ...]) 
         policy.mpi.control_root,
         policy.mpi.shm_root,
         *policy.readonly_paths,
-        *policy.broker_paths,
     )
     if any(_overlap(resolved_path, _resolve_declared_path(item, strict=False)) for item in forbidden):
         raise ValueError("PMIX_SERVER_TMPDIR overlaps a protected daemon root")
@@ -473,11 +468,12 @@ def _open_pmix_directory(policy: Any, environment: tuple[tuple[str, str], ...]) 
     return path, descriptor
 
 
-def _check_command(path: Path, approved: tuple[Path, ...], mutable_roots: tuple[Path, ...]) -> None:
+def _check_command(path: Path, mutable_roots: tuple[Path, ...], approved: tuple[Path, ...] | None = None) -> None:
+    # ``approved`` applies only to commands run inside a payload sandbox; host-view commands need no containment.
     resolved = _resolve_declared_path(path, strict=True)
     if any(_overlap(resolved, mutable_root) for mutable_root in mutable_roots):
         raise ValueError(f"trusted command resolves across a mutable root: {path}")
-    if not _is_within(resolved, approved):
+    if approved is not None and not _is_within(resolved, approved):
         raise ValueError(f"trusted command resolves outside its approved roots: {path}")
     information = resolved.stat()
     if not stat.S_ISREG(information.st_mode) or information.st_mode & 0o111 == 0:
@@ -595,7 +591,11 @@ def _base_bwrap_argv(
             argv += ["--setenv", name, value]
     if mode == "broker" and policy.slurm_conf is not None:
         argv += ["--setenv", "SLURM_CONF", str(policy.slurm_conf)]
-    # Bubblewrap starts from its own empty tmpfs root; only these private paths
+    if mode in _HOST_VIEW_MODES:
+        # Recursive, so host submounts (/software, /etc, the munge socket) come in read-only as well.
+        argv += ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home"]
+        return argv
+    # Payload sandboxes start from Bubblewrap's own empty tmpfs root; only these private paths
     # and the descriptor-backed mounts below are then added to it.
     argv += ["--dir", "/workspace", "--dir", "/run", "--tmpfs", "/tmp", "--dir", "/tmp/home"]
     return argv
@@ -653,7 +653,7 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
         "-m",
         "httk.workflow._daemon_service",
         "--policy",
-        "/daemon-policy.json",
+        _HOST_POLICY_DESTINATION,
         "--policy-source",
         str(policy_source),
     ]
@@ -668,7 +668,8 @@ def _prepare_sandbox(
     arguments: argparse.Namespace, policy: Any, policy_data: bytes, policy_source: Path, check_layout: Any
 ) -> _PreparedSandbox:
     mutable_roots = (policy.root, policy.state)
-    resolved_roots = _resolved_roots(policy, arguments.mode)
+    resolved_roots = _resolved_roots(policy)
+    host_view = arguments.mode in _HOST_VIEW_MODES
     mpi_payload = arguments.mode == "payload" and policy.profile(arguments.profile).mpi is not None
     _validate_resolved_mpi_roots(policy, resolved_roots, arguments.mode, mpi_payload=mpi_payload)
     source = _source_path()
@@ -677,22 +678,18 @@ def _prepare_sandbox(
     _check_protected_file(policy_source, mutable_roots)
     # Every entry rechecks the layout; only the broker, which owns the exchange, runs the rename probe.
     check_layout(policy, probe=arguments.mode == "broker")
-    _check_command(policy.python, resolved_roots.readonly, resolved_roots.mutable)
-    _check_command(policy.bwrap, (*resolved_roots.readonly, *resolved_roots.broker), resolved_roots.mutable)
+    # Payloads run python inside their allow-list; bwrap and the Slurm clients run with a host view or on the host.
+    _check_command(policy.python, resolved_roots.mutable, resolved_roots.readonly)
+    _check_command(policy.bwrap, resolved_roots.mutable)
     if arguments.mode == "broker":
         for command in (policy.sbatch, policy.squeue, policy.scancel):
-            _check_command(command, (*resolved_roots.readonly, *resolved_roots.broker), resolved_roots.mutable)
-        if policy.mpi is not None:
-            _check_command(policy.mpi.srun, (*resolved_roots.readonly, *resolved_roots.broker), resolved_roots.mutable)
-    if arguments.mode in ("broker", "allocation") and policy.slurm_conf is not None:
+            _check_command(command, resolved_roots.mutable)
+    if host_view and policy.mpi is not None:
+        _check_command(policy.mpi.srun, resolved_roots.mutable)
+    if host_view and policy.slurm_conf is not None:
         resolved_slurm_conf = _resolve_declared_path(policy.slurm_conf, strict=True)
-        if not _is_within(resolved_slurm_conf, resolved_roots.broker) or any(
-            _overlap(resolved_slurm_conf, mutable_root) for mutable_root in resolved_roots.mutable
-        ):
-            raise ValueError("Slurm configuration resolves outside broker-only runtime roots")
-    if arguments.mode == "allocation":
-        assert policy.mpi is not None
-        _check_command(policy.mpi.srun, (*resolved_roots.readonly, *resolved_roots.broker), resolved_roots.mutable)
+        if any(_overlap(resolved_slurm_conf, mutable_root) for mutable_root in resolved_roots.mutable):
+            raise ValueError("Slurm configuration resolves across a mutable root")
     block_userns = _check_bwrap(policy.bwrap)
     if not block_userns and arguments.mode == "broker":
         # Mounts stay locked either way; only nested user namespaces (kernel attack surface) remain open.
@@ -710,36 +707,35 @@ def _prepare_sandbox(
         if arguments.mode == "broker":
             # One writable bind of the dedicated parent; the service reaches the exchange and the
             # workspace staging area only through descriptor-anchored no-follow opens below it.
-            for source_path, destination in ((policy.root, str(_ROOT_DESTINATION)), (policy.state, "/control")):
+            for source_path, destination in (
+                (policy.root, _HOST_ROOT_DESTINATION),
+                (policy.state, _HOST_STATE_DESTINATION),
+            ):
                 descriptor = _open_directory_nofollow(source_path)
                 descriptors.append(descriptor)
                 argv += ["--dir", destination, "--bind-fd", str(descriptor), destination]
-        else:
+        elif not host_view:
             workspace_fd = _open_directory_nofollow(policy.workspace)
             descriptors.append(workspace_fd)
-            writable_workspace = arguments.mode in ("payload", "mpi-rank")
-            argv += ["--bind-fd" if writable_workspace else "--ro-bind-fd", str(workspace_fd), "/workspace"]
-
-        runtime_paths = list(zip(policy.readonly_paths, resolved_roots.readonly, strict=True))
-        if arguments.mode in ("broker", "allocation"):
-            runtime_paths.extend(zip(policy.broker_paths, resolved_roots.broker, strict=True))
-        for runtime_path, resolved_path in runtime_paths:
-            descriptor = os.open(resolved_path, _O_PATH | os.O_CLOEXEC)
-            descriptors.append(descriptor)
-            argv += ["--ro-bind-fd", str(descriptor), str(runtime_path)]
-        argv += _merged_usr_symlinks(
-            tuple(resolved for _path, resolved in runtime_paths), {path for path, _ in runtime_paths}
-        )
+            argv += ["--bind-fd", str(workspace_fd), "/workspace"]
+            runtime_paths = list(zip(policy.readonly_paths, resolved_roots.readonly, strict=True))
+            for runtime_path, resolved_path in runtime_paths:
+                descriptor = os.open(resolved_path, _O_PATH | os.O_CLOEXEC)
+                descriptors.append(descriptor)
+                argv += ["--ro-bind-fd", str(descriptor), str(runtime_path)]
+            argv += _merged_usr_symlinks(
+                tuple(resolved for _path, resolved in runtime_paths), {path for path, _ in runtime_paths}
+            )
 
         policy_fd = _policy_snapshot(policy_data)
         descriptors.append(policy_fd)
-        argv += ["--ro-bind-data", str(policy_fd), "/daemon-policy.json"]
+        argv += ["--ro-bind-data", str(policy_fd), _HOST_POLICY_DESTINATION if host_view else _POLICY_DESTINATION]
         if arguments.mode == "allocation":
             assert policy.mpi is not None
             control_source, control_fd = _create_control_directory(policy.mpi.control_root)
             arguments.control_source = control_source
             descriptors.append(control_fd)
-            argv += ["--dir", str(_CONTROL_DESTINATION), "--bind-fd", str(control_fd), str(_CONTROL_DESTINATION)]
+            argv += ["--dir", _HOST_CONTROL_DESTINATION, "--bind-fd", str(control_fd), _HOST_CONTROL_DESTINATION]
         elif arguments.mode == "payload" and policy.profile(arguments.profile).mpi is not None:
             assert policy.mpi is not None
             control_fd = _open_control_source(policy.mpi.control_root, Path(arguments.control_source))
@@ -748,7 +744,8 @@ def _prepare_sandbox(
             argv += ["--setenv", "HTTK_DAEMON_MPI_HANDLE", arguments.handle]
             argv += ["--setenv", "HTTK_DAEMON_MPI_PROFILE", arguments.profile]
 
-        argv += ["--proc", "/proc", "--dev", "/dev"]
+        if not host_view:
+            argv += ["--proc", "/proc", "--dev", "/dev"]
         if arguments.mode == "mpi-rank":
             assert policy.mpi is not None
             _, shm_fd = _create_shared_memory_directory(policy, arguments.handle)

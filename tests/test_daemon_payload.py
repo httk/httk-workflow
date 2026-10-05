@@ -33,7 +33,6 @@ def _start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity: list[str])
         scancel=runtime / "scancel",
         cluster="cluster",
         readonly_paths=(runtime,),
-        broker_paths=(),
         profiles=(
             Profile(
                 "cpu",

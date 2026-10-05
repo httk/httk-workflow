@@ -54,7 +54,7 @@ def test_client_service_rank_roundtrip(
         json.dumps(
             {
                 "format": "httk-workspace-daemon-policy",
-                "format_version": 2,
+                "format_version": 3,
                 "workspace": str(workspace),
                 "workspace_id": "12345678-1234-4234-8234-123456789abc",
                 "enrollment_id": "e" * 32,
@@ -68,7 +68,6 @@ def test_client_service_rank_roundtrip(
                 "scancel": str(runtime / "scancel"),
                 "cluster": "site",
                 "readonly_paths": ["/usr", sys.prefix, str(runtime)],
-                "broker_paths": [],
                 "authorized_keys": [AUTHORIZED_KEY],
                 "profiles": {"mpi": {"cpus": 1, "memory_mb": 128, "time_minutes": 1, "mpi": {"nodes": 1, "ranks": 2}}},
                 "mpi": {"srun": str(srun), "control_root": str(tmp_path / "control"), "termination_grace": 0.1},

@@ -231,6 +231,10 @@ def _process_gone(path: Path) -> bool:
     return False
 
 
+def test_allocation_service_listens_on_its_host_view_control_bind() -> None:
+    assert service_module._SOCKET == Path("/tmp/httk-mpi/control.sock")
+
+
 def test_fixed_commands_clean_environment_listener_order_and_nonzero_streaming(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -575,3 +579,18 @@ def test_main_refuses_malformed_capacity(
     assert service_module.main(argv) == 2
     assert "--procs" in capsys.readouterr().err
     assert started == []
+
+
+def test_main_loads_the_policy_from_the_host_view_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _socket_path, _srun, _policy, _profile, arguments = _configuration(tmp_path)
+    loaded: list[Path] = []
+
+    def load(path: Path) -> object:
+        loaded.append(path)
+        raise ValueError("stop after loading")
+
+    monkeypatch.setattr(service_module, "load_policy", load)
+    argv = ["--policy-source", arguments.policy_source, "--profile", "parallel", "--handle", HANDLE]
+    argv += ["--job-id", "123", "--node", "node01", "--control-source", arguments.control_source, "--procs", "4"]
+    assert service_module.main(argv) == 2
+    assert loaded == [Path("/tmp/daemon-policy.json")]

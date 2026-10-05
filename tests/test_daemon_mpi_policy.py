@@ -31,7 +31,7 @@ def _document(tmp_path: Path) -> dict[str, Any]:
     }
     return {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 2,
+        "format_version": 3,
         "workspace": str(roots["site/workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
@@ -45,7 +45,6 @@ def _document(tmp_path: Path) -> dict[str, Any]:
         "scancel": str(roots["broker"] / "scancel"),
         "cluster": "cluster",
         "readonly_paths": [str(roots["runtime"])],
-        "broker_paths": [str(roots["broker"])],
         "authorized_keys": [AUTHORIZED_KEY],
         "profiles": {
             "serial": {"cpus": 2, "memory_mb": 1024, "time_minutes": 10},
@@ -254,50 +253,34 @@ def test_direct_mpi_dataclasses_require_immutable_collections(tmp_path: Path) ->
         )
 
 
-@pytest.mark.parametrize("role", ["readonly_paths", "broker_paths"])
-def test_run_mpi_destination_is_reserved(tmp_path: Path, role: str) -> None:
+def test_run_mpi_destination_is_reserved(tmp_path: Path) -> None:
     document = _document(tmp_path)
-    document[role] = ["/run"]
-    if role == "readonly_paths":
-        document["python"] = "/run/python"
-    else:
-        document["bwrap"] = "/run/bwrap"
-        document["sbatch"] = "/run/sbatch"
-        document["squeue"] = "/run/squeue"
-        document["scancel"] = "/run/scancel"
-        mpi = document["mpi"]
-        assert isinstance(mpi, dict)
-        mpi["srun"] = "/run/srun"
+    document["readonly_paths"] = ["/run"]
+    document["python"] = "/run/python"
     with pytest.raises(ValueError, match="reserved sandbox destinations"):
         load_policy(_write(tmp_path, document))
 
 
-@pytest.mark.parametrize("role", ["readonly_paths", "broker_paths"])
-def test_serial_policy_preserves_run_runtime_roots(tmp_path: Path, role: str) -> None:
+def test_serial_policy_preserves_run_runtime_roots(tmp_path: Path) -> None:
     document = _document(tmp_path)
     document.pop("mpi")
     profiles = document["profiles"]
     assert isinstance(profiles, dict)
     profiles.pop("mpi")
-    document[role] = ["/run"]
-    if role == "readonly_paths":
-        document["python"] = "/run/python"
-    else:
-        document["bwrap"] = "/run/bwrap"
-        document["sbatch"] = "/run/sbatch"
-        document["squeue"] = "/run/squeue"
-        document["scancel"] = "/run/scancel"
+    document["readonly_paths"] = ["/run"]
+    document["python"] = "/run/python"
     policy = load_policy(_write(tmp_path, document))
-    assert getattr(policy, role) == (Path("/run"),)
+    assert policy.readonly_paths == (Path("/run"),)
 
 
-def test_mpi_srun_must_be_in_an_approved_runtime(tmp_path: Path) -> None:
+def test_mpi_srun_may_lie_outside_readonly_paths(tmp_path: Path) -> None:
+    # Only the allocation service runs srun, and it sees the host read-only.
     document = _document(tmp_path)
     mpi = document["mpi"]
     assert isinstance(mpi, dict)
     mpi["srun"] = str(tmp_path / "other/srun")
-    with pytest.raises(ValueError, match="within an approved runtime"):
-        load_policy(_write(tmp_path, document))
+    policy = load_policy(_write(tmp_path, document))
+    assert policy.mpi is not None and policy.mpi.srun == tmp_path / "other/srun"
 
 
 def test_policy_can_be_constructed_directly_with_mpi(tmp_path: Path) -> None:
@@ -316,7 +299,6 @@ def test_policy_can_be_constructed_directly_with_mpi(tmp_path: Path) -> None:
         scancel=tmp_path / "broker/scancel",
         cluster="cluster",
         readonly_paths=(tmp_path / "runtime",),
-        broker_paths=(tmp_path / "broker",),
         profiles=(Profile("mpi", 2, 4096, 10, mpi=MPIProfile(1, 2)),),
         mpi=mpi,
     )
