@@ -13,6 +13,7 @@ from typing import Any
 
 from ._allocation import argv_allocation, half_physical_memory_mb, split_allocation
 from ._confine import confine_settings
+from ._daemon_policy import SLURM_EXPORT_SETTING, validate_slurm_export
 from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
@@ -105,6 +106,11 @@ def _validate_launcher_metadata(
     if metadata.get("kind") == "slurm":
         # Pinned on every manager this bundle starts; refuse a bad value before any submission.
         confine_settings(settings)
+    # The sbatch --export mode of a daemon manager submission; refuse a bad value at configure/add/enroll
+    # (a null reads as unset and resolves to the default at submission time).
+    export = settings.get(SLURM_EXPORT_SETTING)
+    if export is not None:
+        validate_slurm_export(export)
     timeout = metadata.get("timeout_seconds", 60.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("launcher timeout_seconds must be positive")

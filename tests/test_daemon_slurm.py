@@ -26,6 +26,7 @@ from httk.workflow._daemon_slurm import (
     manager_argv,
 )
 from httk.workflow._daemon_state import Ledger
+from httk.workflow.launch_runtime import SubmissionIdentity, slurm_submission
 
 _HANDLE = "a" * 32
 
@@ -90,7 +91,7 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
     argv, environment, script = json.loads(record.read_text())
     assert argv[1:] == [
         "--parsable",
-        "--export=NIL",
+        "--export=NONE",
         "--no-requeue",
         "--input=/dev/null",
         "--clusters=cluster",
@@ -139,6 +140,48 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "--idle",
     ]
     assert not (policy.workspace / ".httk-workspace").exists()
+
+
+def _submission_identity(policy: Policy) -> SubmissionIdentity:
+    return SubmissionIdentity(
+        job_name=f"httk-{_HANDLE}",
+        sbatch=policy.sbatch,
+        cluster=policy.cluster,
+        output=str(policy.jobs / "httk-%j.out"),
+    )
+
+
+def test_submission_emits_one_export_none_by_default(policy: Policy) -> None:
+    argv, _script = slurm_submission(
+        settings=dict(policy.launcher("cpu").settings),
+        argv=manager_argv(policy),
+        workspace=str(policy.workspace),
+        identity=_submission_identity(policy),
+    )
+    assert [item for item in argv if item.startswith("--export=")] == ["--export=NONE"]
+
+
+def test_submission_honours_slurm_export_nil(policy: Policy) -> None:
+    launcher = _launcher("cpu", **{**CPU, "slurm.export": "NIL"})
+    argv, _script = slurm_submission(
+        settings=dict(launcher.settings),
+        argv=manager_argv(policy),
+        workspace=str(policy.workspace),
+        identity=_submission_identity(policy),
+    )
+    assert [item for item in argv if item.startswith("--export=")] == ["--export=NIL"]
+
+
+@pytest.mark.parametrize("value", ["ALL", "NONE,FOO", "", "NONE --wrap x", "none", "nil", " NONE", "NONE\n", 1])
+def test_slurm_submission_defensively_refuses_an_unvalidated_export(policy: Policy, value: object) -> None:
+    # The frozen path validates first, so reach the sbatch-argv guard directly with a raw settings map.
+    with pytest.raises(ValueError, match="slurm.export must be exactly"):
+        slurm_submission(
+            settings={**CPU, "slurm.export": value},
+            argv=manager_argv(policy),
+            workspace=str(policy.workspace),
+            identity=_submission_identity(policy),
+        )
 
 
 def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_path: Path) -> None:

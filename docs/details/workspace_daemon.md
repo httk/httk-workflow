@@ -327,18 +327,20 @@ Slurm's partition and site defaults apply:
   are refused at `--initialize` and `--reload` unless `--force` is passed.
 
 Each signed start submits exactly one manager, with the launcher's batch
-directives plus `--parsable`, `--export=NIL`, `--no-requeue`,
+directives plus `--parsable`, `--export=<mode>`, `--no-requeue`,
 `--input=/dev/null`, `--clusters`, the job name `httk-<handle>` and its output
-file. The batch script, piped to `sbatch`, writes nothing into the workspace.
-It runs the frozen `environment.prelude` under `set -e` in a login shell, then
-the manager: `manager.command` (default `httk`) on the resulting `PATH` when a
-prelude is set, otherwise the enrollment's `--python`. With a prelude, the
-approved launcher's content, not `--python`, therefore decides which
-interpreter runs the manager; the configuration digest covers that content.
-Because of
-`--export=NIL`, the manager's environment comes from the login shell and the
-prelude, not from the daemon. The workspace's own `environment.prelude` does
-not apply to daemon submissions.
+file. The export mode is the launcher setting `slurm.export`, either `NONE`
+(the default when unset) or `NIL`; see the site's `sbatch` manual for what each
+means on that cluster. The batch script, piped to `sbatch`, writes nothing into
+the workspace. It runs the frozen `environment.prelude` under `set -e` in a
+login shell, then the manager: `manager.command` (default `httk`) on the
+resulting `PATH` when a prelude is set, otherwise the enrollment's `--python`.
+With a prelude, the approved launcher's content, not `--python`, therefore
+decides which interpreter runs the manager; the configuration digest covers that
+content. With the default `--export=NONE`, the manager's environment comes from
+the login shell and the prelude, not from the daemon; `NIL` was observed to
+break the login-shell Lmod environment on one site, so `NONE` is the default.
+The workspace's own `environment.prelude` does not apply to daemon submissions.
 
 The manager is `httk workflow manager run --by-path --workspace WORKSPACE
 --exchange --idle` with the launcher's `--workers` (from `manager.workers`),

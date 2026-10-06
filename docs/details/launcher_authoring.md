@@ -136,7 +136,10 @@ copied into the bundle. The settings fall into four groups:
 
 - scheduler settings: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
   `slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
-  `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation`;
+  `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation`,
+  which become batch directives; and `slurm.export` (`NONE`, the default, or
+  `NIL`), which instead sets the `sbatch --export` mode of a workspace-daemon
+  manager submission;
 - `manager.workers` and `manager.allocation`, which belong to the manager
   command;
 - the manager's pinned settings `manager.confine`, `manager.launch_template`,

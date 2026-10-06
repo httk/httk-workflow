@@ -68,9 +68,13 @@ $ httk workflow run --count 4 --workspace default
 | `slurm.mem` | Slurm memory allocation. |
 | `slurm.gres` | Slurm generic resource request. |
 | `slurm.reservation` | Slurm reservation. |
+| `slurm.export` | sbatch `--export` mode for a workspace-daemon manager submission: `NONE` (default) or `NIL`. |
 | `environment.prelude` | Shell setup run before the manager, such as a module load or environment activation. |
 
-The `slurm.*` values become batch directives. `environment.prelude` runs before
+The `slurm.*` values become batch directives, except `slurm.export`, which sets
+the `sbatch --export` command-line mode (`NONE` or `NIL`, default `NONE`) of a
+workspace-daemon manager submission; see the site's `sbatch` manual for what
+each mode means. `environment.prelude` runs before
 the manager under `set -e`, and `manager.command` is then looked up on the
 resulting `PATH`. Without a prelude, the launcher preserves the Python
 interpreter that started the command.

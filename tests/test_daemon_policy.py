@@ -145,6 +145,12 @@ def test_configuration_digest_binds_the_launcher_and_the_submission_identity(tmp
         ({"settings": {"slurm.mem": True}, "digest": DIGEST}, "JSON scalar"),
         ({"settings": {"slurm.mem": ["4G"]}, "digest": DIGEST}, "JSON scalar"),
         ({"settings": {"slurm.mem": "4\u0000G"}, "digest": DIGEST}, "JSON scalar"),
+        ({"settings": {"slurm.export": "ALL"}, "digest": DIGEST}, "slurm.export must be exactly"),
+        ({"settings": {"slurm.export": "none"}, "digest": DIGEST}, "slurm.export must be exactly"),
+        ({"settings": {"slurm.export": " NONE"}, "digest": DIGEST}, "slurm.export must be exactly"),
+        ({"settings": {"slurm.export": "NONE\n"}, "digest": DIGEST}, "slurm.export must be exactly"),
+        ({"settings": {"slurm.export": ""}, "digest": DIGEST}, "slurm.export must be exactly"),
+        ({"settings": {"slurm.export": 1}, "digest": DIGEST}, "slurm.export must be exactly"),
     ],
 )
 def test_launcher_entries_are_strict(tmp_path: Path, entry: object, message: str) -> None:
@@ -167,6 +173,38 @@ def test_launcher_names_are_daemon_configuration_names(tmp_path: Path) -> None:
         ApprovedLauncher("cpu", (("slurm.mem", "1G"), ("slurm.mem", "2G")), DIGEST)
     with pytest.raises(ValueError, match="key/value pairs"):
         ApprovedLauncher("cpu", (("slurm.mem",),), DIGEST)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", ["NONE", "NIL"])
+def test_slurm_export_is_frozen_when_valid(value: str) -> None:
+    launcher = ApprovedLauncher("cpu", (("slurm.export", value),), DIGEST)
+    assert dict(launcher.settings)["slurm.export"] == value
+
+
+@pytest.mark.parametrize("value", ["ALL", "none", "nil", " NONE", "NONE\n", "", "NONE,FOO", 1])
+def test_slurm_export_is_refused_when_invalid(value: object) -> None:
+    with pytest.raises(ValueError, match="slurm.export must be exactly"):
+        ApprovedLauncher("cpu", (("slurm.export", value),), DIGEST)  # type: ignore[arg-type]
+
+
+def test_slurm_export_null_reads_as_unset() -> None:
+    launcher = ApprovedLauncher("cpu", (("slurm.export", None),), DIGEST)
+    assert dict(launcher.settings)["slurm.export"] is None
+
+
+def test_policy_without_slurm_export_loads_and_a_present_one_round_trips(tmp_path: Path) -> None:
+    # A legacy snapshot without the key loads (it resolves to NONE only at submission time).
+    legacy = load_policy(_write(tmp_path, _document(tmp_path)))
+    assert "slurm.export" not in dict(legacy.launcher("cpu").settings)
+    document = _document(tmp_path)
+    launchers = document["launchers"]
+    assert isinstance(launchers, dict)
+    launchers["cpu"]["settings"]["slurm.export"] = "NIL"
+    policy = load_policy(_write(tmp_path, document))
+    assert dict(policy.launcher("cpu").settings)["slurm.export"] == "NIL"
+    round_trip = tmp_path / "round-trip.json"
+    round_trip.write_text(json.dumps(policy_document(policy)), encoding="utf-8")
+    assert load_policy(round_trip) == policy
 
 
 @pytest.mark.parametrize("field", ["workspace", "workspace_id", "launchers", "bwrap", "cluster"])

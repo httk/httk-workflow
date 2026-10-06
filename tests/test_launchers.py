@@ -155,6 +155,27 @@ def test_launcher_settings_use_workspace_validation_rules(
         configure_launcher("cluster", settings, project=project)
 
 
+@pytest.mark.parametrize("value", ["ALL", "NONE,FOO", "", "NONE --wrap x", "none", "nil", " NONE", "NONE\n"])
+def test_slurm_export_rejects_bad_values_at_configure_and_add(tmp_path: Path, remote: Remote, value: str) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="slurm-export-validation")
+    with pytest.raises(ValueError, match="slurm.export must be exactly"):
+        add_launcher("bad", template="slurm", settings={"slurm.export": value}, project=project)
+    add_launcher("cluster", template="slurm", project=project)
+    with pytest.raises(ValueError, match="slurm.export must be exactly"):
+        configure_launcher("cluster", {"slurm.export": value}, project=project)
+
+
+@pytest.mark.parametrize("value", ["NONE", "NIL"])
+def test_slurm_export_accepts_none_and_nil(tmp_path: Path, remote: Remote, value: str) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="slurm-export-accept")
+    bundle = add_launcher("cluster", template="slurm", settings={"slurm.export": value}, project=project)
+    stored = json.loads((bundle / "launcher.json").read_text(encoding="utf-8"))
+    assert stored["settings"]["slurm.export"] == value
+    configure_launcher("cluster", {"slurm.export": "NIL" if value == "NONE" else "NONE"}, project=project)
+
+
 def test_launcher_add_process_is_reserved(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="reserved-launcher")

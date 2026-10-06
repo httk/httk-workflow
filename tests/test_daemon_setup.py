@@ -243,6 +243,30 @@ def test_other_launcher_settings_are_frozen_as_ordinary_slurm_settings(tmp_path:
     )
 
 
+def test_slurm_export_default_keeps_the_digest_and_nil_changes_it(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    # Without slurm.export the frozen content, and so the digest, is what it was before the setting existed.
+    default_digest = _bundle_digest("small")
+    policy = load_policy(_initialize(layout, "small"))
+    assert policy.launcher("small").digest == default_digest
+    assert "slurm.export" not in dict(policy.launcher("small").settings)
+    # NIL is a different frozen configuration, so both the bundle digest and the configuration digest change.
+    _rewrite_launcher("small", **{"slurm.export": "NIL"})
+    reloaded = load_policy(_daemon_setup.reload(layout.workspace.root))
+    assert dict(reloaded.launcher("small").settings)["slurm.export"] == "NIL"
+    assert reloaded.launcher("small").digest == _bundle_digest("small") != default_digest
+    assert reloaded.configuration_digest("small") != policy.configuration_digest("small")
+
+
+@pytest.mark.parametrize("value", ["ALL", "none", " NONE", "NONE\n", ""])
+def test_slurm_export_invalid_value_fails_at_approval(value: str, tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    _rewrite_launcher("small", **{"slurm.export": value})
+    with pytest.raises(ValueError, match="slurm.export must be exactly"):
+        _initialize(layout, "small")
+    assert not _state(layout).exists()
+
+
 def test_the_launcher_executable_must_be_the_packaged_slurm_launcher(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _executable(launchers_home() / "small" / "launcher", "#!/bin/sh\nexec site-launcher \"$@\"\n")

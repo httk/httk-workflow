@@ -15,6 +15,7 @@ from typing import Any
 
 from ._allocation import argv_allocation, parse_allocation_spec
 from ._confine import is_override_key
+from ._daemon_policy import DEFAULT_SLURM_EXPORT, SLURM_EXPORT_SETTING, validate_slurm_export
 from .launchers import _manager_command
 
 BATCH_DIRECTORY = ".httk-workspace/batch"
@@ -241,10 +242,14 @@ def slurm_submission(
     script = _batch_script(
         _manager_argv(argv, settings, settings), settings=settings, workspace=workspace, directory=None
     )
+    # Defensive revalidation: never place an unvalidated string into the sbatch argv (argv-injection
+    # surface). An unset slurm.export resolves to the default; a present one must be NONE or NIL.
+    export = settings.get(SLURM_EXPORT_SETTING)
+    export_value = DEFAULT_SLURM_EXPORT if export is None else validate_slurm_export(export)
     command = [
         str(identity.sbatch),
         "--parsable",
-        "--export=NIL",
+        f"--export={export_value}",
         "--no-requeue",
         "--input=/dev/null",
         f"--clusters={identity.cluster}",

@@ -89,6 +89,31 @@ def _authorized_keys(value: object) -> tuple[str, ...]:
 
 type SettingValue = str | int | float | None
 
+#: The launcher setting that selects the sbatch ``--export`` mode of a daemon manager submission.
+SLURM_EXPORT_SETTING = "slurm.export"
+#: The only accepted ``slurm.export`` values, case-sensitive and never stripped or coerced. ``ALL`` is
+#: excluded on purpose: it would leak the broker's sandbox environment (HOME=/tmp/home and the rest) into
+#: the submitted manager.
+SLURM_EXPORT_VALUES = ("NONE", "NIL")
+#: The export mode used when ``slurm.export`` is unset.
+DEFAULT_SLURM_EXPORT = "NONE"
+
+
+def validate_slurm_export(value: object) -> str:
+    """Return a valid ``slurm.export`` value, refusing anything but ``NONE`` or ``NIL``.
+
+    :param value: The value to check, used exactly as given: no stripping, no case folding.
+    :return: The value unchanged.
+    :raises ValueError: If the value is not exactly ``NONE`` or ``NIL``.
+    """
+
+    if type(value) is not str or value not in SLURM_EXPORT_VALUES:
+        raise ValueError(
+            f"launcher setting {SLURM_EXPORT_SETTING} must be exactly {' or '.join(SLURM_EXPORT_VALUES)} "
+            f"(case-sensitive, no surrounding whitespace): {value!r}"
+        )
+    return value
+
 
 def _setting_value(key: str, value: object) -> SettingValue:
     if value is None or (type(value) is str and "\0" not in value) or type(value) is int:
@@ -123,6 +148,10 @@ class ApprovedLauncher:
             key, value = item
             _name(key, "launcher setting name", _SETTING_KEY)
             _setting_value(key, value)
+            # Freeze/decode guard: a frozen or snapshot-decoded slurm.export must be NONE or NIL (a null
+            # reads as unset and resolves to the default). This is the broker/bootstrap decode entry.
+            if key == SLURM_EXPORT_SETTING and value is not None:
+                validate_slurm_export(value)
             keys.append(key)
         if keys != sorted(set(keys)):
             raise ValueError("launcher settings must be sorted with unique keys")
