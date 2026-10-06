@@ -636,7 +636,8 @@ def test_a_launch_that_cannot_be_reaped_is_uncertain_and_closes_admission(
 _OUTLIVING = """
 rank_pid = results.parent / "pids" / "outliving"
 rank = 'trap "" TERM; echo $$ > "$1"; sleep 4'
-subprocess.Popen([*launch, "sh", "-c", rank, "sh", str(rank_pid)], start_new_session=True, cwd=workdir)
+client = subprocess.Popen([*launch, "sh", "-c", rank, "sh", str(rank_pid)], start_new_session=True, cwd=workdir)
+(results.parent / "pids" / "client").write_text(str(client.pid))
 wait_for(rank_pid)
 """
 
@@ -676,6 +677,11 @@ def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_i
     assert bench.outcome(job_id) == ("succeeded", None)
     job = bench.workspace.payload_path(marker.placement, marker.job_key)
     assert not (job / "attempts").exists()
+    client = int(bench.pid_file("client").read_text())
+    deadline = time.monotonic() + 5
+    while _alive(client):  # the commit removed launch/; the client must not poll it forever
+        assert time.monotonic() < deadline, "the launch client outlived its launch directory"
+        time.sleep(0.05)
 
 
 # -- takeover evidence ---------------------------------------------------------------------------------

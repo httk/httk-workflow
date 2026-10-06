@@ -8,7 +8,8 @@ output and error, and exits with the launch's exit status:
    so the manager can tell a live client from a dead one;
 2. publish ``launch/ID.request.json`` by renaming a temporary file into place;
 3. copy ``launch/ID.stdout`` and ``launch/ID.stderr`` (created by the manager) to its own standard output
-   and error until ``launch/ID.status.json`` exists and both are drained.
+   and error until ``launch/ID.status.json`` exists and both are drained. If ``launch/`` is removed first
+   (the attempt was committed or cleaned up), the client exits with status 2 instead of waiting forever.
 
 SIGTERM, SIGINT and SIGHUP do not end the client: it creates ``launch/ID.stop`` and keeps waiting for the
 manager's ``stopped`` status, so its caller returns only after the ranks are reaped. Only SIGKILL ends it
@@ -272,6 +273,13 @@ def _wait(directory_fd: int, request_id: str, stop_requested: list[int]) -> int:
                 if status.error is not None:
                     print(f"httk-workflow launch: {status.state}: {status.error}", file=sys.stderr, flush=True)
                 return _exit_code(status)
+            if os.fstat(directory_fd).st_nlink == 0:  # the streams were pumped one last time above
+                print(
+                    "httk-workflow launch: the launch directory was removed before its status arrived",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 2
             time.sleep(_POLL_SECONDS)
     finally:
         for stream in streams:

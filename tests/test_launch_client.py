@@ -4,6 +4,7 @@ import errno
 import fcntl
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -228,6 +229,16 @@ def test_sigkill_releases_the_lock(attempt: _Attempt, clients: list[subprocess.P
     process.wait(timeout=_TIMEOUT)
     assert not _lock_held(lock)
     assert not (attempt.launch / stop_name(request.request_id)).exists()
+
+
+def test_a_removed_launch_directory_ends_the_client(attempt: _Attempt, clients: list[subprocess.Popen[bytes]]) -> None:
+    process = _start(attempt, "app")
+    clients.append(process)
+    _wait_for_request(attempt, process)
+    shutil.rmtree(attempt.launch)
+    _stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 2
+    assert b"the launch directory was removed before its status arrived" in stderr
 
 
 def _in_process(
