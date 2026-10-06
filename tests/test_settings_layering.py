@@ -121,10 +121,12 @@ def _attempt_environment(
     context_json = json.dumps(
         {
             "format": "httk-workflow-attempt-context",
+            "durable": False,
+            "deadline": None,
             "format_version": 2,
             "workspace_id": str(uuid.uuid4()),
-            "job_id": str(uuid.uuid4()),
-            "job_key": f"fabricated--{uuid.uuid4()}",
+            "job_id": (_jid := str(uuid.uuid4())),
+            "job_key": f"fabricated--{_jid}",
             "placement": "project/fabricated",
             "payload": str(payload),
             "step": "only",

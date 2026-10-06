@@ -64,11 +64,29 @@ def _key_record(value: str) -> dict[str, object]:
     return {"public_key": value, "fingerprint": key_fingerprint(value)}
 
 
-def _workspace_of(project: Path) -> Workspace | None:
-    """Attach the project's workspace read-only, or report that there is none."""
+def _workspace_root(project: Path) -> Path | None:
+    """Return the root of the project's recorded default local workspace, if it resolves."""
 
+    recorded = read_project_section(project, "workspace").get("default")
+    if not isinstance(recorded, str):
+        return None
     try:
-        return Workspace(project, mutable=False)
+        binding = resolve_workspace(recorded, project=project)
+    except (OSError, ValueError, WorkflowError):
+        return None
+    if binding.remote != "local" or binding.path is None:
+        return None
+    root = Path(binding.path)
+    return root if (root / WORKSPACE_DIRECTORY / "format.json").is_file() else None
+
+
+def _workspace_at(root: Path | None) -> Workspace | None:
+    """Attach the workspace at *root* read-only, or report that there is none."""
+
+    if root is None:
+        return None
+    try:
+        return Workspace(root, mutable=False)
     except (WorkflowError, OSError, ValueError):
         return None
 
@@ -77,8 +95,7 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
     """Summarize the project workspace without mutating anything in it."""
 
     summary: dict[str, object] = {
-        "present": (project / WORKSPACE_DIRECTORY / "format.json").is_file(),
-        "initialization_failed": metadata.get("workspace_initialization_failed") is True,
+        "present": _workspace_root(project) is not None,
     }
     section = read_project_section(project, "workspace")
     recorded = section.get("default")
@@ -95,7 +112,7 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
         else:
             default["resolves"] = True
     summary["default"] = default
-    workspace = _workspace_of(project)
+    workspace = _workspace_at(_workspace_root(project))
     if workspace is None:
         return summary
     counts: dict[str, int] = {}
@@ -300,10 +317,10 @@ class Finding:
         }
 
 
-def _check_maintenance_lock(project: Path, repair: bool) -> Finding:
+def _check_maintenance_lock(workspace_root: Path, repair: bool) -> Finding:
     """A stale maintenance lock fences every manager for nothing."""
 
-    workspace = _workspace_of(project)
+    workspace = _workspace_at(workspace_root)
     if workspace is None:
         return Finding("maintenance_lock", "ok", "there is no workspace to hold a maintenance lock")
     holder = read_maintenance_lock(workspace)
@@ -324,7 +341,7 @@ def _check_maintenance_lock(project: Path, repair: bool) -> Finding:
         details={"path": str(holder.path)},
     )
     if repair:
-        finding.action = release_maintenance_lock(Workspace(project))
+        finding.action = release_maintenance_lock(Workspace(workspace_root))
         finding.repaired = True
         finding.status = "ok"
     return finding
@@ -347,10 +364,10 @@ def _check_workspace_default(project: Path) -> Finding | None:
     )
 
 
-def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
+def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
     """Staging entries nothing renamed out are pure leftovers."""
 
-    tmp = project / WORKSPACE_DIRECTORY / "tmp"
+    tmp = workspace_root / WORKSPACE_DIRECTORY / "tmp"
     if not tmp.is_dir():
         return Finding("tmp_leftovers", "ok", "there is no workspace staging directory")
     deadline = time.time() - TMP_MAXIMUM_AGE_SECONDS

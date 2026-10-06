@@ -53,6 +53,7 @@ from .errors import FormatError, WorkflowError
 from .journal import JournalWriter, iter_record_chain, parse_record_ref
 from .models import (
     ATTEMPTS_DIRECTORY,
+    LOGS_DIRECTORY,
     QUIESCENT_KINDS,
     STATE_KINDS,
     TERMINAL_KINDS,
@@ -89,6 +90,7 @@ GC_CATEGORIES = (
     "retired_requests",
     "journal_segments",
     "manager_directories",
+    "manager_logs",
     "placement_directories",
 )
 #: Categories whose entries cannot carry information and are safe to collect
@@ -468,6 +470,7 @@ class _Collection:
         # the writer's surviving segments.
         if "manager_directories" in selected:
             selected.add("journal_segments")
+            selected.add("manager_logs")
         self._selected = frozenset(selected)
         self._accumulators = {name: _Accumulator(name) for name in GC_CATEGORIES}
         self._skipped: list[str] = []
@@ -695,7 +698,9 @@ class _Collection:
             # reached and listed through no-follow descriptors and every
             # removal is anchored on them.
             try:
-                with JobDirectory.open(self.workspace.root, marker.placement, marker.job_key) as job_dir:
+                with JobDirectory.open(
+                    jobs=self.workspace.jobs, placement=marker.placement, job_key=marker.job_key
+                ) as job_dir:
                     attempts = job_dir.directory(ATTEMPTS_DIRECTORY)
             except (FormatError, OSError):
                 continue
@@ -845,7 +850,9 @@ class _Collection:
             # and removed only through no-follow descriptors: a symlink planted
             # anywhere on the way is skipped, never followed.
             try:
-                with JobDirectory.open(self.workspace.root, marker.placement, marker.job_key) as job_dir:
+                with JobDirectory.open(
+                    jobs=self.workspace.jobs, placement=marker.placement, job_key=marker.job_key
+                ) as job_dir:
                     attempts = job_dir.directory(ATTEMPTS_DIRECTORY)
             except (FormatError, OSError):
                 continue
@@ -1108,6 +1115,27 @@ class _Collection:
                 continue
             self._collect("manager_directories", manager_dir)
 
+    def collect_manager_logs(self) -> None:
+        """Collect the per-manager logs of managers whose directory is gone.
+
+        ``logs/managers/<id>.log`` (and its ``.1`` backup) outlives the manager
+        so a crash stays diagnosable; once the manager directory is collected
+        and the file is older than ``retention.trash_days`` it is removed.
+        ``logs/batch/`` is never touched.
+        """
+
+        cutoff = self._cutoff(self.retention.trash_days)
+        if cutoff is None:
+            self._skip("manager_logs", "retention.trash_days is not configured")
+            return
+        for entry in _iterdir(self.workspace.root / LOGS_DIRECTORY / "managers"):
+            manager_id = entry.name.removesuffix(".1").removesuffix(".log")
+            if not entry.name.endswith((".log", ".log.1")) or not entry.is_file():
+                continue
+            if (self.control / "managers" / manager_id).exists() or not self._aged(entry, cutoff):
+                continue
+            self._collect("manager_logs", entry, size=self._entry_size(entry))
+
     def _collect_dead_launch_records(self, manager_dir: Path) -> frozenset[str]:
         """Collect the trusted launch records of a dead manager that describe no live launch; return their names."""
 
@@ -1362,7 +1390,7 @@ def collect_garbage(
         canonical :data:`GC_CATEGORIES` order. Selecting
         ``manager_directories`` also selects ``journal_segments`` because the
         manager-directory decision depends on that category's surviving
-        segment count.
+        segment count, and ``manager_logs``, whose eligibility follows it.
     :param journal_writer: Append a collection frame to this already-open
         writer instead of opening a new writer.
     :param sizes: Whether to calculate byte estimates. Set this to ``False``

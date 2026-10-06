@@ -327,7 +327,7 @@ def test_a_bundle_sealed_under_the_previous_digest_rule_is_refused_by_version(tm
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
     manifest_path = bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["format_version"] == TRANSFER_FORMAT_VERSION == 2
+    assert manifest["format_version"] == TRANSFER_FORMAT_VERSION == 3
     manifest["format_version"] = 1
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     # A manifest at any other version is refused by the strict format gate.

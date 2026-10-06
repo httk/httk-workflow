@@ -82,6 +82,9 @@ from .models import (
     normalize_placement,
     parse_job_key,
     parse_package_runner,
+    parse_placement_text,
+    payload_relative,
+    placement_text,
     validate_declaration_name,
     validate_failure,
     validate_label,
@@ -447,8 +450,7 @@ def children_of(frames: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, obje
 
     A campaign therefore collects as a tree: every record names the children it
     spawned, and each of those is a job a consumer collects in its own right. A
-    label is mandatory in ``core-v2``, so an unlabeled child reference — only
-    possible in a workspace written by an older profile — is left out rather than
+    label is mandatory, so an unlabeled child reference is left out rather than
     given an invented name. A label reused by a later activation names the child
     of the most recent spawn under it.
 
@@ -735,7 +737,7 @@ class JobRecord:
             "runner_provenance": None if self.runner_provenance is None else dict(self.runner_provenance),
             "state": self.state,
             "failure": None if self.failure is None else self.failure.as_mapping(),
-            "placement": self.placement.as_posix(),
+            "placement": placement_text(self.placement),
             "payload_path": self.payload_path.as_posix(),
             "workdir_path": None if self.workdir_path is None else self.workdir_path.as_posix(),
             "data_path": None if self.data_path is None else self.data_path.as_posix(),
@@ -778,7 +780,7 @@ class JobRecord:
             runner_provenance=None if not isinstance(provided, Mapping) else dict(provided),
             state=require_string(value.get("state"), "state"),
             failure=None if not isinstance(failure, Mapping) else validate_failure(failure),
-            placement=normalize_placement(require_string(value.get("placement"), "placement")),
+            placement=parse_placement_text(value.get("placement")),
             payload_path=PurePosixPath(require_string(value.get("payload_path"), "payload_path")),
             workdir_path=_optional_posix(value.get("workdir_path")),
             data_path=_optional_posix(value.get("data_path")),
@@ -904,7 +906,7 @@ def record_of(workspace: Workspace, marker: Marker) -> JobRecord | None:
     failure, failure_damaged = _failure_of(state)
     if state_error is not None or failure_damaged:
         provenance["gaps"] = True
-    payload_path = marker.placement / marker.job_key
+    payload_path = payload_relative(marker.placement, marker.job_key)
     workdir = _workdir_relative(job, state)
     declarations, declarations_damaged = declarations_of(job, workspace.payload_path(marker.placement, marker.job_key))
     if declarations_damaged:

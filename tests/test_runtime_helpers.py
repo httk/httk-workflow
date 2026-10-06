@@ -14,6 +14,9 @@ from httk.workflow.runtime import run_command
 def _context(path: Path) -> dict[str, object]:
     return {
         "format": "httk-workflow-attempt-context",
+        "durable": False,
+        "deadline": None,
+        "settings": {},
         "format_version": 2,
         "workspace_id": "workspace",
         "job_id": "job",

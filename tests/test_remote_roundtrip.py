@@ -67,8 +67,7 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
 
     local_root = tmp_path / "local"
     initialize_project(local_root, name="roundtrip")
-    Workspace.initialize(local_root)
-    local = Workspace(local_root)
+    local = Workspace.initialize(local_root / "workspace")
     station = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(local_root, workspace=str(station.root))
     station.set_setting("manager.workers", "2")
@@ -103,7 +102,7 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
     context = CLIContext("httk", local_root)
     # Every command names a registered workspace: "home" is local, "station" is
     # the workspace on the "cluster" remote the transfers cross to.
-    register_ws(context, local_root, "home")
+    register_ws(context, local.root, "home")
     register_ws(context, station.root, "station", remote="cluster")
     return Campaign(cluster=remote, local=local, station=station, context=context, job_id=job.id)
 

@@ -57,6 +57,7 @@ workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 results = Path(os.environ["HTTK_TEST_RESULTS"])
 launch = shlex.split(os.environ.get("HTTK_WORKFLOW_LAUNCH", ""))
 launch_dir = control / "launch"
+locks_dir = Path(os.environ["HTTK_WORKFLOW_LAUNCH_LOCKS"]) if "HTTK_WORKFLOW_LAUNCH_LOCKS" in os.environ else None
 result = {"launch": os.environ.get("HTTK_WORKFLOW_LAUNCH")}
 published = False
 
@@ -118,8 +119,18 @@ def alive(pid):
 def request(request_id, *, lock="held", stdout=False):
     launch_dir.mkdir(exist_ok=True)
     descriptor = None
-    if lock != "missing":
-        descriptor = os.open(launch_dir / protocol.lock_name(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    if lock in ("symlink", "launch_directory"):
+        # A lock the manager must not accept: a symlink in the lock directory, or the old location.
+        target = locks_dir / protocol.lock_name(request_id) if lock == "symlink" else launch_dir / protocol.lock_name(request_id)
+        real = control / "forged.lock"
+        descriptor = os.open(real, os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if lock == "symlink":
+            os.symlink(real, target)
+        else:
+            os.rename(real, target)
+    elif lock != "missing":
+        descriptor = os.open(locks_dir / protocol.lock_name(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         if lock == "held":
             fcntl.flock(descriptor, fcntl.LOCK_EX)
         else:
@@ -368,6 +379,8 @@ _FORGED = """
 import secrets
 result["missing_lock"] = request(secrets.token_hex(16), lock="missing")
 result["dead_client"] = request(secrets.token_hex(16), lock="released")
+result["symlinked_lock"] = request(secrets.token_hex(16), lock="symlink")
+result["lock_in_launch_directory"] = request(secrets.token_hex(16), lock="launch_directory")
 result["forged_stdout"] = request(secrets.token_hex(16), stdout=True)
 """
 
@@ -381,11 +394,37 @@ def test_requests_without_a_live_client_lock_or_with_forged_output_are_refused(b
     for key, text in (
         ("missing_lock", "no client lock file"),
         ("dead_client", "client is gone"),
+        ("symlinked_lock", "no client lock file"),
+        ("lock_in_launch_directory", "no client lock file"),
         ("forged_stdout", "output files already exist"),
     ):
         assert result[key]["state"] == "refused", key
         assert text in result[key]["error"], key
     assert not bench.record.exists()
+
+
+_LOCKS = """
+result["locks_dir"] = str(locks_dir)
+result["locks_mode"] = oct(locks_dir.stat().st_mode & 0o777)
+result["ran"] = run([*launch, "true"])
+result["locks_during"] = sorted(path.name for path in locks_dir.iterdir())
+result["locks_under_launch_directory"] = any(launch_dir.glob("*.lock"))
+"""
+
+
+def test_the_lock_directory_is_per_attempt_on_shm_and_removed_with_the_attempt(bench: _Bench) -> None:
+    _marker, job_id = bench.submit("locks", _LOCKS)
+    with bench.manager() as manager:
+        manager.run_until_idle(timeout=_TIMEOUT)
+    assert bench.outcome(job_id) == ("succeeded", None)
+    result = bench.result(job_id)
+    assert Path(result["locks_dir"]).parent == bench.shm
+    assert Path(result["locks_dir"]).name.startswith("httk-launch-")
+    assert result["locks_mode"] == "0o700"
+    assert result["ran"]["code"] == 0
+    assert result["locks_during"] and all(name.endswith(".lock") for name in result["locks_during"])
+    assert not result["locks_under_launch_directory"]
+    assert list(bench.shm.iterdir()) == []
 
 
 _AFTER_PUBLISH = """
@@ -901,7 +940,7 @@ def test_a_reaped_launch_leaves_no_trusted_record(bench: _Bench) -> None:
 _SHARED_MEMORY = """
 os.environ["SHM_ROOT"] = os.environ["HTTK_TEST_SHM_ROOT"]
 os.environ["WORKSPACE"] = os.environ["HTTK_WORKFLOW_WORKSPACE_DIR"]
-listing = 'ls "$SHM_ROOT"; cat "$WORKSPACE"/.httk-workspace/managers/*/launches/*/launch.json'
+listing = 'ls "$SHM_ROOT" | grep -v ^httk-launch-; cat "$WORKSPACE"/.httk-workspace/managers/*/launches/*/launch.json'
 result["shm"] = run([*launch, "sh", "-c", listing])
 """
 

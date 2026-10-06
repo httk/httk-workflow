@@ -345,10 +345,13 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
     control.mkdir()
     context = {
         "format": "httk-workflow-attempt-context",
+        "durable": False,
+        "deadline": None,
+        "settings": {},
         "format_version": 2,
         "workspace_id": str(uuid.uuid4()),
-        "job_id": str(uuid.uuid4()),
-        "job_key": f"job--{uuid.uuid4()}",
+        "job_id": (_jid := str(uuid.uuid4())),
+        "job_key": f"job--{_jid}",
         "placement": "project/a",
         "payload": str(tmp_path / "job"),
         "step": "branch",
@@ -425,10 +428,13 @@ def _in_process_attempt(tmp_path: Path, *, label: str | None = None) -> Attempt:
     child_id = str(uuid.uuid4())
     context = {
         "format": "httk-workflow-attempt-context",
+        "durable": False,
+        "deadline": None,
+        "settings": {},
         "format_version": 2,
         "workspace_id": str(uuid.uuid4()),
-        "job_id": str(uuid.uuid4()),
-        "job_key": f"job--{uuid.uuid4()}",
+        "job_id": (_jid := str(uuid.uuid4())),
+        "job_key": f"job--{_jid}",
         "placement": "project/a",
         "payload": str(tmp_path / "job"),
         "step": "branch",

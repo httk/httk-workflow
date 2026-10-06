@@ -14,7 +14,7 @@ from ._manager_runners import check_runner_reference, contained, runner_command_
 from ._manager_scheduling import unmet_job_requirements
 from .errors import WorkflowError
 from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
-from .models import STATE_KINDS, JobDefinition, Marker, parse_package_runner
+from .models import STATE_KINDS, JobDefinition, Marker, parse_package_runner, placement_text
 from .scaffold import payload_relative
 from .sdk import resolve_declared_environment
 from .workspace import Workspace
@@ -225,7 +225,7 @@ def _claim_finding(
     if not live:
         return None
     requirements = claim_requirements(job)
-    placement = marker.placement.as_posix()
+    placement = placement_text(marker.placement)
     try:
         owner_uid: int | None = marker.path.lstat().st_uid
     except OSError:
@@ -395,7 +395,7 @@ def _finding(
             "job_id": marker.job_id,
             "workflow": None,
             "state": marker.kind,
-            "placement": marker.placement.as_posix(),
+            "placement": placement_text(marker.placement),
             "environment": [],
             "environment_problems": [str(exc)],
             "runner": {"problem": str(exc)},
@@ -417,7 +417,7 @@ def _finding(
         "job_id": job.id,
         "workflow": job.workflow,
         "state": marker.kind,
-        "placement": marker.placement.as_posix(),
+        "placement": placement_text(marker.placement),
         "environment": environment["entries"],
         "environment_problems": environment["problems"],
         "runner": runner,

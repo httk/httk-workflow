@@ -84,6 +84,7 @@ from .models import (
     expand_runner_command,
     normalize_placement,
     normalize_resources,
+    placement_text,
     validate_parameters,
     validate_resources,
     validate_step,
@@ -123,8 +124,8 @@ __all__ = [
 
 #: The format of the machine-readable report :meth:`ScaffoldedJob.as_mapping` returns.
 JOB_SCAFFOLD_FORMAT = "httk-workflow-job-scaffold"
-#: Where a scaffolded job is placed when nothing else is asked for.
-DEFAULT_PLACEMENT = "jobs"
+#: Where a scaffolded job is placed when nothing else is asked for: directly in the jobs root.
+DEFAULT_PLACEMENT = ""
 #: The payload directory a staged file lands in when its name has no directory of
 #: its own. Every packaged runner reads its inputs from there.
 FILES_DIRECTORY = "files"
@@ -727,7 +728,7 @@ class ScaffoldedJob:
             "job_id": self.job_id,
             "job_key": self.job_key,
             "tag": self.tag,
-            "placement": self.placement.as_posix(),
+            "placement": placement_text(self.placement),
             "payload_path": str(self.payload),
             "marker_path": str(self.marker),
             "workflow": self.workflow,

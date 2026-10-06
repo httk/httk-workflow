@@ -32,9 +32,15 @@ from ..configuration import machine_names
 from ..gc import iter_report_rows
 from ..introspection import read_managers
 from ..manifests import read_maintenance_lock, release_maintenance_lock, workspace_maintenance_guard
-from ..models import DEFAULT_LEASE_SECONDS, POLICY_KEYS, STATE_KINDS, WORKSPACE_DIRECTORY
+from ..models import (
+    DEFAULT_LEASE_SECONDS,
+    POLICY_KEYS,
+    STATE_KINDS,
+    WORKSPACE_DIRECTORY,
+    placement_text,
+)
 from ..packages import load_workflow_package
-from ..projects import read_project_section, require_project, write_project_section
+from ..projects import discover_project, read_project_section, require_project, write_project_section
 from ..registry import (
     LOCAL_REMOTE,
     _update_workspace_path,
@@ -197,6 +203,13 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
     else:
         created = create_workspace(name, root, durable=_durable(arguments), settings=settings)
     print(created.name)
+    project = discover_project(root)
+    if project is not None:
+        section = read_project_section(project, "workspace")
+        if section.get("default") is None:
+            section["default"] = created.name
+            write_project_section(project, "workspace", section)
+            print(f"recorded {created.name} as the default workspace of the project at {project}")
     return 0
 
 
@@ -234,7 +247,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
                 "job_id": marker.job_id,
                 "job_key": marker.job_key,
                 "state": marker.kind,
-                "placement": marker.placement.as_posix(),
+                "placement": placement_text(marker.placement),
                 "priority": marker.priority,
                 "generation": marker.generation,
             }
@@ -244,7 +257,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
             json.dumps(
                 {
                     "format": "httk-workflow-status",
-                    "format_version": 2,
+                    "format_version": 3,
                     "workspace_id": workspace.workspace_id,
                     "root": str(workspace.root),
                     "workspace_format_version": workspace.format["format_version"],

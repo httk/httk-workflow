@@ -370,13 +370,13 @@ def test_identity_public_key_is_a_signer(tmp_path: Path) -> None:
 
 
 def _setup_root_workspace(tmp_path: Path, *, jobs: int = 1) -> Env:
-    """Build the single-directory layout: the project root is itself a workspace."""
+    """Build a project whose member workspace lives in ``workspace/``."""
 
     configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="sealed-root")
     (project / "content.txt").write_text("loose project file\n", encoding="utf-8")
-    workspace = Workspace.initialize(project)
+    workspace = Workspace.initialize(project / "workspace")
     source = tmp_path / "source"
     markers = [workspace.submit(_payload(source, f"job{index}"), "jobs") for index in range(jobs)]
     return Env(project, workspace, markers)
@@ -391,10 +391,10 @@ def test_project_seal_of_root_workspace_layout(tmp_path: Path) -> None:
     records = read_seal(path).records
     paths = {str(record["path"]) for record in records if "type" in record}
     assert "content.txt" in paths
-    payload_rel = env.workspace.payload_path(marker.placement, marker.job_key).relative_to(env.project).as_posix()
-    assert not any(name == payload_rel or name.startswith(f"{payload_rel}/") for name in paths)
+    # The member workspace subtree is excluded wholesale.
+    assert not any(name == "workspace" or name.startswith("workspace/") for name in paths)
     workspace_records = [record for record in records if "member" in record]
-    assert [record["member"] for record in workspace_records] == ["."]
+    assert [record["member"] for record in workspace_records] == ["workspace"]
     expected = hashlib.sha256(workspace_seal_path(env.workspace).read_bytes()).hexdigest()
     assert workspace_records[0]["seal_sha256"] == expected
 

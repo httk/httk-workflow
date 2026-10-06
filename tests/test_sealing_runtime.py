@@ -334,7 +334,7 @@ def _seal_root_project(tmp_path: Path):
     configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="pp")
-    workspace = Workspace.initialize(project)
+    workspace = Workspace.initialize(project / "workspace")
     marker = workspace.submit(_payload(tmp_path / "source")[0], "jobs")
     return project, workspace, marker
 
@@ -356,12 +356,12 @@ def test_project_seal_excludes_the_default_postprocess_tree(tmp_path: Path) -> N
 def test_project_seal_excludes_a_configured_postprocess_dir(tmp_path: Path) -> None:
     project, workspace, marker = _seal_root_project(tmp_path)
     # The setting must be stored before sealing (a sealed workspace refuses writes).
-    workspace.set_setting("postprocess.directory", "reports")
+    workspace.set_setting("postprocess.directory", str(project / "reports"))
     seal_job(workspace, marker)
     seal_workspace(workspace)
     seal_project(project)
 
-    out = workspace.root / "reports" / "jobs" / marker.job_key / "plot"
+    out = project / "reports" / "jobs" / marker.job_key / "plot"
     out.mkdir(parents=True)
     (out / "chart.svg").write_text("<svg/>\n", encoding="utf-8")
     assert verify_tree(project).ok

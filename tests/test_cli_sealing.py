@@ -38,6 +38,17 @@ os.rename(temporary, control / "outcome.ready")
 """
 
 
+def _init_workspace(project: Path) -> Workspace:
+    """Create ``project/workspace``, register it as ``default``, and record it as the project default."""
+
+    from httk.workflow.projects import write_project_section
+    from httk.workflow.registry import create_workspace
+
+    create_workspace("default", project / "workspace")
+    write_project_section(project, "workspace", {"default": "default"})
+    return Workspace(project / "workspace")
+
+
 def _payload(root: Path, tag: str) -> tuple[Path, str]:
     """Create a minimal complete payload that succeeds when run."""
 
@@ -80,7 +91,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Workspace, str]:
     project_root.mkdir()
     initialize_project(project_root, name="sealing")
     configure_identity()
-    workspace = Workspace.initialize(project_root, durable=False)
+    workspace = _init_workspace(project_root)
     # Drive the job to succeeded without the manager auto-sealing it, so these
     # tests exercise the explicit seal commands from a known unsealed start.
     workspace.set_setting("seal.succeeded", "false")
@@ -114,7 +125,7 @@ def test_job_seal_refuses_a_non_quiescent_job(tmp_path: Path, capsys) -> None:
     project_root.mkdir()
     initialize_project(project_root, name="sealing")
     configure_identity()
-    workspace = Workspace.initialize(project_root, durable=False)
+    workspace = _init_workspace(project_root)
     payload, job_id = _payload(tmp_path / "source", "silicon")
     marker = workspace.submit(payload, "jobs/silicon")
     with workspace.open_journal_writer() as writer:

@@ -44,6 +44,8 @@ from .models import (
     is_payload_private,
     normalize_placement,
     parse_job_key,
+    parse_placement_text,
+    placement_text,
     validate_runner_path,
     validate_sha256,
 )
@@ -84,8 +86,9 @@ _EJECTED_TREE = "tree"
 
 TRANSFER_FORMAT = "httk-workflow-detached-transfer"
 #: Version 2 widened the payload digest: it now also pins the executable bit of
-#: every regular file and the target of every symlink.
-TRANSFER_FORMAT_VERSION = 2
+#: every regular file and the target of every symlink. Version 3 belongs to the
+#: v3 workspace format; earlier bundles are refused.
+TRANSFER_FORMAT_VERSION = 3
 #: Domain separation of the payload digest, so a digest computed by an older
 #: rule can never collide with one computed by the current rule.
 _PAYLOAD_DIGEST_DOMAIN = b"httk-workflow-transfer-payload-v2\0"
@@ -737,7 +740,7 @@ def _seal_into(
         "destination_remote": state.get("destination_remote"),
         "job_id": marker.job_id,
         "job_key": marker.job_key,
-        "source_placement": marker.placement.as_posix(),
+        "source_placement": placement_text(marker.placement),
         "destination_placement": str(state["destination_placement"]),
         "payload_sha256": _payload_digest(payload),
         "runners": runners,
@@ -885,7 +888,7 @@ def _detach_job(
     if _unresolved_join_reference(workspace, marker, waiting_parent_map):
         raise ValueError("job participates in an unresolved join and cannot transfer")
     _require_tree_boundary(workspace, marker, with_tree=with_tree)
-    target_placement = normalize_placement(destination_placement or marker.placement)
+    target_placement = normalize_placement(marker.placement if destination_placement is None else destination_placement)
     # Refused here, before the job is fenced, rather than by the destination's import.
     check_job_placement(target_placement)
     # Likewise refused before fencing: a sealing that must refuse would strand the job.
@@ -918,7 +921,7 @@ def _detach_job(
                     "source_workspace_id": workspace.workspace_id,
                     "destination_workspace_id": destination_id,
                     "destination_remote": destination_remote,
-                    "destination_placement": target_placement.as_posix(),
+                    "destination_placement": placement_text(target_placement),
                     "prior_kind": marker.kind,
                     "prior_state": prior_state,
                     "reason": "ejected" if destination_id is None else "detached_transfer",
@@ -1051,7 +1054,7 @@ def _sequence_ack(workspace: Workspace, manifest: Mapping[str, Any]) -> dict[str
     return sign_document(
         {
             "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 2,
+            "format_version": 3,
             "transfer_id": manifest["transfer_id"],
             "transfer_sequence": manifest["transfer_sequence"],
             **({"transfer_epoch": manifest["transfer_epoch"]} if "transfer_epoch" in manifest else {}),
@@ -1227,7 +1230,7 @@ def _import_bundle(
                     {
                         "job_id": manifest["job_id"],
                         "job_key": manifest["job_key"],
-                        "placement": placement.as_posix(),
+                        "placement": placement_text(placement),
                         "payload_sha256": digest,
                     },
                     durable=workspace.durable,
@@ -1280,11 +1283,11 @@ def _import_bundle(
             }
         },
         "format": "httk-workflow-state",
-        "format_version": 2,
+        "format_version": 3,
         "workspace_id": workspace.workspace_id,
         "job_id": manifest["job_id"],
         "job_key": manifest["job_key"],
-        "placement": placement.as_posix(),
+        "placement": placement_text(placement),
         "state_generation": generation,
         "kind": prior_kind,
         "previous_record_ref": None,
@@ -1333,14 +1336,14 @@ def _import_bundle(
     acknowledgement: dict[str, object] = sign_document(
         {
             "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 2,
+            "format_version": 3,
             "transfer_id": transfer_id,
             "source_workspace_id": manifest["source_workspace_id"],
             "destination_workspace_id": workspace.workspace_id,
             "payload_sha256": digest,
             "job_id": manifest["job_id"],
             "job_key": manifest["job_key"],
-            "placement": placement.as_posix(),
+            "placement": placement_text(placement),
             "state": prior_kind,
             "acknowledged_at": utc_now(),
         }
@@ -1358,14 +1361,14 @@ def _acknowledge_arrival(
     acknowledgement: dict[str, object] = sign_document(
         {
             "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 2,
+            "format_version": 3,
             "transfer_id": transfer_id,
             "source_workspace_id": source_workspace_id,
             "destination_workspace_id": workspace.workspace_id,
             "payload_sha256": digest,
             "job_id": marker.job_id,
             "job_key": marker.job_key,
-            "placement": marker.placement.as_posix(),
+            "placement": placement_text(marker.placement),
             "state": marker.kind,
             "acknowledged_at": utc_now(),
         }
@@ -1649,7 +1652,7 @@ def _sealed_bundle_candidates(workspace: Workspace) -> list[Path]:
     """Return every job directory of the workspace that carries a transfer manifest.
 
     A sealed bundle in a workspace is always a job directory
-    ``<placement>/<job_key>``. The walk starts at the workspace root and
+    ``jobs/<placement>/<job_key>``. The walk starts at the workspace ``jobs/`` directory (a missing one has no candidates) and
     descends only through directories whose names do not parse as job keys
     (placement components), to a depth of 64, skipping every
     ``.httk-workspace`` and ``.httk-transfer``. A placement component may be an
@@ -1670,13 +1673,13 @@ def _sealed_bundle_candidates(workspace: Workspace) -> list[Path]:
     """
 
     try:
-        root = os.stat(workspace.root)
+        root = os.stat(workspace.jobs)
     except OSError:
         return []
     visited: set[tuple[int, int]] = set()
     # Routes through no symlink are drained before any route through one, and a
     # directory is marked visited when it is walked, so its plain route wins.
-    plain: list[tuple[Path, int, tuple[int, int]]] = [(workspace.root, 0, (root.st_dev, root.st_ino))]
+    plain: list[tuple[Path, int, tuple[int, int]]] = [(workspace.jobs, 0, (root.st_dev, root.st_ino))]
     linked: list[tuple[Path, int, tuple[int, int]]] = []
     candidates: dict[str, Path] = {}
     while plain or linked:
@@ -2111,7 +2114,7 @@ def _with_trees(
     unresolved join; otherwise the whole tree is blocked.
     """
 
-    ordered = sorted(candidates, key=lambda item: (item.source_placement.as_posix(), item.job_key))
+    ordered = sorted(candidates, key=lambda item: (placement_text(item.source_placement), item.job_key))
     live = {
         item.job_id
         for item in ordered
@@ -2811,7 +2814,7 @@ def _eject_tree_of(workspace: Workspace, marker: Marker, waiting: Mapping[str, s
         {
             "job_id": member.job_id,
             "job_key": member.job_key,
-            "placement": member.source_placement.as_posix(),
+            "placement": placement_text(member.source_placement),
             "parent_job_id": member.tree_parent,
             "transfer_id": str(uuid.uuid4()),
         }
@@ -2953,7 +2956,11 @@ def _adoption_needed(
         )
     if workspace.find_marker_by_id(str(manifest["job_id"])) is not None:
         raise FileExistsError(f"this workspace already holds job {manifest['job_id']}; {bundle} was left in place")
-    effective = placement or normalize_placement(str(manifest["destination_placement"]))
+    effective = (
+        parse_placement_text(manifest["destination_placement"], "destination_placement")
+        if placement is None
+        else placement
+    )
     check_job_placement(effective)
     target = workspace.payload_path(effective, str(manifest["job_key"]))
     if (target.exists() or target.is_symlink()) and not _holds_bundle(target, transfer_id):

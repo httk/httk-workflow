@@ -140,8 +140,8 @@ def _state_default(workspace: Path) -> Path:
 def _workspace_id(workspace: Path) -> str:
     path = workspace / ".httk-workspace" / "format.json"
     value = _decode_object(_read_bounded(path, _MAX_WORKSPACE_BYTES), description="workspace format")
-    if value.get("format") != "httk-workflow-filesystem" or value.get("format_version") != 2:
-        raise ValueError("workspace must use httk-workflow-filesystem format version 2")
+    if value.get("format") != "httk-workflow-filesystem" or value.get("format_version") != 3:
+        raise ValueError("workspace must use httk-workflow-filesystem format version 3")
     workspace_id = value.get("workspace_id")
     if type(workspace_id) is not str:
         raise ValueError("workspace has no valid workspace_id")

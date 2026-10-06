@@ -260,18 +260,19 @@ def test_postprocess_of_a_sealed_job_works_and_leaves_the_seal_valid(tmp_path: P
 
 def test_postprocess_directory_setting_overrides_the_root(tmp_path: Path) -> None:
     _package, provider, workspace, _job, record = _finished(tmp_path)
-    workspace.set_setting("postprocess.directory", "analysis")
+    analysis = tmp_path / "analysis"
+    workspace.set_setting("postprocess.directory", str(analysis))
     output_root = postprocess_root(workspace)
-    assert output_root == workspace.root / "analysis"
+    assert output_root == analysis
     result = run_postprocess_script(provider, "report", record, output_root=output_root)
-    expected = workspace.root.joinpath("analysis", *record.placement.parts, record.job_key, "report")
+    expected = analysis.joinpath(*record.placement.parts, record.job_key, "report")
     assert result.output_dir == expected
     assert (result.output_dir / "report.json").is_file()
 
 
 def test_postprocess_output_dir_override_wins(tmp_path: Path) -> None:
     _package, provider, workspace, _job, record = _finished(tmp_path)
-    workspace.set_setting("postprocess.directory", "ignored")
+    workspace.set_setting("postprocess.directory", str(tmp_path / "ignored"))
     absolute = tmp_path / "elsewhere"
     output_root = postprocess_root(workspace, str(absolute))
     assert output_root == absolute
@@ -306,6 +307,27 @@ def test_postprocess_cli_output_dir_flag_places_output(tmp_path: Path, capsys) -
     line = json.loads(capsys.readouterr().out)
     assert Path(line["output_dir"]).is_relative_to(target)
     assert (Path(line["output_dir"]) / "report.json").is_file()
+
+
+def test_postprocess_directory_setting_must_be_absolute_and_outside(tmp_path: Path) -> None:
+    _package, _provider, workspace, _job, _record = _finished(tmp_path)
+    workspace.set_setting("postprocess.directory", "analysis")
+    with pytest.raises(ValueError, match="absolute path outside the workspace"):
+        postprocess_root(workspace)
+    workspace.set_setting("postprocess.directory", str(workspace.root / "analysis"))
+    with pytest.raises(ValueError, match="outside the workspace"):
+        postprocess_root(workspace)
+
+
+def test_postprocess_output_dir_override_must_be_outside_the_workspace(tmp_path: Path, monkeypatch) -> None:
+    _package, _provider, workspace, _job, _record = _finished(tmp_path)
+    with pytest.raises(ValueError, match="outside the workspace"):
+        postprocess_root(workspace, str(workspace.root / "analysis"))
+    monkeypatch.chdir(workspace.root)
+    with pytest.raises(ValueError, match="outside the workspace"):
+        postprocess_root(workspace, "analysis")  # relative: resolves against the current directory
+    monkeypatch.chdir(tmp_path)
+    assert postprocess_root(workspace, "rel-out") == tmp_path / "rel-out"
 
 
 def test_postprocess_root_refuses_the_control_directory(tmp_path: Path) -> None:

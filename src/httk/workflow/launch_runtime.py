@@ -18,7 +18,7 @@ from ._confine import is_override_key
 from ._daemon_policy import DEFAULT_SLURM_EXPORT, SLURM_EXPORT_SETTING, validate_slurm_export
 from .launchers import _manager_command
 
-BATCH_DIRECTORY = ".httk-workspace/batch"
+BATCH_DIRECTORY = "logs/batch"
 BATCH_DIRECTIVES = (
     ("slurm.account", "--account"),
     ("slurm.partition", "--partition"),

@@ -57,6 +57,9 @@ from .models import (
     normalize_placement,
     normalize_resources,
     parse_job_key,
+    parse_placement_text,
+    payload_relative,
+    placement_text,
     validate_declaration_name,
     validate_declarations,
     validate_failure,
@@ -487,7 +490,7 @@ class ChildResult:
             job_key=require_string(raw.get("job_key"), "child job_key"),
             kind=require_string(raw.get("kind"), "child kind"),
             failure=None if not isinstance(failure_raw, Mapping) else validate_failure(failure_raw, "child failure"),
-            placement=PurePosixPath(require_string(raw.get("placement"), "child placement")),
+            placement=parse_placement_text(raw.get("placement"), "child placement"),
             payload=payload,
             workdir=None if not isinstance(workdir_raw, str) else workspace.joinpath(*PurePosixPath(workdir_raw).parts),
             data=None if generation is None else payload / "data",
@@ -741,13 +744,12 @@ class Attempt:
         if raw is None or is_detached(self.payload):
             return None
         job_key, placement = raw.get("job_key"), raw.get("placement")
-        # Children written before spawns recorded the parent's placement cannot be located.
         if not isinstance(job_key, str) or not isinstance(placement, str):
-            return None
+            raise FormatError("parent must carry job_key and placement")
         if parse_job_key(job_key)[1] != raw.get("job_id"):
             raise FormatError(f"parent job_key {job_key!r} does not carry the parent job_id")
         normalized = normalize_placement(placement)
-        payload = self.workspace.joinpath(*normalized.parts, job_key)
+        payload = self.workspace / payload_relative(normalized, job_key)
         definition_path = payload / "job.json"
         if not definition_path.is_file():
             return None
@@ -1403,7 +1405,7 @@ class Attempt:
                     "job_id": observed.job_id,
                     "job_key": observed.job_key,
                     "label": label,
-                    "placement_hint": observed.placement.as_posix(),
+                    "placement_hint": placement_text(observed.placement),
                 }
             )
         if not children and not rejoin_children:

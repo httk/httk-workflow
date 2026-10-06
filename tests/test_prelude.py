@@ -146,9 +146,9 @@ def test_batch_script_quotes_slurm_values_and_paths_with_spaces() -> None:
         [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
         settings={"slurm.partition": "main cluster"},
         workspace="/ws with space",
-        directory="/ws with space/.httk-workspace/batch",
+        directory="/ws with space/logs/batch",
     )
     assert "#SBATCH --partition='main cluster'" in script
     assert "#SBATCH --chdir='/ws with space'" in script
-    assert "#SBATCH --output='/ws with space/.httk-workspace/batch/manager-%j.out'" in script
-    assert "#SBATCH --error='/ws with space/.httk-workspace/batch/manager-%j.err'" in script
+    assert "#SBATCH --output='/ws with space/logs/batch/manager-%j.out'" in script
+    assert "#SBATCH --error='/ws with space/logs/batch/manager-%j.err'" in script

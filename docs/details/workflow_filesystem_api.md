@@ -7,7 +7,7 @@ workspace on disk means.*
 
 This is the normative on-disk protocol of the *httk-workflow* engine, not
 Python API documentation. The current `httk.workflow` implementation writes and
-serves the `core-v2` profile described in
+serves the `core-v3` profile described in
 [Conformance profiles](#conformance-profiles). Relocation and cross-workspace
 children remain reserved future capabilities; they are rejected rather than
 partially executed.
@@ -45,7 +45,8 @@ compatible major format version.
 ## Design summary
 
 1. A job has one payload directory containing one required metadata file,
-   `job.json`. Its parent path is an arbitrary, user-chosen placement.
+   `job.json`. Its parent path is an arbitrary, user-chosen placement below
+   the workspace's `jobs/` directory.
 2. A job has exactly one small marker file in the global `state/` tree.
 3. The marker's location is the sole authority for the job's current state. It
    is atomically renamed between `submitted`, `ready`, `claimed`, `running`,
@@ -77,7 +78,7 @@ Steady-state workflow metadata for a job with no retained application data:
 | `.httk-job/` runner job state | 0 or 1 directory | Job lifetime, when a runner keeps state across attempts |
 | `attempts/` reserved container | 0 or 1 directory | Exists only while an attempt is live, failed/cancelled evidence is retained, or a succeeded leftover awaits collection |
 | `attempts/<attempt-id>/` control directories | 0 or more directories | Live-attempt lifetime, failed/cancelled evidence retention, or a succeeded leftover awaiting collection |
-| `logs/` | 0 or 1 directory | Reserved for a future run-log layout; unused in core-v2 |
+| `logs/` | 0 or 1 directory | Created by the manager when it runs an attempt: `stdio.out` and `runlog.jsonl` |
 | Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
 
@@ -117,7 +118,8 @@ permanent per-job protocol object.
 
 **Placement**
 : An arbitrary relative parent path below a workspace, such as
-  `project-17/0/03a`. The payload is at `<placement>/<job-key>`.
+  `project-17/0/03a`, relative to the workspace's `jobs/` directory and possibly
+  empty. The payload is at `jobs/<placement>/<job-key>`.
 
 **Step**
 : An application-defined name such as `relax` or `collect`, not declared in
@@ -177,7 +179,7 @@ fencing. Correctness comes from moving the one current state marker.
 
 ## Conformance profiles
 
-A conforming **core** implementation of the current profile, **core-v2**,
+A conforming **core** implementation of the current profile, **core-v3**,
 supports:
 
 - one workflow workspace per job and all references within that workspace;
@@ -192,7 +194,7 @@ supports:
 - transactional data publication and replay;
 - sealed detached transfer, and replay and recovery after a stopped manager.
 
-In core-v2:
+In core-v3:
 
 - every `spawn.json` entry carries a mandatory unique `label`;
 - a join summary records typed per-child observations, which the next
@@ -202,8 +204,10 @@ In core-v2:
 - a runner-declared failure marked `retryable` is retried within the job's
   existing attempt budgets.
 
-`format.json` carries an `extensions` array for future additions. It is empty
-in this release; a workspace declaring an unknown extension refuses to attach.
+`format.json` carries an `extensions` array for additions such as the exchange
+extension. A workspace declaring an unknown extension refuses to attach, and a
+workspace of an older format version is refused rather than migrated: reset and
+recreate it with `httk system reset`.
 Unknown state kinds are never treated as failed or orphaned jobs.
 
 Priority is encoded in marker names, not directory levels. Scheduling is
@@ -212,9 +216,9 @@ lower-priority work first, and strict global priority is not guaranteed.
 
 ## Workspace layout and arbitrary placement
 
-A workspace is an ordinary directory. Protocol control data live below
-`WORKSPACE/.httk-workspace/`; payloads may be at any valid relative path
-outside it:
+A workspace is an ordinary directory whose top level *httk₂* owns. Protocol
+control data live below `WORKSPACE/.httk-workspace/` and every job payload below
+`WORKSPACE/jobs/`:
 
 ```text
 WORKSPACE/
@@ -242,23 +246,27 @@ WORKSPACE/
 │   │   └── <manager-id>/
 │   │       ├── manager.json
 │   │       └── heartbeat.json
-│   ├── managers.log
-│   ├── batch/                 # launcher-generated batch scripts and logs
 │   └── requests/
 │       ├── tmp/
 │       ├── ready/
 │       ├── claimed/
 │       └── retired/
-└── project-17/
-    └── 0/
-        └── 03a/
-            └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef/
-                ├── job.json
-                ├── data/
-                ├── files/
-                ├── run/
-                ├── attempts/<attempt-id>/
-                └── logs/                   # reserved for a future run-log layout; unused in core-v2
+├── jobs/
+│   └── project-17/
+│       └── 0/
+│           └── 03a/
+│               └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef/
+│                   ├── job.json
+│                   ├── data/
+│                   ├── files/
+│                   ├── run/
+│                   ├── attempts/<attempt-id>/
+│                   └── logs/           # stdio.out, runlog.jsonl; created when an attempt runs
+├── logs/
+│   ├── managers/<manager-id>.log
+│   └── batch/                          # launcher batch scripts and scheduler output
+├── postprocess/                        # default postprocess output root
+└── exchange/                           # only with the exchange extension
 ```
 
 Here the placement is `project-17/0/03a`, and the marker has a parallel path:
@@ -268,12 +276,21 @@ Here the placement is `project-17/0/03a`, and the marker has a parallel path:
 └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef.p500.g4.<record-ref>
 ```
 
-The layout includes the core-v2 transfer state directories. No empty
+The layout includes the core-v3 transfer state directories. No empty
 state-kind or placement directory is required.
 
-- `.httk-workspace/batch/` is created by a configured manager launcher such as
-  the packaged Slurm launcher. It is not remote-adapter state and is absent
-  with the built-in process launcher.
+- The top-level names are exactly `.httk-workspace/`, `jobs/`, `logs/`,
+  `postprocess/`, and, with the exchange extension, `exchange/`; the exchange
+  extension is specified separately. *httk₂* never reads or writes any other
+  top-level name, and a future top-level name is a format change. A workspace
+  root is never a project root.
+- `jobs/` is created at initialization and holds every payload. `logs/` and
+  `postprocess/` are created on first use.
+- `logs/managers/<manager-id>.log` is the diagnostic log of one manager, with a
+  single writer. `logs/batch/` is created by a configured manager launcher such
+  as the packaged Slurm launcher and holds its batch scripts and scheduler
+  output. It is not remote-adapter state and is absent with the built-in
+  process launcher.
 - `.httk-workspace/tmp/` holds unpublished entries. Managers MUST ignore it for
   scheduling. Garbage collection may remove old entries, but correctness MUST
   NOT depend on cleanup.
@@ -282,13 +299,18 @@ state-kind or placement directory is required.
 
 ### Placement rules
 
-Placement components have no protocol meaning. They may be projects, users,
+A placement is a relative path below `jobs/`; the payload is at
+`jobs/<placement>/<job-key>`. Placement components have no protocol meaning. They may be projects, users,
 dates, hash shards of any depth, or a mixture, and jobs in one workspace may use
 different schemes. There is no configured sharding depth and no priority
 level: a marker's path below its state kind is its placement and nothing else.
 
 Placement components MUST be normalized relative path components. Empty
-components, `.`, `..`, NUL bytes, and `.httk-workspace` are forbidden. Each
+components, `.`, `..`, NUL bytes, and `.httk-workspace` are forbidden.
+A placement MAY be empty: the payload is then at `jobs/<job-key>` and the marker
+at `state/<kind>/<marker>`. The canonical text form of the empty placement is
+`""` wherever a placement is written: state frames, manifests, seal records,
+spawn entries, the `parent` member, join observations, and cursors. Each
 component must fit the filesystem's filename limit. A workspace MAY set policy
 limits on depth and total relative path length; these are operational limits,
 not a sharding scheme.
@@ -318,8 +340,8 @@ in “State-marker rename.”
 ```json
 {
   "format": "httk-workflow-filesystem",
-  "format_version": 2,
-  "core_profile": "core-v2",
+  "format_version": 3,
+  "core_profile": "core-v3",
   "extensions": [],
   "record_ref_encoding": "hwref-v2",
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
@@ -329,15 +351,23 @@ in “State-marker rename.”
     "lease_seconds": 900.0,
     "journal_segment_bytes": 67108864,
     "retention": {"journal_days": 1.0, "trash_days": 1.0}
-  }
+  },
+  "settings": {},
+  "workflow_preludes": {}
 }
 ```
+
+`policy`, `settings`, and `workflow_preludes` are always present. `settings`
+holds the workspace's configuration values and `workflow_preludes` its
+workflow-prelude map; both are administrative, like `policy`. When set,
+`settings.postprocess.directory` MUST be an absolute path outside the
+workspace; the default output root is the workspace's `postprocess/` directory.
 
 ### Workspace policy
 
 Everything this specification calls *configured* is the `policy` object of
 `format.json`, so that every implementation attaching a workspace agrees on
-it. It is part of format version 2 and holds exactly these members:
+it. It is part of format version 3 and holds exactly these members:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -395,14 +425,14 @@ Both common arrangements work:
 
 ```text
 # One workspace with projects as placement prefixes
-WORKSPACE/project-a/00/17/<job-key>
-WORKSPACE/project-b/hash/x9/<job-key>
+WORKSPACE/jobs/project-a/00/17/<job-key>
+WORKSPACE/jobs/project-b/hash/x9/<job-key>
 
 # A watch root containing self-contained project workspaces
 WATCH/project-a/.httk-workspace/format.json
-WATCH/project-a/00/17/<job-key>
+WATCH/project-a/jobs/00/17/<job-key>
 WATCH/project-b/.httk-workspace/format.json
-WATCH/project-b/hash/x9/<job-key>
+WATCH/project-b/jobs/hash/x9/<job-key>
 ```
 
 A manager may schedule all attached workspaces from one resource pool. Job and
@@ -489,12 +519,12 @@ Without a tag, the job key is the UUID. Parsers identify the final UUID rather
 than trusting the tag. A tag lookup may return several jobs; a UUID lookup
 returns at most one per workspace.
 
-The payload is at `<workspace>/<placement>/<job-key>/`, and the state marker
+The payload is at `<workspace>/jobs/<placement>/<job-key>/`, and the state marker
 uses the same placement and job key, so ordinary shell completion or `find`
 locates both:
 
 ```bash
-find . -path './.httk-workspace' -prune -o -type d -name 'silicon-relax--*' -print
+find jobs -type d -name 'silicon-relax--*'
 find .httk-workspace/state -type f -name 'silicon-relax--*'
 ```
 
@@ -686,7 +716,7 @@ contains:
 ### Record references
 
 A marker's `record-ref` identifies writer, segment, byte offset, length, and
-checksum. Format version 2 mandates the filename-safe `hwref-v2` encoding, with
+checksum. Format version 3 mandates the filename-safe `hwref-v2` encoding, with
 no alternative, so independent implementations resolve marker names
 identically:
 
@@ -715,7 +745,7 @@ base-36 segment number, `15` each for `-o`/offset and `-l`/length, and `34` for
 `-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming workspace
 MUST support at least 213 bytes per filename component and MUST validate this at
 initialization. These field limits and the tag limit MUST NOT be enlarged
-within format version 2.
+within format version 3.
 
 ### Durability
 
@@ -775,7 +805,7 @@ State frames have this shape; `resources` is absent until an outcome sets it:
 ```json
 {
   "format": "httk-workflow-state",
-  "format_version": 2,
+  "format_version": 3,
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "job_key": "silicon-relax--01234567-89ab-cdef-0123-456789abcdef",
@@ -1065,7 +1095,7 @@ with build registrations; an `installed` runner's command can use only
 job may keep all mutable and final data in its persistent workdir and never
 creates `data/`, publishes a transaction, or increments a data generation.
 With `transactional`, `data/` and the transaction protocol are available in
-every core-v2 workspace.
+every core-v3 workspace.
 
 ### Claim eligibility
 
@@ -1118,7 +1148,7 @@ To submit:
 1. Create a complete job below `.httk-workspace/tmp/`, including `job.json` and
    any initial `files/` or `data/`.
 2. Choose any placement and atomically rename it to
-   `<workspace>/<placement>/<job-key>/`.
+   `<workspace>/jobs/<placement>/<job-key>/`.
 3. Create a temporary zero-length marker named
    `<job-key>.p<priority>.g0.init`.
 4. Atomically rename that marker to
@@ -1372,10 +1402,11 @@ The directory holds only `manager.json` and `heartbeat.json` and is removed when
 the manager exits cleanly; after a crash it awaits policy-gated
 `manager_directories` collection.
 
-Manager diagnostics go to the workspace-level `managers.log`, with the manager
-id on every record. The log is rotated when a manager starts, or every 1000
-records once it exceeds 16 MiB; one backup, `managers.log.1`, is kept. A
-manager that has not yet reopened the file keeps appending to the backup.
+Manager diagnostics go to the manager's own log,
+`logs/managers/<manager-id>.log`, with the manager id on every record. Each
+log has a single writer, which rotates it itself by renaming it to a single
+backup, `<manager-id>.log.1`, and reopening it. Readers merge the logs of
+several managers by timestamp.
 
 A heartbeat is a statement about the manager, not about its scheduling pass. A
 manager MUST NOT let one pass over the state tree hold its heartbeat; it takes
@@ -1431,7 +1462,7 @@ policy MUST be recorded there too.
 Attempt control is separate from the application workdir:
 
 ```text
-<workspace>/<placement>/<job-key>/
+<workspace>/jobs/<placement>/<job-key>/
 ├── attempts/<attempt-id>/
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
@@ -1637,7 +1668,7 @@ An unclean persistent retry context is:
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "placement": "project-17/0/03a",
-  "payload": "/srv/httk/project-17/0/03a/job-1",
+  "payload": "/srv/httk/jobs/project-17/0/03a/job-1",
   "step": "relax",
   "activation_id": "e7f86a0e-34d6-45a7-b92d-3f4b2dc98c54",
   "attempt_id": "a6c2c973-29e1-44e2-9649-ae419e340ac4",
@@ -1982,7 +2013,7 @@ hierarchy per step.
 
 ## Relocating and transferring jobs
 
-This section specifies relocation and detached transfer in core-v2. The current
+This section specifies relocation and detached transfer in core-v3. The current
 implementation performs detached transfer; relocation within one workspace is a
 reserved capability that it rejects rather than partially executes, and its
 `relocating` state is specified here so that a conforming implementation can
@@ -2031,7 +2062,7 @@ files are needed.
 ### Moving new jobs into a running workspace
 
 Files may be copied or generated under `.httk-workspace/tmp/` while managers
-work. The complete payload is renamed to any placement and becomes schedulable
+work. The complete payload is renamed to `jobs/<placement>/<job-key>` and becomes schedulable
 only when its `submitted` marker is published; a partial copy has no marker and
 is invisible.
 
@@ -2195,7 +2226,7 @@ outcome with `protocol_error` without registering any child of the set.
 While the parent is `committing`, the manager:
 
 1. moves each complete child bundle to its chosen
-   `<workspace>/<placement>/<job-key>` path;
+   `<workspace>/jobs/<placement>/<job-key>` path;
 2. creates its one `g0.init` marker at the mirrored target-workspace path below
    `state/submitted`;
 3. treats an identical existing child plus marker as already registered;
@@ -2214,7 +2245,7 @@ parent is still committing.
 Each child is an ordinary independently schedulable job with one job file, one
 marker, its own attempts, and its own children. Because its `job.json` names
 the parent's `job_key` and `placement`, a running child can find its parent's
-payload at `<workspace>/<placement>/<job_key>` without a scan, for example to
+payload at `<workspace>/jobs/<placement>/<job_key>` without a scan, for example to
 read a large shared file in place; the SDKs expose this as the `parent` read.
 The location is meaningful only while parent and child share a workspace.
 
@@ -2312,8 +2343,8 @@ information as one observation object carrying the child's:
 - `kind`, `state_generation`, and `record_ref`;
 - published `failure` object, when it ended `failed` or `cancelled`;
 - `data_generation`;
-- workspace-relative `payload_path` and `workdir_path`, through which its
-  results are read.
+- workspace-relative `payload_path` and `workdir_path`, which include the
+  leading `jobs/` and through which its results are read.
 
 The observations appear in the context both as the `join` summary and as the
 `children` array, which is empty for an activation that follows no join. Child
@@ -2738,7 +2769,7 @@ Under the retention policy in `policy.retention`, a collector may remove:
 That list bounds what a conforming collector *may* touch, not what it must.
 `httk workspace gc` collects the subset in
 [Retention gates and always-safe collection](#retention-gates-and-always-safe-collection),
-plus the retired transfer bundles and per-transfer receipts core-v2
+plus the retired transfer bundles and per-transfer receipts core-v3
 accumulates. It leaves isolated workdirs, incomplete outcome directories, and
 payloads that never reached `submitted` alone, because each may be the only
 remaining evidence of a job that went wrong.
@@ -2879,8 +2910,7 @@ The layout is legible without a database:
 - `.httk-workspace/quarantine/` holds malformed entries needing workspace
   repair rather than scheduling;
 - every marker begins with the optional tag plus UUID job key;
-- the matching payload is at the same relative placement outside
-  `.httk-workspace`;
+- the matching payload is at the same placement below `jobs/`;
 - a first placement component such as `project-17` groups a project without a
   protocol-specific hierarchy.
 
@@ -2960,7 +2990,7 @@ are convenient projections for simple runners.
 
 ## Worked example
 
-Job `silicon-relax--J`, using isolated workdirs in a core-v2 workspace, starts
+Job `silicon-relax--J`, using isolated workdirs in a core-v3 workspace, starts
 at `prepare`, creates two calculations, joins them, and finalizes:
 
 1. Submission publishes its one marker as

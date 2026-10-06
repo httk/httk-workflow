@@ -12,6 +12,8 @@ from .models import (
     StateFrame,
     canonical_uuid,
     normalize_placement,
+    payload_relative,
+    placement_text,
     validate_failure,
     validate_label,
     validate_step,
@@ -88,11 +90,11 @@ def observe_children(manager: Any, children: Sequence[object]) -> tuple[list[dic
                 "job_id": child_id,
                 "job_key": child_marker.job_key,
                 "label": label,
-                "placement": child_marker.placement.as_posix(),
+                "placement": placement_text(child_marker.placement),
                 "kind": child_marker.kind,
                 "state_generation": child_marker.generation,
                 "record_ref": child_marker.record_ref,
-                "payload_path": (child_marker.placement / child_marker.job_key).as_posix(),
+                "payload_path": payload_relative(child_marker.placement, child_marker.job_key).as_posix(),
                 **child_evidence(manager, child_marker),
             }
         )
@@ -100,7 +102,7 @@ def observe_children(manager: Any, children: Sequence[object]) -> tuple[list[dic
 
 
 def child_evidence(manager: Any, marker: Any) -> dict[str, object]:
-    payload = marker.placement / marker.job_key
+    payload = payload_relative(marker.placement, marker.job_key)
     try:
         state = manager._read_frame(marker)
     except (WorkflowError, OSError) as exc:

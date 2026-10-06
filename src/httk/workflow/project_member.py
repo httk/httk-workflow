@@ -55,36 +55,30 @@ class WorkspaceMemberHandler:
     """Implement :class:`httk.core.project.members.ProjectMemberHandler` for a workspace."""
 
     def manifest_exclusions(self, project_root: Path, member_relpath: str) -> tuple[str, ...]:
-        """Return this workspace's control-dir, payload, and postprocess exclusions.
+        """Return this workspace's exclusions: its whole subtree and any external postprocess root.
 
-        The patterns are posix relpaths below the *project* root. The control
-        directory and every job payload are left out of a project manifest and
-        seal — a payload is covered through the workspace seal chain rather than
-        re-hashed loose — as is the workspace's postprocess output tree.
+        The patterns are posix relpaths below the *project* root. The member
+        workspace is left out of a project manifest and seal — it is covered
+        through the workspace seal chain rather than re-hashed loose — as is a
+        configured postprocess output tree that lies elsewhere inside the project.
 
         :param project_root: The project root the patterns are relative to.
         :param member_relpath: This workspace's relpath below the project root.
         :return: The exclusion patterns.
+        :raises ValueError: If the workspace is the project root itself.
         """
 
-        from .models import WORKSPACE_DIRECTORY
         from .workspace import Workspace
 
         root = Path(project_root)
-        prefix = "" if member_relpath in {".", ""} else member_relpath.rstrip("/") + "/"
-        patterns: list[str] = [f"{prefix}{WORKSPACE_DIRECTORY}", f"{prefix}{WORKSPACE_DIRECTORY}/**"]
-        ws_root = root if prefix == "" else root / member_relpath
+        member = member_relpath.rstrip("/")
+        if member in {"", "."}:
+            raise ValueError("a workspace cannot be the project root; move it into a directory of its own")
+        patterns: list[str] = [member, f"{member}/**"]
         try:
-            workspace = Workspace(ws_root)
+            workspace = Workspace(root / member)
         except Exception:
             return tuple(patterns)
-        for marker in sorted(workspace.scan_markers(), key=lambda item: item.job_key):
-            payload = workspace.payload_path(marker.placement, marker.job_key)
-            try:
-                rel = payload.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            patterns.extend((rel, f"{rel}/**"))
         from .postprocessing import postprocess_root
 
         try:
@@ -246,8 +240,16 @@ def _unregistered_workspaces(project_root: Path, adopt: bool) -> dict[str, objec
         # Idempotent: adopt every workspace under the project, whether or not it is
         # already a member or already centrally registered. This fully wires a
         # cleanly-copied tree in one pass.
-        for relpath in on_disk:
-            adopt_workspace(project if relpath == "." else project / relpath)
+        refused = [
+            str(item["message"])
+            for relpath in on_disk
+            for item in adopt_workspace(project if relpath == "." else project / relpath)
+            if item["check"] == "workspace_adopt" and item["status"] == "error"
+        ]
+        if refused:
+            return Finding(
+                "workspace_members", "error", "; ".join(refused), details={"workspaces": on_disk}
+            ).as_mapping()
         return Finding(
             "workspace_members",
             "ok",

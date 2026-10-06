@@ -85,6 +85,8 @@ else:
             "parent": {{
                 "workspace_id": context["workspace_id"],
                 "job_id": context["job_id"],
+                "job_key": context["job_key"],
+                "placement": context["placement"],
                 "activation_id": context["activation_id"],
             }},
         }}))
@@ -242,8 +244,8 @@ def test_gather_step_reads_labeled_child_observations_from_its_context(tmp_path:
     assert succeeded["kind"] == "succeeded"
     assert succeeded["failure"] is None
     assert succeeded["data_generation"] is None
-    assert succeeded["payload_path"] == f"project/children/{succeeded['job_key']}"
-    assert succeeded["workdir_path"] == f"project/children/{succeeded['job_key']}/run"
+    assert succeeded["payload_path"] == f"jobs/project/children/{succeeded['job_key']}"
+    assert succeeded["workdir_path"] == f"jobs/project/children/{succeeded['job_key']}/run"
     assert (workspace.root / str(succeeded["workdir_path"])).is_dir()
 
     failed = by_label["beta"]

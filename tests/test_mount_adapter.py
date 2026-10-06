@@ -517,18 +517,18 @@ def test_check_reports_a_missing_remote_httk_with_the_remedy(tmp_path: Path, mou
 def test_a_job_reaches_a_mount_workspace_and_runs_there(tmp_path: Path, mount: Mount) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="mount-end-to-end")
-    Workspace.initialize(source_root)
+    home = Workspace.initialize(source_root / "workspace")
     destination = Workspace.initialize(mount.remote_root / "runs" / "workspace")
     _mount_remote(source_root, mount)
     payload, job_id = _payload(tmp_path / "incoming")
-    Workspace(source_root).submit(payload, "jobs")
+    home.submit(payload, "jobs")
     context = CLIContext("httk", source_root)
-    register_ws(context, source_root, "home")
+    register_ws(context, home.root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
-    assert Workspace(source_root).find_marker_by_id(job_id) is None
+    assert home.find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "submitted"
     with TaskManager(destination, heartbeat_interval=0.01) as manager:

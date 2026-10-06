@@ -14,7 +14,14 @@ from .._util import read_json
 from ..errors import WorkspaceCorruptionError
 from ..manager import TaskManager
 from ..manifests import read_maintenance_lock
-from ..models import CORE_STATE_KINDS, LOGS_DIRECTORY, TERMINAL_KINDS, Marker, validate_step
+from ..models import (
+    CORE_STATE_KINDS,
+    LOGS_DIRECTORY,
+    TERMINAL_KINDS,
+    Marker,
+    placement_text,
+    validate_step,
+)
 from ..workspace import MarkerFault, Workspace
 from ._diagnosis import observe_join
 from ._reading import (
@@ -194,7 +201,7 @@ def debug_job(
         finally:
             if staged is not None:
                 shutil.rmtree(staged.parent, ignore_errors=True)
-        write(f"[debug] submitted {marker.job_key} at {marker.placement.as_posix()}")
+        write(f"[debug] submitted {marker.job_key} at {placement_text(marker.placement)}")
         if step is not None:
             write(f"[debug] initial step overridden to {step}")
     if payload_source is None:
@@ -262,7 +269,7 @@ def _drive(
         raise ValueError(f"cannot debug {marker.job_key}: {job_error}")
     assert job is not None
     write(
-        f"[{meta}] {marker.job_key} at {marker.placement.as_posix()} is {marker.kind} "
+        f"[{meta}] {marker.job_key} at {placement_text(marker.placement)} is {marker.kind} "
         f"(runner {job.runner_source}:{job.runner_path.as_posix()} on executor {job.runner_executor})"
     )
     scoped = ScopedWorkspace(workspace.root, {marker.job_key}, durable=workspace.durable)

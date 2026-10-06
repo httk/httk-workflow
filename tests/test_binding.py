@@ -386,8 +386,11 @@ def test_nodefile_and_launch_prefix() -> None:
 
 
 def test_attempt_context_binding_is_optional_and_validated(tmp_path: Path) -> None:
-    base = {
+    base: dict[str, object] = {
         "format": "httk-workflow-attempt-context",
+        "settings": {},
+        "durable": False,
+        "deadline": None,
         "format_version": 2,
         **{name: "x" for name in ("workspace_id", "job_id", "job_key", "placement", "step", "activation_id")},
         "attempt_id": "x",

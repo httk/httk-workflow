@@ -50,7 +50,7 @@ END
 ```console
 $ httk init --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
-$ httk workspace init --name default .
+$ httk workspace init --name default workspace
 $ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
 $ httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
@@ -92,7 +92,7 @@ declared structure input as the
 The command printed the job key and the payload directory:
 
 ```console
-silicon--0c4f…	/…/jobs/silicon--0c4f…
+silicon--0c4f…	/…/workspace/jobs/silicon--0c4f…
 ```
 
 **`settings set`** stored workspace state that travels with the job wherever it
@@ -134,8 +134,8 @@ $ httk job show silicon
 $ httk job why silicon
 ```
 
-The job commands also accept a path inside the workspace, such as `jobs` or
-`jobs/silicon--...`.
+The job commands also accept a path inside the workspace, such as `workspace/jobs` or
+`workspace/jobs/silicon--...`.
 
 Any job UUID, complete `tag--uuid` key, or unique prefix of either names a job.
 `job show` describes it from its authoritative state, and `job why` explains a job

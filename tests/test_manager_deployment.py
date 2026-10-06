@@ -192,8 +192,9 @@ def test_local_count_starts_multiple_manager_processes(tmp_path: Path) -> None:
     )
     managers = list((tmp_path / "workspace" / ".httk-workspace" / "managers").iterdir())
     assert managers == []
-    log = tmp_path / "workspace" / ".httk-workspace" / "managers.log"
-    assert len(log.read_text(encoding="utf-8").splitlines()) > 0
+    logs = list((tmp_path / "workspace" / "logs" / "managers").glob("*.log"))
+    assert len(logs) == 2
+    assert all(log.read_text(encoding="utf-8").splitlines() for log in logs)
 
 
 def test_local_count_splits_capacity_in_each_child_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

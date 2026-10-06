@@ -11,7 +11,7 @@ test-only ``tests.relax`` (``conftest.relax_workflow``).
 import dataclasses
 import json
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httk.core
@@ -527,7 +527,7 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
     # digest of its bytes, and the payload holds the structure where the runner
     # reads it.
     assert job.job_key == f"silicon--{job.job_id}"
-    assert job.placement.as_posix() == "jobs"
+    assert job.placement == PurePosixPath()
     digest = sha256_file(RELAX_RUNNER)
     assert job.runner == {"source": "workspace", "path": f"relax.{digest[:12]}.py", "sha256": digest}
     assert sha256_file(workspace.runner_store_path(str(job.runner["path"]))) == digest

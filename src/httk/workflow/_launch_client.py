@@ -4,8 +4,10 @@ Run as ``python -m httk.workflow._launch_client APP ARG...`` inside the attempt 
 manager to launch ``APP ARG...`` on the ranks of the attempt's binding, reproduces the launch's standard
 output and error, and exits with the launch's exit status:
 
-1. create ``launch/ID.lock`` exclusively and hold ``flock(LOCK_EX)`` on it for the client's whole life,
-   so the manager can tell a live client from a dead one;
+1. create ``ID.lock`` exclusively in the attempt's launch-lock directory (``$HTTK_WORKFLOW_LAUNCH_LOCKS``, a
+   per-attempt directory on host tmpfs that the manager binds into the sandbox, never a directory of the
+   shared workspace filesystem) and hold ``flock(LOCK_EX)`` on it for the client's whole life, so the
+   manager can tell a live client from a dead one. The lock is a death notification, not mutual exclusion;
 2. publish ``launch/ID.request.json`` by renaming a temporary file into place;
 3. copy ``launch/ID.stdout`` and ``launch/ID.stderr`` (created by the manager) to its own standard output
    and error until ``launch/ID.status.json`` exists and both are drained. If ``launch/`` is removed first
@@ -13,10 +15,10 @@ output and error, and exits with the launch's exit status:
 
 SIGTERM, SIGINT and SIGHUP do not end the client: it creates ``launch/ID.stop`` and keeps waiting for the
 manager's ``stopped`` status, so its caller returns only after the ranks are reaped. Only SIGKILL ends it
-early; the released lock then makes the manager stop the launch.
+early; the released lock then makes the manager stop the launch. The manager removes the lock directory
+when it drops the attempt.
 """
 
-import errno
 import fcntl
 import json
 import os
@@ -55,7 +57,6 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _STOP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _STREAM_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-_UNSUPPORTED_LOCK_ERRNOS = frozenset({errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP})
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 _STOPPED_DEFAULT = 128 + signal.SIGTERM
 
@@ -147,19 +148,32 @@ def _unlink(directory_fd: int, name: str) -> None:
         pass
 
 
-def _lock(directory_fd: int, request_id: str) -> int:
+def _open_lock_directory(environ: Mapping[str, str]) -> int:
+    """Open the attempt's launch-lock directory, which the manager created on host tmpfs."""
+
+    path = environ.get("HTTK_WORKFLOW_LAUNCH_LOCKS")
+    if not path:
+        raise _Refusal("a confined launch needs HTTK_WORKFLOW_LAUNCH_LOCKS, which is not set")
+    try:
+        return os.open(path, _DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise _Refusal(f"HTTK_WORKFLOW_LAUNCH_LOCKS {path} is not a usable directory: {exc.strerror or exc}") from exc
+
+
+def _lock(locks_fd: int, request_id: str) -> int:
     """Create and exclusively lock ``ID.lock``; the descriptor holds the lock until the client exits."""
 
     name = lock_name(request_id)
-    descriptor = os.open(name, _CREATE_FLAGS, 0o600, dir_fd=directory_fd)
+    try:
+        descriptor = os.open(name, _CREATE_FLAGS, 0o600, dir_fd=locks_fd)
+    except OSError as exc:
+        raise _Refusal(f"cannot create the client lock {name}: {exc.strerror or exc}") from exc
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
     except OSError as exc:
         os.close(descriptor)
-        _unlink(directory_fd, name)
-        if exc.errno in _UNSUPPORTED_LOCK_ERRNOS:
-            raise _Refusal("the filesystem does not support flock, which confined launches need") from exc
-        raise
+        _unlink(locks_fd, name)
+        raise _Refusal(f"cannot lock the client lock {name}: {exc.strerror or exc}") from exc
     return descriptor
 
 
@@ -299,20 +313,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
 
     command = list(sys.argv[1:] if argv is None else argv)
+    locks_fd = -1
     try:
         control, request = _build_request(command, os.environ)
+        locks_fd = _open_lock_directory(os.environ)
         directory_fd = _open_launch_directory(control)
     except _Refusal as exc:
+        if locks_fd >= 0:
+            os.close(locks_fd)
         print(f"httk-workflow launch: {exc}", file=sys.stderr, flush=True)
         return 2
     except OSError as exc:
+        if locks_fd >= 0:
+            os.close(locks_fd)
         print(f"httk-workflow launch: cannot prepare the launch directory: {exc}", file=sys.stderr, flush=True)
         return 2
     lock_fd: int | None = None
     previous: dict[signal.Signals, Callable[[int, FrameType | None], Any] | int | None] = {}
     try:
         try:
-            lock_fd = _lock(directory_fd, request.request_id)
+            lock_fd = _lock(locks_fd, request.request_id)
         except _Refusal as exc:
             print(f"httk-workflow launch: {exc}", file=sys.stderr, flush=True)
             return 2
@@ -331,6 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             signal.signal(signum, handler)
         if lock_fd is not None:
             os.close(lock_fd)
+        os.close(locks_fd)
         os.close(directory_fd)
 
 

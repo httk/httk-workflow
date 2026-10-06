@@ -24,8 +24,8 @@ from .models import (
     StateFrame,
     check_job_placement,
     is_payload_private,
-    normalize_placement,
     parse_job_key,
+    parse_placement_text,
     validate_failure,
     validate_label,
     validate_resources,
@@ -581,7 +581,7 @@ def _validated_spawn_entries(manager: Any, entries: Sequence[Mapping[str, object
     for raw in entries:
         job_key = require_string(raw.get("job_key"), "spawn child job_key")
         parse_job_key(job_key)
-        placement = normalize_placement(str(raw.get("placement", "")))
+        placement = parse_placement_text(raw.get("placement"), "spawn child placement")
         check_job_placement(placement)
         if raw.get("workspace_id", manager.workspace.workspace_id) != manager.workspace.workspace_id:
             raise UnsupportedExtensionError("cross-workspace spawn children are not supported")
@@ -829,7 +829,9 @@ def register_children(
                 continue
             if not published_here:
                 try:
-                    with JobDirectory.open(manager.workspace.root, placement, job_key) as published:
+                    with JobDirectory.open(
+                        jobs=manager.workspace.jobs, placement=placement, job_key=job_key
+                    ) as published:
                         published_digest = published.digest_tree(skip=is_payload_private, digest=digest)
                 except FileNotFoundError as exc:
                     raise FormatError(f"registered child bundle does not match: {job_key}") from exc

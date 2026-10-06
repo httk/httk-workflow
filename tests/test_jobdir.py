@@ -33,7 +33,7 @@ def layout(tmp_path: Path) -> tuple[Path, Path, Path]:
 @pytest.fixture
 def job_dir(layout: tuple[Path, Path, Path]) -> Iterator[JobDirectory]:
     root, _job, _outside = layout
-    with JobDirectory.open(root, _PLACEMENT, _KEY) as handle:
+    with JobDirectory.open(jobs=root, placement=_PLACEMENT, job_key=_KEY) as handle:
         yield handle
 
 
@@ -69,7 +69,7 @@ def _bounded[T](call: Callable[[], T], seconds: float = 5.0) -> T | BaseExceptio
 
 def test_open_pins_the_job_directory(layout: tuple[Path, Path, Path]) -> None:
     root, job, _outside = layout
-    with JobDirectory.open(root, _PLACEMENT, _KEY) as handle:
+    with JobDirectory.open(jobs=root, placement=_PLACEMENT, job_key=_KEY) as handle:
         assert handle.path == job
         assert os.path.samestat(os.fstat(handle.fd), os.stat(job))
     with pytest.raises(ValueError, match="closed"):
@@ -84,7 +84,7 @@ def test_open_follows_a_symlinked_placement_directory(layout: tuple[Path, Path, 
     target.rename(moved)
     target.symlink_to(moved, target_is_directory=True)
     # Placement directories are operator layout, e.g. project -> /scratch/project.
-    with JobDirectory.open(root, _PLACEMENT, _KEY) as handle:
+    with JobDirectory.open(jobs=root, placement=_PLACEMENT, job_key=_KEY) as handle:
         assert handle.path == job
         assert handle.stat("absent") is None
 
@@ -95,21 +95,21 @@ def test_open_refuses_a_symlinked_job_directory(layout: tuple[Path, Path, Path])
     job.rename(moved)
     job.symlink_to(moved, target_is_directory=True)
     with pytest.raises(JobDirectoryError):
-        JobDirectory.open(root, _PLACEMENT, _KEY)
+        JobDirectory.open(jobs=root, placement=_PLACEMENT, job_key=_KEY)
     assert _outside_state(outside) == {"sentinel": b"outside\n"}
 
 
 def test_open_reports_a_missing_job_as_not_found(layout: tuple[Path, Path, Path]) -> None:
     root, _job, _outside = layout
     with pytest.raises(FileNotFoundError):
-        JobDirectory.open(root, _PLACEMENT, "absent")
+        JobDirectory.open(jobs=root, placement=_PLACEMENT, job_key="absent")
 
 
 @pytest.mark.parametrize("key", ["..", ".", "", "a/b", "a\0b"])
 def test_open_refuses_an_invalid_job_key(layout: tuple[Path, Path, Path], key: str) -> None:
     root, _job, _outside = layout
     with pytest.raises(JobDirectoryError):
-        JobDirectory.open(root, _PLACEMENT, key)
+        JobDirectory.open(jobs=root, placement=_PLACEMENT, job_key=key)
 
 
 def test_at_trusts_its_anchor_but_nothing_below_it(layout: tuple[Path, Path, Path], tmp_path: Path) -> None:

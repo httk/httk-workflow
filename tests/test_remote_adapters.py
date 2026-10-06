@@ -327,7 +327,7 @@ def test_workspace_launcher_profile_dispatches_run_to_slurm(tmp_path: Path, remo
     assert command(["run", "--workspace", "station"], context) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["job_ids"] == ["4201", "4202"]
-    script = next(workspace.root.glob(".httk-workspace/batch/*.sbatch")).read_text(encoding="utf-8")
+    script = next(workspace.root.glob("logs/batch/*.sbatch")).read_text(encoding="utf-8")
     for directive in (
         "--account=p2026-1",
         "--partition=main",
@@ -355,7 +355,7 @@ def test_invocation_launcher_overrides_workspace_launcher(tmp_path: Path, remote
 
     assert command(["run", "--workspace", "station", "--launcher", "gpu"], context) == 0
     capsys.readouterr()
-    script = next(workspace.root.glob(".httk-workspace/batch/*.sbatch")).read_text(encoding="utf-8")
+    script = next(workspace.root.glob("logs/batch/*.sbatch")).read_text(encoding="utf-8")
     assert "#SBATCH --partition=gpu" in script
     assert "--launcher" not in script
 
@@ -729,18 +729,18 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
 def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="end-to-end")
-    Workspace.initialize(source_root)
+    home = Workspace.initialize(source_root / "workspace")
     destination = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(source_root, workspace=str(destination.root))
     payload, job_id = _payload(tmp_path / "incoming")
-    Workspace(source_root).submit(payload, "jobs")
+    home.submit(payload, "jobs")
     context = CLIContext("httk", source_root)
-    register_ws(context, source_root, "home")
+    register_ws(context, home.root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
-    assert Workspace(source_root).find_marker_by_id(job_id) is None
+    assert home.find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "submitted"
     with TaskManager(destination, heartbeat_interval=0.01) as manager:
@@ -754,23 +754,12 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
 
-def test_probe_remote_workspace_reports_older_remote_returning_single_document(tmp_path: Path) -> None:
+def test_probe_remote_workspace_refuses_an_older_remote_with_the_upgrade(tmp_path: Path) -> None:
     target = RemoteTarget("far", tmp_path, False)
 
-    def _old_release_adapter(bundle, verb, payload, *, timeout):
-        # A remote on the previous release answers ``status --json`` with a
-        # single status object rather than the current one-element list.
-        return {
-            "returncode": 0,
-            "stdout": json.dumps(
-                {
-                    "format": "httk-workflow-status",
-                    "format_version": 2,
-                    "workspace_id": str(uuid.uuid4()),
-                    "root": "/data/ws",
-                }
-            ),
-        }
+    def _old_adapter(bundle, verb, payload, *, timeout):
+        document = {"format": "httk-workflow-status", "format_version": 2, "core_profile": "core-v2"}
+        return {"returncode": 0, "stdout": json.dumps([{**document, "workspace_id": str(uuid.uuid4()), "root": "/ws"}])}
 
-    with pytest.raises(ValueError, match="older than this client"):
-        probe_remote_workspace(target, "ws", timeout=None, adapter=_old_release_adapter)
+    with pytest.raises(ValueError, match="Upgrade httk-workflow on the remote"):
+        probe_remote_workspace(target, "ws", timeout=None, adapter=_old_adapter)

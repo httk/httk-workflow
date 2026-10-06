@@ -152,7 +152,7 @@ class JobDirectory:
         self._follow = follow_symlinks
 
     @classmethod
-    def open(cls, workspace_root: Path, placement: PurePosixPath, job_key: str) -> Self:
+    def open(cls, *, jobs: Path, placement: PurePosixPath, job_key: str) -> Self:
         """Open one job directory of a workspace without following a link at or below it.
 
         The workspace root and the placement directories are operator layout
@@ -160,14 +160,14 @@ class JobDirectory:
         followed; the job directory itself, the job-key component, is opened
         ``O_NOFOLLOW``, and so is everything the handle reaches below it.
 
-        :param workspace_root: The workspace root, trusted and followed as the
+        :param jobs: The workspace ``jobs/`` directory, trusted and followed as the
             workspace resolves it.
         :param placement: The job's relative placement, followed.
         :param job_key: The job key naming the job directory.
         :return: The pinned job directory.
         :raises JobDirectoryError: If the job directory is a symlink or not a
             directory, or a component is invalid.
-        :raises OSError: If the workspace root or a placement directory cannot be
+        :raises OSError: If the jobs root or a placement directory cannot be
             opened, including :class:`FileNotFoundError` for a missing job directory.
         """
 
@@ -175,7 +175,7 @@ class JobDirectory:
             raise JobDirectoryError(f"placement must be relative: {placement}")
         for name in (*placement.parts, job_key):
             _check_component(name, placement / job_key)
-        anchor = workspace_root.joinpath(*placement.parts)
+        anchor = jobs.joinpath(*placement.parts)
         descriptor = os.open(anchor, _ANCHOR_FLAGS)
         shown = anchor / job_key
         try:

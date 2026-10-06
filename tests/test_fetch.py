@@ -135,11 +135,11 @@ def _build(root: Path) -> dict[str, str]:
     remote_root = root / "remote"
     initialize_project(local_root, name="fetch-local")
     initialize_project(remote_root, name="fetch-remote")
-    Workspace.initialize(local_root)
-    Workspace.initialize(remote_root)
+    Workspace.initialize(local_root / "workspace")
+    Workspace.initialize(remote_root / "workspace")
     add_remote("cluster", template="local", project=local_root)
 
-    remote = Workspace(remote_root)
+    remote = Workspace(remote_root / "workspace")
     source = root / "runners" / "fetch.py"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(_RUNNER, encoding="utf-8")
@@ -192,13 +192,13 @@ def pair(template: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pai
     # The adapter of the copy must name the remote workspace of the copy.
     metadata_path = local_root / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(remote_root)
+    metadata["settings"]["workspace_root"] = str(remote_root / "workspace")
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     identifiers = json.loads((root / "ids.json").read_text(encoding="utf-8"))
     context = CLIContext("httk", local_root)
-    register_ws(context, local_root, "home")
-    register_ws(context, remote_root, "station", remote="cluster")
-    return Pair(local_root, remote_root, context, identifiers)
+    register_ws(context, local_root / "workspace", "home")
+    register_ws(context, remote_root / "workspace", "station", remote="cluster")
+    return Pair(local_root / "workspace", remote_root / "workspace", context, identifiers)
 
 
 def _live_bundles(workspace: Workspace) -> list[Path]:
@@ -771,7 +771,7 @@ def _relay_pair(root: Path) -> tuple[CLIContext, Path, Path, Path, str, str]:
     source_root = root / "kappa"
     destination_root = root / "arrhenius"
     initialize_project(local_root, name="relay-local")
-    Workspace.initialize(local_root)
+    Workspace.initialize(local_root / "workspace")
     Workspace.initialize(source_root)
     Workspace.initialize(destination_root)
     kappa = add_remote("kappa", template="local", project=local_root)
@@ -791,7 +791,7 @@ def _relay_pair(root: Path) -> tuple[CLIContext, Path, Path, Path, str, str]:
     source.submit(root / "selected", "project/relay")
     source.submit(root / "other", "project/relay")
     context = CLIContext("httk", local_root)
-    register_ws(context, local_root, "home")
+    register_ws(context, local_root / "workspace", "home")
     register_ws(context, source_root, "source")
     register_ws(context, destination_root, "destination")
     return context, source_root, destination_root, local_root, selected, other

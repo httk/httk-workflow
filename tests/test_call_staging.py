@@ -201,7 +201,7 @@ def _outcome(workspace: Workspace, job_id: str) -> tuple[str, str | None, str]:
 
 
 def _published_children(workspace: Workspace) -> list[Path]:
-    return sorted(workspace.root.glob("project/stager/callee--*"))
+    return sorted(workspace.jobs.glob("project/stager/callee--*"))
 
 
 def _store(workspace: Workspace) -> list[str]:
@@ -475,10 +475,13 @@ def _in_process_attempt(tmp_path: Path, workspace_root: Path) -> Attempt:
     (tmp_path / "run").mkdir()
     context = {
         "format": "httk-workflow-attempt-context",
+        "settings": {},
+        "durable": False,
+        "deadline": None,
         "format_version": 2,
         "workspace_id": str(uuid.uuid4()),
-        "job_id": str(uuid.uuid4()),
-        "job_key": f"job--{uuid.uuid4()}",
+        "job_id": (_jid := str(uuid.uuid4())),
+        "job_key": f"job--{_jid}",
         "placement": "project/a",
         "payload": str(tmp_path / "job"),
         "step": "start",

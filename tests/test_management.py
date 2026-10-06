@@ -89,7 +89,7 @@ def test_config_import_v1_writes_identity_and_config(tmp_path: Path, monkeypatch
 def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="manifest-test", manifest_exclusions=("ignored*",))
-    Workspace.initialize(project)
+    Workspace.initialize(project / "workspace")
     (project / "space and\nnewline").write_bytes(b"content")
     (project / "empty").mkdir()
     (project / "link").symlink_to("space and\nnewline")
@@ -109,8 +109,8 @@ def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: P
 def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="active")
-    Workspace.initialize(project)
-    workspace = Workspace(project)
+    Workspace.initialize(project / "workspace")
+    workspace = Workspace(project / "workspace")
     payload, job_id = _payload(tmp_path)
     submitted = workspace.submit(payload, "jobs")
     # Construct the active state through the public transition protocol.
@@ -246,21 +246,21 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    Workspace.initialize(source_root)
-    Workspace.initialize(destination_root)
+    Workspace.initialize(source_root / "workspace")
+    Workspace.initialize(destination_root / "workspace")
     remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(destination_root)
+    metadata["settings"]["workspace_root"] = str(destination_root / "workspace")
     (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
-    Workspace(source_root).submit(payload, "jobs")
+    Workspace(source_root / "workspace").submit(payload, "jobs")
     context = CLIContext("httk", source_root)
-    register_ws(context, source_root, "home")
-    register_ws(context, destination_root, "station", remote="cluster")
+    register_ws(context, source_root / "workspace", "home")
+    register_ws(context, destination_root / "workspace", "station", remote="cluster")
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
-    imported = Workspace(destination_root).find_marker_by_id(job_id)
+    imported = Workspace(destination_root / "workspace").find_marker_by_id(job_id)
     assert imported is not None and imported.kind == "submitted"
-    assert Workspace(source_root).find_marker_by_id(job_id) is None
+    assert Workspace(source_root / "workspace").find_marker_by_id(job_id) is None
 
 
 def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch) -> None:
@@ -268,17 +268,17 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    Workspace.initialize(source_root)
-    Workspace.initialize(destination_root)
+    Workspace.initialize(source_root / "workspace")
+    Workspace.initialize(destination_root / "workspace")
     remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(destination_root)
+    metadata["settings"]["workspace_root"] = str(destination_root / "workspace")
     (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
-    Workspace(source_root).submit(payload, "jobs")
+    Workspace(source_root / "workspace").submit(payload, "jobs")
     context = CLIContext("httk", source_root)
-    register_ws(context, source_root, "home")
-    register_ws(context, destination_root, "station", remote="cluster")
+    register_ws(context, source_root / "workspace", "home")
+    register_ws(context, destination_root / "workspace", "station", remote="cluster")
 
     real_run_adapter = transfer_cli.run_adapter
     failed = False
@@ -296,8 +296,8 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     # stopped rather than start a second copy.
     arguments = ["job", "transfer", "--job", job_id, "home", "cluster:station"]
     assert command(arguments, context) == 2
-    assert Workspace(source_root).find_marker_by_id(job_id) is None
+    assert Workspace(source_root / "workspace").find_marker_by_id(job_id) is None
     monkeypatch.setattr(transfer_cli, "run_adapter", real_run_adapter)
     monkeypatch.setattr(workflow_common, "run_adapter", real_run_adapter)
     assert command(arguments, context) == 0
-    assert Workspace(destination_root).find_marker_by_id(job_id) is not None
+    assert Workspace(destination_root / "workspace").find_marker_by_id(job_id) is not None

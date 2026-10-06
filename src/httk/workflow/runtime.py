@@ -82,23 +82,19 @@ class AttemptContext:
     #: Whether the workspace this attempt runs in claims storage-crash
     #: durability. A runner threads it into every artifact it publishes so an
     #: outcome, a transaction, or a spawned child is synchronized before it is
-    #: renamed authoritative. An old context that predates the member reads as
-    #: ``False``: process-interruption safety only, which is what such a context
-    #: was written under.
+    #: renamed authoritative. The member is required.
     durable: bool
     #: The workspace's application settings at claim time, a flat dotted map. It
     #: is the workspace layer of the job-parameters → environment → workspace →
     #: default resolution a runner reads through
-    #: :meth:`~httk.workflow.sdk.Attempt.setting`. An old context that predates
-    #: the member reads as empty, which is what a context written before layered
-    #: settings existed meant.
+    #: :meth:`~httk.workflow.sdk.Attempt.setting`. The member is required.
     settings: Mapping[str, object]
     resources: Mapping[str, int]
     join: object
     raw: Mapping[str, Any]
     #: The epoch second at which the manager stops this attempt, present exactly
-    #: when the attempt runs under a ``maxtime``. An old context that predates
-    #: the member reads as ``None``.
+    #: when the attempt runs under a ``maxtime``, otherwise ``None``. The member
+    #: is required.
     deadline: int | None = None
     #: The ``nodes`` (host, procs, gpus and, when placed, mem), ``nodefile``,
     #: ``file`` (the full ``binding.json`` with per-node ``cpus`` and
@@ -129,7 +125,7 @@ class AttemptContext:
             "activation_id",
             "attempt_id",
         )
-        if any(not isinstance(value.get(name), str) or not value[name] for name in required):
+        if any(not isinstance(value.get(name), str) or not (value[name] or name == "placement") for name in required):
             raise ValueError("attempt context is missing a required string identity")
         generation = value.get("data_generation")
         if generation is not None and (not isinstance(generation, int) or isinstance(generation, bool)):
@@ -138,7 +134,11 @@ class AttemptContext:
             resources = validate_resources(value.get("resources", {}), "attempt resources")
         except FormatError as exc:
             raise ValueError(str(exc)) from exc
-        settings_raw = value.get("settings", {})
+        if not isinstance(value.get("durable"), bool):
+            raise ValueError("attempt durable must be a boolean")
+        if "deadline" not in value:
+            raise ValueError("attempt context is missing deadline")
+        settings_raw = value.get("settings")
         if not isinstance(settings_raw, Mapping):
             raise ValueError("attempt settings must be an object")
         payload = value.get("payload")
@@ -190,7 +190,7 @@ class AttemptContext:
             workdir_reused=bool(value.get("workdir_reused", False)),
             unsafe_persistent_takeover=bool(value.get("unsafe_persistent_takeover", False)),
             data_generation=generation,
-            durable=bool(value.get("durable", False)),
+            durable=value["durable"],
             settings=dict(settings_raw),
             resources=resources,
             join=value.get("join"),

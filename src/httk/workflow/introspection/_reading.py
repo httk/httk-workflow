@@ -18,6 +18,7 @@ from ..models import (
     Marker,
     normalize_placement,
     parse_job_key,
+    placement_text,
     validate_attempt_control,
 )
 from ..workspace import MarkerFault, Workspace, _marker_shaped, _safe_is_dir, _scandir_sorted
@@ -189,6 +190,10 @@ class JobSelectorResolver:
         root = self.workspace.root.resolve()
         if not resolved.is_relative_to(root):
             raise ValueError(f"{path_name} is not inside workspace {root}")
+        if not resolved.is_relative_to(self.workspace.jobs.resolve()):
+            raise ValueError(
+                f"{path_name} is not below the jobs directory {self.workspace.jobs}; job payloads live in jobs/"
+            )
 
         if resolved.is_file():
             raise ValueError(f"{path_name} is a file, not a job directory")
@@ -396,12 +401,18 @@ def job_frames(workspace: Workspace, marker: Marker, *, limit: int | None = None
 def _parse_marker_cursor(cursor: str) -> tuple[tuple[str, ...], str]:
     """Parse the placement and job key in an enumeration cursor."""
 
-    placement_text, separator, job_key = cursor.rpartition("/")
-    if not separator or not placement_text or not job_key:
-        raise ValueError("marker cursor must be '<placement>/<job_key>'")
-    placement = normalize_placement(PurePosixPath(placement_text)).parts
+    text, _separator, job_key = cursor.rpartition("/")
+    if not job_key:
+        raise ValueError("marker cursor must be '<placement>/<job_key>' or, for the empty placement, '<job_key>'")
+    placement = normalize_placement(text).parts
     parse_job_key(job_key)
     return placement, job_key
+
+
+def _cursor_text(kind: str, placement: str, job_key: str) -> str:
+    """Build a paging cursor; the empty placement contributes no ``/``."""
+
+    return f"{kind}:{placement}/{job_key}" if placement else f"{kind}:{job_key}"
 
 
 def _directory_after_relation(rel: tuple[str, ...], after: tuple[str, ...] | None) -> str:
@@ -576,7 +587,7 @@ def list_jobs(
     if after is not None:
         after_kind, separator, after_local = after.partition(":")
         if not separator or after_kind not in STATE_KINDS or not after_local:
-            raise ValueError("job list cursor must be '<kind>:<placement>/<job_key>'")
+            raise ValueError("job list cursor must be '<kind>:<placement>/<job_key>' or '<kind>:<job_key>'")
         if after_kind not in selected:
             selected_names = ", ".join(selected) or "none"
             raise ValueError(f"job list cursor kind {after_kind!r} is not among the selected kinds ({selected_names})")
@@ -615,7 +626,7 @@ def list_jobs(
                 "job_id": marker.job_id,
                 "state": marker.kind,
                 "step": state.get("step"),
-                "placement": marker.placement.as_posix(),
+                "placement": placement_text(marker.placement),
                 "priority": marker.priority,
                 "generation": marker.generation,
                 "reason": state.get("reason"),
@@ -644,8 +655,8 @@ def list_jobs(
             break
     next_after = None
     if stop_reason == "scan_budget" and last_seen is not None:
-        next_after = f"{last_seen.kind}:{last_seen.placement.as_posix()}/{last_seen.job_key}"
+        next_after = _cursor_text(last_seen.kind, placement_text(last_seen.placement), last_seen.job_key)
     elif stop_reason == "page_full" and rows:
         last = rows[-1]
-        next_after = f"{last['state']}:{last['placement']}/{last['job_key']}"
+        next_after = _cursor_text(last["state"], last["placement"], last["job_key"])
     return JobListPage(rows, next_after)

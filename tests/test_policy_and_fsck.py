@@ -150,15 +150,34 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
     assert attached.policy.retention.journal_days == 30.0
     assert attached.policy.lease_seconds == 900.0
     assert attached.workspace_id == workspace.workspace_id
-    assert attached.format["core_profile"] == "core-v2"
+    assert attached.format["core_profile"] == "core-v3"
 
 
-def test_a_workspace_written_before_the_policy_section_reads_as_the_defaults(tmp_path: Path) -> None:
+def test_initialize_creates_jobs_and_every_format_section(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    assert (workspace.root / "jobs").is_dir()
+    stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
+    assert stored["format_version"] == 3 and stored["core_profile"] == "core-v3"
+    assert stored["settings"] == {} and stored["workflow_preludes"] == {} and "policy" in stored
+
+
+def test_a_version_2_workspace_is_refused_with_a_teaching_message(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
-    del stored["policy"]
+    stored["format_version"] = 2
     (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
-    assert Workspace(tmp_path / "workspace").policy == WorkspacePolicy()
+    with pytest.raises(FormatError, match="httk system reset"):
+        Workspace(workspace.root)
+
+
+@pytest.mark.parametrize("section", ["policy", "settings", "workflow_preludes"])
+def test_a_workspace_missing_a_format_section_is_refused(tmp_path: Path, section: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
+    del stored[section]
+    (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
+    with pytest.raises(FormatError, match=section):
+        Workspace(workspace.root)
 
 
 @pytest.mark.parametrize(

@@ -33,7 +33,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import FrameType
 
 from . import _pmi_proxy
@@ -59,7 +59,15 @@ from ._sandbox import (
     open_directory_nofollow,
 )
 from .errors import FormatError
-from .models import check_job_placement, normalize_placement, parse_job_key
+from .models import (
+    EXCHANGE_DIRECTORY,
+    JOBS_DIRECTORY,
+    LOGS_DIRECTORY,
+    POSTPROCESS_DIRECTORY,
+    check_job_placement,
+    normalize_placement,
+    parse_job_key,
+)
 
 #: The trusted launch description inside the launch directory.
 LAUNCH_FILE = "launch.json"
@@ -164,12 +172,10 @@ def open_job(launch: TrustedLaunch, workspace: Path) -> tuple[Path, int]:
     """
 
     try:
-        placement = PurePosixPath()
-        if launch.placement:
-            placement = normalize_placement(launch.placement)
-            check_job_placement(placement)
+        placement = normalize_placement(launch.placement)
+        check_job_placement(placement)
         parse_job_key(launch.job_key)
-        with JobDirectory.open(workspace, placement, launch.job_key) as job:
+        with JobDirectory.open(jobs=workspace / JOBS_DIRECTORY, placement=placement, job_key=launch.job_key) as job:
             descriptor = os.dup(job.fd)
             shown = job.path
     except FormatError as exc:
@@ -178,7 +184,9 @@ def open_job(launch: TrustedLaunch, workspace: Path) -> tuple[Path, int]:
         real = Path(os.path.realpath(shown))
         if not os.path.samestat(os.fstat(descriptor), os.stat(real)):
             raise ValueError(f"the job directory {shown} changed while it was opened")
-        if real == workspace or real.is_relative_to(workspace / _WORKSPACE_DIRECTORY):
+        # Placement directories may be symlinks anywhere, so no positive "below jobs/" check.
+        refused = (_WORKSPACE_DIRECTORY, EXCHANGE_DIRECTORY, LOGS_DIRECTORY, POSTPROCESS_DIRECTORY)
+        if real == workspace or any(real.is_relative_to(workspace / name) for name in refused):
             raise ValueError(f"the job directory {real} is the workspace or lies in its control directory")
     except BaseException:
         os.close(descriptor)

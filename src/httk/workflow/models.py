@@ -25,7 +25,7 @@ from ._util import (
 )
 from .errors import FormatError
 
-CORE_PROFILE = "core-v2"
+CORE_PROFILE = "core-v3"
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset()
 RUNNER_SOURCES = frozenset({"payload", "workspace", "installed"})
 PACKAGE_RUNNER_PREFIX = "pkg:"
@@ -62,6 +62,9 @@ QUIESCENT_KINDS = frozenset({"submitted", "ready", "waiting", "paused", "failed"
 # digest pins.
 ATTEMPTS_DIRECTORY = "attempts"
 LOGS_DIRECTORY = "logs"
+JOBS_DIRECTORY = "jobs"
+POSTPROCESS_DIRECTORY = "postprocess"
+EXCHANGE_DIRECTORY = "exchange"
 JOB_STATE_DIRECTORY = ".httk-job"
 # The envelope a detached or ejected job carries while it is out of every
 # workspace: its manifest, its marker, and any shared runner it pins. It
@@ -765,13 +768,15 @@ def ensure_step_known(step: str, steps: Sequence[str], subject: str) -> str:
 def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
     """Validate and normalize one relative POSIX placement.
 
+    The empty placement (``""`` or ``"."``) is legal and normalizes to ``PurePosixPath()``.
+
     :param value: The placement to validate.
     :return: The normalized relative placement.
-    :raises httk.workflow.errors.FormatError: If the placement is absolute, empty, unsafe, or too long.
+    :raises httk.workflow.errors.FormatError: If the placement is absolute, unsafe, or too long.
     """
     placement = PurePosixPath(value)
-    if placement.is_absolute() or not placement.parts:
-        raise FormatError("placement must be a nonempty relative POSIX path")
+    if placement.is_absolute():
+        raise FormatError("placement must be a relative POSIX path")
     for part in placement.parts:
         if part in _UNSAFE_PATH_COMPONENTS or "\x00" in part:
             raise FormatError(f"invalid placement component: {part!r}")
@@ -780,14 +785,45 @@ def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
     return placement
 
 
+def payload_relative(placement: PurePosixPath, job_key: str) -> PurePosixPath:
+    """Return a job payload's workspace-relative path, ``jobs/<placement>/<job_key>``.
+
+    :param placement: The job's normalized placement.
+    :param job_key: The job key.
+    :return: The relative payload path.
+    """
+    return PurePosixPath(JOBS_DIRECTORY, *placement.parts, job_key)
+
+
+def placement_text(placement: PurePosixPath) -> str:
+    """Return the canonical text of a placement: ``""`` for the empty placement, else its POSIX form.
+
+    :param placement: The normalized placement.
+    :return: The text written to JSON, frames, manifests, and cursors.
+    """
+    return placement.as_posix() if placement.parts else ""
+
+
+def parse_placement_text(value: object, name: str = "placement") -> PurePosixPath:
+    """Parse the canonical text of a placement, allowing the empty string.
+
+    :param value: The text to parse.
+    :param name: The field name used in error messages.
+    :return: The normalized placement.
+    :raises httk.workflow.errors.FormatError: If the value is not a string or not a valid placement.
+    """
+    if not isinstance(value, str):
+        raise FormatError(f"{name} must be a string")
+    return normalize_placement(value)
+
+
 def check_job_placement(placement: PurePosixPath) -> None:
     """Refuse a placement that names a job directory, so job directories never nest.
 
     Every job directory is ``<placement>/<job_key>``. A placement none of whose
     components parses as a job key therefore never places one job inside
     another's directory, without any lock or index. New jobs are held to this
-    rule wherever they enter a workspace; :func:`~httk.workflow.protocol.normalize_placement` does not
-    apply it, so markers of jobs placed before the rule keep parsing.
+    rule wherever they enter a workspace.
 
     :param placement: The normalized placement to check.
     :raises httk.workflow.errors.FormatError: If a component of the placement parses as a job key.
@@ -799,7 +835,7 @@ def check_job_placement(placement: PurePosixPath) -> None:
         except FormatError:
             continue
         raise FormatError(
-            f"placement {placement.as_posix()!r} has the component {part!r}, which parses as a job key: "
+            f"placement {placement_text(placement)!r} has the component {part!r}, which parses as a job key: "
             "a placement must not name a job directory, so job directories never nest"
         )
 
@@ -935,8 +971,7 @@ class WorkspacePolicy:
     These are workspace properties rather than per-process options: two
     managers on different hosts must agree on how long a marker may take to
     become visible and on how long an unheartbeaten lease means anything. They
-    live in ``format.json`` beside the format and profile declarations, and a
-    workspace written before this section existed simply reads as the defaults.
+    live in ``format.json`` beside the format and profile declarations.
 
     :param visibility_deadline_seconds: The marker visibility deadline.
     :param lease_seconds: The manager claim lease duration.
@@ -1208,8 +1243,8 @@ class StateFrame:
     """The members of one state frame, typed for the manager that uses them.
 
     The frame is held exactly as it is on disk, so every member round-trips
-    verbatim — including one written by a newer implementation, by an enabled
-    extension, or by a workspace older than this code. What this implementation
+    verbatim — including one written by a newer implementation or by an enabled
+    extension. What this implementation
     reads and writes goes through the typed accessors and through :meth:`replace`,
     so a mistyped member name is a type error at the call site rather than a
     silently defaulted value at runtime.
@@ -1765,6 +1800,12 @@ class JobDefinition:
         declared = {} if declared_raw is None else validate_declared(declared_raw)
         parent_raw = value.get("parent")
         parent = None if parent_raw is None else require_mapping(parent_raw, "parent")
+        if parent is not None:
+            parent_id = canonical_uuid(parent.get("job_id"), "parent.job_id")
+            parent_key = require_string(parent.get("job_key"), "parent.job_key")
+            if parse_job_key(parent_key)[1] != parent_id:
+                raise FormatError("parent.job_key does not carry the parent.job_id")
+            parse_placement_text(parent.get("placement"), "parent.placement")
         requires_raw = value.get("requires")
         try:
             requires = () if requires_raw is None else parse_requirements(requires_raw, "requires")
@@ -1840,8 +1881,8 @@ class Marker:
         :raises httk.workflow.errors.FormatError: If the path does not use marker syntax.
         """
         relative = path.relative_to(state_root)
-        if len(relative.parts) < 3:
-            raise FormatError(f"marker has no placement: {path}")
+        if len(relative.parts) < 2:
+            raise FormatError(f"marker has no state kind: {path}")
         kind = relative.parts[0]
         if kind not in STATE_KINDS:
             raise FormatError(f"unknown state kind: {kind}")

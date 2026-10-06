@@ -229,16 +229,16 @@ def remote_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Worksp
     remote_root = tmp_path / "remote"
     initialize_project(local_root, name="tree-local")
     initialize_project(remote_root, name="tree-remote")
-    local = Workspace.initialize(local_root)
-    remote = Workspace.initialize(remote_root)
+    local = Workspace.initialize(local_root / "workspace")
+    remote = Workspace.initialize(remote_root / "workspace")
     add_remote("cluster", template="local", project=local_root)
     metadata_path = local_root / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata.setdefault("settings", {})["workspace_root"] = str(remote_root)
+    metadata.setdefault("settings", {})["workspace_root"] = str(remote.root)
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     context = CLIContext("httk", local_root)
-    register_ws(context, local_root, "home")
-    register_ws(context, remote_root, "station", remote="cluster")
+    register_ws(context, local.root, "home")
+    register_ws(context, remote.root, "station", remote="cluster")
     return local, remote, context
 
 

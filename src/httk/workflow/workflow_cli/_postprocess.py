@@ -81,7 +81,7 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
 
     wanted: set[str] | None = None
     if arguments.jobs:
-        if arguments.state or arguments.placement:
+        if arguments.state or arguments.placement is not None:
             print("job selectors cannot be combined with --state or --placement", file=sys.stderr)
             return 2
         try:
@@ -168,8 +168,8 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
     parser.add_argument(
         "--output-dir",
         metavar="DIR",
-        help="output root for this run (default: the postprocess.directory setting, or <workspace>/postprocess); "
-        "a relative path resolves against the workspace root",
+        help="output root for this run, outside the workspace (default: the postprocess.directory setting, "
+        "or <workspace>/postprocess); a relative path resolves against the current directory",
     )
     parser.add_argument(
         "--timeout",

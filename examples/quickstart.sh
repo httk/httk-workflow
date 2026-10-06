@@ -57,9 +57,9 @@ END
 # One-time per-user setup is `httk init --name "Your Name" --email you@example.org`;
 # deliberately not run here so this example leaves your per-user configuration untouched.
 
-# 1. The project anchor and an explicit workspace at its root.
+# 1. The project anchor and a workspace in its own directory.
 httk_project init --name quickstart .
-httk_cmd workspace init --name default .
+httk_cmd workspace init --name default workspace
 
 # 2. One job of the vasp.relax workflow, referenced by its git URI, starting from
 #    that structure. The command prints one tab-separated line with its key and payload.
@@ -86,4 +86,4 @@ fi
 # 6. Make a plot from the workdir OUTCAR.
 httk_workflow postprocess --script relaxation-plot
 
-printf '\nthe result is in jobs/*/run/ (no data/ copy)\n'
+printf '\nthe result is in workspace/jobs/*/run/ (no data/ copy)\n'

@@ -86,7 +86,7 @@ def _fake_bwrap(directory: Path) -> Path:
 def launch(tmp_path: Path) -> _Launch:
     root = tmp_path.resolve()
     workspace = root / "ws"
-    job = workspace / "project" / f"relax--{uuid.uuid4()}"
+    job = workspace / "jobs" / "project" / f"relax--{uuid.uuid4()}"
     job.mkdir(parents=True)
     shm_root = root / "shm"
     shm_root.mkdir(mode=0o700)
@@ -391,7 +391,7 @@ def test_open_job_refusals(launch: _Launch) -> None:
         _confine_rank.open_job(replace(launch.trusted, placement=f"project/{nested}"), workspace)
     with pytest.raises(ValueError, match="placement"):
         _confine_rank.open_job(replace(launch.trusted, placement=".httk-workspace"), workspace)
-    linked = workspace / "project" / f"linked--{uuid.uuid4()}"
+    linked = workspace / "jobs" / "project" / f"linked--{uuid.uuid4()}"
     linked.symlink_to(launch.job)
     with pytest.raises(ValueError, match="symlink"):
         _confine_rank.open_job(replace(launch.trusted, job_key=linked.name), workspace)
@@ -399,12 +399,20 @@ def test_open_job_refusals(launch: _Launch) -> None:
     # Placement directories are operator layout and followed; the job's real path is used.
     scratch = launch.root / "scratch"
     scratch.mkdir()
-    (workspace / "elsewhere").symlink_to(scratch)
+    (workspace / "jobs" / "elsewhere").symlink_to(scratch)
     moved = scratch / launch.job.name
     moved.mkdir()
     job, descriptor = _confine_rank.open_job(replace(launch.trusted, placement="elsewhere"), workspace)
     os.close(descriptor)
     assert job == moved
+
+    # Placement symlinks may point anywhere except the workspace's own control trees.
+    for name in ("logs", "exchange", "postprocess", ".httk-workspace"):
+        (workspace / name).mkdir(exist_ok=True)
+        (workspace / name / launch.job.name).mkdir()
+        (workspace / "jobs" / f"to-{name}").symlink_to(workspace / name)
+        with pytest.raises(ValueError, match="control directory"):
+            _confine_rank.open_job(replace(launch.trusted, placement=f"to-{name}"), workspace)
 
 
 def test_shared_memory_is_shared_and_removed_by_the_last_rank(launch: _Launch) -> None:
@@ -910,7 +918,7 @@ def _use_real_bwrap(launch: _Launch) -> None:
 
 def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
     _use_real_bwrap(launch)
-    sibling = launch.workspace / "project" / f"other--{uuid.uuid4()}"
+    sibling = launch.workspace / "jobs" / "project" / f"other--{uuid.uuid4()}"
     sibling.mkdir()
     script = (
         'for target in "$1/own" "$2/x" "$3/x" "/dev/shm/x"; do\n'

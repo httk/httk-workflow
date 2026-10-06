@@ -152,15 +152,18 @@ publish("succeed")
     assert marker is not None and marker.kind == "succeeded"
     seen = json.loads((workspace.payload_path(marker.placement, marker.job_key) / "run" / "seen.json").read_text())
     if maxtime is None:
-        assert seen == {"context": "absent", "env": "absent"}
+        assert seen == {"context": None, "env": "absent"}
     else:
         assert launched + maxtime - 1 <= seen["context"] <= finished + maxtime
         assert seen["env"] == str(seen["context"])
 
 
 def test_attempt_context_deadline_is_optional_and_validated() -> None:
-    base = {
+    base: dict[str, object] = {
         "format": "httk-workflow-attempt-context",
+        "durable": False,
+        "deadline": None,
+        "settings": {},
         "format_version": 2,
         **{
             name: name

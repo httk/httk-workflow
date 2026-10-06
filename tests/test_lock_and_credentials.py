@@ -12,7 +12,6 @@ import pytest
 from httk.core.cli import CLIContext
 from httk.core.project.manifests import create_manifest
 
-from conftest import register_ws
 from httk.workflow import Workspace
 from httk.workflow.adapters import add_remote, remote_settings, run_adapter
 from httk.workflow.manifests import (
@@ -25,12 +24,23 @@ from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.workflow_cli import command
 
 
+def _init_workspace(project: Path) -> Workspace:
+    """Create ``project/workspace``, register it as ``default``, and record it as the project default."""
+
+    from httk.workflow.projects import write_project_section
+    from httk.workflow.registry import create_workspace
+
+    create_workspace("default", project / "workspace")
+    write_project_section(project, "workspace", {"default": "default"})
+    return Workspace(project / "workspace")
+
+
 def _project(tmp_path: Path, monkeypatch, name: str = "locking") -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     project = tmp_path / name
     initialize_project(project, name=name)
-    Workspace.initialize(project)
+    _init_workspace(project)
     return project
 
 
@@ -43,7 +53,7 @@ def _dead_pid() -> int:
 
 
 def _write_lock(project: Path, value: object) -> Path:
-    path = project / ".httk-workspace" / MAINTENANCE_LOCK_FILE
+    path = project / "workspace" / ".httk-workspace" / MAINTENANCE_LOCK_FILE
     path.write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
     return path
 
@@ -61,8 +71,8 @@ def _lock_json(**overrides: object) -> dict[str, object]:
 
 def test_guard_records_json_and_removes_it(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = Workspace(project)
-    path = project / ".httk-workspace" / MAINTENANCE_LOCK_FILE
+    workspace = Workspace(project / "workspace")
+    path = project / "workspace" / ".httk-workspace" / MAINTENANCE_LOCK_FILE
     with workspace_maintenance_guard(workspace):
         holder = read_maintenance_lock(workspace)
         assert holder is not None
@@ -85,7 +95,7 @@ def test_guard_records_json_and_removes_it(tmp_path: Path, monkeypatch) -> None:
 )
 def test_stale_lock_is_reclaimed_by_the_guard(tmp_path: Path, monkeypatch, content) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = Workspace(project)
+    workspace = Workspace(project / "workspace")
     path = _write_lock(project, content())
     with workspace_maintenance_guard(workspace):
         holder = read_maintenance_lock(workspace)
@@ -95,7 +105,7 @@ def test_stale_lock_is_reclaimed_by_the_guard(tmp_path: Path, monkeypatch, conte
 
 def test_live_lock_refuses_with_holder_information(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = Workspace(project)
+    workspace = Workspace(project / "workspace")
     path = _write_lock(project, _lock_json(pid=os.getpid()))
     expected = re.escape(f"pid {os.getpid()} on host {socket.gethostname()}")
     with pytest.raises(ValueError, match=expected), workspace_maintenance_guard(workspace):
@@ -108,7 +118,7 @@ def test_live_lock_refuses_with_holder_information(tmp_path: Path, monkeypatch) 
 
 def test_lock_age_bound_is_one_day(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = Workspace(project)
+    workspace = Workspace(project / "workspace")
     assert MAINTENANCE_LOCK_MAX_AGE_SECONDS == 24 * 60 * 60
     _write_lock(project, _lock_json(pid=os.getpid(), hostname="another-host.example.test"))
     holder = read_maintenance_lock(workspace)
@@ -120,7 +130,7 @@ def test_lock_age_bound_is_one_day(tmp_path: Path, monkeypatch) -> None:
 def test_workspace_unlock_clears_stale_and_needs_force_for_live(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch)
     context = CLIContext("httk", project)
-    ws = register_ws(context, project)
+    ws = "default"
     assert command(["workspace", "unlock", ws], context) == 0
     assert "no maintenance lock" in capsys.readouterr().out
 

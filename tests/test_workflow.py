@@ -345,6 +345,8 @@ os.rename(temporary, control / "outcome.ready")
         "parent": {
             "workspace_id": context["workspace_id"],
             "job_id": context["job_id"],
+            "job_key": context["job_key"],
+            "placement": context["placement"],
             "activation_id": context["activation_id"],
         },
     }))

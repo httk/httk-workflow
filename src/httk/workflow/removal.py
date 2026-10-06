@@ -132,9 +132,9 @@ def _remove_payload(path: Path) -> None:
 def _payload_safety(workspace: "Workspace", marker: Marker) -> str | None:
     """Validate payload containment and its runner-owned directories."""
 
-    current = workspace.root
+    current = workspace.jobs
     if not _is_real_directory(current):
-        return f"workspace root is not a real directory: {current}"
+        return f"workspace jobs directory is not a real directory: {current}"
     for component in marker.placement.parts:
         current /= component
         if not _is_real_directory(current, missing_ok=True):

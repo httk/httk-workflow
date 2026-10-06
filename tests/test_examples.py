@@ -147,7 +147,7 @@ def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subpr
 def _finished(workspace_root: Path) -> tuple[str, Path, Path]:
     """Return the terminal state, payload, and postprocess SVG path of the one job."""
 
-    workspace = Workspace(workspace_root, mutable=False)
+    workspace = Workspace(workspace_root / "workspace", mutable=False)
     markers = list(workspace.scan_markers())
     assert len(markers) == 1, f"expected exactly one job, found {[marker.job_key for marker in markers]}"
     marker = markers[0]

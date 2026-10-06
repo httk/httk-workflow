@@ -197,20 +197,11 @@ def probe_remote_workspace(
         documents = json.loads(str(status.get("stdout", "")))
     except json.JSONDecodeError as exc:
         raise ValueError(f"{noun} did not return a compatible workspace status") from exc
-    if isinstance(documents, dict):
-        raise ValueError(
-            "remote httk-workflow is older than this client: upgrade the remote "
-            "(workspace status --json returned a single document)"
-        )
     try:
         if not isinstance(documents, list) or len(documents) != 1:
             raise ValueError
         document = documents[0]
-        if (
-            document.get("format") != "httk-workflow-status"
-            or document.get("format_version") != 2
-            or document.get("core_profile") != CORE_PROFILE
-        ):
+        if document.get("format") != "httk-workflow-status":
             raise ValueError
         workspace_id = document["workspace_id"]
         root = document["root"]
@@ -219,6 +210,12 @@ def probe_remote_workspace(
         uuid.UUID(workspace_id)
     except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         raise ValueError(f"{noun} did not return a compatible workspace status") from exc
+    if document.get("format_version") != 3 or document.get("core_profile") != CORE_PROFILE:
+        raise ValueError(
+            f"{noun} runs an incompatible httk-workflow (status format {document.get('format_version')!r}, "
+            f"profile {document.get('core_profile')!r}); this client reads only {CORE_PROFILE}. "
+            "Upgrade httk-workflow on the remote and recreate its workspace; there is no migration."
+        )
     return workspace_id, root
 
 

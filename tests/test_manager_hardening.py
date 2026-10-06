@@ -218,8 +218,8 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     assert marker is not None and marker.kind == "failed"
     # Stopped by the drain without an outcome: lost to the manager, not failed by itself.
     assert workspace.read_state(marker)["failure"]["code"] == "lease_lost"
-    log = workspace.control / "managers.log"
-    assert log.is_file() and not list((workspace.control / "managers").iterdir())
+    (log,) = (workspace.root / "logs" / "managers").glob("*.log")
+    assert not list((workspace.control / "managers").iterdir())
     events = [json.loads(line).get("event") for line in log.read_text(encoding="utf-8").splitlines() if line]
     assert "drain_started" in events and "drain_complete" in events
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
@@ -306,8 +306,8 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     )
 
     assert code == 0
-    log = workspace.control / "managers.log"
-    assert log.is_file() and not list((workspace.control / "managers").iterdir())
+    (log,) = (workspace.root / "logs" / "managers").glob("*.log")
+    assert not list((workspace.control / "managers").iterdir())
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
     assert all({"ts", "level", "logger", "message"} <= set(record) for record in records)
     assert all(record["manager_id"] == records[0]["manager_id"] for record in records)
@@ -321,30 +321,23 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     assert any(record.get("event") == "transition" and record.get("kind") == "succeeded" for record in records)
 
 
-def test_shared_manager_log_rotates_once_before_startup_logging(tmp_path: Path) -> None:
+def test_manager_log_rotates_once_at_attach(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    ws = register_ws(None, workspace.root)
-    log = workspace.control / "managers.log"
-    log.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
+    logs = workspace.root / "logs" / "managers"
+    logs.mkdir(parents=True)
+    old = logs / "manager-old.log"
+    old.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
+    logging_module.add_log_file(old, manager_id="manager-old", json_logs=True)
+    logging.getLogger("httk.workflow").info("after")
+    logging_module.reset_logging()
 
-    code = command(
-        ["manager", "run", "--workspace", ws, "--json-logs"],
-        CLIContext("httk", tmp_path),
-    )
-
-    assert code == 0
-    rotated = workspace.control / "managers.log.1"
+    rotated = logs / "manager-old.log.1"
     assert rotated.is_file() and rotated.stat().st_size == 16 * 1024 * 1024 + 1
-    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
-    assert records
-    assert all(record["manager_id"] == records[0]["manager_id"] for record in records)
-    assert any(record.get("event") == "manager_started" for record in records)
+    assert "after" in old.read_text(encoding="utf-8") and old.stat().st_size < 1000
 
 
-def test_concurrent_manager_log_startup_rotation_keeps_both_managers(tmp_path: Path) -> None:
+def test_two_managers_write_two_separate_logs(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    log = workspace.control / "managers.log"
-    log.write_bytes(b"original-sentinel\n" + b"x" * (16 * 1024 * 1024 + 1))
     script = """
 from pathlib import Path
 import sys
@@ -354,7 +347,7 @@ from httk.workflow._logging import add_log_file, configure_logging
 workspace = Workspace(Path(sys.argv[1]))
 configure_logging()
 def setup(manager_id):
-    add_log_file(workspace.control / "managers.log", manager_id=manager_id)
+    add_log_file(workspace.root / "logs" / "managers" / f"{manager_id}.log", manager_id=manager_id)
 with TaskManager(workspace, on_attached=setup) as manager:
     print(manager.manager_id, flush=True)
     manager.run_until_idle(timeout=10)
@@ -373,10 +366,11 @@ with TaskManager(workspace, on_attached=setup) as manager:
     assert all(process.returncode == 0 for process in processes), results
     manager_ids = {stdout.strip() for stdout, _stderr in results}
     assert len(manager_ids) == 2
-    assert list(workspace.control.glob("managers.log.1")) == [workspace.control / "managers.log.1"]
-    combined = log.read_text(encoding="utf-8") + (workspace.control / "managers.log.1").read_text(encoding="utf-8")
-    assert "original-sentinel" in combined
-    assert all(manager_id in combined for manager_id in manager_ids)
+    logs = {path.name: path.read_text(encoding="utf-8") for path in (workspace.root / "logs" / "managers").iterdir()}
+    assert set(logs) == {f"{manager_id}.log" for manager_id in manager_ids}
+    for manager_id in manager_ids:
+        text = logs[f"{manager_id}.log"]
+        assert text and all(line.startswith(manager_id) for line in text.splitlines() if line)
 
 
 def test_manager_log_rotates_after_1000_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

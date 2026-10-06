@@ -217,16 +217,27 @@ def register_workspace(
     :param path: Locate the local workspace to register.
     :param durable: Flush the registry update durably when true.
     :return: The registered local binding.
-    :raises ValueError: If the name or path is already registered.
+    :raises ValueError: If the name or path is already registered, or the path is itself a project root.
     """
 
     workspaces = _read_global()
     location = str(Path(path).expanduser().resolve())
+    _refuse_project_root(Path(location))
     _refuse_registered(workspaces, name, location)
     workspaces[name] = {"path": location}
     _write_global(workspaces, durable=durable)
     _record_member_name(Path(location), name)
     return WorkspaceBinding(name, LOCAL_REMOTE, location)
+
+
+def _refuse_project_root(root: Path) -> None:
+    """Refuse a workspace root that is also a project root (format v3: a workspace is a directory of its own)."""
+
+    if discover_project(root) == root:
+        raise ValueError(
+            f"{root} is a project root and cannot be a workspace; a workspace lives in a directory of its own, "
+            "e.g. `httk workspace init --name default workspace`"
+        )
 
 
 def _record_member_name(path: Path, name: str) -> None:
@@ -412,6 +423,10 @@ def adopt_workspace(root: str | os.PathLike[str], *, name: str | None = None) ->
 
     root = Path(root).expanduser().resolve()
     findings: list[dict[str, object]] = []
+    try:
+        _refuse_project_root(root)
+    except ValueError as exc:
+        return (Finding("workspace_adopt", "error", str(exc), details={"path": str(root)}).as_mapping(),)
     project = discover_project(root)
     members = list(project_members(project)) if project is not None else []
     member = None

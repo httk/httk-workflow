@@ -52,6 +52,17 @@ from httk.workflow.projects import (
 from httk.workflow.workflow_cli import command
 
 
+def _init_workspace(project: Path) -> Workspace:
+    """Create ``project/workspace``, register it as ``default``, and record it as the project default."""
+
+    from httk.workflow.projects import write_project_section
+    from httk.workflow.registry import create_workspace
+
+    create_workspace("default", project / "workspace")
+    write_project_section(project, "workspace", {"default": "default"})
+    return Workspace(project / "workspace")
+
+
 def _fields(value: Mapping[str, object]) -> dict[str, Any]:
     """Read one JSON report in a test without restating every member type."""
 
@@ -71,7 +82,7 @@ def _project(tmp_path: Path, monkeypatch, name: str = "trust") -> Path:
     _isolate(tmp_path, monkeypatch)
     project = tmp_path / name
     initialize_project(project, name=name)
-    Workspace.initialize(project)
+    _init_workspace(project)
     (project / "content.txt").write_text("original\n", encoding="utf-8")
     return project
 
@@ -249,7 +260,7 @@ def test_workspace_payloads_are_excluded_from_the_project_manifest(tmp_path: Pat
     """A workspace member's payloads are excluded; loose project files are covered."""
 
     project = _project(tmp_path, monkeypatch)  # root-as-workspace, a registered member
-    workspace = Workspace(project)
+    workspace = Workspace(project / "workspace")
     source = tmp_path / "src" / "job"
     (source / "files").mkdir(parents=True)
     (source / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")

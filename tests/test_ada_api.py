@@ -223,8 +223,8 @@ def _attempt(
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
             "workspace_id": workspace_id,
-            "job_id": str(uuid.uuid4()),
-            "job_key": f"fabricated--{uuid.uuid4()}",
+            "job_id": (_jid := str(uuid.uuid4())),
+            "job_key": f"fabricated--{_jid}",
             "placement": "project/fabricated",
             "payload": str(payload),
             "step": step,
@@ -233,6 +233,8 @@ def _attempt(
             "data_generation": data_generation,
             "children": [],
             "settings": {},
+            "durable": False,
+            "deadline": None,
         }
     )
     environment = os.environ.copy()
@@ -257,7 +259,7 @@ def _attempt(
 def _fabricate_parent(workspace: Path, workspace_id: str) -> dict[str, object]:
     """Fabricate a parent payload with a persistent ``calc`` workdir; return the child's ``parent`` block."""
 
-    staging = workspace / "project/parent/staging"
+    staging = workspace / "jobs/project/parent/staging"
     (staging / "files").mkdir(parents=True)
     (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     spec = JobSpec(
@@ -468,7 +470,7 @@ def test_parent_reads_the_spawning_job_or_answers_absent(tmp_path: Path) -> None
       end;"""
     binary = _write_runner(tmp_path / "build", "tests.ada.parent", {"probe": body})
     child = _attempt(tmp_path / "child", step="probe", parent=True)
-    parent_payload = next((tmp_path / "child/workspace/project/parent").iterdir())
+    parent_payload = next((tmp_path / "child/workspace/jobs/project/parent").iterdir())
     completed = child.run(binary)
     assert completed.returncode == 0, completed.stderr
     job_id = parent_payload.name.removeprefix("parent--")

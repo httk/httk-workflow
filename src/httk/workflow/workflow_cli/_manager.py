@@ -29,7 +29,7 @@ from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
 from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
 from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, NotIdleError, TaskManager
-from ..models import WORKSPACE_DIRECTORY, validate_capacity
+from ..models import LOGS_DIRECTORY, validate_capacity
 from ..registry import WorkspaceBinding
 from ..workspace import Workspace, _validate_setting_key, _validate_setting_value
 from ._common import (
@@ -422,7 +422,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log-file",
         metavar="PATH",
-        help=f"manager log file (default: WORKSPACE/{WORKSPACE_DIRECTORY}/managers.log)",
+        help=f"fixed log file for one in-process manager (default: WORKSPACE/{LOGS_DIRECTORY}/managers/<manager-id>.log)",
     )
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     inline_detach = parser.add_mutually_exclusive_group()
@@ -555,10 +555,21 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     _add_time_limit_arguments(parser)
     parser.add_argument("--gc-interval", type=float, metavar="SECONDS", help="background garbage collection interval")
-    parser.add_argument("--log-file", metavar="PATH", help="manager log file")
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        help="fixed log file for one in-process manager (default: WORKSPACE/logs/managers/<manager-id>.log)",
+    )
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     add_durability_arguments(parser)
     parser.set_defaults(handler=handle_manager_run, **manager_option_defaults())
+
+
+_LOG_FILE_REFUSAL = (
+    "--log-file names one fixed file and is accepted only for a single in-process manager; "
+    "managers started with --count > 1, --detach, a launcher or a remote binding always log to "
+    "logs/managers/<manager-id>.log"
+)
 
 
 def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
@@ -630,8 +641,6 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv.append("--exchange")
     if getattr(arguments, "log_level", None) is not None:
         argv += ["--log-level", arguments.log_level]
-    if getattr(arguments, "log_file", None) is not None:
-        argv += ["--log-file", arguments.log_file]
     if getattr(arguments, "json_logs", False):
         argv.append("--json-logs")
     if getattr(arguments, "no_durable", False):
@@ -647,6 +656,8 @@ def _remote_manager_argv(arguments: argparse.Namespace, name: str) -> list[str]:
     count = getattr(arguments, "count", None)
     if count is not None and count < 1:
         raise ValueError("--count must be a positive integer")
+    if getattr(arguments, "log_file", None) is not None:
+        raise ValueError(_LOG_FILE_REFUSAL)
     argv = [
         *REMOTE_MANAGER_COMMAND,
         "--workspace",
@@ -754,7 +765,7 @@ def _run_in_process_manager(
     configure_logging(
         level=getattr(arguments, "log_level", None) or "warning", json_logs=getattr(arguments, "json_logs", False)
     )
-    # After configure_logging so its warnings are formatted; managers.log only
+    # After configure_logging so its warnings are formatted; the manager log only
     # attaches inside TaskManager, which needs the end time first.
     allocation = probe_allocation(
         getattr(arguments, "allocation", "auto"), os.environ, cpu_slots=bind_cpus_setting(effective)
@@ -766,9 +777,13 @@ def _run_in_process_manager(
         scheduler = detect_scheduler(os.environ)
         allocation_end = None if scheduler is None else scheduler.end_time(os.environ)
     end_time, deadline_margin = _manager_end_time(arguments, allocation_end)
-    log_file = Path(arguments.log_file) if getattr(arguments, "log_file", None) else workspace.control / "managers.log"
+    fixed_log_file = getattr(arguments, "log_file", None)
+    log_file = Path(fixed_log_file) if fixed_log_file else None
 
     def install_manager_log(manager_id: str) -> None:
+        nonlocal log_file
+        if log_file is None:
+            log_file = workspace.root / LOGS_DIRECTORY / "managers" / f"{manager_id}.log"
         add_log_file(
             log_file,
             level=getattr(arguments, "log_level", None) or "info",
@@ -869,6 +884,10 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
     if getattr(arguments, "inline", False) and requested_count not in (None, 1):
         raise ValueError("--inline can only be combined with --count 1")
     count = 1 if forced_process else requested_count or _positive_setting(settings, "manager.count", 1)
+    if getattr(arguments, "log_file", None) is not None and (
+        profile != PROCESS_LAUNCHER or getattr(arguments, "detach", False) or count > 1
+    ):
+        raise ValueError(_LOG_FILE_REFUSAL)
     tail = manager_argv_tail(arguments)
     if profile == PROCESS_LAUNCHER and getattr(arguments, "workers", None) is None and "manager.workers" in settings:
         tail += ["--workers", str(_positive_setting(settings, "manager.workers", 1))]
@@ -906,8 +925,6 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
     if getattr(arguments, "detach", False):
         return PROCESS_LAUNCHER, launch_processes(workspace_root=root, argv=argv, count=count, settings=settings)
     if count > 1:
-        if getattr(arguments, "log_file", None) is not None:
-            raise ValueError("--log-file cannot be used with --count > 1: all managers share the workspace log")
         return PROCESS_LAUNCHER, _run_local_manager_children(arguments, root, context, count)
     return PROCESS_LAUNCHER, _run_in_process_manager(arguments, root, context, settings)
 

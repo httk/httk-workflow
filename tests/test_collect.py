@@ -223,12 +223,17 @@ def test_a_default_collect_yields_only_the_succeeded_jobs(
     assert parent.job_id == identifiers["parent"]
     assert parent.job_key == f"campaign--{identifiers['parent']}"
     assert parent.placement.as_posix() == "project/campaign"
-    assert parent.payload_path.as_posix() == f"project/campaign/{parent.job_key}"
+    assert parent.payload_path.as_posix() == f"jobs/project/campaign/{parent.job_key}"
     assert parent.workdir_path is not None
     assert parent.workdir_path.as_posix() == f"{parent.payload_path.as_posix()}/run"
     # The workspace-relative members resolve into the workspace they came from.
-    assert parent.payload == workspace.root / "project" / "campaign" / parent.job_key
+    assert parent.payload == workspace.jobs / "project" / "campaign" / parent.job_key
     assert parent.payload.is_dir() and parent.workdir is not None and parent.workdir.is_dir()
+    assert parent.payload_path.parts[:3] == ("jobs", "project", "campaign")
+    from httk.workflow.collecting import _workspace_file_record
+
+    url = _workspace_file_record(parent, "report.json").url  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
+    assert url == f"{parent.payload_path.as_posix()}/run/report.json"
     assert json.loads((parent.workdir / "report.json").read_text(encoding="utf-8")) == {"succeeded": ["alpha"]}
     # This job publishes no transactional data, so it has no data directory.
     assert parent.data_path is None and parent.data is None and parent.data_generation is None

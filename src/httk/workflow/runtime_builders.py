@@ -36,6 +36,7 @@ from .models import (
     JobDefinition,
     normalize_placement,
     normalize_resources,
+    placement_text,
     validate_calls,
     validate_declarations,
     validate_declared,
@@ -682,7 +683,7 @@ class OutcomeDraft:
             self.context.workspace_id,
             child.id,
             child.job_key,
-            normalized.as_posix(),
+            placement_text(normalized),
         )
         entry: dict[str, object] = {
             "workspace_id": reference.workspace_id,

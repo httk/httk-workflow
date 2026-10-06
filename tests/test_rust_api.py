@@ -146,7 +146,7 @@ class _Attempt:
 def _parent_job(tmp_path: Path) -> dict[str, str]:
     """Fabricate a persistent-workdir parent payload in the workspace; return a child's ``parent`` block."""
 
-    staging = tmp_path / "workspace" / "project" / "parent" / "staging"
+    staging = tmp_path / "workspace" / "jobs" / "project" / "parent" / "staging"
     (staging / "files").mkdir(parents=True)
     (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     spec = JobSpec(
@@ -197,10 +197,12 @@ def _attempt(
     context_json = json.dumps(
         {
             "format": "httk-workflow-attempt-context",
+            "durable": False,
+            "deadline": None,
             "format_version": 2,
             "workspace_id": parent["workspace_id"] if parent else str(uuid.uuid4()),
-            "job_id": str(uuid.uuid4()),
-            "job_key": f"fabricated--{uuid.uuid4()}",
+            "job_id": (_jid := str(uuid.uuid4())),
+            "job_key": f"fabricated--{_jid}",
             "placement": "project/fabricated",
             "payload": str(payload),
             "step": step,
@@ -460,7 +462,7 @@ def test_parent_reads_the_parent_location_or_answers_none(tmp_path: Path) -> Non
     parent = _parent_job(tmp_path)
     completed = _attempt(tmp_path, step="start", parent=parent).run(binary)
     assert completed.returncode == 0, completed.stderr
-    payload = tmp_path / "workspace" / "project" / "parent" / parent["job_key"]
+    payload = tmp_path / "workspace" / "jobs" / "project" / "parent" / parent["job_key"]
     lines = completed.stdout.splitlines()
     assert lines[:3] == [str(payload), str(payload / "calc"), parent["job_id"]]
     assert json.loads(lines[3])["spawn_id"] == parent["spawn_id"]

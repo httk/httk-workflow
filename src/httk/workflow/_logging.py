@@ -11,7 +11,6 @@ When this module's handlers are installed, ``httk.workflow`` has
 is intentional.
 """
 
-import fcntl
 import logging
 import logging.handlers
 import os
@@ -42,54 +41,26 @@ __all__ = [
 
 PACKAGE_LOGGER = "httk.workflow"
 _LOGGER = logging.getLogger(__name__)
-#: A shared manager log is rotated once it exceeds this size.
+#: A per-manager log is rotated once it exceeds this size.
 MANAGER_LOG_ROTATION_BYTES = 16 * 1024 * 1024
 MANAGER_LOG_ROTATION_RECORDS = 1000
 _rotation_warnings: set[Path] = set()
 
 
 def _rotate_manager_log(path: Path) -> None:
-    """Link an oversized shared manager log into its one retained backup."""
+    """Move an oversized manager log to its one ``.1`` backup.
 
-    descriptor: int | None = None
-    locked = False
+    Only the owning manager writes the file, so no lock is needed
+    (ponytail: the file must never be shared between managers).
+    """
+
     try:
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-        except FileNotFoundError:
-            return
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        locked = True
-        current = os.fstat(descriptor)
-        named = os.stat(path)
-        if (current.st_dev, current.st_ino) != (named.st_dev, named.st_ino):
-            return
-        if current.st_size <= MANAGER_LOG_ROTATION_BYTES:
-            return
-        backup = path.with_name(f"{path.name}.1")
-        try:
-            os.unlink(backup)
-        except FileNotFoundError:
-            pass
-        try:
-            os.link(path, backup)
-        except FileExistsError:
-            # Another manager won the rotation race.
-            return
-        os.unlink(path)
+        if path.stat().st_size > MANAGER_LOG_ROTATION_BYTES:
+            os.replace(path, path.with_name(f"{path.name}.1"))
+    except FileNotFoundError:
+        return
     except OSError as exc:
         _warn_rotation_error(path, exc)
-    finally:
-        if descriptor is not None:
-            if locked:
-                try:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                except OSError as exc:
-                    _warn_rotation_error(path, exc)
-            try:
-                os.close(descriptor)
-            except OSError as exc:
-                _warn_rotation_error(path, exc)
 
 
 def _warn_rotation_error(path: Path, error: OSError) -> None:
@@ -120,7 +91,7 @@ def add_log_file(
 
     When *manager_id* is supplied, the handler is an append-only manager log:
     text records begin with the id and JSON records carry it as
-    ``manager_id``. The shared manager log is rotated to one ``.1`` backup
+    ``manager_id``. The manager log is rotated to one ``.1`` backup
     when it exceeds 16 MiB. The legacy rotating handler remains available to
     callers that do not identify a manager.
     """
@@ -176,7 +147,7 @@ class _ManagerJsonFormatter(JsonFormatter):
 
 
 class _ManagerLogHandler(logging.handlers.WatchedFileHandler):
-    """Watch and periodically rotate the shared manager log."""
+    """Write and periodically rotate this manager's own log."""
 
     def __init__(self, path: Path) -> None:
         super().__init__(path, mode="a", encoding="utf-8")
@@ -195,7 +166,12 @@ class _ManagerLogHandler(logging.handlers.WatchedFileHandler):
         self._records += 1
         if self._records >= MANAGER_LOG_ROTATION_RECORDS:
             self._records = 0
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
             _rotate_manager_log(Path(self.baseFilename))
+            self.stream = self._open()
+            self._statstream()  # refresh dev/ino so the next emit does not reopen again
         super().emit(record)
 
 

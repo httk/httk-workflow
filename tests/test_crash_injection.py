@@ -114,6 +114,8 @@ if context["step"] == "prepare":
         "parent": {
             "workspace_id": context["workspace_id"],
             "job_id": context["job_id"],
+            "job_key": context["job_key"],
+            "placement": context["placement"],
             "activation_id": context["activation_id"],
         },
     }))
@@ -514,7 +516,7 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     # The child was registered exactly once: one bundle, one marker, one run.
     children = [marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--")]
     assert len(children) == 1 and children[0].kind == "succeeded"
-    assert [path.name for path in sorted((root / "project" / "children").iterdir())] == [children[0].job_key]
+    assert [path.name for path in sorted((root / "jobs" / "project" / "children").iterdir())] == [children[0].job_key]
 
     # The transaction is all or nothing at the attempt boundary, and it advanced
     # the data generation exactly once however far into it the manager died.
@@ -643,7 +645,9 @@ def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_p
 
     # The runner was started in its own session, so it outlives its manager and
     # publishes the outcome the killed manager never got to see.
-    published = _wait_for(lambda: bool(list((root / "project" / "sigkilled").rglob("outcome.ready"))), timeout=60.0)
+    published = _wait_for(
+        lambda: bool(list((root / "jobs" / "project" / "sigkilled").rglob("outcome.ready"))), timeout=60.0
+    )
     if not published:  # pragma: no cover - only on a host where the orphan was reaped
         pytest.skip("the orphaned runner never published its outcome on this host")
 
@@ -854,7 +858,7 @@ def test_a_rename_that_failed_because_another_actor_won_is_reported_as_lost(
         rival_ref = writer.append(
             {
                 "format": "httk-workflow-state",
-                "format_version": 2,
+                "format_version": 3,
                 "workspace_id": rival.workspace_id,
                 "job_id": ready.job_id,
                 "job_key": ready.job_key,

@@ -24,6 +24,7 @@ from ..models import (
     Marker,
     normalize_placement,
     parse_package_runner,
+    placement_text,
     validate_process,
 )
 from ..workspace import Workspace
@@ -415,7 +416,8 @@ def observe_join(workspace: Workspace, join: Mapping[str, Any]) -> list[dict[str
         label = _optional_string(raw.get("label"))
         marker: Marker | None = None
         error: str | None = None
-        placement_hint = _optional_string(raw.get("placement_hint"))
+        placement_hint = raw.get("placement_hint")
+        placement_hint = placement_hint if isinstance(placement_hint, str) else None
         try:
             if placement_hint is not None and job_key is not None:
                 marker = workspace.find_marker_at(job_key, normalize_placement(placement_hint))
@@ -428,7 +430,7 @@ def observe_join(workspace: Workspace, join: Mapping[str, Any]) -> list[dict[str
                 "label": label,
                 "job_id": job_id,
                 "job_key": job_key if marker is None else marker.job_key,
-                "placement": None if marker is None else marker.placement.as_posix(),
+                "placement": None if marker is None else placement_text(marker.placement),
                 "kind": None if marker is None else marker.kind,
                 "terminal": None if marker is None else marker.kind in TERMINAL_KINDS,
                 "error": error,
@@ -1000,7 +1002,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 requirements,
                 report,
                 executor_only=True,
-                placement=marker.placement.as_posix(),
+                placement=placement_text(marker.placement),
                 owner_uid=owner_uid,
                 job=job,
             )
@@ -1014,7 +1016,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 requirements,
                 report,
                 executor_only=False,
-                placement=marker.placement.as_posix(),
+                placement=placement_text(marker.placement),
                 owner_uid=owner_uid,
                 job=job,
             )
@@ -1083,7 +1085,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 claim_requirements(job),
                 report,
                 executor_only=True,
-                placement=marker.placement.as_posix(),
+                placement=placement_text(marker.placement),
                 owner_uid=owner_uid,
                 job=job,
             )
@@ -1137,7 +1139,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 claim_requirements(job),
                 report,
                 executor_only=True,
-                placement=marker.placement.as_posix(),
+                placement=placement_text(marker.placement),
                 owner_uid=owner_uid,
                 job=job,
             )
@@ -1216,7 +1218,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 claim_requirements(job),
                 report,
                 executor_only=True,
-                placement=marker.placement.as_posix(),
+                placement=placement_text(marker.placement),
                 owner_uid=owner_uid,
                 job=job,
             )

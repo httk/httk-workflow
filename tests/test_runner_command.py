@@ -417,3 +417,23 @@ def test_a_named_entry_that_is_a_build_artifact_points_at_command(tmp_path: Path
     (package / "relax").chmod(0o755)
     with pytest.raises(ValueError, match=r'is a build artifact; use command = \["\{artifacts\}/relax"\]'):
         parse_workflow_manifest(package)
+
+
+def test_a_parent_member_must_locate_its_parent(tmp_path: Path) -> None:
+    import uuid
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, _python_package(tmp_path / "package"))
+    document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
+    parent_id = str(uuid.uuid4())
+    good = {"job_id": parent_id, "job_key": f"p--{parent_id}", "placement": "jobs"}
+    assert JobDefinition.from_mapping(dict(document, parent=good)).parent == good
+    for bad in (
+        {"job_id": parent_id},
+        {**good, "placement": 3},
+        {**good, "job_key": f"p--{uuid.uuid4()}"},
+        {**good, "job_id": "nope"},
+        "parent",
+    ):
+        with pytest.raises(FormatError):
+            JobDefinition.from_mapping(dict(document, parent=bad))

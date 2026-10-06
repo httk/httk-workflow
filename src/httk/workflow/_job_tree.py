@@ -32,6 +32,7 @@ from .models import (
     Marker,
     normalize_placement,
     parse_job_key,
+    placement_text,
 )
 from .workspace import Workspace
 
@@ -275,7 +276,7 @@ def live_parent(workspace: Workspace, parent: Mapping[str, object] | None) -> Ma
     try:
         if parse_job_key(job_key)[1] != job_id:
             return None
-        marker = workspace.find_marker_at(job_key, PurePosixPath(placement))
+        marker = workspace.find_marker_at(job_key, normalize_placement(placement))
     except (FormatError, ValueError):
         return None
     if marker is None or marker.kind == "transferring":
@@ -322,14 +323,14 @@ def tree_children(workspace: Workspace, payload: Path, job: JobDefinition) -> li
     # Siblings usually share one placement: list each placement once rather than
     # probing it per child, which would be quadratic in a large fan-out.
     live: dict[tuple[str, str], Marker] = {}
-    for placement in dict.fromkeys(str(entry["placement"]) for entry in entries):
+    for placement in dict.fromkeys(placement_text(normalize_placement(str(entry["placement"]))) for entry in entries):
         try:
             live.update(((placement, marker.job_key), marker) for marker in _markers_at(workspace, placement))
         except (FormatError, ValueError):
             continue
     children: list[tuple[Marker, JobDefinition]] = []
     for entry in entries:
-        child_marker = live.get((str(entry["placement"]), str(entry["job_key"])))
+        child_marker = live.get((placement_text(normalize_placement(str(entry["placement"]))), str(entry["job_key"])))
         if child_marker is None or child_marker.job_id != entry["job_id"]:
             continue
         child_payload = workspace.payload_path(child_marker.placement, child_marker.job_key)
@@ -389,7 +390,9 @@ def descendant_ids(workspace: Workspace, payload: Path, job: JobDefinition) -> s
         parent_payload, parent_job = queue.pop()
         for entry in spawned_children(parent_payload):
             try:
-                child_payload = workspace.payload_path(PurePosixPath(str(entry["placement"])), str(entry["job_key"]))
+                child_payload = workspace.payload_path(
+                    normalize_placement(str(entry["placement"])), str(entry["job_key"])
+                )
                 child = JobDefinition.from_path(child_payload / "job.json")
             except (FormatError, OSError, ValueError):
                 continue

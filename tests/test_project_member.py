@@ -87,7 +87,7 @@ def test_project_repair_recovers_a_deleted_members_registry(tmp_path: Path) -> N
 
     project = tmp_path / "project"
     initialize_project(project, name="member")
-    Workspace.initialize(project)  # the root itself is the workspace, member "."
+    Workspace.initialize(project / "workspace")  # member "workspace"
     members_path(project).unlink()
     assert project_members(project) == ()
 
@@ -97,10 +97,10 @@ def test_project_repair_recovers_a_deleted_members_registry(tmp_path: Path) -> N
     unregistered = [
         finding for finding in findings if finding["check"] == "workspace_members" and finding["status"] == "error"
     ]
-    assert unregistered and "." in str(unregistered[0]["details"]["workspaces"])
+    assert unregistered and "workspace" in str(unregistered[0]["details"]["workspaces"])
 
     project_repair(project, apply=True, adopt=True)
-    assert [member.path for member in project_members(project)] == ["."]
+    assert [member.path for member in project_members(project)] == ["workspace"]
     # A second run is clean: the workspace is registered again.
     clean = project_repair(project, apply=False, adopt=True)
     findings = clean["findings"]
@@ -112,7 +112,7 @@ def test_project_seal_end_to_end_via_the_core_cli(tmp_path: Path) -> None:
     configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="member")
-    workspace = Workspace.initialize(project)
+    workspace = Workspace.initialize(project / "workspace")
     marker = workspace.submit(_payload(tmp_path / "src", "job"), "jobs")
     seal_job(workspace, marker)
     seal_workspace(workspace)
@@ -262,8 +262,8 @@ def test_scan_does_not_descend_into_a_workspace_within_a_workspace(tmp_path: Pat
     # so it is never adopted or reported by the project scan.
     project = tmp_path / "project"
     initialize_project(project, name="member")
-    Workspace.initialize(project)  # the project root itself is a workspace, member "."
-    nested = project / "sub" / "inner"
+    Workspace.initialize(project / "workspace")
+    nested = project / "workspace" / "sub" / "inner"
     nested.mkdir(parents=True)
     (nested / ".httk-workspace" / "format.json").parent.mkdir(parents=True)
     (nested / ".httk-workspace" / "format.json").write_text("{}", encoding="utf-8")
@@ -272,4 +272,4 @@ def test_scan_does_not_descend_into_a_workspace_within_a_workspace(tmp_path: Pat
     findings = report["findings"]
     assert isinstance(findings, list)
     members = next(f for f in findings if f["check"] == "workspace_members")
-    assert "sub/inner" not in str(members)
+    assert "sub/inner" not in str(members)  # pruned below the member workspace

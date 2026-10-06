@@ -50,7 +50,7 @@ an index map to a partition reproducibly, run after run.
 ```console
 $ httk workflow campaign submit --workflow vasp.relax --key silicon \
       --input structure=structures/Si.vasp --tag silicon
-silicon--0c4f…	/…/screening-a/jobs/silicon--0c4f…
+silicon--0c4f…	/…/screening-a/workspace/jobs/silicon--0c4f…
 ```
 
 `campaign submit` assigns `--key` to a partition and submits one root job into

@@ -78,9 +78,6 @@ from .gc import ALWAYS_SAFE_CATEGORIES
 from .journal import SEGMENT_HEADER, parse_record_ref
 from .manifests import read_maintenance_lock
 from .models import (
-    _MARKER_PATTERN as MARKER_PATTERN,
-)
-from .models import (
     _MAXIMUM_JOB_DOCUMENT_BYTES as MAXIMUM_JOB_DOCUMENT_BYTES,
 )
 from .models import (
@@ -96,6 +93,7 @@ from .models import (
     canonical_uuid,
     check_job_placement,
     normalize_placement,
+    placement_text,
     validate_attempt_control,
     validate_capacity,
     validate_process,
@@ -152,8 +150,6 @@ _CANCELLING_MEMBERS = (
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
 #: How long a failed Bubblewrap probe stands before the manager probes again.
 CONFINE_REPROBE_SECONDS = 60.0
-#: The most entries a check for jobs nested below a job directory visits per state kind.
-_NESTED_SCAN_ENTRIES = 4096
 _ENROLLED_MESSAGE = (
     "this workspace is enrolled with a workspace daemon (.httk-workspace/exchange/enrollment.json exists), so "
     "every manager "
@@ -693,6 +689,9 @@ class TaskManager:
         self.placement_prefixes: tuple[PurePosixPath, ...] = tuple(
             normalize_placement(prefix) for prefix in placement_prefixes
         )
+        # The empty placement covers the whole state tree: it is no restriction at all.
+        if any(not prefix.parts for prefix in self.placement_prefixes):
+            self.placement_prefixes = ()
         # Background collection is off unless a deployment asks for it. It is a
         # housekeeping timer of this manager, never part of a scheduling
         # decision: it runs at the end of a tick, after every pass has decided
@@ -762,7 +761,7 @@ class TaskManager:
                 "uid": self.uid,
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
-                "placement_prefixes": [prefix.as_posix() for prefix in self.placement_prefixes],
+                "placement_prefixes": [placement_text(prefix) for prefix in self.placement_prefixes],
                 "executors": sorted(self.allowed_executors),
                 "runner_search_paths": [str(path) for path in self.runner_search_paths],
                 "runner_modules": list(self.runner_modules),
@@ -831,14 +830,14 @@ class TaskManager:
             try:
                 found = next(iter(self.workspace.walk_markers(roots=(prefix,))), None)
             except (WorkflowError, OSError) as exc:
-                _LOGGER.debug("cannot check placement prefix %s: %s", prefix.as_posix(), exc)
+                _LOGGER.debug("cannot check placement prefix %s: %s", placement_text(prefix), exc)
                 continue
             if found is None:
                 _LOGGER.warning(
                     "placement prefix %s currently matches no job in this workspace; this manager will serve that "
                     "subtree when work arrives there, and claim nothing until then — check it if this is unexpected",
-                    prefix.as_posix(),
-                    extra=self._event("placement_prefix_empty", placement_prefix=prefix.as_posix()),
+                    placement_text(prefix),
+                    extra=self._event("placement_prefix_empty", placement_prefix=placement_text(prefix)),
                 )
 
     def __enter__(self) -> Self:
@@ -861,6 +860,11 @@ class TaskManager:
                 clean = False
         if clean:
             self._collect_garbage("shutdown")
+        # Attempts may outlive a clean exit. Their launch-lock directories on host tmpfs go with the
+        # manager: no manager serves their launches any more, and a surviving client keeps working on
+        # its already-open lock descriptor.
+        for local in self._running.values():
+            _manager_launches.forget(self, local)
         self._running.clear()
         try:
             self.writer.close()
@@ -1015,7 +1019,7 @@ class TaskManager:
                 {
                     "job_key": marker.job_key,
                     "job_id": marker.job_id,
-                    "placement": marker.placement.as_posix(),
+                    "placement": placement_text(marker.placement),
                     "kind": marker.kind,
                     "generation": marker.generation,
                 }
@@ -2125,13 +2129,18 @@ class TaskManager:
                 confinement=checked.launch,
             )
             binding_environment["HTTK_WORKFLOW_LAUNCH"] = _manager_launches.client_prefix()
+            # The client's liveness lock lives on host tmpfs, never on the shared workspace
+            # filesystem; the directory is created just before the sandbox is built.
+            binding_environment["HTTK_WORKFLOW_LAUNCH_LOCKS"] = str(
+                _confine.launch_locks_path(checked.launch.shm_root, attempt_id)
+            )
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
             "workspace_id": self.workspace.workspace_id,
             "job_id": job.id,
             "job_key": job.job_key,
-            "placement": marker.placement.as_posix(),
+            "placement": placement_text(marker.placement),
             "payload": str(payload.resolve()),
             "step": claimed_state.step,
             "activation_id": claimed_state.activation_id,
@@ -2158,7 +2167,7 @@ class TaskManager:
             # parameters → environment → workspace → default resolution.
             "settings": settings,
             "resources": dict(requirement),
-            **({} if deadline is None else {"deadline": deadline}),
+            "deadline": deadline,
             **({} if binding is None else {"binding": binding}),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an
@@ -2179,7 +2188,12 @@ class TaskManager:
         environment.pop("HTTK_WORKFLOW_DEADLINE", None)
         if deadline is not None:
             environment["HTTK_WORKFLOW_DEADLINE"] = str(deadline)
-        for variable in ("HTTK_WORKFLOW_NODELIST", "HTTK_WORKFLOW_NODEFILE", "HTTK_WORKFLOW_LAUNCH"):
+        for variable in (
+            "HTTK_WORKFLOW_NODELIST",
+            "HTTK_WORKFLOW_NODEFILE",
+            "HTTK_WORKFLOW_LAUNCH",
+            "HTTK_WORKFLOW_LAUNCH_LOCKS",
+        ):
             environment.pop(variable, None)
         environment.update(binding_environment)
         environment.update(
@@ -2246,6 +2260,8 @@ class TaskManager:
         running: Marker | None = None
         payload_runner_sha256: str | None = None
         sandbox: PreparedSandbox | None = None
+        launch_locks: tuple[int, Path] | None = None
+        launch_locks_kept = False
         try:
             logs = handles.enter_context(job_dir.directory(LOGS_DIRECTORY, create=True))
             stdio_fd = logs.open_append("stdio.out")
@@ -2313,7 +2329,14 @@ class TaskManager:
                 # passes through to the sandboxed command; it never appears on
                 # Bubblewrap's world-readable argv.
                 environment = _confine.filtered_attempt_environment(environment)
-                sandbox = self._prepare_sandbox(confinement, job_dir, workdir, environment, block_userns)
+                if launch_context is not None:
+                    try:
+                        launch_locks = _confine.create_launch_locks(launch_context.confinement.shm_root, attempt_id)
+                    except ConfinementUnavailableError as exc:
+                        raise FormatError(f"cannot confine the attempt: {exc}") from exc
+                sandbox = self._prepare_sandbox(
+                    confinement, job_dir, workdir, environment, block_userns, launch_locks=launch_locks
+                )
             process = subprocess.Popen(
                 [
                     sys.executable,
@@ -2386,6 +2409,7 @@ class TaskManager:
                 verified = _manager_runners.VerifiedRunner(
                     verified.path, verified.root, verified.sha256, None, verified.artifacts
                 )
+            launch_locks_kept = True
         except Exception as exc:
             if gate_read >= 0:
                 os.close(gate_read)
@@ -2393,6 +2417,8 @@ class TaskManager:
             if gate_write >= 0:
                 os.close(gate_write)
                 gate_write = -1
+            if launch_locks is not None and launch_context is not None:
+                _confine.remove_launch_locks(launch_context.confinement.shm_root, attempt_id)
             if process is not None:
                 # The gate is closed, so the launcher observes end-of-file and
                 # exits, but an unreaped launcher must never be left behind.
@@ -2425,6 +2451,8 @@ class TaskManager:
                 os.close(verified.fd)
             if sandbox is not None:
                 sandbox.close()
+            if launch_locks is not None and not launch_locks_kept:
+                os.close(launch_locks[0])
         assert process is not None
         assert running is not None
         self._running[attempt_id] = RunningAttempt(
@@ -2438,7 +2466,7 @@ class TaskManager:
             owner_uid=self.uid,
             placement=self._unlaunched.pop(attempt_id, None),
             confined=confined,
-            launches=AttemptLaunches(control_name, launch_context) if confined else None,
+            launches=(AttemptLaunches(control_name, launch_context, launch_locks=launch_locks) if confined else None),
         )
         launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
         if confined:
@@ -3167,59 +3195,22 @@ class TaskManager:
         self._report_confinement_blocked(reason)
         return reason
 
-    def _nested_marker(self, directory: Path) -> str | None:
-        """Return a marker-shaped entry anywhere below *directory*, or ``None``; bounded and without following links.
-
-        :param directory: A state directory mirroring a job directory.
-        :return: The entry's path relative to *directory*, or a description of
-            why the directory cannot be shown to hold no marker.
-        """
-
-        visited = 0
-        failed: list[OSError] = []
-        for root, directories, files in os.walk(directory, onerror=failed.append):
-            for name in (*files, *directories):
-                visited += 1
-                if visited > _NESTED_SCAN_ENTRIES:
-                    return f"more than {_NESTED_SCAN_ENTRIES} entries"
-                if MARKER_PATTERN.fullmatch(name) is not None:
-                    return os.path.relpath(os.path.join(root, name), directory)
-        if any(not isinstance(error, FileNotFoundError) for error in failed):
-            return f"unreadable: {failed[0]}"
-        return None
-
     def _check_confinement_start(self, marker: Marker) -> None:
         """Refuse to confine a job whose directory is not a disjoint job directory.
 
-        A placement component that parses as a job key, or another job placed
-        below this job's directory, would put a second job inside the
-        directory the sandbox makes writable. A state directory below the job
-        directory counts only when it holds a marker; empty mirrors are left
-        behind by garbage collection's later pruning.
+        A placement component that parses as a job key would put a second job
+        inside the directory the sandbox makes writable.
 
         :param marker: The claimed job.
-        :raises httk.workflow.errors.FormatError: If the placement violates the
-            rule or the job directory contains another job.
+        :raises httk.workflow.errors.FormatError: If the placement violates the rule.
         """
 
         check_job_placement(marker.placement)
-        nested = marker.placement / marker.job_key
-        for kind in sorted(STATE_KINDS):
-            directory = self.workspace.state_directory(kind, nested)
-            if not directory.is_dir():
-                continue
-            found = self._nested_marker(directory)
-            if found is None:
-                continue
-            raise FormatError(
-                f"cannot confine {marker.job_key}: its job directory contains another job "
-                f"({kind} state below placement {nested.as_posix()}: {found}); job directories must not nest"
-            )
 
     def _job_directory(self, marker: Marker) -> JobDirectory:
         """Open one job's directory without following any link below the workspace root."""
 
-        return JobDirectory.open(self.workspace.root, marker.placement, marker.job_key)
+        return JobDirectory.open(jobs=self.workspace.jobs, placement=marker.placement, job_key=marker.job_key)
 
     @staticmethod
     def _attempt_control_name(state: StateFrame) -> str:
@@ -3285,6 +3276,7 @@ class TaskManager:
         workdir: Path,
         environment: Mapping[str, str],
         block_userns: bool,
+        launch_locks: tuple[int, Path] | None = None,
     ) -> PreparedSandbox:
         """Build one attempt's Bubblewrap sandbox from the pinned workspace root and job directory.
 
@@ -3293,6 +3285,8 @@ class TaskManager:
         :param workdir: The attempt's working directory.
         :param environment: The filtered attempt environment.
         :param block_userns: Whether to block nested user namespaces.
+        :param launch_locks: The descriptor and host path of the attempt's launch-lock directory, or ``None``
+            for an attempt without the launch client.
         :return: The sandbox; the caller closes it after the spawn.
         :raises httk.workflow.errors.FormatError: If the sandbox cannot be built
             for this job, for instance when its directory is not inside the
@@ -3310,6 +3304,7 @@ class TaskManager:
                 workdir=workdir,
                 environment=environment,
                 block_userns=block_userns,
+                launch_locks=launch_locks,
             )
         except ValueError as exc:
             raise FormatError(f"cannot confine the attempt: {exc}") from exc
@@ -3819,10 +3814,7 @@ class TaskManager:
         parent_key = parent.get("job_key")
         parent_placement = parent.get("placement")
         if not isinstance(parent_key, str) or not isinstance(parent_placement, str):
-            # A child written before spawns carried the parent's placement. The
-            # guard is advisory, so it probes nothing rather than rescan the
-            # whole workspace to reconstruct a hint the child should have held.
-            return None
+            raise FormatError("parent must carry job_key and placement")
         try:
             parent_marker = self.workspace.find_marker_at(parent_key, normalize_placement(parent_placement))
             if parent_marker is None or parent_marker.job_id != parent_id:

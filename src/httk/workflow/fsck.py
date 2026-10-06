@@ -24,7 +24,7 @@ from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import WorkflowError
 from .gc import REMOVABLE_KINDS
 from .journal import JournalFrame, JournalWriter, iter_journal_frames, verify_record
-from .models import STATE_KINDS, Marker
+from .models import STATE_KINDS, Marker, placement_text
 from .workspace import MarkerFault
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
@@ -173,7 +173,7 @@ class _JournalIndex:
         grouped: dict[str, list[JournalFrame]] = {}
         for entry in iter_journal_frames(self._workspace.control):
             frame = entry.frame
-            if frame.get("format") != "httk-workflow-state" or frame.get("format_version") != 2:
+            if frame.get("format") != "httk-workflow-state" or frame.get("format_version") != 3:
                 continue
             if frame.get("workspace_id") != workspace_id:
                 continue
@@ -197,7 +197,7 @@ def _identity_problem(workspace: "Workspace", marker: Marker, frame: Mapping[str
 
     expected: list[tuple[str, object]] = [
         ("format", "httk-workflow-state"),
-        ("format_version", 2),
+        ("format_version", 3),
         ("workspace_id", workspace.workspace_id),
         ("job_id", marker.job_id),
         ("job_key", marker.job_key),
@@ -283,11 +283,11 @@ def _repair_frame(workspace: "Workspace", marker: Marker, recovered: JournalFram
     frame.update(
         {
             "format": "httk-workflow-state",
-            "format_version": 2,
+            "format_version": 3,
             "workspace_id": workspace.workspace_id,
             "job_id": marker.job_id,
             "job_key": marker.job_key,
-            "placement": marker.placement.as_posix(),
+            "placement": placement_text(marker.placement),
             "state_generation": marker.generation + 1,
             "kind": marker.kind,
             "previous_record_ref": recovered.record_ref,

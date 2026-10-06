@@ -93,7 +93,7 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
         "files": files,
         "parameters": parameters,
         "tag": arguments.tag or input_tag,
-        "placement": arguments.placement or DEFAULT_PLACEMENT,
+        "placement": DEFAULT_PLACEMENT if arguments.placement is None else arguments.placement,
         "priority": arguments.priority,
         "name": arguments.name,
     }

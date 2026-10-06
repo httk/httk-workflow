@@ -67,6 +67,7 @@ from ..models import (
     canonical_uuid,
     ensure_step_known,
     parse_job_key,
+    placement_text,
 )
 from ..registry import WorkspaceBinding
 from ..removal import RemovalReport, remove_jobs
@@ -815,7 +816,7 @@ def _request_document(
         "request_id": str(uuid.uuid4()),
         "job_id": marker.job_id,
         "job_key": marker.job_key,
-        "placement": marker.placement.as_posix(),
+        "placement": placement_text(marker.placement),
         "expected_generation": marker.generation,
         "expected_record_ref": marker.record_ref,
         "action": action,
@@ -2000,7 +2001,7 @@ def build_job_parser(
         "--placement",
         metavar="PLACEMENT",
         default=DEFAULT_PLACEMENT,
-        help=f"placement subtree (default: {DEFAULT_PLACEMENT})",
+        help="placement subtree (default: the jobs root)",
     )
     new.add_argument(
         "--priority",

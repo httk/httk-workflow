@@ -91,25 +91,25 @@ def _context(cwd: Path) -> CLIContext:
 def test_delete_succeeded_and_submitted_jobs_without_gc(tmp_path: Path) -> None:
     workspace, name = _workspace(tmp_path)
     succeeded_payload, succeeded_id = _payload(tmp_path / "source", "succeeded")
-    workspace.submit(succeeded_payload, "jobs/succeeded")
+    workspace.submit(succeeded_payload, "succeeded")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=30)
     submitted_payload, submitted_id = _payload(tmp_path / "source", "submitted")
-    workspace.submit(submitted_payload, "jobs/submitted")
+    workspace.submit(submitted_payload, "submitted")
 
     assert (
         command(["job", "delete", "--force", "--workspace", name, succeeded_id, submitted_id], _context(tmp_path)) == 0
     )
     assert workspace.find_marker_by_id(succeeded_id) is None
     assert workspace.find_marker_by_id(submitted_id) is None
-    assert not (workspace.root / "jobs" / "succeeded" / f"succeeded--{succeeded_id}").exists()
-    assert not (workspace.root / "jobs" / "submitted" / f"submitted--{submitted_id}").exists()
+    assert not (workspace.jobs / "succeeded" / f"succeeded--{succeeded_id}").exists()
+    assert not (workspace.jobs / "submitted" / f"submitted--{submitted_id}").exists()
 
 
 def test_delete_ready_job_after_manual_payload_removal(tmp_path: Path) -> None:
     workspace, name = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "ready")
-    marker = workspace.submit(payload, "jobs/ready")
+    marker = workspace.submit(payload, "ready")
     with workspace.open_journal_writer() as writer:
         marker = workspace.transition(writer, marker, "ready", {})
     installed_payload = workspace.payload_path(marker.placement, marker.job_key)
@@ -123,7 +123,7 @@ def test_delete_ready_job_after_manual_payload_removal(tmp_path: Path) -> None:
 def test_delete_refuses_symlinked_payload_and_placement(tmp_path: Path) -> None:
     workspace, _name = _workspace(tmp_path)
     payload, _job_id = _payload(tmp_path / "source", "symlink-payload")
-    marker = workspace.submit(payload, "jobs/symlink-payload")
+    marker = workspace.submit(payload, "symlink-payload")
     installed_payload = workspace.payload_path(marker.placement, marker.job_key)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -135,8 +135,8 @@ def test_delete_refuses_symlinked_payload_and_placement(tmp_path: Path) -> None:
     assert marker.path.exists() and installed_payload.is_symlink() and outside.exists()
 
     payload2, job_id2 = _payload(tmp_path / "source", "symlink-placement")
-    marker2 = workspace.submit(payload2, "jobs/symlink-placement")
-    installed_root = workspace.root / "jobs"
+    marker2 = workspace.submit(payload2, "symlink-placement")
+    installed_root = workspace.jobs / "symlink-placement"
     moved_root = tmp_path / "moved-jobs"
     shutil.move(installed_root, moved_root)
     installed_root.symlink_to(moved_root, target_is_directory=True)
@@ -150,7 +150,7 @@ def test_delete_refuses_symlinked_payload_and_placement(tmp_path: Path) -> None:
 def test_delete_refuses_symlinked_attempt_or_log_directory(tmp_path: Path, directory: str) -> None:
     workspace, _name = _workspace(tmp_path)
     payload, _job_id = _payload(tmp_path / "source", directory)
-    marker = workspace.submit(payload, f"jobs/{directory}")
+    marker = workspace.submit(payload, f"{directory}")
     installed_payload = workspace.payload_path(marker.placement, marker.job_key)
     outside = tmp_path / f"outside-{directory}"
     outside.mkdir()
@@ -166,7 +166,7 @@ def test_delete_marker_move_during_unlink_leaves_payload(
 ) -> None:
     workspace, name = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "raced")
-    marker = workspace.submit(payload, "jobs/raced")
+    marker = workspace.submit(payload, "raced")
     installed_payload = workspace.payload_path(marker.placement, marker.job_key)
     claimed_path = workspace.control / "state" / "claimed" / marker.placement / marker.path.name
 
@@ -185,7 +185,7 @@ def test_delete_marker_move_during_unlink_leaves_payload(
 def test_delete_refuses_running_job_through_cli_without_mutation(tmp_path: Path, capsys) -> None:
     workspace, name = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "running")
-    marker = workspace.submit(payload, "jobs/running")
+    marker = workspace.submit(payload, "running")
     with workspace.open_journal_writer() as writer:
         workspace.transition(writer, marker, "running", {})
 
@@ -200,7 +200,7 @@ def test_delete_prompt_decline_and_non_tty_refusal_leave_job(
 ) -> None:
     workspace, name = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "prompt")
-    marker = workspace.submit(payload, "jobs/prompt")
+    marker = workspace.submit(payload, "prompt")
     installed_payload = workspace.payload_path(marker.placement, marker.job_key)
 
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: False)
@@ -219,8 +219,8 @@ def test_delete_path_glob_and_batch_resolution_are_safe(tmp_path: Path) -> None:
     workspace, name = _workspace(tmp_path)
     first, first_id = _payload(tmp_path / "source", "silicon-one")
     second, second_id = _payload(tmp_path / "source", "silicon-two")
-    workspace.submit(first, "jobs/silicon-one")
-    workspace.submit(second, "jobs/silicon-two")
+    workspace.submit(first, "silicon-one")
+    workspace.submit(second, "silicon-two")
     context = _context(workspace.root)
 
     assert command(["job", "delete", "--force", "--workspace", name, "jobs/silicon*"], context) == 0
@@ -228,7 +228,7 @@ def test_delete_path_glob_and_batch_resolution_are_safe(tmp_path: Path) -> None:
     assert workspace.find_marker_by_id(second_id) is None
 
     third, third_id = _payload(tmp_path / "source", "protected")
-    workspace.submit(third, "jobs/protected")
+    workspace.submit(third, "protected")
     assert command(["job", "delete", "--force", "--workspace", name, "missing-selector", third_id], context) != 0
     assert workspace.find_marker_by_id(third_id) is not None
 
@@ -236,9 +236,9 @@ def test_delete_path_glob_and_batch_resolution_are_safe(tmp_path: Path) -> None:
 def test_delete_join_child_guard_and_force(tmp_path: Path) -> None:
     workspace, name = _workspace(tmp_path)
     child_payload, child_id = _payload(tmp_path / "source", "child")
-    child = workspace.submit(child_payload, "jobs/child")
+    child = workspace.submit(child_payload, "child")
     parent_payload, _parent_id = _payload(tmp_path / "source", "parent")
-    parent = workspace.submit(parent_payload, "jobs/parent")
+    parent = workspace.submit(parent_payload, "parent")
     with workspace.open_journal_writer() as writer:
         workspace.transition(
             writer,

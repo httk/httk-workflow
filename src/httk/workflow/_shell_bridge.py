@@ -49,7 +49,7 @@ from ._durations import TIME_RESOURCES
 from ._util import read_json, write_json_atomic
 from .codes import BRIDGE_ABSENT, installed_codes
 from .errors import FormatError
-from .models import normalize_resources
+from .models import normalize_resources, placement_text
 from .runtime import _read_environment
 from .runtime_builders import (
     JobSpec,
@@ -765,7 +765,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             **located.raw,
             "job_id": located.job_id,
             "job_key": located.job_key,
-            "placement": located.placement.as_posix(),
+            "placement": placement_text(located.placement),
             "payload": str(located.payload),
             "workdir": None if located.workdir is None else str(located.workdir),
         }

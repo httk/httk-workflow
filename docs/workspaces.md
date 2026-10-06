@@ -11,7 +11,7 @@ sets all of that up; {doc}`running` then creates and runs jobs in it.
 ```console
 httk init --name "Your Name" --email you@example.org
 httk project init --name campaign .
-httk workspace init --name default .
+httk workspace init --name default workspace
 httk workspace status
 ```
 
@@ -20,8 +20,11 @@ sign what you publish; it is idempotent. `project init` writes the project
 anchor `httk_project/`. `workspace init` creates a workspace and registers it
 under a name in the per-user registry, so every later command can address it
 with `--workspace NAME`; without `--workspace`, commands use the enclosing
-workspace, then the project's default, then the per-user default. A project
-does not contain its workspaces; it records them as members.
+workspace, then the project's default, then the per-user default. A workspace
+is a directory of its own (`workspace init` refuses a non-empty directory, so
+a project root is never a workspace); a project records its workspaces as
+members, and the first workspace initialized inside a project becomes its
+default.
 
 ```console
 httk workspace list

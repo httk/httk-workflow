@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from ._util import interpreter_first_path
+from .models import POSTPROCESS_DIRECTORY
 
 if TYPE_CHECKING:
     from .collecting import JobRecord
@@ -41,10 +42,6 @@ if TYPE_CHECKING:
     from .workspace import Workspace
 
 DEFAULT_POSTPROCESS_TIMEOUT: float = 3600.0
-
-#: The workspace-relative default output root, used when no setting or override
-#: names one.
-DEFAULT_POSTPROCESS_DIRNAME = "postprocess"
 
 
 @dataclass(frozen=True)
@@ -63,7 +60,7 @@ class PostprocessResult:
 def _default_root(workspace_root: Path) -> Path:
     """Return the built-in default postprocess root for one workspace root."""
 
-    return workspace_root / DEFAULT_POSTPROCESS_DIRNAME
+    return workspace_root / POSTPROCESS_DIRECTORY
 
 
 def _reject_reserved_root(workspace: Workspace, base: Path) -> None:
@@ -83,12 +80,14 @@ def postprocess_root(workspace: Workspace, override: str | None = None) -> Path:
     """Resolve the output root all this workspace's postprocess output lands in.
 
     Precedence is the per-invocation *override*, then the ``postprocess.directory``
-    application setting, then ``<workspace.root>/postprocess``. A relative value
-    resolves against the workspace root; an absolute value is used as given.
+    application setting, then ``<workspace.root>/postprocess``. The setting must be
+    an absolute path outside the workspace; a relative *override* resolves against
+    the current directory and must also land outside the workspace.
 
     :param workspace: The workspace whose postprocess output root to resolve.
     :param override: A per-invocation output root that wins over the setting.
     :return: The resolved absolute output root.
+    :raises ValueError: If the root is inside the workspace (other than the default), or the setting is relative.
     """
 
     raw = override
@@ -97,9 +96,18 @@ def postprocess_root(workspace: Workspace, override: str | None = None) -> Path:
         if not setting:
             return _default_root(workspace.root)
         raw = str(setting)
-    base = Path(raw)
-    base = base if base.is_absolute() else workspace.root / base
-    _reject_reserved_root(workspace, base)
+        if not Path(raw).is_absolute():
+            raise ValueError(
+                f"postprocess.directory must be an absolute path outside the workspace, got {raw!r} "
+                f"(unset it to use the default {_default_root(workspace.root)})"
+            )
+    base = Path(raw).absolute()
+    _reject_reserved_root(workspace, base)  # specific messages first; symlinked placements can lead outside
+    if base.resolve().is_relative_to(workspace.root.resolve()):
+        raise ValueError(
+            f"postprocess output root must be outside the workspace: {base} "
+            f"(the default {_default_root(workspace.root)} applies when none is set)"
+        )
     return base
 
 
@@ -218,7 +226,6 @@ def run_postprocess_script(
 
 
 __all__ = [
-    "DEFAULT_POSTPROCESS_DIRNAME",
     "DEFAULT_POSTPROCESS_TIMEOUT",
     "PostprocessResult",
     "postprocess_root",

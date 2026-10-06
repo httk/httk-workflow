@@ -314,10 +314,11 @@ def _attempt(
     context_json = json.dumps(
         {
             "format": "httk-workflow-attempt-context",
+            "durable": False,
             "format_version": 2,
             "workspace_id": str(uuid.uuid4()),
-            "job_id": str(uuid.uuid4()),
-            "job_key": f"fabricated--{uuid.uuid4()}",
+            "job_id": (_jid := str(uuid.uuid4())),
+            "job_key": f"fabricated--{_jid}",
             "placement": "project/fabricated",
             "payload": str(payload),
             "step": step,
@@ -327,7 +328,7 @@ def _attempt(
             "children": children or [],
             "settings": settings or {},
             "resources": context_resources or {},
-            **({} if deadline is None else {"deadline": deadline}),
+            "deadline": deadline,
         }
     )
     attempt_environment = {
@@ -1165,7 +1166,7 @@ def _child_of(
     workspace, workspace_id = tmp_path / "workspace", str(uuid.uuid4())
     parent_id = str(uuid.uuid4())
     parent_key = f"parent--{parent_id}"
-    parent_payload = workspace / parent_placement / parent_key
+    parent_payload = workspace / "jobs" / parent_placement / parent_key
 
     def spec(**workdir: Any) -> JobSpec:
         return JobSpec(
@@ -1180,7 +1181,7 @@ def _child_of(
         parent_id = JobDefinition.from_path(parent_payload / "job.json").id
         parent_key = f"parent--{parent_id}"
         parent_payload = parent_payload.rename(parent_payload.with_name(parent_key))
-    child_payload = workspace / "project/children" / f"child--{uuid.uuid4()}"
+    child_payload = workspace / "jobs/project/children" / f"child--{uuid.uuid4()}"
     (child_payload / "files").mkdir(parents=True)
     (child_payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     parent = {
@@ -1197,6 +1198,9 @@ def _child_of(
     (child_payload / "run").mkdir()
     context = {
         "format": "httk-workflow-attempt-context",
+        "durable": False,
+        "deadline": None,
+        "settings": {},
         "format_version": 2,
         "workspace_id": workspace_id,
         "job_id": str(uuid.uuid4()),

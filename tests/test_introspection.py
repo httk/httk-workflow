@@ -176,6 +176,8 @@ else:
         "parent": {
             "workspace_id": context["workspace_id"],
             "job_id": context["job_id"],
+            "job_key": context["job_key"],
+            "placement": context["placement"],
             "activation_id": context["activation_id"],
         },
     }))
@@ -416,24 +418,24 @@ def test_log_renders_every_transition_oldest_first(tmp_path: Path, capsys) -> No
 def test_job_selector_paths_expand_nested_placements_and_deduplicate(tmp_path: Path, capsys) -> None:
     workspace = _workspace(tmp_path)
     payload, first_id = _payload(tmp_path / "source-first", _THREE_STEP_RUNNER)
-    workspace.submit(payload, "jobs/silicon")
+    workspace.submit(payload, "work/silicon")
     payload, second_id = _payload(tmp_path / "source-second", _THREE_STEP_RUNNER)
-    workspace.submit(payload, "jobs/nested/germanium")
+    workspace.submit(payload, "work/nested/germanium")
     payload, third_id = _payload(tmp_path / "source-third", _THREE_STEP_RUNNER)
     workspace.submit(payload, "other")
     cwd = workspace.root
 
-    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/silicon"])] == [first_id]
-    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs"])] == [second_id, first_id]
-    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/silicon*"])] == [first_id]
-    assert [marker.job_id for marker in resolve_job_selector(workspace, cwd, "jobs/**")] == [second_id, first_id]
-    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs", "jobs/silicon"])] == [
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/work/silicon"])] == [first_id]
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/work"])] == [second_id, first_id]
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/work/silicon*"])] == [first_id]
+    assert [marker.job_id for marker in resolve_job_selector(workspace, cwd, "jobs/work/**")] == [second_id, first_id]
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/work", "jobs/work/silicon"])] == [
         second_id,
         first_id,
     ]
     assert third_id not in {first_id, second_id}
 
-    assert command(["job", "show", "jobs/sil*"], CLIContext("httk", workspace.root)) == 0
+    assert command(["job", "show", "jobs/work/sil*"], CLIContext("httk", workspace.root)) == 0
     assert f"job example--{first_id}" in capsys.readouterr().out
 
 
@@ -444,10 +446,12 @@ def test_job_selector_paths_report_outside_or_missing_jobs(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="is not inside workspace"):
         resolve_job_selectors(workspace, tmp_path, [str(outside)])
+    with pytest.raises(ValueError, match="not below the jobs directory"):
+        resolve_job_selectors(workspace, workspace.root, [str(workspace.control)])
     with pytest.raises(ValueError, match="no path matches 'missing\\*'"):
         resolve_job_selectors(workspace, workspace.root, ["missing*"])
 
-    orphan = workspace.root / "jobs" / "orphan"
+    orphan = workspace.jobs / "orphan"
     orphan.mkdir(parents=True)
     payload, _ = _payload(tmp_path / "orphan-source", _THREE_STEP_RUNNER)
     shutil.copy2(payload / "job.json", orphan / "job.json")
@@ -462,7 +466,7 @@ def test_existing_path_wins_over_tag_prefix(tmp_path: Path) -> None:
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
     workspace.submit(payload, "silicon")
 
-    marker = resolve_job_selectors(workspace, workspace.root, ["silicon"])[0]
+    marker = resolve_job_selectors(workspace, workspace.jobs, ["silicon"])[0]
     assert marker.job_id == job_id
     assert marker.placement == PurePosixPath("silicon")
 

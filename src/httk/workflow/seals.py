@@ -51,7 +51,13 @@ from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
 from ._util import json_bytes
 from .errors import FormatError, SealedError, SealError
 from .manifests import payload_file_records
-from .models import JOB_STATE_DIRECTORY, WORKSPACE_DIRECTORY, JobDefinition, Marker
+from .models import (
+    JOB_STATE_DIRECTORY,
+    WORKSPACE_DIRECTORY,
+    JobDefinition,
+    Marker,
+    placement_text,
+)
 from .projects import PROJECT_DIRECTORY, discover_project
 from .workspace import Workspace
 
@@ -251,7 +257,7 @@ def _job_seal_digest(workspace: Workspace, placement: PurePosixPath, job_key: st
     """Return the SHA-256 of one job's seal document, or ``None`` when it has none."""
 
     try:
-        with JobDirectory.open(workspace.root, placement, job_key) as job_dir:
+        with JobDirectory.open(jobs=workspace.jobs, placement=placement, job_key=job_key) as job_dir:
             if not _job_seal_present(job_dir):
                 return None
             return hashlib.sha256(job_dir.read(_JOB_SEAL, CONTROL_DOCUMENT_LIMIT)).hexdigest()
@@ -277,7 +283,7 @@ def seal_job(workspace: Workspace, marker: Marker, *, keys: SealKeys | None = No
     payload = workspace.payload_path(marker.placement, marker.job_key)
     records = payload_file_records(payload)
     path = job_seal_path(payload)
-    with JobDirectory.open(workspace.root, marker.placement, marker.job_key) as job_dir:
+    with JobDirectory.open(jobs=workspace.jobs, placement=marker.placement, job_key=marker.job_key) as job_dir:
         if _job_seal_present(job_dir):
             existing = _read_job_seal(job_dir)
             if list(existing.records) == records:
@@ -307,7 +313,7 @@ def unseal_job(workspace: Workspace, marker: Marker) -> None:
     if is_workspace_sealed(workspace):
         raise SealedError("cannot unseal a job while its workspace is sealed; unseal the workspace first")
     try:
-        with JobDirectory.open(workspace.root, marker.placement, marker.job_key) as job_dir:
+        with JobDirectory.open(jobs=workspace.jobs, placement=marker.placement, job_key=marker.job_key) as job_dir:
             job_dir.unlink(_JOB_SEAL, missing_ok=True)
     except FileNotFoundError:
         return
@@ -358,7 +364,7 @@ def seal_workspace(workspace: Workspace, *, keys: SealKeys | None = None) -> Pat
             {
                 "job_id": marker.job_id,
                 "job_key": marker.job_key,
-                "placement": marker.placement.as_posix(),
+                "placement": placement_text(marker.placement),
                 "kind": marker.kind,
                 "seal_sha256": digest,
             }

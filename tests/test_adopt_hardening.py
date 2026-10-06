@@ -307,7 +307,7 @@ def _sealed_without_ledger(
 def test_a_bundle_seen_through_an_alias_is_recovered_once_by_its_plain_path(tmp_path: Path) -> None:
     source, destination = _pair(tmp_path)
     # The alias sorts, and is pushed, before the plain placement it points into.
-    (source.root / "a").symlink_to(source.root / "jobs", target_is_directory=True)
+    (source.jobs / "a").symlink_to(source.jobs / "jobs", target_is_directory=True)
     bundle, manifest, ledger = _sealed_without_ledger(source, destination, "jobs", tmp_path)
     results = source.recover_transfers()
     assert json.loads(ledger.read_text(encoding="utf-8"))["bundle"] == str(bundle)
@@ -319,10 +319,10 @@ def test_a_bundle_under_a_symlinked_placement_is_recovered_exactly_once(tmp_path
     scratch = tmp_path / "scratch" / "project"
     scratch.mkdir(parents=True)
     # An operator placement symlink, and a second alias of the same directory.
-    (source.root / "project").symlink_to(scratch, target_is_directory=True)
-    (source.root / "zalias").symlink_to(scratch, target_is_directory=True)
+    (source.jobs / "project").symlink_to(scratch, target_is_directory=True)
+    (source.jobs / "zalias").symlink_to(scratch, target_is_directory=True)
     bundle, manifest, ledger = _sealed_without_ledger(source, destination, "project/runs", tmp_path)
-    assert bundle == source.root / "project" / "runs" / bundle.name
+    assert bundle == source.jobs / "project" / "runs" / bundle.name
     results = source.recover_transfers()
     recorded = Path(json.loads(ledger.read_text(encoding="utf-8"))["bundle"])
     assert recorded.resolve() == bundle.resolve()
@@ -332,10 +332,10 @@ def test_a_bundle_under_a_symlinked_placement_is_recovered_exactly_once(tmp_path
 
 def test_a_placement_symlink_loop_terminates(tmp_path: Path) -> None:
     source, destination = _pair(tmp_path)
-    bundle, _manifest, ledger = _sealed_without_ledger(source, destination, "jobs/deep", tmp_path)
+    bundle, _manifest, ledger = _sealed_without_ledger(source, destination, "deep", tmp_path)
     # Placement symlinks pointing at ancestors, the workspace root among them.
-    (source.root / "jobs" / "deep" / "up").symlink_to("..", target_is_directory=True)
-    (source.root / "jobs" / "root").symlink_to(source.root, target_is_directory=True)
+    (source.jobs / "deep" / "up").symlink_to("..", target_is_directory=True)
+    (source.jobs / "root").symlink_to(source.root, target_is_directory=True)
     results = _without_hanging(lambda: source.recover_transfers())
     assert results is None
     assert json.loads(ledger.read_text(encoding="utf-8"))["bundle"] == str(bundle)

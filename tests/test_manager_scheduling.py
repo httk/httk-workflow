@@ -383,7 +383,7 @@ def _publish_pending_environment(
 #: implementation knows, and every envelope member the workspace supplies.
 _GOLDEN_RUNNING_FRAME: dict[str, Any] = {
     "format": "httk-workflow-state",
-    "format_version": 2,
+    "format_version": 3,
     "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
     "job_id": "01234567-89ab-cdef-0123-456789abcdef",
     "job_key": "silicon-relax--01234567-89ab-cdef-0123-456789abcdef",

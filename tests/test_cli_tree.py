@@ -71,6 +71,17 @@ GROUPS: dict[str, tuple[str, ...]] = {
 REMOVED_GROUPS = ("tasks", "computer", "internal", "import")
 
 
+def _init_workspace(project: Path) -> Workspace:
+    """Create ``project/workspace``, register it as ``default``, and record it as the project default."""
+
+    from httk.workflow.projects import write_project_section
+    from httk.workflow.registry import create_workspace
+
+    create_workspace("default", project / "workspace")
+    write_project_section(project, "workspace", {"default": "default"})
+    return Workspace(project / "workspace")
+
+
 def _context(tmp_path: Path) -> CLIContext:
     return CLIContext("httk", tmp_path)
 
@@ -263,7 +274,7 @@ def test_top_level_run_defaults_to_until_idle_for_the_project_workspace(tmp_path
 
 def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Path, capsys) -> None:
     initialize_project(tmp_path, name="run-timeout")
-    Workspace.initialize(tmp_path)
+    _init_workspace(tmp_path)
     source = tmp_path / "source" / "files"
     source.mkdir(parents=True)
     (source / "runner").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -278,7 +289,7 @@ def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Pat
             claim_pool="unserved",
         ),
     )
-    Workspace(tmp_path).submit(payload, "project/unserved")
+    Workspace(tmp_path / "workspace").submit(payload, "project/unserved")
 
     assert command(["run", "--idle-timeout", "0.05"], _context(tmp_path)) == 2
     error = capsys.readouterr().err

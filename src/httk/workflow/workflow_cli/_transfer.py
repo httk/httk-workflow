@@ -40,7 +40,16 @@ from ..collecting import COLLECTABLE_KINDS
 from ..errors import ResolutionMiss, WorkflowError
 from ..hygiene import describe_remote, remove_remote
 from ..introspection import JobSelectorResolver
-from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition, Marker, canonical_uuid, parse_job_key
+from ..models import (
+    QUIESCENT_KINDS,
+    WORKSPACE_DIRECTORY,
+    JobDefinition,
+    Marker,
+    canonical_uuid,
+    normalize_placement,
+    parse_job_key,
+    placement_text,
+)
 from ..packages import read_build_spec
 from ..precheck import environment_findings
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, list_workspaces, resolve_workspace
@@ -555,7 +564,7 @@ def _require_whole_trees(candidates: Sequence[TransferCandidate]) -> None:
 def _refuse_tree_placement(candidates: Sequence[TransferCandidate], destination_placement: str | None) -> None:
     """Refuse to re-place a selection that moves a job tree."""
 
-    if not destination_placement:
+    if destination_placement is None:
         return
     members = [candidate for candidate in candidates if candidate.tree_root is not None]
     roots = sorted({candidate.job_key for candidate in members if candidate.tree_root == candidate.job_id}) or sorted(
@@ -775,8 +784,8 @@ def _send_jobs_to_remote(
         if not resumable and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
             return None
         transfer_id = str(resumable[0][1]["transfer_id"]) if resumable else str(uuid.uuid4())
-        if resumable and destination_placement:
-            requested = str(destination_placement).strip("/")
+        if resumable and destination_placement is not None:
+            requested = placement_text(normalize_placement(str(destination_placement)))
             if resumable[0][1].get("destination_placement") != requested:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
         bundle = source.detach(
@@ -1022,7 +1031,7 @@ def _remote_offer(
             argv += ["--state", state]
     for job_id in job_ids or ():
         argv += ["--job", job_id]
-    if placement:
+    if placement is not None:
         argv += ["--placement", placement]
     if environment_settings is not None:
         argv += ["--environment-settings", json.dumps(environment_settings, sort_keys=True, separators=(",", ":"))]

@@ -189,7 +189,7 @@ def test_a_tick_never_opens_the_terminal_kind_directories(tmp_path: Path, monkey
     # Keep the synthetic active marker through the manager's startup
     # always-safe collection; the scheduling scan itself still needs no
     # job.json to exercise its directory walk.
-    (workspace.root / "project" / "active" / active_key).mkdir(parents=True)
+    (workspace.jobs / "project" / "active" / active_key).mkdir(parents=True)
     for kind in TERMINAL_KINDS:
         for index in range(5):
             _touch_marker(workspace, kind, f"project/done/{index:02d}")

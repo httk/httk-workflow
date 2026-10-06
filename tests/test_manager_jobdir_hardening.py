@@ -478,7 +478,7 @@ def test_a_job_under_a_symlinked_placement_directory_runs(tmp_path: Path) -> Non
     # Placement directories are operator layout: project -> /scratch/project.
     scratch = tmp_path / "scratch" / "project"
     scratch.mkdir(parents=True)
-    (workspace.root / "project").symlink_to(scratch, target_is_directory=True)
+    (workspace.jobs / "project").symlink_to(scratch, target_is_directory=True)
     payload, job_id = _payload(tmp_path / "source", "placed", _runner(outside), attempts=1)
     marker = workspace.submit(payload, "project/placed")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:

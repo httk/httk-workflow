@@ -767,19 +767,19 @@ def test_full_local_to_remote_unreachable_notice_is_printed_once(tmp_path: Path,
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    Workspace.initialize(source_root)
-    Workspace.initialize(destination_root)
+    source = Workspace.initialize(source_root / "workspace")
+    destination = Workspace.initialize(destination_root / "workspace")
     from httk.workflow.adapters import add_remote
 
     remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(destination_root)
+    metadata["settings"]["workspace_root"] = str(destination.root)
     (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload = _job(tmp_path, "notice-job", {"declared": {}, "overrides": {}})
-    marker = Workspace(source_root).submit(payload, "ready")
+    marker = source.submit(payload, "ready")
     context = CLIContext("httk", source_root)
-    register_ws(context, source_root, "home")
-    register_ws(context, destination_root, "station")
+    register_ws(context, source.root, "home")
+    register_ws(context, destination.root, "station")
 
     def unavailable(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("settings unavailable")

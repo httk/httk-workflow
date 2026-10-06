@@ -37,6 +37,7 @@ from .models import (
     ACTIVE_STATE_KINDS,
     CORE_PROFILE,
     CORE_STATE_KINDS,
+    JOBS_DIRECTORY,
     STATE_KINDS,
     SUPPORTED_EXTENSIONS,
     WORKSPACE_DIRECTORY,
@@ -48,6 +49,7 @@ from .models import (
     marker_basename,
     normalize_placement,
     parse_job_key,
+    placement_text,
     validate_runner_path,
 )
 
@@ -88,6 +90,23 @@ def _validate_setting_value(key: str, value: object) -> object:
 
 def _setting_variable_name(key: str) -> str:
     return "HTTK_" + key.upper().replace(".", "_")
+
+
+def _section(document: Mapping[str, object], name: str) -> object:
+    """Return a required ``format.json`` section, refusing a document without it."""
+
+    if name not in document:
+        raise FormatError(f"workspace format.json has no {name!r} section")
+    return document[name]
+
+
+def _refuse_format(root: object, version: object, profile: object) -> FormatError:
+    return FormatError(
+        f"workspace at {root} uses httk-workflow-filesystem format version {version} (profile {profile!r}); "
+        f"this version of httk-workflow reads only format 3 ({CORE_PROFILE}). "
+        "There is no migration: remove old per-user state with `httk system reset` "
+        "and recreate the workspace with `httk workspace init`."
+    )
 
 
 def _validate_settings(raw: object) -> dict[str, object]:
@@ -388,20 +407,21 @@ class Workspace:
             raise ValueError("marker_index_capacity must be positive")
         self._marker_index_capacity = marker_index_capacity
         self.root = Path(root).resolve()
+        self.jobs = self.root / JOBS_DIRECTORY
         self.control = self.root / WORKSPACE_DIRECTORY
         self.runners = self.control / "runners"
         self.runner_builds = self.control / "runner-builds"
         self.durable = durable
         self._reported_faults: set[Path] = set()
         self.format = read_json(self.control / "format.json")
-        # A workspace written before the policy section existed reads as the
-        # defaults, so an old workspace attaches without migration.
-        self._policy = WorkspacePolicy.from_mapping(self.format.get("policy", {}))
-        if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 2:
-            raise FormatError("workspace must use httk-workflow-filesystem format version 2")
+        if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 3:
+            raise _refuse_format(self.root, self.format.get("format_version"), self.format.get("core_profile"))
         self.core_profile = self.format.get("core_profile")
         if self.core_profile != CORE_PROFILE:
-            raise UnsupportedExtensionError(f"unsupported core profile: {self.core_profile!r}")
+            raise _refuse_format(self.root, self.format.get("format_version"), self.format.get("core_profile"))
+        self._policy = WorkspacePolicy.from_mapping(_section(self.format, "policy"))
+        _validate_settings(_section(self.format, "settings"))
+        _validate_workflow_preludes(_section(self.format, "workflow_preludes"))
         extensions_raw = self.format.get("extensions", [])
         if not isinstance(extensions_raw, list) or not all(isinstance(item, str) for item in extensions_raw):
             raise FormatError("workspace extensions must be an array of strings")
@@ -465,7 +485,8 @@ class Workspace:
         :param durable: Enable storage-crash durability for filesystem publications.
         :param policy: Override the default workspace policy values.
         :return: The initialized workspace.
-        :raises httk.workflow.errors.FormatError: If the filesystem cannot satisfy the workspace profile.
+        :raises httk.workflow.errors.FormatError: If the filesystem cannot satisfy the workspace profile or
+            ``root`` exists and is not an empty directory.
         :raises httk.workflow.errors.UnsupportedExtensionError: If an extension is not supported.
         :raises httk.workflow.errors.SealedError: If the enclosing project is sealed.
         """
@@ -478,6 +499,17 @@ class Workspace:
         project = discover_project(root_path)
         if project is not None and is_project_sealed(project):
             raise SealedError(f"project at {project} is sealed; cannot initialize a workspace under it")
+        if (
+            root_path.exists()
+            and not (
+                root_path / WORKSPACE_DIRECTORY
+            ).exists()  # a half-made workspace keeps the FileExistsError race path
+            and (not root_path.is_dir() or any(root_path.iterdir()))
+        ):
+            raise FormatError(
+                f"{root_path} is not empty: a workspace is a directory of its own; initialize it in a new or "
+                "empty directory, e.g. `httk workspace init --name default workspace`"
+            )
         root_path.mkdir(parents=True, exist_ok=True)
         extension_set = frozenset(extensions)
         unsupported = extension_set - SUPPORTED_EXTENSIONS
@@ -500,19 +532,22 @@ class Workspace:
             "state/submitted",
         ):
             (control / relative).mkdir(parents=True, exist_ok=True)
+        (root_path / JOBS_DIRECTORY).mkdir(exist_ok=True)
         for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
             (control / relative).mkdir(parents=True, exist_ok=True)
         write_json_atomic(
             control / "format.json",
             {
                 "format": "httk-workflow-filesystem",
-                "format_version": 2,
+                "format_version": 3,
                 "core_profile": CORE_PROFILE,
                 "extensions": sorted(extension_set),
                 "record_ref_encoding": "hwref-v2",
                 "workspace_id": str(uuid.uuid4()),
                 "created_at": utc_now(),
                 "policy": initial_policy.as_mapping(),
+                "settings": {},
+                "workflow_preludes": {},
             },
             durable=durable,
         )
@@ -616,7 +651,7 @@ class Workspace:
 
         self._require_unsealed()
         stored = read_json(self.control / "format.json")
-        merged = WorkspacePolicy.from_mapping(stored.get("policy", {})).updated(changes)
+        merged = WorkspacePolicy.from_mapping(_section(stored, "policy")).updated(changes)
         stored["policy"] = merged.as_mapping()
         write_json_atomic(self.control / "format.json", stored, durable=self.durable)
         self.format = stored
@@ -637,13 +672,12 @@ class Workspace:
         engine. These are the values an application step resolves at run time —
         the VASP command, a pseudopotential library — one layer of the
         job-parameters → environment → workspace → default resolution a runner reads
-        through :meth:`~httk.workflow.sdk.Attempt.setting`. A workspace written
-        before the section existed reads as an empty map.
+        through :meth:`~httk.workflow.sdk.Attempt.setting`.
 
         :return: The workspace's application settings.
         """
 
-        return _validate_settings(self.format.get("settings", {}))
+        return _validate_settings(_section(self.format, "settings"))
 
     def read_settings(self) -> dict[str, object]:
         """Read and validate the current settings from disk.
@@ -652,7 +686,7 @@ class Workspace:
         :raises httk.workflow.errors.FormatError: If the stored settings are not valid.
         """
 
-        return _validate_settings(read_json(self.control / "format.json").get("settings", {}))
+        return _validate_settings(_section(read_json(self.control / "format.json"), "settings"))
 
     @staticmethod
     def _check_setting_collision(key: str, settings: Mapping[str, object]) -> None:
@@ -679,7 +713,7 @@ class Workspace:
         _validate_setting_key(key)
         _validate_setting_value(key, value)
         stored = read_json(self.control / "format.json")
-        settings = _validate_settings(stored.get("settings", {}))
+        settings = _validate_settings(_section(stored, "settings"))
         self._check_setting_collision(key, settings)
         settings[key] = value
         stored["settings"] = settings
@@ -696,7 +730,7 @@ class Workspace:
         """
 
         stored = read_json(self.control / "format.json")
-        settings = _validate_settings(stored.get("settings", {}))
+        settings = _validate_settings(_section(stored, "settings"))
         if key not in settings:
             raise ValueError(f"application setting is not set: {key}")
         del settings[key]
@@ -720,7 +754,7 @@ class Workspace:
 
         merged = _validate_settings(seeds)
         stored = read_json(self.control / "format.json")
-        current = _validate_settings(stored.get("settings", {}))
+        current = _validate_settings(_section(stored, "settings"))
         for key, value in merged.items():
             if any(
                 existing != key and _setting_variable_name(existing) == _setting_variable_name(key)
@@ -737,14 +771,13 @@ class Workspace:
         """Read and validate the workflow-in-workspace preludes from disk.
 
         A workflow prelude is shell text run to initialize the environment
-        before each launch of a runner for that workflow. A workspace written
-        before the section existed reads as an empty map.
+        before each launch of a runner for that workflow.
 
         :return: The current map of workflow id to prelude text.
         :raises httk.workflow.errors.FormatError: If the stored preludes are not valid.
         """
 
-        return _validate_workflow_preludes(read_json(self.control / "format.json").get("workflow_preludes", {}))
+        return _validate_workflow_preludes(_section(read_json(self.control / "format.json"), "workflow_preludes"))
 
     def set_workflow_prelude(self, workflow_id: str, value: str) -> dict[str, str]:
         """Store one workflow prelude and return the resulting map.
@@ -762,7 +795,7 @@ class Workspace:
         _validate_workflow_prelude_id(workflow_id)
         _validate_workflow_prelude_value(workflow_id, value)
         stored = read_json(self.control / "format.json")
-        preludes = _validate_workflow_preludes(stored.get("workflow_preludes", {}))
+        preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         preludes[workflow_id] = value
         stored["workflow_preludes"] = preludes
         write_json_atomic(self.control / "format.json", stored, durable=self.durable)
@@ -778,7 +811,7 @@ class Workspace:
         """
 
         stored = read_json(self.control / "format.json")
-        preludes = _validate_workflow_preludes(stored.get("workflow_preludes", {}))
+        preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         if workflow_id not in preludes:
             raise ValueError(f"workflow prelude is not set: {workflow_id}")
         del preludes[workflow_id]
@@ -1149,13 +1182,15 @@ class Workspace:
         :param job_key: Identify the job payload.
         :return: The payload directory path.
         """
-        return self.root.joinpath(*placement.parts, job_key)
+        return self.jobs.joinpath(*placement.parts, job_key)
 
     def _iter_state_subtree(
         self,
         directory: Path,
         rel: tuple[str, ...],
         after: tuple[str, ...] | None,
+        *,
+        flat: bool = False,
     ) -> Iterator[tuple[tuple[str, ...], "Marker | MarkerFault | None"]]:
         """Yield every entry below *directory* in stable pre-order, past *after*.
 
@@ -1177,6 +1212,8 @@ class Workspace:
         for entry in _scandir_sorted(directory):
             position = rel + (entry.name,)
             if _safe_is_dir(entry):
+                if flat:
+                    continue
                 relation = _cursor_relation(position, after)
                 if relation == "skip":
                     continue
@@ -1609,11 +1646,11 @@ class Workspace:
         if marker.record_ref == "init":
             return {
                 "format": "httk-workflow-state",
-                "format_version": 2,
+                "format_version": 3,
                 "workspace_id": self.workspace_id,
                 "job_id": marker.job_id,
                 "job_key": marker.job_key,
-                "placement": marker.placement.as_posix(),
+                "placement": placement_text(marker.placement),
                 "state_generation": 0,
                 "kind": "submitted",
                 "previous_record_ref": None,
@@ -1623,7 +1660,7 @@ class Workspace:
         frame = read_record(self.control, marker.record_ref, deadline_seconds=self.visibility_deadline)
         if (
             frame.get("format") != "httk-workflow-state"
-            or frame.get("format_version") != 2
+            or frame.get("format_version") != 3
             or frame.get("workspace_id") != self.workspace_id
             or frame.get("job_key") != marker.job_key
             or frame.get("state_generation") != marker.generation
@@ -1668,11 +1705,11 @@ class Workspace:
             raise WorkspaceCorruptionError("state generation exhausted")
         frame: dict[str, object] = {
             "format": "httk-workflow-state",
-            "format_version": 2,
+            "format_version": 3,
             "workspace_id": self.workspace_id,
             "job_id": marker.job_id,
             "job_key": marker.job_key,
-            "placement": marker.placement.as_posix(),
+            "placement": placement_text(marker.placement),
             "state_generation": generation,
             "kind": kind,
             "previous_record_ref": None if marker.record_ref == "init" else marker.record_ref,
@@ -1980,7 +2017,12 @@ class MarkerStream:
         if self._prefixes:
             return sorted(prefix.parts for prefix in self._prefixes)
         base = self.workspace.control / "state" / self.kind
-        return sorted((entry.name,) for entry in _scandir_sorted(base) if _safe_is_dir(entry))
+        entries = _scandir_sorted(base)
+        roots: list[tuple[str, ...]] = [(entry.name,) for entry in entries if _safe_is_dir(entry)]
+        # The empty root: markers of the empty placement sit directly in ``state/<kind>/``.
+        if any(not _safe_is_dir(entry) and _marker_shaped(entry.name) for entry in entries):
+            roots.append(())
+        return sorted(roots)
 
     def advance(
         self,
@@ -2035,7 +2077,9 @@ class MarkerStream:
             last_root = root
             after = self._cursors.get(root)
             reached_end = True
-            for position, entry in self.workspace._iter_state_subtree(base.joinpath(*root), root, after):
+            for position, entry in self.workspace._iter_state_subtree(
+                base.joinpath(*root), root, after, flat=not root and not self._prefixes
+            ):
                 examined += 1
                 if heartbeat is not None and examined % heartbeat_every == 0:
                     heartbeat()

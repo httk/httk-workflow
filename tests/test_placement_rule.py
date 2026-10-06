@@ -1,7 +1,6 @@
 """Job directories never nest: no placement component may parse as a job key."""
 
 import json
-import uuid
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -9,7 +8,7 @@ import pytest
 from conftest import configure_identity
 from httk.workflow import Workspace
 from httk.workflow.errors import FormatError
-from httk.workflow.models import Marker, check_job_placement, normalize_placement
+from httk.workflow.models import check_job_placement
 from httk.workflow.transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST, adopt_job, validate_bundle
 from test_eject_adopt import _payload
 
@@ -131,20 +130,6 @@ def test_adopt_accepts_an_ordinary_placement_override(tmp_path: Path) -> None:
     assert adopted.job_id == job_id and adopted.placement == PurePosixPath("project/children")
 
 
-def test_existing_markers_with_nesting_placements_still_parse(tmp_path: Path, nesting: str) -> None:
-    # normalize_placement does not apply the rule, so a workspace that placed
-    # jobs this way before the rule existed keeps reading its markers.
-    assert normalize_placement(nesting) == PurePosixPath(nesting)
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job_key = f"child--{uuid.uuid4()}"
-    marker_path = workspace.marker_path("submitted", PurePosixPath(nesting), job_key, 500, 0, "init")
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.touch()
-    marker = Marker.from_path(workspace.control / "state", marker_path)
-    assert marker.placement == PurePosixPath(nesting) and marker.job_key == job_key
-    assert [found.job_key for found in workspace.scan_markers(("submitted",))] == [job_key]
-
-
 def test_detach_refuses_a_nesting_destination_placement_before_fencing(tmp_path: Path, nesting: str) -> None:
     configure_identity()
     source = Workspace.initialize(tmp_path / "source")
@@ -156,46 +141,3 @@ def test_detach_refuses_a_nesting_destination_placement_before_fencing(tmp_path:
     assert source.find_marker_by_id(marker.job_id) == marker
     assert not list(source.scan_markers(("transferring",)))
     assert not (source.payload_path(marker.placement, marker.job_key) / TRANSFER_DIRECTORY).exists()
-
-
-def _legacy_finished(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nesting: str) -> tuple[Workspace, Marker]:
-    """A finished job placed, as before the placement rule, inside a job-key component."""
-
-    from test_exchange_staging import _finish
-
-    configure_identity()
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    with monkeypatch.context() as patch:
-        patch.setattr("httk.workflow.workspace.check_job_placement", lambda placement: None)
-        marker = workspace.submit(_payload(tmp_path / "payloads"), nesting)
-    return workspace, _finish(workspace, marker)
-
-
-def test_eject_refuses_a_legacy_nesting_placement_before_fencing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nesting: str
-) -> None:
-    workspace, marker = _legacy_finished(tmp_path, monkeypatch, nesting)
-    with pytest.raises(FormatError, match="must not name a job directory"):
-        workspace.eject(marker.job_id, tmp_path / "loose")
-    assert workspace.find_marker_by_id(marker.job_id) == marker
-    assert not (tmp_path / "loose").exists()
-
-
-def test_the_exchange_records_and_warns_once_about_a_job_that_can_never_eject(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, nesting: str
-) -> None:
-    from httk.workflow._exchange_staging import exchange_pass
-    from test_exchange_staging import _LATER, _staging, _status
-
-    workspace, marker = _legacy_finished(tmp_path, monkeypatch, nesting)
-    staging = _staging(workspace)
-    with caplog.at_level("WARNING", logger="httk.workflow._exchange_staging"):
-        exchange_pass(workspace, now=_LATER)
-        exchange_pass(workspace, now=_LATER + 10)
-    warnings = [record for record in caplog.records if "is never ejected" in record.getMessage()]
-    assert len(warnings) == 1 and marker.job_key in warnings[0].getMessage()
-    record = json.loads((staging / "records" / f"eject-{marker.job_id}.json").read_text(encoding="utf-8"))
-    assert record["job_id"] == marker.job_id and "must not name a job directory" in record["reason"]
-    assert _status(workspace)["eject_errors"] == [{"job_id": marker.job_id, "reason": record["reason"]}]
-    assert workspace.find_marker_by_id(marker.job_id) == marker
-    assert not (staging / "outbox" / marker.job_key).exists()

@@ -1180,3 +1180,52 @@ def test_a_collection_report_round_trips_through_its_mapping(aged: _Fixture) -> 
     assert [category.name for category in report.categories] == list(gc_module.GC_CATEGORIES)
     assert report.category("no_such_category").candidates == 0
     assert document["candidates"] == report.candidates
+
+
+def _manager_log(workspace: Workspace, name: str, *, days: float) -> Path:
+    path = workspace.root / "logs" / "managers" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("log\n", encoding="utf-8")
+    _age(path, days)
+    return path
+
+
+def test_manager_logs_are_collected_when_the_manager_is_gone_and_the_log_is_old(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"trash_days": 7.0}})
+    old, backup = _manager_log(workspace, "m-old.log", days=10), _manager_log(workspace, "m-old.log.1", days=10)
+    recent = _manager_log(workspace, "m-recent.log", days=1)
+    live = _manager_log(workspace, "m-live.log", days=10)
+    (workspace.control / "managers" / "m-live").mkdir(parents=True)
+    batch = workspace.root / "logs" / "batch" / "manager-x.out"
+    batch.parent.mkdir(parents=True)
+    batch.write_text("out", encoding="utf-8")
+    _age(batch, 10)
+
+    dry = workspace.collect_garbage(categories=("manager_logs",), dry_run=True)
+    assert dry.category("manager_logs").candidates == 2 and old.exists()
+    report = workspace.collect_garbage(categories=("manager_logs",))
+
+    assert report.category("manager_logs").removed == 2
+    assert not old.exists() and not backup.exists()
+    assert recent.exists() and live.exists() and batch.exists()
+
+
+def test_manager_logs_are_kept_without_trash_retention(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"trash_days": None}})
+    old = _manager_log(workspace, "m-old.log", days=400)
+
+    report = workspace.collect_garbage(categories=("manager_logs",))
+
+    assert old.exists() and report.category("manager_logs").skipped
+
+
+def test_selecting_manager_directories_also_selects_manager_logs(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"trash_days": 7.0, "journal_days": 30.0}})
+    old = _manager_log(workspace, "m-old.log", days=10)
+
+    workspace.collect_garbage(categories=("manager_directories",))
+
+    assert not old.exists()

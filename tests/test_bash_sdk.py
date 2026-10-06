@@ -120,8 +120,8 @@ def _fixture(
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
             "workspace_id": str(uuid.uuid4()),
-            "job_id": str(uuid.uuid4()),
-            "job_key": f"fabricated--{uuid.uuid4()}",
+            "job_id": (_jid := str(uuid.uuid4())),
+            "job_key": f"fabricated--{_jid}",
             "placement": "project/fabricated",
             "payload": str(payload),
             "step": step,
@@ -130,6 +130,8 @@ def _fixture(
             "data_generation": data_generation,
             "children": children or [],
             "settings": settings or {},
+            "durable": False,
+            "deadline": None,
         }
     )
     process_environment = os.environ.copy()
@@ -550,6 +552,8 @@ def test_parameter_items_iterates_an_array_parameter(tmp_path: Path) -> None:
             "nul": ["a\u0000b"],
             "encut": 520,
             "settings": {"a": 1},
+            "durable": False,
+            "deadline": None,
         },
     )
     source = _runner(

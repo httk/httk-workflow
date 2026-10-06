@@ -4,7 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..models import Marker
+from ..models import Marker, placement_text
 from ..workspace import Workspace
 from ._diagnosis import (
     BudgetStatus,
@@ -56,7 +56,7 @@ def describe_job(
         "job_id": marker.job_id,
         "job_key": marker.job_key,
         "state": marker.kind,
-        "placement": marker.placement.as_posix(),
+        "placement": placement_text(marker.placement),
         "priority": marker.priority,
         "generation": marker.generation,
         "record_ref": marker.record_ref,

@@ -5,8 +5,18 @@ which publishes a request in ``launch/`` of the attempt control directory. The m
 
 * **Admission.** A request is started only for a live attempt that is neither fenced, cancelling, timed
   out, drained, reaped nor published, whose admission was not closed by an uncertain launch, with a client
-  lock file whose lock is still held, and only one launch at a time per attempt; further requests wait in
-  arrival order. Every other request gets a ``refused`` status.
+  lock file (in the attempt's launch-lock directory, see below) whose lock is still held, and only one
+  launch at a time per attempt; further requests wait in arrival order. Every other request gets a
+  ``refused`` status.
+* **Liveness lock.** The client's ``flock`` lives on host tmpfs, never on the shared workspace filesystem:
+  for an attempt with the launch client the manager creates ``<confine.shm_root>/httk-launch-<attempt_id>/``
+  (exclusively, owner and mode checked, see :func:`httk.workflow._confine.create_launch_locks`), binds it
+  into the sandbox at the identical path and exports it as ``HTTK_WORKFLOW_LAUNCH_LOCKS``. The client
+  creates ``ID.lock`` there; the manager opens it relative to its own directory descriptor and probes it
+  with ``LOCK_EX|LOCK_NB``: held means alive, acquired means the client is gone, even after ``SIGKILL``.
+  Requests, statuses and output stay in ``launch/`` of the attempt control directory. The manager removes
+  the directory when it drops the attempt (:func:`forget`); the directory of a crashed manager stays on its
+  node until reboot.
 * **Start.** The manager writes the trusted launch directory
   ``<workspace>/.httk-workspace/managers/<manager_id>/launches/<attempt_id>.<request_id>/`` (``nodefile``
   rendered from the placement kept in memory, ``launch.json`` with a random launch token and, after the
@@ -41,7 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ._confine import ConfineSettings
+from ._confine import ConfineSettings, remove_launch_locks
 from ._jobdir import JobDirectory, JobDirectoryError
 from ._launch_protocol import (
     LAUNCH_DIRECTORY,
@@ -69,7 +79,7 @@ from ._launch_protocol import (
 from ._manager_binding import Placement, nodefile_lines, render_launch
 from ._util import timestamp_seconds, utc_now
 from .errors import FormatError
-from .models import Marker
+from .models import Marker, placement_text
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
 
@@ -94,7 +104,7 @@ _RECORD_BYTES = 4096
 _REQUEST_SUFFIX = ".request.json"
 _STREAM_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_UNSUPPORTED_LOCK_ERRNOS = frozenset({errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP})
+_LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def client_prefix() -> str:
@@ -192,12 +202,15 @@ class AttemptLaunches:
         (every request is then refused).
     :param launches: The started launches by request identifier.
     :param closed: Why admission is closed for good, or ``None``.
+    :param launch_locks: The descriptor (owned by this state, closed by :func:`forget`) and host path of the
+        attempt's launch-lock directory on node-local shared memory, or ``None`` without one.
     """
 
     control_name: str
     context: LaunchContext | None
     launches: dict[str, ConfinedLaunch] = field(default_factory=dict)
     closed: str | None = None
+    launch_locks: tuple[int, Path] | None = None
 
 
 def _state(attempt: Any) -> AttemptLaunches | None:
@@ -337,6 +350,11 @@ def forget(manager: Any, attempt: Any) -> None:
     for launch in state.launches.values():
         if launch.reaped:
             _remove_trusted(launch)
+    if state.launch_locks is not None:
+        descriptor, path = state.launch_locks
+        state.launch_locks = None
+        os.close(descriptor)
+        remove_launch_locks(path.parent, attempt.attempt_id)
 
 
 def _escalate(manager: Any, attempt: Any, state: AttemptLaunches, launch: ConfinedLaunch, now: float) -> None:
@@ -375,12 +393,28 @@ def _open_launch_directory(manager: Any, attempt: Any, state: AttemptLaunches) -
         return job_dir.directory(f"{state.control_name}/{LAUNCH_DIRECTORY}")
 
 
-def _client_alive(directory: JobDirectory, request_id: str) -> bool | None:
-    """Return whether the client holds its lock: ``None`` when this filesystem cannot tell."""
+def _open_client_lock(state: AttemptLaunches, request_id: str) -> int | None:
+    """Open the client's lock file in the attempt's launch-lock directory, or return ``None`` if it is not one."""
 
+    if state.launch_locks is None:
+        return None
     try:
-        descriptor = directory.open_read(lock_name(request_id))
-    except (FileNotFoundError, JobDirectoryError):
+        descriptor = os.open(lock_name(request_id), _LOCK_FLAGS, dir_fd=state.launch_locks[0])
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENXIO, errno.ENOTDIR):
+            return None
+        raise
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def _client_alive(state: AttemptLaunches, request_id: str) -> bool:
+    """Return whether the client holds its lock: a missing or unlocked file means the client is gone."""
+
+    descriptor = _open_client_lock(state, request_id)
+    if descriptor is None:
         return False
     try:
         try:
@@ -388,8 +422,6 @@ def _client_alive(directory: JobDirectory, request_id: str) -> bool | None:
         except OSError as exc:
             if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 return True
-            if exc.errno in _UNSUPPORTED_LOCK_ERRNOS:
-                return None
             raise
         return False
     finally:
@@ -401,13 +433,13 @@ def _client_stop_reason(manager: Any, attempt: Any, state: AttemptLaunches, laun
         with _open_launch_directory(manager, attempt, state) as directory:
             if directory.stat(stop_name(launch.request_id)) is not None:
                 return "the client asked to stop the launch"
-            alive = _client_alive(directory, launch.request_id)
+            alive = _client_alive(state, launch.request_id)
     except (FileNotFoundError, JobDirectoryError):
         return "the attempt's launch directory is gone or was replaced"
     except (FormatError, OSError) as exc:
         _LOGGER.debug("cannot check the client of launch %s: %s", launch.request_id, exc)
         return None
-    return "the client is gone" if alive is False else None
+    return None if alive else "the client is gone"
 
 
 def _poll_launch(manager: Any, attempt: Any, state: AttemptLaunches, launch: ConfinedLaunch, now: float) -> bool:
@@ -572,9 +604,13 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
     context = state.context
     if context is None:
         return "the attempt has no launch binding; HTTK_WORKFLOW_LAUNCH is not available to it"
-    information = directory.stat(lock_name(request_id))
-    if information is None or not stat.S_ISREG(information.st_mode):
+    try:
+        lock = _open_client_lock(state, request_id)
+    except OSError as exc:
+        return f"cannot open the client lock: {exc}"
+    if lock is None:
         return "the request has no client lock file"
+    os.close(lock)
     try:
         request = decode_request(directory.read(request_name(request_id), MAX_REQUEST_BYTES))
     except (FormatError, OSError, ValueError) as exc:
@@ -586,10 +622,10 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
     if directory.stat(stop_name(request_id)) is not None:
         return "the client asked to stop before the launch started"
     try:
-        alive = _client_alive(directory, request_id)
+        alive = _client_alive(state, request_id)
     except OSError as exc:
         return f"cannot check the client lock: {exc}"
-    if alive is False:
+    if not alive:
         return "the client is gone"
     streams: list[int] = []
     trusted = manager.manager_directory / LAUNCHES_DIRECTORY / trusted_name(attempt.attempt_id, request_id)
@@ -608,7 +644,6 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
             created = True
             _write_new(trusted, NODEFILE, "".join(f"{host}\n" for host in nodefile_lines(context.placement)).encode())
             marker = attempt.marker
-            placement = marker.placement.as_posix()
             _write_new(
                 trusted,
                 LAUNCH_FILE,
@@ -618,7 +653,7 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
                         attempt_id=attempt.attempt_id,
                         workspace_id=manager.workspace.workspace_id,
                         workspace_root=manager.workspace.root,
-                        placement="" if placement == "." else placement,
+                        placement=placement_text(marker.placement),
                         job_key=marker.job_key,
                         request=request_relative_path(attempt.attempt_id, request_id),
                         confine=context.confinement,
