@@ -263,11 +263,15 @@ def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, 
             ledger_keys=keys,
         )
     # Collect succeeds: the output is store-minted, and the ledger holds nothing.
-    # The records family has three backings (DataRecord, TotalEnergyRecord,
-    # AverageTotalEnergyRecord), and a minted number is logical_id * 3 + backing
-    # index, so the first DataRecord is 3.
+    # A minted number is logical_id * N + backing index, with N the backings of
+    # the records family (they depend on the installed packages) and DataRecord
+    # the first, so the first DataRecord is N.
+    from httk.store import SqliteStore  # pyright: ignore[reportMissingImports]
+
+    with SqliteStore(tmp_path / "s.sqlite") as store:
+        backings = {family.name: family.records for family in store.entry_layout}["records"]
     assert "storage_error" not in reports[0]
-    assert cast(Any, reports[0]["stored"])["entries"] == ["httk.probe-1-3"]
+    assert cast(Any, reports[0]["stored"])["entries"] == [f"httk.probe-1-{len(backings)}"]
     assert list(_ledger_records(ledger)) == []
     assert any("unstable identity" in message for message in caplog.messages)
 

@@ -33,9 +33,15 @@ _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 #: Other registered records of the family follow in name order. A later additive
 #: upgrade may only append to this order, never insert or reorder.
 _CORE_RECORDS_ORDER = ("core-data-record", "core-total-energy", "core-average-total-energy")
+_REBUILD_KEEP = (
+    "delete {target} and collect again, keeping the id ledger beside it, so record and run ids are preserved."
+)
+_PREDATES_TYPED = "{target} predates typed records: its values are stored as generic DataRecord rows. Rebuild it: " + (
+    _REBUILD_KEEP
+)
 _REBUILD_TYPED = (
-    "{target} predates typed records: its values are stored as generic DataRecord rows. Rebuild it: delete "
-    "{target} and collect again, keeping the id ledger beside it, so record and run ids are preserved."
+    "{target} holds generic DataRecord rows of definitions that are now stored as typed records ({ids}); "
+    "rebuild it: " + _REBUILD_KEEP
 )
 
 
@@ -353,13 +359,20 @@ def _typed_record_classes(records: Sequence[type]) -> dict[str, type]:
     """Map each property IRI a typed record of the ``records`` family carries to that class.
 
     A typed record declares exactly one property in ``__httk_property_definitions__``
-    and builds itself from a generic record through ``from_data_record``.
+    and needs a ``from_data_record`` classmethod to be mapped; a class without them
+    is skipped with a warning. Derived (statistics) kinds of
+    :class:`httk.core.TypedRecord` are skipped silently: they are keyed by an ad-hoc
+    served IRI no generic record carries and are built with ``from_value`` only. This
+    is the one place workflow reads the core typed-record spec
+    (``__httk_typed_record__``).
     """
 
     typed: dict[str, type] = {}
     for record in records:
         definitions = getattr(record, "__httk_property_definitions__", None)
         if record is DataRecord or not definitions:
+            continue
+        if getattr(getattr(record, "__httk_typed_record__", None), "derivation", None) is not None:
             continue
         if not callable(getattr(record, "from_data_record", None)) or len(definitions) != 1:
             # Its values would silently stay generic and unserved; the class owner must fix it.
@@ -442,8 +455,8 @@ def _layout_additions(diff: object) -> str | None:
     return "new record kinds: " + ", ".join(added) if added else None
 
 
-def _holds_generic_typed(path: Path, typed: Mapping[str, type]) -> bool:
-    """Report whether an existing store, opened in its persisted layout, holds now-typed generic rows.
+def _holds_generic_typed(path: Path, typed: Mapping[str, type]) -> tuple[str, ...]:
+    """Return the now-typed definitions an existing store, opened in its persisted layout, holds generic rows of.
 
     A store that cannot be opened in its persisted layout (an interrupted upgrade)
     is not inspected here; the check after the open covers it.
@@ -454,23 +467,20 @@ def _holds_generic_typed(path: Path, typed: Mapping[str, type]) -> bool:
     try:
         current = SqliteStore(path)
     except Exception:
-        return False
+        return ()
     with current:
         return _stored_generic_typed(current, typed)
 
 
-def _stored_generic_typed(store: Any, typed: Mapping[str, type]) -> bool:
-    """Report whether the store holds generic data records for a definition that is now typed."""
+def _stored_generic_typed(store: Any, typed: Mapping[str, type]) -> tuple[str, ...]:
+    """Return the now-typed definitions the store holds generic data records of, sorted; empty when none."""
 
-    if not any(DataRecord in records for records in store.entry_records.values()):
-        return False
-    for definition_id in typed:
-        searcher = store.searcher()
-        variable = searcher.variable(DataRecord)
-        searcher.add(variable.definition_id == definition_id)
-        if searcher.results(entry=variable).first() is not None:
-            return True
-    return False
+    if not typed or not any(DataRecord in records for records in store.entry_records.values()):
+        return ()
+    searcher = store.searcher()
+    variable = searcher.variable(DataRecord)
+    searcher.add(variable.definition_id.is_in(*typed))
+    return tuple(sorted({row.definition_id for row in searcher.results(definition_id=variable.definition_id)}))
 
 
 def _latest_stored_entry(store: Any, value: object, entry_id: str) -> Any:
@@ -781,7 +791,7 @@ def store_collected(
             if exc.remedy in ("reopen", "retry"):
                 return ValueError(f"{target}: {exc}")
             if _predates_typed_records(exc.diff):
-                return ValueError(_REBUILD_TYPED.format(target=target))
+                return ValueError(_PREDATES_TYPED.format(target=target))
             needs = ", ".join(requested) or "no entry types"
             return ValueError(
                 f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
@@ -795,22 +805,22 @@ def store_collected(
             )
         except StorageLayoutUpgradeRequiredError as exc:
             if exc.remedy != "upgrade" or not upgrade:
-                if exc.remedy == "upgrade" and _holds_generic_typed(target, typed):
-                    raise ValueError(_REBUILD_TYPED.format(target=target)) from exc
+                if exc.remedy == "upgrade" and (ids := _holds_generic_typed(target, typed)):
+                    raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
                 raise refusal(exc) from exc
             # Checked before anything is upgraded: generic rows of a definition that is
             # now typed cannot move to the typed backing under their ids, so appending
             # the typed record would leave them stranded. Only a rebuild fixes that.
-            if _holds_generic_typed(target, typed):
-                raise ValueError(_REBUILD_TYPED.format(target=target)) from exc
+            if ids := _holds_generic_typed(target, typed):
+                raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
             try:
                 store = stack.enter_context(
                     SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series), upgrade=True)
                 )
             except StorageLayoutUpgradeRequiredError as again:
                 raise refusal(again) from again
-        if _stored_generic_typed(store, typed):
-            raise ValueError(_REBUILD_TYPED.format(target=target))
+        if ids := _stored_generic_typed(store, typed):
+            raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids)))
         # A dataclass entry is stored only as a record of its family; anything else
         # would land in a private table no provider serves.
         members = {record for records in layout.values() for record in records}

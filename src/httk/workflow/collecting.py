@@ -47,7 +47,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
 from functools import cache
 from importlib import metadata
 from itertools import islice
@@ -1148,13 +1148,28 @@ def _executable_path(provider: object, root: Path) -> Path:
     return source
 
 
+def _fits_shape(record: type, keys: set[str]) -> bool:
+    """Report whether a mapping with *keys* has the shape of *record*: no unknown key, no missing required field.
+
+    A record that is not a dataclass has no inspectable shape and always fits.
+    """
+
+    if not is_dataclass(record):
+        return True
+    names = {item.name: item for item in fields(record)}
+    required = {name for name, item in names.items() if item.default is MISSING and item.default_factory is MISSING}
+    return required <= keys <= names.keys()
+
+
 def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -> object:
     """Reconstruct one ``{"entry": {...}}`` collector output as its registered entry.
 
     The entry ``type`` (checked against the declared output's ``entry_type``)
     selects the registered records and families of that type; a declared output
     ``ref`` naming one of their definition IRIs narrows the choice. A record that
-    constructs itself from its mapping (``from_obj``) owns the emitted form.
+    constructs itself from its mapping (``from_obj``) owns the emitted form; when
+    several can, the one whose fields the mapping's keys fit is chosen (so a
+    ``derivation`` key selects ``DerivedDataRecord`` over ``DataRecord``).
     Otherwise the form is the family's served OPTIMADE form, and the family's
     OPTIMADE entry binding builds it through
     :func:`httk.core.optimade.served_entry` — the same backend and view that
@@ -1232,7 +1247,16 @@ def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -
     constructible = [item for item in records if callable(getattr(item[1], "from_obj", None))]
     if len(constructible) > 1:
         names = ", ".join(name for name, _, _ in constructible)
-        raise ValueError(f"entry type {entry_type!r} is ambiguous between records {names}; declare the output ref")
+        shaped = [item for item in constructible if _fits_shape(item[1], set(fields))]
+        if not shaped:
+            raise ValueError(
+                f"the {entry_type!r} entry fits none of records {names} (unknown or missing fields); "
+                "declare the output ref"
+            )
+        if len(shaped) > 1:
+            names = ", ".join(name for name, _, _ in shaped)
+            raise ValueError(f"entry type {entry_type!r} is ambiguous between records {names}; declare the output ref")
+        constructible = shaped
     if constructible:
         result = cast(Any, constructible[0][1]).from_obj(fields)
         if expected_id is not None and expected_id != getattr(result, "id", None):

@@ -718,18 +718,21 @@ def test_a_store_that_predates_typed_records_upgrades_unless_it_holds_generic_va
     # Without generic total energies, appending the typed record is an ordinary additive upgrade.
     empty = old_store("empty.sqlite", DataRecord.from_value("https://example.test/defs/other", "other", 1))
     with pytest.raises(
-        ValueError,
-        match=r"needs an additive layout upgrade \(new record kinds: records/core-total-energy, "
-        r"records/core-average-total-energy\); rerun with --upgrade",
-    ):
+        ValueError, match=r"needs an additive layout upgrade \(new record kinds: [^)]*\); rerun with --upgrade"
+    ) as refusal:
         store_collected(items, str(empty), id_base="httk.probe")
+    # The installed packages decide which other kinds are new; the typed energies always are.
+    assert "records/core-total-energy" in str(refusal.value)
+    assert "records/core-average-total-energy" in str(refusal.value)
     (report,) = store_collected(items, str(empty), id_base="httk.probe", upgrade=True)
     assert "storage_error" not in report and report["stored"] is not None
 
     # With them, the typed record would strand those rows: rebuild, even with --upgrade.
     held = old_store("held.sqlite", DataRecord.from_value(_TOTAL_ENERGY, "_httk_total_energy", -1.0))
     for upgrade in (False, True):
-        with pytest.raises(ValueError, match="predates typed records.*keeping the id ledger"):
+        with pytest.raises(
+            ValueError, match=f"holds generic DataRecord rows.*\\({_TOTAL_ENERGY}\\).*keeping the id ledger"
+        ):
             store_collected(items, str(held), id_base="httk.probe", upgrade=upgrade)
 
     # A store with the typed backing that still holds a generic total energy is refused once too.
@@ -737,7 +740,7 @@ def test_a_store_that_predates_typed_records_upgrades_unless_it_holds_generic_va
     layout, _failures = _storage_layout(items)
     with SqliteStore(mixed, entry_records=layout, entry_ids=EntryIdScheme("x", "1")) as store:
         store.save(DataRecord.from_value(_TOTAL_ENERGY, "_httk_total_energy", -1.0))
-    with pytest.raises(ValueError, match="predates typed records"):
+    with pytest.raises(ValueError, match=f"holds generic DataRecord rows of definitions .*\\({_TOTAL_ENERGY}\\)"):
         store_collected(items, str(mixed), id_base="httk.probe")
 
 
@@ -785,7 +788,7 @@ def test_a_store_lacking_only_an_appended_core_record_upgrades_with_upgrade(
 
     with pytest.raises(ValueError, match="new record kinds: records/test-appended-record.*--upgrade") as refusal:
         store_collected(items, str(path), id_base="httk.probe")
-    assert "predates typed records" not in str(refusal.value)
+    assert "holds generic DataRecord rows" not in str(refusal.value)
 
     old, new = store_collected(items, str(path), id_base="httk.probe", upgrade=True)
     assert "storage_error" not in old and "storage_error" not in new
@@ -1077,6 +1080,18 @@ entry_type = "records"
 _AVERAGE_IRI = "https://schemas.httk.org/defs/v0.1/properties/core/average_total_energy"
 
 
+def _expected_records_layout() -> tuple[type, ...]:
+    """The ``records`` layout of a new store: the pinned core records, then every other registered record by name."""
+
+    from httk.core.register import known_entry_records, resolve_entry_record
+
+    pinned = ("core-data-record", "core-total-energy", "core-average-total-energy")
+    names = (*pinned, *sorted(set(known_entry_records("records")) - set(pinned)))
+    layout = tuple(resolve_entry_record(name) for name in names)
+    assert len(set(layout)) == len(layout)
+    return layout
+
+
 def test_an_average_total_energy_is_stored_typed_and_served(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("starlette")
@@ -1096,7 +1111,8 @@ def test_an_average_total_energy_is_stored_typed_and_served(tmp_path: Path) -> N
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
         records = {family.name: family.records for family in store.entry_layout}["records"]
-        assert records == (DataRecord, TotalEnergyRecord, AverageTotalEnergyRecord)
+        assert records == _expected_records_layout()
+        assert records[:3] == (DataRecord, TotalEnergyRecord, AverageTotalEnergyRecord)
         searcher = store.searcher()
         (row,) = searcher.results(entry=searcher.variable(AverageTotalEnergyRecord))
         assert row.entry.average_total_energy == -12.25
@@ -1216,3 +1232,123 @@ class ARecord:
 
 
 _TEST_RECORDS = {"test-x-record": "XRecord", "test-a-record": "ARecord"}
+
+
+def _store_value(tmp_path: Path, value: object, path: Path | None = None, **options: Any) -> list[dict[str, object]]:
+    """Collect one fixture calculation with *value* as an extra output and store it."""
+
+    from dataclasses import replace
+
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "calc")
+    (item,) = collect_tree(tmp_path / "tree", collectors=(package,))
+    item = replace(item, outputs={**item.outputs, "extra": value})
+    return store_collected([item], str(path or tmp_path / "store.sqlite"), id_base="httk.probe", **options)
+
+
+def test_a_collected_temperature_is_stored_typed_and_filterable(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    pytest.importorskip("starlette")
+    serve = pytest.importorskip("httk.serve.optimade")
+    from httk.core import DataRecord
+    from httk.core.definition_ids import TEMPERATURE
+    from httk.core.property_records import TemperatureRecord
+    from httk.store import SqliteStore  # pyright: ignore[reportMissingImports]
+    from starlette.testclient import TestClient
+
+    (report,) = _store_value(tmp_path, DataRecord.from_value(TEMPERATURE, "_httk_temperature", 300.0))
+    assert "storage_error" not in report
+
+    with SqliteStore(tmp_path / "store.sqlite") as store:
+        searcher = store.searcher()
+        (row,) = searcher.results(entry=searcher.variable(TemperatureRecord))
+        assert row.entry.temperature == 300.0
+        searcher = store.searcher()
+        assert list(searcher.results(entry=searcher.variable(DataRecord))) == []
+        app = serve.create_asgi_app(serve.adapter_from_store(store), baseurl="http://testserver")
+        with TestClient(app, base_url="http://testserver") as client:
+            for value, expected in ((250, [300.0]), (350, [])):
+                filtered = client.get("/v1/_httk_records", params={"filter": f"_httk_temperature > {value}"})
+                assert filtered.status_code == 200, filtered.text
+                assert [item["attributes"]["_httk_temperature"] for item in filtered.json()["data"]] == expected
+
+
+def test_an_analysis_kind_is_stored_typed_when_installed(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    records = pytest.importorskip("httk.analyse.property_records")
+    from httk.core import DataRecord
+    from httk.store import SqliteStore  # pyright: ignore[reportMissingImports]
+
+    iri = "https://schemas.httk.org/defs/v0.1/properties/mechanics/bulk_modulus"
+    (report,) = _store_value(tmp_path, DataRecord.from_value(iri, "_httk_bulk_modulus", 97.5))
+    assert "storage_error" not in report
+
+    with SqliteStore(tmp_path / "store.sqlite") as store:
+        searcher = store.searcher()
+        (row,) = searcher.results(entry=searcher.variable(records.BulkModulusRecord))
+        assert row.entry.bulk_modulus == 97.5
+
+
+def test_generic_rows_of_a_now_typed_core_kind_require_a_rebuild(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import DataRecord
+    from httk.core.definition_ids import TEMPERATURE
+    from httk.core.property_records import TemperatureRecord
+    from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow.storing import _storage_layout
+
+    # A store declared before TemperatureRecord existed, holding a generic temperature.
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "calc")
+    layout, _failures = _storage_layout(list(collect_tree(tmp_path / "tree", collectors=(package,))))
+    older = {family: tuple(r for r in records if r is not TemperatureRecord) for family, records in layout.items()}
+    path = tmp_path / "old.sqlite"
+    with SqliteStore(path, entry_records=older, entry_ids=EntryIdScheme("x", "1")) as store:
+        store.save(DataRecord.from_value(TEMPERATURE, "_httk_temperature", 300.0))
+
+    for upgrade in (False, True):
+        with pytest.raises(
+            ValueError, match=f"holds generic DataRecord rows.*\\({TEMPERATURE}\\).*keeping the id ledger"
+        ):
+            _store_value(tmp_path, DataRecord.from_value(TEMPERATURE, "_httk_temperature", 1.0), path, upgrade=upgrade)
+
+
+def test_a_store_already_typed_but_holding_a_generic_temperature_is_refused(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import DataRecord
+    from httk.core.definition_ids import TEMPERATURE
+    from httk.core.property_records import TemperatureRecord
+    from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow.storing import _storage_layout
+
+    # Collected while TemperatureRecord was declared but not yet used for collected values.
+    package = _collector(tmp_path / "pkg")
+    _calculation(tmp_path / "tree" / "calc")
+    layout, _failures = _storage_layout(list(collect_tree(tmp_path / "tree", collectors=(package,))))
+    assert any(TemperatureRecord in records for records in layout.values())
+    path = tmp_path / "typed.sqlite"
+    with SqliteStore(path, entry_records=layout, entry_ids=EntryIdScheme("x", "1")) as store:
+        store.save(DataRecord.from_value(TEMPERATURE, "_httk_temperature", 300.0))
+
+    with pytest.raises(ValueError, match=f"holds generic DataRecord rows of definitions .*\\({TEMPERATURE}\\)"):
+        _store_value(tmp_path, DataRecord.from_value(TEMPERATURE, "_httk_temperature", 1.0), path)
+
+
+def test_every_plain_typed_kind_carries_collected_values_without_warnings(caplog: pytest.LogCaptureFixture) -> None:
+    from httk.core.property_records import TemperatureRecord
+    from httk.core.register import known_entry_records, resolve_entry_record
+
+    from httk.workflow.storing import _typed_record_classes
+
+    records = [resolve_entry_record(name) for name in known_entry_records("records")]
+    with caplog.at_level(logging.WARNING, logger="httk.workflow.storing"):
+        typed = _typed_record_classes(records)
+
+    assert "is not used for collected values" not in caplog.text
+    plain = {r for r in records if getattr(getattr(r, "__httk_typed_record__", None), "derivation", True) is None}
+    assert TemperatureRecord in plain and plain <= set(typed.values())
+    # Derived (statistics) kinds carry no generic definition, so they are never mapped.
+    derived = {r for r in records if getattr(getattr(r, "__httk_typed_record__", None), "derivation", None)}
+    assert not derived & set(typed.values())

@@ -622,27 +622,27 @@ reports = store_collected(items, "results.sqlite", id_base="mydb")
 ### Typed records and store upgrades
 
 `store_collected` stores each calculation's inputs like its outputs. A
-`DataRecord` whose definition a typed record carries is stored as that typed
-record:
+`DataRecord` whose property definition has a typed record kind is stored as
+that kind, served and filterable under its property name: the core total
+energy as a `TotalEnergyRecord` (`_httk_total_energy`), the average total
+energy of a molecular-dynamics run as an `AverageTotalEnergyRecord`
+(`_httk_average_total_energy`), the other core kinds such as `_httk_temperature`,
+and the analysis kinds such as `_httk_bulk_modulus` when *httk-analyse* is
+installed. Other definitions stay generic records: stored, but their values
+are not served.
 
-- the core total energy becomes a `TotalEnergyRecord`, served and filterable
-  as `_httk_total_energy`;
-- the core average total energy of a molecular-dynamics run becomes an
-  `AverageTotalEnergyRecord`, served as `_httk_average_total_energy`.
-
-Other definitions stay generic records: stored, but their values are not
-served.
-
-When a newer *httk* ships another typed record kind, such as a further core
-property, an existing store is refused with a message naming `--upgrade`.
-Rerun with `--upgrade` (`upgrade=True`) to append the new record kind. The
-upgrade is additive: it adds tables and does not rewrite stored rows or ids.
-Keep a backup of the store first.
+A store's layout declares every registered record kind, so it depends on the
+installed packages. When a newer *httk* or a newly installed package brings
+another record kind, an existing store is refused with a message naming
+`--upgrade`. Rerun with `--upgrade` (`upgrade=True`) to append the new kinds.
+The upgrade is additive: it adds tables and does not rewrite stored rows or
+ids. Keep a backup of the store first. A store declared with the analysis
+kinds needs *httk-analyse* installed to be collected into again.
 
 A store holding generic records of a definition that is now typed (collected
-before typed records existed) cannot be upgraded and is refused with advice to
-rebuild it. Delete it and collect again, keeping the id ledger so record and
-run ids are preserved.
+before its typed kind existed or before it was used for collected values) is
+refused, naming those definitions, with advice to rebuild it. Delete it and collect again, keeping the id ledger so record
+and run ids are preserved.
 
 ### Ids and re-collection
 

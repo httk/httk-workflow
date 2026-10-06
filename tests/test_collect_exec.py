@@ -836,6 +836,8 @@ def test_records_and_runs_entries_are_built_by_their_from_obj(tmp_path: Path) ->
     import httk.core
 
     data = DataRecord.from_value("https://example.org/p", "p", 3)
+    # Both build from a ``records`` mapping; the envelope's keys pick the one it fits.
+    derived = httk.core.DerivedDataRecord.from_value("https://example.org/p", "https://example.org/mean", "p", 3)
     run = httk.core.Run(
         workflow_declaration_uri=None,
         workflow_definition_uri=None,
@@ -846,9 +848,11 @@ def test_records_and_runs_entries_are_built_by_their_from_obj(tmp_path: Path) ->
         last_modified=None,
     )
     provider = SimpleNamespace(outputs={"data": {"role": "data"}, "run": {"role": "run"}})
-    for role, value in (("data", data), ("run", run)):
+    for role, value in (("data", data), ("data", derived), ("run", run)):
         emitted = json.loads(json.dumps({"type": value.type, **asdict(value)}))
         assert _resolve_executable_output(_record(tmp_path), provider, role, {"entry": emitted}) == value
+    with pytest.raises(ValueError, match="'records' entry fits none of records .*core-data-record"):
+        _resolve_executable_output(_record(tmp_path), provider, "data", {"entry": {"type": "records", "x": 1}})
 
 
 def test_a_malformed_served_entry_degrades_only_its_job(
