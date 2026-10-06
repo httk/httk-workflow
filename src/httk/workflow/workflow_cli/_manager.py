@@ -53,7 +53,10 @@ _ALLOCATION_HELP = (
     "where this manager learns its nodes, processors and devices: auto, none, slurm, host, or exec:PATH (default: auto)"
 )
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
-_SETTING_KEYS = "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*"
+_SETTING_KEYS = (
+    "manager.confine, manager.confine.block_mpi_spawn, manager.launch_template, manager.launch_mpi, "
+    "manager.bind_cpus or confine.*"
+)
 
 
 class _LauncherOption(argparse.Action):
@@ -203,7 +206,7 @@ def _setting_override(text: str) -> str:
     try:
         _validate_setting_key(key)
         _validate_setting_value(key, value)
-        if key == "manager.confine" or key.startswith(CONFINE_PREFIX):
+        if key in ("manager.confine", "manager.confine.block_mpi_spawn") or key.startswith(CONFINE_PREFIX):
             confine_settings({key: value})
         if key == "manager.launch_mpi":
             launch_mpi_setting({key: value})

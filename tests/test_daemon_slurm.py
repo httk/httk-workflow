@@ -197,6 +197,7 @@ def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_p
             "environment.prelude": "module load httk",
             "confine.readonly_paths": "/usr:/software",
             "manager.launch_mpi": "pmi2",
+            "manager.confine.block_mpi_spawn": "off",
             "slurm.gres": "gpu:a100=2",
             "slurm.reservation": "maint.1",
             "slurm.nodes": "2",
@@ -220,6 +221,8 @@ def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_p
         "confine.readonly_paths=/usr:/software",
         "--setting",
         "manager.confine=bwrap",
+        "--setting",
+        "manager.confine.block_mpi_spawn=off",
         "--setting",
         "manager.launch_mpi=pmi2",
     ]

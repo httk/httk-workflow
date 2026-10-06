@@ -57,6 +57,7 @@ $ httk workflow run --count 4 --workspace default
 | `manager.allocation` | The `--allocation` probe a launcher passes its managers: `auto`, `none`, `slurm`, `host` or `exec:PATH`; the Slurm launcher's default is `slurm`. |
 | `manager.launch_template` | Argv template for the attempt launch prefix; placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}` `{cpus_per_proc}`. |
 | `manager.launch_mpi` | Slurm MPI plugin appended as `--mpi=<name>` to the built-in Slurm launch step (for example `pmi2` for Intel MPI); ignored when `manager.launch_template` is set. |
+| `manager.confine.block_mpi_spawn` | Under `manager.confine=bwrap`: `on` (default) relays confined ranks' Slurm PMI-1 and refuses `MPI_Comm_spawn`, `auto` does so only when Slurm sets `PMI_FD`, `off` passes Slurm's PMI through; see [PMI-2 launches](workspace_daemon.md#pmi-2-launches-intel-mpi). |
 | `manager.bind_cpus` | `true`, `1` or `yes` pins locally executed attempts to the CPUs of their processor slots; off by default. |
 | `manager.confine`, `confine.*` | Attempt confinement; see [Confinement](#confinement). |
 | `slurm.account` | Slurm account directive. |
@@ -173,7 +174,7 @@ reason until it is available again.
 ### Pinned settings
 
 A `slurm` launcher pins its own values of `manager.confine`,
-`manager.launch_template`, `manager.launch_mpi`, `manager.bind_cpus` and every
+`manager.launch_template`, `manager.launch_mpi`, `manager.confine.block_mpi_spawn`, `manager.bind_cpus` and every
 `confine.*` key on each manager it starts: they are passed as `--setting KEY=VALUE`, appended after any
 `--setting` given on the command line, and the last occurrence of a key wins.
 Pinned values override the workspace setting of the same key and stay fixed

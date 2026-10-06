@@ -151,6 +151,7 @@ def launch_confinement(settings: ConfineSettings, *, block_userns: bool) -> Laun
         pmix_roots=settings.pmix_roots,
         shm_root=settings.shm_root,
         environment=settings.environment,
+        block_mpi_spawn=settings.block_mpi_spawn,
     )
 
 

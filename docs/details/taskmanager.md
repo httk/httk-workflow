@@ -349,6 +349,11 @@ shape the launch:
 - `manager.launch_mpi`: the Slurm MPI plugin appended as `--mpi=<name>` to the
   built-in Slurm launch step (for example `pmi2` for Intel MPI); ignored when
   `manager.launch_template` is set.
+- `manager.confine.block_mpi_spawn`: under `manager.confine=bwrap`, `on`
+  (default) relays confined ranks' Slurm PMI-1 and refuses `MPI_Comm_spawn`,
+  `auto` does so only when Slurm sets `PMI_FD`, and `off` passes Slurm's PMI
+  through; see
+  [PMI-2 launches](workspace_daemon.md#pmi-2-launches-intel-mpi).
 - `manager.bind_cpus`: `true`, `1` or `yes` (any case) pins every locally
   executed attempt to the CPUs of its processor slots; anything else, or no
   value, leaves CPU affinity alone; set it before the manager starts (see
@@ -357,7 +362,7 @@ shape the launch:
   [confining attempts](#confining-attempts).
 
 A `slurm` launcher pins its own values of `manager.confine`,
-`manager.launch_template`, `manager.launch_mpi`, `manager.bind_cpus` and
+`manager.launch_template`, `manager.launch_mpi`, `manager.confine.block_mpi_spawn`, `manager.bind_cpus` and
 `confine.*` on the managers it starts with the manager option `--setting KEY=VALUE` (not shown in `--help`;
 the last occurrence of a key wins). Pinned values override the workspace
 settings and stay fixed for the manager's lifetime; all other workspace

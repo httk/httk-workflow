@@ -18,6 +18,11 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.registry import register_workspace
 from httk.workflow.workflow_cli import _manager, build_parser, command
 
+_KEYS = (
+    "manager.confine, manager.confine.block_mpi_spawn, manager.launch_template, manager.launch_mpi, "
+    "manager.bind_cpus or confine.*"
+)
+
 
 def _parser(tmp_path: Path) -> argparse.ArgumentParser:
     return build_parser("httk workflow", CLIContext("httk", tmp_path))
@@ -30,6 +35,8 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
             *leaf,
             "--setting",
             "manager.confine=bwrap",
+            "--setting",
+            "manager.confine.block_mpi_spawn=off",
             "--setting",
             "confine.isolate_network=false",
             "--setting",
@@ -46,6 +53,7 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
     )
     assert _manager._pinned_settings(arguments) == {
         "manager.confine": "none",
+        "manager.confine.block_mpi_spawn": "off",
         "confine.isolate_network": "false",
         "manager.launch_template": "srun --mpi=pmix {command}",
         "manager.bind_cpus": "true",
@@ -58,18 +66,9 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
 @pytest.mark.parametrize(
     ("item", "message"),
     [
-        (
-            "manager.workers=2",
-            "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*",
-        ),
-        (
-            "manager.launch=slurm",
-            "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*",
-        ),
-        (
-            "slurm.partition=debug",
-            "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*",
-        ),
+        ("manager.workers=2", _KEYS),
+        ("manager.launch=slurm", _KEYS),
+        ("slurm.partition=debug", _KEYS),
         ("manager.confine", "KEY=VALUE"),
         ("manager.confine=chroot", "manager.confine must be none or bwrap"),
         ("confine.bogus=1", "unknown confinement setting 'confine.bogus'"),
@@ -78,6 +77,7 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
         ("confine.environment.HTTK_X=1", "must name a variable"),
         ("manager.launch_template=a\0b", "NUL"),
         ("manager.launch_mpi=PMI2", "manager.launch_mpi must be 1-32 lowercase"),
+        ("manager.confine.block_mpi_spawn=maybe", "manager.confine.block_mpi_spawn must be on, off or auto"),
     ],
 )
 def test_other_keys_and_bad_values_are_usage_errors(

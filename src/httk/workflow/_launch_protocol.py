@@ -580,6 +580,7 @@ class LaunchConfinement:
     :param pmix_roots: Approved parents of the per-step PMIx directory.
     :param shm_root: The node-local parent of the per-launch shared-memory directory.
     :param environment: ``confine.environment.*`` variables set in rank sandboxes, sorted by name.
+    :param block_mpi_spawn: The ``manager.confine.block_mpi_spawn`` mode of the ranks: ``on``, ``off`` or ``auto``.
     """
 
     bwrap: Path
@@ -589,10 +590,13 @@ class LaunchConfinement:
     pmix_roots: tuple[Path, ...]
     shm_root: Path
     environment: tuple[tuple[str, str], ...]
+    block_mpi_spawn: Literal["on", "off", "auto"] = "on"
 
     def __post_init__(self) -> None:
         """Validate and canonicalize the members."""
 
+        if self.block_mpi_spawn not in ("on", "off", "auto"):
+            raise ValueError("manager.confine.block_mpi_spawn must be on, off or auto")
         object.__setattr__(self, "bwrap", _absolute_path(_path_text(self.bwrap), "confine.bwrap"))
         if type(self.block_userns) is not bool:
             raise ValueError("confine.block_userns must be a boolean")
@@ -685,6 +689,7 @@ def encode_trusted(launch: TrustedLaunch) -> bytes:
                 "pmix_roots": [str(path) for path in confine.pmix_roots],
                 "shm_root": str(confine.shm_root),
                 "environment": [list(entry) for entry in confine.environment],
+                "block_mpi_spawn": confine.block_mpi_spawn,
             },
             "python": str(launch.python),
             "token": launch.token,
@@ -725,7 +730,10 @@ def decode_trusted(data: bytes) -> TrustedLaunch:
     }
     _check_header(value, "trusted launch", TRUSTED_FORMAT, fields)
     raw = value["confine"]
-    confine_fields = {"bwrap", "block_userns", "readonly_paths", "devices", "pmix_roots", "shm_root", "environment"}
+    confine_fields = {
+        *("bwrap", "block_userns", "readonly_paths", "devices", "pmix_roots", "shm_root", "environment"),
+        "block_mpi_spawn",
+    }
     if not isinstance(raw, dict) or set(raw) != confine_fields:
         raise ValueError("confine fields are missing or unknown")
     confine = LaunchConfinement(
@@ -736,6 +744,7 @@ def decode_trusted(data: bytes) -> TrustedLaunch:
         pmix_roots=_string_list(raw["pmix_roots"], "confine.pmix_roots"),  # type: ignore[arg-type]
         shm_root=raw["shm_root"],
         environment=_pairs(raw["environment"], "confine.environment"),  # type: ignore[arg-type]
+        block_mpi_spawn=raw["block_mpi_spawn"],
     )
     launch = TrustedLaunch(
         request_id=value["request_id"],  # type: ignore[arg-type]

@@ -199,6 +199,7 @@ def test_missing_bwrap_is_not_a_settings_error(monkeypatch: pytest.MonkeyPatch) 
 def test_override_keys_are_the_manager_launch_keys_and_every_confine_key() -> None:
     assert CONFINE_OVERRIDE_KEYS == {
         "manager.confine",
+        "manager.confine.block_mpi_spawn",
         "manager.launch_template",
         "manager.launch_mpi",
         "manager.bind_cpus",
@@ -207,6 +208,19 @@ def test_override_keys_are_the_manager_launch_keys_and_every_confine_key() -> No
         assert is_override_key(key)
     for key in ("manager.workers", "manager.launch", "manager.allocation", "slurm.partition", "confined.x", "confine"):
         assert not is_override_key(key)
+
+
+def test_block_mpi_spawn_defaults_on_and_is_validated_in_every_mode() -> None:
+    assert confine_settings({}).block_mpi_spawn == "on"
+    assert confine_settings({"manager.confine": "bwrap"}).block_mpi_spawn == "on"
+    for mode in ("on", "off", "auto"):
+        for confine in ("none", "bwrap"):
+            settings = {"manager.confine": confine, "manager.confine.block_mpi_spawn": mode}
+            assert confine_settings(settings).block_mpi_spawn == mode
+    for bad in ("ON", "yes", "", True):
+        for confine in ("none", "bwrap"):
+            with pytest.raises(ValueError, match="manager.confine.block_mpi_spawn must be on, off or auto"):
+                confine_settings({"manager.confine": confine, "manager.confine.block_mpi_spawn": bad})
 
 
 @pytest.mark.parametrize("value", ["pmi2", "pmix", "none"])

@@ -35,7 +35,13 @@ _LOGGER = logging.getLogger(__name__)
 
 #: The non-``confine.*`` keys a manager accepts as pinned ``--setting`` overrides.
 CONFINE_OVERRIDE_KEYS = frozenset(
-    {"manager.confine", "manager.launch_template", "manager.launch_mpi", "manager.bind_cpus"}
+    {
+        "manager.confine",
+        "manager.confine.block_mpi_spawn",
+        "manager.launch_template",
+        "manager.launch_mpi",
+        "manager.bind_cpus",
+    }
 )
 #: Every key with this prefix is a confinement setting, and may also be pinned.
 CONFINE_PREFIX = "confine."
@@ -49,6 +55,7 @@ _KNOWN_KEYS = (
     "confine.shm_root",
 )
 _MODES: dict[str, Literal["none", "bwrap"]] = {"none": "none", "bwrap": "bwrap"}
+_SPAWN_MODES: dict[str, Literal["on", "off", "auto"]] = {"on": "on", "off": "off", "auto": "auto"}
 _BOOLEANS = {"true": True, "false": False, "1": True, "0": False}
 _LAUNCH_MPI = re.compile(r"[a-z0-9_]{1,32}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
@@ -75,6 +82,8 @@ class ConfineSettings:
     :param pmix_roots: Approved parents of a per-step PMIx directory exposed to ranks.
     :param shm_root: The node-local parent of per-launch shared-memory directories.
     :param environment: Extra variables set in rank sandboxes, in name order.
+    :param block_mpi_spawn: ``manager.confine.block_mpi_spawn``: whether confined ranks may not spawn MPI
+        processes (``on``, ``off`` or ``auto``); it only applies in ``bwrap`` mode.
     """
 
     mode: Literal["none", "bwrap"]
@@ -85,6 +94,7 @@ class ConfineSettings:
     pmix_roots: tuple[Path, ...]
     shm_root: Path
     environment: tuple[tuple[str, str], ...]
+    block_mpi_spawn: Literal["on", "off", "auto"] = "on"
 
 
 def is_override_key(key: str) -> bool:
@@ -216,7 +226,7 @@ def _default_bwrap() -> Path | None:
 def confine_settings(settings: Mapping[str, object]) -> ConfineSettings:
     """Validate and return the confinement settings of an effective settings mapping.
 
-    Keys other than ``manager.confine`` and ``confine.*`` are ignored; a ``null`` value reads as unset.
+    Keys other than ``manager.confine``, ``manager.confine.block_mpi_spawn`` and ``confine.*`` are ignored; a ``null`` value reads as unset.
 
     :param settings: Effective settings: workspace settings with the manager's pinned overrides applied.
     :return: The validated settings with defaults filled in.
@@ -234,6 +244,12 @@ def confine_settings(settings: Mapping[str, object]) -> ConfineSettings:
     mode = _MODES.get(raw_mode) if isinstance(raw_mode, str) else None
     if mode is None:
         raise ValueError(f"setting manager.confine must be none or bwrap: {raw_mode!r}")
+    raw_spawn = settings.get("manager.confine.block_mpi_spawn")
+    if raw_spawn is None:
+        raw_spawn = "on"
+    block_mpi_spawn = _SPAWN_MODES.get(raw_spawn) if isinstance(raw_spawn, str) else None
+    if block_mpi_spawn is None:
+        raise ValueError(f"setting manager.confine.block_mpi_spawn must be on, off or auto: {raw_spawn!r}")
     bwrap_text = _string(settings, "confine.bwrap")
     shm_root = _string(settings, "confine.shm_root")
     return ConfineSettings(
@@ -245,6 +261,7 @@ def confine_settings(settings: Mapping[str, object]) -> ConfineSettings:
         pmix_roots=_paths(settings, "confine.pmix_roots") or (),
         shm_root=_DEFAULT_SHM_ROOT if shm_root is None else _absolute("confine.shm_root", shm_root),
         environment=_environment(settings),
+        block_mpi_spawn=block_mpi_spawn,
     )
 
 

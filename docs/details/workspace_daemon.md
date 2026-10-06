@@ -232,7 +232,7 @@ Every start of the daemon (`check` and `run`) reads the listed bundles again
 and freezes their settings, with the digest of their `launcher.json`, into the
 runtime snapshot it serves. The broker submits through the installed *httk*
 and never runs a bundle's `launcher` executable. Each frozen launcher setting `manager.confine`,
-`manager.launch_template`, `manager.launch_mpi`, `manager.bind_cpus` and `confine.*` is pinned on the
+`manager.launch_template`, `manager.launch_mpi`, `manager.bind_cpus`, `manager.confine.block_mpi_spawn` and `confine.*` is pinned on the
 managers it starts and cannot be changed by workspace settings; every other
 workspace setting still applies live inside the manager, as for any manager.
 
@@ -722,7 +722,7 @@ The setting is pinned on the managers the daemon starts, and the built-in
 step becomes `srun --mpi=pmi2 ...`. A `manager.launch_template` owns its argv
 and must contain `--mpi=pmi2` itself.
 
-Slurm's `PMI_FD` socket stays in the rank helper; the rank gets a private
+With spawn blocking (the default), Slurm's `PMI_FD` socket stays in the rank helper; the rank gets a private
 socket as its `PMI_FD`. The helper relays the PMI-1 simple protocol, which
 Intel MPI speaks over `srun --mpi=pmi2`, one request at a time and only for
 Slurm's PMI-1 commands. `MPI_Comm_spawn` (any `mcmd=` block or `cmd=mcmd`) is
@@ -737,9 +737,18 @@ ends the rank's PMI channel with an `httk-workflow rank: PMI refused: ...`
 line, and MPI initialization then fails. A `PMI_FD` that is not a socket
 refuses the launch.
 
-The relay is always on in confined launches with `PMI_FD`; unconfined managers
-are unaffected. Slurm's PMIx plugin does not implement spawn, so
-`--mpi=pmix` needs no filter.
+Spawn blocking is the pinned launcher setting `manager.confine.block_mpi_spawn`,
+read only under `manager.confine=bwrap` and ignored without confinement:
+
+- `on` (default): the relay above. `PMI_PORT` is also dropped from the rank
+  environment, and a rank whose relay cannot start is killed and refused.
+- `auto`: `on` when Slurm sets `PMI_FD`, otherwise `off`.
+- `off`: the rank gets Slurm's own `PMI_FD` and `PMI_PORT`, so
+  `MPI_Comm_spawn` starts processes outside the sandbox.
+
+The setting does not cover a non-Slurm PMIx server, such as the one of an
+Open MPI `mpirun` launch template. Slurm's PMIx plugin does not implement
+spawn, so `--mpi=pmix` needs no filter.
 
 For site acceptance, run the spawn probe (see [Launch
 acceptance](#launch-acceptance)) and a multi-node Intel MPI job, and confirm

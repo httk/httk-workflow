@@ -270,6 +270,28 @@ def test_a_pinned_launch_template_wins_over_the_workspace_one(tmp_path: Path, sa
     assert not sandbox.prepares
 
 
+def test_a_live_block_mpi_spawn_change_reaches_the_next_trusted_launch(tmp_path: Path, sandbox: _Sandbox) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    first_id = _submit(workspace, tmp_path / "source", "first")[1]
+    with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        manager.run_until_idle(timeout=60.0)
+        launch = manager._confinement(manager._effective_settings()).launch
+        assert launch is not None and launch.block_mpi_spawn == "on"
+        workspace.set_setting("manager.confine.block_mpi_spawn", "off")
+        second_id = _submit(workspace, tmp_path / "source", "second")[1]
+        manager.run_until_idle(timeout=60.0)
+        # The trusted launch of a confined attempt carries this launch confinement.
+        launch = manager._confinement(manager._effective_settings()).launch
+        assert launch is not None and launch.block_mpi_spawn == "off"
+        # An invalid live value holds back claims instead of reusing the last valid one.
+        workspace.set_setting("manager.confine.block_mpi_spawn", "maybe")
+        third_id = _submit(workspace, tmp_path / "source", "third")[1]
+        manager.run_until_idle(timeout=60.0)
+        assert _outcome(workspace, third_id)[0] == "ready"
+    assert [_outcome(workspace, job_id)[:2] for job_id in (first_id, second_id)] == [("succeeded", None)] * 2
+    assert [call["settings"].block_mpi_spawn for call in sandbox.prepares] == ["on", "off"]
+
+
 def test_pinned_overrides_are_limited_to_confinement_keys(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(ValueError, match="pinned setting"):

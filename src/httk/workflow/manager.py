@@ -547,8 +547,8 @@ class TaskManager:
         into *resources* and *end_time* by the caller.
     :param exchange: Run the workspace-daemon exchange pass (adopt staged job
         directories, eject finished jobs, publish status) at the start of every tick.
-    :param setting_overrides: Pinned ``manager.confine``, ``manager.launch_template``,
-        ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings that win over the
+    :param setting_overrides: Pinned ``manager.confine``, ``manager.confine.block_mpi_spawn``,
+        ``manager.launch_template``, ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings that win over the
         workspace settings for this manager's lifetime.
     :raises ValueError: If a manager limit, a pinned setting or the effective
         confinement settings are invalid, or executor configuration conflicts.
@@ -624,8 +624,9 @@ class TaskManager:
         for key, value in overrides.items():
             if not isinstance(key, str) or not _confine.is_override_key(key) or not isinstance(value, str):
                 raise ValueError(
-                    f"a pinned setting must be manager.confine, manager.launch_template, manager.launch_mpi, "
-                    f"manager.bind_cpus or confine.* with a string value: {key!r}"
+                    "a pinned setting must be manager.confine, manager.confine.block_mpi_spawn, "
+                    "manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.* "
+                    f"with a string value: {key!r}"
                 )
         self.workspace = workspace
         #: Pinned settings that win over the workspace settings for this manager's lifetime.
@@ -3077,7 +3078,8 @@ class TaskManager:
             sorted(
                 (name, repr(value))
                 for name, value in settings.items()
-                if name == "manager.confine" or name.startswith(_confine.CONFINE_PREFIX)
+                if name in ("manager.confine", "manager.confine.block_mpi_spawn")
+                or name.startswith(_confine.CONFINE_PREFIX)
             )
         )
         if self._confine_checked is None or self._confine_checked[0] != key:

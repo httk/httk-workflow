@@ -12,9 +12,10 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -30,6 +31,7 @@ from httk.workflow._launch_protocol import (
     request_relative_path,
     trusted_name,
 )
+from httk.workflow._sandbox import PreparedSandbox
 from test_pmi_proxy import INIT, REPLIES, SPAWN, serve_slurm
 
 _FAKE_BWRAP = Path(__file__).with_name("fake_bwrap.py")
@@ -670,28 +672,90 @@ def test_open_pmi_relay_needs_an_open_socket(tmp_path: Path) -> None:
         server.close()
 
 
-def test_prepare_passes_the_pmi_relay_end_as_pmi_fd(launch: _Launch, opened: _Opened) -> None:
-    relay_end, rank_end = socket.socketpair()
-    pmi_fd = rank_end.detach()
+def _with_mode(launch: _Launch, mode: Literal["on", "off", "auto"]) -> TrustedLaunch:
+    return replace(launch.trusted, confine=replace(launch.trusted.confine, block_mpi_spawn=mode))
+
+
+def test_slurm_pmi_fd_parses_the_descriptor_number(tmp_path: Path) -> None:
+    assert _confine_rank.slurm_pmi_fd({}) is None
+    assert _confine_rank.slurm_pmi_fd({"PMI_FD": ""}) is None
+    for raw in ("abc", "-1", " 3", "1234567890"):
+        with pytest.raises(ValueError, match="is not a descriptor number"):
+            _confine_rank.slurm_pmi_fd({"PMI_FD": raw})
+    descriptor = os.open(tmp_path, os.O_RDONLY)
+    try:
+        assert _confine_rank.slurm_pmi_fd({"PMI_FD": str(descriptor)}) == descriptor
+    finally:
+        os.close(descriptor)
+    with pytest.raises(ValueError, match="is not an open descriptor"):
+        _confine_rank.slurm_pmi_fd({"PMI_FD": str(descriptor)})
+
+
+@pytest.mark.parametrize(
+    ("mode", "has_fd", "relayed"),
+    [("on", True, True), ("on", False, True), ("off", True, False), ("auto", True, True), ("auto", False, False)],
+)
+def test_prepare_pmi_plumbing_per_mode(
+    launch: _Launch, opened: _Opened, mode: Literal["on", "off", "auto"], has_fd: bool, relayed: bool
+) -> None:
+    trusted = _with_mode(launch, mode)
+    other, passed = socket.socketpair()
+    pmi_fd = passed.detach() if has_fd else None
+    environ = {"PMI_PORT": "node1:4242", "PMI_RANK": "3"}
+    if has_fd:  # never the passed number, so a reassigned PMI_FD shows
+        environ["PMI_FD"] = "99"
+    assert _confine_rank.blocks_mpi_spawn(trusted, environ) is relayed
     prepared, environment = _confine_rank.prepare_rank_sandbox(
-        launch.trusted,
+        trusted,
         workspace=opened.workspace,
         workspace_fd=opened.workspace_fd,
         job=opened.job,
         job_fd=opened.job_fd,
         shm_fd=opened.shm_fd,
-        environ={"PMI_FD": "99", "PMI_RANK": "3", "PMI_SIZE": "4"},
+        environ=environ,
         pmi_fd=pmi_fd,
     )
     try:
-        assert pmi_fd in prepared.descriptors
-        assert os.get_inheritable(pmi_fd)
-        assert (environment["PMI_FD"], environment["PMI_RANK"], environment["PMI_SIZE"]) == (str(pmi_fd), "3", "4")
+        if pmi_fd is not None:
+            assert pmi_fd in prepared.descriptors
+            assert os.get_inheritable(pmi_fd)
+        assert environment.get("PMI_FD") == ((str(pmi_fd) if relayed else "99") if has_fd else None)
+        assert environment.get("PMI_PORT") == (None if relayed else "node1:4242")
+        assert environment["PMI_RANK"] == "3"
     finally:
         prepared.close()
-        relay_end.close()
-    with pytest.raises(OSError):
-        os.fstat(pmi_fd)
+        other.close()
+        if pmi_fd is None:
+            passed.close()
+    if pmi_fd is not None:
+        with pytest.raises(OSError):
+            os.fstat(pmi_fd)
+
+
+class _UnstartableThread(threading.Thread):
+    def start(self) -> None:
+        raise RuntimeError("can't start new thread")
+
+
+def test_run_refuses_when_the_pmi_relay_cannot_start(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_confine_rank.threading, "Thread", _UnstartableThread)
+    saved = {signum: signal.getsignal(signum) for signum in _confine_rank._FORWARDED_SIGNALS}
+    first, second = socket.socketpair()
+    pmi = (first.detach(), second.detach())
+    prepared = PreparedSandbox([sys.executable, "-c", "import time; time.sleep(60)"], ())
+    started = time.monotonic()
+    try:
+        assert _confine_rank._run(prepared, dict(os.environ), pmi) == 2
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
+    assert time.monotonic() - started < 30  # the rank group was killed, not waited out
+    assert "refused: cannot start the PMI relay: can't start new thread" in capsys.readouterr().err
+    for descriptor in pmi:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 _PMI_CLIENT = """
@@ -715,19 +779,23 @@ try:
 except OSError:
     print("original closed")
 print("distinct" if fd != original else "same")
+print("PMI_PORT=" + os.environ.get("PMI_PORT", "-"))
 """
 
 
-def _pmi_session(launch: _Launch, python: str) -> tuple[subprocess.Popen[bytes], list[bytes], threading.Thread]:
+def _pmi_session(
+    launch: _Launch, python: str, answer: Callable[[socket.socket, bytes], None] | None = None
+) -> tuple[subprocess.Popen[bytes], list[bytes], threading.Thread]:
     slurm, helper_end = socket.socketpair()
     original = helper_end.fileno()
     requests = (INIT, SPAWN % (1, 1), b"cmd=barrier_in\n", b"cmd=finalize\n")
     launch.request((python, "-I", "-c", _PMI_CLIENT, str(original), *(item.decode() for item in requests)))
     received: list[bytes] = []
-    server = threading.Thread(target=serve_slurm, args=(slurm, received), daemon=True)
+    server = threading.Thread(target=serve_slurm, args=(slurm, received, answer), daemon=True)
     server.start()
     try:
-        process = _run_helper(launch, {"PMI_FD": str(original)}, wait=False, pass_fds=(original,))
+        environ = {"PMI_FD": str(original), "PMI_PORT": "node1:4242"}
+        process = _run_helper(launch, environ, wait=False, pass_fds=(original,))
     finally:
         helper_end.close()
     process.wait(timeout=_TIMEOUT)
@@ -746,6 +814,7 @@ def _assert_pmi_session(process: subprocess.Popen[bytes], received: list[bytes],
         REPLIES[b"finalize"].decode().strip(),
         "original closed",
         "distinct",
+        "PMI_PORT=-",
     ]
     assert not server.is_alive()  # the helper closed Slurm's socket when it exited
     assert received == [INIT, b"cmd=barrier_in\n", b"cmd=finalize\n"]
@@ -755,6 +824,41 @@ def _assert_pmi_session(process: subprocess.Popen[bytes], received: list[bytes],
 def test_helper_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
     _assert_pmi_session(*_pmi_session(launch, sys.executable))
     assert not launch.shm.exists()
+
+
+def _answer_spawn(slurm: socket.socket, line: bytes) -> None:
+    if line == b"endcmd\n":
+        slurm.sendall(b"cmd=spawn_result rc=0\n")
+    elif (name := line[4:].split(b" ", 1)[0].strip()) in REPLIES:
+        slurm.sendall(REPLIES[name])
+
+
+def test_block_mpi_spawn_off_passes_slurms_pmi_fd(launch: _Launch) -> None:
+    launch.write(_with_mode(launch, "off"))
+    process, received, server = _pmi_session(launch, sys.executable, _answer_spawn)
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, stderr
+    assert stdout.decode().splitlines() == [
+        REPLIES[b"init"].decode().strip(),
+        "cmd=spawn_result rc=0",
+        REPLIES[b"barrier_in"].decode().strip(),
+        REPLIES[b"finalize"].decode().strip(),
+        "original open",
+        "same",
+        "PMI_PORT=node1:4242",
+    ]
+    assert not server.is_alive()
+    assert received == [INIT, *(SPAWN % (1, 1)).splitlines(keepends=True), b"cmd=barrier_in\n", b"cmd=finalize\n"]
+    assert b"PMI" not in stderr
+
+
+def test_block_mpi_spawn_auto_without_pmi_fd_keeps_pmi_port(launch: _Launch) -> None:
+    launch.write(_with_mode(launch, "auto"))
+    launch.request(("sh", "-c", 'echo "$PMI_PORT|${PMI_FD-unset}"'))
+    process = _run_helper(launch, {"PMI_PORT": "node1:4242"})
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, stderr
+    assert stdout.decode().splitlines() == ["node1:4242|unset"]
 
 
 def test_helper_refuses_a_pmi_fd_that_is_not_a_socket(launch: _Launch) -> None:

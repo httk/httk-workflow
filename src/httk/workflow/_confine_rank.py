@@ -13,8 +13,9 @@ the step when it lies below ``confine.pmix_roots`` and the approved devices, and
 directory is writable. Bubblewrap runs as a child in its own process group, which every process in the
 sandbox keeps; SIGTERM, SIGINT, SIGHUP and SIGCONT delivered to the helper are forwarded to that whole group,
 and ``--die-with-parent`` ends the sandbox when the helper is killed. Under ``srun --mpi=pmi2`` Slurm's
-``PMI_FD`` socket never enters the sandbox: the rank gets one end of a socket pair as its ``PMI_FD``, and a
-:mod:`~httk.workflow._pmi_proxy` thread relays PMI-1 to Slurm and refuses ``MPI_Comm_spawn``. The helper
+``PMI_FD`` socket never enters the sandbox while the launch's ``manager.confine.block_mpi_spawn`` setting is in effect: the rank gets one
+end of a socket pair as its ``PMI_FD``, and a :mod:`~httk.workflow._pmi_proxy` thread relays PMI-1 to Slurm
+and refuses ``MPI_Comm_spawn``. The helper
 exits with the sandbox's status, ``128+N`` for signal ``N``, and with 2 when it refuses.
 """
 
@@ -387,6 +388,39 @@ def open_pmix_directory(
     return path, descriptor
 
 
+def blocks_mpi_spawn(launch: TrustedLaunch, environ: Mapping[str, str]) -> bool:
+    """Return whether the rank's PMI goes through the spawn-refusing relay.
+
+    :param launch: The trusted launch description, whose ``confine.block_mpi_spawn`` is ``on``, ``off`` or
+        ``auto`` (``on`` exactly when ``PMI_FD`` is set).
+    :param environ: The helper's environment, as the launcher set it.
+    :return: Whether to relay ``PMI_FD`` and drop ``PMI_PORT``.
+    """
+
+    mode = launch.confine.block_mpi_spawn
+    return mode == "on" or (mode == "auto" and bool(environ.get("PMI_FD")))
+
+
+def slurm_pmi_fd(environ: Mapping[str, str]) -> int | None:
+    """Return the descriptor number of Slurm's ``PMI_FD``, to pass it to the rank unrelayed.
+
+    :param environ: The helper's environment, as the launcher set it.
+    :return: The descriptor number, or ``None`` when ``PMI_FD`` is unset or empty.
+    :raises ValueError: If ``PMI_FD`` is not the decimal number of an open descriptor.
+    """
+
+    raw = environ.get("PMI_FD", "")
+    if not raw:
+        return None
+    if not (len(raw) <= 9 and raw.isascii() and raw.isdigit()):
+        raise ValueError(f"PMI_FD {raw!r} is not a descriptor number")
+    try:
+        os.fstat(int(raw))
+    except OSError:
+        raise ValueError(f"PMI_FD {raw!r} is not an open descriptor") from None
+    return int(raw)
+
+
 def open_pmi_relay(environ: Mapping[str, str]) -> tuple[int, int, int] | None:
     """Return ``(server, relay_end, rank_end)`` for the rank's ``PMI_FD``, or ``None`` without one.
 
@@ -476,8 +510,9 @@ def prepare_rank_sandbox(
     :param job_fd: A descriptor of the job directory; duplicated, not consumed.
     :param shm_fd: A descriptor of the per-launch shared-memory directory; duplicated, not consumed.
     :param environ: The helper's environment, as the launcher set it.
-    :param pmi_fd: The sandbox end of the PMI relay from :func:`open_pmi_relay`, passed as the rank's
-        ``PMI_FD``; consumed: it is among the returned descriptors, and closed here on failure.
+    :param pmi_fd: The rank's PMI descriptor, consumed: it is among the returned descriptors, and closed here
+        on failure. When :func:`blocks_mpi_spawn` holds, it is the sandbox end from :func:`open_pmi_relay`,
+        which replaces ``PMI_FD``, and ``PMI_PORT`` is dropped; otherwise it is Slurm's own ``PMI_FD``.
     :return: The complete argument vector with the inheritable descriptors to pass with ``pass_fds``, which
         the caller closes after the spawn, and the whole environment to start Bubblewrap with.
     :raises ValueError: If a path or the environment is not acceptable.
@@ -491,8 +526,10 @@ def prepare_rank_sandbox(
     except BaseException:
         PreparedSandbox([], tuple(descriptors)).close()
         raise
-    if pmi_fd is not None:
-        environment["PMI_FD"] = str(pmi_fd)
+    if blocks_mpi_spawn(launch, environ):
+        environment.pop("PMI_PORT", None)
+        if pmi_fd is not None:
+            environment["PMI_FD"] = str(pmi_fd)
     argv = [str(confine.bwrap), "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
     if confine.block_userns:
         argv += BWRAP_USERNS_BLOCK
@@ -553,7 +590,8 @@ def _run(prepared: PreparedSandbox, environment: Mapping[str, str], pmi: tuple[i
     """Run Bubblewrap in its own process group, forward signals to the group, and return its status.
 
     With *pmi*, ``(server, relay_end)`` from :func:`open_pmi_relay`, a daemon thread relays PMI-1 between
-    them once Bubblewrap runs and the helper has closed its copy of the sandbox end; *pmi* is consumed.
+    them once Bubblewrap runs and the helper has closed its copy of the sandbox end; *pmi* is consumed. If
+    the thread cannot start, the rank's process group is killed and the launch is refused with status 2.
 
     Bubblewrap does not forward signals into its namespace, and a launcher such as ``mpirun`` signals only
     its direct children (the helpers), so the helper signals the whole group: the rank sandbox has no
@@ -582,13 +620,25 @@ def _run(prepared: PreparedSandbox, environment: Mapping[str, str], pmi: tuple[i
             _close(descriptor)
         raise
     prepared.close()
+    group = process.pid
     relay: threading.Thread | None = None
+    refused = False
     if pmi is not None:
         relay = threading.Thread(
             target=_pmi_proxy.relay, args=pmi, kwargs={"log": _log_pmi}, daemon=True, name="pmi-relay"
         )
-        relay.start()
-    group = process.pid
+        try:
+            relay.start()
+        except Exception as exc:  # the rank must never run without its relay
+            relay = None
+            refused = True
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except OSError:
+                pass
+            for descriptor in pmi:
+                _close(descriptor)
+            print(f"httk-workflow rank: refused: cannot start the PMI relay: {exc}", file=sys.stderr, flush=True)
     for received in pending:
         forward(received, None)
     status = process.wait()
@@ -596,6 +646,8 @@ def _run(prepared: PreparedSandbox, environment: Mapping[str, str], pmi: tuple[i
         time.sleep(_GROUP_POLL_SECONDS)
     if relay is not None:
         relay.join(_RELAY_JOIN_SECONDS)  # the rank end is gone; a daemon thread still blocked dies with the helper
+    if refused:
+        return 2
     return 128 - status if status < 0 else status
 
 
@@ -619,9 +671,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             job, job_fd = open_job(launch, workspace)
             descriptors.append(job_fd)
             shared = join_shared_memory(launch.confine.shm_root, launch.token)
-            pmi = open_pmi_relay(os.environ)
-            if pmi is not None:
-                relay_descriptors += pmi[:2]
+            pmi_fd = None
+            if blocks_mpi_spawn(launch, os.environ):
+                pmi = open_pmi_relay(os.environ)
+                if pmi is not None:
+                    relay_descriptors += pmi[:2]
+                    pmi_fd = pmi[2]
+            else:
+                pmi_fd = slurm_pmi_fd(os.environ)
             prepared, environment = prepare_rank_sandbox(
                 launch,
                 workspace=workspace,
@@ -630,7 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 job_fd=job_fd,
                 shm_fd=shared.fd,
                 environ=os.environ,
-                pmi_fd=None if pmi is None else pmi[2],
+                pmi_fd=pmi_fd,
             )
         except (OSError, ValueError) as exc:
             print(f"httk-workflow rank: refused: {exc}", file=sys.stderr, flush=True)

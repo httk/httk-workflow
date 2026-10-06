@@ -327,7 +327,11 @@ def test_trusted_round_trip() -> None:
         "pmix_roots": ["/var/spool/slurmd"],
         "shm_root": "/dev/shm",
         "environment": [["OMPI_MCA_btl_vader_single_copy_mechanism", "none"]],
+        "block_mpi_spawn": "on",
     }
+    for mode in ("on", "off", "auto"):
+        spawn = _trusted(confine=_confinement(block_mpi_spawn=mode))
+        assert decode_trusted(encode_trusted(spawn)).confine.block_mpi_spawn == mode
     no_placement = _trusted(placement="")
     assert decode_trusted(encode_trusted(no_placement)).placement == ""
 
@@ -372,6 +376,8 @@ def test_trusted_refusals(changes: dict[str, object]) -> None:
         {"shm_root": Path("shm")},
         {"environment": (("A-B", "x"),)},
         {"environment": (("A", "1"), ("A", "2"))},
+        {"block_mpi_spawn": "ON"},
+        {"block_mpi_spawn": True},
     ],
 )
 def test_confinement_refusals(changes: dict[str, object]) -> None:
@@ -383,6 +389,14 @@ def test_trusted_decode_refusals() -> None:
     value = json.loads(encode_trusted(_trusted()))
     value["confine"]["extra"] = 1
     with pytest.raises(ValueError, match="confine fields"):
+        decode_trusted(_canonical(value))
+    value = json.loads(encode_trusted(_trusted()))
+    del value["confine"]["block_mpi_spawn"]
+    with pytest.raises(ValueError, match="confine fields"):
+        decode_trusted(_canonical(value))
+    value = json.loads(encode_trusted(_trusted()))
+    value["confine"]["block_mpi_spawn"] = "maybe"
+    with pytest.raises(ValueError, match="block_mpi_spawn"):
         decode_trusted(_canonical(value))
     value = json.loads(encode_trusted(_trusted()))
     value["confine"]["environment"] = [["B", "1"], ["A", "1"]]

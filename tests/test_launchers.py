@@ -166,6 +166,20 @@ def test_slurm_export_rejects_bad_values_at_configure_and_add(tmp_path: Path, re
         configure_launcher("cluster", {"slurm.export": value}, project=project)
 
 
+def test_block_mpi_spawn_is_validated_at_configure_and_add(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="block-mpi-spawn-validation")
+    setting = "manager.confine.block_mpi_spawn"
+    with pytest.raises(ValueError, match=f"{setting} must be on, off or auto"):
+        add_launcher("bad", template="slurm", settings={setting: "maybe"}, project=project)
+    bundle = add_launcher("cluster", template="slurm", settings={setting: "off"}, project=project)
+    with pytest.raises(ValueError, match=f"{setting} must be on, off or auto"):
+        configure_launcher("cluster", {setting: "ON"}, project=project)
+    configure_launcher("cluster", {setting: "auto"}, project=project)
+    stored = json.loads((bundle / "launcher.json").read_text(encoding="utf-8"))
+    assert stored["settings"][setting] == "auto"
+
+
 def test_launch_mpi_is_validated_at_configure_and_add(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="launch-mpi-validation")
