@@ -363,6 +363,15 @@ def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
             f"cannot inspect workspace staging directory {tmp}: {exc}",
             details={"path": str(tmp), "error": str(exc)},
         )
+    adopting = tmp.parent / "transfers" / "adopting"
+    # A moving adoption's staging entry may be the job's only copy, exactly as gc keeps it.
+    stale = [
+        entry
+        for entry in stale
+        if not (
+            entry.name.startswith("import.") and (adopting / f"{entry.name.removeprefix('import.')}.json").is_file()
+        )
+    ]
     if not stale:
         return Finding("tmp_leftovers", "ok", "the workspace staging directory holds nothing abandoned")
     finding = Finding(

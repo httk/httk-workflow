@@ -7,6 +7,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 from httk.core.cli import CLIContext
@@ -244,12 +245,12 @@ def test_eject_copies_and_verifies_across_filesystems(tmp_path: Path, monkeypatc
     target = tmp_path / "loose"
     real_rename = os.rename
 
-    def rename(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+    def rename(src: str | os.PathLike[str], dst: str | os.PathLike[str], **kwargs: Any) -> None:
         # Only the direct bundle move crosses the (simulated) filesystem boundary;
         # the verified staging copy is renamed into place normally.
         if Path(dst) == target and not Path(src).name.startswith(".loose.eject-"):
             raise OSError(errno.EXDEV, "cross-device link")
-        real_rename(src, dst)
+        real_rename(src, dst, **kwargs)
 
     monkeypatch.setattr(transfers.os, "rename", rename)
     loose = source.eject(marker.job_id, target)
@@ -406,10 +407,10 @@ def _crossing_tmp(monkeypatch: pytest.MonkeyPatch, workspace: Workspace) -> None
 
     real_rename = os.rename
 
-    def rename(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+    def rename(src: str | os.PathLike[str], dst: str | os.PathLike[str], **kwargs: Any) -> None:
         if Path(dst).parent == workspace.control / "tmp" and Path(dst).name.startswith("import."):
             raise OSError(errno.EXDEV, "cross-device link")
-        real_rename(src, dst)
+        real_rename(src, dst, **kwargs)
 
     monkeypatch.setattr(transfers.os, "rename", rename)
 
@@ -904,10 +905,10 @@ def test_a_tree_ejected_across_filesystems_carries_verified_members(
     target = tmp_path / "loose"
     real_rename = os.rename
 
-    def rename(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+    def rename(src: str | os.PathLike[str], dst: str | os.PathLike[str], **kwargs: Any) -> None:
         if Path(dst) == target and not Path(src).name.startswith(".loose.eject-"):
             raise OSError(errno.EXDEV, "cross-device link")
-        real_rename(src, dst)
+        real_rename(src, dst, **kwargs)
 
     monkeypatch.setattr(transfers.os, "rename", rename)
     loose = source.eject(root.job_id, target)

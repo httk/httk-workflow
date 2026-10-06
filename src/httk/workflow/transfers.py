@@ -26,7 +26,7 @@ from httk.core.identity import identity_seed, sign_document, verify_document
 
 from . import _transfer_receipts as receipts
 from ._job_tree import bound_parent, descendant_ids, tree_children
-from ._util import fsync_directory, fsync_tree, read_json, utc_now, write_json_atomic
+from ._util import fsync_directory, fsync_tree, json_bytes, read_json, utc_now, write_json_atomic
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .journal import SEGMENT_HEADER, encode_record_ref, iter_record_chain, parse_record_ref, read_record
 from .models import (
@@ -264,23 +264,109 @@ def _read_manifest(bundle: Path) -> dict[str, Any]:
     return value
 
 
-def _transfer_directory(payload: Path) -> Path:
-    """Create or reuse a payload's ``.httk-transfer`` without following a symlink.
+def _read_manifest_at(transfer_fd: int, where: Path) -> dict[str, Any]:
+    """Read ``manifest.json`` through a transfer-directory descriptor, bounded and without following a symlink.
 
-    :param payload: The job payload being sealed.
-    :return: The transfer directory, a real directory.
-    :raises httk.workflow.errors.FormatError: If ``.httk-transfer`` is a symlink or not a directory.
+    :param transfer_fd: A descriptor of the transfer directory.
+    :param where: The transfer directory path, for messages only.
+    :return: The manifest object, not yet validated.
+    :raises httk.workflow.errors.FormatError: If the manifest cannot be read or is not a JSON object.
+    """
+
+    try:
+        descriptor = os.open(
+            TRANSFER_MANIFEST, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=transfer_fd
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise FormatError("not a regular file")
+            data = bytearray()
+            while chunk := os.read(descriptor, _MANIFEST_BYTES + 1 - len(data)):
+                data.extend(chunk)
+                if len(data) > _MANIFEST_BYTES:
+                    raise FormatError(f"larger than {_MANIFEST_BYTES} bytes")
+        finally:
+            os.close(descriptor)
+        value = json.loads(bytes(data).decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, FormatError) as exc:
+        raise FormatError(f"cannot read JSON object {where / TRANSFER_MANIFEST}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise FormatError(f"expected JSON object in {where / TRANSFER_MANIFEST}")
+    return value
+
+
+def _check_transfer_directory(payload: Path, transfer_id: str) -> None:
+    """Refuse, before a job is fenced, a ``.httk-transfer`` that sealing would refuse.
+
+    :param payload: The job payload about to be sealed.
+    :param transfer_id: The transfer about to be sealed.
+    :raises httk.workflow.errors.FormatError: If ``.httk-transfer`` is a symlink or not a directory, or holds
+        a manifest that is unreadable or names another transfer.
     """
 
     transfer_dir = payload / TRANSFER_DIRECTORY
     try:
-        os.mkdir(transfer_dir)
-    except FileExistsError:
-        if not stat.S_ISDIR(os.lstat(transfer_dir).st_mode):
-            raise FormatError(
-                f"cannot seal {payload}: its {TRANSFER_DIRECTORY} is a symlink or not a directory"
-            ) from None
-    return transfer_dir
+        mode = os.lstat(transfer_dir).st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        raise FormatError(f"cannot seal {payload}: its {TRANSFER_DIRECTORY} is a symlink or not a directory")
+    if not os.path.lexists(transfer_dir / TRANSFER_MANIFEST):
+        return
+    existing = _read_manifest(payload)
+    if existing.get("transfer_id") != transfer_id:
+        raise FormatError(f"cannot seal {payload}: {transfer_dir} pre-exists and belongs to another transfer")
+
+
+def _transfer_directory(payload: Path, transfer_id: str) -> int:
+    """Create or resume a payload's ``.httk-transfer`` and return a descriptor of it.
+
+    A job could have planted anything below its own ``.httk-transfer`` before it
+    was fenced. A directory without a manifest is therefore a leftover (of a
+    job's own doing or of a crash before the manifest was written) and is
+    replaced; one with a manifest is only accepted as the resumption of this
+    very transfer. Everything below is then reached through the returned
+    ``O_DIRECTORY|O_NOFOLLOW`` descriptor, never by path.
+
+    :param payload: The job payload being sealed.
+    :param transfer_id: The transfer being sealed.
+    :return: An open descriptor of the transfer directory; the caller closes it.
+    :raises httk.workflow.errors.FormatError: If ``.httk-transfer`` pre-exists and is a symlink, not a
+        directory, or holds an unreadable manifest or one of another transfer.
+    """
+
+    transfer_dir = payload / TRANSFER_DIRECTORY
+    payload_fd = os.open(payload, _DIRECTORY_FLAGS)
+    try:
+        for _attempt in range(2):
+            try:
+                os.mkdir(TRANSFER_DIRECTORY, 0o755, dir_fd=payload_fd)
+            except FileExistsError:
+                if not stat.S_ISDIR(os.lstat(TRANSFER_DIRECTORY, dir_fd=payload_fd).st_mode):
+                    raise FormatError(
+                        f"cannot seal {payload}: its {TRANSFER_DIRECTORY} is a symlink or not a directory"
+                    ) from None
+                transfer_fd = _open_directory_at(payload_fd, TRANSFER_DIRECTORY, create=False)
+                try:
+                    os.lstat(TRANSFER_MANIFEST, dir_fd=transfer_fd)
+                except FileNotFoundError:
+                    os.close(transfer_fd)
+                    _remove_at(payload_fd, TRANSFER_DIRECTORY)
+                    continue
+                try:
+                    existing = _read_manifest_at(transfer_fd, transfer_dir)
+                    if existing.get("transfer_id") != transfer_id:
+                        raise FormatError(
+                            f"cannot seal {payload}: {transfer_dir} pre-exists and belongs to another transfer"
+                        )
+                except BaseException:
+                    os.close(transfer_fd)
+                    raise
+                return transfer_fd
+            return _open_directory_at(payload_fd, TRANSFER_DIRECTORY, create=False)
+    finally:
+        os.close(payload_fd)
+    raise FormatError(f"cannot seal {payload}: {transfer_dir} keeps reappearing")
 
 
 def _payload_digest(payload: Path) -> str:
@@ -334,7 +420,7 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path)
 
 
-def _bundled_runners(workspace: Workspace, payload: Path, transfer_dir: Path) -> list[dict[str, str]]:
+def _bundled_runners(workspace: Workspace, payload: Path, transfer_fd: int) -> list[dict[str, str]]:
     """Copy the workspace runners one job references into its bundle.
 
     A detached job must remain runnable at its destination, so a runner it only
@@ -353,22 +439,108 @@ def _bundled_runners(workspace: Workspace, payload: Path, transfer_dir: Path) ->
         raise WorkspaceCorruptionError(
             f"workspace runner {relative.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}"
         )
-    embedded = transfer_dir / TRANSFER_RUNNERS / Path(*relative.parts)
-    embedded.parent.mkdir(parents=True, exist_ok=True)
-    if not embedded.is_symlink() and (embedded.is_file() or embedded.is_dir()):
-        same_shape = source.is_file() == embedded.is_file()
-        if same_shape and _runner_digest(embedded) == digest:
-            return [{"path": relative.as_posix(), "sha256": digest}]
-        if embedded.is_dir():
-            _remove_tree(embedded)
-        else:
-            embedded.unlink()
-    if source.is_dir():
-        shutil.copytree(source, embedded)
-    else:
-        shutil.copyfile(source, embedded)
-        embedded.chmod(0o555)
+    _embed_runner(transfer_fd, relative, source)
     return [{"path": relative.as_posix(), "sha256": digest}]
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_directory_at(parent_fd: int, name: str, *, create: bool) -> int:
+    """Open one subdirectory by descriptor without following a symlink, optionally creating it."""
+
+    if create:
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+    try:
+        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise FormatError(f"cannot seal into {name!r}: not a real directory ({exc.strerror})") from exc
+
+
+def _remove_at(parent_fd: int, name: str, depth: int = 1) -> None:
+    """Remove one entry below a directory descriptor, never following a symlink.
+
+    :param parent_fd: A descriptor of the containing directory.
+    :param name: The entry to remove.
+    :param depth: The nesting depth reached so far.
+    :raises httk.workflow.errors.FormatError: If the entry nests deeper than the adoption walk bound.
+    """
+
+    if depth > _ADOPT_MAX_DEPTH:
+        raise FormatError(f"cannot remove {name!r}: it nests deeper than {_ADOPT_MAX_DEPTH} levels")
+    if not stat.S_ISDIR(os.lstat(name, dir_fd=parent_fd).st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return
+    fd = _open_directory_at(parent_fd, name, create=False)
+    try:
+        os.fchmod(fd, 0o755)
+        with os.scandir(fd) as entries:
+            children = [entry.name for entry in entries]
+        for child in children:
+            _remove_at(fd, child, depth + 1)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _copy_file_at(source: Path, parent_fd: int, name: str, mode: int) -> None:
+    """Copy one trusted file to a new name below a directory descriptor, exclusively."""
+
+    out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+    try:
+        with open(source, "rb") as reader, os.fdopen(out, "wb", closefd=False) as writer:
+            shutil.copyfileobj(reader, writer)
+        os.fchmod(out, mode)
+    finally:
+        os.close(out)
+
+
+def _copy_tree_at(source: Path, parent_fd: int, name: str) -> None:
+    """Copy a trusted directory tree to a new name below a directory descriptor."""
+
+    fd = _open_directory_at(parent_fd, name, create=True)
+    try:
+        for entry in sorted(source.iterdir()):
+            if entry.is_dir():
+                _copy_tree_at(entry, fd, entry.name)
+            else:
+                _copy_file_at(entry, fd, entry.name, stat.S_IMODE(entry.stat().st_mode))
+        os.fchmod(fd, stat.S_IMODE(source.stat().st_mode))
+    finally:
+        os.close(fd)
+
+
+def _embed_runner(transfer_fd: int, relative: PurePosixPath, source: Path) -> None:
+    """Place the store runner at ``runners/<relative>`` below the transfer directory.
+
+    Every step goes through directory descriptors opened with ``O_NOFOLLOW``,
+    one component at a time, so no symlink below ``.httk-transfer`` is ever
+    followed. A stale entry at the final name is removed and recopied.
+    """
+
+    held: list[int] = []
+    try:
+        fd = transfer_fd
+        for part in (TRANSFER_RUNNERS, *relative.parts[:-1]):
+            fd = _open_directory_at(fd, part, create=True)
+            held.append(fd)
+        name = relative.parts[-1]
+        try:
+            os.lstat(name, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        else:
+            _remove_at(fd, name)
+        if source.is_dir():
+            _copy_tree_at(source, fd, name)
+        else:
+            _copy_file_at(source, fd, name, 0o555)
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
 
 
 def _install_bundled_runners(workspace: Workspace, bundle: Path, manifest: Mapping[str, Any]) -> None:
@@ -498,10 +670,53 @@ def _require_tree_boundary(workspace: Workspace, marker: Marker, *, with_tree: b
             raise ValueError(f"job has {len(children)} child job(s) that travel with it: transfer it as a tree")
 
 
+def _write_manifest_at(transfer_fd: int, manifest: Mapping[str, Any], *, durable: bool) -> None:
+    """Install ``manifest.json`` atomically below a transfer-directory descriptor, never following a symlink."""
+
+    temporary = f".{TRANSFER_MANIFEST}.tmp.{uuid.uuid4().hex}"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=transfer_fd)
+    try:
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(json_bytes(manifest))
+                handle.write(b"\n")
+                handle.flush()
+            if durable:
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.rename(temporary, TRANSFER_MANIFEST, src_dir_fd=transfer_fd, dst_dir_fd=transfer_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=transfer_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    if durable:
+        os.fsync(transfer_fd)
+
+
 def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path:
     payload = workspace.payload_path(marker.placement, marker.job_key)
-    transfer_dir = _transfer_directory(payload)
     transfer_id = canonical_uuid(state.get("transfer_id"), "transfer_id")
+    transfer_fd = _transfer_directory(payload, transfer_id)
+    try:
+        return _seal_into(workspace, marker, state, payload, transfer_id, transfer_fd)
+    finally:
+        os.close(transfer_fd)
+
+
+def _seal_into(
+    workspace: Workspace,
+    marker: Marker,
+    state: Mapping[str, Any],
+    payload: Path,
+    transfer_id: str,
+    transfer_fd: int,
+) -> Path:
+    """Write the manifest, runners and marker of one sealing through the transfer-directory descriptor."""
+
+    transfer_dir = payload / TRANSFER_DIRECTORY
     destination_workspace_id = (
         None
         if state.get("destination_workspace_id") is None
@@ -511,7 +726,7 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
     if not isinstance(prior, Mapping):
         raise FormatError("transferring state has no prior_state object")
     prior_kind = str(state.get("prior_kind"))
-    runners = _bundled_runners(workspace, payload, transfer_dir)
+    runners = _bundled_runners(workspace, payload, transfer_fd)
     manifest = {
         "format": TRANSFER_FORMAT,
         "format_version": TRANSFER_FORMAT_VERSION,
@@ -543,17 +758,23 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         if name in state:
             manifest[name] = state[name]
     manifest_path = transfer_dir / TRANSFER_MANIFEST
-    if os.path.lexists(manifest_path):
-        existing = _read_manifest(payload)
+    try:
+        os.lstat(TRANSFER_MANIFEST, dir_fd=transfer_fd)
+    except FileNotFoundError:
+        _write_manifest_at(transfer_fd, manifest, durable=workspace.durable)
+    else:
+        existing = _read_manifest_at(transfer_fd, transfer_dir)
         if existing != manifest:
             raise WorkspaceCorruptionError(f"conflicting transfer manifest: {manifest_path}")
-    else:
-        write_json_atomic(manifest_path, manifest, durable=workspace.durable)
-    embedded = transfer_dir / marker.path.name
     if marker.path.exists():
-        os.rename(marker.path, embedded)
-    elif not embedded.is_file():
-        raise WorkspaceCorruptionError("transfer marker exists in neither state tree nor sealed bundle")
+        os.rename(marker.path, marker.path.name, dst_dir_fd=transfer_fd)
+    else:
+        try:
+            embedded_mode = os.lstat(marker.path.name, dir_fd=transfer_fd).st_mode
+        except FileNotFoundError:
+            embedded_mode = 0
+        if not stat.S_ISREG(embedded_mode):
+            raise WorkspaceCorruptionError("transfer marker exists in neither state tree nor sealed bundle")
     ledger = {**manifest, "status": "sealed", "bundle": str(payload), "updated_at": utc_now()}
     if "eject_to" in state:
         # Where an ejection moves the bundle is source bookkeeping, not part of
@@ -667,6 +888,8 @@ def _detach_job(
     target_placement = normalize_placement(destination_placement or marker.placement)
     # Refused here, before the job is fenced, rather than by the destination's import.
     check_job_placement(target_placement)
+    # Likewise refused before fencing: a sealing that must refuse would strand the job.
+    _check_transfer_directory(workspace.payload_path(marker.placement, marker.job_key), identifier)
     prior_state = workspace.read_state(marker)
     _finish_incoming_receipt(workspace, marker, prior_state)
     fields: dict[str, object] = {"transfer_id": identifier}
@@ -717,6 +940,32 @@ def _detach_job(
     return _seal_transferring(workspace, transferring, workspace.read_state(transferring))
 
 
+def _check_sealed_marker(payload: Path, manifest: Mapping[str, Any], job_key: str) -> None:
+    """Require the manifest's sealed marker to be this job's marker, a real file beside the manifest.
+
+    The name must be one path component that parses as a ``transferring`` marker
+    basename (:meth:`~httk.workflow.models.Marker.from_path`) of ``job_key``, and
+    the entry must be a regular file by ``lstat`` rather than a symlink, because
+    the importer renames it into the workspace state tree.
+    """
+
+    name = manifest.get("sealed_marker")
+    if not isinstance(name, str) or name in {"", ".", ".."} or "/" in name or "\0" in name:
+        raise FormatError(f"sealed transfer marker is absent or not a plain file name: {name!r}")
+    try:
+        parsed = Marker.from_path(Path("state"), Path("state") / "transferring" / "placement" / name)
+    except FormatError as exc:
+        raise FormatError(f"sealed transfer marker is not a marker name: {name!r}") from exc
+    if parsed.job_key != job_key:
+        raise FormatError(f"sealed transfer marker belongs to another job: {name!r}")
+    try:
+        mode = os.lstat(payload / TRANSFER_DIRECTORY / name).st_mode
+    except OSError:
+        raise FormatError("sealed transfer marker is absent") from None
+    if not stat.S_ISREG(mode):
+        raise FormatError(f"sealed transfer marker is not a regular file: {name!r}")
+
+
 def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     """Validate a sealed bundle and return its manifest.
 
@@ -738,9 +987,10 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
         canonical_uuid(manifest.get("destination_workspace_id"), "destination_workspace_id")
     canonical_uuid(manifest.get("job_id"), "job_id")
     normalize_placement(str(manifest.get("destination_placement")))
-    marker_name = manifest.get("sealed_marker")
-    if not isinstance(marker_name, str) or not (payload / TRANSFER_DIRECTORY / marker_name).is_file():
-        raise FormatError("sealed transfer marker is absent")
+    job_key = manifest.get("job_key")
+    if not isinstance(job_key, str) or parse_job_key(job_key)[1] != manifest["job_id"]:
+        raise FormatError(f"transfer manifest names a job key that is not this job's: {job_key!r}")
+    _check_sealed_marker(payload, manifest, job_key)
     if _payload_digest(payload) != manifest.get("payload_sha256"):
         raise FormatError("detached transfer payload digest mismatch")
     # Bundled runners sit beside the manifest rather than inside the payload, so
@@ -840,6 +1090,7 @@ def import_bundles(workspace: Workspace, bundles: Sequence[str | os.PathLike[str
     results = []
     seen: set[str] = set()
     for bundle in bundles:
+        _refuse_unsafe_entries(Path(bundle).expanduser())
         manifest = validate_bundle(bundle)
         job_id = str(manifest["job_id"])
         known = _UNKNOWN_MARKER if job_id in seen else markers.get(job_id)
@@ -860,6 +1111,7 @@ def _import_one(
     :return: A destination acknowledgement safe for source retirement.
     """
 
+    _refuse_unsafe_entries(Path(bundle).expanduser())
     manifest = validate_bundle(bundle)
     if manifest["destination_workspace_id"] != workspace.workspace_id:
         raise ValueError("bundle names a different destination workspace")
@@ -1159,6 +1411,7 @@ def _finish_interrupted_adoptions(workspace: Workspace) -> None:
             arrival = _arrival(workspace, str(intent["job_id"]))
             try:
                 if held is not None:
+                    _refuse_unsafe_entries(held)
                     _import_bundle(workspace, held, placement=placement)
                 elif arrival is not None and arrival[1].get("transfer_id") == transfer_id:
                     marker, provenance = arrival
@@ -1487,7 +1740,16 @@ def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
             receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
     for marker in list(workspace.scan_markers(("transferring",))):
         state = workspace.read_state(marker)
-        bundle = _seal_transferring(workspace, marker, state)
+        try:
+            bundle = _seal_transferring(workspace, marker, state)
+        except (WorkflowError, OSError, ValueError) as exc:
+            _LOGGER.warning(
+                "cannot seal transferring job %s: %s",
+                marker.job_key,
+                exc,
+                extra={"event": "transfer_seal_pending", "transfer_id": state.get("transfer_id")},
+            )
+            continue
         results.append({"transfer_id": state["transfer_id"], "status": "sealed", "bundle": str(bundle)})
     for bundle in _sealed_bundle_candidates(workspace):
         try:
@@ -2477,7 +2739,15 @@ def _finish_pending_ejections(workspace: Workspace) -> list[dict[str, Any]]:
     for marker in list(workspace.scan_markers(("transferring",))):
         state = workspace.read_state(marker)
         if "eject_to" in state:
-            _seal_transferring(workspace, marker, state)
+            try:
+                _seal_transferring(workspace, marker, state)
+            except (WorkflowError, OSError, ValueError) as exc:
+                _LOGGER.warning(
+                    "cannot seal transferring job %s: %s",
+                    marker.job_key,
+                    exc,
+                    extra={"event": "transfer_seal_pending", "transfer_id": state.get("transfer_id")},
+                )
     finished = []
     for ledger in _ledgers(workspace):
         if ledger.get("status") != "sealed" or "eject_to" not in ledger:
@@ -2770,6 +3040,9 @@ def adopt_job(
             or member["job_id"] != entry["job_id"]
             or member.get("destination_workspace_id") is not None
             or member.get("eject_root") != transfer_id
+            or member.get("job_key") != entry["job_key"]
+            or normalize_placement(str(member.get("destination_placement")))
+            != normalize_placement(str(entry.get("placement")))
         ):
             raise FormatError(f"tree member {member_dir} does not belong to this ejected tree")
         if _adoption_needed(workspace, member_dir, member, None):
