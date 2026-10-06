@@ -921,16 +921,15 @@ def build_workspace_parser(
         prog=program,
     )
 
-    from .._daemon_cli import add_arguments, launch
+    from .._daemon_cli import add_subcommands, launch
 
-    daemon = _leaf(
+    _, daemon = _group(
         group,
         "daemon",
-        summary="run the confined workspace command daemon",
-        description="Run the confined workspace command daemon for an approved exchange enrollment",
-        handler=lambda arguments, _context: launch(arguments),
+        summary="set up and run the confined workspace command daemon",
+        description="Set up and run the confined workspace command daemon for an exchange enrollment",
     )
-    add_arguments(daemon)
+    add_subcommands(daemon, handler=lambda arguments, _context: launch(arguments))
     add_workspace_init_arguments(
         _leaf(
             group,

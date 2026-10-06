@@ -53,7 +53,7 @@ $ httk workflow run --count 4 --workspace default
 | `manager.launch` | Launcher name; the built-in `process` launcher is the default. |
 | `manager.count` | Default number of managers; `--count N` overrides it for one invocation. |
 | `manager.workers` | Default number of workers per manager; `--workers N` overrides it. |
-| `manager.command` | The manager interpreter/command used after `environment.prelude`; without a prelude, the launching Python interpreter is used (for a daemon submission, the enrollment's `--python`). |
+| `manager.command` | The manager interpreter/command used after `environment.prelude`; without a prelude, the launching Python interpreter is used (for a daemon submission, the daemon configuration's `python`). |
 | `manager.allocation` | The `--allocation` probe a launcher passes its managers: `auto`, `none`, `slurm`, `host` or `exec:PATH`; the Slurm launcher's default is `slurm`. |
 | `manager.launch_template` | Argv template for the attempt launch prefix; placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}` `{cpus_per_proc}`. |
 | `manager.bind_cpus` | `true`, `1` or `yes` pins locally executed attempts to the CPUs of their processor slots; off by default. |

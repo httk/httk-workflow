@@ -1,5 +1,6 @@
 """Prove the daemon entry bypasses mutable workflow discovery."""
 
+import argparse
 import base64
 import json
 import os
@@ -13,7 +14,6 @@ from httk.core.cli import CLIContext
 
 from httk.workflow import _daemon_cli, _daemon_setup, workflow_cli
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy, policy_document
-from httk.workflow._daemon_setup import BrokerOptions
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
@@ -54,23 +54,55 @@ def test_daemon_dispatch_does_not_build_ordinary_parser(monkeypatch: pytest.Monk
     monkeypatch.setattr(workflow_cli, "command", forbidden)
     monkeypatch.setattr(_daemon_cli, "command", daemon)
     context = CLIContext(program="httk", cwd=tmp_path)
-    assert workflow_cli.workspace_command(["daemon", "/data", "--state", "/state", "--once"], context) == 0
-    assert observed == [["/data", "--state", "/state", "--once"], "httk workspace daemon"]
+    assert workflow_cli.workspace_command(["daemon", "run", "/data", "--state", "/state", "--once"], context) == 0
+    assert observed == [["run", "/data", "--state", "/state", "--once"], "httk workspace daemon"]
+
+
+def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    context = CLIContext(program="httk", cwd=tmp_path)
+    assert workflow_cli.command(["workspace", "daemon"], context) == 0
+    output = capsys.readouterr().out
+    assert all(mode in output for mode in ("init", "configure", "show", "check", "run"))
+    observed: list[argparse.Namespace] = []
+
+    def launch(arguments: argparse.Namespace) -> int:
+        observed.append(arguments)
+        return 0
+
+    monkeypatch.setattr(_daemon_cli, "launch", launch)
+    arguments = ["workspace", "daemon", "configure", "/data", "--add", "launchers=a", "--set", "force=true"]
+    assert workflow_cli.command(arguments, context) == 0
+    assert observed[0].daemon_mode == "configure"
+    assert observed[0].changes == [("add", "launchers=a"), ("set", "force=true")]
 
 
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["/data/../other"],
-        ["data/../other"],
-        ["/data", "--state", "../link/../state"],
-        ["/data", "--check", "--once"],
-        ["/data", "--command", "rm"],
-        ["/data", "--policy", "/policy"],
-        ["/data", "--export-endpoint"],
+        ["run", "/data/../other"],
+        ["run", "data/../other"],
+        ["run", "/data", "--state", "../link/../state"],
+        ["check", "/data", "--once"],
+        ["run", "/data", "--command", "rm"],
+        ["run", "/data", "--policy", "/policy"],
+        ["run", "/data", "--export-endpoint"],
+        ["/data", "--once"],
+        ["/data", "--reload"],
+        ["/data", "--initialize"],
+        ["init", "/data", "--add", "launchers=a"],
+        ["run", "/data", "--set", "cluster=c"],
+        ["show", "/data", "--add", "launchers=a"],
+        ["init", "/data", "--exchange", "/x", "--remove", "launchers=a"],
     ],
 )
-def test_daemon_refuses_ambiguous_paths_and_execution_options(arguments: list[str]) -> None:
+def test_daemon_refuses_ambiguous_paths_and_unknown_options(
+    arguments: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("initialize", "configure", "describe", "activate"):
+        monkeypatch.setattr(_daemon_setup, name, lambda *_args, **_kwargs: pytest.fail("must refuse before setup"))
+    monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("must refuse before any handoff"))
     assert _daemon_cli.command(arguments, program="httk workspace daemon") == 2
 
 
@@ -86,14 +118,14 @@ def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
         return _snapshot(tmp_path)
 
     monkeypatch.setattr(_daemon_setup, "initialize", initialize)
+    monkeypatch.setattr(_daemon_setup, "describe", lambda *_a, **_k: {"configuration": {}})
     monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
     monkeypatch.chdir(cwd)
-    setup = ["--launcher", "small", "--authorize", AUTHORIZED_KEY, "--initialize"]
     assert (
-        _daemon_cli.command([".", "--exchange", "../exchange", "--state", "../../state", *setup], program="httk") == 0
+        _daemon_cli.command(["init", ".", "--exchange", "../exchange", "--state", "../../state"], program="httk") == 0
     )
-    assert _daemon_cli.command(["link/x", "--exchange", "./exchange", *setup], program="httk") == 0
+    assert _daemon_cli.command(["init", "link/x", "--exchange", "./exchange"], program="httk") == 0
     assert calls == [
         (cwd, tmp_path / "site" / "exchange", tmp_path / "state"),
         (cwd / "link" / "x", cwd / "exchange", None),
@@ -125,12 +157,12 @@ import os
 from httk.workflow import _daemon_cli
 _daemon_cli.__file__ = {str(installed / '_daemon_cli.py')!r}
 from httk.workflow import _daemon_setup
-_daemon_setup.active_policy_path = lambda workspace, **_: __import__('pathlib').Path('/active/runtime.json')
+_daemon_setup.activate = lambda workspace, **_: (__import__('pathlib').Path('/active/runtime.json'), None)
 fd = os.open({str(outside)!r}, os.O_RDONLY)
 os.set_inheritable(fd, True)
 os.environ.update(PYTHONPATH={str(untrusted)!r}, BASH_ENV='untrusted', SBATCH_ACCOUNT='other', NSC_RESOURCE_NAME='x')
 os.chdir({str(untrusted)!r})
-raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--once'], program='httk workspace daemon'))
+raise SystemExit(_daemon_cli.command(['run',{str(workspace)!r},'--once'], program='httk workspace daemon'))
 """
     result = subprocess.run(
         [sys.executable, "-c", script], cwd="/", capture_output=True, text=True, check=True, timeout=20
@@ -153,164 +185,133 @@ raise SystemExit(_daemon_cli.command([{str(workspace)!r},'--once'], program='htt
     ]
 
 
-@pytest.mark.parametrize("mode", ["initialize", "reload"])
-def test_local_setup_modes_print_approved_launchers_and_keys_without_exec(
-    mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    calls: list[dict[str, object]] = []
+def _description() -> dict[str, object]:
+    return {
+        "workspace": "/workspace",
+        "cluster": "c1",
+        "configuration": {
+            "launchers": ["small", "large"],
+            "authorized_keys": [AUTHORIZED_KEY],
+            "sacct": None,
+            "force": True,
+        },
+    }
 
-    def setup(workspace: Path, **options: object) -> Path:
-        calls.append({"workspace": workspace, **options})
+
+_RENDERED = (
+    f"workspace: /workspace\ncluster: c1\nlaunchers=small,large\nauthorized_keys={AUTHORIZED_KEY}\nsacct=\nforce=true\n"
+)
+
+
+def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[str, Path, dict[str, object]]] = []
+
+    def initialize(workspace: Path, **options: object) -> Path:
+        calls.append(("init", workspace, options))
         return _snapshot(tmp_path)
 
-    monkeypatch.setattr(_daemon_setup, mode, setup)
+    def configure(workspace: Path, changes: object, **options: object) -> dict[str, object]:
+        calls.append(("configure", workspace, {"changes": changes, **options}))
+        return _description()
+
+    monkeypatch.setattr(_daemon_setup, "initialize", initialize)
+    monkeypatch.setattr(_daemon_setup, "configure", configure)
+    monkeypatch.setattr(_daemon_setup, "describe", lambda *_a, **_k: _description())
     monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("local setup must not exec"))
     monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
-    arguments = ["/workspace", f"--{mode}", "--launcher", "small", "--launcher", "large", "--authorize", AUTHORIZED_KEY]
-    if mode == "initialize":
-        arguments += ["--exchange", "/exchange"]
+    changes = ["--set", "bwrap=tools/bwrap", "--add", "launchers=small", "--set", "cluster=c1"]
+    changes += ["--add", f"authorized_keys={AUTHORIZED_KEY}"]
+    assert _daemon_cli.command(["init", "/workspace", "--exchange", "/exchange", *changes], program="httk") == 0
+    arguments = ["configure", "/workspace", "--remove", "launchers=large", "--set", "force=true", "--state", "/state"]
     assert _daemon_cli.command(arguments, program="httk") == 0
-    assert _daemon_cli.command([*arguments, "--force"], program="httk") == 0
-    expected: dict[str, object] = {
-        "workspace": Path("/workspace"),
-        "launchers": ["small", "large"],
-        "authorized_keys": [AUTHORIZED_KEY],
-        "state": None,
-        "snapshots": None,
-    }
-    if mode == "initialize":
-        expected["exchange"] = Path("/exchange")
-    broker = {"broker": BrokerOptions()}
-    assert calls == [{**expected, "force": False, **broker}, {**expected, "force": True, **broker}]
-    printed = f"launcher small\nauthorized {AUTHORIZED_KEY}\nsandbox check passed\n"
-    assert capsys.readouterr().out == printed * 2
-
-
-@pytest.mark.parametrize("mode", ["initialize", "reload"])
-def test_broker_options_reach_setup_anchored(mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    def setup(_workspace: Path, **options: object) -> Path:
-        calls.append(options)
-        return _snapshot(tmp_path)
-
-    monkeypatch.setattr(_daemon_setup, mode, setup)
-    monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
-    monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
-    monkeypatch.chdir(tmp_path)
-    arguments = ["/workspace", f"--{mode}"]
-    if mode == "initialize":
-        arguments += ["--exchange", "/exchange", "--launcher", "small", "--authorize", AUTHORIZED_KEY]
-    for name in ("bwrap", "python", "sbatch", "squeue", "scancel", "sacct", "scontrol", "slurm-conf"):
-        arguments += [f"--{name}", f"tools/{name}"]
-    arguments += ["--cluster", "c1", "--max-submissions", "5"]
-    assert _daemon_cli.command(arguments, program="httk") == 0
-    tools = tmp_path / "tools"
-    assert calls[0]["broker"] == BrokerOptions(
-        bwrap=tools / "bwrap",
-        python=tools / "python",
-        sbatch=tools / "sbatch",
-        squeue=tools / "squeue",
-        scancel=tools / "scancel",
-        sacct=tools / "sacct",
-        scontrol=tools / "scontrol",
-        cluster="c1",
-        slurm_conf=tools / "slurm-conf",
-        max_submissions=5,
+    assert calls == [
+        (
+            "init",
+            Path("/workspace"),
+            {
+                "exchange": Path("/exchange"),
+                "changes": [
+                    ("set", "bwrap=tools/bwrap"),
+                    ("add", "launchers=small"),
+                    ("set", "cluster=c1"),
+                    ("add", f"authorized_keys={AUTHORIZED_KEY}"),
+                ],
+                "state": None,
+                "snapshots": None,
+            },
+        ),
+        (
+            "configure",
+            Path("/workspace"),
+            {
+                "changes": [("remove", "launchers=large"), ("set", "force=true")],
+                "state": Path("/state"),
+                "snapshots": None,
+            },
+        ),
+    ]
+    assert capsys.readouterr().out == (
+        f"{_RENDERED}sandbox check passed\n{_RENDERED}"
+        "the configuration takes effect when the daemon next starts: httk workspace daemon run /workspace\n"
     )
 
 
-def test_reload_without_lists_keeps_the_stored_launchers_and_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[dict[str, object]] = []
+def test_show_renders_or_prints_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[object] = []
 
-    def reload(_workspace: Path, **options: object) -> Path:
-        calls.append(options)
-        return _snapshot(tmp_path)
+    def describe(workspace: Path, **options: object) -> dict[str, object]:
+        calls.append((workspace, options))
+        return _description()
 
-    monkeypatch.setattr(_daemon_setup, "reload", reload)
-    monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
-    monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
-    assert _daemon_cli.command(["/workspace", "--reload", "--state", "/state"], program="httk") == 0
+    monkeypatch.setattr(_daemon_setup, "describe", describe)
+    assert _daemon_cli.command(["show", "/workspace", "--snapshots", "/snapshots"], program="httk") == 0
+    assert capsys.readouterr().out == _RENDERED
+    assert _daemon_cli.command(["show", "/workspace", "--json"], program="httk") == 0
+    assert json.loads(capsys.readouterr().out) == _description()
     assert calls == [
-        {
-            "launchers": None,
-            "authorized_keys": None,
-            "state": Path("/state"),
-            "snapshots": None,
-            "force": False,
-            "broker": BrokerOptions(),
-        }
+        (Path("/workspace"), {"state": None, "snapshots": Path("/snapshots")}),
+        (Path("/workspace"), {"state": None, "snapshots": None}),
     ]
 
 
-@pytest.mark.parametrize(
-    ("arguments", "message"),
-    [
-        (["--once", "--force"], "--force applies only"),
-        (["--check", "--force"], "--force applies only"),
-        (["--force"], "--force applies only"),
-        (["--initialize", "--launcher", "a", "--authorize", "k"], "--initialize requires --exchange"),
-        (["--initialize", "--exchange", "/x", "--authorize", "k"], "--initialize requires"),
-        (["--initialize", "--exchange", "/x", "--launcher", "a"], "--initialize requires"),
-        (["--reload", "--exchange", "/x"], "--reload cannot change --exchange"),
-        (["--once", "--exchange", "/x"], "apply only to --initialize and --reload"),
-        (["--check", "--launcher", "a"], "apply only to --initialize and --reload"),
-        (["--authorize", "k"], "apply only to --initialize and --reload"),
-        (["--once", "--cluster", "c"], "broker configuration options apply only to --initialize and --reload"),
-        (["--sacct", "/usr/bin/sacct"], "broker configuration options apply only"),
-    ],
-)
-def test_cli_argument_matrix_is_refused_before_any_setup(
-    arguments: list[str], message: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    for name in ("initialize", "reload", "active_policy_path"):
-        monkeypatch.setattr(_daemon_setup, name, lambda *_args, **_kwargs: pytest.fail("must refuse before setup"))
-    monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("must refuse before any handoff"))
-    assert _daemon_cli.command(["/workspace", *arguments], program="httk") == 2
-    assert message in capsys.readouterr().err
-
-
-def test_run_modes_hand_state_and_snapshots_to_the_active_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_modes_hand_state_and_snapshots_to_activation(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[object] = []
 
-    def active(workspace: Path, **options: object) -> Path:
+    def activate(workspace: Path, **options: object) -> tuple[Path, None]:
         observed.append((workspace, options))
         raise ValueError("inspection stop")
 
-    monkeypatch.setattr(_daemon_setup, "active_policy_path", active)
-    arguments = ["/workspace", "--once", "--state", "/state", "--snapshots", "/snapshots"]
-    assert _daemon_cli.command(arguments, program="httk") == 2
-    assert observed == [(Path("/workspace"), {"state": Path("/state"), "snapshots": Path("/snapshots")})]
+    monkeypatch.setattr(_daemon_setup, "activate", activate)
+    for mode in (["run", "--once"], ["check"]):
+        arguments = [mode[0], "/workspace", *mode[1:], "--state", "/state", "--snapshots", "/snapshots"]
+        assert _daemon_cli.command(arguments, program="httk") == 2
+    assert observed == [(Path("/workspace"), {"state": Path("/state"), "snapshots": Path("/snapshots")})] * 2
 
 
 def test_incompatible_ledger_is_a_clean_local_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def incompatible(_workspace: Path, **_options: object) -> Path:
+    def incompatible(_workspace: Path, *_args: object, **_options: object) -> Path:
         raise sqlite3.DatabaseError("preserve this state and initialize a new enrollment")
 
-    monkeypatch.setattr(_daemon_setup, "reload", incompatible)
-    assert _daemon_cli.command(["/workspace", "--reload"], program="httk") == 2
+    monkeypatch.setattr(_daemon_setup, "configure", incompatible)
+    assert _daemon_cli.command(["configure", "/workspace", "--set", "force=true"], program="httk") == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "preserve this state" in captured.err
 
 
-def _setup_with_check(
-    mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: int | OSError
-) -> tuple[list[str], list[dict[str, object]], list[object]]:
+def _init_with_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: int | OSError
+) -> tuple[Path, list[dict[str, object]], list[object]]:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    setups: list[str] = []
+    snapshot = _snapshot(tmp_path)
     runs: list[dict[str, object]] = []
     argvs: list[object] = []
-
-    def setup(*_args: object, **_kwargs: object) -> Path:
-        setups.append(mode)
-        return _snapshot(tmp_path)
 
     def run(argv: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         argvs.append(argv)
@@ -321,28 +322,24 @@ def _setup_with_check(
 
     monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
     monkeypatch.setenv("SBATCH_ACCOUNT", "other")
-    monkeypatch.setattr(_daemon_setup, mode, setup)
-    monkeypatch.setattr(_daemon_setup, "active_policy_path", lambda *_a, **_k: tmp_path / "active.json")
+    monkeypatch.setattr(_daemon_setup, "initialize", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr(_daemon_setup, "describe", lambda *_a, **_k: {"configuration": {}})
     monkeypatch.setattr(_daemon_cli.subprocess, "run", run)
     monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("setup must not exec"))
-    arguments = [str(workspace), f"--{mode}", "--launcher", "small", "--authorize", AUTHORIZED_KEY]
-    if mode == "initialize":
-        arguments += ["--exchange", str(tmp_path / "ex")]
+    arguments = ["init", str(workspace), "--exchange", str(tmp_path / "ex"), "--add", "launchers=small"]
     status = _daemon_cli.command(arguments, program="httk")
     runs.append({"status": status})
-    return setups, runs, argvs
+    return snapshot, runs, argvs
 
 
-@pytest.mark.parametrize("mode", ["initialize", "reload"])
-def test_setup_runs_one_clean_sandbox_check_and_reports_success(
-    mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_init_runs_one_clean_sandbox_check_and_reports_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    setups, runs, argvs = _setup_with_check(mode, tmp_path, monkeypatch, 0)
-    assert setups == [mode]
+    snapshot, runs, argvs = _init_with_check(tmp_path, monkeypatch, 0)
     assert len(argvs) == 1 and runs[-1] == {"status": 0}
     argv = argvs[0]
     assert isinstance(argv, list) and argv[-1] == "--check" and "--mode" not in argv
-    assert argv == _daemon_cli._bootstrap_argv(tmp_path / "ws", state=None, snapshots=None, flag="--check")
+    assert argv == _daemon_cli._bootstrap_argv(tmp_path / "ws", snapshot, "--check")
     environment = runs[0].pop("env")
     assert runs[0] == {"stdin": subprocess.DEVNULL, "cwd": "/", "close_fds": True, "check": False}
     assert isinstance(environment, dict) and environment == _daemon_cli._launch_environment()
@@ -354,16 +351,26 @@ def test_setup_runs_one_clean_sandbox_check_and_reports_success(
 def test_failed_check_keeps_the_enrollment_and_exits_2(
     outcome: int | OSError, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    setups, runs, _argvs = _setup_with_check("reload", tmp_path, monkeypatch, outcome)
-    assert setups == ["reload"] and runs[-1] == {"status": 2}
+    _snapshot_path, runs, _argvs = _init_with_check(tmp_path, monkeypatch, outcome)
+    assert runs[-1] == {"status": 2}
     captured = capsys.readouterr()
     assert "sandbox check passed" not in captured.out
     assert "the enrollment was saved, but the sandbox check failed" in captured.err
-    assert "run --reload" in captured.err
+    assert "httk workspace daemon configure" in captured.err and "httk workspace daemon check" in captured.err
 
 
-def test_run_mode_and_setup_check_share_the_bootstrap_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_daemon_setup, "active_policy_path", lambda *_a, **_k: tmp_path / "active.json")
+@pytest.mark.parametrize(("mode", "flag"), [(["check"], "--check"), (["run", "--once"], "--once"), (["run"], None)])
+@pytest.mark.parametrize("changed", [None, (), ("small",)])
+def test_run_modes_exec_the_bootstrap_with_the_activated_snapshot(
+    mode: list[str],
+    flag: str | None,
+    changed: tuple[str, ...] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    active = tmp_path / "active.json"
+    monkeypatch.setattr(_daemon_setup, "activate", lambda *_a, **_k: (active, changed))
     execs: list[tuple[str, list[str], dict[str, str]]] = []
 
     def execve(path: str, argv: list[str], env: dict[str, str]) -> None:
@@ -378,9 +385,15 @@ def test_run_mode_and_setup_check_share_the_bootstrap_argv(tmp_path: Path, monke
     monkeypatch.setattr(_daemon_cli, "_close_inherited", lambda: None)
     monkeypatch.setattr(_daemon_cli.os, "dup2", lambda *_a, **_k: 0)
     monkeypatch.setattr(_daemon_cli.os, "set_inheritable", lambda *_a: None)
-    assert _daemon_cli.command([str(tmp_path), "--check"], program="httk") == 2
-    expected = _daemon_cli._bootstrap_argv(tmp_path, state=None, snapshots=None, flag="--check")
+    assert _daemon_cli.command([mode[0], str(tmp_path), *mode[1:]], program="httk") == 2
+    expected = _daemon_cli._bootstrap_argv(tmp_path, active, flag)
     assert [(path, argv) for path, argv, _ in execs] == [(sys.executable, expected)]
     environment = execs[0][2]
     assert environment["NSC_RESOURCE_NAME"] == "tetralith" and "SBATCH_ACCOUNT" not in environment
     assert environment["PATH"] == "/usr/bin:/bin" and environment["LANG"] == os.environ.get("LANG", "C.UTF-8")
+    output = capsys.readouterr().out
+    if changed is None:
+        assert output == ""
+    else:
+        names = ", ".join(changed) or "none"
+        assert output == f"activated the changed daemon configuration; changed launchers: {names}\n"

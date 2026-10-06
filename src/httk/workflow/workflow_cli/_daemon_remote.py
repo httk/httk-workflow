@@ -114,7 +114,8 @@ def _take_back_waiting(endpoint: Endpoint, only: str | None, moved: list[str]) -
         target_directory = MailboxDirectory(endpoint.exchange / "outbox/withdrawn")
     except FileNotFoundError:
         raise ValueError(
-            "the exchange has no outbox/withdrawn directory; update the broker and run `httk workspace daemon … --reload`"
+            "the exchange has no outbox/withdrawn directory; update the broker and restart it with "
+            "`httk workspace daemon run …`"
         ) from None
     with MailboxDirectory(endpoint.exchange / "inbox") as source, target_directory as target:
         source_fd, target_fd = source._require_open(), target._require_open()

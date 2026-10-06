@@ -2,65 +2,83 @@
 
 import argparse
 import errno
+import json
 import os
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from ._daemon_bootstrap import _operator_environment
 
-_BROKER_PATHS = (
-    ("bwrap", "Bubblewrap executable of the broker sandbox"),
-    ("python", "Python executable of the broker and the submitted managers"),
-    ("sbatch", "Slurm submission executable"),
-    ("squeue", "Slurm query executable"),
-    ("scancel", "Slurm cancellation executable"),
-    ("sacct", "Slurm accounting executable, optional"),
-    ("scontrol", "Slurm control executable, used to discover the cluster name"),
-    ("slurm_conf", "Slurm configuration file"),
+_MODES = {
+    "init": "approve global slurm launchers and initialize a new enrollment",
+    "configure": "change the daemon configuration, activated when the daemon next starts",
+    "show": "describe the enrollment and its daemon configuration",
+    "check": "activate the configuration and check the real sandbox and scheduler requirements",
+    "run": "activate the configuration and serve the exchange",
+}
+_KEYS_HELP = (
+    "keys: launchers and authorized_keys (lists; --set takes a comma-separated value), bwrap, python, sbatch, "
+    "squeue, scancel (executables), sacct and slurm_conf (optional paths; an empty value unsets), "
+    "max_submissions, force (true or false: approve CPU, memory and time above the sanity limits)"
 )
-_BROKER_OPTIONS = (*(name for name, _kind in _BROKER_PATHS), "cluster", "max_submissions")
 
 
-def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare the explicit local daemon arguments.
+def _change(operation: str) -> Callable[[str], tuple[str, str]]:
+    return lambda item: (operation, item)
 
-    :param parser: The daemon command parser.
+
+def add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]", **defaults: object) -> None:
+    """Declare the daemon subcommands ``init``, ``configure``, ``show``, ``check`` and ``run``.
+
+    :param modes: The subcommand action of the daemon command parser.
+    :param **defaults: Extra parser defaults set on every subcommand, such as a handler.
     """
 
-    parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
-    parser.add_argument("--exchange", type=Path, help="client exchange directory, a sibling of the workspace")
-    parser.add_argument(
-        "--launcher",
-        action="append",
-        metavar="NAME",
-        help="approve a global slurm launcher that sets manager.confine=bwrap (repeatable)",
-    )
-    parser.add_argument("--authorize", action="append", metavar="KEY", help="authorize an Ed25519 key (repeatable)")
-    parser.add_argument("--state", type=Path, help="broker state directory when not the default")
-    parser.add_argument("--snapshots", type=Path, help="runtime snapshot directory when not <state>.snapshots")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--check", action="store_true", help="check the real sandbox and scheduler requirements")
-    mode.add_argument("--initialize", action="store_true", help="approve and initialize a new enrollment")
-    mode.add_argument("--reload", action="store_true", help="approve and activate updated launchers or keys")
-    mode.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="approve CPU, memory and time requests above the built-in sanity limits",
-    )
-    broker = parser.add_argument_group(
-        "broker configuration",
-        "used by --initialize and --reload; --initialize discovers what is not given, --reload keeps the stored value",
-    )
-    for name, kind in _BROKER_PATHS:
-        broker.add_argument(f"--{name.replace('_', '-')}", type=Path, metavar="PATH", help=f"the {kind}")
-    broker.add_argument("--cluster", metavar="NAME", help="the fixed Slurm cluster name")
-    broker.add_argument(
-        "--max-submissions", type=int, metavar="N", help="maximum manager submissions of the enrollment"
-    )
+    for mode, summary in _MODES.items():
+        parser = modes.add_parser(mode, help=summary, description=summary[0].upper() + summary[1:])
+        parser.set_defaults(daemon_mode=mode, **defaults)
+        parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
+        if mode == "init":
+            parser.add_argument(
+                "--exchange", type=Path, required=True, help="client exchange directory, a sibling of the workspace"
+            )
+        if mode in ("init", "configure"):
+            extra = "; init also takes cluster and scontrol" if mode == "init" else ""
+            parser.add_argument(
+                "--set",
+                dest="changes",
+                action="append",
+                type=_change("set"),
+                metavar="KEY=VALUE",
+                help=f"set one configuration value (repeatable); {_KEYS_HELP}{extra}",
+            )
+            parser.add_argument(
+                "--add",
+                dest="changes",
+                action="append",
+                type=_change("add"),
+                metavar="KEY=VALUE",
+                help="add one launcher name or authorized Ed25519 key (repeatable)",
+            )
+        if mode == "configure":
+            parser.add_argument(
+                "--remove",
+                dest="changes",
+                action="append",
+                type=_change("remove"),
+                metavar="KEY=VALUE",
+                help="remove one launcher name or authorized key (repeatable)",
+            )
+        if mode == "show":
+            parser.add_argument("--json", action="store_true", help="print the description as one JSON document")
+        if mode == "run":
+            parser.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
+        parser.add_argument("--state", type=Path, help="broker state directory when not the default")
+        snapshots = "when not <state>.snapshots" if mode == "init" else "of the enrollment, checked when given"
+        parser.add_argument("--snapshots", type=Path, help=f"runtime snapshot directory {snapshots}")
 
 
 def _anchored(path: Path, name: str) -> Path:
@@ -76,21 +94,6 @@ def _anchored(path: Path, name: str) -> Path:
             f"{name} path may use '..' only as a leading relative component and must not contain NUL: {path}"
         )
     return path
-
-
-def _usage_refusal(arguments: argparse.Namespace) -> str | None:
-    setup = arguments.initialize or arguments.reload
-    if arguments.force and not setup:
-        return "--force applies only to --initialize and --reload"
-    if arguments.initialize and (arguments.exchange is None or not arguments.launcher or not arguments.authorize):
-        return "--initialize requires --exchange, at least one --launcher and at least one --authorize"
-    if arguments.reload and arguments.exchange is not None:
-        return "--reload cannot change --exchange; a new enrollment is required"
-    if not setup and (arguments.exchange is not None or arguments.launcher or arguments.authorize):
-        return "--exchange, --launcher and --authorize apply only to --initialize and --reload"
-    if not setup and any(getattr(arguments, name) is not None for name in _BROKER_OPTIONS):
-        return "broker configuration options apply only to --initialize and --reload"
-    return None
 
 
 def _close_inherited() -> None:
@@ -113,19 +116,15 @@ def _launch_environment() -> dict[str, str]:
     return _CLEAN_ENV | _operator_environment(os.environ)
 
 
-def _bootstrap_argv(workspace: Path, *, state: Path | None, snapshots: Path | None, flag: str | None) -> list[str]:
+def _bootstrap_argv(workspace: Path, policy: Path, flag: str | None) -> list[str]:
     """Build the isolated bootstrap command line for the active policy.
 
     :param workspace: The anchored workspace path.
-    :param state: The broker state directory, or None for the default.
-    :param snapshots: The runtime snapshot directory, or None for the default.
+    :param policy: The active runtime snapshot.
     :param flag: An extra run-mode flag such as ``--check``, or None.
     :return: The argv that starts the broker bootstrap.
     """
 
-    from . import _daemon_setup
-
-    policy = _daemon_setup.active_policy_path(workspace, state=state, snapshots=snapshots)
     argv = [
         sys.executable,
         "-I",
@@ -139,10 +138,10 @@ def _bootstrap_argv(workspace: Path, *, state: Path | None, snapshots: Path | No
     return argv if flag is None else [*argv, flag]
 
 
-def _check_after_setup(workspace: Path, *, state: Path | None, snapshots: Path | None) -> int:
+def _check_after_setup(workspace: Path, policy: Path) -> int:
     # No skip option by design: a misconfiguration must surface at setup time. Setup is not rolled back.
     try:
-        argv = _bootstrap_argv(workspace, state=state, snapshots=snapshots, flag="--check")
+        argv = _bootstrap_argv(workspace, policy, "--check")
         code = subprocess.run(
             argv, stdin=subprocess.DEVNULL, cwd="/", env=_launch_environment(), close_fds=True, check=False
         ).returncode
@@ -153,83 +152,80 @@ def _check_after_setup(workspace: Path, *, state: Path | None, snapshots: Path |
         print("sandbox check passed")
         return 0
     print(
-        "httk workspace daemon: the enrollment was saved, but the sandbox check failed (see above); "
-        "fix the broker configuration or the launchers and run --reload",
+        "httk workspace daemon: the enrollment was saved, but the sandbox check failed (see above); fix the "
+        "launchers or the daemon configuration ('httk workspace daemon configure') and run "
+        "'httk workspace daemon check'",
         file=sys.stderr,
     )
     return 2
 
 
-def launch(arguments: argparse.Namespace) -> int:
-    """Replace the CLI process with the isolated installed bootstrap.
+def _render(description: dict[str, object]) -> str:
+    """Render a daemon description: the fixed enrollment, then the configuration as ``KEY=VALUE`` lines."""
 
-    :param arguments: Parsed local daemon arguments.
-    :return: A failure exit status if the bootstrap cannot start.
+    configuration = description["configuration"]
+    assert isinstance(configuration, dict)
+    lines = [f"{key}: {value}" for key, value in description.items() if key != "configuration"]
+    for key, value in configuration.items():
+        if isinstance(value, list):
+            value = ",".join(str(item) for item in value)
+        elif isinstance(value, bool):
+            value = "true" if value else "false"
+        lines.append(f"{key}={'' if value is None else value}")
+    return "\n".join(lines)
+
+
+def _local(
+    arguments: argparse.Namespace, workspace: Path, state: Path | None, snapshots: Path | None
+) -> list[str] | int:
+    """Run a local mode, returning an exit status, or the bootstrap argv for ``check`` and ``run``."""
+
+    from . import _daemon_setup
+
+    mode = arguments.daemon_mode
+    if mode == "init":
+        snapshot = _daemon_setup.initialize(
+            workspace,
+            exchange=_anchored(arguments.exchange, "exchange"),
+            changes=arguments.changes or (),
+            state=state,
+            snapshots=snapshots,
+        )
+        print(_render(_daemon_setup.describe(workspace, state=state, snapshots=snapshots)))
+        return _check_after_setup(workspace, snapshot)
+    if mode == "configure":
+        print(_render(_daemon_setup.configure(workspace, arguments.changes or (), state=state, snapshots=snapshots)))
+        print(f"the configuration takes effect when the daemon next starts: httk workspace daemon run {workspace}")
+        return 0
+    if mode == "show":
+        description = _daemon_setup.describe(workspace, state=state, snapshots=snapshots)
+        print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render(description))
+        return 0
+    snapshot, changed = _daemon_setup.activate(workspace, state=state, snapshots=snapshots)
+    if changed is not None:
+        print(f"activated the changed daemon configuration; changed launchers: {', '.join(changed) or 'none'}")
+        sys.stdout.flush()
+    flag = "--check" if mode == "check" else "--once" if arguments.once else None
+    return _bootstrap_argv(workspace, snapshot, flag)
+
+
+def launch(arguments: argparse.Namespace) -> int:
+    """Run one daemon subcommand; ``check`` and ``run`` replace the CLI process with the isolated bootstrap.
+
+    :param arguments: Parsed daemon subcommand arguments.
+    :return: The exit status of a local subcommand, or a failure status if the bootstrap cannot start.
     """
 
-    refusal = _usage_refusal(arguments)
-    if refusal is not None:
-        print(f"httk workspace daemon: {refusal}", file=sys.stderr)
-        return 2
     try:
         workspace = _anchored(arguments.workspace, "workspace")
-        paths = {
-            name: None if getattr(arguments, name) is None else _anchored(getattr(arguments, name), name)
-            for name in ("exchange", "state", "snapshots", *(name for name, _kind in _BROKER_PATHS))
-        }
-    except (OSError, ValueError) as exc:
-        print(f"httk workspace daemon: {exc}", file=sys.stderr)
-        return 2
-    try:
-        from . import _daemon_setup
-        from ._daemon_policy import load_policy
-
-        if arguments.initialize or arguments.reload:
-            broker = _daemon_setup.BrokerOptions(
-                bwrap=paths["bwrap"],
-                python=paths["python"],
-                sbatch=paths["sbatch"],
-                squeue=paths["squeue"],
-                scancel=paths["scancel"],
-                sacct=paths["sacct"],
-                scontrol=paths["scontrol"],
-                cluster=arguments.cluster,
-                slurm_conf=paths["slurm_conf"],
-                max_submissions=arguments.max_submissions,
-            )
-            if arguments.initialize:
-                assert paths["exchange"] is not None
-                snapshot = _daemon_setup.initialize(
-                    workspace,
-                    exchange=paths["exchange"],
-                    launchers=arguments.launcher,
-                    authorized_keys=arguments.authorize,
-                    state=paths["state"],
-                    snapshots=paths["snapshots"],
-                    force=arguments.force,
-                    broker=broker,
-                )
-            else:
-                snapshot = _daemon_setup.reload(
-                    workspace,
-                    launchers=arguments.launcher,
-                    authorized_keys=arguments.authorize,
-                    state=paths["state"],
-                    snapshots=paths["snapshots"],
-                    force=arguments.force,
-                    broker=broker,
-                )
-            approved = load_policy(snapshot)
-            for launcher in approved.launchers:
-                print(f"launcher {launcher.name}")
-            for key in approved.authorized_keys:
-                print(f"authorized {key}")
-            return _check_after_setup(workspace, state=paths["state"], snapshots=paths["snapshots"])
-        flag = "--check" if arguments.check else "--once" if arguments.once else None
-        argv = _bootstrap_argv(workspace, state=paths["state"], snapshots=paths["snapshots"], flag=flag)
+        state = None if arguments.state is None else _anchored(arguments.state, "state")
+        snapshots = None if arguments.snapshots is None else _anchored(arguments.snapshots, "snapshots")
+        result = _local(arguments, workspace, state, snapshots)
     except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2
+    if isinstance(result, int):
+        return result
     try:
         os.chdir("/")
         descriptor = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
@@ -240,24 +236,27 @@ def launch(arguments: argparse.Namespace) -> int:
             if descriptor != 0:
                 os.close(descriptor)
         _close_inherited()
-        os.execve(sys.executable, argv, _launch_environment())
+        os.execve(sys.executable, result, _launch_environment())
     except OSError:
         print("httk workspace daemon: isolated bootstrap could not start", file=sys.stderr)
         return 2
 
 
 def command(argv: Sequence[str], *, program: str) -> int:
-    """Parse and launch the daemon without constructing the workflow tree.
+    """Parse and run one daemon subcommand without constructing the workflow tree.
 
-    :param argv: Arguments following the daemon subcommand.
+    :param argv: Arguments following the daemon command.
     :param program: Display name for help and usage errors.
-    :return: An exit status for help or a startup failure.
+    :return: An exit status for help, a local subcommand or a startup failure.
     """
 
-    parser = argparse.ArgumentParser(prog=program, description="Run the confined workspace command daemon")
-    add_arguments(parser)
+    parser = argparse.ArgumentParser(prog=program, description="Set up and run the confined workspace command daemon")
+    add_subcommands(parser.add_subparsers(metavar="COMMAND"))
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
+    if getattr(arguments, "daemon_mode", None) is None:
+        parser.print_help()
+        return 0
     return launch(arguments)

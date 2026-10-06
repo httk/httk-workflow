@@ -1,7 +1,6 @@
 """Trusted local enrollment and publication for the workspace daemon."""
 
 import hashlib
-import importlib.resources
 import json
 import os
 import re
@@ -15,12 +14,12 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
 
 from httk.core.userdirs import data_home
 
 from ._confine import confine_settings
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
+from ._daemon_cli import _anchored
 from ._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from ._daemon_policy import (
     _LAUNCHER_NAME,
@@ -45,7 +44,7 @@ from ._daemon_slurm import submission
 from ._daemon_state import Ledger
 from ._exchange_staging import ENROLLMENT_MARKER
 from .configuration import launchers_home
-from .launchers import LAUNCHER_EXECUTABLE, LAUNCHER_METADATA, _validate_launcher_metadata
+from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
 
 _ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
 _ENDPOINT_VERSION = 2
@@ -66,38 +65,35 @@ _CPU_LIMIT = 1024
 _MEMORY_LIMIT = 1_048_576
 _TIME_LIMIT = 10_080
 _HARD_LIMIT = 2**31 - 1
-_FORCE_HINT = "; pass --force to approve it"
+_FORCE_HINT = "; set force=true to approve it"
+_CONFIGURATION_FILE = "configuration.json"
+_CONFIGURATION_FORMAT = "httk-workspace-daemon-configuration"
+_CONFIGURATION_VERSION = 1
+_MAX_CONFIGURATION_BYTES = 64 * 1024
+_LIST_KEYS = ("launchers", "authorized_keys")
+_EXECUTABLE_KEYS = ("bwrap", "python", "sbatch", "squeue", "scancel")
+_OPTIONAL_KEYS = ("sacct", "slurm_conf")
+#: The daemon configuration keys, in their stored and displayed order.
+CONFIGURATION_KEYS = (*_LIST_KEYS, *_EXECUTABLE_KEYS, *_OPTIONAL_KEYS, "max_submissions", "force")
+#: Keys accepted only by ``init``: the cluster is part of the fixed enrollment, scontrol only discovers it.
+INITIALIZE_KEYS = ("cluster", "scontrol")
 
 
 @dataclass(frozen=True, slots=True)
-class BrokerOptions:
-    """Broker configuration given to daemon setup; each unset value is discovered or kept.
+class _Configuration:
+    """The operator's daemon configuration, fully resolved; ``CONFIGURATION_KEYS`` names the fields."""
 
-    ``--initialize`` discovers unset values (executables on ``PATH``, the running interpreter, the effective
-    Slurm configuration and its cluster, 128 submissions); ``--reload`` keeps the enrollment's stored values.
-
-    :param bwrap: Bubblewrap executable for the broker sandbox.
-    :param python: Python executable that runs the broker and the submitted managers.
-    :param sbatch: Slurm submission executable.
-    :param squeue: Slurm query executable.
-    :param scancel: Slurm cancellation executable.
-    :param sacct: Optional Slurm accounting executable.
-    :param scontrol: Slurm control executable, used only to discover the cluster name.
-    :param cluster: Fixed Slurm cluster name.
-    :param slurm_conf: Fixed Slurm configuration file.
-    :param max_submissions: Maximum accepted manager submissions of the enrollment.
-    """
-
-    bwrap: Path | None = None
-    python: Path | None = None
-    sbatch: Path | None = None
-    squeue: Path | None = None
-    scancel: Path | None = None
-    sacct: Path | None = None
-    scontrol: Path | None = None
-    cluster: str | None = None
-    slurm_conf: Path | None = None
-    max_submissions: int | None = None
+    launchers: tuple[str, ...]
+    authorized_keys: tuple[str, ...]
+    bwrap: Path
+    python: Path
+    sbatch: Path
+    squeue: Path
+    scancel: Path
+    sacct: Path | None
+    slurm_conf: Path | None
+    max_submissions: int
+    force: bool
 
 
 def _read_bounded(path: Path, limit: int, *, protected: bool = False) -> bytes:
@@ -168,10 +164,8 @@ def _running_python() -> Path:
         return executable
 
 
-def _effective_slurm_conf(declared: Path | None) -> Path | None:
+def _effective_slurm_conf() -> Path | None:
     # The operator environment is trusted at setup; the broker later uses only this fixed file.
-    if declared is not None:
-        return declared
     environment = os.environ.get("SLURM_CONF")
     if environment and Path(environment).is_absolute() and os.path.isfile(environment):
         return Path(environment)
@@ -282,13 +276,8 @@ def _check_resources(settings: Mapping[str, object], *, force: bool) -> None:
         _time_minutes(time_limit, force=force)
 
 
-def _packaged_slurm_launcher() -> bytes:
-    source = importlib.resources.files("httk.workflow").joinpath("launch_templates", "slurm", LAUNCHER_EXECUTABLE)
-    return source.read_bytes()
-
-
 def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -> ApprovedLauncher:
-    """Read one global ``slurm`` launcher bundle and freeze its approved content; never execute it."""
+    """Read one global ``slurm`` launcher bundle and freeze its approved settings; never execute it."""
 
     if type(name) is not str or _LAUNCHER_NAME.fullmatch(name) is None:
         raise ValueError(f"daemon launcher names must match {_LAUNCHER_NAME.pattern}: {name!r}")
@@ -309,16 +298,13 @@ def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -
         )
     settings = _validate_launcher_metadata(bundle, metadata, check_binaries=False).get("settings", {})
     assert isinstance(settings, Mapping)
-    executable = _read_bounded(bundle / LAUNCHER_EXECUTABLE, _MAX_LAUNCHER_BYTES, protected=True)
-    if executable != _packaged_slurm_launcher():
-        raise ValueError(f"launcher {name!r} must keep the packaged slurm launcher executable unchanged")
     if settings.get("manager.confine") != "bwrap":
         raise ValueError(f"launcher {name!r} must set manager.confine=bwrap: the daemon starts only confined managers")
     confine_settings(settings)
     _check_resources(settings, force=force)
-    content = {"launcher_json": metadata, "launcher_sha256": hashlib.sha256(executable).hexdigest()}
+    # The broker submits through the installed launch runtime and never runs the bundle's executable.
     return ApprovedLauncher(
-        name, tuple(sorted(settings.items())), hashlib.sha256(_canonical_bytes(content)).hexdigest()
+        name, tuple(sorted(settings.items())), hashlib.sha256(_canonical_bytes(metadata)).hexdigest()
     )
 
 
@@ -412,52 +398,114 @@ def _cluster(cluster: str | None, slurm_conf: Path | None, scontrol: Path | None
     return discovered
 
 
-class _BrokerFields(TypedDict):
-    bwrap: Path
-    python: Path
-    sbatch: Path
-    squeue: Path
-    scancel: Path
-    sacct: Path | None
-    cluster: str
-    slurm_conf: Path | None
-    max_submissions: int
+def _setting(key: str, value: str) -> object:
+    """Return the stored form of one ``--set`` value; executables resolve and relative paths anchor to the cwd."""
+
+    if key in _LIST_KEYS:
+        return value.split(",") if value else []
+    if key in _OPTIONAL_KEYS and not value:
+        return None
+    if not value:
+        raise ValueError(f"daemon configuration {key} requires a value")
+    if key == "max_submissions":
+        return _positive_integer(value, key, _HARD_LIMIT)
+    if key == "force":
+        if value not in ("true", "false"):
+            raise ValueError(f"daemon configuration force must be true or false: {value!r}")
+        return value == "true"
+    if key == "cluster":
+        return value
+    path = _anchored(Path(value), key)
+    return str(path if key in ("slurm_conf", "scontrol") else _resolve_executable(path, key))
 
 
-def _broker_fields(options: BrokerOptions, stored: Policy | None) -> _BrokerFields:
-    """Resolve the enrollment-held broker configuration: given values win, then stored ones, then discovery."""
+def _apply(document: dict[str, object], changes: Sequence[tuple[str, str]], keys: tuple[str, ...]) -> None:
+    """Apply ``(operation, "KEY=VALUE")`` changes in order, where operation is ``set``, ``add`` or ``remove``."""
 
-    if stored is not None:
-        slurm_conf = stored.slurm_conf if options.slurm_conf is None else options.slurm_conf
-        # Only a new cluster or Slurm configuration rediscovers the cluster, which reload refuses to change.
-        rediscover = options.cluster is not None or options.slurm_conf is not None
-        cluster = _cluster(options.cluster, slurm_conf, options.scontrol) if rediscover else stored.cluster
-        return {
-            "bwrap": stored.bwrap if options.bwrap is None else _resolve_executable(options.bwrap, "bwrap"),
-            "python": stored.python if options.python is None else _resolve_executable(options.python, "python"),
-            "sbatch": stored.sbatch if options.sbatch is None else _resolve_executable(options.sbatch, "sbatch"),
-            "squeue": stored.squeue if options.squeue is None else _resolve_executable(options.squeue, "squeue"),
-            "scancel": stored.scancel if options.scancel is None else _resolve_executable(options.scancel, "scancel"),
-            "sacct": stored.sacct if options.sacct is None else _resolve_executable(options.sacct, "sacct"),
-            "cluster": cluster,
-            "slurm_conf": slurm_conf,
-            "max_submissions": stored.max_submissions if options.max_submissions is None else options.max_submissions,
-        }
-    slurm_conf = _effective_slurm_conf(options.slurm_conf)
-    return {
-        "bwrap": _resolve_executable(options.bwrap, "bwrap"),
-        "python": _running_python() if options.python is None else _resolve_executable(options.python, "python"),
-        "sbatch": _resolve_executable(options.sbatch, "sbatch"),
-        "squeue": _resolve_executable(options.squeue, "squeue"),
-        "scancel": _resolve_executable(options.scancel, "scancel"),
-        # Reporting only: no sacct on PATH is not an error, but a given --sacct must exist.
-        "sacct": None
-        if options.sacct is None and shutil.which("sacct") is None
-        else _resolve_executable(options.sacct, "sacct"),
-        "cluster": _cluster(options.cluster, slurm_conf, options.scontrol),
-        "slurm_conf": slurm_conf,
-        "max_submissions": _DEFAULT_MAX_SUBMISSIONS if options.max_submissions is None else options.max_submissions,
-    }
+    for operation, item in changes:
+        key, separator, value = item.partition("=")
+        if not separator:
+            raise ValueError(f"--{operation} expects KEY=VALUE: {item!r}")
+        if key not in keys:
+            if key in INITIALIZE_KEYS:
+                raise ValueError(f"{key} is fixed by the enrollment; changing it requires a new enrollment")
+            raise ValueError(f"unknown daemon configuration key {key!r}; valid keys: {', '.join(keys)}")
+        if operation == "set":
+            document[key] = _setting(key, value)
+            continue
+        if key not in _LIST_KEYS:
+            raise ValueError(f"--{operation} applies only to the list keys {' and '.join(_LIST_KEYS)}: {key}")
+        current = document[key]
+        assert isinstance(current, list)
+        if operation == "add" and value not in current:
+            current.append(value)
+        elif operation == "remove":
+            if value not in current:
+                raise ValueError(f"daemon configuration {key} does not contain {value!r}")
+            current.remove(value)
+
+
+def _discover(document: dict[str, object]) -> None:
+    """Fill the configuration values ``init`` was not given from the operator environment."""
+
+    for key in _EXECUTABLE_KEYS:
+        if key not in document:
+            document[key] = str(_running_python() if key == "python" else _resolve_executable(None, key))
+    if "sacct" not in document:
+        # Reporting only: no sacct on PATH is not an error, but a given sacct must exist.
+        document["sacct"] = None if shutil.which("sacct") is None else str(_resolve_executable(None, "sacct"))
+    if "slurm_conf" not in document:
+        slurm_conf = _effective_slurm_conf()
+        document["slurm_conf"] = None if slurm_conf is None else str(slurm_conf)
+    document.setdefault("max_submissions", _DEFAULT_MAX_SUBMISSIONS)
+    document.setdefault("force", False)
+
+
+def _configuration_document(configuration: _Configuration) -> dict[str, object]:
+    document: dict[str, object] = {"format": _CONFIGURATION_FORMAT, "format_version": _CONFIGURATION_VERSION}
+    for key in CONFIGURATION_KEYS:
+        value = getattr(configuration, key)
+        document[key] = list(value) if isinstance(value, tuple) else str(value) if isinstance(value, Path) else value
+    return document
+
+
+def _stored_path(document: Mapping[str, object], key: str) -> Path:
+    value = document[key]
+    if type(value) is not str or "\0" in value or not os.path.isabs(value):
+        raise ValueError(f"daemon configuration {key} must be an absolute path")
+    return Path(value)
+
+
+def _stored_list(document: Mapping[str, object], key: str) -> tuple[str, ...]:
+    value = document[key]
+    if type(value) is not list or any(type(item) is not str for item in value):
+        raise ValueError(f"daemon configuration {key} must be a list of strings")
+    return tuple(value)
+
+
+def _configuration(document: Mapping[str, object]) -> _Configuration:
+    """Validate one configuration document, as stored or as ``init`` and ``configure`` assembled it."""
+
+    if set(document) != {"format", "format_version", *CONFIGURATION_KEYS}:
+        raise ValueError("daemon configuration fields are missing or unknown")
+    if document["format"] != _CONFIGURATION_FORMAT or document["format_version"] != _CONFIGURATION_VERSION:
+        raise ValueError("unsupported daemon configuration format or version")
+    max_submissions, force = document["max_submissions"], document["force"]
+    if type(max_submissions) is not int or type(force) is not bool:
+        raise ValueError("daemon configuration max_submissions must be an integer and force a boolean")
+    return _Configuration(
+        launchers=_stored_list(document, "launchers"),
+        authorized_keys=_stored_list(document, "authorized_keys"),
+        bwrap=_stored_path(document, "bwrap"),
+        python=_stored_path(document, "python"),
+        sbatch=_stored_path(document, "sbatch"),
+        squeue=_stored_path(document, "squeue"),
+        scancel=_stored_path(document, "scancel"),
+        sacct=None if document["sacct"] is None else _stored_path(document, "sacct"),
+        slurm_conf=None if document["slurm_conf"] is None else _stored_path(document, "slurm_conf"),
+        max_submissions=max_submissions,
+        force=force,
+    )
 
 
 def _compile(
@@ -466,22 +514,20 @@ def _compile(
     state: Path,
     snapshots: Path,
     enrollment_id: str,
-    launchers: Sequence[str],
-    authorized_keys: Sequence[str],
-    *,
-    options: BrokerOptions,
-    stored: Policy | None = None,
-    force: bool,
+    cluster: str,
+    configuration: _Configuration,
 ) -> Policy:
+    launchers = configuration.launchers
     if not launchers:
         raise ValueError("at least one daemon launcher is required")
-    if not authorized_keys:
+    if not configuration.authorized_keys:
         raise ValueError("at least one authorized key is required")
     if len(set(launchers)) != len(launchers):
         raise ValueError("daemon launcher names must be unique")
     # In name order, the order of the canonical snapshot document.
     approved = tuple(
-        _approved_launcher(name, (exchange.parent, state, snapshots), force=force) for name in sorted(launchers)
+        _approved_launcher(name, (exchange.parent, state, snapshots), force=configuration.force)
+        for name in sorted(launchers)
     )
     policy = Policy(
         workspace=workspace,
@@ -491,8 +537,16 @@ def _compile(
         state=state,
         snapshots=snapshots,
         launchers=approved,
-        authorized_keys=_runtime_authorized_keys(tuple(authorized_keys)),
-        **_broker_fields(options, stored),
+        authorized_keys=_runtime_authorized_keys(configuration.authorized_keys),
+        bwrap=configuration.bwrap,
+        python=configuration.python,
+        sbatch=configuration.sbatch,
+        squeue=configuration.squeue,
+        scancel=configuration.scancel,
+        sacct=configuration.sacct,
+        cluster=cluster,
+        slurm_conf=configuration.slurm_conf,
+        max_submissions=configuration.max_submissions,
     )
     for launcher in approved:
         # Build each submission once now, so a setting the packaged dispatcher refuses fails at approval.
@@ -692,46 +746,88 @@ def _snapshots_default(state: Path) -> Path:
     return state.with_name(state.name + ".snapshots")
 
 
+def _save_configuration(state: Path, configuration: _Configuration) -> None:
+    _write_atomic(state / _CONFIGURATION_FILE, _canonical_bytes(_configuration_document(configuration)))
+
+
+def _load_configuration(policy: Policy) -> _Configuration:
+    try:
+        data = _read_bounded(policy.state / _CONFIGURATION_FILE, _MAX_CONFIGURATION_BYTES, protected=True)
+    except FileNotFoundError:
+        # An enrollment made before the configuration file existed: seed it once from the active snapshot.
+        configuration = _Configuration(
+            launchers=tuple(launcher.name for launcher in policy.launchers),
+            authorized_keys=policy.authorized_keys,
+            bwrap=policy.bwrap,
+            python=policy.python,
+            sbatch=policy.sbatch,
+            squeue=policy.squeue,
+            scancel=policy.scancel,
+            sacct=policy.sacct,
+            slurm_conf=policy.slurm_conf,
+            max_submissions=policy.max_submissions,
+            force=False,
+        )
+        _save_configuration(policy.state, configuration)
+        return configuration
+    return _configuration(_decode_object(data, description="daemon configuration"))
+
+
+def _description(policy: Policy, configuration: _Configuration) -> dict[str, object]:
+    document = _configuration_document(configuration)
+    del document["format"], document["format_version"]
+    return {
+        "workspace": str(policy.workspace),
+        "workspace_id": policy.workspace_id,
+        "enrollment_id": policy.enrollment_id,
+        "exchange": str(policy.exchange),
+        "state": str(policy.state),
+        "snapshots": str(policy.snapshots),
+        "cluster": policy.cluster,
+        "configuration": document,
+    }
+
+
 def initialize(
     workspace: Path,
     *,
     exchange: Path,
-    launchers: Sequence[str],
-    authorized_keys: Sequence[str],
+    changes: Sequence[tuple[str, str]] = (),
     state: Path | None = None,
     snapshots: Path | None = None,
-    force: bool = False,
-    broker: BrokerOptions | None = None,
 ) -> Path:
     """Compile and publish a fresh enrollment from approved global ``slurm`` launchers.
 
+    Configuration values that *changes* does not set are discovered: executables on ``PATH``, the running
+    interpreter, the effective Slurm configuration and its cluster, 128 submissions, and ``force=false``.
+
     :param workspace: Workspace data root.
     :param exchange: Client exchange directory; a missing or empty sibling of the workspace.
-    :param launchers: Names of the approved global ``slurm`` launchers, which become the configurations.
-    :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
+    :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set`` or ``add``, applied in order to
+        ``CONFIGURATION_KEYS`` and ``INITIALIZE_KEYS``; at least one launcher and one key must result.
     :param state: Broker state directory, by default under the httk data home.
     :param snapshots: Snapshot directory, by default ``<state>.snapshots``.
-    :param force: Approve CPU, memory and time requests above the built-in sanity limits.
-    :param broker: Broker configuration; unset values are discovered.
     :return: Path of the published runtime snapshot.
-    :raises ValueError: If a launcher, key or the layout is refused.
+    :raises ValueError: If a launcher, key, configuration value or the layout is refused.
     """
 
     workspace = workspace.resolve(strict=True)
     exchange = exchange.parent.resolve(strict=True) / exchange.name
     state = _state_default(workspace) if state is None else state
     snapshots = _snapshots_default(state) if snapshots is None else snapshots
-    policy = _compile(
-        workspace,
-        exchange,
-        state,
-        snapshots,
-        secrets.token_hex(16),
-        launchers,
-        authorized_keys,
-        options=BrokerOptions() if broker is None else broker,
-        force=force,
-    )
+    document: dict[str, object] = {
+        "format": _CONFIGURATION_FORMAT,
+        "format_version": _CONFIGURATION_VERSION,
+        "launchers": [],
+        "authorized_keys": [],
+    }
+    _apply(document, changes, (*CONFIGURATION_KEYS, *INITIALIZE_KEYS))
+    cluster, scontrol = document.pop("cluster", None), document.pop("scontrol", None)
+    assert (cluster is None or isinstance(cluster, str)) and (scontrol is None or isinstance(scontrol, str))
+    _discover(document)
+    configuration = _configuration(document)
+    cluster = _cluster(cluster, configuration.slurm_conf, None if scontrol is None else Path(scontrol))
+    policy = _compile(workspace, exchange, state, snapshots, secrets.token_hex(16), cluster, configuration)
     home = data_home().resolve()
     if _overlap(policy.root, home):
         raise ValueError(f"daemon parent {policy.root} must be disjoint from the httk data home {home}")
@@ -753,6 +849,7 @@ def initialize(
         _mkdir_exclusive(exchange / name)
     for directory in (state, snapshots, policy.jobs):
         _mkdir_exclusive(directory)
+    _save_configuration(state, configuration)
     initialize_response_seed(state)
     with Ledger(
         state,
@@ -764,13 +861,16 @@ def initialize(
     ):
         snapshot = _publish(policy)
         _write_endpoint(policy)
-        # Last: a failed --initialize leaves no enrolled workspace without a daemon. From here on every
+        # Last: a failed init leaves no enrolled workspace without a daemon. From here on every
         # manager of the workspace must be confined.
         _write_enrollment(workspace, policy)
         return snapshot
 
 
-def _active(workspace: Path, state: Path, snapshots: Path | None = None) -> tuple[Path, Policy, str]:
+def _active(workspace: Path, state: Path | None, snapshots: Path | None) -> tuple[Path, Policy, str]:
+    workspace = workspace.resolve(strict=True)
+    state = _state_default(workspace) if state is None else state
+    _validate_private_directory(state)
     snapshot, digest = read_active_snapshot(state)
     policy = load_policy(snapshot)
     verify_active_snapshot(state, snapshot, policy)
@@ -781,102 +881,115 @@ def _active(workspace: Path, state: Path, snapshots: Path | None = None) -> tupl
     return snapshot, policy, digest
 
 
-def active_policy_path(workspace: Path, *, state: Path | None = None, snapshots: Path | None = None) -> Path:
-    """Return the saved active runtime snapshot for ordinary daemon startup.
+def _recompile(active: Policy, configuration: _Configuration) -> Policy:
+    """Compile *configuration* against the current launcher bundles and the fixed enrollment connection."""
+
+    policy = _compile(
+        active.workspace,
+        active.exchange,
+        active.state,
+        active.snapshots,
+        active.enrollment_id,
+        active.cluster,
+        configuration,
+    )
+    if policy.workspace_id != active.workspace_id:
+        raise ValueError("the workspace identity changed since the enrollment; a new enrollment is required")
+    _runtime_policy_bytes(policy)
+    return policy
+
+
+def describe(workspace: Path, *, state: Path | None = None, snapshots: Path | None = None) -> dict[str, object]:
+    """Describe the fixed enrollment connection and the saved daemon configuration.
 
     :param workspace: Workspace data root.
     :param state: Broker state directory when not the default.
     :param snapshots: Expected snapshot directory, checked when given.
-    :return: Path of the active runtime snapshot.
+    :return: JSON-compatible description with the configuration under ``configuration``.
     """
 
-    workspace = workspace.resolve(strict=True)
-    return _active(workspace, _state_default(workspace) if state is None else state, snapshots)[0]
+    _snapshot, active, _digest = _active(workspace, state, snapshots)
+    return _description(active, _load_configuration(active))
 
 
-def _fixed_connection(old: Policy, new: Policy) -> None:
-    fields = (
-        "workspace",
-        "workspace_id",
-        "enrollment_id",
-        "exchange",
-        "state",
-        "snapshots",
-        # Recorded jobs are bound to the cluster; Slurm client paths and slurm.conf may change.
-        "cluster",
-    )
-    changed = [name for name in fields if getattr(old, name) != getattr(new, name)]
-    if changed:
-        raise ValueError(
-            f"reload cannot change the fixed enrollment connection: {', '.join(changed)}; a new enrollment is required"
-        )
-
-
-def reload(
+def configure(
     workspace: Path,
+    changes: Sequence[tuple[str, str]],
     *,
-    launchers: Sequence[str] | None = None,
-    authorized_keys: Sequence[str] | None = None,
     state: Path | None = None,
     snapshots: Path | None = None,
-    force: bool = False,
-    broker: BrokerOptions | None = None,
-) -> Path:
-    """Recompile the enrollment and atomically activate the replacement snapshot.
+) -> dict[str, object]:
+    """Change the saved daemon configuration after compiling the result as activation would.
 
-    Every approved launcher is read and frozen again, so edits to a bundle take effect only here.
+    Nothing is published: the daemon activates the configuration when it next starts.
 
     :param workspace: Workspace data root.
-    :param launchers: Replacement launcher names, or ``None`` to keep the active launcher names.
-    :param authorized_keys: Replacement authorized keys, or ``None`` to keep the active keys.
+    :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set``, ``add`` or ``remove``,
+        applied in order to ``CONFIGURATION_KEYS``.
     :param state: Broker state directory when not the default.
-    :param snapshots: Snapshot directory when not ``<state>.snapshots``.
-    :param force: Approve CPU, memory and time requests above the built-in sanity limits.
-    :param broker: Replacement broker configuration; unset values keep the active ones.
-    :return: Path of the newly activated runtime snapshot.
-    :raises ValueError: If a launcher or key is refused or the fixed connection would change.
+    :param snapshots: Expected snapshot directory, checked when given.
+    :return: The resulting description, as ``describe`` returns it.
+    :raises ValueError: If a change or the resulting configuration is refused; nothing is then saved.
     """
 
-    workspace = workspace.resolve(strict=True)
-    state = _state_default(workspace) if state is None else state
-    snapshots = _snapshots_default(state) if snapshots is None else snapshots
-    _validate_private_directory(state)
-    old_snapshot, old, old_digest = _active(workspace, state)
-    new = _compile(
-        workspace,
-        old.exchange,
-        state,
-        snapshots,
-        old.enrollment_id,
-        [launcher.name for launcher in old.launchers] if launchers is None else launchers,
-        old.authorized_keys if authorized_keys is None else authorized_keys,
-        options=BrokerOptions() if broker is None else broker,
-        stored=old,
-        force=force,
-    )
-    _runtime_policy_bytes(new)
-    _fixed_connection(old, new)
-    _validate_private_directory(snapshots)
+    _snapshot, active, _digest = _active(workspace, state, snapshots)
+    document = _configuration_document(_load_configuration(active))
+    _apply(document, changes, CONFIGURATION_KEYS)
+    configuration = _configuration(document)
+    _recompile(active, configuration)
+    _save_configuration(active.state, configuration)
+    return _description(active, configuration)
+
+
+def activate(
+    workspace: Path, *, state: Path | None = None, snapshots: Path | None = None
+) -> tuple[Path, tuple[str, ...] | None]:
+    """Compile the saved configuration from the current launcher bundles and activate it when it changed.
+
+    The directories, workspace staging and enrollment marker are recreated when missing. An unchanged
+    compilation publishes nothing and takes no lock; a changed one is published under the ledger lock,
+    which a running daemon holds.
+
+    :param workspace: Workspace data root.
+    :param state: Broker state directory when not the default.
+    :param snapshots: Expected snapshot directory, checked when given.
+    :return: The active runtime snapshot, and the names of the launchers whose approval changed, or
+        ``None`` when the active snapshot already matched.
+    :raises ValueError: If the configuration is refused or a running daemon holds the ledger.
+    """
+
+    old_snapshot, old, old_digest = _active(workspace, state, snapshots)
+    new = _recompile(old, _load_configuration(old))
+    _validate_private_directory(old.snapshots)
     _mkdir_exclusive(new.jobs, exist_ok=True)
     for name in _REPORT_DIRECTORIES:
         _mkdir_exclusive(new.exchange / name, exist_ok=True)
-    _create_staging(workspace)
-    check_layout(new)
-    _write_enrollment(workspace, new, replace=False)
-    with Ledger(
-        old.state,
-        old.workspace_id,
-        old.enrollment_id,
-        max_records=old.max_records,
-        max_submissions=old.max_submissions,
-    ):
-        current_snapshot, current_digest = read_active_snapshot(state)
-        if current_snapshot != old_snapshot or current_digest != old_digest:
-            raise ValueError("active daemon approval changed while reload was waiting for its lock")
-        verify_active_snapshot(state, old_snapshot, old)
+    _create_staging(new.workspace)
+    _write_enrollment(new.workspace, new, replace=False)
+    if _runtime_policy_bytes(new) == _runtime_policy_bytes(old):
+        return old_snapshot, None
+    try:
+        ledger = Ledger(
+            old.state,
+            old.workspace_id,
+            old.enrollment_id,
+            max_records=old.max_records,
+            max_submissions=old.max_submissions,
+        )
+    except OSError as exc:
+        if isinstance(exc.__cause__, BlockingIOError):
+            raise ValueError(
+                "the daemon configuration changed, but the daemon is running; stop it and start it again "
+                "to activate the change"
+            ) from exc
+        raise
+    with ledger:
+        if read_active_snapshot(old.state) != (old_snapshot, old_digest):
+            raise ValueError("the active daemon snapshot changed while activation was waiting for its lock")
+        verify_active_snapshot(old.state, old_snapshot, old)
         snapshot = _publish(new)
         _write_endpoint(new)
-        return snapshot
+    return snapshot, tuple(sorted({launcher.name for launcher in set(old.launchers) ^ set(new.launchers)}))
 
 
-__all__ = ["BrokerOptions", "active_policy_path", "initialize", "reload"]
+__all__ = ["CONFIGURATION_KEYS", "INITIALIZE_KEYS", "activate", "configure", "describe", "initialize"]

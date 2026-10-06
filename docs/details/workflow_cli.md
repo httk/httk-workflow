@@ -16,7 +16,7 @@ action is reported by its group.
 ## The command tree
 
 ```text
-httk workspace          init | adopt | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock | seal | unseal | daemon
+httk workspace          init | adopt | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock | seal | unseal | daemon init | daemon configure | daemon show | daemon check | daemon run
 httk job                 new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug | transfer
 httk collect             [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list       [--json]
@@ -68,7 +68,11 @@ remote workspace for execution.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workspace init [OPTIONS] PATH...` | create or adopt workspaces, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
-| `workspace daemon WORKSPACE` | set up or run the confined Slurm broker serving an exchange directory | `--initialize`, `--reload`, `--check`, `--once`, `--exchange`, `--launcher` (repeatable; a global `slurm` launcher that sets `manager.confine=bwrap`), `--authorize` (repeatable), `--state`, `--snapshots`, `--force` (approve resources above the sanity limits); broker configuration for `--initialize` and `--reload`: `--bwrap`, `--python`, `--sbatch`, `--squeue`, `--scancel`, `--sacct`, `--scontrol`, `--cluster`, `--slurm-conf`, `--max-submissions` |
+| `workspace daemon init WORKSPACE` | approve global `slurm` launchers and enroll a workspace with a new exchange directory, then check the sandbox | required `--exchange`; `--set KEY=VALUE`, `--add KEY=VALUE` (repeatable; keys as for `configure`, plus `cluster` and `scontrol`), `--state`, `--snapshots` |
+| `workspace daemon configure WORKSPACE` | change the daemon configuration, activated when the daemon next starts | `--set KEY=VALUE`, `--add KEY=VALUE`, `--remove KEY=VALUE` (repeatable; lists `launchers`, `authorized_keys`; `bwrap`, `python`, `sbatch`, `squeue`, `scancel`, `sacct`, `slurm_conf`, `max_submissions`, `force`), `--state`, `--snapshots` |
+| `workspace daemon show WORKSPACE` | describe the enrollment and its daemon configuration | `--json`, `--state`, `--snapshots` |
+| `workspace daemon check WORKSPACE` | activate the configuration and check the real sandbox and scheduler clients | `--state`, `--snapshots` |
+| `workspace daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker serving the exchange | `--once`, `--state`, `--snapshots` |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |

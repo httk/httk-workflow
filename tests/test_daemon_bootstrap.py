@@ -357,7 +357,7 @@ def test_layout_is_rechecked_before_every_sandbox_entry(tmp_path: Path) -> None:
     (Path(policy["workspace"]) / ".httk-workspace/exchange").rmdir()
     result = _run(tmp_path, policy_path, arguments)
     assert result.returncode == 2
-    assert "workspace staging directory" in result.stderr and "--reload" in result.stderr
+    assert "workspace staging directory" in result.stderr and "httk workspace daemon run" in result.stderr
     assert not record.exists()
 
 

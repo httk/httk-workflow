@@ -129,7 +129,7 @@ class ApprovedLauncher:
 
     :param name: Launcher name, which daemon requests use as their configuration name.
     :param settings: The bundle's ``settings`` as sorted key/value pairs, exactly as approved.
-    :param digest: SHA-256 of the canonical bundle content: ``launcher.json`` and the launcher executable.
+    :param digest: SHA-256 of the canonical ``launcher.json`` content of the bundle.
     """
 
     name: str
@@ -625,8 +625,8 @@ def check_layout(policy: Policy, *, probe: bool = True) -> None:
             staging = _open_directory(Path(".httk-workspace", "exchange"), workspace)
         except FileNotFoundError as exc:
             raise ValueError(
-                f"workspace staging directory {staging_path} is missing; recreate it with "
-                "'httk workspace daemon WORKSPACE --reload'"
+                f"workspace staging directory {staging_path} is missing; restarting with "
+                "'httk workspace daemon run WORKSPACE' recreates it"
             ) from exc
         descriptors.append(staging)
         if not probe:

@@ -74,10 +74,13 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Site:
     snapshot = _daemon_setup.initialize(
         server.root,
         exchange=root / "exchange",
-        launchers=["confined"],
-        authorized_keys=[AUTHORIZED_KEY],
+        changes=[
+            ("add", "launchers=confined"),
+            ("add", f"authorized_keys={AUTHORIZED_KEY}"),
+            ("set", "cluster=test-cluster"),
+            ("set", "slurm_conf="),
+        ],
         state=tmp_path / "state",
-        broker=_daemon_setup.BrokerOptions(cluster="test-cluster", slurm_conf=None),
     )
     policy = load_policy(snapshot)
     public_key = str(read_endpoint(policy.exchange)["daemon_public_key"])

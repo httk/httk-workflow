@@ -195,8 +195,8 @@ $ httk workflow remote check confined
 
 The remote's settings are `exchange` and the pinned `daemon_workspace_id`,
 `daemon_enrollment_id` and `daemon_public_key`. Approved configuration digests
-and the request lifetime are read live from `endpoint.json`, so a daemon
-`--reload` needs no reconfiguration; a changed identity is refused. Configure
+and the request lifetime are read live from `endpoint.json`, so a changed
+daemon configuration needs no reconfiguration; a changed identity is refused. Configure
 an *httk* identity whose public key the daemon authorizes. `configure` publishes
 nothing. `check` sends a signed health request; it checks a broker response and
 does not establish compute-node readiness.

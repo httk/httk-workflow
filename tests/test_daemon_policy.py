@@ -600,7 +600,7 @@ def test_check_layout_without_probe_still_checks_the_parent(tmp_path: Path, monk
 def test_check_layout_reports_a_missing_staging_directory(tmp_path: Path) -> None:
     policy = _layout_policy(tmp_path)
     (tmp_path / "site/workspace/.httk-workspace/exchange").rmdir()
-    with pytest.raises(ValueError, match="staging directory .* is missing; .*--reload"):
+    with pytest.raises(ValueError, match="staging directory .* is missing; restarting with .*daemon run WORKSPACE"):
         check_layout(policy)
 
 
