@@ -278,15 +278,14 @@ class SlurmScheduler:
         if any(share.procs <= 0 and share.gpus > 0 for share in placement.nodes):
             raise ValueError("cannot launch a GPU share without processor slots")
         shares = tuple(share for share in placement.nodes if share.procs > 0)
-        hosts = ",".join(share.host for share in shares)
         gpus = sum(share.gpus for share in shares)
+        # The per-task SLURM_HOSTFILE alone names the hosts and the layout: srun rejects --nodes with the
+        # arbitrary distribution, and a --nodelist would replace the hostfile with one entry per node.
         argv = [
             "env",
             f"SLURM_HOSTFILE={nodefile}",
             "srun",
-            f"--nodes={len(shares)}",
             f"--ntasks={tasks}",
-            f"--nodelist={hosts}",
             "--distribution=arbitrary",
             "--exact",
             f"--cpus-per-task={cpus_per_proc}",

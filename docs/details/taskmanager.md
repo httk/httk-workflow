@@ -751,8 +751,8 @@ needs quoting, so `$HTTK_WORKFLOW_LAUNCH vasp_std` usually works there too. Insi
 is
 
 ```text
-env SLURM_HOSTFILE=NODEFILE srun --nodes=N --ntasks=T --nodelist=HOSTS
-     --distribution=arbitrary --exact --cpus-per-task=C
+env SLURM_HOSTFILE=NODEFILE srun --ntasks=T --distribution=arbitrary
+     --exact --cpus-per-task=C
      [--mem=MBM | --mem-per-cpu=MBM] [--gpus=G | --gres=none]
 ```
 
@@ -763,7 +763,10 @@ the processor slots it will use. The default Slurm prefix rejects a mixed
 placement with GPUs on a node without processor slots. The prefix sets `SLURM_HOSTFILE` to the
 nodefile for its own `srun` only, so the arbitrary distribution places exactly
 the reserved tasks on each node while any other `srun` the runner starts is
-unaffected. `--cpus-per-task` repeats the
+unaffected. The hostfile alone names the nodes: `srun` refuses `--nodes` with
+the arbitrary distribution, and a `--nodelist` would replace the hostfile, so
+the prefix passes neither (a custom `manager.launch_template` using
+`--distribution=arbitrary` must not either). `--cpus-per-task` repeats the
 allocation's normalized CPUs per processor slot, captured by the probe when
 the manager starts. A one-node attempt with `mem` gets `--mem` (its share); a multi-node
 one gets `--mem-per-cpu`, its `mem` divided over its tasks' CPUs and rounded

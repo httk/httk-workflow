@@ -336,12 +336,12 @@ def test_nodefile_and_launch_prefix() -> None:
     # b's memory is unknown, so a multi-node step gets no memory option.
     assert render_launch(placement, kind="slurm", template=None, nodefile="/n") == [
         *srun,
-        *("--nodes=2", "--ntasks=3", "--nodelist=a,b", *layout, "--cpus-per-task=1", "--gpus=1"),
+        *("--ntasks=3", *layout, "--cpus-per-task=1", "--gpus=1"),
     ]
     single = Placement((NodeShare("a", 4, 900, 0, None, None, True),), None)
     assert render_launch(single, kind="slurm", template=None, nodefile="/n", gpus_present=True) == [
         *srun,
-        *("--nodes=1", "--ntasks=4", "--nodelist=a", *layout, "--cpus-per-task=1", "--mem=900M", "--gres=none"),
+        *("--ntasks=4", *layout, "--cpus-per-task=1", "--mem=900M", "--gres=none"),
     ]
     # Several nodes: memory per CPU, rounded up, over every task's CPUs.
     spread = Placement(
@@ -349,7 +349,7 @@ def test_nodefile_and_launch_prefix() -> None:
     )
     assert render_launch(spread, kind="slurm", template=None, nodefile="/n", cpus_per_proc=2) == [
         *srun,
-        *("--nodes=2", "--ntasks=4", "--nodelist=a,b", *layout),
+        *("--ntasks=4", *layout),
         *("--cpus-per-task=2", "--mem-per-cpu=125M"),
     ]
     default = render_launch(spread, kind="slurm", template=None, nodefile="/n")
@@ -557,7 +557,7 @@ def test_slurm_allocation_gets_an_srun_prefix(tmp_path: Path) -> None:
         seen = campaign.seen(manager, "mpi")
         nodefile = seen["binding"]["nodefile"]
         assert str(seen["env"]["HTTK_WORKFLOW_LAUNCH"]).startswith(
-            f"env SLURM_HOSTFILE={nodefile} srun --nodes=2 --ntasks=8 --nodelist="
+            f"env SLURM_HOSTFILE={nodefile} srun --ntasks=8 --distribution=arbitrary "
         )
         # Only the prefix's own srun reads the hostfile; the runner's environment does not carry it.
         assert seen["env"]["SLURM_HOSTFILE"] is None

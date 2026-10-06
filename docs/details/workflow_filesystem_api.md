@@ -1686,7 +1686,7 @@ path of a file in the attempt control directory holding one host line per
 processor slot (one line for a node given no processor slot); `file`, the
 absolute path of `binding.json` in the same directory; and, when a launch
 prefix applies, `launch`, the argument vector to put before a parallel command
-(such as `env SLURM_HOSTFILE=... srun --nodes=2 ...`). `binding.json` holds the same object without
+(such as `env SLURM_HOSTFILE=... srun --ntasks=8 ...`). `binding.json` holds the same object without
 `file`, with each node's `gpu_ids` and `cpus` (the cpulists of its processor
 slots) added when known; they are kept out of the context so that it stays
 within its size limit. The built-in Slurm prefix starts with
