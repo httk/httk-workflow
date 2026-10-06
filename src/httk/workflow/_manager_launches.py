@@ -118,6 +118,7 @@ class LaunchContext:
     :param gpus_present: Whether the allocation has GPUs.
     :param cpus_per_proc: The allocation's CPUs per processor slot.
     :param mem: The attempt's ``mem`` requirement, or ``None``.
+    :param mpi: The effective ``manager.launch_mpi`` plugin of the scheduler default, or ``None``.
     :param confinement: The rank sandbox settings.
     """
 
@@ -127,6 +128,7 @@ class LaunchContext:
     gpus_present: bool
     cpus_per_proc: int
     mem: int | None
+    mpi: str | None
     confinement: LaunchConfinement
 
 
@@ -632,6 +634,7 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
                 gpus_present=context.gpus_present,
                 cpus_per_proc=context.cpus_per_proc,
                 mem=context.mem,
+                mpi=context.mpi,
             )
             if not prefix:
                 raise ValueError("the launch template renders no launch prefix")

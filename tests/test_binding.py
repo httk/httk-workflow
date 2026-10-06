@@ -368,6 +368,10 @@ def test_nodefile_and_launch_prefix() -> None:
         "mem" in item for item in render_launch(one, kind="slurm", template=None, nodefile="/n", mem=0) or []
     )
     assert render_launch(single, kind="host", template=None, nodefile="/n") is None
+    # manager.launch_mpi goes right after srun on the default step; a template owns its argv and ignores it.
+    mpi = render_launch(single, kind="slurm", template=None, nodefile="/n", mpi="pmi2")
+    assert mpi is not None and mpi[:5] == [*srun, "--mpi=pmi2", "--ntasks=4"]
+    assert render_launch(single, kind="slurm", template="run {procs}", nodefile="/n", mpi="pmi2") == ["run", "4"]
     placement = Placement(shares, None)
     template = "mpirun -np {procs} --hostfile {nodefile} -x OMP={cpus_per_proc} --host '{hosts}' {mem}"
     assert render_launch(placement, kind="host", template=template, nodefile="/n") == [
@@ -562,6 +566,20 @@ def test_slurm_allocation_gets_an_srun_prefix(tmp_path: Path) -> None:
         # Only the prefix's own srun reads the hostfile; the runner's environment does not carry it.
         assert seen["env"]["SLURM_HOSTFILE"] is None
         assert seen["binding"]["launch"][:3] == ["env", f"SLURM_HOSTFILE={nodefile}", "srun"]
+        campaign.finish(manager, "mpi")
+
+
+@pytest.mark.timing
+def test_launch_mpi_setting_adds_the_srun_mpi_plugin(tmp_path: Path) -> None:
+    campaign = _Campaign(tmp_path)
+    campaign.workspace.set_setting("manager.launch_mpi", "pmi2")
+    campaign.submit("mpi", procs=8)
+    with _manager(campaign, kind="slurm") as manager:
+        seen = campaign.seen(manager, "mpi")
+        nodefile = seen["binding"]["nodefile"]
+        assert str(seen["env"]["HTTK_WORKFLOW_LAUNCH"]).startswith(
+            f"env SLURM_HOSTFILE={nodefile} srun --mpi=pmi2 --ntasks=8 "
+        )
         campaign.finish(manager, "mpi")
 
 

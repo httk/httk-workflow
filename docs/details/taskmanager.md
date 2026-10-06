@@ -346,6 +346,9 @@ shape the launch:
 - `manager.launch_template`: the argv template for the attempt launch prefix;
   placeholders `{procs}` `{nodes}` `{hosts}` `{nodefile}` `{gpus}` `{mem}`
   `{cpus_per_proc}`.
+- `manager.launch_mpi`: the Slurm MPI plugin appended as `--mpi=<name>` to the
+  built-in Slurm launch step (for example `pmi2` for Intel MPI); ignored when
+  `manager.launch_template` is set.
 - `manager.bind_cpus`: `true`, `1` or `yes` (any case) pins every locally
   executed attempt to the CPUs of its processor slots; anything else, or no
   value, leaves CPU affinity alone; set it before the manager starts (see
@@ -354,8 +357,8 @@ shape the launch:
   [confining attempts](#confining-attempts).
 
 A `slurm` launcher pins its own values of `manager.confine`,
-`manager.launch_template`, `manager.bind_cpus` and `confine.*` on the managers
-it starts with the manager option `--setting KEY=VALUE` (not shown in `--help`;
+`manager.launch_template`, `manager.launch_mpi`, `manager.bind_cpus` and
+`confine.*` on the managers it starts with the manager option `--setting KEY=VALUE` (not shown in `--help`;
 the last occurrence of a key wins). Pinned values override the workspace
 settings and stay fixed for the manager's lifetime; all other workspace
 settings are read live at each claim. See
@@ -751,12 +754,13 @@ needs quoting, so `$HTTK_WORKFLOW_LAUNCH vasp_std` usually works there too. Insi
 is
 
 ```text
-env SLURM_HOSTFILE=NODEFILE srun --ntasks=T --distribution=arbitrary
+env SLURM_HOSTFILE=NODEFILE srun [--mpi=M] --ntasks=T --distribution=arbitrary
      --exact --cpus-per-task=C
      [--mem=MBM | --mem-per-cpu=MBM] [--gpus=G | --gres=none]
 ```
 
-with `T` the nodefile's line count, equal to the reserved processor slots.
+with `T` the nodefile's line count, equal to the reserved processor slots,
+and `M` the workspace setting `manager.launch_mpi` when it is set.
 A share with zero slots adds no task. A reservation with no processor slots
 gets no default scheduler launch prefix; a parallel application must request
 the processor slots it will use. The default Slurm prefix rejects a mixed

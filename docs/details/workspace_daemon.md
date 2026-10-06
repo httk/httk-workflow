@@ -232,7 +232,7 @@ Every start of the daemon (`check` and `run`) reads the listed bundles again
 and freezes their settings, with the digest of their `launcher.json`, into the
 runtime snapshot it serves. The broker submits through the installed *httk*
 and never runs a bundle's `launcher` executable. Each frozen launcher setting `manager.confine`,
-`manager.launch_template`, `manager.bind_cpus` and `confine.*` is pinned on the
+`manager.launch_template`, `manager.launch_mpi`, `manager.bind_cpus` and `confine.*` is pinned on the
 managers it starts and cannot be changed by workspace settings; every other
 workspace setting still applies live inside the manager, as for any manager.
 
@@ -709,12 +709,51 @@ support. Host networking and the PMIx endpoint are service authorities: the
 site must verify that they do not let ranks launch unconfined processes or
 reach other protected services.
 
+### PMI-2 launches (Intel MPI)
+
+Intel MPI under Slurm needs `srun --mpi=pmi2`. Set it on the daemon's approved
+launcher, then restart the daemon so `run` picks up the changed launcher:
+
+```bash
+httk workflow launcher configure --set manager.launch_mpi=pmi2 small
+```
+
+The setting is pinned on the managers the daemon starts, and the built-in
+step becomes `srun --mpi=pmi2 ...`. A `manager.launch_template` owns its argv
+and must contain `--mpi=pmi2` itself.
+
+Slurm's `PMI_FD` socket stays in the rank helper; the rank gets a private
+socket as its `PMI_FD`. The helper relays the PMI-1 simple protocol, which
+Intel MPI speaks over `srun --mpi=pmi2`, one request at a time and only for
+Slurm's PMI-1 commands. `MPI_Comm_spawn` (any `mcmd=` block or `cmd=mcmd`) is
+answered with `cmd=spawn_result rc=-1` and never reaches Slurm, so the
+application sees a spawn error and the rank's launch stderr gets
+`httk-workflow rank: PMI refused MPI_Comm_spawn`.
+
+The relay fails closed. A PMI-2 wire client (for example an application linked
+against Slurm's `libpmi2`), a request over 1024 bytes, any other command, or
+a request containing `mcmd` anywhere (even in a key, value or service name)
+ends the rank's PMI channel with an `httk-workflow rank: PMI refused: ...`
+line, and MPI initialization then fails. A `PMI_FD` that is not a socket
+refuses the launch.
+
+The relay is always on in confined launches with `PMI_FD`; unconfined managers
+are unaffected. Slurm's PMIx plugin does not implement spawn, so
+`--mpi=pmix` needs no filter.
+
+For site acceptance, run the spawn probe (see [Launch
+acceptance](#launch-acceptance)) and a multi-node Intel MPI job, and confirm
+that the sandbox cannot reach the munge socket: keep `/run/munge` and `/run`
+out of `confine.readonly_paths`. A rank that can create munge credentials
+could contact `srun`'s PMI-2 port or `slurmctld` directly.
+
 ### Launch acceptance
 
 Each launch style needs its own site acceptance; none is claimed here:
 
-- the built-in `srun` prefix on a site whose default MPI plugin is PMIx (`confine.pmix_roots` set to the
-  `slurmd` spool parent of the step directories);
+- the built-in `srun` prefix with `manager.launch_mpi=pmi2` for Intel MPI (the rank helper filters PMI-1
+  spawn requests; see [PMI-2 launches](#pmi-2-launches-intel-mpi)) or on a site whose default MPI plugin is PMIx (`confine.pmix_roots`
+  set to the `slurmd` spool parent of the step directories);
 - Open MPI `mpirun`, for example through
   `manager.launch_template=mpirun -np {procs} --hostfile {nodefile}`;
 - NSC `mpprun`;

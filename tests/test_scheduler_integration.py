@@ -39,6 +39,7 @@ def test_scheduler_hooks_supply_capacity_and_normalized_step_metadata(
             gpus_present: bool = False,
             cpus_per_proc: int = 1,
             mem: int | None = None,
+            mpi: str | None = None,
         ) -> list[str]:
             return ["example-run", "--cpus", str(cpus_per_proc), "--nodefile", nodefile]
 

@@ -5,9 +5,11 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -28,6 +30,7 @@ from httk.workflow._launch_protocol import (
     request_relative_path,
     trusted_name,
 )
+from test_pmi_proxy import INIT, REPLIES, SPAWN, serve_slurm
 
 _FAKE_BWRAP = Path(__file__).with_name("fake_bwrap.py")
 _TIMEOUT = 60.0
@@ -462,7 +465,7 @@ def test_shared_memory_root_must_be_safe(launch: _Launch) -> None:
 
 
 def _run_helper(
-    launch: _Launch, environ: dict[str, str] | None = None, *, wait: bool = True
+    launch: _Launch, environ: dict[str, str] | None = None, *, wait: bool = True, pass_fds: tuple[int, ...] = ()
 ) -> subprocess.Popen[bytes]:
     process = subprocess.Popen(
         [sys.executable, "-I", "-m", "httk.workflow._confine_rank", "--launch-dir", str(launch.launch_dir)],
@@ -470,6 +473,7 @@ def _run_helper(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        pass_fds=pass_fds,
     )
     if wait:
         process.wait(timeout=_TIMEOUT)
@@ -642,7 +646,133 @@ def test_inner_exec_refusals(
     assert _exec(launch, monkeypatch) == 2
 
 
-def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
+def test_open_pmi_relay_needs_an_open_socket(tmp_path: Path) -> None:
+    assert _confine_rank.open_pmi_relay({}) is None
+    assert _confine_rank.open_pmi_relay({"PMI_FD": ""}) is None
+    closed = os.open(tmp_path, os.O_RDONLY)
+    os.close(closed)
+    with (tmp_path / "file").open("wb") as regular:
+        for raw in ("abc", "-1", " 3", "3 ", "+3", "1234567890", str(closed), str(regular.fileno())):
+            with pytest.raises(ValueError, match="is not an open socket"):
+                _confine_rank.open_pmi_relay({"PMI_FD": raw})
+    slurm, server = socket.socketpair()
+    try:
+        os.set_inheritable(server.fileno(), True)
+        opened = _confine_rank.open_pmi_relay({"PMI_FD": str(server.fileno())})
+        assert opened is not None
+        assert opened[0] == server.fileno() and len(set(opened)) == 3
+        assert not os.get_inheritable(opened[0])
+        for descriptor in opened[1:]:
+            assert stat.S_ISSOCK(os.fstat(descriptor).st_mode)
+            os.close(descriptor)
+    finally:
+        slurm.close()
+        server.close()
+
+
+def test_prepare_passes_the_pmi_relay_end_as_pmi_fd(launch: _Launch, opened: _Opened) -> None:
+    relay_end, rank_end = socket.socketpair()
+    pmi_fd = rank_end.detach()
+    prepared, environment = _confine_rank.prepare_rank_sandbox(
+        launch.trusted,
+        workspace=opened.workspace,
+        workspace_fd=opened.workspace_fd,
+        job=opened.job,
+        job_fd=opened.job_fd,
+        shm_fd=opened.shm_fd,
+        environ={"PMI_FD": "99", "PMI_RANK": "3", "PMI_SIZE": "4"},
+        pmi_fd=pmi_fd,
+    )
+    try:
+        assert pmi_fd in prepared.descriptors
+        assert os.get_inheritable(pmi_fd)
+        assert (environment["PMI_FD"], environment["PMI_RANK"], environment["PMI_SIZE"]) == (str(pmi_fd), "3", "4")
+    finally:
+        prepared.close()
+        relay_end.close()
+    with pytest.raises(OSError):
+        os.fstat(pmi_fd)
+
+
+_PMI_CLIENT = """
+import os, sys
+fd = int(os.environ["PMI_FD"])
+def ask(data):
+    os.write(fd, data)
+    reply = b""
+    while not reply.endswith(b"\\n"):
+        chunk = os.read(fd, 1)
+        if not chunk:
+            break
+        reply += chunk
+    print(reply.decode().strip())
+for request in sys.argv[2:]:
+    ask(request.encode())
+original = int(sys.argv[1])
+try:
+    os.fstat(original)
+    print("original open")
+except OSError:
+    print("original closed")
+print("distinct" if fd != original else "same")
+"""
+
+
+def _pmi_session(launch: _Launch, python: str) -> tuple[subprocess.Popen[bytes], list[bytes], threading.Thread]:
+    slurm, helper_end = socket.socketpair()
+    original = helper_end.fileno()
+    requests = (INIT, SPAWN % (1, 1), b"cmd=barrier_in\n", b"cmd=finalize\n")
+    launch.request((python, "-I", "-c", _PMI_CLIENT, str(original), *(item.decode() for item in requests)))
+    received: list[bytes] = []
+    server = threading.Thread(target=serve_slurm, args=(slurm, received), daemon=True)
+    server.start()
+    try:
+        process = _run_helper(launch, {"PMI_FD": str(original)}, wait=False, pass_fds=(original,))
+    finally:
+        helper_end.close()
+    process.wait(timeout=_TIMEOUT)
+    server.join(5)
+    slurm.close()
+    return process, received, server
+
+
+def _assert_pmi_session(process: subprocess.Popen[bytes], received: list[bytes], server: threading.Thread) -> None:
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, stderr
+    assert stdout.decode().splitlines() == [
+        REPLIES[b"init"].decode().strip(),
+        "cmd=spawn_result rc=-1",
+        REPLIES[b"barrier_in"].decode().strip(),
+        REPLIES[b"finalize"].decode().strip(),
+        "original closed",
+        "distinct",
+    ]
+    assert not server.is_alive()  # the helper closed Slurm's socket when it exited
+    assert received == [INIT, b"cmd=barrier_in\n", b"cmd=finalize\n"]
+    assert b"httk-workflow rank: PMI refused MPI_Comm_spawn" in stderr
+
+
+def test_helper_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
+    _assert_pmi_session(*_pmi_session(launch, sys.executable))
+    assert not launch.shm.exists()
+
+
+def test_helper_refuses_a_pmi_fd_that_is_not_a_socket(launch: _Launch) -> None:
+    launch.request(("sh", "-c", "touch ran"))
+    read, write = os.pipe()
+    try:
+        process = _run_helper(launch, {"PMI_FD": str(read)}, wait=False, pass_fds=(read,))
+        _stdout, stderr = process.communicate(timeout=_TIMEOUT)
+    finally:
+        os.close(read)
+        os.close(write)
+    assert process.returncode == 2
+    assert b"refused: PMI_FD" in stderr
+    assert not (launch.job / "ran").exists()
+    assert not launch.shm.exists()
+
+
+def _use_real_bwrap(launch: _Launch) -> None:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
@@ -672,6 +802,10 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
             ),
         )
     )
+
+
+def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
+    _use_real_bwrap(launch)
     sibling = launch.workspace / "project" / f"other--{uuid.uuid4()}"
     sibling.mkdir()
     script = (
@@ -690,4 +824,13 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         "writable /dev/shm/x",
     ]
     assert not (sibling / "x").exists() and not (launch.workspace / "x").exists()
+    assert not launch.shm.exists()
+
+
+def test_real_bwrap_rank_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
+    _use_real_bwrap(launch)
+    python = shutil.which("python3", path="/usr/bin:/bin")
+    if python is None:
+        pytest.skip("no system python3 to run the PMI client in the sandbox")
+    _assert_pmi_session(*_pmi_session(launch, python))
     assert not launch.shm.exists()

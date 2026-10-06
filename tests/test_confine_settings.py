@@ -17,6 +17,7 @@ from httk.workflow._confine import (
     default_readonly_paths,
     filtered_attempt_environment,
     is_override_key,
+    launch_mpi_setting,
 )
 
 
@@ -196,11 +197,28 @@ def test_missing_bwrap_is_not_a_settings_error(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_override_keys_are_the_manager_launch_keys_and_every_confine_key() -> None:
-    assert CONFINE_OVERRIDE_KEYS == {"manager.confine", "manager.launch_template", "manager.bind_cpus"}
+    assert CONFINE_OVERRIDE_KEYS == {
+        "manager.confine",
+        "manager.launch_template",
+        "manager.launch_mpi",
+        "manager.bind_cpus",
+    }
     for key in (*CONFINE_OVERRIDE_KEYS, "confine.readonly_paths", "confine.environment.X", "confine.unknown"):
         assert is_override_key(key)
     for key in ("manager.workers", "manager.launch", "manager.allocation", "slurm.partition", "confined.x", "confine"):
         assert not is_override_key(key)
+
+
+@pytest.mark.parametrize("value", ["pmi2", "pmix", "none"])
+def test_launch_mpi_accepts_plugin_names(value: str) -> None:
+    assert launch_mpi_setting({"manager.launch_mpi": value}) == value
+    assert launch_mpi_setting({}) is None
+
+
+@pytest.mark.parametrize("value", ["PMI2", "pmi 2", "", "a" * 33, 2])
+def test_launch_mpi_refuses_other_values(value: object) -> None:
+    with pytest.raises(ValueError, match="manager.launch_mpi"):
+        launch_mpi_setting({"manager.launch_mpi": value})
 
 
 def test_filtered_environment_hides_the_scheduler_and_sets_private_paths() -> None:

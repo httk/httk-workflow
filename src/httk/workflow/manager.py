@@ -548,7 +548,7 @@ class TaskManager:
     :param exchange: Run the workspace-daemon exchange pass (adopt staged job
         directories, eject finished jobs, publish status) at the start of every tick.
     :param setting_overrides: Pinned ``manager.confine``, ``manager.launch_template``,
-        ``manager.bind_cpus`` and ``confine.*`` settings that win over the
+        ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings that win over the
         workspace settings for this manager's lifetime.
     :raises ValueError: If a manager limit, a pinned setting or the effective
         confinement settings are invalid, or executor configuration conflicts.
@@ -624,8 +624,8 @@ class TaskManager:
         for key, value in overrides.items():
             if not isinstance(key, str) or not _confine.is_override_key(key) or not isinstance(value, str):
                 raise ValueError(
-                    f"a pinned setting must be manager.confine, manager.launch_template, manager.bind_cpus "
-                    f"or confine.* with a string value: {key!r}"
+                    f"a pinned setting must be manager.confine, manager.launch_template, manager.launch_mpi, "
+                    f"manager.bind_cpus or confine.* with a string value: {key!r}"
                 )
         self.workspace = workspace
         #: Pinned settings that win over the workspace settings for this manager's lifetime.
@@ -2119,6 +2119,8 @@ class TaskManager:
                 gpus_present=self.resources.get("gpus", 0) > 0,
                 cpus_per_proc=self.allocation.cpus_per_proc,
                 mem=requirement.get("mem"),
+                # Already validated by the binding above, which rendered the prefix.
+                mpi=_confine.launch_mpi_setting(settings),
                 confinement=checked.launch,
             )
             binding_environment["HTTK_WORKFLOW_LAUNCH"] = _manager_launches.client_prefix()
@@ -2508,6 +2510,10 @@ class TaskManager:
         template = settings.get("manager.launch_template")
         if template is not None and not isinstance(template, str):
             raise FormatError("workspace setting manager.launch_template must be a string")
+        try:
+            mpi = _confine.launch_mpi_setting(settings)
+        except ValueError as exc:
+            raise FormatError(f"workspace setting manager.launch_mpi: {exc}") from exc
         assert self.allocation is not None
         try:
             launch = render_launch(
@@ -2518,6 +2524,7 @@ class TaskManager:
                 gpus_present=self.resources.get("gpus", 0) > 0,
                 cpus_per_proc=self.allocation.cpus_per_proc,
                 mem=mem,
+                mpi=mpi,
             )
         except ValueError as exc:
             source = "workspace setting manager.launch_template" if template is not None else "scheduler launch"

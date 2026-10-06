@@ -166,6 +166,19 @@ def test_slurm_export_rejects_bad_values_at_configure_and_add(tmp_path: Path, re
         configure_launcher("cluster", {"slurm.export": value}, project=project)
 
 
+def test_launch_mpi_is_validated_at_configure_and_add(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="launch-mpi-validation")
+    with pytest.raises(ValueError, match="manager.launch_mpi"):
+        add_launcher("bad", template="slurm", settings={"manager.launch_mpi": "PMI 2"}, project=project)
+    bundle = add_launcher("cluster", template="slurm", settings={"manager.launch_mpi": "pmi2"}, project=project)
+    with pytest.raises(ValueError, match="manager.launch_mpi"):
+        configure_launcher("cluster", {"manager.launch_mpi": "PMI 2"}, project=project)
+    configure_launcher("cluster", {"manager.launch_mpi": "pmix"}, project=project)
+    stored = json.loads((bundle / "launcher.json").read_text(encoding="utf-8"))
+    assert stored["settings"]["manager.launch_mpi"] == "pmix"
+
+
 @pytest.mark.parametrize("value", ["NONE", "NIL"])
 def test_slurm_export_accepts_none_and_nil(tmp_path: Path, remote: Remote, value: str) -> None:
     project = tmp_path / "project"

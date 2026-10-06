@@ -476,6 +476,7 @@ def render_launch(
     gpus_present: bool = False,
     cpus_per_proc: int = 1,
     mem: int | None = None,
+    mpi: str | None = None,
 ) -> list[str] | None:
     """Return the launch prefix a runner puts before its parallel command.
 
@@ -484,7 +485,9 @@ def render_launch(
     ``{gpus}``, ``{mem}`` (MB on the first node, or empty) and
     ``{cpus_per_proc}`` are substituted in each word; other braces stay as
     written. Without one, the allocation scheduler supplies its default step
-    arguments from the placement and normalized allocation metadata.
+    arguments from the placement and normalized allocation metadata, with
+    *mpi* as the step's MPI plugin; the template owns its argv, so *mpi* is
+    ignored with one.
 
     :param placement: The attempt's placement.
     :param kind: The allocation kind.
@@ -494,6 +497,7 @@ def render_launch(
     :param cpus_per_proc: The allocation's normalized CPUs per processor slot.
     :param mem: The attempt's ``mem`` requirement, the step memory when the
         shares carry none because the inventory does not place memory.
+    :param mpi: The ``manager.launch_mpi`` plugin of the default step, or ``None``.
     :return: The prefix, or ``None`` when no default scheduler step applies.
     :raises ValueError: If the template is invalid or the scheduler cannot launch the placement.
     """
@@ -523,5 +527,5 @@ def render_launch(
     if scheduler is None:
         return None
     return scheduler.step_argv(
-        placement, nodefile=nodefile, gpus_present=gpus_present, cpus_per_proc=cpus_per_proc, mem=mem
+        placement, nodefile=nodefile, gpus_present=gpus_present, cpus_per_proc=cpus_per_proc, mem=mem, mpi=mpi
     )

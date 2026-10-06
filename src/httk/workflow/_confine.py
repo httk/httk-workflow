@@ -34,7 +34,9 @@ from .errors import ConfinementUnavailableError
 _LOGGER = logging.getLogger(__name__)
 
 #: The non-``confine.*`` keys a manager accepts as pinned ``--setting`` overrides.
-CONFINE_OVERRIDE_KEYS = frozenset({"manager.confine", "manager.launch_template", "manager.bind_cpus"})
+CONFINE_OVERRIDE_KEYS = frozenset(
+    {"manager.confine", "manager.launch_template", "manager.launch_mpi", "manager.bind_cpus"}
+)
 #: Every key with this prefix is a confinement setting, and may also be pinned.
 CONFINE_PREFIX = "confine."
 _ENVIRONMENT_PREFIX = "confine.environment."
@@ -48,6 +50,7 @@ _KNOWN_KEYS = (
 )
 _MODES: dict[str, Literal["none", "bwrap"]] = {"none": "none", "bwrap": "bwrap"}
 _BOOLEANS = {"true": True, "false": False, "1": True, "0": False}
+_LAUNCH_MPI = re.compile(r"[a-z0-9_]{1,32}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _ENVIRONMENT_VALUE_BYTES = 4096
 _DEFAULT_READONLY = ("/usr", "/bin", "/lib", "/lib64", "/etc")
@@ -243,6 +246,20 @@ def confine_settings(settings: Mapping[str, object]) -> ConfineSettings:
         shm_root=_DEFAULT_SHM_ROOT if shm_root is None else _absolute("confine.shm_root", shm_root),
         environment=_environment(settings),
     )
+
+
+def launch_mpi_setting(settings: Mapping[str, object]) -> str | None:
+    """Return the validated ``manager.launch_mpi`` setting, the Slurm MPI plugin of the built-in step, or ``None``.
+
+    :param settings: Effective settings: workspace settings with the manager's pinned overrides applied.
+    :return: The plugin name, or ``None`` when the setting is unset.
+    :raises ValueError: If the value is not a plugin name of 1-32 lowercase letters, digits or underscores.
+    """
+
+    value = _string(settings, "manager.launch_mpi")
+    if value is not None and not _LAUNCH_MPI.match(value):
+        raise ValueError(f"setting manager.launch_mpi must be 1-32 lowercase letters, digits or underscores: {value!r}")
+    return value
 
 
 def filtered_attempt_environment(environment: Mapping[str, str]) -> dict[str, str]:

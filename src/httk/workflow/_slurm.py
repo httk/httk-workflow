@@ -260,6 +260,7 @@ class SlurmScheduler:
         gpus_present: bool = False,
         cpus_per_proc: int = 1,
         mem: int | None = None,
+        mpi: str | None = None,
     ) -> list[str] | None:
         """Render the default Slurm step from placement metadata only.
 
@@ -268,6 +269,7 @@ class SlurmScheduler:
         :param gpus_present: Whether the allocation has GPUs despite this share.
         :param cpus_per_proc: Normalized CPUs assigned to each process.
         :param mem: Aggregate memory override in MB, when supplied.
+        :param mpi: The Slurm MPI plugin passed as ``--mpi`` (``manager.launch_mpi``), or ``None``.
         :return: The step argv, or ``None`` when no process slot can launch.
         :raises ValueError: If a GPU share has no process slot.
         """
@@ -285,6 +287,7 @@ class SlurmScheduler:
             "env",
             f"SLURM_HOSTFILE={nodefile}",
             "srun",
+            *([f"--mpi={mpi}"] if mpi else []),
             f"--ntasks={tasks}",
             "--distribution=arbitrary",
             "--exact",

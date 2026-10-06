@@ -264,6 +264,7 @@ def test_approved_launchers_must_confine_their_managers(confine: str | None, tmp
     [
         ({"confine.readonly_paths": "relative"}, "absolute paths"),
         ({"confine.unknown": "x"}, "unknown confinement setting"),
+        ({"manager.launch_mpi": "bad value"}, "manager.launch_mpi must be"),
         ({"slurm.partition": "short\nexport X=1"}, "control characters"),
         ({"manager.workers": "many"}, "manager.workers must be a positive integer"),
         ({"manager.allocation": "pbs"}, "allocation"),

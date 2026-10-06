@@ -32,6 +32,13 @@ def test_slurm_step_argv_uses_placement_and_normalized_cpu_metadata() -> None:
     ]
 
 
+def test_slurm_step_argv_puts_the_mpi_plugin_after_srun() -> None:
+    placement = _placement(NodeShare("n01", 2, None, 0, None, None, False))
+    argv = SLURM.step_argv(placement, nodefile="/tmp/nodes", mpi="pmi2")
+    assert argv is not None
+    assert argv[:5] == ["env", "SLURM_HOSTFILE=/tmp/nodes", "srun", "--mpi=pmi2", "--ntasks=2"]
+
+
 def test_slurm_step_argv_skips_zero_task_placement() -> None:
     placement = _placement(NodeShare("n01", 0, None, 0, None, None, False))
     assert SLURM.step_argv(placement, nodefile="/tmp/nodes") is None

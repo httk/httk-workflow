@@ -12,7 +12,10 @@ the step when it lies below ``confine.pmix_roots`` and the approved devices, and
 (:mod:`httk.workflow._confine_exec`) in a Bubblewrap sandbox with host networking in which only the job
 directory is writable. Bubblewrap runs as a child in its own process group, which every process in the
 sandbox keeps; SIGTERM, SIGINT, SIGHUP and SIGCONT delivered to the helper are forwarded to that whole group,
-and ``--die-with-parent`` ends the sandbox when the helper is killed. The helper exits with the sandbox's status, ``128+N`` for signal ``N``, and with 2 when it refuses.
+and ``--die-with-parent`` ends the sandbox when the helper is killed. Under ``srun --mpi=pmi2`` Slurm's
+``PMI_FD`` socket never enters the sandbox: the rank gets one end of a socket pair as its ``PMI_FD``, and a
+:mod:`~httk.workflow._pmi_proxy` thread relays PMI-1 to Slurm and refuses ``MPI_Comm_spawn``. The helper
+exits with the sandbox's status, ``128+N`` for signal ``N``, and with 2 when it refuses.
 """
 
 import argparse
@@ -21,15 +24,18 @@ import fcntl
 import os
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
 
+from . import _pmi_proxy
 from ._jobdir import JobDirectory
 from ._launch_protocol import (
     MAX_ENVIRONMENT_ENTRIES,
@@ -70,6 +76,7 @@ _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOE
 _SHM_LOCK = ".lock"
 _SHM_ATTEMPTS = 16
 _GROUP_POLL_SECONDS = 0.05
+_RELAY_JOIN_SECONDS = 1.0
 # Destinations the sandbox owns: a PMIx directory must not be bound over or into them.
 _RESERVED_DESTINATIONS = (Path("/proc"), Path("/dev"), Path("/tmp/home"))
 
@@ -380,6 +387,36 @@ def open_pmix_directory(
     return path, descriptor
 
 
+def open_pmi_relay(environ: Mapping[str, str]) -> tuple[int, int, int] | None:
+    """Return ``(server, relay_end, rank_end)`` for the rank's ``PMI_FD``, or ``None`` without one.
+
+    ``server`` is Slurm's socket named by ``PMI_FD``, made close-on-exec so that no child inherits it;
+    ``relay_end`` and ``rank_end`` are the two close-on-exec ends of a new Unix stream socket pair, the
+    first for :func:`httk.workflow._pmi_proxy.relay` and the second for the sandbox. The caller owns all three.
+
+    :param environ: The helper's environment, as the launcher set it.
+    :return: The three descriptors, or ``None`` when ``PMI_FD`` is unset or empty.
+    :raises ValueError: If ``PMI_FD`` is not the decimal number of an open socket.
+    :raises OSError: If the socket pair cannot be created.
+    """
+
+    raw = environ.get("PMI_FD", "")
+    if not raw:
+        return None
+    mode = 0
+    if len(raw) <= 9 and raw.isascii() and raw.isdigit():
+        try:
+            mode = os.fstat(int(raw)).st_mode
+        except OSError:
+            pass
+    if not stat.S_ISSOCK(mode):
+        raise ValueError(f"PMI_FD {raw!r} is not an open socket")
+    server = int(raw)
+    os.set_inheritable(server, False)
+    relay_end, rank_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    return server, relay_end.detach(), rank_end.detach()
+
+
 def _pmix_parent_dirs(path: Path) -> list[str]:
     parents: list[Path] = []
     parent = path.parent
@@ -420,6 +457,7 @@ def prepare_rank_sandbox(
     job_fd: int,
     shm_fd: int,
     environ: Mapping[str, str],
+    pmi_fd: int | None = None,
 ) -> tuple[PreparedSandbox, dict[str, str]]:
     """Build the Bubblewrap argument vector, descriptor set and environment of one rank sandbox.
 
@@ -438,6 +476,8 @@ def prepare_rank_sandbox(
     :param job_fd: A descriptor of the job directory; duplicated, not consumed.
     :param shm_fd: A descriptor of the per-launch shared-memory directory; duplicated, not consumed.
     :param environ: The helper's environment, as the launcher set it.
+    :param pmi_fd: The sandbox end of the PMI relay from :func:`open_pmi_relay`, passed as the rank's
+        ``PMI_FD``; consumed: it is among the returned descriptors, and closed here on failure.
     :return: The complete argument vector with the inheritable descriptors to pass with ``pass_fds``, which
         the caller closes after the spawn, and the whole environment to start Bubblewrap with.
     :raises ValueError: If a path or the environment is not acceptable.
@@ -445,14 +485,20 @@ def prepare_rank_sandbox(
     """
 
     confine = launch.confine
-    environment = rank_environment(environ, launch)
+    descriptors: list[int] = [] if pmi_fd is None else [pmi_fd]
+    try:
+        environment = rank_environment(environ, launch)
+    except BaseException:
+        PreparedSandbox([], tuple(descriptors)).close()
+        raise
+    if pmi_fd is not None:
+        environment["PMI_FD"] = str(pmi_fd)
     argv = [str(confine.bwrap), "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
     if confine.block_userns:
         argv += BWRAP_USERNS_BLOCK
     # Unlike an attempt, a rank never outlives its helper, which holds its shared memory and is its only reaper.
     argv += ["--die-with-parent", "--cap-drop", "ALL"]
     argv += ["--tmpfs", "/tmp", "--dir", "/tmp/home"]
-    descriptors: list[int] = []
     try:
         resolved: list[Path] = []
         for path in confine.readonly_paths:
@@ -499,8 +545,15 @@ def _group_alive(group: int) -> bool:
     return True
 
 
-def _run(prepared: PreparedSandbox, environment: Mapping[str, str]) -> int:
+def _log_pmi(line: str) -> None:
+    print(f"httk-workflow rank: PMI {line}", file=sys.stderr, flush=True)
+
+
+def _run(prepared: PreparedSandbox, environment: Mapping[str, str], pmi: tuple[int, int] | None = None) -> int:
     """Run Bubblewrap in its own process group, forward signals to the group, and return its status.
+
+    With *pmi*, ``(server, relay_end)`` from :func:`open_pmi_relay`, a daemon thread relays PMI-1 between
+    them once Bubblewrap runs and the helper has closed its copy of the sandbox end; *pmi* is consumed.
 
     Bubblewrap does not forward signals into its namespace, and a launcher such as ``mpirun`` signals only
     its direct children (the helpers), so the helper signals the whole group: the rank sandbox has no
@@ -522,14 +575,27 @@ def _run(prepared: PreparedSandbox, environment: Mapping[str, str]) -> int:
 
     for signum in _FORWARDED_SIGNALS:
         signal.signal(signum, forward)
-    process = subprocess.Popen(prepared.argv, env=dict(environment), pass_fds=prepared.descriptors, process_group=0)
+    try:
+        process = subprocess.Popen(prepared.argv, env=dict(environment), pass_fds=prepared.descriptors, process_group=0)
+    except BaseException:
+        for descriptor in pmi or ():
+            _close(descriptor)
+        raise
     prepared.close()
+    relay: threading.Thread | None = None
+    if pmi is not None:
+        relay = threading.Thread(
+            target=_pmi_proxy.relay, args=pmi, kwargs={"log": _log_pmi}, daemon=True, name="pmi-relay"
+        )
+        relay.start()
     group = process.pid
     for received in pending:
         forward(received, None)
     status = process.wait()
     while _group_alive(group):
         time.sleep(_GROUP_POLL_SECONDS)
+    if relay is not None:
+        relay.join(_RELAY_JOIN_SECONDS)  # the rank end is gone; a daemon thread still blocked dies with the helper
     return 128 - status if status < 0 else status
 
 
@@ -544,6 +610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--launch-dir", required=True, type=Path)
     arguments = parser.parse_args(argv)
     descriptors: list[int] = []
+    relay_descriptors: list[int] = []  # (server, relay_end) until handed to _run
     shared: SharedMemory | None = None
     try:
         try:
@@ -552,6 +619,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             job, job_fd = open_job(launch, workspace)
             descriptors.append(job_fd)
             shared = join_shared_memory(launch.confine.shm_root, launch.token)
+            pmi = open_pmi_relay(os.environ)
+            if pmi is not None:
+                relay_descriptors += pmi[:2]
             prepared, environment = prepare_rank_sandbox(
                 launch,
                 workspace=workspace,
@@ -560,6 +630,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 job_fd=job_fd,
                 shm_fd=shared.fd,
                 environ=os.environ,
+                pmi_fd=None if pmi is None else pmi[2],
             )
         except (OSError, ValueError) as exc:
             print(f"httk-workflow rank: refused: {exc}", file=sys.stderr, flush=True)
@@ -567,8 +638,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for descriptor in descriptors:
             _close(descriptor)
         descriptors.clear()
+        relay_pair = (relay_descriptors[0], relay_descriptors[1]) if relay_descriptors else None
+        relay_descriptors.clear()
         try:
-            return _run(prepared, environment)
+            return _run(prepared, environment, relay_pair)
         except OSError as exc:
             prepared.close()
             print(
@@ -576,7 +649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
     finally:
-        for descriptor in descriptors:
+        for descriptor in descriptors + relay_descriptors:
             _close(descriptor)
         if shared is not None:
             leave_shared_memory(shared)

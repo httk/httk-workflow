@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ._allocation import argv_allocation, half_physical_memory_mb, split_allocation
-from ._confine import confine_settings
+from ._confine import confine_settings, launch_mpi_setting
 from ._daemon_policy import SLURM_EXPORT_SETTING, validate_slurm_export
 from ._util import write_json_atomic
 from .configuration import launchers_home
@@ -103,6 +103,7 @@ def _validate_launcher_metadata(
     if not isinstance(settings, Mapping):
         raise ValueError("manager launcher settings must be an object")
     _validate_settings(settings)
+    launch_mpi_setting(settings)
     if metadata.get("kind") == "slurm":
         # Pinned on every manager this bundle starts; refuse a bad value before any submission.
         confine_settings(settings)

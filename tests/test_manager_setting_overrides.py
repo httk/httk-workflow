@@ -37,6 +37,8 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
             "--setting",
             "manager.bind_cpus=true",
             "--setting",
+            "manager.launch_mpi=pmi2",
+            "--setting",
             "confine.environment.OMPI_MCA_x=a=b",
             "--setting",
             "manager.confine=none",
@@ -47,6 +49,7 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
         "confine.isolate_network": "false",
         "manager.launch_template": "srun --mpi=pmix {command}",
         "manager.bind_cpus": "true",
+        "manager.launch_mpi": "pmi2",
         "confine.environment.OMPI_MCA_x": "a=b",
     }
     assert _manager._pinned_settings(_parser(tmp_path).parse_args(leaf)) == {}
@@ -55,9 +58,18 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
 @pytest.mark.parametrize(
     ("item", "message"),
     [
-        ("manager.workers=2", "manager.confine, manager.launch_template, manager.bind_cpus or confine.*"),
-        ("manager.launch=slurm", "manager.confine, manager.launch_template, manager.bind_cpus or confine.*"),
-        ("slurm.partition=debug", "manager.confine, manager.launch_template, manager.bind_cpus or confine.*"),
+        (
+            "manager.workers=2",
+            "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*",
+        ),
+        (
+            "manager.launch=slurm",
+            "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*",
+        ),
+        (
+            "slurm.partition=debug",
+            "manager.confine, manager.launch_template, manager.launch_mpi, manager.bind_cpus or confine.*",
+        ),
         ("manager.confine", "KEY=VALUE"),
         ("manager.confine=chroot", "manager.confine must be none or bwrap"),
         ("confine.bogus=1", "unknown confinement setting 'confine.bogus'"),
@@ -65,6 +77,7 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
         ("confine.readonly_paths=usr", "absolute paths"),
         ("confine.environment.HTTK_X=1", "must name a variable"),
         ("manager.launch_template=a\0b", "NUL"),
+        ("manager.launch_mpi=PMI2", "manager.launch_mpi must be 1-32 lowercase"),
     ],
 )
 def test_other_keys_and_bad_values_are_usage_errors(
