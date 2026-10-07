@@ -354,6 +354,7 @@ def test_committing_wedge_surfaces_in_job_why(tmp_path: Path) -> None:
                 attempt_id=str(state.attempt_id),
                 attempt_control=str(state.attempt_control),
                 outcome_action="succeed",
+                commit_base_generation=running.generation + 1,
                 reason="outcome_published",
             ),
         )
@@ -393,6 +394,7 @@ def test_a_malformed_committing_outcome_fails_as_protocol_error_naming_both_ids(
                 attempt_id=str(state.attempt_id),
                 attempt_control=str(state.attempt_control),
                 outcome_action="succeed",
+                commit_base_generation=running.generation + 1,
                 reason="outcome_published",
             ),
         )
@@ -445,6 +447,7 @@ def test_an_unparseable_committing_outcome_carries_the_assembly_remedy(tmp_path:
                 attempt_id=str(state.attempt_id),
                 attempt_control=str(state.attempt_control),
                 outcome_action="succeed",
+                commit_base_generation=running.generation + 1,
                 reason="outcome_published",
             ),
         )
@@ -482,6 +485,7 @@ def test_corrupt_committing_job_idles_promptly_and_is_reported(tmp_path: Path) -
                 attempt_id=str(state.attempt_id),
                 attempt_control=str(state.attempt_control),
                 outcome_action="succeed",
+                commit_base_generation=running.generation + 1,
                 reason="outcome_published",
             ),
         )

@@ -525,6 +525,48 @@ the job as blocked, names the writer's host, and says to run a manager on that
 host or pass `--unsafe-persistent-takeover`, rather than claiming the expired
 lease will be recovered here.
 
+### Taking over another manager's commit
+
+A `committing` job is committed only by the manager its state frame names.
+Another manager serving the job's runner executor takes the commit over once
+that owner is evidently gone, by one of three kinds of evidence:
+
+| Evidence | Meaning |
+| --- | --- |
+| `manager_process_dead` | The owner's `managers/<id>/manager.json` names this host and its process is gone, so a restarted manager resumes its predecessor's commits at once. |
+| `manager_record_absent` | The owner has no manager directory or readable heartbeat. |
+| `lease_grace_expired` | The owner's heartbeat has been silent for its lease times `--takeover-grace-factor`. |
+
+Until then the commit is left alone and does not count as work for
+`run_until_idle`. The takeover is itself a marker transition, `committing` →
+`committing`, whose frame repeats the commit and records `previous_manager_id`
+and `takeover_evidence`, so of two would-be successors exactly one wins.
+Because it advances the state generation, an operator request issued against
+the earlier generation is retired as stale and must be re-issued.
+
+The owner of a commit first renames the published `outcome.ready` draft to
+`commit.<generation>` in the attempt-control directory, after the generation of
+the `committing` marker it holds, and reaches the draft by that name for every
+step. A takeover renames the draft again, so the previous owner, should it still
+be running, stops at its next step with nothing recorded; at most the one step
+it had already started can overlap, and the replay tolerates that by checking
+whether the step's result is already in place. A manager may therefore die or
+be replaced at any point of a commit, and the commit completes exactly once.
+One overlap is detected rather than prevented: a `replace-tree` step sets the
+old tree aside only after checking that its trash name is free, but Python
+offers no rename that refuses to replace, so in the gap between that check and
+the rename a stalled previous owner could move the successor's new tree onto an
+*empty* set-aside directory. The previous owner then finds a tree it never
+observed in its trash and reports an error anomaly (`commit_displaced_data`)
+naming both paths, so an operator can move the tree back.
+
+A lingering attempt process that publishes a second `outcome.ready` after its
+draft was renamed is ignored: the commit only ever reads its own draft, and the
+attempt-control directory is removed (or collected) with it. Cancelling a
+`committing` job moves it straight to `cancelled`; a commit already under way
+then loses its final transition and records nothing, while transaction
+operations it applied before that remain in `data/`.
+
 ### Unresolvable join children
 
 A job `waiting` on a child that cannot be resolved in this workspace fails with
@@ -850,7 +892,7 @@ process group (such as `srun`) is gone; remote tasks of a killed `srun` end
 when Slurm cleans up the step. The attempt keeps
 its placement until every launch is reaped. The client keeps its liveness lock
 in `<confine.shm_root>/httk-launch-<attempt_id>/`, a node-local tmpfs
-directory (`confine.shm_root` is assumed to be a tmpfs, not checked), so the workspace filesystem
+directory (`confine.shm_root` must be a tmpfs and is checked), so the workspace filesystem
 needs no lock support. ORCA,
 which starts its own MPI, is supported on one node only under confinement.
 Each launch style needs site acceptance, and stale shared-memory directories
@@ -1075,8 +1117,9 @@ still shown.
 - `claimed` and `running`: the owning manager, its heartbeat age against the
   recorded lease, and whether an expired lease means recovery rather than a
   stuck job;
-- `committing`: that a published outcome is being committed, which any manager
-  serving the executor resumes. If a commit anomaly has repeated for the same
+- `committing`: that a published outcome is being committed, which its owning
+  manager resumes, or another manager serving the executor once the owner is
+  evidently gone (see the commit takeover above). If a commit anomaly has repeated for the same
   attempt, the recorded error is shown and the job is reported as a blocked,
   wedged commit rather than as needing no action;
 - `waiting`: the join condition, every child with its label and state, which
@@ -1141,6 +1184,19 @@ again, because the job has moved on, is moved to
 `.httk-workspace/requests/retired/` with the reason beside it rather than being
 reread on every pass. A request for a runner executor this manager does not
 serve is left for a manager that does.
+
+A manager claims a request by moving it into
+`.httk-workspace/requests/claimed/<manager-id>/` while it applies it, and a
+restarted manager returns its own claims to `ready`. Claims of a manager that
+never comes back are recovered by the others: at most every 10 seconds a
+manager looks at the other managers' claim directories and, once a manager is
+evidently gone (the same evidence as a
+[commit takeover](#taking-over-another-managers-commit)), moves its claimed
+requests back to `ready`, logging `request_recovered`. They are then claimed
+and checked against their exact preconditions like any other request, so a
+request is never applied twice. If the former owner was only slow and had
+already applied the request, the recovered copy is retired as stale, and
+`--wait` and `job why` report that retirement although the request took effect.
 
 When the publishing installation has an operator identity from `httk init`, the
 request also carries a detached Ed25519 signature over its canonical JSON, and

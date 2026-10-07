@@ -3,14 +3,17 @@
 import json
 import logging
 import os
+import stat
+import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from httk.core.identity import verify_document
 
 from ._util import utc_now
 from .errors import FormatError, TransitionLostError, WorkflowError
-from .models import TERMINAL_KINDS, StateFrame, normalize_placement, parse_job_key, validate_step
+from .models import TERMINAL_KINDS, StateFrame, canonical_uuid, normalize_placement, parse_job_key, validate_step
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
 _STATE_ENVELOPE_MEMBERS = frozenset(
@@ -28,6 +31,10 @@ _STATE_ENVELOPE_MEMBERS = frozenset(
         "priority",
     }
 )
+
+
+#: How often a manager looks for requests claimed by managers that are gone, in seconds.
+CLAIM_RECOVERY_SECONDS = 10.0
 
 
 class _IndeterminateRequestRead(Exception):
@@ -218,27 +225,100 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
     raise FormatError(f"request action {action!r} is invalid from state {marker.kind}")
 
 
+def _return_to_ready(claimed_path: Path, ready_path: Path) -> bool:
+    """Rename one claimed request back to ``ready``, deciding a failed rename by looking at the destination.
+
+    :param claimed_path: The claimed request.
+    :param ready_path: Its name in ``ready``.
+    :return: Whether the request is now in ``ready``.
+    """
+
+    try:
+        os.rename(claimed_path, ready_path)
+    except OSError as exc:
+        try:
+            ready_path.lstat()
+        except FileNotFoundError:
+            _LOGGER.debug("request %s remains claimed for retry: %s", claimed_path.name, exc)
+            return False
+        except OSError as stat_error:
+            _LOGGER.debug("request %s restoration is indeterminate: %s", claimed_path.name, stat_error)
+            return False
+        _LOGGER.debug("request %s restoration reported failure but reached ready: %s", claimed_path.name, exc)
+    return True
+
+
+def _recover_departed_claims(manager: Any, ready_dir: Path) -> None:
+    """Return the requests claimed by managers that are evidently gone to ``ready``.
+
+    A manager claims a request by renaming it into ``claimed/<manager-id>/``
+    and restores only its own claims when it restarts, so a claim of a manager
+    that never comes back would strand the request. At most once every
+    :data:`CLAIM_RECOVERY_SECONDS`, every other manager's claims are listed and,
+    when that manager is evidently gone (the one liveness rule,
+    :meth:`~httk.workflow.TaskManager._owner_gone_evidence`), renamed back to
+    ``ready``; the normal pass then claims and re-evaluates them against their
+    exact preconditions. A former owner that was only slow either finds its
+    claimed file gone or has already applied the request, whose recovered copy is
+    then retired as stale: a request is never applied twice. Empty directories
+    are left to garbage collection. A claim records no lease, so the departed
+    manager is judged by this manager's own lease.
+    """
+
+    now = time.monotonic()
+    last = manager._claim_recovery_at
+    if last is not None and now - last < CLAIM_RECOVERY_SECONDS:
+        return
+    manager._claim_recovery_at = now
+    claimed_root = manager.workspace.control / "requests" / "claimed"
+    try:
+        owners = sorted(os.listdir(claimed_root))
+    except OSError as exc:
+        _LOGGER.debug("cannot list claimed requests: %s", exc)
+        return
+    for owner in owners:
+        if owner == manager.manager_id:
+            continue
+        try:
+            canonical_uuid(owner, "claimed request owner")
+        except FormatError:
+            continue
+        evidence = manager._owner_gone_evidence(owner, lease_seconds=manager.lease_seconds)
+        if evidence is None:
+            continue
+        try:
+            names = sorted(os.listdir(claimed_root / owner))
+        except OSError as exc:
+            _LOGGER.debug("cannot list the claimed requests of manager %s: %s", owner, exc)
+            continue
+        for name in names:
+            claimed_path = claimed_root / owner / name
+            try:
+                if not stat.S_ISREG(claimed_path.lstat().st_mode):
+                    continue
+            except OSError:
+                continue
+            manager.workspace.ensure_directory(ready_dir)
+            if _return_to_ready(claimed_path, ready_dir / name):
+                _LOGGER.info(
+                    "recovered request %s from manager %s, which is gone (%s)",
+                    name,
+                    owner,
+                    evidence["evidence"],
+                    extra=manager._event(
+                        "request_recovered", request=name, previous_manager=owner, evidence=evidence["evidence"]
+                    ),
+                )
+
+
 def handle(manager: Any) -> bool:
     ready_dir = manager.workspace.control / "requests" / "ready"
     claimed_dir = manager.workspace.control / "requests" / "claimed" / manager.manager_id
     if claimed_dir.is_dir():
         for claimed_path in sorted(claimed_dir.iterdir()):
-            if not claimed_path.is_file():
-                continue
-            ready_path = ready_dir / claimed_path.name
-            try:
-                os.rename(claimed_path, ready_path)
-            except OSError as exc:
-                try:
-                    ready_path.lstat()
-                except FileNotFoundError:
-                    _LOGGER.debug("request %s remains claimed for retry: %s", claimed_path.name, exc)
-                except OSError as stat_error:
-                    _LOGGER.debug("request %s restoration is indeterminate: %s", claimed_path.name, stat_error)
-                else:
-                    _LOGGER.debug(
-                        "request %s restoration reported failure but reached ready: %s", claimed_path.name, exc
-                    )
+            if claimed_path.is_file():
+                _return_to_ready(claimed_path, ready_dir / claimed_path.name)
+    _recover_departed_claims(manager, ready_dir)
     changed = False
     for request_path in sorted(ready_dir.iterdir()) if ready_dir.exists() else ():
         if not request_path.is_file() or request_path.name in manager._deferred_requests:
@@ -367,6 +447,11 @@ def handle(manager: Any) -> bool:
             try:
                 manager.workspace.quarantine(claimed_path, reason=f"invalid request: {exc}")
             except OSError as failure:
+                if not os.path.lexists(claimed_path):
+                    # A manager that took this manager for gone recovered the claim.
+                    _LOGGER.debug("request %s left this manager's claim before quarantine", claimed_path.name)
+                    changed = True
+                    continue
                 manager._report_anomaly(
                     f"request:{claimed_path.name}",
                     f"cannot quarantine the invalid request {claimed_path.name}: {failure}",

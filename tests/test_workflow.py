@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import bury_manager
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.errors import TransitionLostError
 from httk.workflow.journal import JournalWriter, read_record
@@ -160,6 +161,8 @@ def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
         assert committing is not None and committing.kind == "committing"
     finally:
         first.close()
+    # The first manager is abandoned with the commit it owns, as a crash leaves it.
+    bury_manager(workspace.control / "managers" / first.manager_id)
     with TaskManager(workspace) as replacement:
         replacement.run_until_idle()
     finished = workspace.find_marker_by_id(job_id)

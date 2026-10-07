@@ -352,3 +352,24 @@ def test_profile() -> TestProfile:
     if name not in {"normal", "extended"}:
         raise pytest.UsageError("HTTK_TEST_PROFILE must be 'normal' or 'extended'")
     return TestProfile(name)
+
+
+def bury_manager(manager_dir: Path) -> None:
+    """Make an abandoned in-process manager look like a dead process to its successors.
+
+    A test "kills" a manager by throwing its instance away inside the test
+    process, so its ``manager.json`` still names a live pid. Pointing it at a
+    reaped child's pid gives successors the ``manager_process_dead`` evidence a
+    real crash leaves behind.
+
+    :param manager_dir: The abandoned manager's ``managers/<id>`` directory.
+    """
+
+    import subprocess
+
+    process = subprocess.Popen(["true"])
+    process.wait()
+    record_path = manager_dir / "manager.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["pid"] = process.pid
+    record_path.write_text(json.dumps(record), encoding="utf-8")

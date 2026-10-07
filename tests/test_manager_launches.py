@@ -15,6 +15,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -26,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _confine, _manager_launches
+from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _manager_launches
 from httk.workflow._allocation import Allocation, Node
 from httk.workflow._launch_protocol import LaunchConfinement, TrustedLaunch, encode_trusted, trusted_name
 from httk.workflow._logging import reset_logging
@@ -205,8 +206,7 @@ class _Bench:
         self.recorder = bin_directory / "record-launch"
         self.recorder.write_text(_RECORDER.format(record=shlex.quote(str(self.record))), encoding="utf-8")
         self.recorder.chmod(0o755)
-        self.shm = root / "shm"
-        self.shm.mkdir(mode=0o700)
+        self.shm = _host_shm_directory()
         self.settings = {
             "manager.confine": "bwrap",
             "confine.bwrap": str(self.bwrap),
@@ -280,6 +280,22 @@ class _Bench:
                 pass
 
 
+def _host_shm_directory() -> Path:
+    """Return a fresh private directory on the host's tmpfs, which rank-helper subprocesses accept as shm_root."""
+
+    try:
+        descriptor = os.open("/dev/shm", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            observed = _confine_rank._filesystem_type(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        observed = "unreadable"
+    if observed != "tmpfs":
+        pytest.skip("/dev/shm is not a tmpfs on this host")
+    return Path(tempfile.mkdtemp(prefix="httk-test-", dir="/dev/shm"))
+
+
 @pytest.fixture
 def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Bench]:
     created = _Bench(tmp_path.resolve(), monkeypatch)
@@ -287,6 +303,7 @@ def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Bench]:
         yield created
     finally:
         created.kill_recorded()
+        shutil.rmtree(created.shm, ignore_errors=True)
 
 
 def _events(caplog: pytest.LogCaptureFixture, name: str) -> list[Any]:
@@ -359,6 +376,47 @@ def test_a_confined_launch_runs_through_the_manager_and_reports_its_exit(
         assert record.request_id == request_id and record.job_key == marker.job_key
         assert not hasattr(record, "argv")
     assert finished.exit_code == 3
+
+
+def test_a_launch_whose_process_record_cannot_be_written_never_starts_its_prefix(
+    bench: _Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[subprocess.Popen[Any]] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*arguments: Any, **options: Any) -> subprocess.Popen[Any]:
+        process = real_popen(*arguments, **options)
+        started.append(process)
+        return process
+
+    def refuse(_directory: Path, _name: str, _data: bytes) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_manager_launches.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(_manager_launches, "_write_durable", refuse)
+    bench.submit("gated", _BASIC)
+    with bench.manager() as manager:
+        manager.run_until_idle(timeout=_TIMEOUT)
+    # The gate read EOF instead of the newline: the launch prefix (which records itself) never ran.
+    assert not bench.record.exists()
+    gates = [process for process in started if process.args[1:2] == ["-c"]]  # type: ignore[index]
+    assert gates and all(process.wait(timeout=_TIMEOUT) in (125, -signal.SIGTERM) for process in gates)
+
+
+def test_the_launch_gate_runs_nothing_without_its_newline(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    command = [*_manager_launches._LAUNCH_GATE, "touch", str(marker)]
+    closed = subprocess.Popen(command, stdin=subprocess.PIPE)
+    assert closed.stdin is not None
+    closed.stdin.close()
+    assert closed.wait(timeout=_TIMEOUT) == 125
+    assert not marker.exists()
+    opened = subprocess.Popen(command, stdin=subprocess.PIPE)
+    assert opened.stdin is not None
+    opened.stdin.write(b"\n")
+    opened.stdin.close()
+    assert opened.wait(timeout=_TIMEOUT) == 0
+    assert marker.exists()
 
 
 def test_an_unconfined_attempt_keeps_the_rendered_launch_prefix(bench: _Bench) -> None:

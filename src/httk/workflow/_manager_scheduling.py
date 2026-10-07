@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from httk.core.requirements import parse_requirements, unmet_requirements
 
+from . import _manager_commit
 from ._calls import unready_calls
 from ._durations import TIME_RESOURCES
 from ._manager_binding import INVENTORY_LABELS, can_assign, fits
@@ -492,8 +493,20 @@ def work_census(manager: Any) -> "WorkCensus":
             # named census bucket so the operator sees it and idle exit is prompt.
             unreadable += 1
             continue
-        if manager._executor_for(job) is not None:
-            actionable += 1
+        if manager._executor_for(job) is None:
+            continue
+        if marker.kind == "committing":
+            # Another manager's commit is this manager's work only once it may
+            # take it over; until then counting it would keep this manager awake
+            # for work it must leave alone.
+            try:
+                state = manager._read_frame(marker)
+            except (WorkflowError, OSError):
+                unreadable += 1
+                continue
+            if not _manager_commit.may_commit(manager, marker, state):
+                continue
+        actionable += 1
     return WorkCensus(
         succeeded=succeeded,
         failed=failed,

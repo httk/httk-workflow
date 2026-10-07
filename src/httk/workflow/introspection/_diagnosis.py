@@ -1075,8 +1075,9 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             )
         else:
             summary = (
-                "this job published an outcome and its commit is pending; any manager that serves its runner "
-                "executor resumes the commit, so no operator action is needed"
+                "this job published an outcome and its commit is pending; the manager that owns the commit "
+                "resumes it, and another manager serving its runner executor takes it over once that owner is "
+                "evidently gone, so no operator action is needed"
             )
         _owner_checks(workspace, state, report)
         if job is not None:

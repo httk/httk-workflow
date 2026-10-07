@@ -32,6 +32,7 @@ The attempt keeps its placement, its control tree and its marker until every lau
 checks :func:`unreaped` before it treats an attempt as finished and :func:`holds_commit` before it commits.
 """
 
+import contextlib
 import errno
 import fcntl
 import json
@@ -584,6 +585,10 @@ def _refuse(manager: Any, attempt: Any, directory: JobDirectory, request_id: str
     )
 
 
+#: The shell gate in front of a launch: it execs its arguments only after one line arrives on stdin (exit 125 on EOF).
+_LAUNCH_GATE = ("/bin/sh", "-c", 'IFS= read -r _ || exit 125; exec "$@" </dev/null', "httk-launch-gate")
+
+
 def _write_new(directory: Path, name: str, data: bytes) -> None:
     descriptor = os.open(directory / name, _STREAM_FLAGS, 0o600)
     try:
@@ -592,6 +597,29 @@ def _write_new(directory: Path, name: str, data: bytes) -> None:
             view = view[os.write(descriptor, view) :]
     finally:
         os.close(descriptor)
+
+
+def _write_durable(directory: Path, name: str, data: bytes) -> None:
+    """Write a new file so that a crash leaves either nothing or all of it: temporary, fsync, rename, fsync."""
+
+    temporary = f".{name}.tmp"
+    _write_new(directory, temporary, data)
+    try:
+        descriptor = os.open(directory / temporary, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.rename(directory / temporary, directory / name)
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(directory / temporary)
+        raise
 
 
 def _launch_environment() -> dict[str, str]:
@@ -674,23 +702,35 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
             )
             if not prefix:
                 raise ValueError("the launch template renders no launch prefix")
-            process = subprocess.Popen(
-                [
-                    *prefix,
-                    sys.executable,
-                    "-I",
-                    "-m",
-                    "httk.workflow._confine_rank",
-                    "--launch-dir",
-                    str(trusted),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=streams[0],
-                stderr=streams[1],
-                start_new_session=True,
-                env=_launch_environment(),
-                cwd="/",
-            )
+            # The gate reads one line from its stdin (the pipe) before exec, so the ranks start only once the
+            # manager has made process.json durable; the launch then gets /dev/null as before. A plain pipe end
+            # as stdin needs no descriptor number: dash cannot redirect descriptors above 9, and pass_fds
+            # cannot renumber one.
+            gate_read, gate_write = os.pipe()
+            try:
+                process = subprocess.Popen(
+                    [
+                        *_LAUNCH_GATE,
+                        *prefix,
+                        sys.executable,
+                        "-I",
+                        "-m",
+                        "httk.workflow._confine_rank",
+                        "--launch-dir",
+                        str(trusted),
+                    ],
+                    stdin=gate_read,
+                    stdout=streams[0],
+                    stderr=streams[1],
+                    start_new_session=True,
+                    env=_launch_environment(),
+                    cwd="/",
+                )
+            except BaseException:
+                os.close(gate_write)
+                raise
+            finally:
+                os.close(gate_read)
         except FileExistsError:
             return f"the trusted launch directory {trusted} already exists"
         except (OSError, ValueError) as exc:
@@ -712,10 +752,13 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
     )
     record = {"pid": process.pid, "hostname": manager.hostname, "attempt_id": attempt.attempt_id}
     try:
-        _write_new(trusted, PROCESS_FILE, json.dumps({**record, "started_at": utc_now()}).encode())
+        _write_durable(trusted, PROCESS_FILE, json.dumps({**record, "started_at": utc_now()}).encode())
+        os.write(gate_write, b"\n")
     except OSError as exc:
-        # Without its process record a manager death would hide this launch from takeover: stop it.
+        # Closing the gate unopened makes the launch exit 125 without starting anything; stop it anyway.
         _stop(manager, attempt, launch, f"cannot record the launch process: {exc}", time.monotonic())
+    finally:
+        os.close(gate_write)
     return None
 
 
@@ -921,6 +964,10 @@ def dead_records(manager_dir: Path, *, hostname: str, grace_seconds: float, now:
     is gone on this host, or when it holds no process record (only ``launch.json``, or only malformed
     manager files, or nothing). A record an I/O error hides is never dead. Garbage collection calls
     this for manager directories it already found aged and not live.
+
+    A launch with only ``launch.json`` never hides a started launch: the launch process waits at a gate
+    until the manager has made ``process.json`` durable, and only the manager writes it after starting
+    the process, so ranks run only once the record exists.
 
     :param manager_dir: The manager's directory below ``managers/``.
     :param hostname: This host's name, the only host whose process groups can be proven gone.

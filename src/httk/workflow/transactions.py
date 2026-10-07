@@ -1,11 +1,12 @@
 """Replay of optional transactional-data outcomes.
 
-A replay runs on descriptors. The manager pins the transaction directory and
-the data directory without following links, and every component of every
-operation path below them is opened ``O_DIRECTORY|O_NOFOLLOW``, so a symlink or
-special file planted anywhere on an operation's source or destination path
-fails the replay instead of redirecting a rename, and nothing outside the two
-pinned directories is touched. The public :func:`replay_transaction` is the
+A replay runs on descriptors. The manager pins the data directory, and opens
+the transaction directory of its commit draft afresh, by name, for every
+access, so a takeover that renames the draft fences the replay; every component
+of every operation path below them is opened ``O_DIRECTORY|O_NOFOLLOW``, so a
+symlink or special file planted anywhere on an operation's source or
+destination path fails the replay instead of redirecting a rename, and nothing
+outside those two directories is touched. The public :func:`replay_transaction` is the
 runner's replay into its own workdir and follows symlinks.
 """
 
@@ -14,7 +15,7 @@ import logging
 import os
 import stat
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -24,6 +25,15 @@ from .errors import FormatError, TransactionError, WorkspaceUnavailableError
 from .models import validate_label
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _DisplacedDataError(TransactionError):
+    """A replay moved data it had not observed into its trash: another replayer's result was displaced.
+
+    Only a commit fenced by a takeover can meet this (its one step in flight
+    raced the successor), and unlike every other fenced error it means data is
+    out of place, so it is reported loudly even then.
+    """
 
 
 def _relative_path(value: object, name: str) -> PurePosixPath:
@@ -134,31 +144,59 @@ def replay_transaction(
     """
 
     data_dir.mkdir(parents=True, exist_ok=True)
-    with (
-        JobDirectory.at(transaction_dir, follow_symlinks=True) as transaction,
-        JobDirectory.at(data_dir, follow_symlinks=True) as data,
-    ):
-        return _replay_pinned(transaction, data, expected_generation=expected_generation, durable=durable, follow=True)
+    with JobDirectory.at(data_dir, follow_symlinks=True) as data:
+        return _replay_opened(
+            lambda: JobDirectory.at(transaction_dir, follow_symlinks=True),
+            data,
+            expected_generation=expected_generation,
+            durable=durable,
+            follow=True,
+        )
 
 
 def _replay_pinned(
-    transaction: JobDirectory,
+    control: JobDirectory,
+    draft: str,
     data: JobDirectory,
     *,
     expected_generation: int,
     durable: bool = False,
-    follow: bool = False,
 ) -> bool:
-    """Replay one transaction between two pinned directories; the manager's entry point.
+    """Replay the transaction of one commit draft into a pinned data directory; the manager's entry point.
 
-    With the default ``follow=False`` every component below the two handles
-    is opened without following links, and a symlink or special file on any
-    source or destination path, including the final name, fails the replay
-    with :class:`~httk.workflow._jobdir.JobDirectoryError` rather than being
-    followed or replaced.
+    The draft is never pinned: every access to its ``transaction`` first opens
+    the draft root by *draft* name below *control*, without creating it, so a
+    takeover that renamed the draft stops this replay at its next access with
+    :class:`~httk.workflow._manager_commit.CommitFencedError`. Every component
+    below the draft root and the data directory is opened without following
+    links, and a symlink or special file on any source or destination path,
+    including the final name, fails the replay with
+    :class:`~httk.workflow._jobdir.JobDirectoryError` rather than being followed
+    or replaced.
     """
 
-    manifest = transaction.read_json("manifest.json", CONTROL_DOCUMENT_LIMIT)
+    from ._manager_commit import open_draft
+
+    @contextlib.contextmanager
+    def transaction() -> Iterator[JobDirectory]:
+        with open_draft(control, draft) as root, root.directory("transaction") as opened:
+            yield opened
+
+    return _replay_opened(transaction, data, expected_generation=expected_generation, durable=durable, follow=False)
+
+
+def _replay_opened(
+    transaction: Callable[[], contextlib.AbstractContextManager[JobDirectory]],
+    data: JobDirectory,
+    *,
+    expected_generation: int,
+    durable: bool,
+    follow: bool,
+) -> bool:
+    """Replay one transaction whose directory *transaction* opens afresh for every access."""
+
+    with transaction() as opened:
+        manifest = opened.read_json("manifest.json", CONTROL_DOCUMENT_LIMIT)
     operations = _validated_operations(manifest, expected_generation)
     _replay(transaction, data, operations, durable=durable, follow=follow)
     return bool(operations)
@@ -190,20 +228,44 @@ def _validated_operations(manifest: Mapping[str, object], expected_generation: i
     return operations
 
 
+def _matches(root: JobDirectory, relative: PurePosixPath, expected: str, *, follow: bool) -> bool | None:
+    """Return whether an entry has the expected digest, or ``None`` when it is absent.
+
+    An entry that vanishes while it is digested (another replayer moved it) is
+    absent, never an error.
+    """
+
+    information = _entry(root, relative, follow=follow)
+    if information is None:
+        return None
+    try:
+        return _digest_matches(root, relative, information, expected)
+    except FileNotFoundError:
+        return None
+
+
 def _replay(
-    transaction: JobDirectory,
+    transaction: Callable[[], contextlib.AbstractContextManager[JobDirectory]],
     data: JobDirectory,
     operations: Sequence[Mapping[str, object]],
     *,
     durable: bool,
     follow: bool,
 ) -> None:
+    # *transaction* opens the transaction directory afresh: every access below
+    # is one short operation, and no descriptor inside it is held from one
+    # operation to the next, so a commit draft renamed by a takeover fences this
+    # replay at its next access.
+    #
+    # Two replayers can overlap by at most one operation of the fenced one, so
+    # an absent source never concludes corruption by itself: the destination is
+    # re-observed first, and only a positively inconsistent state raises.
+    #
     # Directories whose entries this replay changed, as (root, relative path)
     # pairs. A durable replay synchronizes each of them once at the end rather
     # than per operation, so a transaction touching many files under one
     # directory pays one directory fsync, not one per file.
     touched_directories: set[tuple[str, PurePosixPath]] = set()
-    roots = {"data": data, "transaction": transaction}
     for raw in operations:
         operation_id = validate_label(raw.get("id"), "transaction operation id")
         operation = raw.get("op")
@@ -222,24 +284,30 @@ def _replay(
         if operation == "put-file":
             source = _relative_path(raw.get("source"), "put-file source")
             expected = str(raw.get("sha256", ""))
-            destination_state = _entry(data, path, follow=follow)
-            source_state = _entry(transaction, source, follow=follow)
-            if (
-                destination_state is not None
-                and _digest_matches(data, path, destination_state, expected)
-                and source_state is None
-            ):
+            installed = _matches(data, path, expected, follow=follow)
+            with transaction() as opened:
+                source_state = _entry(opened, source, follow=follow)
+                usable = (
+                    None
+                    if source_state is None or not stat.S_ISREG(source_state.st_mode)
+                    else _matches(opened, source, expected, follow=follow)
+                )
+            if installed and source_state is None:
                 continue
-            if (
-                source_state is None
-                or not stat.S_ISREG(source_state.st_mode)
-                or not _digest_matches(transaction, source, source_state, expected)
-            ):
+            if not usable:
+                # The source may have been moved in since the destination was
+                # observed: only a destination that still does not match is
+                # corruption.
+                if source_state is None and _matches(data, path, expected, follow=follow):
+                    continue
                 raise TransactionError(f"put-file source digest mismatch: {path}")
-            with _parent(transaction, source) as origin, _parent(data, path, create=True) as target:
+            with (
+                transaction() as opened,
+                _parent(opened, source) as origin,
+                _parent(data, path, create=True) as target,
+            ):
                 _rename_verified(origin, target, replace=True)
-            destination_state = _entry(data, path, follow=follow)
-            if destination_state is None or not _digest_matches(data, path, destination_state, expected):
+            if not _matches(data, path, expected, follow=follow):
                 raise TransactionError(f"put-file destination digest mismatch: {path}")
             if durable:
                 descriptor = data.open_read(path)
@@ -254,22 +322,26 @@ def _replay(
             source = _relative_path(raw.get("source"), "put-tree source")
             expected = str(raw.get("sha256", ""))
             destination_state = _entry(data, path, follow=follow)
-            source_state = _entry(transaction, source, follow=follow)
-            if (
-                destination_state is not None
-                and _digest_matches(data, path, destination_state, expected)
-                and source_state is None
-            ):
+            with transaction() as opened:
+                source_state = _entry(opened, source, follow=follow)
+                usable = (
+                    None
+                    if source_state is None or not stat.S_ISDIR(source_state.st_mode)
+                    else _matches(opened, source, expected, follow=follow)
+                )
+            if destination_state is not None and source_state is None and _matches(data, path, expected, follow=follow):
                 continue
             if destination_state is not None:
                 raise TransactionError(f"put-tree destination already exists: {path}")
-            if (
-                source_state is None
-                or not stat.S_ISDIR(source_state.st_mode)
-                or not _digest_matches(transaction, source, source_state, expected)
-            ):
+            if not usable:
+                if source_state is None and _matches(data, path, expected, follow=follow):
+                    continue
                 raise TransactionError(f"put-tree source digest mismatch: {path}")
-            with _parent(transaction, source) as origin, _parent(data, path, create=True) as target:
+            with (
+                transaction() as opened,
+                _parent(opened, source) as origin,
+                _parent(data, path, create=True) as target,
+            ):
                 _rename_verified(origin, target)
             if durable:
                 data.fsync_tree(path)
@@ -279,10 +351,18 @@ def _replay(
         if operation == "remove":
             trash = trash_root / "removed"
             if _entry(data, path, follow=follow) is None:
-                if transaction.stat(trash) is not None or bool(raw.get("missing_ok", False)):
+                # The rename into the trash is one step: once the target is
+                # absent, a trash entry proves that the removal happened.
+                with transaction() as opened:
+                    removed = opened.stat(trash) is not None
+                if removed or bool(raw.get("missing_ok", False)):
                     continue
                 raise TransactionError(f"remove target is missing: {path}")
-            with _parent(data, path) as origin, _parent(transaction, trash, create=True) as target:
+            with (
+                transaction() as opened,
+                _parent(data, path) as origin,
+                _parent(opened, trash, create=True) as target,
+            ):
                 _rename_verified(origin, target)
             if durable:
                 touched_directories.update({("data", path.parent), ("transaction", trash.parent)})
@@ -293,25 +373,49 @@ def _replay(
             expected = str(raw.get("sha256", ""))
             trash = trash_root / "old"
             destination_state = _entry(data, path, follow=follow)
-            source_state = _entry(transaction, source, follow=follow)
-            if (
-                destination_state is not None
-                and _digest_matches(data, path, destination_state, expected)
-                and source_state is None
-            ):
+            with transaction() as opened:
+                source_state = _entry(opened, source, follow=follow)
+                set_aside = opened.stat(trash) is not None
+            if destination_state is not None and source_state is None and _matches(data, path, expected, follow=follow):
                 continue
-            if destination_state is not None and transaction.stat(trash) is None:
-                with _parent(data, path) as origin, _parent(transaction, trash, create=True) as target:
-                    _rename_verified(origin, target)
+            if destination_state is not None and not set_aside:
+                with (
+                    transaction() as opened,
+                    _parent(data, path) as origin,
+                    _parent(opened, trash, create=True) as target,
+                ):
+                    # Checked again right before the rename: a takeover may have
+                    # set the old tree aside and installed the new one since.
+                    # ponytail: stat-then-rename leaves a syscall gap, because
+                    # the stdlib has no RENAME_NOREPLACE; a rename that lands on
+                    # an empty set-aside directory is detected below, not prevented.
+                    if not target.exists():
+                        _rename_verified(origin, target)
+                        moved = opened.stat(trash)
+                        if moved is None or moved.st_ino != destination_state.st_ino:
+                            raise _DisplacedDataError(
+                                f"replace-tree moved {origin.shown}, which was not the tree it observed there, "
+                                f"onto {target.shown}: another commit of this transaction ran meanwhile, "
+                                f"and its {path} now lies in that trash"
+                            )
                 if durable:
                     touched_directories.add(("transaction", trash.parent))
-            if (
-                source_state is None
-                or not stat.S_ISDIR(source_state.st_mode)
-                or not _digest_matches(transaction, source, source_state, expected)
-            ):
+            with transaction() as opened:
+                source_state = _entry(opened, source, follow=follow)
+                usable = (
+                    None
+                    if source_state is None or not stat.S_ISDIR(source_state.st_mode)
+                    else _matches(opened, source, expected, follow=follow)
+                )
+            if not usable:
+                if source_state is None and _matches(data, path, expected, follow=follow):
+                    continue
                 raise TransactionError(f"replace-tree source digest mismatch: {path}")
-            with _parent(transaction, source) as origin, _parent(data, path, create=True) as target:
+            with (
+                transaction() as opened,
+                _parent(opened, source) as origin,
+                _parent(data, path, create=True) as target,
+            ):
                 _rename_verified(origin, target)
             if durable:
                 data.fsync_tree(path)
@@ -321,7 +425,11 @@ def _replay(
         raise FormatError(f"unsupported transaction operation: {operation!r}")
     if durable:
         for root, relative in sorted(touched_directories, key=lambda item: (item[0], item[1].as_posix())):
-            _fsync_directory(roots[root], relative)
+            if root == "data":
+                _fsync_directory(data, relative)
+                continue
+            with transaction() as opened:
+                _fsync_directory(opened, relative)
 
 
 def _fsync_directory(root: JobDirectory, relative: PurePosixPath) -> None:

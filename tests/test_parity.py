@@ -221,10 +221,10 @@ def _normalized_outcome(body: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _outcomes(workspace: Workspace) -> dict[str, list[dict[str, Any]]]:
-    """Every published outcome of every job, in publication order per job."""
+    """Every committed outcome of every job (its draft renamed to ``commit.<g>``), in publication order per job."""
 
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-    for path in workspace.root.glob("**/attempts/*/outcome.ready/outcome.json"):
+    for path in workspace.root.glob("**/attempts/*/commit.*/outcome.json"):
         body = json.loads(path.read_text(encoding="utf-8"))
         collected.setdefault(_tag(path.parents[3].name), []).append(
             (path.stat().st_mtime_ns, _normalized_outcome(body))
@@ -236,7 +236,7 @@ def _transactions(workspace: Workspace) -> dict[str, list[Any]]:
     """The operations of every published data transaction, keyed by job tag."""
 
     collected: dict[str, list[Any]] = {}
-    for path in workspace.root.glob("**/attempts/*/outcome.ready/transaction/manifest.json"):
+    for path in workspace.root.glob("**/attempts/*/commit.*/transaction/manifest.json"):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         collected[_tag(path.parents[4].name)] = list(manifest["operations"])
     return collected

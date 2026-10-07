@@ -5,6 +5,7 @@ import errno
 import hashlib
 import logging
 import os
+import re
 import shutil
 import stat
 import uuid
@@ -12,10 +13,15 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from . import _txn
 from ._job_tree import record_spawns
 from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
+from ._manager_requests import _STATE_ENVELOPE_MEMBERS
 from ._util import require_int, require_string
 from .errors import FormatError, TransactionError, UnsupportedExtensionError
+from .models import (
+    _MAXIMUM_JOB_DOCUMENT_BYTES as MAXIMUM_JOB_DOCUMENT_BYTES,
+)
 from .models import (
     ATTEMPTS_DIRECTORY,
     Failure,
@@ -31,6 +37,7 @@ from .models import (
     validate_resources,
     validate_step,
 )
+from .transactions import _DisplacedDataError
 from .workspace import _runner_content_digest
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -321,7 +328,7 @@ def _auto_seal_succeeded(manager: Any, destination: Marker) -> None:
 
 
 def _open_draft(control: JobDirectory) -> JobDirectory:
-    """Open a committing attempt's published ``outcome.ready`` without following links."""
+    """Open a running attempt's published ``outcome.ready`` without following links."""
 
     try:
         return control.directory("outcome.ready")
@@ -329,44 +336,156 @@ def _open_draft(control: JobDirectory) -> JobDirectory:
         raise FormatError(f"published outcome is missing: {control.path / 'outcome.ready'}") from exc
 
 
+class CommitFencedError(FormatError):
+    """The commit draft is no longer at the name this manager gave it.
+
+    Another manager took the commit over and renamed the draft to its own name,
+    so this one stops. While the committing marker is still this manager's, the
+    same absence means the draft vanished under the commit, which is a protocol
+    error of the job, so this is a :class:`~httk.workflow.errors.FormatError`.
+    """
+
+
+_DRAFT_NAME = re.compile(r"commit\.(0|[1-9][0-9]{0,19})")
+
+
+def draft_name(generation: int) -> str:
+    """Return the name of the commit draft the holder of committing *generation* works on.
+
+    :param generation: The generation of the committing marker.
+    :return: ``commit.<generation>``.
+    """
+
+    return f"commit.{generation}"
+
+
+def open_draft(control: JobDirectory, name: str) -> JobDirectory:
+    """Open a commit draft root by name below its attempt-control directory, never creating it.
+
+    Every access to a draft starts here, so a takeover that renamed the draft
+    stops the previous owner at its next access.
+
+    :param control: The pinned attempt-control directory.
+    :param name: The draft's name (:func:`draft_name`).
+    :return: The pinned draft root; the caller closes it.
+    :raises CommitFencedError: If nothing has that name.
+    :raises JobDirectoryError: If the name is a symlink or not a directory.
+    """
+
+    try:
+        return control.directory(name)
+    except FileNotFoundError as exc:
+        raise CommitFencedError(f"commit draft {control.path / name} is gone") from exc
+
+
+def draft_names(control: JobDirectory) -> list[str]:
+    """List the names a commit draft may have in one attempt-control directory, newest first.
+
+    A listing only finds drafts, for readers that hold no committing frame
+    (garbage collection, logs); the commit itself looks its draft up by fixed
+    names (:func:`_claim_draft`).
+
+    :param control: The pinned attempt-control directory.
+    :return: Every ``commit.<g>`` entry by descending *g*, then ``outcome.ready``.
+    :raises OSError: If the directory cannot be listed.
+    """
+
+    generations = sorted(
+        (int(found.group(1)) for found in map(_DRAFT_NAME.fullmatch, os.listdir(control.fd)) if found), reverse=True
+    )
+    return [draft_name(generation) for generation in generations] + ["outcome.ready"]
+
+
+def _claim_draft(control: JobDirectory, state: StateFrame, generation: int) -> str:
+    """Rename the commit draft to the name of the committing generation this manager holds.
+
+    The current name is looked up by fixed names, never by a listing:
+    ``commit.<g>`` (already renamed), ``commit.<g-1>`` down to
+    ``commit.<commit_base_generation>`` (an earlier owner's, or the name before
+    a request bumped the generation), then ``outcome.ready``. That order
+    ignores a second ``outcome.ready`` a lingering attempt published after the
+    first rename. The rename is identity-checked by inode.
+    """
+
+    name = draft_name(generation)
+    base = state.commit_base_generation
+    if base is None or not 1 <= base <= generation:
+        raise FormatError(
+            f"committing frame needs a commit_base_generation between 1 and {generation}, "
+            f"not {state.members.get('commit_base_generation')!r}"
+        )
+    for candidate in [*(draft_name(value) for value in range(generation, base - 1, -1)), "outcome.ready"]:
+        information = control.stat(candidate)
+        if information is None:
+            continue
+        if not stat.S_ISDIR(information.st_mode):
+            raise JobDirectoryError(f"commit draft {control.path / candidate} is a symlink or not a directory")
+        if candidate == name:
+            return name
+        error: OSError | None = None
+        try:
+            os.rename(candidate, name, src_dir_fd=control.fd, dst_dir_fd=control.fd)
+        except OSError as exc:
+            error = exc
+        moved = control.stat(name)
+        if moved is not None and moved.st_ino == information.st_ino:
+            return name
+        if moved is None and error is not None:
+            # Nothing took the name and the draft is still where it was: the
+            # rename failed and may be retried.
+            remaining = control.stat(candidate)
+            if remaining is not None and remaining.st_ino == information.st_ino:
+                raise error
+        # Something else holds the name (the job planted it), or the draft
+        # went away under this rename.
+        detail = f": {error}" if error is not None else ""
+        raise FormatError(f"cannot rename commit draft {control.path / candidate} to {name}{detail}")
+    raise FormatError(f"published outcome is missing from {control.path}")
+
+
 def process_committing(manager: Any, marker: Marker) -> None:
     """Apply a validated committing outcome through the manager's effects."""
 
     state = manager._read_frame(marker)
     job = manager.workspace.load_job(marker)
-    # The draft is reached only through descriptors pinned without following
-    # links, so whatever the job planted in it cannot redirect the commit.
+    # The draft is reached only through descriptors opened without following
+    # links, so whatever the job planted in it cannot redirect the commit, and
+    # every access opens it afresh by this owner's name (open_draft), so a
+    # takeover fences this commit at its next access.
     with (
         manager._open_attempt_control(marker, state) as control,
         manager._job_directory(marker) as job_dir,
-        _open_draft(control) as draft,
     ):
-        outcome_path = draft.path
-        outcome = manager._read_outcome(draft, marker, state)
+        name = _claim_draft(control, state, marker.generation)
+        _txn._hook("commit.draft_renamed")
+        outcome_path = control.path / name
+        with open_draft(control, name) as draft:
+            outcome = manager._read_outcome(draft, marker, state)
+            transactional = draft.exists_dir("transaction")
         data_generation = state.data_generation
-        if draft.exists_dir("transaction"):
+        if transactional:
             if job.data_mode != "transactional" or data_generation is None:
                 raise TransactionError("transaction published by a nontransactional job")
             if outcome.get("expected_data_generation") != data_generation:
                 raise TransactionError("outcome expected_data_generation is stale")
             from .transactions import _replay_pinned
 
-            with draft.directory("transaction") as transaction, job_dir.directory("data", create=True) as data:
+            with job_dir.directory("data", create=True) as data:
                 changed_data = _replay_pinned(
-                    transaction,
+                    control,
+                    name,
                     data,
                     expected_generation=data_generation,
                     durable=manager.workspace.durable,
                 )
             if changed_data:
                 data_generation += 1
-        manager._register_children(marker, state, draft)
+        manager._register_children(marker, state, control, name)
         joined = outcome.get("join")
-        labeled = (
-            manager._labeled_join(joined, draft)
-            if outcome["action"] == "wait" and isinstance(joined, Mapping)
-            else None
-        )
+        labeled = None
+        if outcome["action"] == "wait" and isinstance(joined, Mapping):
+            with open_draft(control, name) as draft:
+                labeled = manager._labeled_join(joined, draft)
     executor = manager._executor_for(job)
     if executor is None:
         return
@@ -560,11 +679,12 @@ def retry(
 def child_staging_name(attempt_id: str, job_key: str) -> str:
     """Return the deterministic staging name of one spawned child bundle.
 
-    A child bundle is renamed out of the job-writable draft into the manager's
-    ``.httk-workspace/tmp`` before it is verified and published. The name is
-    derived from the attempt and the child key, never random, so a commit
-    replayed after a crash between that rename and the publication finds the
-    bundle again in staging rather than missing from the draft.
+    A child bundle is copied out of the job-writable draft into the manager's
+    ``.httk-workspace/tmp`` and verified and published from that copy. The name
+    is derived from the attempt and the child key, never random, so ``gc`` can
+    tell a copy of an unfinished commit from an abandoned one; a commit replayed
+    after a crash removes a copy left behind, which may be incomplete, and copies
+    the draft's bundle again.
 
     :param attempt_id: The attempt whose outcome spawned the child.
     :param job_key: The child's job key.
@@ -589,27 +709,38 @@ def _validated_spawn_entries(manager: Any, entries: Sequence[Mapping[str, object
     return validated
 
 
-def _stage_child(jobs: JobDirectory | None, staging: JobDirectory, job_key: str, staged: str) -> bool:
-    """Move a child bundle out of the draft into staging; report whether one is staged.
+def _copy_child(control: JobDirectory, name: str, staging: JobDirectory, job_key: str, staged: str) -> bool:
+    """Copy one child bundle out of the draft into staging; report whether the draft holds one.
 
-    A bundle already in staging (from a commit interrupted after this rename)
-    takes precedence: whatever the job put back in the draft since is ignored.
+    The bundle is copied, never renamed (:func:`_copy_from_draft`): every staged
+    file is a fresh inode the attempt never had a descriptor on or a link to, so
+    a job that keeps writing its draft, or that linked a child file elsewhere,
+    cannot change what is verified and published. A copy left by an interrupted
+    commit may be incomplete, so it is removed and made again — only below an
+    opened draft, because the staging name is shared with a successor that took
+    the commit over.
     """
 
-    present = staging.stat(staged)
-    if present is not None:
-        if not stat.S_ISDIR(present.st_mode):
-            raise JobDirectoryError(f"staged child {staging.path / staged} is not a real directory")
-        return True
-    if jobs is None:
-        return False
-    information = jobs.stat(job_key)
-    if information is None:
-        return False
-    if not stat.S_ISDIR(information.st_mode):
-        raise JobDirectoryError(f"child bundle {jobs.path / job_key} is a symlink or not a directory")
-    jobs.rename_out(job_key, staging.fd, staged)
+    relative = PurePosixPath("children", "jobs", job_key)
+    with open_draft(control, name) as outcome:
+        information = outcome.stat(relative)
+        if information is None:
+            return False
+        if not stat.S_ISDIR(information.st_mode):
+            raise JobDirectoryError(f"child bundle {outcome.path / relative} is a symlink or not a directory")
+        staging.remove_tree(staged)
+        _copy_from_draft(outcome, relative, staging, staged)
     return True
+
+
+def _remove_staged(control: JobDirectory, name: str, staging: JobDirectory, staged: str) -> None:
+    """Remove one staged copy while this owner still holds the draft; a fenced owner leaves it to its successor."""
+
+    try:
+        with open_draft(control, name):
+            staging.remove_tree(staged)
+    except CommitFencedError:
+        _LOGGER.debug("leaving staged %s to the commit's new owner", staged)
 
 
 def _verify_staged(
@@ -660,21 +791,26 @@ def runner_staging_name(attempt_id: str, path: PurePosixPath) -> str:
 
 
 def _copy_file(source: JobDirectory, relative: str | PurePosixPath, target: JobDirectory, name: str) -> None:
-    """Copy one regular file through no-follow descriptors into a new entry of *target*."""
+    """Copy one regular file and its permission bits through no-follow descriptors into a new entry of *target*."""
 
     with (
         open(source.open_read(relative), "rb") as reader,
         open(os.open(name, _COPY_FLAGS, 0o600, dir_fd=target.fd), "wb") as writer,
     ):
         shutil.copyfileobj(reader, writer)
+        # A child's runner must stay executable; set-id bits are never copied.
+        os.fchmod(writer.fileno(), stat.S_IMODE(os.fstat(reader.fileno()).st_mode) & 0o777 | 0o600)
 
 
-def _copy_staged_runner(outcome: JobDirectory, relative: PurePosixPath, staging: JobDirectory, name: str) -> None:
-    """Copy one staged runner file or tree out of the draft, refusing links and special files.
+def _copy_from_draft(outcome: JobDirectory, relative: PurePosixPath, staging: JobDirectory, name: str) -> None:
+    """Copy one file or tree out of the draft (a staged runner, a child bundle), refusing links and special files.
 
     Every entry is opened without following links below the pinned draft, so a
-    symlink or special file anywhere in the staged runner is a
+    symlink or special file anywhere in it is a
     :class:`~httk.workflow._jobdir.JobDirectoryError`, never followed or read.
+    Permission bits are kept (owner access added, set-id bits dropped). The
+    copy is not bounded here: the tree was already walked and digested when
+    the outcome was accepted (``child_digests``) or is a runner a child pins.
     """
 
     information = outcome.stat(relative)
@@ -682,8 +818,9 @@ def _copy_staged_runner(outcome: JobDirectory, relative: PurePosixPath, staging:
         _copy_file(outcome, relative, staging, name)
         return
     if information is None or not stat.S_ISDIR(information.st_mode):
-        raise JobDirectoryError(f"staged runner {outcome.path / relative} is a symlink or special file")
-    with outcome.directory(relative) as tree, staging.directory(name, create=True, exclusive=True, mode=0o700) as copy:
+        raise JobDirectoryError(f"{outcome.path / relative} is a symlink or special file")
+    mode = stat.S_IMODE(information.st_mode) & 0o777 | 0o700
+    with outcome.directory(relative) as tree, staging.directory(name, create=True, exclusive=True, mode=mode) as copy:
         pending = [PurePosixPath()]
         while pending:
             current = pending.pop()
@@ -695,16 +832,21 @@ def _copy_staged_runner(outcome: JobDirectory, relative: PurePosixPath, staging:
                     if entry_information is None:
                         continue
                     if stat.S_ISDIR(entry_information.st_mode):
-                        os.mkdir(entry, 0o700, dir_fd=target.fd)
+                        os.mkdir(entry, stat.S_IMODE(entry_information.st_mode) & 0o777 | 0o700, dir_fd=target.fd)
                         pending.append(current / entry)
                     elif stat.S_ISREG(entry_information.st_mode):
                         _copy_file(source, entry, target, entry)
                     else:
-                        raise JobDirectoryError(f"staged runner {source.path / entry} is a symlink or special file")
+                        raise JobDirectoryError(f"{source.path / entry} is a symlink or special file")
 
 
 def _publish_staged_runners(
-    manager: Any, outcome: JobDirectory, staging: JobDirectory, attempt_id: str, children: Iterable[JobDefinition]
+    manager: Any,
+    control: JobDirectory,
+    name: str,
+    staging: JobDirectory,
+    attempt_id: str,
+    children: Iterable[JobDefinition],
 ) -> None:
     """Publish the runners staged in a draft for the verified children that reference them.
 
@@ -717,6 +859,7 @@ def _publish_staged_runners(
     already holds that digest) and removed. Staged runners no child references
     are ignored; a referenced runner that is not staged is left to the store,
     where a missing one fails the child as ``runner_unavailable`` when claimed.
+    Each copy opens the draft afresh by *name* below *control* (:func:`open_draft`).
     """
 
     pinned: dict[PurePosixPath, set[str]] = {}
@@ -725,17 +868,22 @@ def _publish_staged_runners(
             pinned.setdefault(child.runner_path, set()).add(child.runner_sha256)
     for path, digests in pinned.items():
         relative = STAGED_RUNNERS / path
-        if outcome.stat(relative) is None:
+        with open_draft(control, name) as outcome:
+            staged = outcome.stat(relative) is not None
+        if not staged:
             continue
         if len(digests) != 1:
             raise FormatError(f"spawned children pin staged workspace runner {path} to different digests")
         (expected,) = digests
-        name = runner_staging_name(attempt_id, path)
-        # A copy left by an interrupted commit may be incomplete: never reuse it.
-        staging.remove_tree(name)
+        copy = runner_staging_name(attempt_id, path)
         try:
-            _copy_staged_runner(outcome, relative, staging, name)
-            copied = staging.path / name
+            with open_draft(control, name) as outcome:
+                # A copy left by an interrupted commit may be incomplete: never
+                # reuse it. The staging name is shared with a successor, so it
+                # is removed only below the opened draft.
+                staging.remove_tree(copy)
+                _copy_from_draft(outcome, relative, staging, copy)
+            copied = staging.path / copy
             actual = _runner_content_digest(copied)[1]
             if actual != expected:
                 raise FormatError(f"staged workspace runner {path} has digest {actual}, but its child pins {expected}")
@@ -744,45 +892,53 @@ def _publish_staged_runners(
             except FileExistsError as exc:
                 raise FormatError(f"cannot publish staged workspace runner {path}: {exc}") from exc
         finally:
-            staging.remove_tree(name)
+            _remove_staged(control, name, staging, copy)
 
 
 def register_children(
-    manager: Any, marker: Marker, state: StateFrame, outcome: JobDirectory, digest: Callable[..., str]
+    manager: Any, marker: Marker, state: StateFrame, control: JobDirectory, name: str, digest: Callable[..., str]
 ) -> None:
     """Register the children one committed outcome spawned.
 
     Every spawn entry is validated (job key, placement rule, workspace) before
     the parent's durable spawn record is written, so a refused spawn leaves no
-    record. Each child bundle is then renamed out of the job-writable draft
-    into manager-owned staging (:func:`child_staging_name`), verified there —
-    a real directory whose ``job.json`` names the key and whose digest is the
-    one recorded when the outcome was accepted. Runners the verified children
+    record. Each child bundle is then copied out of the job-writable draft into
+    manager-owned staging (:func:`child_staging_name`, :func:`_copy_child`) and
+    the copy is verified — a real directory whose ``job.json`` names the key and
+    whose digest is the one recorded when the outcome was accepted. Runners the verified children
     pin and the draft stages under ``children/runners/`` are then copied into
     staging, verified against those pins and published into the workspace
     runner store (:func:`_publish_staged_runners`), and only then is each child
-    published at ``<placement>/<job_key>``. A job that keeps writing its draft
-    after publication therefore cannot change what was verified.
+    published at ``<placement>/<job_key>``, with the priority of the verified
+    copy's definition. A job that keeps writing its draft after publication, or
+    holds a descriptor on or a link to a child file, therefore cannot change what
+    was verified. A child already published at its target (a replayed commit) is
+    checked against its recorded digest instead. Every access
+    to the draft opens it afresh by *name* (:func:`open_draft`), so a takeover
+    fences this registration at its next access.
 
     :param manager: The committing task manager.
     :param marker: The committing parent.
     :param state: The parent's committing frame.
-    :param outcome: The pinned ``outcome.ready`` directory.
+    :param control: The pinned attempt-control directory.
+    :param name: The commit draft's name in it (:func:`draft_name`).
     :param digest: The tree-digest function.
     :raises httk.workflow.errors.FormatError: If the spawn set or a child bundle
         is malformed, tampered with, or changed since the outcome was accepted.
     :raises httk.workflow.errors.UnsupportedExtensionError: If a child names another workspace.
+    :raises CommitFencedError: If the draft is no longer at *name*.
     """
 
-    if not outcome.exists_dir("children"):
-        return
-    spawn = _spawn_document(outcome)
-    if spawn is None:
-        raise FormatError(f"cannot read JSON object {outcome.path / 'children' / 'spawn.json'}: it is missing")
+    with open_draft(control, name) as outcome:
+        if not outcome.exists_dir("children"):
+            return
+        spawn = _spawn_document(outcome)
+        if spawn is None:
+            raise FormatError(f"cannot read JSON object {outcome.path / 'children' / 'spawn.json'}: it is missing")
+        manager._spawn_labels(outcome)
     entries = spawn.get("children")
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         raise FormatError("spawn children must be an array")
-    manager._spawn_labels(outcome)
     expected_digests = state.child_digests
     if expected_digests is None and state.has("child_digests"):
         raise FormatError("committing child_digests must be an object")
@@ -799,45 +955,49 @@ def register_children(
         record_spawns(job_dir, state.attempt_id, entries, durable=manager.workspace.durable)
     staging_path = manager.workspace.control / "tmp"
     staging_path.mkdir(parents=True, exist_ok=True)
-    with JobDirectory.at(staging_path) as staging, contextlib.ExitStack() as handles:
-        jobs = (
-            handles.enter_context(outcome.directory("children/jobs")) if outcome.exists_dir("children/jobs") else None
-        )
-        # Every child still to publish is moved out of the draft and verified
+    with JobDirectory.at(staging_path) as staging:
+        # Every child still to publish is copied out of the draft and verified
         # first, then the runners those verified children pin are published, and
         # only then does any child appear: a child never exists before its
         # staged runner, and a refused runner publishes no child.
         verified: dict[str, JobDefinition] = {}
-        for job_key, _placement in validated:
+        for job_key, placement in validated:
+            if os.path.lexists(manager.workspace.payload_path(placement, job_key)):
+                continue
             staged = child_staging_name(state.attempt_id, job_key)
-            if _stage_child(jobs, staging, job_key, staged):
+            if _copy_child(control, name, staging, job_key, staged):
                 expected_digest = str(expected_digests.get(job_key, ""))
                 verified[job_key] = _verify_staged(staging, staged, job_key, expected_digest, digest)
-        _publish_staged_runners(manager, outcome, staging, state.attempt_id, verified.values())
+        _publish_staged_runners(manager, control, name, staging, state.attempt_id, verified.values())
+        # A fenced owner that finished every copy before the takeover stops here,
+        # before publishing anything.
+        open_draft(control, name).close()
         for job_key, placement in validated:
             expected_digest = str(expected_digests.get(job_key, ""))
             target = manager.workspace.payload_path(placement, job_key)
-            staged = child_staging_name(state.attempt_id, job_key)
-            published_here = False
-            if verified.pop(job_key, None) is not None:
+            child = verified.pop(job_key, None)
+            if child is not None:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                manager.workspace._publish_path(staging.path / staged, target)
-                published_here = True
+                manager.workspace._publish_path(staging.path / child_staging_name(state.attempt_id, job_key), target)
             if not target.is_dir():
                 raise FormatError(f"registered child bundle does not match: {job_key}")
             if manager.workspace.find_marker_at(job_key, placement) is not None:
                 continue
-            if not published_here:
+            if child is None:
+                # Published by an interrupted commit: the copy there is the
+                # manager's own, checked again against the recorded digest.
                 try:
                     with JobDirectory.open(
                         jobs=manager.workspace.jobs, placement=placement, job_key=job_key
                     ) as published:
                         published_digest = published.digest_tree(skip=is_payload_private, digest=digest)
+                        child = JobDefinition.from_bytes(
+                            published.read("job.json", MAXIMUM_JOB_DOCUMENT_BYTES), name=str(target / "job.json")
+                        )
                 except FileNotFoundError as exc:
                     raise FormatError(f"registered child bundle does not match: {job_key}") from exc
-                if published_digest != expected_digest:
+                if published_digest != expected_digest or child.job_key != job_key:
                     raise FormatError(f"registered child bundle does not match: {job_key}")
-            child = JobDefinition.from_path(target / "job.json")
             temporary = manager.workspace.control / "tmp" / f"child-marker.{uuid.uuid4()}"
             temporary.touch(exist_ok=False)
             destination = manager.workspace.marker_path("submitted", placement, job_key, child.priority, 0, "init")
@@ -890,6 +1050,112 @@ def handle_attempt_failure(
             raise
 
 
+def _commit_owner(manager: Any, marker: Marker, state: StateFrame) -> str | None:
+    """Return the manager a committing frame names, or ``None`` when it names none.
+
+    A frame naming something that is not a manager is reported and raised, never
+    taken over: a takeover would hide the damage instead of surfacing it.
+    """
+
+    try:
+        return state.manager_id
+    except FormatError as exc:
+        manager._report_anomaly(
+            f"commit_owner:{marker.job_key}",
+            f"committing job {marker.job_key} does not name a usable manager: {exc}",
+            manager._event("protocol_error", marker),
+        )
+        raise
+
+
+def may_commit(manager: Any, marker: Marker, state: StateFrame) -> bool:
+    """Report whether this manager may process a committing marker now.
+
+    It may when the frame names it, or when the frame names no manager or one
+    that is evidently gone (:meth:`~httk.workflow.TaskManager._owner_gone_evidence`),
+    so the commit can be taken over.
+
+    :param manager: The task manager.
+    :param marker: The committing marker.
+    :param state: Its committing frame.
+    :return: Whether the commit is this manager's work now.
+    """
+
+    try:
+        owner = _commit_owner(manager, marker, state)
+    except FormatError:
+        return False
+    if owner == manager.manager_id:
+        return True
+    lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
+    return manager._owner_gone_evidence(owner, lease_seconds=lease_seconds) is not None
+
+
+def _owned_commit(manager: Any, marker: Marker, state: StateFrame, logger: Any) -> Marker | None:
+    """Return the committing marker this manager owns, taking an abandoned commit over first.
+
+    A commit belongs to the manager its frame names. Another manager takes it
+    over only on evidence that the owner is gone, by a ``committing`` →
+    ``committing`` transition: the rename is the decision, so of two successors
+    one wins and the other loses with
+    :class:`~httk.workflow.errors.TransitionLostError`, and the old owner's own
+    later transition loses the same way. The takeover frame repeats every
+    member of the current frame except the state envelope.
+
+    :param manager: The task manager.
+    :param marker: The committing marker.
+    :param state: Its committing frame.
+    :param logger: The manager's logger.
+    :return: The marker to process, or ``None`` while the owner may be alive.
+    :raises httk.workflow.errors.TransitionLostError: If another actor moved the marker first.
+    """
+
+    try:
+        owner = _commit_owner(manager, marker, state)
+    except FormatError:
+        return None
+    if owner == manager.manager_id:
+        return marker
+    lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
+    evidence = manager._owner_gone_evidence(owner, lease_seconds=lease_seconds)
+    if evidence is None:
+        logger.debug("leaving the commit of %s to its manager %s", marker.job_key, owner)
+        return None
+    taken = manager._transition(
+        marker,
+        "committing",
+        StateFrame.replace(
+            StateFrame({name: value for name, value in state.members.items() if name not in _STATE_ENVELOPE_MEMBERS}),
+            manager_id=manager.manager_id,
+            writer_id=manager.writer.writer_id,
+            previous_manager_id=owner,
+            takeover_evidence=dict(evidence),
+            reason="commit_takeover",
+        ),
+    )
+    logger.warning(
+        "took over the commit of %s from manager %s: %s",
+        marker.job_key,
+        owner or "-",
+        evidence["evidence"],
+        extra=manager._event("commit_takeover", taken, previous_manager=owner, **evidence),
+    )
+    _txn._hook("commit.taken_over")
+    return taken
+
+
+def _fenced(marker: Marker) -> bool:
+    """Report whether a marker has moved away from the path this commit started from."""
+
+    try:
+        os.lstat(marker.path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def resume(manager: Any, logger: Any) -> bool:
     from .errors import (
         TransitionLostError,
@@ -897,51 +1163,84 @@ def resume(manager: Any, logger: Any) -> bool:
     )
 
     changed = False
-    for marker in manager._window("resume_committing", "committing"):
+    for found in manager._window("resume_committing", "committing"):
         manager._pace()
-        loaded = manager._load_job_and_state(marker, "resume_committing")
+        loaded = manager._load_job_and_state(found, "resume_committing")
         if loaded is None:
             continue
         job, state = loaded
         if manager._executor_for(job) is None:
             logger.debug(
-                "skipping committing job %s: runner executor %s is not served here", marker.job_key, job.runner_executor
+                "skipping committing job %s: runner executor %s is not served here", found.job_key, job.runner_executor
             )
             continue
         try:
+            marker = _owned_commit(manager, found, state, logger)
+        except TransitionLostError:
+            continue
+        except (WorkflowError, OSError) as exc:
+            manager._report_anomaly(
+                f"resume_committing:{found.job_key}",
+                f"cannot take over the commit of {found.job_key}: {exc}",
+                manager._event("commit_error", found),
+            )
+            continue
+        if marker is None:
+            continue
+        try:
+            if marker is not found:
+                state = manager._read_frame(marker)
             manager._process_committing(marker)
         except TransitionLostError:
             pass
-        except (FormatError, TransactionError) as exc:
-            # FormatError covers JobDirectoryError: a symlink or special file the
-            # job planted in its draft or data, or draft content a digest cannot
-            # describe, is the job's own protocol violation, never a reason to
-            # stop the manager.
-            # A replay that fails midway is transaction corruption; a manifest or
-            # outcome the manager cannot parse is a protocol violation of the
-            # runner. Both used to be reported as corruption, which lied about a
-            # malformed outcome.
-            code = "transaction_corruption" if isinstance(exc, TransactionError) else "protocol_error"
-            logger.error("commit of %s failed: %s", marker.job_key, exc, extra=manager._event("commit_failed", marker))
-            try:
-                manager._transition(
-                    marker,
-                    "failed",
-                    StateFrame.replace(
-                        StateFrame.replace(state.carried(), process=state.members["process"])
-                        if "process" in state.members
-                        else state.carried(),
-                        failure=manager._failure(code, str(exc)),
-                        reason="commit_failed",
-                    ),
-                )
-            except TransitionLostError:
-                pass
         except (WorkflowError, OSError) as exc:
-            manager._report_anomaly(
-                f"resume_committing:{marker.job_key}",
-                f"cannot resume the commit of {marker.job_key}: {exc}",
-                manager._event("commit_error", marker),
-            )
+            if _fenced(marker) and isinstance(exc, _DisplacedDataError):
+                # The one step in flight across the takeover displaced the
+                # successor's data: nothing to record against the job, but an
+                # operator must know where the data went.
+                manager._report_anomaly(
+                    f"displaced:{marker.job_key}",
+                    f"a fenced commit of {marker.job_key} displaced data: {exc}",
+                    manager._event("commit_displaced_data", marker),
+                )
+            elif _fenced(marker):
+                # Another manager took the commit over, or an operator moved the
+                # job: whatever this commit observed since is not evidence of
+                # anything, so it records nothing.
+                logger.debug("the commit of %s was fenced: %s", marker.job_key, exc)
+            elif isinstance(exc, (FormatError, TransactionError)):
+                # FormatError covers JobDirectoryError: a symlink or special file the
+                # job planted in its draft or data, or draft content a digest cannot
+                # describe, is the job's own protocol violation, never a reason to
+                # stop the manager. It also covers CommitFencedError while the
+                # marker is still this manager's: the draft vanished under the commit.
+                # A replay that fails midway is transaction corruption; a manifest or
+                # outcome the manager cannot parse is a protocol violation of the
+                # runner. Both used to be reported as corruption, which lied about a
+                # malformed outcome.
+                code = "transaction_corruption" if isinstance(exc, TransactionError) else "protocol_error"
+                logger.error(
+                    "commit of %s failed: %s", marker.job_key, exc, extra=manager._event("commit_failed", marker)
+                )
+                try:
+                    manager._transition(
+                        marker,
+                        "failed",
+                        StateFrame.replace(
+                            StateFrame.replace(state.carried(), process=state.members["process"])
+                            if "process" in state.members
+                            else state.carried(),
+                            failure=manager._failure(code, str(exc)),
+                            reason="commit_failed",
+                        ),
+                    )
+                except TransitionLostError:
+                    pass
+            else:
+                manager._report_anomaly(
+                    f"resume_committing:{marker.job_key}",
+                    f"cannot resume the commit of {marker.job_key}: {exc}",
+                    manager._event("commit_error", marker),
+                )
         changed = True
     return changed

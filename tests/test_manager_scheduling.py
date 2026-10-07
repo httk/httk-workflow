@@ -23,7 +23,7 @@ from httk.core.digests import tree_digest
 import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
 from conftest import configure_identity
-from httk.workflow import TaskManager, Workspace, _manager_requests
+from httk.workflow import TaskManager, Workspace, _manager_requests, _manager_scheduling
 from httk.workflow._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory
 from httk.workflow._logging import reset_logging
 from httk.workflow.journal import JournalWriter, read_record
@@ -597,16 +597,18 @@ def test_commit_failure_rebuild_retains_process_identity(tmp_path: Path) -> None
     )
     outcome.mkdir()
     (outcome / "outcome.json").write_text("{}", encoding="utf-8")
+    departed = str(uuid.uuid4())
     committing = StateFrame.replace(
         state.carried(),
         process=original,
-        manager_id=str(uuid.uuid4()),
+        manager_id=departed,
         writer_id=str(uuid.uuid4()),
         attempt_id=state.members["attempt_id"],
         attempt_control=state.members["attempt_control"],
         outcome_action="succeed",
-        child_digests={},
-        child_labels={},
+        child_digests={"child--x": "sha256:feed"},
+        child_labels={"child--x": "x"},
+        commit_base_generation=marker.generation + 1,
         reason="outcome_published",
     )
     with JournalWriter(workspace.control) as writer:
@@ -617,7 +619,124 @@ def test_commit_failure_rebuild_retains_process_identity(tmp_path: Path) -> None
 
     failed = workspace.find_marker_by_id(job_id)
     assert failed is not None and failed.kind == "failed"
-    assert workspace.read_state(failed)["process"] == original
+    failed_state = workspace.read_state(failed)
+    assert failed_state["process"] == original
+    # The foreign commit was processed only after a takeover frame, which
+    # repeats every member of the committing frame under the new owner.
+    takeover = read_record(
+        workspace.control, str(failed_state["previous_record_ref"]), deadline_seconds=workspace.visibility_deadline
+    )
+    assert takeover["kind"] == "committing" and takeover["state_generation"] == marker.generation + 1
+    assert takeover["reason"] == "commit_takeover"
+    assert takeover["manager_id"] == manager.manager_id
+    assert takeover["previous_manager_id"] == departed
+    assert takeover["takeover_evidence"] == {"evidence": "manager_record_absent", "heartbeat_age_seconds": None}
+    for member in ("attempt_control", "child_digests", "child_labels", "process", "commit_base_generation"):
+        assert takeover[member] == committing.members[member], member
+
+
+def _foreign_owner(workspace: Workspace, liveness: str) -> str | None:
+    """Publish the record of a committing frame's owner in one liveness state."""
+
+    if liveness == "no_manager_id":
+        return None
+    if liveness == "malformed":
+        return "Not-A-Manager"
+    if liveness == "manager_record_absent":
+        return str(uuid.uuid4())
+    manager_id = _fake_manager(workspace, heartbeat_age=3600.0 if liveness == "lease_grace_expired" else 0.0)
+    pid = os.getpid()
+    if liveness == "manager_process_dead":
+        exited = subprocess.Popen(["true"])
+        exited.wait()
+        pid = exited.pid
+    (workspace.control / "managers" / manager_id / "manager.json").write_text(
+        json.dumps({"manager_id": manager_id, "hostname": socket.gethostname(), "pid": pid}), encoding="utf-8"
+    )
+    return manager_id
+
+
+@pytest.mark.parametrize(
+    "liveness",
+    ["alive", "malformed", "no_manager_id", "manager_process_dead", "manager_record_absent", "lease_grace_expired"],
+)
+def test_a_foreign_commit_is_taken_over_only_on_evidence_that_its_owner_is_gone(tmp_path: Path, liveness: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="foreign-commit")
+    running, _attempt_id = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/foreign-commit",
+        manager_id=_fake_manager(workspace, heartbeat_age=None),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+    )
+    state = StateFrame.from_mapping(workspace.read_state(running))
+    control = workspace.payload_path(running.placement, running.job_key) / str(state.attempt_control)
+    (control / "outcome.ready").mkdir()
+    (control / "outcome.ready" / "outcome.json").write_text(
+        json.dumps(
+            {
+                "format": "httk-workflow-outcome",
+                "format_version": 2,
+                "job_id": running.job_id,
+                "activation_id": state.activation_id,
+                "attempt_id": state.attempt_id,
+                "action": "succeed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    owner = _foreign_owner(workspace, liveness)
+    committing = StateFrame.replace(
+        state.carried(),
+        process=state.members["process"],
+        writer_id=str(uuid.uuid4()),
+        attempt_id=str(state.attempt_id),
+        attempt_control=str(state.attempt_control),
+        lease_seconds=10.0,
+        outcome_action="succeed",
+        child_digests={"child--absent": "sha256:never-registered"},
+        child_labels={"child--absent": "absent"},
+        commit_base_generation=running.generation + 1,
+        reason="outcome_published",
+    )
+    if owner is not None:
+        committing = StateFrame.replace(committing, manager_id=owner)
+    with JournalWriter(workspace.control) as writer:
+        marker = workspace.transition(writer, running, "committing", committing.as_mapping())
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        if liveness in {"alive", "malformed"}:
+            # A live owner may still be committing, and a frame that names no
+            # usable manager is damage to surface, not to heal by a takeover:
+            # this manager neither touches the commit nor counts it as its work.
+            manager._resume_committing()
+            assert marker.path.is_file() and (control / "outcome.ready").is_dir()
+            assert _manager_scheduling.work_census(manager).actionable_count == 0
+            assert (f"commit_owner:{marker.job_key}" in manager._reported) == (liveness == "malformed")
+            return
+        manager.run_until_idle(timeout=30.0)
+
+    succeeded = workspace.find_marker_by_id(job_id)
+    assert succeeded is not None and succeeded.kind == "succeeded"
+    takeover = read_record(
+        workspace.control,
+        str(workspace.read_state(succeeded)["previous_record_ref"]),
+        deadline_seconds=workspace.visibility_deadline,
+    )
+    assert takeover["kind"] == "committing" and takeover["reason"] == "commit_takeover"
+    assert takeover["state_generation"] == marker.generation + 1
+    assert takeover["manager_id"] == manager.manager_id
+    assert takeover["previous_manager_id"] == owner
+    assert takeover["takeover_evidence"]["evidence"] == (
+        "manager_record_absent" if liveness == "no_manager_id" else liveness
+    )
+    for member in ("attempt_control", "child_digests", "child_labels", "process", "lease_seconds"):
+        assert takeover[member] == committing.members[member], member
+    assert takeover["commit_base_generation"] == marker.generation
+    # The draft carries the name of the generation that committed it.
+    assert (control / f"commit.{marker.generation + 1}" / "outcome.json").is_file()
 
 
 def test_a_symlinked_attempts_directory_fails_launch_without_gc_escape(tmp_path: Path) -> None:
@@ -1328,6 +1447,7 @@ def test_deferred_pause_is_consumed_by_runner_pause_and_continue_resumes(
                 state.carried(),
                 process=state.members["process"],
                 outcome_action="pause",
+                commit_base_generation=current_running.generation + 1,
                 reason="outcome_published",
             ),
         )
@@ -1859,6 +1979,7 @@ def test_inherited_committing_success_retains_attempt_control_for_gc(tmp_path: P
         outcome_action="succeed",
         child_digests={},
         child_labels={},
+        commit_base_generation=running.generation + 1,
         reason="outcome_published",
     )
     with JournalWriter(workspace.control) as writer:
@@ -1870,6 +1991,10 @@ def test_inherited_committing_success_retains_attempt_control_for_gc(tmp_path: P
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
     assert control.is_dir()
+    # The inherited commit renamed the draft to the name of its takeover generation.
+    assert [path.name for path in control.iterdir() if path.name.startswith(("commit.", "outcome."))] == [
+        f"commit.{running.generation + 2}"
+    ]
 
 
 def test_a_runlog_directory_is_evidence_failure_and_does_not_block_launch(

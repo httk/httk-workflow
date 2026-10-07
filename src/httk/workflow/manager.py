@@ -56,7 +56,7 @@ from ._manager_binding import (
 )
 from ._manager_launches import AttemptLaunches, LaunchContext
 from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
-from ._txn import owner_token
+from ._txn import manager_gone, owner_token
 from ._util import (
     interpreter_first_path,
     json_bytes,
@@ -210,14 +210,21 @@ def _append_log_line(job_dir: JobDirectory, line: str, *, job_key: str) -> None:
 
 
 def _attempt_outcome_action(job_dir: JobDirectory, control_name: str) -> str:
-    """Return an attempt's published action, or ``none`` while it is absent or unreadable."""
+    """Return an attempt's published action, or ``none`` while it is absent or unreadable.
+
+    The outcome is read from the newest commit draft, or ``outcome.ready``
+    before a commit renamed it (:func:`~httk.workflow._manager_commit.draft_names`).
+    """
 
     try:
-        outcome = job_dir.read_json(f"{control_name}/outcome.ready/outcome.json", CONTROL_DOCUMENT_LIMIT)
+        with job_dir.directory(control_name) as control:
+            for name in _manager_commit.draft_names(control):
+                if control.exists_dir(name):
+                    action = control.read_json(f"{name}/outcome.json", CONTROL_DOCUMENT_LIMIT).get("action")
+                    return action if isinstance(action, str) else "none"
     except (FormatError, OSError):
-        return "none"
-    action = outcome.get("action")
-    return action if isinstance(action, str) else "none"
+        pass
+    return "none"
 
 
 def _append_attempt_event(logs: JobDirectory, record: Mapping[str, object], job_key: str) -> None:
@@ -763,6 +770,10 @@ class TaskManager:
         # Repeating anomaly key -> last reported text, so a permanently broken
         # job is reported loudly once instead of once per poll interval.
         self._reported: dict[str, str] = {}
+        # Manager liveness evidence by (manager id, lease), observed once per tick.
+        self._liveness: dict[tuple[str | None, float], dict[str, object] | None] = {}
+        # When this manager last looked for requests claimed by departed managers (monotonic).
+        self._claim_recovery_at: float | None = None
         self._reset_drain()
         self._closed = False
         write_json_atomic(
@@ -1288,6 +1299,7 @@ class TaskManager:
 
         started = time.monotonic()
         self.heartbeat()
+        self._liveness.clear()
         changed = False
         if self._exchange is not None and not self._draining and self._serving_exchange():
             # First, so an adopted job registers and is claimed in this same tick.
@@ -1844,8 +1856,9 @@ class TaskManager:
 
         A ready, waiting or paused job is failed by any manager. A claimed,
         running or committing one is failed only by its own manager, or once
-        its manager's lease has expired; a local attempt of it stays tracked, so
-        the orphan sweep stops and reaps its process.
+        its manager is evidently gone (:meth:`_owner_gone_evidence`); a local
+        attempt of it stays tracked, so the orphan sweep stops and reaps its
+        process.
         """
 
         anomaly = f"unloadable:{marker.job_key}"
@@ -1853,7 +1866,7 @@ class TaskManager:
             state = self._read_frame(marker)
             if marker.kind in {"claimed", "running", "committing"} and state.manager_id != self.manager_id:
                 lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
-                if self._manager_alive(state.manager_id, lease_seconds=lease_seconds):
+                if self._owner_gone_evidence(state.manager_id, lease_seconds=lease_seconds) is None:
                     self._report_anomaly(
                         anomaly,
                         f"leaving {marker.kind} job {marker.job_key} to its manager: {message}",
@@ -2905,21 +2918,16 @@ class TaskManager:
             return None
         if self.unsafe_isolated_takeover:
             return {"evidence": "unsafe_isolated_takeover", "heartbeat_age_seconds": age, "unsafe": True}
-        if age is None:
-            # No manager record at all: nothing is heartbeating this attempt and
-            # nothing ever will, which is exactly what the grace waits for.
-            return {"evidence": "manager_record_absent", "heartbeat_age_seconds": None}
-        if age >= grace:
-            return {
-                "evidence": "lease_grace_expired",
-                "heartbeat_age_seconds": age,
-                "grace_seconds": grace,
-                "takeover_grace_factor": self.takeover_grace_factor,
-            }
+        evidence = self._owner_gone_evidence(state.manager_id, lease_seconds=lease_seconds)
+        # A dead manager process does not prove its attempt stopped: the attempt
+        # runs in a session of its own, and only writer evidence covers it.
+        if evidence is not None and evidence["evidence"] != "manager_process_dead":
+            return dict(evidence)
         self._report_anomaly(
             f"takeover:{marker.job_key}",
-            f"not taking over {marker.job_key}: manager {state.manager_id or '-'} last heartbeated "
-            f"{age:.0f}s ago, short of the {grace:.0f}s takeover grace",
+            f"not taking over {marker.job_key}: manager {state.manager_id or '-'} "
+            f"{'has no readable heartbeat' if age is None else f'last heartbeated {age:.0f}s ago'}, "
+            f"short of the {grace:.0f}s takeover grace",
             self._event("takeover_deferred", marker, previous_manager=state.manager_id, heartbeat_age_seconds=age),
             level=logging.INFO,
         )
@@ -3465,6 +3473,10 @@ class TaskManager:
             outcome_action=str(outcome["action"]),
             child_digests=child_digests,
             child_labels=child_labels,
+            # The generation the transition below creates: the first name the
+            # commit draft takes (commit.<generation>), and the lower bound of
+            # the names a later owner looks it up by.
+            commit_base_generation=marker.generation + 1,
             reason="outcome_published",
         )
         if "process" in state.members:
@@ -3510,8 +3522,8 @@ class TaskManager:
     def _labeled_join(self, join: Mapping[str, Any], outcome: JobDirectory) -> dict[str, object]:
         return _manager_commit.labeled_join(join, outcome)
 
-    def _register_children(self, marker: Marker, state: StateFrame, outcome: JobDirectory) -> None:
-        _manager_commit.register_children(self, marker, state, outcome, tree_digest)
+    def _register_children(self, marker: Marker, state: StateFrame, control: JobDirectory, draft: str) -> None:
+        _manager_commit.register_children(self, marker, state, control, draft, tree_digest)
 
     def _advance(
         self,
@@ -3616,6 +3628,27 @@ class TaskManager:
         except (WorkflowError, KeyError, ValueError):
             return None
         return time.time() - updated
+
+    def _owner_gone_evidence(self, manager_id: str | None, *, lease_seconds: float) -> dict[str, object] | None:
+        """Return the evidence that a manager owning work is gone, observed once per tick.
+
+        This is :func:`~httk.workflow._txn.manager_gone` with this manager's
+        takeover grace factor; it decides only *when* work is taken over.
+
+        :param manager_id: The owning manager, or ``None`` when the work names none.
+        :param lease_seconds: The lease the work was taken under.
+        :return: The evidence mapping, or ``None`` while the owner may be alive.
+        """
+
+        key = (manager_id, lease_seconds)
+        if key not in self._liveness:
+            self._liveness[key] = manager_gone(
+                self.workspace.control,
+                manager_id,
+                lease_seconds=lease_seconds,
+                grace_factor=self.takeover_grace_factor,
+            )
+        return self._liveness[key]
 
     def _manager_alive(self, manager_id: str | None, *, lease_seconds: float) -> bool:
         age = self._heartbeat_age(manager_id)
@@ -3812,8 +3845,23 @@ class TaskManager:
         """
 
         retired_dir = self.workspace.control / "requests" / "retired"
+        # The request is moved first and its reason written beside it after, so
+        # a claim another manager recovered meanwhile leaves no reason behind
+        # that would describe a request this manager never retired.
         try:
             retired_dir.mkdir(parents=True, exist_ok=True)
+            os.replace(claimed_path, retired_dir / claimed_path.name)
+        except OSError as exc:
+            if not os.path.lexists(claimed_path):
+                _LOGGER.debug("request %s is no longer claimed by this manager: %s", claimed_path.name, exc)
+                return
+            self._report_anomaly(
+                f"request:{claimed_path.name}",
+                f"cannot retire the unactionable request {claimed_path.name}: {exc}",
+                self._event("request_error", request=claimed_path.name),
+            )
+            return
+        try:
             write_json_atomic(
                 retired_dir / f"{claimed_path.name}.retirement",
                 {
@@ -3826,11 +3874,10 @@ class TaskManager:
                 },
                 durable=self.workspace.durable,
             )
-            os.replace(claimed_path, retired_dir / claimed_path.name)
         except OSError as exc:
             self._report_anomaly(
                 f"request:{claimed_path.name}",
-                f"cannot retire the unactionable request {claimed_path.name}: {exc}",
+                f"retired request {claimed_path.name} without recording why ({reason}): {exc}",
                 self._event("request_error", request=claimed_path.name),
             )
             return

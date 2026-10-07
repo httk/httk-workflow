@@ -618,9 +618,14 @@ def test_both_managers_drain_without_stranding_the_work_they_started(tmp_path: P
         )
         manager_a._draining = True
         manager_b._draining = True
+        # A drain completes once its own attempts are reaped and its own
+        # commits are done: each manager commits only the outcomes it owns.
         _interleave(
             (manager_a, manager_b),
-            until=lambda: not manager_a._running and not manager_b._running,
+            until=lambda: all(
+                not manager._running and not manager._has_live_owned_marker(("committing",))
+                for manager in (manager_a, manager_b)
+            ),
         )
         assert not manager_a._running and not manager_b._running
 
@@ -772,6 +777,8 @@ def test_an_isolated_attempt_is_adopted_on_the_grace_and_its_zombie_is_fenced(tm
         assert waited is not None and waited.kind == "running"
 
         _backdate_heartbeat(workspace_b, manager_a.manager_id, age=600.0)
+        # Liveness is observed once per tick; this pass runs outside tick().
+        manager_b._liveness.clear()
         manager_b._poll_running()
         adopted = workspace_b.find_marker_by_id(job_id)
         assert adopted is not None and adopted.kind == "ready"

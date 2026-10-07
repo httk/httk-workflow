@@ -31,7 +31,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, _confine, _manager_launches
+from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _manager_launches
 from httk.workflow import manager as manager_module
 from httk.workflow._allocation import Allocation, Node
 from httk.workflow._exchange import enable_exchange
@@ -92,6 +92,12 @@ with open({record!r}, "a") as handle:
     handle.write(json.dumps(entry) + "\\n")
 os.execvp(sys.argv[1], sys.argv[1:])
 """
+
+
+@pytest.fixture(autouse=True)
+def _shm_roots_are_tmpfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The tests use tmp_path directories as confine.shm_root; the host tmpfs check is covered in test_confine_rank.
+    monkeypatch.setattr(_confine_rank, "_filesystem_type", lambda _descriptor: "tmpfs")
 
 
 @pytest.fixture(autouse=True)

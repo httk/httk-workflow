@@ -547,11 +547,25 @@ def probe_bwrap(settings: ConfineSettings) -> bool:
 
     :param settings: The validated confinement settings.
     :return: Whether attempts block nested user namespaces.
-    :raises ConfinementUnavailableError: If Bubblewrap is missing or cannot create the sandbox.
+    :raises ConfinementUnavailableError: If Bubblewrap is missing or cannot create the sandbox, or
+        ``confine.shm_root`` is not a usable tmpfs directory.
     """
 
     if settings.bwrap is None:
         raise ConfinementUnavailableError("manager.confine=bwrap needs Bubblewrap: none on PATH; set confine.bwrap")
+    # Imported here for the same reason as in create_launch_locks.
+    from ._confine_rank import _check_shm_root
+
+    try:
+        root_fd = open_directory_nofollow(settings.shm_root)
+    except OSError as exc:
+        raise ConfinementUnavailableError(f"cannot open confine.shm_root {settings.shm_root}: {exc}") from exc
+    try:
+        _check_shm_root(root_fd, settings.shm_root)
+    except ValueError as exc:
+        raise ConfinementUnavailableError(str(exc)) from exc
+    finally:
+        os.close(root_fd)
     try:
         listed = check_bwrap(settings.bwrap)
     except ValueError as exc:

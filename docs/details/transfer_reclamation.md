@@ -61,7 +61,7 @@ same way as the rest of garbage collection:
   like every other abandoned `tmp/` entry. A trash directory that still holds a
   job payload is moved to `quarantine/` instead of being removed. (The
   `transaction_trash` category is unrelated: it collects the aged
-  `outcome.ready/transaction/trash` of attempt outcomes.)
+  `commit.<g>/transaction/trash` of committed attempt outcomes.)
 
 gc never removes `tmp/import.*`, `eject.*`, `abort.*`, `export.*` or `birth.*`,
 nor `transfers/adopting`, `outgoing` or `exports`: only the protocol steps and

@@ -221,7 +221,11 @@ httk_workflow_main
         while process.poll() is None and time.monotonic() < process_deadline:
             time.sleep(0.01)
         assert process.poll() is not None
-        time.sleep(0.1)
+        # Expected: the lingering Bash runner republishes outcome.ready when it
+        # exits, because the commit has renamed its draft to commit.<g> (the
+        # commit ignores the second publication). That write refreshes the
+        # control directory, so collection waits one more lease (1.0 s) from it.
+        time.sleep(1.1)
         report = workspace.collect_garbage()
 
     assert report.category("attempt_control").removed == 1
@@ -554,8 +558,9 @@ class _Fixture:
         self.pending_payload = self.workspace.payload_path(pending_marker.placement, pending_marker.job_key)
         self.pending_attempts = [_attempt_directory(self.pending_payload, days=90) for _ in range(2)]
 
-        # Transaction trash inside the attempt directory that survives.
-        self.trash = self.newest_attempts[0] / "outcome.ready" / "transaction" / "trash" / "replace"
+        # Transaction trash inside the attempt directory that survives: in a
+        # draft a commit renamed to commit.<generation>, and in one it never did.
+        self.trash = self.newest_attempts[0] / "commit.7" / "transaction" / "trash" / "replace"
         (self.trash / "old").mkdir(parents=True)
         (self.trash / "old" / "data.txt").write_text("replaced tree\n", encoding="utf-8")
         _age(self.trash, 30)

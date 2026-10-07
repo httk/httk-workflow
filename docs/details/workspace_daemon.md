@@ -90,8 +90,8 @@ workspace setting.
 - Slurm 23.11.6 or later.
 - For parallel launches, a tmpfs at `confine.shm_root` (default `/dev/shm`)
   on the nodes: the launch client's lock lives in
-  `<confine.shm_root>/httk-launch-<attempt_id>/`, and that root is assumed to
-  be a tmpfs. The workspace filesystem needs no lock support.
+  `<confine.shm_root>/httk-launch-<attempt_id>/`, and that root must be a
+  tmpfs, which is checked. The workspace filesystem needs no lock support.
 
 The daemon's ledger needs no local filesystem and no locking: any filesystem
 with POSIX rename and link semantics works. Startup refuses missing

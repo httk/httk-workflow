@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from httk.core.digests import sha256_file, tree_digest
 
+from conftest import bury_manager
 from httk.workflow import Attempt, TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow._manager_commit import runner_staging_name
@@ -219,7 +220,7 @@ def _staging_leftovers(workspace: Workspace) -> list[str]:
 
 def _staged_drafts(workspace: Workspace, parent: Marker) -> list[Path]:
     installed = workspace.payload_path(parent.placement, parent.job_key)
-    return sorted(installed.glob("attempts/*/outcome.ready/children/runners/*"))
+    return sorted(installed.glob("attempts/*/commit.*/children/runners/*"))
 
 
 def _snapshot(directory: Path) -> dict[str, Any]:
@@ -451,6 +452,7 @@ def test_a_commit_interrupted_after_publishing_a_staged_runner_completes_exactly
             attempt.process.wait(timeout=30)
         dying._running.clear()
     monkeypatch.undo()
+    bury_manager(Workspace(root).control / "managers" / dying.manager_id)
 
     workspace = Workspace(root)
     interrupted = workspace.find_marker_by_id(job_id)

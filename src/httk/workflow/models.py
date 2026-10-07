@@ -1328,6 +1328,8 @@ class StateFrame:
         outcome_action: str = _UNSET,
         child_digests: Mapping[str, str] = _UNSET,
         child_labels: Mapping[str, str] = _UNSET,
+        commit_base_generation: int = _UNSET,
+        previous_manager_id: str | None = _UNSET,
         next_step: str = _UNSET,
         join: Mapping[str, object] = _UNSET,
         pause: object = _UNSET,
@@ -1379,6 +1381,8 @@ class StateFrame:
         :param outcome_action: The published outcome action.
         :param child_digests: The child payload digests.
         :param child_labels: The child labels.
+        :param commit_base_generation: The generation of the first committing frame of this attempt.
+        :param previous_manager_id: The manager a commit was taken over from.
         :param next_step: The next activation step.
         :param join: The child join condition.
         :param pause: The pause record.
@@ -1425,6 +1429,8 @@ class StateFrame:
             ("outcome_action", outcome_action),
             ("child_digests", child_digests),
             ("child_labels", child_labels),
+            ("commit_base_generation", commit_base_generation),
+            ("previous_manager_id", previous_manager_id),
             ("next_step", next_step),
             ("join", join),
             ("pause", pause),
@@ -1619,6 +1625,11 @@ class StateFrame:
     def child_digests(self) -> Mapping[str, object] | None:
         """Return the child digests, when present."""
         return self._mapping("child_digests")
+
+    @property
+    def commit_base_generation(self) -> int | None:
+        """Return the generation of the first committing frame of this attempt, when present."""
+        return self._integer("commit_base_generation")
 
     @property
     def previous_attempt_id(self) -> str | None:

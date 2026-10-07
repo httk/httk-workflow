@@ -2659,8 +2659,11 @@ outcome with `protocol_error` without registering any child of the set.
 
 While the parent is `committing`, the manager:
 
-1. moves each complete child bundle to its chosen
-   `<workspace>/jobs/<placement>/<job-key>` path;
+1. copies each complete child bundle out of the draft into its own staging,
+   verifies the copy against the digest recorded when the outcome was
+   accepted, and moves the copy to its chosen
+   `<workspace>/jobs/<placement>/<job-key>` path, so nothing the attempt still
+   holds open or linked in its draft is published;
 2. creates its one `g0.init` marker at the mirrored target-workspace path below
    `state/submitted`;
 3. treats an identical existing child plus marker as already registered;

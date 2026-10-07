@@ -1,6 +1,8 @@
 """The rank helper and inner exec of a confined launch, with the plumbing-only fake Bubblewrap."""
 
+import builtins
 import fcntl
+import io
 import os
 import secrets
 import shutil
@@ -9,6 +11,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -82,14 +85,29 @@ def _fake_bwrap(directory: Path) -> Path:
     return wrapper
 
 
+def _host_shm_directory() -> Path:
+    """Return a fresh private directory on the host's tmpfs, which rank-helper subprocesses accept as shm_root."""
+
+    try:
+        descriptor = os.open("/dev/shm", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            observed = _confine_rank._filesystem_type(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        observed = "unreadable"
+    if observed != "tmpfs":
+        pytest.skip("/dev/shm is not a tmpfs on this host")
+    return Path(tempfile.mkdtemp(prefix="httk-test-", dir="/dev/shm"))
+
+
 @pytest.fixture
-def launch(tmp_path: Path) -> _Launch:
+def launch(tmp_path: Path) -> Iterator[_Launch]:
     root = tmp_path.resolve()
     workspace = root / "ws"
     job = workspace / "jobs" / "project" / f"relax--{uuid.uuid4()}"
     job.mkdir(parents=True)
-    shm_root = root / "shm"
-    shm_root.mkdir(mode=0o700)
+    shm_root = _host_shm_directory()
     pmix_root = root / "pmix"
     pmix_root.mkdir()
     bin_directory = root / "bin"
@@ -119,7 +137,10 @@ def launch(tmp_path: Path) -> _Launch:
     launch_dir = workspace / ".httk-workspace" / "managers" / "m1" / "launches" / trusted_name(attempt_id, request_id)
     created = _Launch(root, workspace, job, shm_root, pmix_root, launch_dir, trusted)
     created.write()
-    return created
+    try:
+        yield created
+    finally:
+        shutil.rmtree(shm_root, ignore_errors=True)
 
 
 def _option_index(argv: list[str], *items: str) -> int:
@@ -298,6 +319,9 @@ def test_pmix_directory_must_not_overlap_the_workspace(launch: _Launch, opened: 
     launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, pmix_roots=(launch.root,)))
     with pytest.raises(ValueError, match="overlaps"):
         _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(launch.job)})
+    launch.trusted = replace(
+        launch.trusted, confine=replace(launch.trusted.confine, pmix_roots=(launch.shm_root.parent,))
+    )
     with pytest.raises(ValueError, match="overlaps"):
         _prepare(launch, opened, {"PMIX_SERVER_TMPDIR": str(launch.shm_root)})
 
@@ -946,3 +970,61 @@ def test_real_bwrap_rank_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
         pytest.skip("no system python3 to run the PMI client in the sandbox")
     _assert_pmi_session(*_pmi_session(launch, python))
     assert not launch.shm.exists()
+
+
+_FDINFO = "pos:\t0\nflags:\t02500000\nmnt_id:\t771\nino:\t1\n"
+_MOUNTINFO = (
+    "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+    "771 862 0:61 / /dev/shm rw,nosuid,nodev,noexec,relatime shared:2 - tmpfs shm rw,size=1048576k\n"
+    "900 862 0:70 / /mnt/with\\040space rw,relatime - tmpfs tmp rw\n"
+)
+
+
+def _fake_proc(monkeypatch: pytest.MonkeyPatch, fdinfo: str, mountinfo: str) -> None:
+    real_open = builtins.open
+
+    def fake_open(path: object, *args: object, **kwargs: object) -> object:
+        text = {"/proc/self/mountinfo": mountinfo}.get(str(path))
+        if str(path).startswith("/proc/self/fdinfo/"):
+            text = fdinfo
+        if text is None:
+            return real_open(path, *args, **kwargs)  # type: ignore[call-overload]
+        return io.StringIO(text)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+
+def test_filesystem_type_is_read_from_fdinfo_and_mountinfo(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_proc(monkeypatch, _FDINFO, _MOUNTINFO)
+    assert _confine_rank._filesystem_type(5) == "tmpfs"
+    _fake_proc(monkeypatch, _FDINFO.replace("771", "900"), _MOUNTINFO)
+    assert _confine_rank._filesystem_type(5) == "tmpfs"
+    _fake_proc(monkeypatch, _FDINFO.replace("771", "22"), _MOUNTINFO)
+    assert _confine_rank._filesystem_type(5) == "ext4"
+    _fake_proc(monkeypatch, _FDINFO.replace("771", "5"), _MOUNTINFO)
+    with pytest.raises(OSError, match="not in mountinfo"):
+        _confine_rank._filesystem_type(5)
+
+
+def test_shm_root_that_is_not_a_tmpfs_is_refused(launch: _Launch, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_confine_rank, "_filesystem_type", lambda _descriptor: "ext4")
+    with pytest.raises(ValueError, match=r"confine\.shm_root .* must be a tmpfs, not ext4"):
+        _confine_rank.join_shared_memory(launch.shm_root, launch.trusted.token)
+    descriptor = os.open(launch.shm_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        monkeypatch.setattr(
+            _confine_rank, "_filesystem_type", lambda _descriptor: (_ for _ in ()).throw(OSError("no /proc"))
+        )
+        with pytest.raises(ValueError, match="cannot be read: no /proc"):
+            _confine_rank._check_shm_root(descriptor, launch.shm_root)
+    finally:
+        os.close(descriptor)
+
+
+def test_the_host_shm_directory_passes_the_check(launch: _Launch) -> None:
+    # The fixture skips when /dev/shm is no tmpfs; a directory made there must then pass for real.
+    descriptor = os.open(launch.shm_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _confine_rank._check_shm_root(descriptor, launch.shm_root)
+    finally:
+        os.close(descriptor)

@@ -210,7 +210,29 @@ class SharedMemory:
     lock_fd: int
 
 
+def _filesystem_type(descriptor: int) -> str:
+    """Return the filesystem type of the mount holding an open descriptor, read from ``/proc``."""
+
+    with open(f"/proc/self/fdinfo/{descriptor}", encoding="utf-8") as handle:
+        mount_ids = [line.split()[1] for line in handle if line.startswith("mnt_id:")]
+    if len(mount_ids) != 1:
+        raise OSError("no mnt_id in fdinfo")
+    with open("/proc/self/mountinfo", encoding="utf-8") as handle:
+        for line in handle:
+            # Fields: id parent major:minor root mount-point options [optional...] - type source super-options.
+            fields = line.split()
+            if fields[0] == mount_ids[0]:
+                return fields[fields.index("-") + 1]
+    raise OSError(f"mount {mount_ids[0]} is not in mountinfo")
+
+
 def _check_shm_root(descriptor: int, path: Path) -> None:
+    try:
+        observed = _filesystem_type(descriptor)
+    except (OSError, ValueError, IndexError) as exc:
+        raise ValueError(f"confine.shm_root {path} must be a tmpfs; its filesystem type cannot be read: {exc}") from exc
+    if observed != "tmpfs":
+        raise ValueError(f"confine.shm_root {path} must be a tmpfs, not {observed}")
     information = os.fstat(descriptor)
     mode = stat.S_IMODE(information.st_mode)
     if not stat.S_ISDIR(information.st_mode) or information.st_uid not in (0, os.geteuid()):

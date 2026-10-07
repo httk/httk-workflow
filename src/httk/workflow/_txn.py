@@ -640,40 +640,116 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def owner_gone(control: Path, token: str, *, since: int, now: int, lease_seconds: float) -> bool:
+def manager_gone(
+    control: Path,
+    manager_id: str | None,
+    *,
+    lease_seconds: float,
+    grace_factor: float | None = None,
+    now: float | None = None,
+    since: float | None = None,
+) -> dict[str, object] | None:
+    """Return the evidence that a manager is evidently gone, or ``None`` while it may be alive.
+
+    This is the one liveness rule for a manager that owns protocol work (a
+    commit, a claimed request, a transfer step). The evidence, checked in this
+    order, is one of:
+
+    - ``manager_record_absent``: no manager id, no ``managers/<id>`` directory,
+      or (without *since*) an unreadable heartbeat;
+    - ``lease_grace_expired``: the heartbeat (or *since*, when the heartbeat is
+      unreadable) is at least ``lease_seconds * grace_factor`` old;
+    - ``manager_process_dead``: its ``manager.json`` names this host and its
+      ``pid`` is not alive. Two hosts with one hostname are an accepted limit;
+      a reused pid only delays the takeover.
+
+    It only decides *when* another actor takes over; the takeover itself is
+    fenced by renames and is correct either way.
+
+    :param control: The workspace control directory.
+    :param manager_id: The owning manager's canonical UUID, or ``None`` when the work names none.
+    :param lease_seconds: The lease the work was taken under.
+    :param grace_factor: Multiply the lease into the takeover grace;
+        ``DEFAULT_TAKEOVER_GRACE_FACTOR`` when omitted.
+    :param now: The current time in UTC seconds; the clock when omitted.
+    :param since: When the owner started the work, in UTC seconds, to age an unreadable heartbeat from.
+    :return: The evidence mapping (``evidence`` plus what was observed), or ``None``.
+    """
+
+    from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR
+
+    factor = DEFAULT_TAKEOVER_GRACE_FACTOR if grace_factor is None else grace_factor
+    grace = lease_seconds * factor
+    current = time.time() if now is None else now
+    absent: dict[str, object] = {"evidence": "manager_record_absent", "heartbeat_age_seconds": None}
+    if manager_id is None:
+        return absent
+    manager_dir = control / "managers" / manager_id
+    if _probe(manager_dir, None) is None:
+        return absent
+    try:
+        heartbeat = read_json(manager_dir / "heartbeat.json")
+        age = current - timestamp_seconds(str(heartbeat["updated_at"]))
+    except (WorkflowError, KeyError, ValueError):
+        if since is None:
+            return absent
+        age = current - since
+    if age >= grace:
+        return {
+            "evidence": "lease_grace_expired",
+            "heartbeat_age_seconds": age,
+            "grace_seconds": grace,
+            "takeover_grace_factor": factor,
+        }
+    try:
+        record = read_json(manager_dir / "manager.json")
+    except WorkflowError:
+        return None
+    pid = record.get("pid")
+    if (
+        record.get("hostname") == socket.gethostname()
+        and isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and not _process_alive(pid)
+    ):
+        return {"evidence": "manager_process_dead", "heartbeat_age_seconds": age, "pid": pid}
+    return None
+
+
+def owner_gone(
+    control: Path, token: str, *, since: int, now: int, lease_seconds: float, grace_factor: float | None = None
+) -> bool:
     """Report whether the owner of some protocol work is evidently gone, so another actor may take over.
 
-    A manager owner is gone when its directory below ``managers/`` is absent,
-    or when its heartbeat is older than ``lease_seconds *
-    DEFAULT_TAKEOVER_GRACE_FACTOR`` (an unreadable heartbeat is aged from
-    *since* instead). A CLI owner is gone :data:`CLI_OWNER_SECONDS` after
-    *since*, or at once when its token names this host and boot and its
-    process is not alive. This only decides *when* to take over; the takeover
-    itself is fenced by renames and is correct either way.
+    A manager owner is gone when :func:`manager_gone` finds evidence (an
+    unreadable heartbeat is aged from *since*). A CLI owner is gone
+    :data:`CLI_OWNER_SECONDS` after *since*, or at once when its token names
+    this host and boot and its process is not alive. This only decides *when*
+    to take over; the takeover itself is fenced by renames and is correct
+    either way.
 
     :param control: The workspace control directory.
     :param token: The owner token recorded with the work.
     :param since: When the owner started the work, in integer UTC nanoseconds (name-encoded).
     :param now: The current time, in integer UTC nanoseconds.
     :param lease_seconds: The workspace manager lease (``WorkspacePolicy.lease_seconds``).
+    :param grace_factor: Multiply the lease into a manager owner's takeover grace;
+        ``DEFAULT_TAKEOVER_GRACE_FACTOR`` when omitted.
     :return: Whether the owner is evidently gone.
     :raises httk.workflow.errors.FormatError: If *token* is not an owner token.
     """
 
     parsed = parse_owner_token(token)
     if parsed.kind == "manager":
-        from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR
-
-        grace = lease_seconds * DEFAULT_TAKEOVER_GRACE_FACTOR
-        manager_dir = control / "managers" / str(parsed.manager_id)
-        if _probe(manager_dir, None) is None:
-            return True
-        try:
-            heartbeat = read_json(manager_dir / "heartbeat.json")
-            updated = timestamp_seconds(str(heartbeat["updated_at"]))
-        except (WorkflowError, KeyError, ValueError):
-            return now - since > grace * 1e9
-        return now / 1e9 - updated > grace
+        evidence = manager_gone(
+            control,
+            parsed.manager_id,
+            lease_seconds=lease_seconds,
+            grace_factor=grace_factor,
+            now=now / 1e9,
+            since=since / 1e9,
+        )
+        return evidence is not None
     boot = _boot_hash()
     same_boot = boot != _UNKNOWN_BOOT and parsed.boot == boot
     if same_boot and parsed.host == _host_hash() and not _process_alive(int(parsed.pid or 0)):

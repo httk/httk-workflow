@@ -28,8 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import register_ws
-from httk.workflow import TaskManager, Workspace
+from conftest import bury_manager, register_ws
+from httk.workflow import TaskManager, Workspace, _txn
 from httk.workflow import transactions as transactions_module
 from httk.workflow._logging import reset_logging
 from httk.workflow.errors import TransitionLostError, WorkspaceUnavailableError
@@ -327,6 +327,19 @@ def _kill_after(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setattr(TaskManager, name, hooked)
 
 
+def _kill_at_step(monkeypatch: pytest.MonkeyPatch, step: str) -> None:
+    """Kill the manager the first time it reaches one named protocol step (:func:`httk.workflow._txn._hook`)."""
+
+    armed = [True]
+
+    def hook(reached: str) -> None:
+        if armed[0] and reached == step:
+            armed[0] = False
+            raise _KilledManager()
+
+    monkeypatch.setattr(_txn, "_HOOK", hook)
+
+
 def _kill_at_transaction_operation(monkeypatch: pytest.MonkeyPatch, ordinal: int) -> None:
     """Kill the manager part way through replaying a multi-operation transaction."""
 
@@ -429,6 +442,11 @@ _INTERRUPTIONS = (
         "committing",
     ),
     _Interruption(
+        "after-draft-rename",
+        lambda monkeypatch, job_key: _kill_at_step(monkeypatch, "commit.draft_renamed"),
+        "committing",
+    ),
+    _Interruption(
         "mid-transaction-replay",
         lambda monkeypatch, job_key: _kill_at_transaction_operation(monkeypatch, ordinal=2),
         "committing",
@@ -467,6 +485,26 @@ _EXPECTED_CHAIN = [
 ]
 
 
+#: Where the newest commit-takeover frame sits in a chain from :func:`_expected_chain`.
+_TAKEOVER = _EXPECTED_CHAIN.index("waiting") + 1
+
+
+def _expected_chain(takeovers: int) -> list[str]:
+    """Return :data:`_EXPECTED_CHAIN` with *takeovers* commit-takeover frames on the first commit."""
+
+    return _EXPECTED_CHAIN[:_TAKEOVER] + ["committing"] * takeovers + _EXPECTED_CHAIN[_TAKEOVER:]
+
+
+def _assert_taken_over(frame: dict[str, object], previous: TaskManager, successor: TaskManager) -> None:
+    """Assert one commit-takeover frame names both managers and the dead-process evidence."""
+
+    assert frame["kind"] == "committing" and frame["reason"] == "commit_takeover"
+    assert frame["previous_manager_id"] == previous.manager_id
+    assert frame["manager_id"] == successor.manager_id
+    evidence = frame["takeover_evidence"]
+    assert isinstance(evidence, dict) and evidence["evidence"] == "manager_process_dead"
+
+
 @pytest.mark.parametrize(
     "interruption",
     _INTERRUPTIONS,
@@ -495,6 +533,7 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
             _tick_until_killed(dying)
         _stop_attempts(dying)
     monkeypatch.undo()
+    bury_manager(Workspace(root).control / "managers" / dying.manager_id)
 
     workspace = Workspace(root)
     interrupted = workspace.find_marker_by_id(job_id)
@@ -534,7 +573,70 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     assert len({line.split()[1] for line in steps}) == 2
 
     chain = _walk_chain(workspace, parent)
-    assert [frame["kind"] for frame in chain] == _EXPECTED_CHAIN
+    # A commit left behind by a dead manager is taken over by one transition
+    # before the fresh manager touches it; any other interruption is not.
+    takeovers = 1 if interruption.kind_after_kill == "committing" else 0
+    assert [frame["kind"] for frame in chain] == _expected_chain(takeovers)
+    if takeovers:
+        _assert_taken_over(chain[_TAKEOVER], dying, fresh)
+    assert workspace.check().ok
+
+
+@pytest.mark.timing
+def test_a_commit_taken_over_by_a_manager_that_then_dies_completes_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successor killed right after its takeover transition is itself taken over."""
+
+    root = tmp_path / "workspace"
+    Workspace.initialize(root)
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _COMMIT_HEAVY_RUNNER,
+        tag="taken-over",
+        data_mode="transactional",
+        initial_step="prepare",
+    )
+    Workspace(root).submit(payload, "project/taken-over")
+    control = Workspace(root).control
+
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
+        _kill_on_entry(monkeypatch, "_process_committing")
+        with pytest.raises(_KilledManager):
+            _tick_until_killed(dying)
+        _stop_attempts(dying)
+    monkeypatch.undo()
+    bury_manager(control / "managers" / dying.manager_id)
+
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as successor:
+        _kill_at_step(monkeypatch, "commit.taken_over")
+        with pytest.raises(_KilledManager):
+            _tick_until_killed(successor)
+    monkeypatch.undo()
+    bury_manager(control / "managers" / successor.manager_id)
+
+    workspace = Workspace(root)
+    interrupted = workspace.find_marker_by_id(job_id)
+    assert interrupted is not None and interrupted.kind == "committing"
+    # The successor died after its takeover and before touching the draft.
+    installed = workspace.payload_path(interrupted.placement, interrupted.job_key)
+    assert not (installed / "data").exists() or not list((installed / "data").iterdir())
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as fresh:
+        fresh.run_until_idle(timeout=90.0)
+
+    parent = workspace.find_marker_by_id(job_id)
+    assert parent is not None and parent.kind == "succeeded"
+    children = [marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--")]
+    assert len(children) == 1 and children[0].kind == "succeeded"
+    data = workspace.payload_path(parent.placement, parent.job_key) / "data"
+    assert sorted(path.name for path in data.iterdir()) == ["result-0.txt", "result-1.txt", "result-2.txt"]
+    assert workspace.read_state(parent)["data_generation"] == 1
+    chain = _walk_chain(workspace, parent)
+    assert [frame["kind"] for frame in chain] == _expected_chain(2)
+    _assert_taken_over(chain[_TAKEOVER], successor, fresh)
+    _assert_taken_over(chain[_TAKEOVER + 1], dying, successor)
     assert workspace.check().ok
 
 
@@ -570,6 +672,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
             _tick_until_killed(dying)
         _stop_attempts(dying)
     monkeypatch.undo()
+    bury_manager(Workspace(root).control / "managers" / dying.manager_id)
 
     workspace = Workspace(root)
     interrupted = workspace.find_marker_by_id(job_id)
@@ -594,6 +697,8 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
                 break
             time.sleep(0.01)
     monkeypatch.undo()
+    # That manager took the abandoned parent commit over before leaving it alone.
+    bury_manager(workspace.control / "managers" / child_runner.manager_id)
     assert workspace.find_markers(child_key)[0].kind == "succeeded"
 
     with TaskManager(Workspace(root), heartbeat_interval=0.01) as fresh:
@@ -602,7 +707,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
     parent = workspace.find_marker_by_id(job_id)
     assert parent is not None and parent.kind == "succeeded"
     assert len(workspace.find_markers(child_key)) == 1
-    assert [frame["kind"] for frame in _walk_chain(workspace, parent)] == _EXPECTED_CHAIN
+    assert [frame["kind"] for frame in _walk_chain(workspace, parent)] == _expected_chain(2)
     assert workspace.check().ok
 
 
@@ -695,13 +800,13 @@ def _lying_rename(
     real = os.rename
     fired = [0]
 
-    def rename(source: _RenamePath, destination: _RenamePath) -> None:
+    def rename(source: _RenamePath, destination: _RenamePath, **keywords: int | None) -> None:
         if not fired[0] and f"{os.sep}state{os.sep}{source_kind}{os.sep}" in str(source):
             fired[0] += 1
             if perform:
-                real(source, destination)
+                real(source, destination, **keywords)
             raise OSError(errno.EIO, "simulated retransmitted rename whose reply was lost")
-        real(source, destination)
+        real(source, destination, **keywords)
 
     monkeypatch.setattr(os, "rename", rename)
     return fired

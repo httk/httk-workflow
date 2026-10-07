@@ -17,7 +17,8 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace
+from conftest import bury_manager
+from httk.workflow import TaskManager, Workspace, _manager_commit
 from httk.workflow._logging import reset_logging
 from httk.workflow.models import Marker
 
@@ -341,6 +342,74 @@ def test_a_child_bundle_changed_after_its_digest_was_recorded_is_refused(
     assert runner.read_text(encoding="utf-8") == "#!/bin/sh\necho swapped\n"
 
 
+def _before_commit(monkeypatch: pytest.MonkeyPatch, parent: Marker, change: Any) -> None:
+    """Apply *change* to the parent's published draft child just before the manager commits it."""
+
+    real_process_committing = TaskManager._process_committing
+
+    def change_the_draft_first(self: TaskManager, committing: Marker) -> None:
+        if committing.job_key == parent.job_key and committing.kind == "committing":
+            installed = self.workspace.payload_path(committing.placement, committing.job_key)
+            for child in installed.glob("attempts/*/outcome.ready/children/jobs/*"):
+                change(installed, child)
+        real_process_committing(self, committing)
+
+    monkeypatch.setattr(TaskManager, "_process_committing", change_the_draft_first)
+
+
+def test_a_child_file_hard_linked_into_the_parent_is_not_the_published_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", "parent", _spawner(_outside(tmp_path)))
+    parent = workspace.submit(payload, "project/parent")
+    _before_commit(monkeypatch, parent, lambda installed, child: os.link(child / "job.json", installed / "alias.json"))
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+
+    assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
+    (child,) = _children(workspace)
+    published = workspace.payload_path(child.placement, child.job_key) / "job.json"
+    alias = workspace.payload_path(parent.placement, parent.job_key) / "alias.json"
+    assert published.stat().st_ino != alias.stat().st_ino and published.stat().st_nlink == 1
+    original = published.read_bytes()
+    alias.write_text(json.dumps({**json.loads(original), "priority": 999}), encoding="utf-8")
+    assert published.read_bytes() == original
+
+
+def test_a_child_file_written_through_a_retained_descriptor_after_verification_is_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", "parent", _spawner(_outside(tmp_path)))
+    parent = workspace.submit(payload, "project/parent")
+    retained: list[Any] = []
+    _before_commit(monkeypatch, parent, lambda installed, child: retained.append(open(child / "job.json", "r+b")))  # noqa: SIM115
+    real_verify = _manager_commit._verify_staged
+
+    def write_after_verification(*arguments: Any) -> Any:
+        verified = real_verify(*arguments)
+        for stream in retained:
+            document = json.loads(stream.read())
+            stream.seek(0)
+            stream.write(json.dumps({**document, "priority": 999, "name": "swapped"}).encode())
+            stream.truncate()
+            stream.close()
+        return verified
+
+    monkeypatch.setattr(_manager_commit, "_verify_staged", write_after_verification)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+
+    assert len(retained) == 1 and retained[0].closed
+    assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
+    (child,) = _children(workspace)
+    document = json.loads((workspace.payload_path(child.placement, child.job_key) / "job.json").read_text("utf-8"))
+    assert (document["priority"], document["name"]) == (500, "Commit hardening child")
+    assert child.priority == 500
+
+
 @pytest.mark.parametrize("operation", ["put-file", "put-tree", "remove", "replace-tree"])
 def test_a_symlink_below_data_never_redirects_a_replay(tmp_path: Path, operation: str) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -376,22 +445,32 @@ def test_a_symlinked_transaction_source_is_refused(tmp_path: Path) -> None:
     assert _snapshot(outside) == before
 
 
+@pytest.mark.parametrize("interruption", ["mid-copy", "before-publication"])
 def test_a_commit_interrupted_after_staging_a_child_publishes_it_exactly_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str
 ) -> None:
     root = tmp_path / "workspace"
     Workspace.initialize(root)
     outside = _outside(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "parent", _spawner(outside))
     Workspace(root).submit(payload, "project/parent")
-    real_publish = Workspace._publish_path
+    if interruption == "mid-copy":
+        real_copy = _manager_commit._copy_file
 
-    def crash_when_publishing_a_staged_child(self: Workspace, source: Path, destination: Path) -> None:
-        if source.name.startswith("child."):
+        def crash_after_one_copied_file(*arguments: Any) -> None:
+            real_copy(*arguments)
             raise _Killed()
-        real_publish(self, source, destination)
 
-    monkeypatch.setattr(Workspace, "_publish_path", crash_when_publishing_a_staged_child)
+        monkeypatch.setattr(_manager_commit, "_copy_file", crash_after_one_copied_file)
+    else:
+        real_publish = Workspace._publish_path
+
+        def crash_when_publishing_a_staged_child(self: Workspace, source: Path, destination: Path) -> None:
+            if source.name.startswith("child."):
+                raise _Killed()
+            real_publish(self, source, destination)
+
+        monkeypatch.setattr(Workspace, "_publish_path", crash_when_publishing_a_staged_child)
     with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
         with pytest.raises(_Killed):
             dying.run_until_idle(timeout=60.0)
@@ -400,15 +479,23 @@ def test_a_commit_interrupted_after_staging_a_child_publishes_it_exactly_once(
             attempt.process.wait(timeout=30)
         dying._running.clear()
     monkeypatch.undo()
+    bury_manager(Workspace(root).control / "managers" / dying.manager_id)
 
     workspace = Workspace(root)
     interrupted = workspace.find_marker_by_id(job_id)
     assert interrupted is not None and interrupted.kind == "committing"
     staged = _staged(workspace)
     assert len(staged) == 1
-    # The bundle has left the job-writable draft: only the staged copy remains.
+    # The bundle was copied, not moved: the draft still holds it, and the
+    # staged copy (complete or partial) is the manager's own.
     installed = workspace.payload_path(interrupted.placement, interrupted.job_key)
-    assert not list(installed.glob("attempts/*/outcome.ready/children/jobs/*"))
+    (draft_child,) = installed.glob("attempts/*/commit.*/children/jobs/*")
+    draft_runner = (draft_child / "files" / "runner").read_bytes()
+    copied = sorted(
+        path.relative_to(workspace.control / "tmp" / staged[0]).as_posix()
+        for path in (workspace.control / "tmp" / staged[0]).rglob("*")
+    )
+    assert copied == (["files", "job.json"] if interruption == "mid-copy" else ["files", "files/runner", "job.json"])
 
     with TaskManager(workspace, heartbeat_interval=0.01) as fresh:
         fresh.run_until_idle(timeout=90.0)
@@ -418,6 +505,10 @@ def test_a_commit_interrupted_after_staging_a_child_publishes_it_exactly_once(
     children = _children(workspace)
     assert len(children) == 1 and children[0].kind == "succeeded"
     assert not _staged(workspace)
+    # The published child is the complete bundle, its runner still executable.
+    published = workspace.payload_path(children[0].placement, children[0].job_key)
+    assert (published / "files" / "runner").read_bytes() == draft_runner
+    assert os.access(published / "files" / "runner", os.X_OK)
 
 
 def test_transaction_trash_collection_never_follows_a_planted_symlink(tmp_path: Path) -> None:
@@ -542,12 +633,15 @@ def test_a_runner_side_replay_with_paths_still_follows_a_symlinked_workdir_direc
     # The manager's pinned handles refuse the same symlinked directory.
     second = _batch(tmp_path / "second", [operations[0]])
     (second / "payload" / "out.txt").write_text("out\n", encoding="utf-8")
+    control = tmp_path / "control"
+    (control / "commit.2").mkdir(parents=True)
+    second.rename(control / "commit.2" / "transaction")
     with (
-        JobDirectory.at(second) as pinned_transaction,
+        JobDirectory.at(control) as pinned_control,
         JobDirectory.at(workdir) as pinned_data,
         pytest.raises(JobDirectoryError),
     ):
-        _replay_pinned(pinned_transaction, pinned_data, expected_generation=0)
+        _replay_pinned(pinned_control, "commit.2", pinned_data, expected_generation=0)
 
 
 @pytest.mark.parametrize("kind", ["failed", "cancelled"])

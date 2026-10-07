@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from httk.workflow import _confine_rank
 from httk.workflow._confine import (
     ConfinementUnavailableError,
     ConfineSettings,
@@ -24,6 +25,13 @@ from httk.workflow._confine import (
     remove_launch_locks,
 )
 from httk.workflow._sandbox import PreparedSandbox, device_parent_dirs, open_directory_nofollow
+
+
+@pytest.fixture(autouse=True)
+def _shm_roots_are_tmpfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The tests use tmp_path directories as confine.shm_root; the host tmpfs check is covered in test_confine_rank.
+    monkeypatch.setattr(_confine_rank, "_filesystem_type", lambda _descriptor: "tmpfs")
+
 
 _REQUIRED_HELP = (
     "--bind-fd --clearenv --new-session --ro-bind-data --ro-bind-fd --unshare-ipc --unshare-net "

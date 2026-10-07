@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._jobdir import JobDirectory
+from ._manager_commit import draft_names
 from ._txn import holds_job_payload, trash
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
@@ -831,12 +832,20 @@ class _Collection:
                 continue
             with attempts:
                 for control in _directory_names(attempts):
+                    # A commit renamed its draft to commit.<generation>; a
+                    # listing finds every draft, and one it misses only waits.
                     try:
-                        transaction = attempts.directory(f"{control}/outcome.ready/transaction")
+                        with attempts.directory(control) as control_dir:
+                            drafts = draft_names(control_dir)
                     except (FormatError, OSError):
                         continue
-                    with transaction:
-                        self._collect_trash(transaction)
+                    for draft in drafts:
+                        try:
+                            transaction = attempts.directory(f"{control}/{draft}/transaction")
+                        except (FormatError, OSError):
+                            continue
+                        with transaction:
+                            self._collect_trash(transaction)
 
     def _collect_trash(self, transaction: JobDirectory) -> None:
         """Collect the aged entries of one pinned transaction's trash, then the emptied trash."""
