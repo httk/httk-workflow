@@ -531,6 +531,27 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
     return 0
 
 
+def handle_workspace_exchange_enable(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Enable the exchange extension of a workspace, or report that it is enabled already."""
+
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_exchange_enable)
+    from .._exchange import enable_exchange, exchange_directory
+
+    workspace = Workspace(_local_root(arguments, context, action="enable its exchange"), durable=_durable(arguments))
+    directory = exchange_directory(workspace)
+    if not enable_exchange(workspace):
+        print(f"{workspace.root}	exchange already enabled	{directory}")
+        return 0
+    print(f"{workspace.root}	exchange enabled	{directory}")
+    print(
+        "every manager on this workspace must now confine its attempts (manager.confine=bwrap); "
+        f"clients write ejected jobs into {directory / 'inbox'} and adopt finished ones from {directory / 'outbox'}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def handle_workspace_unlock(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Release a workspace maintenance lock."""
 
@@ -943,6 +964,25 @@ def build_workspace_parser(
         description="Set up and run the confined workspace command daemon for an exchange enrollment",
     )
     add_subcommands(daemon, handler=lambda arguments, _context: launch(arguments))
+    _, exchange_actions = _group(
+        group,
+        "exchange",
+        summary="enable the client exchange directory",
+        description="Manage the exchange extension: WORKSPACE/exchange, where clients send and fetch ejected jobs",
+    )
+    exchange_enable = _leaf(
+        exchange_actions,
+        "enable",
+        summary="create WORKSPACE/exchange and enable the extension",
+        description=(
+            "Create WORKSPACE/exchange with its inbox and outbox and enable the exchange extension; every "
+            "manager of the workspace must then confine its attempts. Enabling an enabled workspace changes nothing"
+        ),
+        handler=handle_workspace_exchange_enable,
+    )
+    _add_workspace_targets(exchange_enable, help_text="the workspace whose exchange to enable")
+    _add_by_path_argument(exchange_enable)
+    add_durability_arguments(exchange_enable)
     add_workspace_init_arguments(
         _leaf(
             group,

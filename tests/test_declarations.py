@@ -30,9 +30,9 @@ from httk.workflow import (
     Workspace,
     job_records,
 )
+from httk.workflow._bundle import _payload_digest
 from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, validate_declarations
 from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
-from httk.workflow.transfers import _payload_digest
 
 _SRC = str(Path(__file__).parents[1] / "src")
 _SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "languages" / "bash" / "httk-workflow.sh"

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from httk.core.project.members import ProjectMember
 
-from ._util import read_json, write_json_atomic
+from ._util import write_json_atomic
 from .adapters import resolve_remote, valid_remote_name
 from .configuration import config_home, data_home, machine_names
 from .errors import ResolutionMiss
@@ -283,12 +283,10 @@ def forget_workspace(name: str, *, durable: bool = True, force: bool = False) ->
     assert binding.path is not None
     _unregister_project_member(Path(binding.path), allow_sealed=True)
     if not force:
-        transfers = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers"
-        pending = []
-        for ledger_path in sorted(transfers.glob("*.json")) if transfers.is_dir() else ():
-            ledger = read_json(ledger_path)
-            if ledger.get("status") != "retired":
-                pending.append(ledger_path.name)
+        # A sealed addressed bundle waits in transfers/outgoing/<T> until its
+        # destination acknowledges it.
+        outgoing = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers" / "outgoing"
+        pending = sorted(os.listdir(outgoing)) if outgoing.is_dir() else []
         if pending:
             raise ValueError(
                 f"workspace {name!r} has unretired outbound transfers; fetch or retire them first, "

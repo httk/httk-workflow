@@ -46,7 +46,8 @@ _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 #: The hidden protocol subcommands the ``transfer`` verb dispatches by name: the
 #: far-side halves one machine invokes on another. A workspace name can never be
 #: one of these, so the verb never mistakes ``transfer offer`` for a move.
-_TRANSFER_PROTOCOL = ("receive", "offer", "retire")
+#: ``retire`` and ``reclaim`` are also the operator verbs ``transfer retire|reclaim JOB_ID``.
+_TRANSFER_PROTOCOL = ("receive", "offer", "retire", "reclaim")
 
 Handler = Callable[[argparse.Namespace, CLIContext], int]
 

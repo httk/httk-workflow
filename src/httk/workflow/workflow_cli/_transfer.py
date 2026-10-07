@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import tempfile
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
@@ -16,7 +15,8 @@ from typing import Any
 from httk.core.cli import CLIContext
 
 from .._runner_builds import workspace_build_command
-from .._util import read_json, write_json_atomic
+from .._sealing import Transaction, pending_outgoing
+from .._util import write_json_atomic
 from ..adapters import (
     REMOTE_OFFER_COMMAND,
     REMOTE_RECEIVE_COMMAND,
@@ -48,11 +48,10 @@ from ..models import (
     canonical_uuid,
     normalize_placement,
     parse_job_key,
-    placement_text,
 )
 from ..packages import read_build_spec
 from ..precheck import environment_findings
-from ..registry import LOCAL_REMOTE, WorkspaceBinding, list_workspaces, resolve_workspace
+from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
 from ..transfers import (
     DEFAULT_OFFER_STATES,
     TRANSFER_OFFER_FORMAT,
@@ -60,9 +59,9 @@ from ..transfers import (
     TransferCandidate,
     _waiting_parent_map,
     acknowledge_transfers,
-    discard_staged_bundle,
     import_bundles,
     offer_transfers,
+    reclaim_transfer,
     retire_transfers,
     select_transfer_jobs,
 )
@@ -681,6 +680,8 @@ def _remote_workspace_settings(target: Any, name: str, *, timeout: float | None)
 def _receive_remote(
     target: Any, name: str, bundles: Sequence[str], *, timeout: float | None, quiet: bool
 ) -> list[dict[str, object]]:
+    """Ask the destination to import pushed bundles; return its per-bundle results."""
+
     if not bundles:
         return []
     argv = [*REMOTE_RECEIVE_COMMAND, "--workspace", name]
@@ -692,15 +693,35 @@ def _receive_remote(
     if not quiet:
         _relay_success_stderr(response)
     try:
-        document = json.loads(str(response.get("stdout", "")))
-        acknowledgements = [document] if len(bundles) == 1 else document["acknowledgements"]
-        if not isinstance(acknowledgements, list) or len(acknowledgements) != len(bundles):
+        results = json.loads(str(response.get("stdout", "")))["results"]
+        if not isinstance(results, list) or len(results) != len(bundles):
             raise ValueError
-        if not all(isinstance(ack, dict) for ack in acknowledgements):
+        if not all(isinstance(result, dict) for result in results):
             raise ValueError
     except (ValueError, KeyError, TypeError) as exc:
-        raise ValueError("destination import did not return the requested acknowledgements") from exc
-    return acknowledgements
+        raise ValueError("destination import did not return one result per bundle") from exc
+    return results
+
+
+def _acknowledged(results: Sequence[Mapping[str, object]]) -> tuple[list[dict[str, object]], list[str]]:
+    """Split import results into the acknowledgements to retire with and the problems to report."""
+
+    acknowledgements: list[dict[str, object]] = []
+    problems: list[str] = []
+    for result in results:
+        acknowledgement = result.get("acknowledgement")
+        if result.get("status") in {"imported", "replay"} and isinstance(acknowledgement, dict):
+            acknowledgements.append(acknowledgement)
+        else:
+            problems.append(
+                f"{result.get('job_key') or result.get('transfer_id')}: {result.get('status')}: {result.get('reason')}"
+            )
+    return acknowledgements, problems
+
+
+def _raise_problems(problems: Sequence[str]) -> None:
+    if problems:
+        raise ValueError("some bundles were not imported: " + "; ".join(problems))
 
 
 def _send_jobs_to_remote(
@@ -751,11 +772,9 @@ def _send_jobs_to_remote(
         )
     _announce_tree_members(precheck_candidates, jobs, quiet=quiet)
     source.recover_transfers()
-    ledger_paths = list((source.control / "transfers").glob("*.json"))
-    ledgers_by_job: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
-    for path in ledger_paths:
-        ledger = read_json(path)
-        ledgers_by_job.setdefault(str(ledger.get("job_id")), []).append((path, ledger))
+    pending_by_job: dict[str, list[Transaction]] = {}
+    for root_marker, _frame, txn in pending_outgoing(source):
+        pending_by_job.setdefault(root_marker.job_id, []).append(txn)
     known_by_id = {
         candidate.job_id: candidate.marker for candidate in precheck_candidates if candidate.marker is not None
     }
@@ -763,30 +782,17 @@ def _send_jobs_to_remote(
         known_by_id.update({marker.job_id: marker for marker in known_markers})
 
     def seal_and_push(job_id: str, *, with_tree: bool) -> str | None:
-        resumable: list[tuple[Path, dict[str, object]]] = []
-        for ledger_path, ledger in ledgers_by_job.get(job_id, []):
-            if ledger.get("job_id") != job_id or ledger.get("status") != "sealed":
-                continue
-            if ledger.get("destination_workspace_id") != destination_workspace_id:
-                continue
-            if "destination_remote" not in ledger:
-                raise ValueError(
-                    f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} has no destination_remote"
-                )
-            if ledger.get("destination_remote") == target.name:
-                resumable.append((ledger_path, ledger))
-        if len(resumable) > 1:
-            ledger_path = resumable[0][0]
-            raise ValueError(
-                f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} is ambiguous; "
-                "retire it or fetch the job from the destination"
-            )
+        resumable = [
+            txn
+            for txn in pending_by_job.get(job_id, [])
+            if txn.destination_workspace_id == destination_workspace_id and txn.destination_remote == target.name
+        ]
         if not resumable and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
             return None
-        transfer_id = str(resumable[0][1]["transfer_id"]) if resumable else str(uuid.uuid4())
+        transfer_id = resumable[0].transfer_id if resumable else None
         if resumable and destination_placement is not None:
-            requested = placement_text(normalize_placement(str(destination_placement)))
-            if resumable[0][1].get("destination_placement") != requested:
+            requested = normalize_placement(str(destination_placement))
+            if resumable[0].destination_placement != requested:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
         bundle = source.detach(
             job_id,
@@ -798,7 +804,7 @@ def _send_jobs_to_remote(
             transfer_id=transfer_id,
             with_tree=with_tree,
         )
-        incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{transfer_id}"
+        incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{bundle.name}"
         push = run_adapter(
             target.bundle,
             "push",
@@ -817,8 +823,10 @@ def _send_jobs_to_remote(
         quiet=quiet,
     )
     remote_bundles = [bundle for bundle in pushed if bundle is not None]
-    acknowledgements = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
+    results = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
+    acknowledgements, problems = _acknowledged(results)
     acknowledge_transfers(source, acknowledgements)
+    _raise_problems(problems)
     return acknowledgements
 
 
@@ -879,23 +887,22 @@ def _protocol_workspace(value: str, context: CLIContext) -> Workspace:
 
 
 def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Import by registry name, with an explicit-path compatibility fallback.
+    """Import pushed bundles by registry name, with an explicit-path compatibility fallback.
 
     Names are tried first. A path is accepted only when it contains a path
     separator or already names an existing directory; receive has no hidden
-    ``--by-path`` spelling.
+    ``--by-path`` spelling. It prints ``{"results": [...]}``, one result per
+    bundle, and one bundle's result never aborts the others.
     """
 
     workspace = _protocol_workspace(arguments.workspace, context)
     bundles = arguments.bundle if isinstance(arguments.bundle, list) else [arguments.bundle]
-    acknowledgements = import_bundles(workspace, bundles)
-    for bundle, acknowledgement in zip(bundles, acknowledgements, strict=True):
-        staging = Path(bundle).expanduser().resolve()
-        if staging.parent == (workspace.control / "transfers" / "incoming").resolve():
-            discard_staged_bundle(workspace, staging)
-        _print_build_reminder(workspace, acknowledgement)
-    document = acknowledgements[0] if len(bundles) == 1 else {"acknowledgements": acknowledgements}
-    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    results = import_bundles(workspace, bundles)
+    for result in results:
+        acknowledgement = result.get("acknowledgement")
+        if isinstance(acknowledgement, Mapping):
+            _print_build_reminder(workspace, acknowledgement)
+    print(json.dumps({"results": results}, sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -955,10 +962,45 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
     return 0
 
 
-def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Retire the sealed source bundles of jobs another workspace has imported."""
+def _operator_workspace(name: str | None, context: CLIContext) -> Workspace:
+    """Resolve the workspace of an operator transfer verb: named, enclosing, or the default."""
 
-    workspace = _protocol_workspace(arguments.workspace, context)
+    if name is not None:
+        return _protocol_workspace(name, context)
+    discovered = Workspace.discover(context.cwd)
+    if discovered is not None:
+        return Workspace(discovered)
+    binding = default_workspace(project=context.cwd)
+    if binding.remote != LOCAL_REMOTE or binding.path is None:
+        raise ValueError(f"the default workspace {binding.name!r} is not local; name a local one with --workspace")
+    return Workspace(binding.path)
+
+
+def _is_job_id(value: str) -> bool:
+    try:
+        canonical_uuid(value)
+    except (WorkflowError, ValueError, TypeError):
+        return False
+    return True
+
+
+def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Retire the sealed source bundles of jobs another workspace has imported.
+
+    The protocol spelling names the workspace first; the operator spelling
+    (``transfer retire [--workspace W] JOB_ID...``) retires a delivered transfer
+    as an acknowledgement without a document.
+    """
+
+    words = list(arguments.words)
+    if arguments.operator_workspace is not None or _is_job_id(words[0]):
+        workspace = _operator_workspace(arguments.operator_workspace, context)
+        arguments.jobs = words
+    else:
+        if len(words) < 2:
+            raise ValueError("transfer retire needs a WORKSPACE and at least one JOB_ID")
+        workspace = _protocol_workspace(words[0], context)
+        arguments.jobs = words[1:]
     envelopes = getattr(arguments, "acknowledgements_json", None)
     if envelopes is None:
         retired = retire_transfers(
@@ -999,6 +1041,19 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
     _print_skipped(_skipped_report(arguments.jobs, retired))
     for entry in retired:
         print(f"{entry['job_key']}\t{entry['status']}\t{entry['retired_bundle']}")
+    return 0
+
+
+def handle_transfer_reclaim(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Take back undelivered addressed transfers once no destination can accept them any more."""
+
+    workspace = _operator_workspace(arguments.operator_workspace, context)
+    reclaimed = [reclaim_transfer(workspace, canonical_uuid(job, "job_id")) for job in arguments.jobs]
+    if arguments.json:
+        print(json.dumps({"reclaimed": reclaimed}, sort_keys=True, separators=(",", ":")))
+        return 0
+    for entry in reclaimed:
+        print(f"{entry['job_key']}\treclaimed\t{entry['transfer_id']}")
     return 0
 
 
@@ -1171,7 +1226,6 @@ def _fetch_jobs_from_remote(
     _require_offers_for_jobs(offers, jobs)
     _announce_offered_members(offers, jobs, quiet=quiet)
     staging_root = local.control / "transfers" / "incoming"
-    staged: list[Path] = []
     pulled_paths: list[str] = []
     for offer in offers:
         transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
@@ -1186,12 +1240,10 @@ def _fetch_jobs_from_remote(
             timeout=timeout,
         )
         pulled_paths.append(str(pulled.get("path", staging)))
-        staged.append(staging)
-    acknowledgements = import_bundles(local, pulled_paths)
-    for acknowledgement, staging in zip(acknowledgements, staged, strict=True):
-        if not quiet:
+    acknowledgements, problems = _acknowledged(import_bundles(local, pulled_paths))
+    if not quiet:
+        for acknowledgement in acknowledgements:
             _print_build_reminder(local, acknowledgement)
-        discard_staged_bundle(local, staging)
     retired = _remote_retire(
         target,
         remote_name,
@@ -1200,6 +1252,7 @@ def _fetch_jobs_from_remote(
         timeout=timeout,
         acknowledgements=acknowledgements,
     )
+    _raise_problems(problems)
     return acknowledgements, retired
 
 
@@ -1264,7 +1317,6 @@ def _transfer_local_to_local(
                 marker=known_by_id.get(job_id),
                 waiting_parent_map=waiting_parent_map,
                 destination_workspace_id=destination.workspace_id,
-                transfer_id=str(uuid.uuid4()),
             )
         )
 
@@ -1276,16 +1328,16 @@ def _transfer_local_to_local(
             marker=known_by_id.get(candidate.job_id) or candidate.marker,
             waiting_parent_map=waiting_parent_map,
             destination_workspace_id=destination.workspace_id,
-            transfer_id=str(uuid.uuid4()),
             with_tree=candidate.tree_root is not None,
         )
 
     bundles += _seal_trees(candidates, seal, quiet=quiet)
-    acknowledgements = import_bundles(destination, bundles)
+    acknowledgements, problems = _acknowledged(import_bundles(destination, bundles))
     if not quiet:
         for acknowledgement in acknowledgements:
             _print_build_reminder(destination, acknowledgement)
     acknowledge_transfers(source, acknowledgements)
+    _raise_problems(problems)
     return acknowledgements
 
 
@@ -1362,8 +1414,8 @@ def _transfer_remote_to_remote(
             )
             remote_bundle = str(pushed.get("path", incoming))
             remote_bundles.append(remote_bundle)
-    acknowledgements = _receive_remote(
-        destination_target, destination_name, remote_bundles, timeout=timeout, quiet=quiet
+    acknowledgements, problems = _acknowledged(
+        _receive_remote(destination_target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
     )
     retired = _remote_retire(
         source_target,
@@ -1373,6 +1425,7 @@ def _transfer_remote_to_remote(
         timeout=timeout,
         acknowledgements=acknowledgements,
     )
+    _raise_problems(problems)
     return acknowledgements, retired
 
 
@@ -1555,13 +1608,22 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
     offer.add_argument("--strict-environment", action="store_true", help=argparse.SUPPRESS)
     offer.set_defaults(handler=handle_transfer_offer)
 
+    # Protocol: `retire WORKSPACE JOB_ID...` (a peer always names the workspace
+    # first). Operator: `retire [--workspace WORKSPACE] JOB_ID...`, whose first
+    # word is a job UUID, which no workspace name is taken to be.
     retire = protocol.add_parser("retire")
-    retire.add_argument("workspace", metavar="WORKSPACE")
-    retire.add_argument("jobs", metavar="JOB_ID", nargs="+")
+    retire.add_argument("words", metavar="[WORKSPACE] JOB_ID", nargs="+")
+    retire.add_argument("--workspace", dest="operator_workspace", metavar="WORKSPACE")
     retire.add_argument("--destination-workspace-id", metavar="UUID")
     retire.add_argument("--json", action="store_true")
     retire.add_argument("--acknowledgements-json")
     retire.set_defaults(handler=handle_transfer_retire)
+
+    reclaim = protocol.add_parser("reclaim")
+    reclaim.add_argument("jobs", metavar="JOB_ID", nargs="+")
+    reclaim.add_argument("--workspace", dest="operator_workspace", metavar="WORKSPACE")
+    reclaim.add_argument("--json", action="store_true")
+    reclaim.set_defaults(handler=handle_transfer_reclaim)
 
     try:
         arguments = parser.parse_args(list(tokens))

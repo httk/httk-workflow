@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
@@ -349,13 +349,13 @@ def tree_children(workspace: Workspace, payload: Path, job: JobDefinition) -> li
     return children
 
 
-def _markers_at(workspace: Workspace, placement: str) -> list[Marker]:
+def _markers_at(workspace: Workspace, placement: str, kinds: Sequence[str] = CORE_STATE_KINDS) -> list[Marker]:
     """Return every live marker directly at one placement, one listing per state kind."""
 
     normalized = normalize_placement(placement)
     state_root = workspace.control / "state"
     markers: list[Marker] = []
-    for kind in CORE_STATE_KINDS:
+    for kind in kinds:
         directory = workspace.state_directory(kind, normalized)
         if not directory.is_dir():
             continue
@@ -369,7 +369,13 @@ def _markers_at(workspace: Workspace, placement: str) -> list[Marker]:
     return markers
 
 
-def descendant_ids(workspace: Workspace, payload: Path, job: JobDefinition) -> set[str]:
+def descendant_ids(
+    workspace: Workspace,
+    payload: Path,
+    job: JobDefinition,
+    *,
+    locate: Callable[[PurePosixPath, str], Path] | None = None,
+) -> set[str]:
     """Return the ids of every non-detached descendant recorded below one job.
 
     Unlike :func:`tree_children` this follows payloads rather than live markers,
@@ -380,6 +386,9 @@ def descendant_ids(workspace: Workspace, payload: Path, job: JobDefinition) -> s
     :param workspace: The workspace holding the tree.
     :param payload: The root's payload directory.
     :param job: The root's immutable definition.
+    :param locate: Find a child's payload from its placement and job key, when it
+        may have left its placement (a committed outgoing bundle); the payload path
+        at its placement otherwise.
     :return: The descendant job ids.
     :raises httk.workflow.errors.FormatError: If a spawn record is malformed.
     """
@@ -390,8 +399,11 @@ def descendant_ids(workspace: Workspace, payload: Path, job: JobDefinition) -> s
         parent_payload, parent_job = queue.pop()
         for entry in spawned_children(parent_payload):
             try:
-                child_payload = workspace.payload_path(
-                    normalize_placement(str(entry["placement"])), str(entry["job_key"])
+                child_placement = normalize_placement(str(entry["placement"]))
+                child_payload = (
+                    workspace.payload_path(child_placement, str(entry["job_key"]))
+                    if locate is None
+                    else locate(child_placement, str(entry["job_key"]))
                 )
                 child = JobDefinition.from_path(child_payload / "job.json")
             except (FormatError, OSError, ValueError):

@@ -1,15 +1,19 @@
-"""Mock end-to-end job round trip through a daemon enrollment's exchange, without Bubblewrap or Slurm.
+"""Mock end-to-end job round trip through an enrolled workspace's exchange extension, without Bubblewrap or Slurm.
 
-The enrollment is real (approved ``slurm`` launcher, layout, endpoint). The broker's movers run in
-process, and the manager is the one the broker's submission would start: a confined exchange manager on
-the real workspace path, whose attempt sandbox is replaced by a pass-through as in
-``test_manager_confinement.py``.
+The enrollment is real (approved ``slurm`` launcher, layout, endpoint), and enrolling enables the
+workspace's exchange extension. The client writes into ``WORKSPACE/exchange/inbox`` and fetches from
+``WORKSPACE/exchange/outbox``; the broker no longer moves bundles. The manager is the one the broker's
+submission would start: a confined manager on the real workspace path (every unrestricted manager serves
+the exchange), whose attempt sandbox is replaced by a pass-through as in ``test_manager_confinement.py``.
+The broker's sibling-layout movers (still present until the daemon is reduced) are exercised by the
+withdraw test.
 """
 
 import base64
 import json
 import os
 import shlex
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,15 +22,15 @@ from typing import Any
 import pytest
 from httk.core.cli import CLIContext
 
-from httk.workflow import TaskManager, Workspace, _confine, _daemon_setup, _exchange_staging
-from httk.workflow._daemon_client import Endpoint, read_endpoint, read_passive_status
+from httk.workflow import TaskManager, Workspace, _confine, _daemon_setup, _exchange
+from httk.workflow._daemon_client import Endpoint, read_endpoint
 from httk.workflow._daemon_exchange import ExchangeMover
 from httk.workflow._daemon_policy import Policy, load_policy
 from httk.workflow._daemon_slurm import submission
-from httk.workflow._exchange_staging import exchange_pass
+from httk.workflow._exchange import ExchangeService
 from httk.workflow._sandbox import PreparedSandbox
+from httk.workflow._txn import owner_token
 from httk.workflow.launchers import add_launcher
-from httk.workflow.transfers import exchange_staging
 from httk.workflow.workflow_cli import command
 from test_eject_adopt import _payload, configure_identity
 
@@ -71,6 +75,7 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Site:
     )
     root = tmp_path / "site"
     server = Workspace.initialize(root / "workspace")
+    reports: list[str] = []
     snapshot = _daemon_setup.initialize(
         server.root,
         exchange=root / "exchange",
@@ -81,14 +86,15 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Site:
             ("set", "slurm_conf="),
         ],
         state=tmp_path / "state",
+        report=reports.append,
     )
+    # Enrolling enables the exchange extension, and says so.
+    assert reports == [f"enabled the exchange extension of {server.root}: {server.root / 'exchange'}"]
+    server = Workspace(server.root)
+    assert "exchange" in server.extensions and (server.root / "exchange" / "inbox").is_dir()
     policy = load_policy(snapshot)
     public_key = str(read_endpoint(policy.exchange)["daemon_public_key"])
     return _Site(root, server, policy, Endpoint(policy.exchange, policy.workspace_id, policy.enrollment_id, public_key))
-
-
-def _passive(endpoint: Endpoint) -> dict[str, Any]:
-    return read_passive_status(endpoint)
 
 
 def _submitted_manager(site: _Site) -> list[str]:
@@ -123,85 +129,68 @@ def test_a_job_round_trips_through_the_exchange(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandboxes: list[Mapping[str, Any]]
 ) -> None:
     configure_identity()
-    monkeypatch.setattr(_exchange_staging, "_EJECT_GRACE_SECONDS", 0.0)
-    monkeypatch.setattr(_exchange_staging, "_STEP_INTERVAL", 0.0)
+    monkeypatch.setattr(_exchange, "RETURN_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(_exchange, "STEP_INTERVAL", 0.0)
     site = _enroll(tmp_path, monkeypatch)
+    exchange = site.server.root / "exchange"
     client = Workspace.initialize(tmp_path / "client" / "workspace")
     marker = client.submit(_payload(tmp_path / "payloads", "trip"), "jobs")
 
-    # The client drops the sealed bundle into the mounted exchange.
+    # The client drops the sealed bundle into the workspace's exchange inbox.
     context = CLIContext("httk", client.root)
-    assert command(["job", "eject", marker.job_id, str(site.exchange / "inbox")], context) == 0
-    assert (site.exchange / "inbox" / marker.job_key).is_dir()
-    mover = site.mover()
-    mover.poll([])
-    staging = exchange_staging(site.server)
-    assert (staging / "inbox" / marker.job_key).is_dir()
-    assert not (site.exchange / "inbox" / marker.job_key).exists()
+    assert command(["job", "eject", marker.job_id, str(exchange / "inbox")], context) == 0
+    assert (exchange / "inbox" / marker.job_key).is_dir()
+    # The broker no longer moves bundles: its movers work on the sibling exchange only.
+    site.mover().poll([])
+    assert (exchange / "inbox" / marker.job_key).is_dir()
+    assert os.listdir(site.exchange / "inbox") == []
 
-    # The approved launcher's submission starts a confined exchange manager on the real workspace path.
+    # The approved launcher's submission starts a confined manager on the real workspace path; it
+    # serves the exchange because the workspace has the extension.
     manager_argv = _submitted_manager(site)
-    assert manager_argv[:8] == [
+    assert manager_argv[:7] == [
         "workflow",
         "manager",
         "run",
         "--by-path",
         "--workspace",
         str(site.server.root),
-        "--exchange",
         "--idle",
     ]
+    assert "--exchange" not in manager_argv
     pins = _pins(manager_argv)
     assert pins["manager.confine"] == "bwrap"
-    with TaskManager(site.server, heartbeat_interval=0.01, exchange=True, setting_overrides=pins) as manager:
-        manager.run_until_idle(timeout=120.0)
-        manager.tick()  # the final pass ejects the finished job
+    with TaskManager(site.server, heartbeat_interval=0.01, setting_overrides=pins) as manager:
+        # Until-idle here, so the test ends; the daemon's managers keep serving with --idle.
+        manager.run_until_idle(timeout=120.0, poll_interval=0.05)
+        assert manager._exchange is not None
     assert [call["settings"].mode for call in sandboxes] == ["bwrap"]
     assert sandboxes[0]["workspace_root"] == site.server.root
-    assert (staging / "outbox" / marker.job_key).is_dir()
+    assert (exchange / "outbox" / marker.job_key).is_dir()
     assert site.server.find_marker_by_id(marker.job_id) is None
+    assert os.listdir(exchange / "inbox") == [] and os.listdir(exchange / "outbox" / "rejected") == []
+    status = json.loads((exchange / "status.json").read_bytes())
+    assert status["format"] == "httk-workspace-exchange-status" and status["workspace_id"] == site.server.workspace_id
 
-    manager_row: dict[str, str | None] = {
-        "handle": HANDLE,
-        "profile": "confined",
-        "request_id": "r" * 32,
-        "state": "submitted",
-        "job_id": "42",
-        "scheduler_state": None,
-        "exit_code": None,
-        "started_at": None,
-        "ended_at": None,
-        "log": None,
-    }
-    mover.poll([manager_row])
-    assert (site.exchange / "outbox" / marker.job_key).is_dir()
-    assert not (staging / "outbox" / marker.job_key).exists()
-    passive = _passive(site.endpoint)
-    status, managers = passive["status"], passive["managers"]
-    assert status["workspace_id"] == site.server.workspace_id and status["rejected"] == []
-    # The status step runs after the eject step of the same pass, so it already shows the job gone.
-    assert status["jobs"] == [] and status["eject_errors"] == []
-    assert managers["managers"] == [manager_row] and managers["enrollment_id"] == site.policy.enrollment_id
-
-    assert command(["job", "adopt", str(site.exchange / "outbox" / marker.job_key)], context) == 0
+    assert command(["job", "adopt", str(exchange / "outbox" / marker.job_key)], context) == 0
     current = client.find_marker_by_id(marker.job_id)
     assert current is not None and current.kind == "succeeded"
-    assert not (site.exchange / "outbox" / marker.job_key).exists()
+    assert "origin" not in client.read_state(current)
+    assert not (exchange / "outbox" / marker.job_key).exists()
 
 
 def test_a_corrupt_bundle_is_rejected_back_to_the_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     configure_identity()
     site = _enroll(tmp_path, monkeypatch)
-    (site.exchange / "inbox" / "broken").mkdir()
-    (site.exchange / "inbox" / "broken" / "junk").write_text("not a job", encoding="utf-8")
-    mover = site.mover()
-    mover.poll([])
-    exchange_pass(site.server, now=1000.0)
-    mover.poll([])
-    assert (site.exchange / "outbox" / "rejected" / "broken" / "junk").is_file()
-    assert not os.listdir(site.exchange / "inbox") and not os.listdir(exchange_staging(site.server) / "inbox")
-    (entry,) = _passive(site.endpoint)["status"]["rejected"]
-    assert entry["name"] == "broken" and entry["reason"]
+    exchange = site.server.root / "exchange"
+    (exchange / "inbox" / "broken").mkdir()
+    (exchange / "inbox" / "broken" / "junk").write_text("not a job", encoding="utf-8")
+    ExchangeService(site.server, owner=owner_token(str(uuid.uuid4()))).run(now=1000.0)
+    assert not os.listdir(exchange / "inbox")
+    [unique] = list((exchange / "outbox" / "rejected").iterdir())
+    assert (unique / "broken" / "junk").is_file()
+    reason = json.loads((unique / "reason.json").read_bytes())
+    assert reason["format"] == "httk-workspace-exchange-rejection" and reason["name"] == "broken" and reason["reason"]
 
 
 def test_a_waiting_job_is_withdrawn_and_adopted_back_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,7 +201,8 @@ def test_a_waiting_job_is_withdrawn_and_adopted_back_unchanged(tmp_path: Path, m
     client.eject(marker.job_id, site.exchange / "inbox")
     mover = site.mover()
     mover.poll([])
-    staged = exchange_staging(site.server) / "inbox" / marker.job_key
+    # The broker's sibling-layout movers still stage into the old directory, which no manager reads.
+    staged = site.server.control / "exchange" / "inbox" / marker.job_key
     assert staged.is_dir()
     assert json.loads((site.exchange / "outbox" / "managers.json").read_bytes())["staged"] == [marker.job_key]
 

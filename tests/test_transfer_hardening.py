@@ -17,8 +17,8 @@ from httk.core.digests import tree_digest
 from conftest import register_ws
 from httk.workflow import FormatError, TaskManager, Workspace
 from httk.workflow import transfers as transfers_module
+from httk.workflow._bundle import _payload_digest
 from httk.workflow._runner_builds import register_build
-from httk.workflow.introspection import resolve_job_selectors
 from httk.workflow.models import Marker
 from httk.workflow.packages import source_tree_digest
 from httk.workflow.registry import WorkspaceBinding
@@ -27,7 +27,6 @@ from httk.workflow.transfers import (
     TRANSFER_DIRECTORY,
     TRANSFER_FORMAT_VERSION,
     TRANSFER_MANIFEST,
-    _payload_digest,
     offer_transfers,
     validate_bundle,
 )
@@ -161,39 +160,13 @@ def test_resuming_a_transfer_requires_the_destination_remote_to_match(
     ]
 
 
-def test_a_sealed_ledger_without_destination_remote_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = Workspace.initialize(tmp_path / "source")
-    transfer_dir = source.control / "transfers"
-    transfer_dir.mkdir(parents=True, exist_ok=True)
-    transfer_id = str(uuid.uuid4())
-    job_id = str(uuid.uuid4())
-    ledger_path = transfer_dir / f"{transfer_id}.json"
-    ledger_path.write_text(
-        json.dumps(
-            {
-                "transfer_id": transfer_id,
-                "job_id": job_id,
-                "destination_workspace_id": "destination-id",
-                "status": "sealed",
-            }
-        ),
-        encoding="utf-8",
-    )
-    target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
-    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
-
-    with pytest.raises(ValueError, match="has no destination_remote"):
-        transfer_cli._send_jobs_to_remote(
-            source, target, "destination", [job_id], destination_placement=None, timeout=None
-        )
-
-
 def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = Workspace.initialize(tmp_path / "source")
     target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
     captured: list[tuple[str, ...]] = []
     detached: list[dict[str, object]] = []
-    bundle = tmp_path / "bundle"
+    # A sealed addressed bundle is outgoing/<T>: the push target is named after it.
+    bundle = tmp_path / str(uuid.uuid4())
     bundle.mkdir()
     payload, job_id = _payload(tmp_path / "real-job")
     source.submit(payload, "jobs")
@@ -210,8 +183,10 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
                 }
             if captured[-1][3] == "retire":
                 return {"returncode": 0, "stdout": json.dumps({"retired": []})}
-            return {"returncode": 0, "stdout": json.dumps({"transfer_id": detached[0]["transfer_id"]})}
-        return {"path": f"/dest/incoming/{detached[0]['transfer_id']}"}
+            acknowledgement = {"transfer_id": bundle.name, "job_id": job_id}
+            result = {"status": "imported", "acknowledgement": acknowledgement}
+            return {"returncode": 0, "stdout": json.dumps({"results": [result]})}
+        return {"path": f"/dest/incoming/{bundle.name}"}
 
     monkeypatch.setattr(transfer_cli, "run_adapter", adapter)
     monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
@@ -234,7 +209,8 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
     transfer_cli._remote_retire(target, "station", [job_id], "destination-id", timeout=None)
     transfer_cli._send_jobs_to_remote(source, target, "destination", [job_id], destination_placement=None, timeout=None)
 
-    transfer_id = str(detached[0]["transfer_id"])
+    transfer_id = bundle.name
+    assert detached[0]["transfer_id"] is None  # a new transfer mints its own id
     assert captured == [
         (
             "httk",
@@ -331,7 +307,7 @@ def test_a_bundle_sealed_under_the_previous_digest_rule_is_refused_by_version(tm
     manifest["format_version"] = 1
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     # A manifest at any other version is refused by the strict format gate.
-    with pytest.raises(FormatError, match="unsupported detached transfer manifest"):
+    with pytest.raises(FormatError, match="unsupported transfer bundle"):
         validate_bundle(bundle)
 
 
@@ -369,48 +345,12 @@ def test_a_v1_style_relative_symlink_transfers_and_survives_the_import(tmp_path:
 # ---------------------------------------------------------------------------
 
 
-def test_a_detach_interrupted_before_sealing_is_completed_by_recovery(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source, destination = _pair(tmp_path)
-    payload, job_id = _payload(tmp_path)
-    source.submit(payload, "jobs")
-
-    def interrupt(*arguments: object, **keywords: object) -> Path:
-        raise RuntimeError("simulated interruption between the transition and the seal")
-
-    monkeypatch.setattr(transfers_module, "_seal_transferring", interrupt)
-    with pytest.raises(RuntimeError):
-        source.detach(job_id, destination_workspace_id=destination.workspace_id)
-    # The job is fenced: it is no longer schedulable, and the only marker left
-    # is the transferring one no bundle has been sealed around yet.
-    assert source.find_marker_by_id(job_id) is None
-    fenced = [marker for marker in source.scan_markers(("transferring",)) if marker.job_id == job_id]
-    assert len(fenced) == 1
-    target = source.payload_path(fenced[0].placement, fenced[0].job_key)
-    relocated = source.control / "state" / "transferring" / "relocated"
-    relocated.mkdir(parents=True)
-    original_path = fenced[0].path
-    original_path.rename(relocated / original_path.name)
-    found = resolve_job_selectors(source, source.root, [str(target)])[0]
-    assert found.job_id == job_id and found.kind == "transferring"
-    (relocated / original_path.name).rename(original_path)
-    monkeypatch.undo()
-
-    recovered = source.recover_transfers()
-    assert len(recovered) == 1 and recovered[0]["status"] == "sealed"
-    bundle = Path(str(recovered[0]["bundle"]))
-    assert validate_bundle(bundle)["job_id"] == job_id
-    assert destination.import_bundle(bundle)["job_id"] == job_id
-
-
 def test_a_sealed_but_unsent_bundle_is_offered_again(tmp_path: Path) -> None:
     source, destination = _pair(tmp_path)
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
-    manifest = validate_bundle(bundle)
+    manifest = json.loads((bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST).read_text(encoding="utf-8"))
 
     # A crash between the seal and the copy loses nothing: the sealed bundle is
     # what a later offer reports, under the transfer UUID it was sealed with.
@@ -424,9 +364,7 @@ def test_a_sealed_but_unsent_bundle_is_offered_again(tmp_path: Path) -> None:
     assert offers[0]["bundle_path"] == str(bundle)
     assert offers[0]["job_id"] == job_id
 
-    # Even a lost ledger is rebuilt from the bundle the workspace still holds.
-    ledger = source.control / "transfers" / f"{manifest['transfer_id']}.json"
-    ledger.unlink()
+    # The offer is found again from the transferring marker and its outgoing bundle.
     assert offer_transfers(source, destination_workspace_id=destination.workspace_id, states=("submitted",)) == offers
 
 
@@ -485,26 +423,6 @@ def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(
         job_ids=(first_id, second_id),
     )
     assert {str(offer["job_id"]) for offer in resumed} == {first_id, second_id}
-
-
-def test_a_source_bundle_already_moved_aside_is_retired_without_a_second_move(tmp_path: Path) -> None:
-    source, destination = _pair(tmp_path)
-    payload, job_id = _payload(tmp_path)
-    source.submit(payload, "jobs")
-    bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
-    acknowledgement = destination.import_bundle(bundle)
-    transfer_id = str(acknowledgement["transfer_id"])
-
-    # Simulate a crash between the rename and the ledger write.
-    retired = source.control / "transfers" / "retired" / transfer_id / "bundle"
-    retired.parent.mkdir(parents=True, exist_ok=True)
-    os.rename(bundle, retired)
-    ledger = source.control / "transfers" / f"{transfer_id}.json"
-    assert json.loads(ledger.read_text(encoding="utf-8"))["status"] == "sealed"
-
-    assert source.acknowledge_transfer(acknowledgement) == retired
-    assert not ledger.exists()
-    assert not retired.exists()
 
 
 def test_a_directory_runner_survives_detach_bundle_import_and_execution(tmp_path: Path) -> None:
@@ -624,42 +542,39 @@ def test_receive_does_not_remind_for_buildless_runner_trees(tmp_path: Path, caps
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("module_name", ["httk.workflow.transfers", "httk.workflow._transfer_receipts"])
-def test_every_transfer_ledger_write_is_durability_aware(module_name: str) -> None:
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "httk.workflow.transfers",
+        "httk.workflow._txn",
+        "httk.workflow._sealing",
+        "httk.workflow._adoption",
+        "httk.workflow._receipts",
+    ],
+)
+def test_every_transfer_protocol_write_is_durability_aware(module_name: str) -> None:
     """No write of the transfer protocol may quietly ignore workspace durability."""
 
     import importlib
 
     module = importlib.import_module(module_name)
     tree = ast.parse(Path(str(module.__file__)).read_text(encoding="utf-8"))
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "write_json_atomic"
-    ]
-    assert calls
-    for call in calls:
-        assert any(keyword.arg == "durable" for keyword in call.keywords), ast.unparse(call)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+        if name in {"write_json_atomic", "link_new", "birth"}:
+            assert any(keyword.arg == "durable" for keyword in node.keywords), ast.unparse(node)
 
 
 def test_offer_selection_state_filter_survives_for_sealed_bundle(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     destination_id = str(uuid.uuid4())
-    job_id = str(uuid.uuid4())
-    transfers_dir = workspace.control / "transfers"
-    transfers_dir.mkdir(parents=True, exist_ok=True)
-    (transfers_dir / f"{job_id}.json").write_text(
-        json.dumps(
-            {
-                "status": "sealed",
-                "destination_workspace_id": destination_id,
-                "job_id": job_id,
-                "prior_kind": "failed",
-                "source_placement": "jobs",
-            }
-        ),
-        encoding="utf-8",
-    )
+    payload, job_id = _payload(tmp_path)
+    marker = workspace.submit(payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        marker = workspace.transition(writer, marker, "failed", {"reason": "test"})
+    workspace.detach(job_id, destination_workspace_id=destination_id)
     # ``failed`` is not among the requested states, so the state filter is the
     # first and correct diagnosis; it must not be overwritten by the generic
     # "sealed bundle is unavailable" reason.

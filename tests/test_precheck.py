@@ -1,7 +1,8 @@
 """Readiness reports and transfer-time environment advisories."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from httk.core.digests import tree_digest
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import precheck as precheck_module
+from httk.workflow._bundle import _payload_digest
 from httk.workflow._runner_builds import register_build
 from httk.workflow.models import QUIESCENT_KINDS
 from httk.workflow.projects import initialize_project
@@ -585,6 +587,23 @@ def test_precheck_rejects_a_prefix_collision_package_runner(tmp_path: Path, caps
     assert "allowlist" in report["jobs"][0]["runner"]["problem"]
 
 
+@contextmanager
+def _interrupted_after_the_fence() -> Iterator[None]:
+    """Interrupt a sealing transaction right after its root is fenced (the job is ``transferring``)."""
+
+    from httk.workflow import _txn
+
+    def interrupt(step: str) -> None:
+        if step == "S3.fenced":
+            raise RuntimeError("interrupt")
+
+    _txn._HOOK = interrupt
+    try:
+        yield
+    finally:
+        _txn._HOOK = None
+
+
 def test_strict_transfer_checks_an_interrupted_marker_before_recovery(tmp_path: Path, monkeypatch) -> None:
     """Strict advisory leaves an interrupted source marker untouched."""
 
@@ -598,23 +617,12 @@ def test_strict_transfer_checks_an_interrupted_marker_before_recovery(tmp_path: 
         ),
         "ready",
     )
-    from httk.workflow import transfers as transfers_module
-
-    real_seal = transfers_module._seal_transferring
-    monkeypatch.setattr(
-        transfers_module,
-        "_seal_transferring",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("interrupt")),
-    )
-    try:
-        with pytest.raises(RuntimeError):
-            source.detach(
-                marker.job_id,
-                destination_workspace_id=destination.workspace_id,
-                destination_remote="cluster",
-            )
-    finally:
-        monkeypatch.setattr(transfers_module, "_seal_transferring", real_seal)
+    with _interrupted_after_the_fence(), pytest.raises(RuntimeError):
+        source.detach(
+            marker.job_id,
+            destination_workspace_id=destination.workspace_id,
+            destination_remote="cluster",
+        )
     fenced = source.find_marker_by_id(marker.job_id)
     assert fenced is None
     assert [item.job_id for item in source.scan_markers(("transferring",))] == [marker.job_id]
@@ -653,23 +661,12 @@ def test_other_destination_interrupted_marker_does_not_block_strict_advisory(tmp
         ),
         "ready",
     )
-    from httk.workflow import transfers as transfers_module
-
-    real_seal = transfers_module._seal_transferring
-    monkeypatch.setattr(
-        transfers_module,
-        "_seal_transferring",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("interrupt")),
-    )
-    try:
-        with pytest.raises(RuntimeError):
-            source.detach(
-                marker.job_id,
-                destination_workspace_id=destination.workspace_id,
-                destination_remote="remote-a",
-            )
-    finally:
-        monkeypatch.setattr(transfers_module, "_seal_transferring", real_seal)
+    with _interrupted_after_the_fence(), pytest.raises(RuntimeError):
+        source.detach(
+            marker.job_id,
+            destination_workspace_id=destination.workspace_id,
+            destination_remote="remote-a",
+        )
 
     candidates = select_transfer_jobs(
         source,
@@ -701,7 +698,7 @@ def test_invalid_sealed_job_is_advisory_problem_but_remains_offerable(tmp_path: 
 
     manifest_path = bundle / transfers_module.TRANSFER_DIRECTORY / transfers_module.TRANSFER_MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["payload_sha256"] = transfers_module._payload_digest(bundle)
+    manifest["payload_sha256"] = _payload_digest(bundle)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     candidates = select_transfer_jobs(
         source,
@@ -737,19 +734,8 @@ def test_local_transfer_strict_checks_recovering_marker_before_recovery(tmp_path
         _job(tmp_path, "local-interrupted", {"declared": {"missing": {"type": "string"}}, "overrides": {}}),
         "ready",
     )
-    from httk.workflow import transfers as transfers_module
-
-    real_seal = transfers_module._seal_transferring
-    monkeypatch.setattr(
-        transfers_module,
-        "_seal_transferring",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("interrupt")),
-    )
-    try:
-        with pytest.raises(RuntimeError):
-            source.detach(marker.job_id, destination_workspace_id=destination.workspace_id)
-    finally:
-        monkeypatch.setattr(transfers_module, "_seal_transferring", real_seal)
+    with _interrupted_after_the_fence(), pytest.raises(RuntimeError):
+        source.detach(marker.job_id, destination_workspace_id=destination.workspace_id)
     with pytest.raises(ValueError, match="strict environment"):
         transfer_cli._transfer_local_to_local(
             source,

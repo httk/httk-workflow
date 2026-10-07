@@ -5,12 +5,11 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from conftest import configure_identity
-from httk.workflow import Workspace, transfers
+from httk.workflow import Workspace, _bundle
 from httk.workflow.errors import FormatError
 from httk.workflow.models import JobDefinition
 from httk.workflow.transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST, validate_bundle
@@ -60,11 +59,11 @@ def test_adopt_bounds_the_walk_by_depth_and_entries(tmp_path: Path, monkeypatch:
     for _ in range(4):
         deep = deep / "d"
     deep.mkdir(parents=True)
-    monkeypatch.setattr(transfers, "_ADOPT_MAX_DEPTH", 3)
+    monkeypatch.setattr(_bundle, "_ADOPT_MAX_DEPTH", 3)
     with pytest.raises(FormatError, match="nests deeper than 3 levels"):
         destination.adopt(loose)
-    monkeypatch.setattr(transfers, "_ADOPT_MAX_DEPTH", 256)
-    monkeypatch.setattr(transfers, "_ADOPT_MAX_ENTRIES", 3)
+    monkeypatch.setattr(_bundle, "_ADOPT_MAX_DEPTH", 256)
+    monkeypatch.setattr(_bundle, "_ADOPT_MAX_ENTRIES", 3)
     with pytest.raises(FormatError, match="holds more than 3 entries"):
         destination.adopt(loose)
     assert loose.is_dir() and not list(destination.scan_markers())
@@ -232,111 +231,3 @@ def _plant(workdir: Path, manifest: dict[str, object]) -> list[Path]:
         path.write_text(json.dumps(manifest), encoding="utf-8")
         planted.append(bundle)
     return planted
-
-
-def test_recovery_ignores_manifests_planted_inside_a_job_and_still_recovers_bundles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source, destination = _pair(tmp_path)
-    leaving = source.submit(_payload(tmp_path / "payloads", "leaving"), "jobs")
-    staying = source.submit(_payload(tmp_path / "payloads", "staying"), "jobs/live")
-    bundle = source.detach(leaving.job_id, destination_workspace_id=destination.workspace_id)
-    manifest = validate_bundle(bundle)
-    # A sealed bundle whose ledger was lost is a legitimate recovery case.
-    ledger = transfers._ledger_path(source, str(manifest["transfer_id"]))
-    ledger.unlink()
-
-    # The live job plants copies of that manifest, and a forged one, in its workdir.
-    workdir = source.payload_path(staying.placement, staying.job_key) / "run"
-    planted = _plant(workdir, dict(manifest))
-    planted += _plant(workdir / "forged", {**manifest, "transfer_id": "9" * 8 + "-9999-4999-8999-" + "9" * 12})
-
-    validated: list[Path] = []
-    settled: list[Path] = []
-    original_validate = transfers.validate_bundle
-    original_settle = transfers._settle_leftover_envelope
-
-    def spy_validate(path: object) -> dict[str, object]:
-        validated.append(Path(str(path)))
-        return original_validate(path)  # type: ignore[arg-type]
-
-    def spy_settle(workspace: Workspace, path: Path, problem: Exception) -> None:
-        settled.append(path)
-        original_settle(workspace, path, problem)
-
-    monkeypatch.setattr(transfers, "validate_bundle", spy_validate)
-    monkeypatch.setattr(transfers, "_settle_leftover_envelope", spy_settle)
-    results = source.recover_transfers()
-
-    assert {(item["transfer_id"], item["status"]) for item in results} == {(manifest["transfer_id"], "sealed")}
-    assert ledger.is_file() and json.loads(ledger.read_text(encoding="utf-8"))["bundle"] == str(bundle)
-    assert bundle.resolve() in {path.resolve() for path in validated}
-    for path in planted:
-        assert path not in validated and path.resolve() not in {item.resolve() for item in validated}
-        assert (path / TRANSFER_DIRECTORY / TRANSFER_MANIFEST).is_file()
-    assert not settled
-
-
-def test_recovery_still_settles_a_leftover_envelope_of_an_arrived_job(tmp_path: Path) -> None:
-    destination, loose = _loose(tmp_path)
-    transfer_id = str(validate_bundle(loose)["transfer_id"])
-    adopted = destination.adopt(loose)
-    payload = destination.payload_path(adopted.placement, adopted.job_key)
-    # Recreate the envelope an import interrupted after publication leaves behind.
-    (payload / TRANSFER_DIRECTORY).mkdir()
-    (payload / TRANSFER_DIRECTORY / TRANSFER_MANIFEST).write_text(
-        json.dumps({"transfer_id": transfer_id, "job_id": adopted.job_id}), encoding="utf-8"
-    )
-    destination.recover_transfers()
-    assert not (payload / TRANSFER_DIRECTORY).exists()
-
-
-def _sealed_without_ledger(
-    source: Workspace, destination: Workspace, marker_placement: str, tmp_path: Path
-) -> tuple[Path, dict[str, Any], Path]:
-    """Seal one job for *destination* and lose its ledger, as an interrupted transfer would."""
-
-    marker = source.submit(_payload(tmp_path / "payloads"), marker_placement)
-    bundle = source.detach(marker.job_id, destination_workspace_id=destination.workspace_id)
-    manifest = validate_bundle(bundle)
-    ledger = transfers._ledger_path(source, str(manifest["transfer_id"]))
-    ledger.unlink()
-    return bundle, manifest, ledger
-
-
-def test_a_bundle_seen_through_an_alias_is_recovered_once_by_its_plain_path(tmp_path: Path) -> None:
-    source, destination = _pair(tmp_path)
-    # The alias sorts, and is pushed, before the plain placement it points into.
-    (source.jobs / "a").symlink_to(source.jobs / "jobs", target_is_directory=True)
-    bundle, manifest, ledger = _sealed_without_ledger(source, destination, "jobs", tmp_path)
-    results = source.recover_transfers()
-    assert json.loads(ledger.read_text(encoding="utf-8"))["bundle"] == str(bundle)
-    assert [item["transfer_id"] for item in results] == [manifest["transfer_id"]]
-
-
-def test_a_bundle_under_a_symlinked_placement_is_recovered_exactly_once(tmp_path: Path) -> None:
-    source, destination = _pair(tmp_path)
-    scratch = tmp_path / "scratch" / "project"
-    scratch.mkdir(parents=True)
-    # An operator placement symlink, and a second alias of the same directory.
-    (source.jobs / "project").symlink_to(scratch, target_is_directory=True)
-    (source.jobs / "zalias").symlink_to(scratch, target_is_directory=True)
-    bundle, manifest, ledger = _sealed_without_ledger(source, destination, "project/runs", tmp_path)
-    assert bundle == source.jobs / "project" / "runs" / bundle.name
-    results = source.recover_transfers()
-    recorded = Path(json.loads(ledger.read_text(encoding="utf-8"))["bundle"])
-    assert recorded.resolve() == bundle.resolve()
-    assert [item["transfer_id"] for item in results] == [manifest["transfer_id"]]
-    assert transfers._sealed_bundle_candidates(source) == [recorded]
-
-
-def test_a_placement_symlink_loop_terminates(tmp_path: Path) -> None:
-    source, destination = _pair(tmp_path)
-    bundle, _manifest, ledger = _sealed_without_ledger(source, destination, "deep", tmp_path)
-    # Placement symlinks pointing at ancestors, the workspace root among them.
-    (source.jobs / "deep" / "up").symlink_to("..", target_is_directory=True)
-    (source.jobs / "root").symlink_to(source.root, target_is_directory=True)
-    results = _without_hanging(lambda: source.recover_transfers())
-    assert results is None
-    assert json.loads(ledger.read_text(encoding="utf-8"))["bundle"] == str(bundle)
-    assert transfers._sealed_bundle_candidates(source) == [bundle]

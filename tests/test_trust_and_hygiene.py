@@ -466,7 +466,7 @@ def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path
 
     assert bundle.is_dir()  # A rejected acknowledgement cannot reclaim the source.
     retired = source.acknowledge_transfer(acknowledgement)
-    assert not retired.exists()
+    assert retired.is_dir()  # Kept for retention.trash_days.
 
 
 # ---------------------------------------------------------------------------

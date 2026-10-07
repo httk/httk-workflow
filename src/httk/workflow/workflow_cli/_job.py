@@ -88,7 +88,7 @@ from ..seals import (
     seal_job,
     unseal_job,
 )
-from ..transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST
+from ..transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST, resume_exports
 from ..workspace import Workspace
 from ._common import (
     _ERRORS,
@@ -1651,8 +1651,17 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Move quiescent jobs out of a workspace to free-standing job directories."""
 
     workspace = Workspace(_local_root(arguments, context, action="eject jobs from it"), durable=_durable(arguments))
-    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
-    destination = Path(arguments.destination).expanduser()
+    targets = list(arguments.targets)
+    if arguments.resume:
+        for directory in resume_exports(workspace):
+            print(f"-\tcopied out\t{directory}")
+        if not targets:
+            return 0
+    if len(targets) < 2:
+        print("error: eject needs at least one JOB and a DEST (or --resume alone)", file=sys.stderr)
+        return 2
+    markers = resolve_job_selectors(workspace, context.cwd, targets[:-1])
+    destination = Path(targets[-1]).expanduser()
     if len(markers) > 1 and not destination.is_dir():
         print(f"error: ejecting {len(markers)} jobs needs an existing directory, not {destination}", file=sys.stderr)
         return 1
@@ -1679,7 +1688,7 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
             print(f"{marker.job_id}: {exc}", file=sys.stderr)
             continue
         manifest = read_json(directory / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-        carried.update(str(entry["job_id"]) for entry in manifest.get("eject_tree") or [])
+        carried.update(str(entry["job_id"]) for entry in manifest.get("members") or [])
         print(f"{marker.job_id}\tejected\t{directory}")
     for marker in deferred:
         if marker.job_id in carried:
@@ -1693,7 +1702,7 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
             print(f"{marker.job_id}: {exc}", file=sys.stderr)
             continue
         manifest = read_json(directory / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-        carried.update(str(entry["job_id"]) for entry in manifest.get("eject_tree") or [])
+        carried.update(str(entry["job_id"]) for entry in manifest.get("members") or [])
         print(f"{marker.job_id}\tejected\t{directory}")
     return 1 if failed else 0
 
@@ -2171,8 +2180,20 @@ def build_job_parser(
         ),
         handler=handle_job_eject,
     )
-    _add_job_selector(eject)
-    eject.add_argument("destination", metavar="DEST", help="the new job directory, or a directory to eject into")
+    _add_workspace_option(eject, help_text="the workspace holding the job")
+    eject.add_argument(
+        "targets",
+        metavar="JOB... DEST",
+        nargs="*",
+        help="the jobs (UUID, key, unique prefix, or a path inside the workspace), then the new job directory "
+        "or a directory to eject into",
+    )
+    eject.add_argument(
+        "--resume",
+        action="store_true",
+        help="first finish every pending copy-out of an earlier eject to another filesystem; "
+        "with no JOB and DEST, only that",
+    )
     add_durability_arguments(eject)
 
     adopt = _leaf(

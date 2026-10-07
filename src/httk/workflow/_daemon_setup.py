@@ -11,7 +11,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,9 +42,11 @@ from ._daemon_policy import (
 )
 from ._daemon_slurm import submission
 from ._daemon_state import Ledger
-from ._exchange_staging import ENROLLMENT_MARKER
+from ._exchange import enable_exchange
 from .configuration import launchers_home
 from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
+from .models import EXCHANGE_DIRECTORY
+from .workspace import Workspace
 
 _ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
 _ENDPOINT_VERSION = 2
@@ -55,6 +57,8 @@ _CLUSTER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _REPORT_DIRECTORIES = ("outbox/managers", "outbox/withdrawn")
 _EXCHANGE_DIRECTORIES = ("requests", "responses", "inbox", "outbox", "outbox/rejected", *_REPORT_DIRECTORIES)
 _STAGING_DIRECTORIES = ("inbox", "outbox", "outbox/rejected", "records")
+#: The enrollment record daemon setup writes into the workspace's staging directory.
+ENROLLMENT_MARKER = "enrollment.json"
 _ENROLLMENT_FORMAT = "httk-workspace-daemon-enrollment"
 _ENROLLMENT_VERSION = 1
 _DEFAULT_SLURM_CONF = Path("/etc/slurm/slurm.conf")
@@ -795,8 +799,12 @@ def initialize(
     changes: Sequence[tuple[str, str]] = (),
     state: Path | None = None,
     snapshots: Path | None = None,
+    report: Callable[[str], None] | None = None,
 ) -> Path:
     """Compile and publish a fresh enrollment from approved global ``slurm`` launchers.
+
+    The workspace's exchange extension is enabled when it is absent (and *report* told so), just before
+    the enrollment is written: from then on every manager of the workspace must confine its attempts.
 
     Configuration values that *changes* does not set are discovered: executables on ``PATH``, the running
     interpreter, the effective Slurm configuration and its cluster, 128 submissions, and ``force=false``.
@@ -807,8 +815,10 @@ def initialize(
         ``CONFIGURATION_KEYS`` and ``INITIALIZE_KEYS``; at least one launcher and one key must result.
     :param state: Broker state directory, by default under the httk data home.
     :param snapshots: Snapshot directory, by default ``<state>.snapshots``.
+    :param report: Called with one line when this call enables the workspace's exchange extension.
     :return: Path of the published runtime snapshot.
     :raises ValueError: If a launcher, key, configuration value or the layout is refused.
+    :raises httk.workflow.errors.WorkflowError: If the exchange extension cannot be enabled.
     """
 
     workspace = workspace.resolve(strict=True)
@@ -863,6 +873,8 @@ def initialize(
         _write_endpoint(policy)
         # Last: a failed init leaves no enrolled workspace without a daemon. From here on every
         # manager of the workspace must be confined.
+        if enable_exchange(Workspace(workspace)) and report is not None:
+            report(f"enabled the exchange extension of {workspace}: {workspace / EXCHANGE_DIRECTORY}")
         _write_enrollment(workspace, policy)
         return snapshot
 

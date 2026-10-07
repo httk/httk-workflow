@@ -39,9 +39,8 @@ def test_register_forget_and_list_use_one_absolute_local_registry(tmp_path: Path
 def test_forget_refuses_unretired_outbound_transfer(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "runs")
     binding = register_workspace("home", workspace.root)
-    ledger = workspace.control / "transfers" / "transfer.json"
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    ledger.write_text(json.dumps({"status": "sealed"}), encoding="utf-8")
+    # A sealed addressed bundle waiting for its acknowledgement.
+    (workspace.control / "transfers" / "outgoing" / "00000000-0000-0000-0000-000000000003").mkdir(parents=True)
     with pytest.raises(ValueError, match="fetch or retire.*workspace forget --force"):
         forget_workspace("home")
     assert resolve_workspace("home") == binding

@@ -241,6 +241,7 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
                 ],
                 "state": None,
                 "snapshots": None,
+                "report": print,
             },
         ),
         (

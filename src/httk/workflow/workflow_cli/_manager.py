@@ -278,7 +278,6 @@ def manager_option_defaults() -> dict[str, object]:
         "time_limit": None,
         "deadline_margin": 120.0,
         "gc_interval": None,
-        "exchange": False,
         "log_level": None,
         "log_file": None,
         "json_logs": False,
@@ -408,11 +407,6 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
             "also collect garbage from this manager, at most once per SECONDS "
             "(default: no background collection; use 'httk workspace gc' instead)"
         ),
-    )
-    parser.add_argument(
-        "--exchange",
-        action="store_true",
-        help="adopt staged exchange bundles, eject finished jobs and publish status (used by the workspace daemon)",
     )
     parser.add_argument(
         "--log-level",
@@ -637,8 +631,6 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--gc-interval", str(arguments.gc_interval)]
     for key, value in _pinned_settings(arguments).items():
         argv += ["--setting", f"{key}={value}"]
-    if getattr(arguments, "exchange", False):
-        argv.append("--exchange")
     if getattr(arguments, "log_level", None) is not None:
         argv += ["--log-level", arguments.log_level]
     if getattr(arguments, "json_logs", False):
@@ -810,7 +802,6 @@ def _run_in_process_manager(
         takeover_grace_factor=getattr(arguments, "takeover_grace_factor", DEFAULT_TAKEOVER_GRACE_FACTOR),
         runner_search_paths=getattr(arguments, "runner_search_path", []),
         gc_interval=getattr(arguments, "gc_interval", None),
-        exchange=getattr(arguments, "exchange", False),
         on_attached=install_manager_log,
         end_time=end_time,
         deadline_margin=deadline_margin,

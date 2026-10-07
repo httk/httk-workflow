@@ -190,6 +190,7 @@ def _local(
             changes=arguments.changes or (),
             state=state,
             snapshots=snapshots,
+            report=print,
         )
         print(_render(_daemon_setup.describe(workspace, state=state, snapshots=snapshots)))
         return _check_after_setup(workspace, snapshot)

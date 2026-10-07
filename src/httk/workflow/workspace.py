@@ -35,8 +35,10 @@ from .errors import (
 from .journal import JournalWriter, read_record
 from .models import (
     ACTIVE_STATE_KINDS,
+    CARRIED_PROVENANCE_MEMBERS,
     CORE_PROFILE,
     CORE_STATE_KINDS,
+    EXCHANGE_EXTENSION,
     JOBS_DIRECTORY,
     STATE_KINDS,
     SUPPORTED_EXTENSIONS,
@@ -107,6 +109,19 @@ def _refuse_format(root: object, version: object, profile: object) -> FormatErro
         "There is no migration: remove old per-user state with `httk system reset` "
         "and recreate the workspace with `httk workspace init`."
     )
+
+
+def _extensions(document: Mapping[str, object]) -> frozenset[str]:
+    """Return the enabled extensions of a ``format.json`` document, refusing unsupported ones."""
+
+    raw = document.get("extensions", [])
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise FormatError("workspace extensions must be an array of strings")
+    extensions = frozenset(raw)
+    unsupported = extensions - SUPPORTED_EXTENSIONS
+    if unsupported:
+        raise UnsupportedExtensionError(f"unsupported enabled extensions: {', '.join(sorted(unsupported))}")
+    return extensions
 
 
 def _validate_settings(raw: object) -> dict[str, object]:
@@ -395,6 +410,10 @@ class Workspace:
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace uses unsupported extensions or a profile.
     """
 
+    # Whether a manager attached through this instance may serve the exchange
+    # extension; a view restricted to some jobs (job debug) never does.
+    _serves_exchange = True
+
     def __init__(
         self,
         root: str | os.PathLike[str],
@@ -422,13 +441,7 @@ class Workspace:
         self._policy = WorkspacePolicy.from_mapping(_section(self.format, "policy"))
         _validate_settings(_section(self.format, "settings"))
         _validate_workflow_preludes(_section(self.format, "workflow_preludes"))
-        extensions_raw = self.format.get("extensions", [])
-        if not isinstance(extensions_raw, list) or not all(isinstance(item, str) for item in extensions_raw):
-            raise FormatError("workspace extensions must be an array of strings")
-        self.extensions = frozenset(extensions_raw)
-        unsupported = self.extensions - SUPPORTED_EXTENSIONS
-        if unsupported:
-            raise UnsupportedExtensionError(f"unsupported enabled extensions: {', '.join(sorted(unsupported))}")
+        self.extensions = _extensions(self.format)
         if self.format.get("record_ref_encoding") != "hwref-v2":
             raise UnsupportedExtensionError("unsupported record reference encoding")
         self.workspace_id = str(self.format.get("workspace_id"))
@@ -533,7 +546,7 @@ class Workspace:
         ):
             (control / relative).mkdir(parents=True, exist_ok=True)
         (root_path / JOBS_DIRECTORY).mkdir(exist_ok=True)
-        for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
+        for relative in ("transfers/acks", "transfers/incoming", "transfers/outgoing", "transfers/retired"):
             (control / relative).mkdir(parents=True, exist_ok=True)
         write_json_atomic(
             control / "format.json",
@@ -541,7 +554,8 @@ class Workspace:
                 "format": "httk-workflow-filesystem",
                 "format_version": 3,
                 "core_profile": CORE_PROFILE,
-                "extensions": sorted(extension_set),
+                # The exchange extension is recorded by enabling it below, once its directory exists.
+                "extensions": sorted(extension_set - {EXCHANGE_EXTENSION}),
                 "record_ref_encoding": "hwref-v2",
                 "workspace_id": str(uuid.uuid4()),
                 "created_at": utc_now(),
@@ -557,7 +571,12 @@ class Workspace:
             from httk.core.project.members import register_project_member
 
             register_project_member(project, root_path, "workspace")
-        return cls(root_path, durable=durable)
+        workspace = cls(root_path, durable=durable)
+        if EXCHANGE_EXTENSION in extension_set:
+            from ._exchange import enable_exchange
+
+            enable_exchange(workspace)
+        return workspace
 
     @classmethod
     def discover(cls, start: str | os.PathLike[str] | None = None) -> Path | None:
@@ -679,14 +698,45 @@ class Workspace:
 
         return _validate_settings(_section(self.format, "settings"))
 
-    def read_settings(self) -> dict[str, object]:
-        """Read and validate the current settings from disk.
+    def refresh_format(self) -> dict[str, object]:
+        """Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.
 
-        :return: The current application settings.
-        :raises httk.workflow.errors.FormatError: If the stored settings are not valid.
+        Extensions can be enabled while processes are attached (``httk
+        workspace exchange enable``), so a long-running reader re-reads them
+        rather than trusting what it saw at attach. The format, profile and
+        workspace identity must still be the attached ones; the policy keeps the
+        value read at attach.
+
+        :return: The re-read ``format.json`` document.
+        :raises httk.workflow.errors.FormatError: If ``format.json`` cannot be read, is not
+            this workspace's format 3 document, or its extensions are malformed.
+        :raises httk.workflow.errors.UnsupportedExtensionError: If it enables an unsupported extension.
         """
 
-        return _validate_settings(_section(read_json(self.control / "format.json"), "settings"))
+        stored = read_json(self.control / "format.json")
+        if stored.get("format") != "httk-workflow-filesystem" or stored.get("format_version") != 3:
+            raise _refuse_format(self.root, stored.get("format_version"), stored.get("core_profile"))
+        if stored.get("core_profile") != CORE_PROFILE:
+            raise _refuse_format(self.root, stored.get("format_version"), stored.get("core_profile"))
+        if stored.get("workspace_id") != self.workspace_id:
+            raise FormatError(
+                f"workspace format.json at {self.root} now names workspace {stored.get('workspace_id')!r}, "
+                f"not the attached {self.workspace_id}"
+            )
+        self.extensions = _extensions(stored)
+        self.format = stored
+        return stored
+
+    def read_settings(self) -> dict[str, object]:
+        """Read and validate the current settings from disk, refreshing the enabled extensions too.
+
+        :return: The current application settings.
+        :raises httk.workflow.errors.FormatError: If ``format.json`` or the stored settings are not valid.
+        :raises httk.workflow.errors.UnsupportedExtensionError: If ``format.json`` now enables an
+            unsupported extension.
+        """
+
+        return _validate_settings(_section(self.refresh_format(), "settings"))
 
     @staticmethod
     def _check_setting_collision(key: str, settings: Mapping[str, object]) -> None:
@@ -1511,7 +1561,7 @@ class Workspace:
                 return [marker] if marker.kind in selected else []
         return [marker for marker in self.scan_markers(selected) if marker.job_key == job_key]
 
-    def find_marker_by_id(self, job_id: str) -> Marker | None:
+    def find_marker_by_id(self, job_id: str, *, kinds: Iterable[str] | None = None) -> Marker | None:
         """Return the one current marker of *job_id*, or ``None`` if it has none.
 
         Resolution follows the specified ladder: the in-memory index, then a
@@ -1520,10 +1570,40 @@ class Workspace:
         rescan, so a job another actor has just created or moved is never
         mistaken for a job that does not exist.
 
+        By default only the core kinds are searched, so a job that is
+        ``transferring`` (or ``relocating``) reads as absent. Naming those kinds
+        in *kinds* also rescans them completely, and a marker found there
+        together with a core marker is the corruption of two current markers.
+
         :param job_id: Identify the job to find.
-        :return: The current marker, or ``None`` when the job has no marker.
+        :param kinds: The state kinds to accept the marker in; the core kinds when omitted.
+        :return: The current marker, or ``None`` when the job has no marker in *kinds*.
+        :raises ValueError: If *kinds* names an unknown state kind.
         :raises httk.workflow.errors.WorkspaceCorruptionError: If more than one current marker identifies the job.
         """
+
+        if kinds is None:
+            return self._find_core_marker_by_id(job_id)
+        selected = frozenset(kinds)
+        unknown = selected - set(STATE_KINDS)
+        if unknown:
+            raise ValueError(f"unknown state kinds: {', '.join(sorted(unknown))}")
+        extra = tuple(kind for kind in STATE_KINDS if kind in selected and kind not in CORE_STATE_KINDS)
+        found = self._find_core_marker_by_id(job_id)
+        if extra:
+            for entry in Workspace.scan_marker_entries(self, extra):
+                if isinstance(entry, MarkerFault):
+                    self.report_marker_fault(entry)
+                    continue
+                if entry.job_id != job_id:
+                    continue
+                if found is not None:
+                    raise WorkspaceCorruptionError(f"job {job_id} has more than one state marker")
+                found = entry
+        return found if found is not None and found.kind in selected else None
+
+    def _find_core_marker_by_id(self, job_id: str) -> Marker | None:
+        """Run the index, probe and rescan ladder of :meth:`find_marker_by_id` over the core kinds."""
 
         index = self._marker_index
         if index is not None:
@@ -1669,6 +1749,33 @@ class Workspace:
             raise WorkspaceCorruptionError(f"state frame disagrees with marker {marker.path}")
         return frame
 
+    def _inherited_origin(self, marker: Marker) -> str | None:
+        """Return the ``origin`` a job's first frame inherits from its ``job.json`` parent, if any.
+
+        A child of a job that arrived through the exchange inbox belongs to that
+        tree: it carries the parent's exchange origin from its first frame, so
+        the exchange's return pass takes it along, and never a job that did not
+        (an orphan whose absent parent a client claims to be). A definition or
+        parent that is absent or cannot be read passes nothing on, which only
+        ever keeps a tree here.
+
+        :param marker: The job's marker (its first frame is about to be written).
+        :return: ``"exchange"``, or ``None``.
+        """
+
+        try:
+            parent = self.load_job(marker).parent
+            parent_id = None if parent is None else parent.get("job_id")
+            if not isinstance(parent_id, str):
+                return None
+            parent_marker = self.find_marker_by_id(parent_id)
+            if parent_marker is None:
+                return None
+            origin = self.read_state(parent_marker).get("origin")
+        except (WorkflowError, OSError):
+            return None
+        return "exchange" if origin == "exchange" else None
+
     def transition(
         self,
         writer: JournalWriter,
@@ -1681,6 +1788,13 @@ class Workspace:
     ) -> Marker:
         """Append a state frame and atomically move *marker* to it.
 
+        The provenance members of :data:`~httk.workflow.models.CARRIED_PROVENANCE_MEMBERS`
+        are read from the current frame and repeated in the new one unless
+        *updates* sets them. A current frame that cannot be read makes the
+        transition fail rather than silently drop that provenance. A job's
+        first frame (from its ``init`` marker) inherits its parent's exchange
+        origin unless *updates* sets ``origin``.
+
         :param writer: Append the new state frame through this journal writer.
         :param marker: Identify the current marker to advance.
         :param kind: Select the next state kind.
@@ -1691,9 +1805,12 @@ class Workspace:
         :return: The marker after the transition.
         :raises ValueError: If the next state kind is unknown.
         :raises httk.workflow.errors.SealedError: If the job, workspace, or project is sealed.
-        :raises httk.workflow.errors.WorkspaceCorruptionError: If the state generation is exhausted.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If the state generation is exhausted,
+            or the current frame disagrees with *marker*.
+        :raises httk.workflow.errors.FormatError: If the current frame cannot be read.
         :raises httk.workflow.errors.TransitionLostError: If another actor moved the marker first.
-        :raises httk.workflow.errors.WorkspaceUnavailableError: If the marker move cannot be resolved.
+        :raises httk.workflow.errors.WorkspaceUnavailableError: If the marker move cannot be resolved,
+            or the current frame remains incoherently visible.
         """
 
         # allow_sealed bypasses only the job-level seal (the transfer paths carry
@@ -1703,6 +1820,7 @@ class Workspace:
         generation = marker.generation + 1
         if generation > (1 << 64) - 1:
             raise WorkspaceCorruptionError("state generation exhausted")
+        previous = None if marker.record_ref == "init" else self.read_state(marker)
         frame: dict[str, object] = {
             "format": "httk-workflow-state",
             "format_version": 3,
@@ -1716,6 +1834,16 @@ class Workspace:
             "created_at": utc_now(),
             "priority": next_priority,
         }
+        if previous is not None:
+            for name in CARRIED_PROVENANCE_MEMBERS:
+                if name in previous:
+                    frame[name] = previous[name]
+        elif "origin" not in updates:
+            # A job's first frame, however it is written (registered, failed,
+            # cancelled or paused while submitted), inherits its parent's origin.
+            origin = self._inherited_origin(marker)
+            if origin is not None:
+                frame["origin"] = origin
         frame.update(updates)
         record_ref = writer.append(frame)
         destination = self.marker_path(kind, marker.placement, marker.job_key, next_priority, generation, record_ref)
@@ -1798,11 +1926,14 @@ class Workspace:
             if source.is_file():
                 _LOGGER.debug("marker %s is not yet visible at %s; retrying", source, destination)
                 continue
-            current = self.find_markers(marker.job_key)
-            if len(current) == 1:
-                raise TransitionLostError(f"another transition moved {source} to {current[0].path}")
-            if len(current) > 1:
-                raise WorkspaceCorruptionError(f"job {marker.job_key} has multiple markers")
+            # Every kind counts: a winner that moved the marker to transferring
+            # (a fence) must read as a lost race too, not as a marker that is
+            # still on its way.
+            current = self.find_marker_by_id(marker.job_id, kinds=STATE_KINDS)
+            if current is not None and current.job_key == marker.job_key:
+                raise TransitionLostError(f"another transition moved {source} to {current.path}")
+            if current is not None:
+                raise WorkspaceCorruptionError(f"job {marker.job_id} has markers under two job keys")
         detail = f": {last_error}" if last_error is not None else ""
         raise WorkspaceUnavailableError(f"cannot resolve marker rename {source} -> {destination}{detail}")
 

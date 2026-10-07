@@ -1,240 +1,142 @@
 # Transfer completion and bounded metadata
 
-`httk job transfer` moves a job by detaching it from the source workspace,
-importing its sealed bundle at the destination, and retiring the source only
-after the destination has acknowledged the import. This page describes what
-that completion protocol leaves on disk, how it recovers when a transfer is
-interrupted or replayed, and why its bookkeeping stays small: an HPC workspace
-that has sent thousands of jobs home keeps a handful of protocol files whose
-count does not grow with the number of jobs. Ordinary use needs none of this;
-it matters when a transfer was interrupted, when both ends run different
-*httk-workflow* versions, or when a filesystem quota counts files.
+`httk job transfer` moves a job by sealing it in the source workspace,
+importing the bundle at the destination, and retiring the source copy only
+after the destination has acknowledged the import. `httk job eject` and
+`httk job adopt` move jobs to and from free-standing directories. This page
+describes what those protocols leave on disk, when `httk workspace gc` collects
+it, and what an operator does with a transfer that never completed. Ordinary
+use needs none of this; it matters when a transfer was interrupted, when a
+filesystem quota counts files, or when `httk workspace check` reports a
+transfer waiting for an operator. The normative protocol is in the
+{doc}`workflow_filesystem_api`.
 
-## Epochs and sequence numbers
+The protocol takes no file locks and keeps no ledger, epoch or sequence
+number. Every state below is a directory or a small file whose name carries the
+transfer ID, and every one of them is removed by a rule stated here.
 
-### Allocation
+## What the workspace keeps
 
-New detached transfers carry a random UUID `transfer_epoch` and a positive
-`transfer_sequence`. Each process allocates a fresh epoch per
-workspace/destination stream, keeping its counter and pending reservations in
-process memory. A restart never adopts an epoch from disk.
+| Entry | Holds | Kept |
+| --- | --- | --- |
+| `tmp/eject.<T>`, `tmp/abort.<T>` | a sealing transaction in progress (or being undone) | while the transaction runs; removed by the protocol itself |
+| `tmp/import.<owner>.<ns>.<L>` | an adoption lineage and its claims | while an import runs; removed by the import or its takeover |
+| `tmp/export.<owner>.<ns>.<T>` | a copy-out of a held export | while the copy-out runs |
+| `transfers/adopting/<job_id>` | the per-job claim of a running import | while the import runs |
+| `transfers/outgoing/<T>/` | a sealed bundle waiting for its acknowledgement | until acknowledged, retired or reclaimed |
+| `transfers/retired/<T>/` | the acknowledged bundle, a full second copy of the payload | `trash_days` after retirement |
+| `transfers/acks/<T>.json` | the destination's signed acknowledgement | `trash_days` |
+| `transfers/received/<T>` | the replay receipt of an addressed import (a few lines of JSON) | until `sealed_at + W + S` |
+| `transfers/exports/<T>/<job_key>/` | an ejected bundle held for copy-out | until copied out or adopted |
 
-The session key includes the PID (so a fork cannot inherit an allocator), host,
-canonical workspace path, and control directory device/inode. A login-node
-switch or new process session therefore starts a fresh epoch. This is harmless:
-it adds one coalesced receipt range per session, not one per job. Interleaved
-processes keep their own volatile streams.
+`W` is the freshness window (7 days) and `S` the clock-skew bound (130
+minutes); a bundle is accepted only within `W` of its sealing time, so after
+`W + S` no importer can accept a copy and the receipt that would have
+recognized it as a replay is no longer needed.
 
-### Issued state on disk
+A transaction directory may be the only copy of a job. Recovery (run by manager
+attach, by `job eject`, `job adopt` and the transfer verbs) finishes or undoes
+a transaction whose owner is gone: it takes an import over by renaming its
+lineage directory, runs the recorded abort or completion steps for a
+transaction under `transferring` markers, and sweeps leftovers (an `eject.<T>`
+nobody names and older than a day is aborted, an unused `abort.<T>` and a
+`tmp/birth.*` older than a day are trashed). A completed transaction leaves
+nothing behind in `tmp/`.
 
-`transfers/protocol/issued.json` and its write-ahead copy
-`issued-checkpoint.json` remain durable diagnostic and retry state, but
-**neither copy authorizes reuse of an epoch**. A reset, a missing copy, or a
-mismatch with the current session's remembered stream rotates the epoch.
+## What gc collects, and when
 
-Restoring both files consistently in place cannot reuse a ticket: a restarted
-process generates a new epoch, and a running process keeps its counter in
-memory and detects rollback of its own stream. A disk entry of another epoch
-cannot replace that volatile counter. The guarantee assumes fresh UUID
-randomness and filesystem restore, not rollback of the whole running process
-and its random-number source.
+`httk workspace gc` handles transfer state in these categories, all gated the
+same way as the rest of garbage collection:
 
-### Reservations and fencing
+- `retired_bundles`: `transfers/retired/<T>` older than `trash_days`. This is
+  the largest item a busy transfer campaign accumulates, since it holds the
+  whole payload again. With no `trash_days` configured it is skipped and
+  reported as such.
+- `transfer_records`: `transfers/acks/<T>.json` older than `trash_days`.
+- `transfer_receipts`: `transfers/received/<T>` once `now > sealed_at + W +
+  S`. A receipt that cannot be parsed is never deleted.
+- `tmp_entries`: a `tmp/trash.*` directory a discarder left behind (it died
+  between renaming a tree there and removing it) once it is older than a day,
+  like every other abandoned `tmp/` entry. A trash directory that still holds a
+  job payload is moved to `quarantine/` instead of being removed. (The
+  `transaction_trash` category is unrelated: it collects the aged
+  `outcome.ready/transaction/trash` of attempt outcomes.)
 
-A reservation may be reused until fencing is attempted. Before invoking the
-fencing transition, the allocator forgets the reusable in-memory reservation:
-another process could finish that transfer, so the reservation must not be
-reused when the job returns, even if its old pending disk entry is restored. An
-interrupted attempt or process restart may reissue an unfenced reservation
-under a fresh epoch, because it was never offered.
+gc never removes `tmp/import.*`, `eject.*`, `abort.*`, `export.*` or `birth.*`,
+nor `transfers/adopting`, `outgoing` or `exports`: only the protocol steps and
+the recovery sweep do. Nothing about a job in flight is therefore reclaimed by
+a collection that runs at the wrong moment.
 
-Once the fencing transition is durable, recovery uses the epoch and sequence in
-that state. A SEALED transfer always resumes from its immutable manifest and
-ledger, even when newer allocations have started in another session.
-Reservations are removed by exact transfer UUID, so an old completion cannot
-remove a newer reservation for the same job. An interrupted allocator
-publication may waste a reservation or epoch but cannot reissue an accepted
-ticket.
+## Held exports
 
-## Receipts at the destination
-
-### Compact receipt ranges
-
-The destination's `transfers/protocol/received.json` holds merged inclusive
-sequence ranges keyed by `source_workspace_id/transfer_epoch`. Receiving 1
-through N in one session leaves just `[[1, N]]`: no job UUIDs, transfer UUIDs,
-digests or payload paths. Out-of-order imports keep separate ranges until the
-intervening transfers arrive.
-
-The range state is the durable replay fence, also after an imported job has
-left this workspace. Never roll back or delete destination receipt state
-independently of its actual jobs.
-
-### Import and replay
-
-Import validates the sealed bundle, publishes the durable payload and state,
-and writes its ordinary acknowledgement. It then durably records the sequence
-receipt before unlinking the individual `acks/` and `imported/` JSON files. This
-can safely precede source retirement, because the compact receipt replaces
-duplicate detection rather than abandoning it.
-
-A replay validates the whole bundle again and looks up the presented job UUID:
-
-- If a marker exists, its transfer UUID, digest and epoch must match the
-  manifest, or import raises `WorkspaceCorruptionError` before signing.
-- With a valid epoch and no live job, the old receipt range permits a replay
-  acknowledgement without creating a job.
-- A *new* job after an allocator reset has a new epoch and is imported normally;
-  a matching source ledger alone would not prevent silent loss here.
-
-### Receipts from before epochs
-
-Pre-epoch compact receipts from the earlier implementation cannot safely
-certify a replay after their job has left. Such a replay fails closed with
-`WorkspaceCorruptionError`. The remedy: verify delivery, then explicitly run
-`httk workflow transfer retire . <JOB_ID>` from the source workspace.
-
-### Acknowledgements
-
-Sequenced acknowledgements omit the historical `acknowledged_at` timestamp;
-their signature attributes the returned receipt, not a permanently retained
-original importer. Before retirement the source still checks the
-acknowledgement signature, job/workspace identity, payload digest, epoch and
-sequence against its sealed ledger.
-
-## Retirement and reclamation at the source
-
-Retirement durably renames the source bundle and publishes a retired ledger
-before reclaiming anything, and prunes the ledger after reclamation. A missing
-ledger is a terminal no-op, even when a newer transfer of that job exists.
-
-Journal segments protected by other jobs or managers are recorded once per
-segment in `transfers/protocol/journal.json`, instead of keeping one ledger per
-retired job:
-
-- An actual retirement or explicit cleanup retries this inventory;
-  `recover_transfers` alone does not when there is no retired ledger.
-- Missing-ledger acknowledgements and idle recovery never trigger journal GC.
-- An empty inventory is not created, and a drained one is removed.
-- No cleanup journal writer is opened.
-
-Existing marker-chain, live-manager, retention and quarantine protections still
-apply. A header-only writer from a failed detach is collected under the same
-reference checks.
-
-## Locking
-
-Protocol mutations are serialized per workspace by the permanent
-`transfers/protocol/lock` inode using POSIX `flock`. Both ends must support
-shared-filesystem locking and the existing durable write/rename/fsync
-semantics. The OS releases the lock on process death. No operation holds two
-workspace locks.
-
-This trades concurrent imports within one workspace for simple, atomic updates
-of the compact receipt state. It has not been benchmarked at one million jobs
-or verified against an actual HPC/NFS power-loss failure.
-
-## Crash and duplicate cases
-
-| Boundary | Durable state and retry |
-| --- | --- |
-| Import before acknowledgement | The destination marker's transfer provenance recognizes the same import. Retry finishes the seal/receipt without another job. Before this job can detach onward, its import receipt is completed from its authoritative state. |
-| Acknowledgement before compact receipt | The individual acknowledgement still exists. Retry records the sequence and prunes the individual records. The source remains sealed until acknowledged. |
-| Compact receipt before/partway through pruning | The range prevents a second import even if either individual record is missing. Pruning is idempotent. |
-| Acknowledgement before source retirement | The intact source is re-offered; the destination reconstructs its receipt. The source checks it before retiring. |
-| Retirement before/partway through reclamation | The retired ledger fences the source and retains the segment inventory. Recovery finishes payload/segment reclamation and ledger pruning. |
-| Source ledger already pruned | Acknowledgement by transfer UUID is a no-op. Explicit offers/transfers for absent exact job UUIDs return no work. A missing UUID cannot be distinguished from an unknown UUID without retaining tombstones; reports include its UUID and reason in `skipped`, and text output prints the skip. |
-| Old bundle replayed after the destination sent the job onward | Its sequence remains received. Validation and acknowledgement occur, but no marker or payload is created. |
-| Old remote retirement replayed while a newer transfer exists | Automated fetch/relay retire with the actual acknowledgements, including transfer UUID, rather than only the job UUID. The newer ledger is untouched. |
-
-## Retirement by job id and upgrades
-
-The legacy explicit `retire JOB_ID` operation remains a caller assertion that
-payload delivery succeeded. Automated fetch/relay instead use
-`--acknowledgements-json` with the validated destination envelopes. This
-protocol extension needs both ends upgraded; it is never silently downgraded to
-retirement by job id. Receive accepts repeated `--bundle` arguments and
-acknowledges them as one batch.
-
-**Upgrade check:** before starting transfers, run this read-only check on both
-endpoints, in the same Python environment as their `httk` executable:
+Ejecting to a directory on another filesystem commits the bundle to
+`transfers/exports/<T>/<job_key>` and finishes the ejection there (the job has
+left the workspace); the copy to its target is a separate, resumable step. If
+that step was interrupted or the target was not writable, the bundle stays
+held:
 
 ```console
-python -c 'from httk.workflow.transfers import import_bundles, acknowledge_transfers; from httk.workflow._transfer_receipts import epoch_of'
+$ httk job eject --resume
 ```
 
-If it fails, stop and upgrade that endpoint before importing anything. This is
-an explicit operator preflight, not automatic fallback or version negotiation.
-Skipping it can still fail a command after imports; source bundles stay intact
-until valid acknowledgements have been accepted.
+finishes every pending copy-out (managers never do this). The held bundle can
+also be taken back with `httk job adopt` of its path under `exports/`. While a
+bundle is held the job is not in the workspace and not at the target:
+`httk workspace check` reports it as an export waiting for copy-out.
 
-## Residual size and compatibility limits
+## Transfers in doubt
 
-### What remains on disk
+A bundle in `transfers/outgoing/<T>` is delivered by the transfer CLI, which
+re-sends every pending bundle each time it runs. It stays there until the
+destination's acknowledgement arrives, so a transfer whose acknowledgement is
+lost simply repeats: the destination recognizes the replay and acknowledges
+again without creating a second job.
 
-With all sequenced transfers completed and ordinary finite retention, an emptied
-HPC workspace keeps four protocol files: `lock`, `issued.json`,
-`issued-checkpoint.json` and `received.json`. A fifth, `journal.json`, exists
-only while protected segments remain to be collected.
+A bundle still unacknowledged after `W` is *in doubt*: it may have been
+delivered, or it may still be delivered until `W + S` has passed. The check
+reports it, and two operator verbs settle it:
 
-The file count is independent of job count, but byte size is not fixed. JSON
-counters and range endpoints need logarithmically more digits as the sequence
-grows. Summary entries scale with workspace peers and historical epochs,
-unfinished reservations and sequence holes, and protected journal segments, not
-with completed job identities. Once every transfer issued in a session has
-arrived, that session's receipt ranges coalesce to one interval, so metadata
-bytes grow with historical sessions. Batch jobs within a process/session to
-amortize this state as well as scan cost.
+- `httk workflow transfer retire [--workspace WS] JOB_ID` when the destination
+  holds the job (verify first). The source behaves as if it had received the
+  acknowledgement: the bundle moves to `retired/<T>` and the job's marker is
+  removed.
+- `httk workflow transfer reclaim [--workspace WS] JOB_ID` to take the job
+  back. It is refused until `sealed_at + W + S`, because until then a
+  destination could still import the bundle. The job returns to its
+  placement and its previous state; a later transfer starts afresh with a new
+  transfer ID.
 
-### Outside the bound
+Automated fetch and relay use acknowledgements from the destination and never
+retire by job ID. The `retire` verb is an explicit statement by the operator
+that delivery succeeded.
 
-- Unsequenced bundles already in flight keep their individual destination
-  receipts: without an ordered sequence, removing them would let an old bundle
-  recreate a job after it left the workspace. This is a compatibility
-  exception; legacy transfers do not meet the bound.
-- Existing unlimited trash/journal retention keeps payloads and history by
-  design and is also outside the bound.
-- Protected live state and quarantine are never removed to make a size test
-  pass.
-- A returning home workspace necessarily keeps the N actual jobs and their live
-  state markers and journals. The bound covers transfer bookkeeping there, and
-  the entire control tree of an emptied HPC workspace.
+## Bounded size
+
+There is no longer a fixed set of "protocol files" whose number does not grow.
+What stays on disk is bounded by retention and by recent traffic, not by the
+number of jobs ever transferred:
+
+- bundles and acknowledgements for `trash_days` (finite retention bounds them;
+  unlimited retention keeps them by design);
+- one `received/<T>` receipt per addressed transfer received in the last `W +
+  S` (about a week and two hours), so the receipt count is bounded by the
+  transfers received in that window;
+- claims and transaction directories only while the transaction runs;
+- held exports and in-doubt outgoing bundles until an operator or a resume
+  finishes them.
+
+An emptied HPC workspace whose transfers are all acknowledged, retired and past
+retention therefore keeps nothing transfer-related except, briefly, receipts
+from the last week. A returning home workspace necessarily keeps the actual
+jobs and their markers and journals.
 
 ## Cost of a sweep
 
-### Batching
-
-The CLI seals and pulls a sweep before importing it in a batch, then retires the
-acknowledgements in a batch, with one source recovery/selection pass per sweep,
-not per job. Known source markers are passed to detach. Imports take one
-identity snapshot under the destination protocol lock; standalone imports use
-`find_marker_by_id` and check duplicate provenance. That existing index is not
-O(1) for cold, terminal or absent lookups, so replacing a full-scan helper alone
-would not have solved the problem.
-
-### Retirement index
-
-A retirement batch scans current markers and sealed ledgers once, recording
-segment protection counts and the references each sealed transfer owns.
-Retiring a transfer removes just its protection counts, and later collection
-queries only the candidate segments.
-
-As in ordinary GC, a terminal marker protects its head segment without reading
-frames, and only non-terminal marker chains are walked. Terminal historical
-references do not pin retired candidate segments. Shared segments are freed only
-when no live head, non-terminal chain or sealed owner still protects them. The
-duplicate GC call is removed. No-op acknowledgements neither build this index
-nor touch an empty journal inventory.
-
-### Complexity
-
-For J transfers, U unrelated markers and H journal references examined, a sweep
-costs O(U + J + H) metadata work plus its payload I/O, where H excludes
-unrelated terminal history entirely. Initial marker enumeration is still O(U);
-steady-state retirement is O(the retiring transfer's candidate references),
-independent of U.
-
-This is **amortized sweep complexity**, not a claim that one isolated, cold
-single-job call is O(1). The timing regression includes the initial scan in its
-batch mean and also reports the warm median. Repeated single-job commands
-forfeit batching; use one multi-job transfer or sweep.
+The CLI seals and pulls a sweep before importing it in a batch, then retires
+the acknowledgements in a batch, with one recovery and selection pass per
+sweep rather than per job. Each import checks presence by name lookups
+(`received/<T>`, `acks/<T>.json`, `transfers/adopting/<job_id>`) and by the
+marker index, never by scanning a directory of receipts. Imports of different
+bundles proceed independently: they serialize only on a job claimed by two
+copies of the same bundle. Repeated single-job commands forfeit the batching;
+use one multi-job transfer or sweep for many jobs.

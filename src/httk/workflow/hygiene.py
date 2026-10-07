@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ._txn import holds_job_payload, trash
 from ._util import read_json
 from .adapters import (
     ADAPTER_EXECUTABLE,
@@ -28,6 +29,7 @@ from .adapters import (
 )
 from .configuration import remotes_home
 from .errors import WorkflowError
+from .gc import TRANSACTION_PREFIXES
 from .manifests import (
     read_maintenance_lock,
     release_maintenance_lock,
@@ -226,20 +228,24 @@ def describe_remote(
 
 
 def _pending_remote_transfers(remote: str) -> list[str]:
-    """Return registered local workspace names with live transfers to *remote*."""
+    """Return registered local workspace names with unacknowledged transfers to *remote*.
+
+    A transfer is pending while its root job is ``transferring`` under an
+    addressed transaction naming the remote.
+    """
+
+    from ._sealing import pending_outgoing
 
     names: list[str] = []
     for binding in list_workspaces():
         assert binding.path is not None
-        directory = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers"
-        for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
-            try:
-                ledger = read_json(path)
-            except (WorkflowError, OSError, ValueError):
-                continue
-            if ledger.get("status") != "retired" and ledger.get("destination_remote") == remote:
-                names.append(binding.name)
-                break
+        try:
+            workspace = Workspace(binding.path, mutable=False)
+            pending = pending_outgoing(workspace)
+        except (WorkflowError, OSError, ValueError):
+            continue
+        if any(txn.destination_remote == remote for _marker, _frame, txn in pending):
+            names.append(binding.name)
     return names
 
 
@@ -364,6 +370,48 @@ def _check_workspace_default(project: Path) -> Finding | None:
     )
 
 
+def _check_transfers(workspace_root: Path) -> Finding:
+    """Report transfer work that waits for an operator (plan 4.7); this check never repairs anything.
+
+    It names exports held for a copy-out (``httk job eject --resume``),
+    addressed bundles still unacknowledged past their freshness window (in
+    doubt: retire them if the destination has the job, reclaim them if not),
+    and per-job adoption claims whose lineage directory is gone.
+    """
+
+    from ._adoption import stale_claims
+    from ._receipts import FRESHNESS_WINDOW_NS
+    from ._sealing import pending_outgoing
+
+    try:
+        workspace = Workspace(workspace_root, mutable=False)
+    except (WorkflowError, OSError) as exc:
+        return Finding("transfers", "ok", f"there is no readable workspace to check transfers in: {exc}")
+    exports_root = workspace.control / "transfers" / "exports"
+    held = sorted(os.listdir(exports_root)) if exports_root.is_dir() else []
+    now = time.time_ns()
+    in_doubt = [
+        {"transfer_id": txn.transfer_id, "job_key": marker.job_key, "sealed_at": txn.sealed_at}
+        for marker, _frame, txn in pending_outgoing(workspace)
+        if now > txn.sealed_at + FRESHNESS_WINDOW_NS
+    ]
+    orphaned = stale_claims(workspace)
+    details: dict[str, object] = {"held_exports": held, "outgoing_in_doubt": in_doubt, "stale_claims": orphaned}
+    if not (held or in_doubt or orphaned):
+        return Finding("transfers", "ok", "no transfer waits for an operator", details=details)
+    parts = []
+    if held:
+        parts.append(f"{len(held)} export(s) held for copy-out (`httk job eject --resume`)")
+    if in_doubt:
+        parts.append(
+            f"{len(in_doubt)} outgoing transfer(s) unacknowledged past their window "
+            "(`httk workflow transfer retire|reclaim JOB_ID`)"
+        )
+    if orphaned:
+        parts.append(f"{len(orphaned)} adoption claim(s) without their lineage")
+    return Finding("transfers", "warning", "; ".join(parts), details=details)
+
+
 def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
     """Staging entries nothing renamed out are pure leftovers."""
 
@@ -380,15 +428,9 @@ def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
             f"cannot inspect workspace staging directory {tmp}: {exc}",
             details={"path": str(tmp), "error": str(exc)},
         )
-    adopting = tmp.parent / "transfers" / "adopting"
-    # A moving adoption's staging entry may be the job's only copy, exactly as gc keeps it.
-    stale = [
-        entry
-        for entry in stale
-        if not (
-            entry.name.startswith("import.") and (adopting / f"{entry.name.removeprefix('import.')}.json").is_file()
-        )
-    ]
+    # The transfer transaction directories may hold a job's only copy; exactly as
+    # gc, hygiene never removes them (only the transfer protocol does).
+    stale = [entry for entry in stale if not entry.name.startswith(TRANSACTION_PREFIXES)]
     if not stale:
         return Finding("tmp_leftovers", "ok", "the workspace staging directory holds nothing abandoned")
     finding = Finding(
@@ -401,7 +443,10 @@ def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
     if repair:
         try:
             for entry in stale:
-                if entry.is_dir() and not entry.is_symlink():
+                if entry.name.startswith("trash.") and holds_job_payload(entry):
+                    # A discarder died before its payload check: quarantined, never removed.
+                    trash(entry, control=workspace_root / WORKSPACE_DIRECTORY, holds_payload=lambda _path: True)
+                elif entry.is_dir() and not entry.is_symlink():
                     shutil.rmtree(entry)
                 else:
                     entry.unlink(missing_ok=True)

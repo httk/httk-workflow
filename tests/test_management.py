@@ -225,17 +225,18 @@ def test_transfer_round_trip_is_idempotent(tmp_path: Path) -> None:
     destination = Workspace.initialize(tmp_path / "destination")
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
-    transfer_id = str(uuid.uuid4())
-    bundle = source.detach(
-        job_id,
-        destination_workspace_id=destination.workspace_id,
-        transfer_id=transfer_id,
-    )
+    # A new transfer always mints its own id; a caller-supplied one only resumes.
+    with pytest.raises(ValueError, match="mints its own id"):
+        source.detach(job_id, destination_workspace_id=destination.workspace_id, transfer_id=str(uuid.uuid4()))
+    bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
+    transfer_id = bundle.name
+    assert source.detach(job_id, destination_workspace_id=destination.workspace_id, transfer_id=transfer_id) == bundle
     assert source.recover_transfers()[0]["transfer_id"] == transfer_id
     acknowledgement = destination.import_bundle(bundle)
     assert destination.import_bundle(bundle) == acknowledgement
     retired = source.acknowledge_transfer(acknowledgement)
-    assert not retired.exists()
+    # The retired bundle is kept for retention.trash_days.
+    assert retired.is_dir()
     assert source.acknowledge_transfer(acknowledgement) == retired
     marker = destination.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "submitted"

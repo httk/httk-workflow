@@ -33,11 +33,12 @@ from httk.workflow import (
     Workspace,
     job_records,
 )
+from httk.workflow._bundle import _payload_digest
 from httk.workflow.adapters import add_remote
 from httk.workflow.models import StateFrame
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest, validate_bundle
+from httk.workflow.transfers import TRANSFER_DIRECTORY, validate_bundle
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
@@ -659,8 +660,9 @@ def test_fetch_retires_the_remote_sources_and_repeating_it_does_nothing(
     assert {str(entry["status"]) for entry in list(first["retired"])} == {"retired"}
 
     remote = pair.remote
-    # Every acknowledged source is retired and its redundant payload reclaimed.
-    assert list((remote.control / "transfers" / "retired").iterdir()) == []
+    # Every acknowledged source is retired (kept for retention.trash_days), none left outgoing.
+    assert len(list((remote.control / "transfers" / "retired").iterdir())) == 2
+    assert list((remote.control / "transfers" / "outgoing").iterdir()) == []
     assert _live_bundles(remote) == []
     for name in ("succeeded", "failed"):
         assert remote.find_marker_by_id(pair.ids[name]) is None
@@ -887,7 +889,8 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
     assert first["format"] == "httk-workflow-transfer-retirement"
     retired = list(first["retired"])
     assert len(retired) == 1 and retired[0]["status"] == "retired"
-    assert not Path(str(retired[0]["retired_bundle"])).exists()
+    # The retired bundle is kept for retention.trash_days, then collected.
+    assert Path(str(retired[0]["retired_bundle"])).is_dir()
 
     assert command(argv, pair.context) == 0
     assert json.loads(capsys.readouterr().out) == {

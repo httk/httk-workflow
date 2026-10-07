@@ -166,7 +166,8 @@ def manager_argv(policy: Policy) -> list[str]:
     """Return the manager command of every daemon submission, before the launcher's own additions.
 
     :param policy: Validated runtime policy.
-    :return: The approved interpreter running an exchange manager on the real workspace path.
+    :return: The approved interpreter running a serving manager on the real workspace path; the workspace
+        has the exchange extension, so every unrestricted manager serves its exchange.
     """
 
     return [
@@ -180,7 +181,6 @@ def manager_argv(policy: Policy) -> list[str]:
         "--by-path",
         "--workspace",
         str(policy.workspace),
-        "--exchange",
         "--idle",
     ]
 

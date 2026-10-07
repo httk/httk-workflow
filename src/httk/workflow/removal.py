@@ -162,6 +162,8 @@ def _remove_one(workspace: "Workspace", marker: Marker) -> RemovalOutcome:
     """
 
     try:
+        if os.path.lexists(workspace.control / "transfers" / "adopting" / marker.job_id):
+            return RemovalOutcome(marker.job_key, marker.kind, False, "an adoption is still publishing it")
         safety = _payload_safety(workspace, marker)
         if safety is not None:
             return RemovalOutcome(marker.job_key, marker.kind, False, safety)

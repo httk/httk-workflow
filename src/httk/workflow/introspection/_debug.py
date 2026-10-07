@@ -39,6 +39,9 @@ DEBUG_EXIT_UNFINISHED = 4
 class ScopedWorkspace(Workspace):
     """A workspace whose scheduling scans observe only the named jobs."""
 
+    # A debugging manager drives one job; it never serves the exchange.
+    _serves_exchange = False
+
     def __init__(self, root: str | Path, scope: Iterable[str], *, durable: bool = True) -> None:
         super().__init__(root, durable=durable)
         self.scope = frozenset(scope)

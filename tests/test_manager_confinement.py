@@ -34,6 +34,7 @@ from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, _confine, _manager_launches
 from httk.workflow import manager as manager_module
 from httk.workflow._allocation import Allocation, Node
+from httk.workflow._exchange import enable_exchange
 from httk.workflow._logging import reset_logging
 from httk.workflow._sandbox import PreparedSandbox
 from httk.workflow.errors import ConfinementUnavailableError, FormatError
@@ -454,56 +455,47 @@ def test_probes_are_cached_per_sandbox_shape(tmp_path: Path, sandbox: _Sandbox) 
     assert [probe.isolate_network for probe in sandbox.probes] == [True, False]
 
 
-# -- enrolled workspaces require confinement -----------------------------------------------
+# -- workspaces with the exchange extension require confinement ----------------------------
 
 
 def _enrolled(tmp_path: Path) -> Workspace:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    (workspace.control / "exchange").mkdir()
-    (workspace.control / "exchange" / "enrollment.json").write_text("{}", encoding="utf-8")
+    assert enable_exchange(workspace)
     return workspace
 
 
-def test_only_the_enrollment_marker_enrolls_a_workspace(tmp_path: Path, sandbox: _Sandbox) -> None:
+def test_only_the_exchange_extension_requires_confinement(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    # The staging directories any --exchange manager creates do not enroll.
-    for name in ("inbox", "outbox/rejected", "records"):
-        (workspace.control / "exchange" / name).mkdir(parents=True)
+    # Neither an exchange-shaped directory nor a daemon enrollment record enables the extension.
+    for name in ("inbox", "outbox/rejected"):
+        (workspace.root / "exchange" / name).mkdir(parents=True)
+    (workspace.control / "exchange").mkdir()
+    (workspace.control / "exchange" / "enrollment.json").write_text("{}", encoding="utf-8")
     TaskManager(workspace).close()
-    # Anything at the marker's name enrolls: a replaced marker fails closed.
-    (workspace.control / "exchange" / "enrollment.json").mkdir()
-    with pytest.raises(ConfinementUnavailableError, match="enrollment.json"):
-        TaskManager(workspace)
-    (workspace.control / "exchange" / "enrollment.json").rmdir()
-    (workspace.control / "exchange" / "enrollment.json").symlink_to(tmp_path / "missing")
-    with pytest.raises(ConfinementUnavailableError, match="enrollment.json"):
+    shutil.rmtree(workspace.root / "exchange")
+    assert enable_exchange(workspace)
+    with pytest.raises(ConfinementUnavailableError, match="exchange extension"):
         TaskManager(workspace)
 
 
-def test_an_unconfined_exchange_manager_on_a_plain_workspace_never_enrolls_it(
+def test_an_unconfined_manager_on_a_plain_workspace_never_creates_the_exchange(
     tmp_path: Path, sandbox: _Sandbox
 ) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     _marker, first = _submit(workspace, tmp_path / "source", "first")
-    with TaskManager(workspace, heartbeat_interval=0.01, exchange=True) as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         for _ in range(5):
             manager.tick()
         manager.run_until_idle(timeout=60.0)
-        assert (workspace.control / "exchange" / "inbox").is_dir()
-        assert not os.path.lexists(workspace.control / "exchange" / "enrollment.json")
-        _marker, second = _submit(workspace, tmp_path / "source", "second")
-        manager.run_until_idle(timeout=60.0)
     assert _outcome(workspace, first)[:2] == ("succeeded", None)
-    assert _outcome(workspace, second)[:2] == ("succeeded", None)
+    assert not os.path.lexists(workspace.root / "exchange") and "exchange" not in workspace.extensions
     assert not sandbox.prepares
-    # And another unconfined manager still starts on it.
-    TaskManager(workspace).close()
 
 
 def test_an_unconfined_manager_on_an_enrolled_workspace_is_refused(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = _enrolled(tmp_path)
     for overrides in ({}, {"manager.confine": "none"}):
-        with pytest.raises(ConfinementUnavailableError, match="enrolled with a workspace daemon"):
+        with pytest.raises(ConfinementUnavailableError, match="exchange extension"):
             TaskManager(workspace, setting_overrides=overrides)
     workspace.set_setting("manager.confine", "bwrap")
     workspace.set_setting("confine.bwrap", _BWRAP)
@@ -525,7 +517,7 @@ def test_inline_cli_managers_on_an_enrolled_workspace_are_refused(
         CLIContext("httk", tmp_path),
     )
     assert code != 0
-    assert "enrolled with a workspace daemon" in capsys.readouterr().err
+    assert "exchange extension" in capsys.readouterr().err
     assert not list((workspace.control / "managers").iterdir())
     assert not sandbox.probes
 

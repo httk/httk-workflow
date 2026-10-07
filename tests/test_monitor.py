@@ -3,8 +3,7 @@
 import os
 from argparse import Namespace
 from concurrent.futures import Future
-from contextlib import nullcontext
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self
 
@@ -14,7 +13,7 @@ from httk.core.cli import CLIContext
 from conftest import fake_remote, register_ws
 from httk.workflow import Workspace, transfers
 from httk.workflow.introspection import JobListPage, _reading
-from httk.workflow.models import STATE_KINDS, Marker
+from httk.workflow.models import STATE_KINDS
 from httk.workflow.monitor import actions as monitor_actions
 from httk.workflow.monitor import data as monitor_data
 from httk.workflow.monitor.data import WorkspaceView
@@ -331,48 +330,25 @@ def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: py
 
 
 def test_known_marker_detach_skips_full_marker_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Known-marker detaches inspect only waiting parents for join references."""
+    """Known-marker detaches inspect only waiting parents (joins) and transferring markers (fences)."""
+
+    from test_eject_adopt import _payload
 
     workspace = Workspace.initialize(tmp_path / "known-marker")
-    job_id = "00000000-0000-0000-0000-000000000001"
-    marker = Marker(
-        "succeeded",
-        PurePosixPath("jobs"),
-        job_id,
-        500,
-        0,
-        "init",
-        tmp_path / "marker",
-    )
+    marker = workspace.submit(_payload(tmp_path / "payloads"), "jobs")
     scanned: list[tuple[str, ...]] = []
-    monkeypatch.setattr(transfers, "_all_markers", lambda _workspace: pytest.fail("full marker scan"))
+    real_scan = Workspace.scan_marker_entries
 
-    def scan_waiting(kinds: tuple[str, ...]) -> list[Marker]:
-        scanned.append(kinds)
-        return []
+    def recording(self: Workspace, kinds: Any = None) -> Any:
+        scanned.append(tuple(kinds or ()))
+        return real_scan(self, kinds)
 
-    monkeypatch.setattr(
-        workspace,
-        "scan_markers",
-        scan_waiting,
+    monkeypatch.setattr(Workspace, "scan_marker_entries", recording)
+    bundle = transfers.detach_job(
+        workspace, marker.job_id, marker=marker, destination_workspace_id="00000000-0000-0000-0000-000000000002"
     )
-    monkeypatch.setattr(workspace, "read_state", lambda _marker: {})
-    monkeypatch.setattr(workspace, "open_journal_writer", nullcontext)
-    monkeypatch.setattr(workspace, "transition", lambda *_args, **_kwargs: marker)
-    monkeypatch.setattr(transfers, "_seal_transferring", lambda *_args: tmp_path / "bundle")
-    # The fabricated marker has no payload; the tree guard only probes recorded placements.
-    monkeypatch.setattr(transfers, "_require_tree_boundary", lambda *_args, **_kwargs: None)
-
-    assert (
-        transfers.detach_job(
-            workspace,
-            job_id,
-            marker=marker,
-            destination_workspace_id="00000000-0000-0000-0000-000000000002",
-        )
-        == tmp_path / "bundle"
-    )
-    assert scanned == [("waiting",)]
+    assert bundle.is_dir()
+    assert scanned and all(set(kinds) <= {"waiting", "transferring"} and kinds for kinds in scanned)
 
 
 def test_quiet_remote_relay_does_not_write_worker_output(

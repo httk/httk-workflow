@@ -41,7 +41,7 @@ from ._allocation import (
     parse_cpulist,
 )
 from ._durations import format_duration
-from ._exchange_staging import ENROLLMENT_MARKER, exchange_pass
+from ._exchange import ExchangeService
 from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
 from ._launch_protocol import LaunchConfinement
 from ._manager_binding import (
@@ -56,6 +56,7 @@ from ._manager_binding import (
 )
 from ._manager_launches import AttemptLaunches, LaunchContext
 from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
+from ._txn import owner_token
 from ._util import (
     interpreter_first_path,
     json_bytes,
@@ -84,6 +85,7 @@ from .models import (
     ATTEMPTS_DIRECTORY,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
+    EXCHANGE_EXTENSION,
     LOGS_DIRECTORY,
     STATE_KINDS,
     TERMINAL_KINDS,
@@ -151,9 +153,8 @@ _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
 #: How long a failed Bubblewrap probe stands before the manager probes again.
 CONFINE_REPROBE_SECONDS = 60.0
 _ENROLLED_MESSAGE = (
-    "this workspace is enrolled with a workspace daemon (.httk-workspace/exchange/enrollment.json exists), so "
-    "every manager "
-    "on it must confine its attempts: set manager.confine=bwrap as a workspace setting or pin it with "
+    "this workspace has the exchange extension enabled (WORKSPACE/exchange is written by clients), so every "
+    "manager on it must confine its attempts: set manager.confine=bwrap as a workspace setting or pin it with "
     "--setting manager.confine=bwrap"
 )
 
@@ -258,8 +259,10 @@ class WorkCensus:
     :param ready_blocked: Requirement kind to requirement to blocked job count.
     :param waiting: Jobs waiting on their join children.
     :param paused: Jobs paused for an operator.
-    :param actionable_count: Jobs this manager can still make progress on.
+    :param actionable_count: Jobs this manager can still make progress on, plus its outstanding exchange work.
     :param unreadable: Committing or cancelling jobs whose definition cannot be read.
+    :param exchange: Exchange work this manager still has to do: inbox bundles to
+        adopt, finished exchange trees to return, adoptions and ejections in flight.
     """
 
     succeeded: int
@@ -270,6 +273,7 @@ class WorkCensus:
     paused: int
     actionable_count: int
     unreadable: int = 0
+    exchange: int = 0
 
     @property
     def actionable(self) -> bool:
@@ -421,6 +425,11 @@ class WorkCensus:
             parts.append(
                 f"{self.unreadable} job(s) have an unreadable definition — repair them with 'httk workspace fsck'"
             )
+        if self.exchange:
+            parts.append(
+                f"{self.exchange} exchange item(s) are still to be adopted or returned (see the manager log), "
+                "or pass --idle to keep serving"
+            )
         if not parts:
             parts.append(
                 "jobs are still running or claimable — rerun, raise --idle-timeout, or pass --idle to keep serving"
@@ -541,8 +550,6 @@ class TaskManager:
     :param allocation: The probed allocation this manager runs inside, or ``None``;
         recorded in ``manager.json``. Its capacity and end time are already folded
         into *resources* and *end_time* by the caller.
-    :param exchange: Run the workspace-daemon exchange pass (adopt staged job
-        directories, eject finished jobs, publish status) at the start of every tick.
     :param setting_overrides: Pinned ``manager.confine``, ``manager.confine.block_mpi_spawn``,
         ``manager.launch_template``, ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings that win over the
         workspace settings for this manager's lifetime.
@@ -551,7 +558,7 @@ class TaskManager:
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
     :raises httk.workflow.errors.ConfinementUnavailableError: If the effective
         ``manager.confine`` is ``bwrap`` and Bubblewrap cannot build the attempt
-        sandbox here, or the workspace is enrolled with a workspace daemon and the
+        sandbox here, or the workspace has the exchange extension and the
         effective ``manager.confine`` is not ``bwrap``.
     """
 
@@ -583,7 +590,6 @@ class TaskManager:
         end_time: float | None = None,
         deadline_margin: float = 120.0,
         allocation: Allocation | None = None,
-        exchange: bool = False,
         setting_overrides: Mapping[str, str] | None = None,
     ) -> None:
         if maximum_workers < 1:
@@ -698,7 +704,6 @@ class TaskManager:
         # what to do, and at most once per interval.
         self.gc_interval = gc_interval
         self._last_gc = 0.0
-        self.exchange = exchange
         executors = [PathRunnerExecutor(), *executors]
         self.executors = {executor.name: executor for executor in executors}
         if len(self.executors) != len(executors):
@@ -712,6 +717,17 @@ class TaskManager:
         self.accept_any_pool = accept_any_pool
         self.manager_id = str(uuid.uuid4())
         self.hostname = socket.gethostname()
+        # Every manager without a placement-prefix or pool restriction serves
+        # the exchange of a workspace that has the extension (job debug's
+        # scoped workspace never does); whether the extension is enabled, and
+        # attempts are confined, is decided again on every tick.
+        self._exchange: ExchangeService | None = None
+        if (
+            not self.placement_prefixes
+            and (self.accept_any_pool or "default" in self.pools)
+            and workspace._serves_exchange
+        ):
+            self._exchange = ExchangeService(workspace, owner=owner_token(self.manager_id), pace=self.heartbeat)
         self.writer = workspace.open_journal_writer()
         self._manager_dir = workspace.control / "managers" / self.manager_id
         self._manager_dir.mkdir(parents=True, exist_ok=False)
@@ -789,6 +805,7 @@ class TaskManager:
             self.maximum_workers,
             extra=self._event("manager_started", workspace=str(self.workspace.root)),
         )
+        self._recover_transfers()
         if self.drain_start is not None and self.drain_start <= time.time():
             _LOGGER.warning(
                 "the allocation's drain point passed %.0f s before this manager started; it will claim nothing",
@@ -1097,6 +1114,23 @@ class TaskManager:
             return self.heartbeat_interval
         return min(self.heartbeat_interval, self.lease_seconds * _MAXIMUM_HEARTBEAT_LEASE_FRACTION)
 
+    def _recover_transfers(self) -> None:
+        """Recover interrupted transfers and adoptions whose owner is gone, once, as the manager attaches.
+
+        It lists ``tmp/`` and the ``transferring`` markers only, so it is cheap;
+        a failure is logged and never stops the manager.
+        """
+
+        from ._txn import owner_token
+        from .transfers import recover_transfers
+
+        try:
+            recover_transfers(self.workspace, owner=owner_token(self.manager_id))
+        except Exception:
+            _LOGGER.exception(
+                "transfer recovery at manager attach failed", extra=self._event("transfer_recovery_failed")
+            )
+
     def heartbeat(self, *, force: bool = False) -> None:
         """Publish a manager heartbeat when the effective interval has elapsed.
 
@@ -1255,9 +1289,9 @@ class TaskManager:
         started = time.monotonic()
         self.heartbeat()
         changed = False
-        if self.exchange:
+        if self._exchange is not None and not self._draining and self._serving_exchange():
             # First, so an adopted job registers and is claimed in this same tick.
-            exchange_pass(self.workspace, now=time.time())
+            changed |= self._exchange.run(time.time())
             self.heartbeat()
         for step in (
             self._handle_requests,
@@ -1277,7 +1311,11 @@ class TaskManager:
             changed |= step()
             self.heartbeat()
         try:
-            return self._claim_pass(changed)
+            changed = self._claim_pass(changed)
+            if changed and self._exchange is not None:
+                # A job may just have finished: the next census looks for finished exchange trees afresh.
+                self._exchange.invalidate()
+            return changed
         finally:
             self._collect_garbage_if_due()
             self.heartbeat()
@@ -1698,6 +1736,13 @@ class TaskManager:
 
     def _work_census(self) -> WorkCensus:
         census = _manager_scheduling.work_census(self)
+        if self._exchange is not None and not self._draining and self._serving_exchange():
+            # Exchange work this manager will do: an until-idle manager does
+            # not exit before adopting and returning it.
+            outstanding = self._exchange.outstanding(time.time())
+            census = dataclasses.replace(
+                census, exchange=outstanding, actionable_count=census.actionable_count + outstanding
+            )
         if not census.ready_claimable or self._draining or self._confinement_blocked() is None:
             return census
         # Held back by a host or operator condition, the ready jobs are not
@@ -1708,6 +1753,22 @@ class TaskManager:
             ready_blocked={**census.ready_blocked, "confinement": {"manager.confine": census.ready_claimable}},
             actionable_count=census.actionable_count - census.ready_claimable,
         )
+
+    def _serving_exchange(self) -> bool:
+        """Report whether this manager serves the workspace's exchange now.
+
+        The extension is re-read with the settings, and the exchange is served
+        only while attempts are confined: an unconfined manager neither adopts
+        client bundles nor returns them (it does not claim work either).
+
+        :return: Whether the workspace has the exchange extension and attempts are confined.
+        """
+
+        try:
+            self._confinement(self._effective_settings())
+        except (_ConfinementBlocked, WorkflowError, OSError, ValueError):
+            return False
+        return EXCHANGE_EXTENSION in self.workspace.extensions
 
     def _load_job_and_state(self, marker: Marker, pass_name: str) -> tuple[JobDefinition, StateFrame] | None:
         """Load one job and its state frame, skipping and reporting damage.
@@ -3037,9 +3098,11 @@ class TaskManager:
     def _effective_settings(self) -> dict[str, Any]:
         """Return the settings this manager decides by: the workspace's, with its pinned overrides applied.
 
-        Workspace values are read live; pinned keys are fixed for the manager's
-        lifetime. Nothing a job carries — its parameters, declared environment
-        or spawned children — enters this mapping.
+        Workspace values are read live, and the enabled extensions are re-read
+        with them (:meth:`~httk.workflow.workspace.Workspace.read_settings`);
+        pinned keys are fixed for the manager's lifetime. Nothing a job carries
+        — its parameters, declared environment or spawned children — enters
+        this mapping.
 
         :return: The effective settings.
         """
@@ -3063,22 +3126,21 @@ class TaskManager:
         raise ValueError(f"setting manager.confine must be none or bwrap: {raw!r}")
 
     def _enrolled(self) -> bool:
-        """Return whether the workspace is enrolled with a workspace daemon.
+        """Return whether the workspace has the exchange extension, as last re-read with the settings.
 
-        Only daemon setup writes the enrollment marker; the exchange staging
-        directory itself is also created by any ``--exchange`` manager and
-        proves nothing. Anything at the marker's name counts, so a replaced
-        marker fails closed.
+        The extension is re-read from ``format.json`` with the settings on every
+        claim pass (:meth:`_effective_settings`), and an unreadable
+        ``format.json`` holds back claims, so this fails closed.
         """
 
-        return os.path.lexists(self.workspace.control / "exchange" / ENROLLMENT_MARKER)
+        return EXCHANGE_EXTENSION in self.workspace.extensions
 
     def _confinement(self, settings: Mapping[str, Any], *, at_start: bool = False) -> _Confinement:
         """Check how attempts started now are confined, validating and probing only what changed.
 
         ``manager.confine`` is parsed first; the ``confine.*`` settings are
-        validated only in ``bwrap`` mode, and again only when they change. An
-        enrolled workspace requires ``bwrap``.
+        validated only in ``bwrap`` mode, and again only when they change. A
+        workspace with the exchange extension requires ``bwrap``.
 
         :param settings: The effective settings.
         :param at_start: Whether this is the manager's start, which refuses a
@@ -3086,7 +3148,7 @@ class TaskManager:
         :return: The checked confinement.
         :raises ValueError: At start, if a confinement setting is invalid.
         :raises httk.workflow.errors.ConfinementUnavailableError: At start, if
-            Bubblewrap is unusable or an enrolled workspace is not confined.
+            Bubblewrap is unusable or a workspace with the exchange extension is not confined.
         :raises _ConfinementBlocked: After start, for any of those conditions.
         """
 

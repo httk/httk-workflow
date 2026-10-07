@@ -8,29 +8,51 @@ directory and retires the source at once, and :func:`adopt_job` moves such a
 directory into any workspace. A job tree travels as one such directory.
 """
 
-import errno
-import hashlib
 import json
 import logging
 import os
-import shutil
 import stat
-import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from httk.core.digests import sha256_file, tree_digest
-from httk.core.identity import identity_seed, sign_document, verify_document
+from httk.core.identity import verify_document
 
-from . import _transfer_receipts as receipts
+from . import _txn
+from ._adoption import AdoptionResult, Source, adopt, recover_lineages
+from ._bundle import (
+    _MANIFEST_BYTES,
+    TRANSFER_FORMAT,
+    TRANSFER_FORMAT_VERSION,
+    TRANSFER_MANIFEST,
+    TRANSFER_RUNNERS,
+    BundleSource,
+    check_bundle,
+)
 from ._job_tree import bound_parent, descendant_ids, tree_children
-from ._util import fsync_directory, fsync_tree, json_bytes, read_json, utc_now, write_json_atomic
-from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
-from .journal import SEGMENT_HEADER, encode_record_ref, iter_record_chain, parse_record_ref, read_record
+from ._receipts import CLOCK_SKEW_NS, FRESHNESS_WINDOW_NS
+from ._sealing import (
+    Commit,
+    Transaction,
+    _open_outbox,
+    copy_out,
+    eject_directory,
+    exchange_outbox,
+    fenced_under,
+    outgoing_path,
+    pending_outgoing,
+    reclaim,
+    recover,
+    resume_copy_outs,
+    retire,
+    retired_path,
+    seal,
+    settle,
+)
+from .errors import FormatError, WorkflowError
 from .models import (
-    CORE_PROFILE,
+    EXCHANGE_DIRECTORY,
     QUIESCENT_KINDS,
     STATE_KINDS,
     TERMINAL_KINDS,
@@ -40,22 +62,17 @@ from .models import (
     Marker,
     _read_regular_file,
     canonical_uuid,
-    check_job_placement,
-    is_payload_private,
     normalize_placement,
-    parse_job_key,
-    parse_placement_text,
     placement_text,
-    validate_runner_path,
-    validate_sha256,
 )
-from .seals import job_seal_path
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "CLOCK_SKEW_NS",
     "DEFAULT_OFFER_STATES",
+    "FRESHNESS_WINDOW_NS",
     "TRANSFER_DIRECTORY",
     "TRANSFER_FORMAT",
     "TRANSFER_FORMAT_VERSION",
@@ -65,41 +82,20 @@ __all__ = [
     "TRANSFER_RUNNERS",
     "TransferCandidate",
     "acknowledge_transfer",
+    "acknowledge_transfers",
     "adopt_job",
     "detach_job",
-    "discard_staged_bundle",
     "eject_job",
-    "exchange_staging",
     "import_bundle",
     "offer_transfers",
+    "reclaim_transfer",
     "recover_interrupted_transfers",
     "recover_transfers",
+    "resume_exports",
     "retire_transfers",
     "select_transfer_jobs",
     "validate_bundle",
 ]
-
-TRANSFER_MANIFEST = "manifest.json"
-TRANSFER_RUNNERS = "runners"
-#: Where an ejected tree root's transfer envelope carries its members.
-_EJECTED_TREE = "tree"
-
-TRANSFER_FORMAT = "httk-workflow-detached-transfer"
-#: Version 2 widened the payload digest: it now also pins the executable bit of
-#: every regular file and the target of every symlink. Version 3 belongs to the
-#: v3 workspace format; earlier bundles are refused.
-TRANSFER_FORMAT_VERSION = 3
-#: Domain separation of the payload digest, so a digest computed by an older
-#: rule can never collide with one computed by the current rule.
-_PAYLOAD_DIGEST_DOMAIN = b"httk-workflow-transfer-payload-v2\0"
-
-# The largest transfer manifest a reader accepts; a manifest is small.
-_MANIFEST_BYTES = 1024 * 1024
-# The bounds of the walk that vets a job directory before it is adopted.
-_ADOPT_MAX_ENTRIES = 1_000_000
-_ADOPT_MAX_DEPTH = 256
-# How deep recovery looks for sealed bundles below the workspace root.
-_RECOVERY_MAX_DEPTH = 64
 
 #: The format of what ``tasks offer`` prints and ``tasks fetch`` consumes.
 TRANSFER_OFFER_FORMAT = "httk-workflow-transfer-offer"
@@ -142,106 +138,6 @@ class TransferCandidate:
     tree_blocked: bool = False
 
 
-def _excluded_from_bundle(name: str) -> bool:
-    """Report whether one top-level payload entry stays out of the digest.
-
-    The transfer directory describes the bundle rather than the job, and the
-    runner-private entries of a payload — attempt control directories and job
-    state — are excluded from every payload digest, so a job that ran before it
-    was detached digests exactly like one that never did.
-    """
-
-    return name == TRANSFER_DIRECTORY or is_payload_private(name)
-
-
-def _contained_symlink_target(payload: Path, entry: Path) -> str:
-    """Return the target of one payload symlink, refusing any that escapes.
-
-    A symlink is transferred as its literal target string, exactly as a signed
-    project manifest records one, because that is what makes the link mean the
-    same thing at the destination. That only holds for a link that stays inside
-    the payload: an absolute target names a path of the source machine, and a
-    relative target climbing out of the payload resolves against whatever
-    happens to sit beside the payload at the destination. Both are refused by
-    name rather than transferred into a different meaning.
-    """
-
-    target = os.readlink(entry)
-    if PurePosixPath(target).is_absolute():
-        raise FormatError(
-            f"transfer payload rejects the absolute symlink {entry.name} -> {target}: "
-            f"an absolute target names a path of the source machine ({entry})"
-        )
-    parts = list(entry.parent.relative_to(payload).parts)
-    for part in PurePosixPath(target).parts:
-        if part in {"", "."}:
-            continue
-        if part != "..":
-            parts.append(part)
-            continue
-        if not parts:
-            raise FormatError(
-                f"transfer payload rejects the escaping symlink {entry.name} -> {target}: "
-                f"the target resolves outside the payload ({entry})"
-            )
-        parts.pop()
-    return target
-
-
-def _refuse_unsafe_entries(bundle: Path) -> None:
-    """Refuse a job directory holding anything but files, directories and contained symlinks.
-
-    The walk only uses ``lstat``/``readlink``, before any file of the directory
-    is opened, so a planted FIFO or device cannot hang or affect an adoption and
-    a symlink cannot lead outside it, also below the undigested ``logs/``,
-    ``attempts/`` and ``.httk-transfer/``. A relative symlink must stay inside
-    the directory both lexically and once every link on its way is resolved.
-    A regular file with more than one link is refused too: its other name may
-    sit anywhere on the filesystem, so adopting it would hand the job a file
-    that something outside the directory still writes or reads. The walk is
-    bounded to 1,000,000 entries and a nesting depth of 256.
-
-    :param bundle: The job directory, which must itself be a real directory.
-    :raises httk.workflow.errors.FormatError: Naming the first refused entry, or if the directory
-        exceeds the walk bounds.
-    :raises FileNotFoundError: If the directory does not exist.
-    """
-
-    if not stat.S_ISDIR(os.lstat(bundle).st_mode):
-        raise FormatError(f"job directory {bundle} is not a directory (a symlink or special file)")
-    real = os.path.realpath(bundle)
-    pending = [(bundle, 1)]
-    visited = 0
-    while pending:
-        directory, depth = pending.pop()
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                visited += 1
-                if visited > _ADOPT_MAX_ENTRIES:
-                    raise FormatError(f"job directory {bundle} holds more than {_ADOPT_MAX_ENTRIES} entries")
-                path = Path(entry.path)
-                if entry.is_symlink():
-                    _contained_symlink_target(bundle, path)
-                    if os.path.commonpath([real, os.path.realpath(path)]) != real:
-                        raise FormatError(
-                            f"job directory rejects the symlink {path.relative_to(bundle)}: it resolves outside it"
-                        )
-                elif entry.is_dir(follow_symlinks=False):
-                    if depth >= _ADOPT_MAX_DEPTH:
-                        raise FormatError(
-                            f"job directory rejects {path.relative_to(bundle)}: "
-                            f"it nests deeper than {_ADOPT_MAX_DEPTH} levels"
-                        )
-                    pending.append((path, depth + 1))
-                elif not entry.is_file(follow_symlinks=False):
-                    raise FormatError(f"job directory rejects the special entry {path.relative_to(bundle)}")
-                elif entry.stat(follow_symlinks=False).st_nlink > 1:
-                    raise FormatError(
-                        f"job directory rejects the hard-linked file {path.relative_to(bundle)}: "
-                        "hard links are not accepted in bundles"
-                    )
-
-
 def _read_manifest(bundle: Path) -> dict[str, Any]:
     """Read a bundle's transfer manifest, bounded and without following a symlink.
 
@@ -265,343 +161,6 @@ def _read_manifest(bundle: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FormatError(f"expected JSON object in {path}")
     return value
-
-
-def _read_manifest_at(transfer_fd: int, where: Path) -> dict[str, Any]:
-    """Read ``manifest.json`` through a transfer-directory descriptor, bounded and without following a symlink.
-
-    :param transfer_fd: A descriptor of the transfer directory.
-    :param where: The transfer directory path, for messages only.
-    :return: The manifest object, not yet validated.
-    :raises httk.workflow.errors.FormatError: If the manifest cannot be read or is not a JSON object.
-    """
-
-    try:
-        descriptor = os.open(
-            TRANSFER_MANIFEST, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=transfer_fd
-        )
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise FormatError("not a regular file")
-            data = bytearray()
-            while chunk := os.read(descriptor, _MANIFEST_BYTES + 1 - len(data)):
-                data.extend(chunk)
-                if len(data) > _MANIFEST_BYTES:
-                    raise FormatError(f"larger than {_MANIFEST_BYTES} bytes")
-        finally:
-            os.close(descriptor)
-        value = json.loads(bytes(data).decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, FormatError) as exc:
-        raise FormatError(f"cannot read JSON object {where / TRANSFER_MANIFEST}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise FormatError(f"expected JSON object in {where / TRANSFER_MANIFEST}")
-    return value
-
-
-def _check_transfer_directory(payload: Path, transfer_id: str) -> None:
-    """Refuse, before a job is fenced, a ``.httk-transfer`` that sealing would refuse.
-
-    :param payload: The job payload about to be sealed.
-    :param transfer_id: The transfer about to be sealed.
-    :raises httk.workflow.errors.FormatError: If ``.httk-transfer`` is a symlink or not a directory, or holds
-        a manifest that is unreadable or names another transfer.
-    """
-
-    transfer_dir = payload / TRANSFER_DIRECTORY
-    try:
-        mode = os.lstat(transfer_dir).st_mode
-    except FileNotFoundError:
-        return
-    if not stat.S_ISDIR(mode):
-        raise FormatError(f"cannot seal {payload}: its {TRANSFER_DIRECTORY} is a symlink or not a directory")
-    if not os.path.lexists(transfer_dir / TRANSFER_MANIFEST):
-        return
-    existing = _read_manifest(payload)
-    if existing.get("transfer_id") != transfer_id:
-        raise FormatError(f"cannot seal {payload}: {transfer_dir} pre-exists and belongs to another transfer")
-
-
-def _transfer_directory(payload: Path, transfer_id: str) -> int:
-    """Create or resume a payload's ``.httk-transfer`` and return a descriptor of it.
-
-    A job could have planted anything below its own ``.httk-transfer`` before it
-    was fenced. A directory without a manifest is therefore a leftover (of a
-    job's own doing or of a crash before the manifest was written) and is
-    replaced; one with a manifest is only accepted as the resumption of this
-    very transfer. Everything below is then reached through the returned
-    ``O_DIRECTORY|O_NOFOLLOW`` descriptor, never by path.
-
-    :param payload: The job payload being sealed.
-    :param transfer_id: The transfer being sealed.
-    :return: An open descriptor of the transfer directory; the caller closes it.
-    :raises httk.workflow.errors.FormatError: If ``.httk-transfer`` pre-exists and is a symlink, not a
-        directory, or holds an unreadable manifest or one of another transfer.
-    """
-
-    transfer_dir = payload / TRANSFER_DIRECTORY
-    payload_fd = os.open(payload, _DIRECTORY_FLAGS)
-    try:
-        for _attempt in range(2):
-            try:
-                os.mkdir(TRANSFER_DIRECTORY, 0o755, dir_fd=payload_fd)
-            except FileExistsError:
-                if not stat.S_ISDIR(os.lstat(TRANSFER_DIRECTORY, dir_fd=payload_fd).st_mode):
-                    raise FormatError(
-                        f"cannot seal {payload}: its {TRANSFER_DIRECTORY} is a symlink or not a directory"
-                    ) from None
-                transfer_fd = _open_directory_at(payload_fd, TRANSFER_DIRECTORY, create=False)
-                try:
-                    os.lstat(TRANSFER_MANIFEST, dir_fd=transfer_fd)
-                except FileNotFoundError:
-                    os.close(transfer_fd)
-                    _remove_at(payload_fd, TRANSFER_DIRECTORY)
-                    continue
-                try:
-                    existing = _read_manifest_at(transfer_fd, transfer_dir)
-                    if existing.get("transfer_id") != transfer_id:
-                        raise FormatError(
-                            f"cannot seal {payload}: {transfer_dir} pre-exists and belongs to another transfer"
-                        )
-                except BaseException:
-                    os.close(transfer_fd)
-                    raise
-                return transfer_fd
-            return _open_directory_at(payload_fd, TRANSFER_DIRECTORY, create=False)
-    finally:
-        os.close(payload_fd)
-    raise FormatError(f"cannot seal {payload}: {transfer_dir} keeps reappearing")
-
-
-def _payload_digest(payload: Path) -> str:
-    """Digest one payload tree: names, kinds, content, exec bits, and link targets.
-
-    The executable bit is part of the digest because it is part of what a
-    payload *is*: a runner or helper script that arrives without it does not
-    run, so a transfer that dropped it would be a silent corruption rather than
-    a detected one.
-    """
-
-    digest = hashlib.sha256()
-    digest.update(_PAYLOAD_DIGEST_DOMAIN)
-    entries = [
-        item
-        for item in payload.rglob("*")
-        if item.relative_to(payload).parts and not _excluded_from_bundle(item.relative_to(payload).parts[0])
-    ]
-    for entry in sorted(entries, key=lambda item: item.relative_to(payload).as_posix()):
-        relative = entry.relative_to(payload).as_posix().encode("utf-8")
-        mode = entry.lstat().st_mode
-        if stat.S_ISLNK(mode):
-            target = _contained_symlink_target(payload, entry).encode("utf-8")
-            digest.update(b"L\0" + relative + b"\0" + target + b"\0")
-        elif stat.S_ISDIR(mode):
-            digest.update(b"D\0" + relative + b"\0")
-        elif stat.S_ISREG(mode):
-            executable = b"x" if mode & 0o111 else b"-"
-            digest.update(b"F\0" + relative + b"\0" + executable + b"\0" + sha256_file(entry).encode("ascii") + b"\0")
-        else:
-            raise FormatError(f"transfer payload rejects special entry: {entry}")
-    return digest.hexdigest()
-
-
-def _runner_digest(path: Path) -> str:
-    """Digest one published runner file or tree with the workspace rule."""
-
-    if path.is_symlink() or not (path.is_file() or path.is_dir()):
-        raise FormatError(f"referenced workspace runner is not a regular file or tree: {path}")
-    return sha256_file(path) if path.is_file() else tree_digest(path)
-
-
-def _remove_tree(path: Path) -> None:
-    """Remove a bundle tree even when a copied runner tree is read-only."""
-
-    for entry in path.rglob("*"):
-        if entry.is_symlink():
-            continue
-        entry.chmod(0o755 if entry.is_dir() else 0o644)
-    path.chmod(0o755)
-    shutil.rmtree(path)
-
-
-def _bundled_runners(workspace: Workspace, payload: Path, transfer_fd: int) -> list[dict[str, str]]:
-    """Copy the workspace runners one job references into its bundle.
-
-    A detached job must remain runnable at its destination, so a runner it only
-    references by name and digest travels with it. Payload runners are already
-    inside the payload, and an installed runner is deployment state of the
-    destination rather than of the job, so neither is bundled.
-    """
-
-    job = JobDefinition.from_path(payload / "job.json")
-    if job.runner_source != "workspace" or job.runner_sha256 is None:
-        return []
-    relative = job.runner_path
-    source = workspace.runner_store_path(relative)
-    digest = _runner_digest(source)
-    if digest != job.runner_sha256:
-        raise WorkspaceCorruptionError(
-            f"workspace runner {relative.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}"
-        )
-    _embed_runner(transfer_fd, relative, source)
-    return [{"path": relative.as_posix(), "sha256": digest}]
-
-
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-
-
-def _open_directory_at(parent_fd: int, name: str, *, create: bool) -> int:
-    """Open one subdirectory by descriptor without following a symlink, optionally creating it."""
-
-    if create:
-        try:
-            os.mkdir(name, 0o755, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-    try:
-        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
-    except OSError as exc:
-        raise FormatError(f"cannot seal into {name!r}: not a real directory ({exc.strerror})") from exc
-
-
-def _remove_at(parent_fd: int, name: str, depth: int = 1) -> None:
-    """Remove one entry below a directory descriptor, never following a symlink.
-
-    :param parent_fd: A descriptor of the containing directory.
-    :param name: The entry to remove.
-    :param depth: The nesting depth reached so far.
-    :raises httk.workflow.errors.FormatError: If the entry nests deeper than the adoption walk bound.
-    """
-
-    if depth > _ADOPT_MAX_DEPTH:
-        raise FormatError(f"cannot remove {name!r}: it nests deeper than {_ADOPT_MAX_DEPTH} levels")
-    if not stat.S_ISDIR(os.lstat(name, dir_fd=parent_fd).st_mode):
-        os.unlink(name, dir_fd=parent_fd)
-        return
-    fd = _open_directory_at(parent_fd, name, create=False)
-    try:
-        os.fchmod(fd, 0o755)
-        with os.scandir(fd) as entries:
-            children = [entry.name for entry in entries]
-        for child in children:
-            _remove_at(fd, child, depth + 1)
-    finally:
-        os.close(fd)
-    os.rmdir(name, dir_fd=parent_fd)
-
-
-def _copy_file_at(source: Path, parent_fd: int, name: str, mode: int) -> None:
-    """Copy one trusted file to a new name below a directory descriptor, exclusively."""
-
-    out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
-    try:
-        with open(source, "rb") as reader, os.fdopen(out, "wb", closefd=False) as writer:
-            shutil.copyfileobj(reader, writer)
-        os.fchmod(out, mode)
-    finally:
-        os.close(out)
-
-
-def _copy_tree_at(source: Path, parent_fd: int, name: str) -> None:
-    """Copy a trusted directory tree to a new name below a directory descriptor."""
-
-    fd = _open_directory_at(parent_fd, name, create=True)
-    try:
-        for entry in sorted(source.iterdir()):
-            if entry.is_dir():
-                _copy_tree_at(entry, fd, entry.name)
-            else:
-                _copy_file_at(entry, fd, entry.name, stat.S_IMODE(entry.stat().st_mode))
-        os.fchmod(fd, stat.S_IMODE(source.stat().st_mode))
-    finally:
-        os.close(fd)
-
-
-def _embed_runner(transfer_fd: int, relative: PurePosixPath, source: Path) -> None:
-    """Place the store runner at ``runners/<relative>`` below the transfer directory.
-
-    Every step goes through directory descriptors opened with ``O_NOFOLLOW``,
-    one component at a time, so no symlink below ``.httk-transfer`` is ever
-    followed. A stale entry at the final name is removed and recopied.
-    """
-
-    held: list[int] = []
-    try:
-        fd = transfer_fd
-        for part in (TRANSFER_RUNNERS, *relative.parts[:-1]):
-            fd = _open_directory_at(fd, part, create=True)
-            held.append(fd)
-        name = relative.parts[-1]
-        try:
-            os.lstat(name, dir_fd=fd)
-        except FileNotFoundError:
-            pass
-        else:
-            _remove_at(fd, name)
-        if source.is_dir():
-            _copy_tree_at(source, fd, name)
-        else:
-            _copy_file_at(source, fd, name, 0o555)
-    finally:
-        for descriptor in held:
-            os.close(descriptor)
-
-
-def _install_bundled_runners(workspace: Workspace, bundle: Path, manifest: Mapping[str, Any]) -> None:
-    """Install every runner a bundle carries into the destination store.
-
-    Installation is content addressed and therefore idempotent: an entry whose
-    digest already matches is skipped, and a name that already holds different
-    content is a conflict rather than something to overwrite, because live jobs
-    at the destination may already reference the stored digest.
-    """
-
-    for entry in _manifest_runners(manifest):
-        relative = validate_runner_path(entry["path"], "workspace")
-        digest = entry["sha256"]
-        source = bundle / TRANSFER_DIRECTORY / TRANSFER_RUNNERS / Path(*relative.parts)
-        target = workspace.runner_store_path(relative)
-        if target.is_file() or target.is_dir():
-            existing = _runner_digest(target)
-            if existing == digest:
-                continue
-            raise WorkspaceCorruptionError(
-                f"destination workspace runner {relative.as_posix()} holds digest {existing}, "
-                f"but the transfer carries {digest}"
-            )
-        if not source.is_file() and not source.is_dir():
-            raise FormatError(f"transfer bundle does not carry the runner it declares: {relative.as_posix()}")
-        workspace.publish_runner(source, name=relative)
-
-
-def _manifest_runners(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
-    """Validate and return the ``runners`` list of one transfer manifest."""
-
-    raw = manifest.get("runners", [])
-    if not isinstance(raw, list):
-        raise FormatError("transfer manifest runners must be an array")
-    result: list[dict[str, str]] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            raise FormatError("transfer manifest runner must be an object")
-        relative = validate_runner_path(item.get("path"), "workspace")
-        result.append({"path": relative.as_posix(), "sha256": validate_sha256(item.get("sha256"), "runner.sha256")})
-    return result
-
-
-def _payload_seal_sha256(payload: Path) -> str | None:
-    """Return the digest of the seal a payload carries, or ``None`` when unsealed.
-
-    The seal lives inside the payload's ``.httk-job/``, which the payload digest
-    excludes, so the manifest pins it separately: a bundle must arrive exactly as
-    sealed, or exactly as unsealed, as it left.
-    """
-
-    path = job_seal_path(payload)
-    return sha256_file(path) if path.is_file() else None
-
-
-def _ledger_path(workspace: Workspace, transfer_id: str) -> Path:
-    return workspace.control / "transfers" / f"{transfer_id}.json"
 
 
 def _all_markers(workspace: Workspace) -> list[Marker]:
@@ -673,123 +232,24 @@ def _require_tree_boundary(workspace: Workspace, marker: Marker, *, with_tree: b
             raise ValueError(f"job has {len(children)} child job(s) that travel with it: transfer it as a tree")
 
 
-def _write_manifest_at(transfer_fd: int, manifest: Mapping[str, Any], *, durable: bool) -> None:
-    """Install ``manifest.json`` atomically below a transfer-directory descriptor, never following a symlink."""
-
-    temporary = f".{TRANSFER_MANIFEST}.tmp.{uuid.uuid4().hex}"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=transfer_fd)
-    try:
-        try:
-            with os.fdopen(descriptor, "wb", closefd=False) as handle:
-                handle.write(json_bytes(manifest))
-                handle.write(b"\n")
-                handle.flush()
-            if durable:
-                os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.rename(temporary, TRANSFER_MANIFEST, src_dir_fd=transfer_fd, dst_dir_fd=transfer_fd)
-    except BaseException:
-        try:
-            os.unlink(temporary, dir_fd=transfer_fd)
-        except FileNotFoundError:
-            pass
-        raise
-    if durable:
-        os.fsync(transfer_fd)
+# ---------------------------------------------------------------------------
+# Sealing: ejection, export and addressed transfer (the source side, plan 4.4 and 4.6)
+# ---------------------------------------------------------------------------
 
 
-def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path:
-    payload = workspace.payload_path(marker.placement, marker.job_key)
-    transfer_id = canonical_uuid(state.get("transfer_id"), "transfer_id")
-    transfer_fd = _transfer_directory(payload, transfer_id)
-    try:
-        return _seal_into(workspace, marker, state, payload, transfer_id, transfer_fd)
-    finally:
-        os.close(transfer_fd)
+def _transferring_root(workspace: Workspace, job_id: str) -> tuple[Marker, Transaction] | None:
+    """Return a job's ``transferring`` marker and transaction when it is the root of one."""
+
+    marker = workspace.find_marker_by_id(job_id, kinds=("transferring",))
+    if marker is None:
+        return None
+    frame = workspace.read_state(marker)
+    outgoing = frame.get("outgoing")
+    if not isinstance(outgoing, Mapping) or outgoing.get("role") != "root":
+        return None
+    return marker, Transaction.from_root(marker, frame)
 
 
-def _seal_into(
-    workspace: Workspace,
-    marker: Marker,
-    state: Mapping[str, Any],
-    payload: Path,
-    transfer_id: str,
-    transfer_fd: int,
-) -> Path:
-    """Write the manifest, runners and marker of one sealing through the transfer-directory descriptor."""
-
-    transfer_dir = payload / TRANSFER_DIRECTORY
-    destination_workspace_id = (
-        None
-        if state.get("destination_workspace_id") is None
-        else canonical_uuid(state.get("destination_workspace_id"), "destination_workspace_id")
-    )
-    prior = state.get("prior_state")
-    if not isinstance(prior, Mapping):
-        raise FormatError("transferring state has no prior_state object")
-    prior_kind = str(state.get("prior_kind"))
-    runners = _bundled_runners(workspace, payload, transfer_fd)
-    manifest = {
-        "format": TRANSFER_FORMAT,
-        "format_version": TRANSFER_FORMAT_VERSION,
-        "core_profile": CORE_PROFILE,
-        "transfer_id": transfer_id,
-        "source_workspace_id": workspace.workspace_id,
-        "destination_workspace_id": destination_workspace_id,
-        "destination_remote": state.get("destination_remote"),
-        "job_id": marker.job_id,
-        "job_key": marker.job_key,
-        "source_placement": placement_text(marker.placement),
-        "destination_placement": str(state["destination_placement"]),
-        "payload_sha256": _payload_digest(payload),
-        "runners": runners,
-        "seal_sha256": _payload_seal_sha256(payload),
-        "prior_kind": prior_kind,
-        "prior_state": dict(prior),
-        "priority": marker.priority,
-        "source_generation": marker.generation,
-        "sealed_marker": marker.path.name,
-    }
-    if "transfer_sequence" in state:
-        manifest["transfer_sequence"] = state["transfer_sequence"]
-    if "transfer_epoch" in state:
-        manifest["transfer_epoch"] = state["transfer_epoch"]
-    for name in ("eject_tree", "eject_root"):
-        # An ejected tree travels as one directory: the root lists its members,
-        # and each member names the root it is nested in.
-        if name in state:
-            manifest[name] = state[name]
-    manifest_path = transfer_dir / TRANSFER_MANIFEST
-    try:
-        os.lstat(TRANSFER_MANIFEST, dir_fd=transfer_fd)
-    except FileNotFoundError:
-        _write_manifest_at(transfer_fd, manifest, durable=workspace.durable)
-    else:
-        existing = _read_manifest_at(transfer_fd, transfer_dir)
-        if existing != manifest:
-            raise WorkspaceCorruptionError(f"conflicting transfer manifest: {manifest_path}")
-    if marker.path.exists():
-        os.rename(marker.path, marker.path.name, dst_dir_fd=transfer_fd)
-    else:
-        try:
-            embedded_mode = os.lstat(marker.path.name, dir_fd=transfer_fd).st_mode
-        except FileNotFoundError:
-            embedded_mode = 0
-        if not stat.S_ISREG(embedded_mode):
-            raise WorkspaceCorruptionError("transfer marker exists in neither state tree nor sealed bundle")
-    ledger = {**manifest, "status": "sealed", "bundle": str(payload), "updated_at": utc_now()}
-    if "eject_to" in state:
-        # Where an ejection moves the bundle is source bookkeeping, not part of
-        # the travelling manifest: the directory may be moved on again freely.
-        ledger["eject_to"] = str(state["eject_to"])
-    write_json_atomic(_ledger_path(workspace, transfer_id), ledger, durable=workspace.durable)
-    if destination_workspace_id is not None:
-        receipts.sealed(workspace, destination_workspace_id, transfer_id)
-    return payload
-
-
-@receipts.serialized
 def detach_job(
     workspace: Workspace,
     job_id: str,
@@ -802,814 +262,97 @@ def detach_job(
     transfer_id: str | None = None,
     with_tree: bool = False,
 ) -> Path:
-    """Fence and seal one job, leaving no schedulable source marker.
+    """Seal one quiescent job for another workspace: an addressed transfer, committed to ``transfers/outgoing/<T>``.
+
+    The job's marker stays ``transferring`` until the destination's
+    acknowledgement retires the bundle (:func:`acknowledge_transfer`). A job
+    that is already transferring to the same destination is resumed rather than
+    sealed again, so an interrupted transfer finishes by asking again.
 
     A spawned child that is still bound to its live parent never leaves on its
     own, and a parent leaves with its bound children only as a tree: the caller
-    fences the root first (*with_tree*) and then each member, whose parent is by
+    seals the root first (*with_tree*) and then each member, whose parent is by
     then transferring and so no longer binds it.
 
     :param workspace: Provide the source workspace.
     :param job_id: Identify the job to detach.
-    :param marker: An already resolved source marker; avoids scanning all states.
+    :param marker: An already resolved source marker; avoids a lookup.
     :param waiting_parent_map: Precomputed child-to-parent map for this transfer batch.
     :param destination_workspace_id: Identify the destination workspace.
     :param destination_remote: Preserve the destination's remote identifier.
     :param destination_placement: Override the destination placement.
-    :param transfer_id: Reuse a transfer id when resuming sealing.
-    :param with_tree: Fence a job whose bound children the caller transfers with it (the
-        root or an intermediate member of a selected tree); the caller must fence every member.
-    :return: The sealed source bundle path.
+    :param transfer_id: The transfer id of the transfer to resume: accepted only when the job is
+        already transferring under it (a new transfer always mints its own id).
+    :param with_tree: Seal a job whose bound children the caller transfers with it.
+    :return: The sealed bundle, ``transfers/outgoing/<T>``.
     :raises ValueError: If the job is missing, active, joined, bound to its parent, a parent
-        transferred without its tree, or already transferring incompatibly.
+        transferred without its tree, already transferring incompatibly, or the transfer aborted.
     """
 
-    return _detach_job(
-        workspace,
-        job_id,
-        marker=marker,
-        waiting_parent_map=waiting_parent_map,
-        destination_workspace_id=canonical_uuid(destination_workspace_id, "destination_workspace_id"),
-        destination_remote=destination_remote,
-        destination_placement=destination_placement,
-        transfer_id=transfer_id,
-        with_tree=with_tree,
-    )
-
-
-def _detach_job(
-    workspace: Workspace,
-    job_id: str,
-    *,
-    marker: Marker | None = None,
-    waiting_parent_map: Mapping[str, set[str]] | None = None,
-    destination_workspace_id: str | None,
-    destination_remote: str | None = None,
-    destination_placement: str | PurePosixPath | None = None,
-    transfer_id: str | None = None,
-    with_tree: bool = False,
-    eject_to: Path | None = None,
-    eject_tree: Sequence[Mapping[str, object]] | None = None,
-    eject_root: str | None = None,
-) -> Path:
-    """Fence and seal one job as :func:`detach_job` does, or as an ejection.
-
-    A null *destination_workspace_id* seals a bundle addressed to no workspace,
-    which carries no replay sequence; *eject_to* then records where
-    :func:`eject_job` moves it, so an interrupted ejection can be resumed.
-    An ejected tree root records its members (*eject_tree*), and each member
-    the transfer id of its root (*eject_root*).
-    """
-
-    destination_id = destination_workspace_id
-    identifier = str(uuid.uuid4()) if transfer_id is None else canonical_uuid(transfer_id, "transfer_id")
-    existing = _ledger_path(workspace, identifier)
-    if existing.is_file():
-        ledger = read_json(existing)
-        if ledger.get("destination_workspace_id") != destination_id:
-            raise WorkspaceCorruptionError("transfer UUID was reused for a different destination")
-        return Path(str(ledger["bundle"]))
+    destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     if marker is None:
-        marker = workspace.find_marker_by_id(job_id)
+        marker = workspace.find_marker_by_id(job_id, kinds=STATE_KINDS)
         if marker is None:
-            interrupted = [item for item in workspace.scan_markers(("transferring",)) if item.job_id == job_id]
-            if len(interrupted) != 1:
-                raise ValueError(f"job must have exactly one source marker: {job_id}")
-            marker = interrupted[0]
+            raise ValueError(f"job must have exactly one source marker: {job_id}")
     elif marker.job_id != job_id:
         raise ValueError(f"known source marker does not identify job: {job_id}")
     if marker.kind == "transferring":
-        state = workspace.read_state(marker)
-        if state.get("transfer_id") != identifier or state.get("destination_workspace_id") != destination_id:
+        found = _transferring_root(workspace, job_id)
+        if (
+            found is None
+            or not found[1].addressed
+            or found[1].destination_workspace_id != destination_id
+            or (transfer_id is not None and found[1].transfer_id != canonical_uuid(transfer_id, "transfer_id"))
+        ):
             raise ValueError("job is already transferring under a different transfer")
-        return _seal_transferring(workspace, marker, state)
-    if marker.kind not in QUIESCENT_KINDS:
-        raise ValueError(f"job is not quiescent and cannot transfer: {marker.kind}")
-    if _unresolved_join_reference(workspace, marker, waiting_parent_map):
-        raise ValueError("job participates in an unresolved join and cannot transfer")
-    _require_tree_boundary(workspace, marker, with_tree=with_tree)
-    target_placement = normalize_placement(marker.placement if destination_placement is None else destination_placement)
-    # Refused here, before the job is fenced, rather than by the destination's import.
-    check_job_placement(target_placement)
-    # Likewise refused before fencing: a sealing that must refuse would strand the job.
-    _check_transfer_directory(workspace.payload_path(marker.placement, marker.job_key), identifier)
-    prior_state = workspace.read_state(marker)
-    _finish_incoming_receipt(workspace, marker, prior_state)
-    fields: dict[str, object] = {"transfer_id": identifier}
-    if destination_id is not None:
-        # Sequenced replay protection is kept per destination peer. An ejected
-        # bundle has no peer; its adopter keeps an individual receipt instead.
-        identifier, sequence, epoch = receipts.reserve(workspace, destination_id, job_id, identifier)
-        fields = {"transfer_id": identifier, "transfer_sequence": sequence, "transfer_epoch": epoch}
-    elif eject_to is not None:
-        fields["eject_to"] = str(eject_to)
-        if eject_tree is not None:
-            fields["eject_tree"] = [dict(entry) for entry in eject_tree]
-        if eject_root is not None:
-            fields["eject_root"] = eject_root
-    writer = workspace.open_journal_writer()
-    try:
-        with writer:
-            if destination_id is not None:
-                receipts.fencing(workspace, destination_id, identifier)
-            transferring = workspace.transition(
-                writer,
-                marker,
-                "transferring",
-                {
-                    **fields,
-                    "source_workspace_id": workspace.workspace_id,
-                    "destination_workspace_id": destination_id,
-                    "destination_remote": destination_remote,
-                    "destination_placement": placement_text(target_placement),
-                    "prior_kind": marker.kind,
-                    "prior_state": prior_state,
-                    "reason": "ejected" if destination_id is None else "detached_transfer",
-                },
-                # A sealed job may be transferred: its seal travels inside the payload,
-                # so the marker move is not a mutation the enforcement guard should refuse.
-                allow_sealed=True,
-            )
-    except BaseException:
-        # A failed transition can leave a header-only operation writer. Use
-        # the usual reference protection, including damaged/live markers.
-        from .gc import collect_retired_journal
-
-        directory = workspace.control / "journal" / writer.writer_id
-        if (directory / "0.hwj").is_file() and (directory / "0.hwj").stat().st_size == len(SEGMENT_HEADER):
-            reference = encode_record_ref(writer.writer_id, 0, len(SEGMENT_HEADER), 1, b"0" * 32)
-            collect_retired_journal(workspace, [reference])
-        raise
-    return _seal_transferring(workspace, transferring, workspace.read_state(transferring))
-
-
-def _check_sealed_marker(payload: Path, manifest: Mapping[str, Any], job_key: str) -> None:
-    """Require the manifest's sealed marker to be this job's marker, a real file beside the manifest.
-
-    The name must be one path component that parses as a ``transferring`` marker
-    basename (:meth:`~httk.workflow.models.Marker.from_path`) of ``job_key``, and
-    the entry must be a regular file by ``lstat`` rather than a symlink, because
-    the importer renames it into the workspace state tree.
-    """
-
-    name = manifest.get("sealed_marker")
-    if not isinstance(name, str) or name in {"", ".", ".."} or "/" in name or "\0" in name:
-        raise FormatError(f"sealed transfer marker is absent or not a plain file name: {name!r}")
-    try:
-        parsed = Marker.from_path(Path("state"), Path("state") / "transferring" / "placement" / name)
-    except FormatError as exc:
-        raise FormatError(f"sealed transfer marker is not a marker name: {name!r}") from exc
-    if parsed.job_key != job_key:
-        raise FormatError(f"sealed transfer marker belongs to another job: {name!r}")
-    try:
-        mode = os.lstat(payload / TRANSFER_DIRECTORY / name).st_mode
-    except OSError:
-        raise FormatError("sealed transfer marker is absent") from None
-    if not stat.S_ISREG(mode):
-        raise FormatError(f"sealed transfer marker is not a regular file: {name!r}")
-
-
-def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Validate a sealed bundle and return its manifest.
-
-    :param bundle: Locate the sealed transfer bundle.
-    :return: The validated transfer manifest.
-    :raises httk.workflow.errors.FormatError: If the manifest is not a regular file of at most 1 MiB
-        in a real ``.httk-transfer`` directory, or the bundle format, digest, marker, or runner is invalid.
-    """
-
-    payload = Path(bundle).expanduser().resolve()
-    manifest = _read_manifest(payload)
-    if manifest.get("format") != TRANSFER_FORMAT or manifest.get("core_profile") != CORE_PROFILE:
-        raise FormatError("unsupported detached transfer manifest")
-    if manifest.get("format_version") != TRANSFER_FORMAT_VERSION:
-        raise FormatError("unsupported detached transfer manifest")
-    canonical_uuid(manifest.get("transfer_id"), "transfer_id")
-    canonical_uuid(manifest.get("source_workspace_id"), "source_workspace_id")
-    if manifest.get("destination_workspace_id") is not None:
-        canonical_uuid(manifest.get("destination_workspace_id"), "destination_workspace_id")
-    canonical_uuid(manifest.get("job_id"), "job_id")
-    normalize_placement(str(manifest.get("destination_placement")))
-    job_key = manifest.get("job_key")
-    if not isinstance(job_key, str) or parse_job_key(job_key)[1] != manifest["job_id"]:
-        raise FormatError(f"transfer manifest names a job key that is not this job's: {job_key!r}")
-    _check_sealed_marker(payload, manifest, job_key)
-    if _payload_digest(payload) != manifest.get("payload_sha256"):
-        raise FormatError("detached transfer payload digest mismatch")
-    # Bundled runners sit beside the manifest rather than inside the payload, so
-    # each one is verified against its own declared digest.
-    for entry in _manifest_runners(manifest):
-        carried = payload / TRANSFER_DIRECTORY / TRANSFER_RUNNERS / Path(*PurePosixPath(entry["path"]).parts)
-        if not carried.is_file() and not carried.is_dir():
-            raise FormatError(f"transfer bundle does not carry the runner it declares: {entry['path']}")
-        if _runner_digest(carried) != entry["sha256"]:
-            raise FormatError(f"bundled runner digest mismatch: {entry['path']}")
-    if _payload_seal_sha256(payload) != manifest.get("seal_sha256"):
-        raise FormatError("detached transfer payload seal does not match the manifest")
-    return manifest
-
-
-def _ack_path(workspace: Workspace, transfer_id: str) -> Path:
-    return workspace.control / "transfers" / "acks" / f"{transfer_id}.json"
-
-
-def _prune_import_receipts(workspace: Workspace, transfer_id: str) -> None:
-    """The durable sequence receipt replaces these per-transfer records."""
-
-    for directory in ("acks", "imported"):
-        path = workspace.control / "transfers" / directory / f"{transfer_id}.json"
-        path.unlink(missing_ok=True)
-        if workspace.durable and path.parent.exists():
-            fsync_directory(path.parent)
-
-
-def _finish_incoming_receipt(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> None:
-    """Finish a published import before allowing its job to leave again.
-
-    A crashed receiver may have published the marker but not its compact
-    receipt. Preserve that import fact even if the original sender has not yet
-    retried. The state provenance is authoritative once its marker exists.
-    """
-
-    provenance = state.get("transfer")
-    if not isinstance(provenance, Mapping) or receipts.sequence_of(provenance) is None:
-        return
-    transfer_dir = workspace.payload_path(marker.placement, marker.job_key) / TRANSFER_DIRECTORY
-    if transfer_dir.exists():
-        _remove_tree(transfer_dir)
-    if not receipts.received(workspace, provenance):
-        receipts.remember(workspace, provenance)
-    _prune_import_receipts(workspace, str(provenance["transfer_id"]))
-
-
-def _sequence_ack(workspace: Workspace, manifest: Mapping[str, Any]) -> dict[str, object]:
-    """Reconstruct a receipt from an intact replay, even after the job moved on.
-
-    Sequenced receipts intentionally have no per-job wall-clock timestamp: the
-    durable range is the acknowledgement fact, and this signed envelope binds
-    it to the replay's validated manifest. Source retirement still compares the
-    complete envelope identity and digest against its own immutable ledger.
-    """
-
-    return sign_document(
-        {
-            "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 3,
-            "transfer_id": manifest["transfer_id"],
-            "transfer_sequence": manifest["transfer_sequence"],
-            **({"transfer_epoch": manifest["transfer_epoch"]} if "transfer_epoch" in manifest else {}),
-            "source_workspace_id": manifest["source_workspace_id"],
-            "destination_workspace_id": workspace.workspace_id,
-            "payload_sha256": manifest["payload_sha256"],
-            "job_id": manifest["job_id"],
-            "job_key": manifest["job_key"],
-            "placement": manifest["destination_placement"],
-            "state": manifest["prior_kind"],
-        }
-    )
-
-
-_UNKNOWN_MARKER = object()
-
-
-@receipts.serialized
-def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
-    """Import one sealed bundle, or validate and acknowledge its replay."""
-
-    return _import_one(workspace, bundle)
-
-
-@receipts.serialized
-def import_bundles(workspace: Workspace, bundles: Sequence[str | os.PathLike[str]]) -> list[dict[str, object]]:
-    """Import a batch under one protocol lock and one destination identity scan."""
-
-    if len(bundles) <= 1:
-        return [_import_one(workspace, bundle) for bundle in bundles]
-    markers: dict[str, Marker] = {}
-    for marker in workspace.scan_markers(STATE_KINDS):
-        if marker.job_id in markers:
-            raise WorkspaceCorruptionError(f"destination has multiple markers for job UUID {marker.job_id}")
-        markers[marker.job_id] = marker
-    results = []
-    seen: set[str] = set()
-    for bundle in bundles:
-        _refuse_unsafe_entries(Path(bundle).expanduser())
-        manifest = validate_bundle(bundle)
-        job_id = str(manifest["job_id"])
-        known = _UNKNOWN_MARKER if job_id in seen else markers.get(job_id)
-        results.append(_import_one(workspace, bundle, known_marker=known))
-        seen.add(job_id)
-    return results
-
-
-def _import_one(
-    workspace: Workspace, bundle: str | os.PathLike[str], *, known_marker: object = _UNKNOWN_MARKER
-) -> dict[str, object]:
-    """Import once, recording a compact durable receipt before pruning metadata.
-
-    Legacy bundles have no sequence and must retain their individual receipts.
-    :param workspace: The destination workspace.
-    :param bundle: The intact sealed bundle to import or replay.
-    :param known_marker: Reuse a previously resolved destination marker.
-    :return: A destination acknowledgement safe for source retirement.
-    """
-
-    _refuse_unsafe_entries(Path(bundle).expanduser())
-    manifest = validate_bundle(bundle)
-    if manifest["destination_workspace_id"] != workspace.workspace_id:
-        raise ValueError("bundle names a different destination workspace")
-    marker = workspace.find_marker_by_id(str(manifest["job_id"])) if known_marker is _UNKNOWN_MARKER else known_marker
-    assert marker is None or isinstance(marker, Marker)
-    if receipts.sequence_of(manifest) is None:
-        return _import_bundle(workspace, bundle, known_marker=marker)
-    identity_seed()
-    if receipts.received(workspace, manifest):
-        if marker is not None:
-            provenance = workspace.read_state(marker).get("transfer")
-            if not isinstance(provenance, Mapping) or any(
-                provenance.get(key) != manifest.get(key) for key in ("transfer_id", "payload_sha256", "transfer_epoch")
-            ):
-                raise WorkspaceCorruptionError("received sequence conflicts with destination job provenance")
-        elif receipts.epoch_of(manifest) is None:
-            # Pre-epoch compact ranges cannot distinguish a replay from a
-            # reused allocator. Never fabricate an acknowledgement for them.
-            raise WorkspaceCorruptionError(
-                "legacy receipt has no epoch or live job; cannot safely acknowledge replay; "
-                "after verifying destination delivery, retire it by job id from the source workspace: "
-                f"httk workflow transfer retire . {manifest['job_id']}"
-            )
-    else:
-        _import_bundle(workspace, bundle, known_marker=marker)
-        receipts.remember(workspace, manifest)
-    _prune_import_receipts(workspace, str(manifest["transfer_id"]))
-    return _sequence_ack(workspace, manifest)
-
-
-def _import_bundle(
-    workspace: Workspace,
-    bundle: str | os.PathLike[str],
-    *,
-    known_marker: object = _UNKNOWN_MARKER,
-    placement: PurePosixPath | None = None,
-    move: bool = False,
-) -> dict[str, object]:
-    """Idempotently import a sealed bundle and publish its prior state.
-
-    Runners are installed and verified before the imported job becomes schedulable;
-    the returned acknowledgement identifies the imported payload and transfer.
-    A moving import (adoption) renames the bundle into the workspace rather than
-    copying it, copying only across filesystems. An adoption intent record names
-    the transfer first, so the job, which its directory then no longer holds, is
-    still found and published by :func:`_finish_interrupted_adoptions`.
-
-    :param workspace: Provide the destination workspace.
-    :param bundle: Locate the sealed source bundle.
-    :param known_marker: Reuse a previously resolved destination marker.
-    :param placement: Place the job here instead of at the manifest's destination placement.
-    :param move: Move the bundle in rather than copy it.
-    :return: The destination acknowledgement.
-    :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation, or
-        its placement names a job directory.
-    :raises ValueError: If the bundle names another destination workspace.
-    """
-
-    source = Path(bundle).expanduser().resolve()
-    manifest = validate_bundle(source)
-    transfer_id = str(manifest["transfer_id"])
-    digest = str(manifest["payload_sha256"])
-    acknowledgement_path = _ack_path(workspace, transfer_id)
-    if acknowledgement_path.is_file():
-        existing_ack = read_json(acknowledgement_path)
-        if existing_ack.get("payload_sha256") != digest:
-            raise WorkspaceCorruptionError("transfer acknowledgement digest mismatch")
-        return existing_ack
-    if manifest["destination_workspace_id"] not in (None, workspace.workspace_id):
-        raise ValueError("bundle names a different destination workspace")
-    if placement is None:
-        placement = normalize_placement(str(manifest["destination_placement"]))
-    # A placement naming a job directory would nest this job inside another.
-    check_job_placement(placement)
-    # Signing the acknowledgement is refused for an ambiguous operator
-    # identity (2+ configured identities and no default). Resolve it now,
-    # before any state mutation, so that refusal cannot leave a runner
-    # installed, a marker renamed, or the transfer tree removed.
-    identity_seed()
-    # Runners are installed before anything about the job is published, because
-    # an imported job must never become schedulable without the runner it pins.
-    _install_bundled_runners(workspace, source, manifest)
-    duplicate = (
-        workspace.find_marker_by_id(str(manifest["job_id"])) if known_marker is _UNKNOWN_MARKER else known_marker
-    )
-    assert duplicate is None or isinstance(duplicate, Marker)
-    if duplicate is not None:
-        duplicate_state = workspace.read_state(duplicate)
-        provenance = duplicate_state.get("transfer")
-        if not isinstance(provenance, Mapping) or provenance.get("transfer_id") != transfer_id:
-            raise FileExistsError(f"destination already contains job UUID {manifest['job_id']}")
-        if provenance.get("payload_sha256") != digest:
-            raise WorkspaceCorruptionError("imported marker transfer digest mismatch")
-        return _acknowledge_arrival(workspace, duplicate, transfer_id, str(manifest["source_workspace_id"]), digest)
-    target = workspace.payload_path(placement, str(manifest["job_key"]))
-    if target.exists():
-        if validate_bundle(target).get("payload_sha256") != digest:
-            raise FileExistsError(f"destination payload collision: {target}")
-    else:
-        staging = _staging_path(workspace, transfer_id)
-        moved = False
-        if move and staging.exists():
-            # The source verified above, so a leftover staging entry of this same
-            # transfer (an interrupted cross-filesystem copy) is redundant.
-            _remove_tree(staging)
-        if staging.exists():
-            if validate_bundle(staging).get("payload_sha256") != digest:
-                raise WorkspaceCorruptionError("staged transfer digest mismatch")
-        else:
-            if move:
-                write_json_atomic(
-                    _adoption_intent_path(workspace, transfer_id),
-                    {
-                        "job_id": manifest["job_id"],
-                        "job_key": manifest["job_key"],
-                        "placement": placement_text(placement),
-                        "payload_sha256": digest,
-                    },
-                    durable=workspace.durable,
-                )
-                try:
-                    os.rename(source, staging)
-                    moved = True
-                except OSError as exc:
-                    if exc.errno != errno.EXDEV:
-                        raise
-            if not moved:
-                shutil.copytree(source, staging, symlinks=True)
-        try:
-            if _payload_digest(staging) != digest:
-                raise FormatError("copied transfer payload digest mismatch")
-            if _payload_seal_sha256(staging) != manifest.get("seal_sha256"):
-                raise FormatError("copied transfer payload seal mismatch")
-        except BaseException:
-            if moved:
-                # Never strand the user's only copy in workspace staging.
-                os.rename(staging, source)
-                _adoption_intent_path(workspace, transfer_id).unlink(missing_ok=True)
-            raise
-        target.parent.mkdir(parents=True, exist_ok=True)
-        workspace._publish_path(staging, target)
-    if workspace.durable:
-        fsync_tree(target)
-    transfer_dir = target / TRANSFER_DIRECTORY
-    embedded = transfer_dir / str(manifest["sealed_marker"])
-    prior = manifest.get("prior_state")
-    if not isinstance(prior, Mapping):
-        raise FormatError("transfer prior_state must be an object")
-    prior_kind = str(manifest["prior_kind"])
-    if prior_kind not in QUIESCENT_KINDS:
-        raise FormatError(f"transfer prior state is not quiescent: {prior_kind}")
-    generation = int(manifest["source_generation"]) + 1
-    frame: dict[str, object] = {
-        **{
-            key: value
-            for key, value in prior.items()
-            if key
-            not in {
-                "workspace_id",
-                "state_generation",
-                "kind",
-                "previous_record_ref",
-                "created_at",
-                "placement",
-                "priority",
-            }
-        },
-        "format": "httk-workflow-state",
-        "format_version": 3,
-        "workspace_id": workspace.workspace_id,
-        "job_id": manifest["job_id"],
-        "job_key": manifest["job_key"],
-        "placement": placement_text(placement),
-        "state_generation": generation,
-        "kind": prior_kind,
-        "previous_record_ref": None,
-        "created_at": utc_now(),
-        "priority": int(manifest["priority"]),
-        "transfer": {
-            "transfer_id": transfer_id,
-            **({"transfer_sequence": manifest["transfer_sequence"]} if "transfer_sequence" in manifest else {}),
-            **({"transfer_epoch": manifest["transfer_epoch"]} if "transfer_epoch" in manifest else {}),
-            "source_workspace_id": manifest["source_workspace_id"],
-            "payload_sha256": digest,
-        },
-    }
-    with workspace.open_journal_writer() as writer:
-        record_ref = writer.append(frame)
-    destination = workspace.marker_path(
-        prior_kind,
-        placement,
-        str(manifest["job_key"]),
-        int(manifest["priority"]),
-        generation,
-        record_ref,
-    )
-    embedded_marker = Marker(
-        "transferring",
-        normalize_placement(str(manifest["source_placement"])),
-        str(manifest["job_key"]),
-        int(manifest["priority"]),
-        int(manifest["source_generation"]),
-        "init",
-        embedded,
-    )
-    imported = workspace._verified_marker_rename(embedded_marker, destination)
-    if workspace.durable:
-        fsync_directory(workspace.control / "journal")
-    imported_record = {**manifest, "status": "imported", "marker": str(imported.path), "imported_at": utc_now()}
-    write_json_atomic(
-        workspace.control / "transfers" / "imported" / f"{transfer_id}.json",
-        imported_record,
-        durable=workspace.durable,
-    )
-    _remove_tree(transfer_dir)
-    # The acknowledgement is what retires a sealed source, so it carries the
-    # optional identity signature of whoever imported the bundle: the source can
-    # then say which identity claimed the payload, not merely that somebody did.
-    acknowledgement: dict[str, object] = sign_document(
-        {
-            "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 3,
-            "transfer_id": transfer_id,
-            "source_workspace_id": manifest["source_workspace_id"],
-            "destination_workspace_id": workspace.workspace_id,
-            "payload_sha256": digest,
-            "job_id": manifest["job_id"],
-            "job_key": manifest["job_key"],
-            "placement": placement_text(placement),
-            "state": prior_kind,
-            "acknowledged_at": utc_now(),
-        }
-    )
-    write_json_atomic(acknowledgement_path, acknowledgement, durable=workspace.durable)
-    _adoption_intent_path(workspace, transfer_id).unlink(missing_ok=True)
-    return acknowledgement
-
-
-def _acknowledge_arrival(
-    workspace: Workspace, marker: Marker, transfer_id: str, source_workspace_id: str, digest: str
-) -> dict[str, object]:
-    """Finish an import whose job is already live here: drop its envelope, write its acknowledgement."""
-
-    acknowledgement: dict[str, object] = sign_document(
-        {
-            "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 3,
-            "transfer_id": transfer_id,
-            "source_workspace_id": source_workspace_id,
-            "destination_workspace_id": workspace.workspace_id,
-            "payload_sha256": digest,
-            "job_id": marker.job_id,
-            "job_key": marker.job_key,
-            "placement": placement_text(marker.placement),
-            "state": marker.kind,
-            "acknowledged_at": utc_now(),
-        }
-    )
-    transfer_dir = workspace.payload_path(marker.placement, marker.job_key) / TRANSFER_DIRECTORY
-    if transfer_dir.exists():
-        _remove_tree(transfer_dir)
-    write_json_atomic(_ack_path(workspace, transfer_id), acknowledgement, durable=workspace.durable)
-    _adoption_intent_path(workspace, transfer_id).unlink(missing_ok=True)
-    return acknowledgement
-
-
-def _staging_path(workspace: Workspace, transfer_id: str) -> Path:
-    return workspace.control / "tmp" / f"import.{transfer_id}"
-
-
-def _adoption_intent_path(workspace: Workspace, transfer_id: str) -> Path:
-    return workspace.control / "transfers" / "adopting" / f"{transfer_id}.json"
-
-
-def _finish_interrupted_adoptions(workspace: Workspace) -> None:
-    """Finish every import an interrupted adoption already moved into the workspace.
-
-    A moving import takes the job out of its directory before publishing it, so
-    the directory can no longer resume it; the intent record says where the job
-    is instead: in its staging entry, or at its payload path, still to be
-    published, or already live by this transfer with only its envelope and
-    acknowledgement left to settle. An intent is dropped only once none of these
-    holds, which means the adoption never moved anything.
-
-    :param workspace: The adopting workspace.
-    """
-
-    directory = workspace.control / "transfers" / "adopting"
-    for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
-        transfer_id = path.stem
-        if not _ack_path(workspace, transfer_id).is_file():
-            intent = read_json(path)
-            placement = normalize_placement(str(intent["placement"]))
-            staging = _staging_path(workspace, transfer_id)
-            candidates = (staging, workspace.payload_path(placement, str(intent["job_key"])))
-            held = next((item for item in candidates if _holds_bundle(item, transfer_id)), None)
-            arrival = _arrival(workspace, str(intent["job_id"]))
-            try:
-                if held is not None:
-                    _refuse_unsafe_entries(held)
-                    _import_bundle(workspace, held, placement=placement)
-                elif arrival is not None and arrival[1].get("transfer_id") == transfer_id:
-                    marker, provenance = arrival
-                    _acknowledge_arrival(
-                        workspace,
-                        marker,
-                        transfer_id,
-                        str(provenance["source_workspace_id"]),
-                        str(provenance["payload_sha256"]),
-                    )
-                elif staging.exists():
-                    raise FormatError(f"staged entry {staging} does not verify")
-                else:
-                    path.unlink(missing_ok=True)
-                    continue
-            except (WorkflowError, OSError, ValueError) as exc:
-                _LOGGER.warning(
-                    "cannot finish adopting job %s: %s",
-                    intent["job_key"],
-                    exc,
-                    extra={"event": "adopt_pending", "transfer_id": transfer_id},
-                )
-                continue
-            _LOGGER.info("finished an interrupted adoption of job %s", intent["job_key"])
-        path.unlink(missing_ok=True)
-
-
-def _retired_journal_refs(workspace: Workspace, ledger: Mapping[str, Any]) -> list[str]:
-    """Remember one reference per source-chain segment before reclaiming any.
-
-    Persisting these in the retired ledger lets a retry finish collection even
-    if a crash already removed the segment linking to older source history.
-    """
-
-    references: dict[tuple[str, int], str] = {}
-    reference = str(ledger.get("sealed_marker", "init")).rsplit(".", 1)[-1]
-    for current, frame in iter_record_chain(workspace.control, reference, deadline_seconds=0):
-        if frame is None:
-            break
-        writer_id, segment, *_ = parse_record_ref(current)
-        references[(writer_id, segment)] = current
-    return list(references.values())
-
-
-def _reclaim_retired_transfer(workspace: Workspace, ledger: Mapping[str, Any]) -> None:
-    """Reclaim only after the retired ledger is published; retries are safe."""
-
-    if workspace.policy.retention.trash_days is None:
-        return
-    retired = Path(str(ledger["retired_bundle"]))
-    if retired.exists():
-        _remove_tree(retired)
-    try:
-        retired.parent.rmdir()
-    except OSError:
-        pass
-
-
-def _remember_pending_journal(
-    workspace: Workspace, references: Sequence[str], *, transfer_id: str | None = None
-) -> None:
-    """Keep shared-segment recovery once per segment, never once per job."""
-
-    from .gc import collect_retired_journal
-    from .journal import segment_path
-
-    path = workspace.control / "transfers" / "protocol" / "journal.json"
-    pending = read_json(path) if path.exists() else {}
-    for reference in references:
-        writer, segment, *_ = parse_record_ref(reference)
-        pending[f"{writer}/{segment}"] = reference
-    if not pending:
-        return
-    # Inventory publication precedes removal of the last per-job ledger. A
-    # killed collector can always retry from this shared recovery inventory.
-    write_json_atomic(path, pending, durable=workspace.durable)
-    collect_retired_journal(workspace, list(pending.values()), transfer_id=transfer_id)
-    if workspace.durable:
-        for reference in pending.values():
-            directory = segment_path(workspace.control, *parse_record_ref(reference)[:2]).parent
-            if directory.exists():
-                fsync_directory(directory)
-        fsync_directory(workspace.control / "journal")
-        retired_root = workspace.control / "transfers" / "retired"
-        if retired_root.exists():
-            fsync_directory(retired_root)
-    pending = {
-        key: ref for key, ref in pending.items() if segment_path(workspace.control, *parse_record_ref(ref)[:2]).exists()
-    }
-    if pending:
-        write_json_atomic(path, pending, durable=workspace.durable)
-    else:
-        path.unlink(missing_ok=True)
-        if workspace.durable:
-            fsync_directory(path.parent)
-
-
-def _retire_sealed_bundle(
-    workspace: Workspace,
-    transfer_id: str,
-    *,
-    provenance: Mapping[str, object],
-    moved_out: bool = False,
-) -> Path:
-    """Atomically retire a sealed source, then reclaim its redundant history.
-
-    The whole bundle is renamed before the retired ledger is durably written.
-    Only then may deletion begin: interrupted deletion leaves a retired source,
-    never a partially live bundle. Repeating retirement finishes cleanup. The
-    returned path identifies the retired bundle even after its bytes are gone.
-    An ejected bundle (*moved_out*) has already left the workspace as the job
-    itself, so no retired copy is kept.
-    """
-
-    ledger_path = _ledger_path(workspace, transfer_id)
-    if not ledger_path.exists():
-        return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
-    ledger = read_json(ledger_path)
-    if ledger.get("destination_workspace_id") is not None:
-        receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
-    elif ledger.get("status") != "retired" and not moved_out:
-        # An ejected bundle is the job itself, not a copy some destination holds.
-        raise WorkspaceCorruptionError(f"refusing to retire ejection {transfer_id} whose job has not left")
-    if ledger.get("status") != "retired":
-        bundle = Path(str(ledger["bundle"]))
-        retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
-        if moved_out:
-            if bundle.exists():
-                raise WorkspaceCorruptionError(f"ejected bundle is still inside the workspace: {bundle}")
-        elif retired.exists():
-            if bundle.exists():
-                raise WorkspaceCorruptionError("both active and retired source bundles exist")
-        else:
-            validate_bundle(bundle)
-            retired.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(bundle, retired)
-        if workspace.durable and not moved_out:
-            # Persist both sides of the rename and the newly created parents
-            # before a ledger can durably declare the source retired.
-            for directory in (bundle.parent, retired.parent, retired.parent.parent):
-                fsync_directory(directory)
-        ledger.update(
-            {
-                "status": "retired",
-                "retired_bundle": str(retired),
-                "retired_journal_refs": _retired_journal_refs(workspace, ledger),
-                "updated_at": utc_now(),
-                **provenance,
-            }
+        txn = found[1]
+        outcome = settle(workspace, txn.transfer_id, force=True)
+        bundle = outgoing_path(workspace, txn.transfer_id)
+        # A deferred abort ("pending") leaves the bundle deliverable until its window passes.
+        if outcome in {"committed", "pending"} and os.path.lexists(bundle):
+            return bundle
+        raise ValueError(f"transfer {txn.transfer_id} of {marker.job_key} could not be resumed ({outcome})")
+    if transfer_id is not None:
+        raise ValueError(
+            f"transfer {transfer_id} names no transfer of job {job_id} to resume; a new transfer mints its own id"
         )
-        write_json_atomic(ledger_path, ledger, durable=workspace.durable)
-    elif "retired_journal_refs" not in ledger:
-        # Older retired ledgers predate eager cleanup; inventory their history
-        # before a retry can remove the links needed to find it.
-        ledger["retired_journal_refs"] = _retired_journal_refs(workspace, ledger)
-        write_json_atomic(ledger_path, ledger, durable=workspace.durable)
-    _reclaim_retired_transfer(workspace, ledger)
-    if workspace.policy.retention.trash_days is not None:
-        _remember_pending_journal(workspace, ledger.get("retired_journal_refs", []), transfer_id=transfer_id)
-        ledger_path.unlink(missing_ok=True)
-        if workspace.durable:
-            fsync_directory(ledger_path.parent)
-    return Path(str(ledger["retired_bundle"]))
+    return seal(
+        workspace,
+        marker,
+        Commit("outgoing"),
+        destination_workspace_id=destination_id,
+        destination_remote=destination_remote,
+        destination_placement=destination_placement,
+        waiting_parent_map=waiting_parent_map,
+        with_tree=with_tree,
+        reason="detached_transfer",
+    )
 
 
-@receipts.serialized
+def _ack_matches(manifest: Mapping[str, Any], acknowledgement: Mapping[str, object]) -> None:
+    for name in ("source_workspace_id", "destination_workspace_id", "payload_sha256", "job_id", "job_key"):
+        if acknowledgement.get(name) != manifest.get(name):
+            raise FormatError(f"transfer acknowledgement disagrees on {name}")
+
+
 def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
-    """Validate one destination receipt and retire its exact source transfer."""
+    """Validate one destination acknowledgement and retire its addressed bundle.
 
-    return _acknowledge_transfer(workspace, acknowledgement)
-
-
-@receipts.serialized
-def acknowledge_transfers(workspace: Workspace, acknowledgements: Sequence[Mapping[str, object]]) -> list[Path]:
-    """Retire a sweep using one journal-protection scan, rather than one per job."""
-
-    from .gc import retirement_batch
-
-    with retirement_batch(workspace):
-        return [_acknowledge_transfer(workspace, acknowledgement) for acknowledgement in acknowledgements]
-
-
-def _acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
-    """Validate an acknowledgement and retire the sealed source bundle.
-
-    An acknowledgement that carries an identity signature must carry a valid
-    one: retiring a source is irreversible enough that a damaged or forged
-    attribution is refused rather than recorded. An acknowledgement with no
-    signature is accepted exactly as before, so a destination without an
-    identity key keeps working.
+    The acknowledgement is checked against the bundle's own manifest
+    (``transfers/outgoing/<T>/.httk-transfer/manifest.json``); then the bundle is
+    renamed to ``transfers/retired/<T>``, and only after that positive result
+    the root marker is removed and the transaction directory trashed. An
+    acknowledgement whose bundle is in neither place is a repeat of one long
+    retired, unless the job is still here: then the transfer was reclaimed (or
+    is being reclaimed) and the destination holds a copy as well, which is
+    reported as in doubt and never as a retirement. An acknowledgement that
+    carries an identity signature must carry a valid one.
 
     :param workspace: Provide the source workspace.
     :param acknowledgement: Supply the destination acknowledgement.
-    :return: The retired source bundle identity path (normally already removed).
+    :return: The retired bundle path ``transfers/retired/<T>`` (which may already be collected).
     :raises httk.workflow.errors.FormatError: If the acknowledgement format, signature, or identity is invalid.
+    :raises ValueError: If the transfer was reclaimed here, so the job may now exist in both workspaces.
     """
 
     if acknowledgement.get("format") != "httk-workflow-transfer-acknowledgement":
@@ -1618,26 +361,12 @@ def _acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, ob
     if signature.present and not signature.valid:
         raise FormatError(f"transfer acknowledgement signature is invalid: {signature.reason}")
     transfer_id = canonical_uuid(acknowledgement.get("transfer_id"), "transfer_id")
-    ledger_path = _ledger_path(workspace, transfer_id)
-    if not ledger_path.exists():
-        # No ledger is also the terminal state after successful reclamation.
-        # Do not inspect or mutate a newer incarnation of the same job.
-        return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
-    ledger = read_json(ledger_path)
-    if "transfer_sequence" in acknowledgement and acknowledgement["transfer_sequence"] != ledger.get(
-        "transfer_sequence"
-    ):
-        raise FormatError("transfer acknowledgement disagrees on transfer_sequence")
-    for name in (
-        "source_workspace_id",
-        "destination_workspace_id",
-        "payload_sha256",
-        "job_id",
-        "job_key",
-        "transfer_epoch",
-    ):
-        if acknowledgement.get(name) != ledger.get(name):
-            raise FormatError(f"transfer acknowledgement disagrees on {name}")
+    outgoing = outgoing_path(workspace, transfer_id)
+    retired = retired_path(workspace, transfer_id)
+    held = outgoing if os.path.lexists(outgoing) else retired if os.path.lexists(retired) else None
+    if held is None:
+        return _unretired(workspace, transfer_id, acknowledgement)
+    _ack_matches(_read_manifest(held), acknowledgement)
     if signature.present:
         _LOGGER.info(
             "transfer %s was acknowledged by %s",
@@ -1645,222 +374,288 @@ def _acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, ob
             signature.operator_key,
             extra={"event": "transfer_ack_verified", "transfer_id": transfer_id},
         )
-    return _retire_sealed_bundle(workspace, transfer_id, provenance={"acknowledgement": dict(acknowledgement)})
+    fenced = fenced_under(workspace, transfer_id)
+    if fenced.root is None:
+        if held == retired:
+            # Retired and its marker removed, but the clean-up after it was interrupted.
+            _txn.trash(
+                eject_directory(workspace, transfer_id), control=workspace.control, holds_payload=_txn.holds_job_payload
+            )
+        return retired
+    if retire(workspace, Transaction.from_root(*fenced.root)) is None:
+        return _unretired(workspace, transfer_id, acknowledgement)
+    return retired
 
 
-def _sealed_bundle_candidates(workspace: Workspace) -> list[Path]:
-    """Return every job directory of the workspace that carries a transfer manifest.
+def _unretired(workspace: Workspace, transfer_id: str, acknowledgement: Mapping[str, object]) -> Path:
+    """An acknowledgement whose bundle is neither outgoing nor retired: long retired, or reclaimed (in doubt)."""
 
-    A sealed bundle in a workspace is always a job directory
-    ``jobs/<placement>/<job_key>``. The walk starts at the workspace ``jobs/`` directory (a missing one has no candidates) and
-    descends only through directories whose names do not parse as job keys
-    (placement components), to a depth of 64, skipping every
-    ``.httk-workspace`` and ``.httk-transfer``. A placement component may be an
-    operator's symlink to a directory (``project -> /scratch/project``) and is
-    followed; each directory is entered once, by device and inode, so a link
-    loop ends and an alias adds nothing, and routes without symlinks are walked
-    first, so a bundle is reported by its plain path when it has one. A job-key
-    directory must be a real directory; only its own
-    ``.httk-transfer/manifest.json`` is checked, and it is never entered. The
-    placement rule (:func:`~httk.workflow.protocol.check_job_placement`) thus
-    holds for every candidate by construction, and a manifest a job plants
-    anywhere inside its own directory is never visited. Members gathered into
-    an ejected tree root's envelope are inside that root, so they are not
-    visited either: they have left as far as this workspace is concerned.
+    retired = retired_path(workspace, transfer_id)
+    job_id = canonical_uuid(acknowledgement.get("job_id"), "job_id")
+    marker = workspace.find_marker_by_id(job_id, kinds=STATE_KINDS)
+    if marker is None or os.path.lexists(retired):
+        return retired
+    _LOGGER.warning(
+        "transfer %s was acknowledged, but job %s is still here (reclaimed): in doubt",
+        transfer_id,
+        marker.job_key,
+        extra={"event": "transfer_ack_in_doubt", "transfer_id": transfer_id, "job_key": marker.job_key},
+    )
+    raise ValueError(
+        f"transfer {transfer_id} was acknowledged by its destination, but job {marker.job_key} was reclaimed "
+        "here: it may now exist in both workspaces; it is not retired"
+    )
 
-    :param workspace: The workspace to search.
-    :return: The candidate bundle directories, in path order, one per real directory.
+
+def acknowledge_transfers(workspace: Workspace, acknowledgements: Sequence[Mapping[str, object]]) -> list[Path]:
+    """Retire every acknowledged bundle of a sweep.
+
+    :param workspace: Provide the source workspace.
+    :param acknowledgements: Supply the destination acknowledgements.
+    :return: The retired bundle paths, in order.
+    :raises httk.workflow.errors.FormatError: If an acknowledgement is invalid.
+    :raises ValueError: If a transfer was reclaimed here (in doubt), after every other one was retired.
     """
 
-    try:
-        root = os.stat(workspace.jobs)
-    except OSError:
-        return []
-    visited: set[tuple[int, int]] = set()
-    # Routes through no symlink are drained before any route through one, and a
-    # directory is marked visited when it is walked, so its plain route wins.
-    plain: list[tuple[Path, int, tuple[int, int]]] = [(workspace.jobs, 0, (root.st_dev, root.st_ino))]
-    linked: list[tuple[Path, int, tuple[int, int]]] = []
-    candidates: dict[str, Path] = {}
-    while plain or linked:
-        through_link = not plain
-        directory, depth, identity = plain.pop() if plain else linked.pop()
-        if identity in visited:
-            continue
-        visited.add(identity)
+    paths: list[Path] = []
+    in_doubt: list[str] = []
+    for acknowledgement in acknowledgements:
         try:
-            with os.scandir(directory) as scan:
-                entries = sorted(scan, key=lambda item: item.name)
-        except OSError:
+            paths.append(acknowledge_transfer(workspace, acknowledgement))
+        except ValueError as exc:
+            if isinstance(exc, FormatError):
+                raise
+            in_doubt.append(str(exc))
+    if in_doubt:
+        raise ValueError("; ".join(in_doubt))
+    return paths
+
+
+def retire_transfers(
+    workspace: Workspace,
+    job_ids: Sequence[str],
+    *,
+    destination_workspace_id: str | None = None,
+) -> list[dict[str, object]]:
+    """Retire the sealed addressed bundle of every named job, as an acknowledgement without a document.
+
+    A fetch retires at the source only once the destination holds the job, so
+    the identity of the job is all this side needs; naming the destination as
+    well refuses to retire a bundle that was sealed for somebody else. A job
+    with no transfer in progress any more is skipped (already retired).
+
+    :param workspace: Provide the source workspace.
+    :param job_ids: Identify the jobs whose bundles to retire.
+    :param destination_workspace_id: Restrict retirement to one destination.
+    :return: Retirement records for the named jobs.
+    :raises ValueError: If a job is live here with no addressed transfer, is being ejected, or
+        its bundle is not (or no longer) waiting in ``transfers/outgoing``.
+    """
+
+    destination_id = (
+        None if destination_workspace_id is None else canonical_uuid(destination_workspace_id, "workspace_id")
+    )
+    results: list[dict[str, object]] = []
+    for job_id in job_ids:
+        identifier = canonical_uuid(job_id, "job_id")
+        found = _transferring_root(workspace, identifier)
+        if found is not None and not found[1].addressed:
+            raise ValueError(
+                f"job {identifier} is not retirable: ejection in progress; "
+                "finish it with `httk job eject` or transfer recovery"
+            )
+        if found is None or (destination_id is not None and found[1].destination_workspace_id != destination_id):
+            if workspace.find_marker_by_id(identifier, kinds=STATE_KINDS) is not None:
+                raise ValueError(f"no detached transfer of this workspace names job: {identifier}")
             continue
-        for entry in entries:
-            if entry.name in {TRANSFER_DIRECTORY, WORKSPACE_DIRECTORY}:
-                continue
-            path = Path(entry.path)
-            try:
-                parse_job_key(entry.name)
-            except FormatError:
-                # A placement component: descend, real or symlinked, within the depth bound.
-                if depth + 1 >= _RECOVERY_MAX_DEPTH:
-                    continue
-                try:
-                    if not entry.is_dir():
-                        continue
-                    information = entry.stat()
-                    via_link = through_link or entry.is_symlink()
-                except OSError:
-                    continue
-                child = (information.st_dev, information.st_ino)
-                if child not in visited:
-                    (linked if via_link else plain).append((path, depth + 1, child))
-                continue
-            try:
-                is_job_directory = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                continue
-            if is_job_directory and os.path.lexists(path / TRANSFER_DIRECTORY / TRANSFER_MANIFEST):
-                candidates.setdefault(os.path.realpath(path), path)
-    return sorted(candidates.values())
+        marker, txn = found
+        retired = retire(workspace, txn)
+        if retired is None:
+            raise ValueError(
+                f"transfer {txn.transfer_id} of {marker.job_key} has no sealed bundle waiting in "
+                f"{outgoing_path(workspace, txn.transfer_id)}; it is not retired"
+            )
+        results.append(
+            {
+                "transfer_id": txn.transfer_id,
+                "job_id": identifier,
+                "job_key": marker.job_key,
+                "status": "retired",
+                "retired_bundle": str(retired),
+            }
+        )
+    return results
 
 
-@receipts.serialized
-def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
-    """Finish source sealing and inventory every retained bundle.
+def reclaim_transfer(workspace: Workspace, job_id: str) -> dict[str, object]:
+    """Take back an addressed transfer that was never delivered: the job returns to its placement.
 
-    Retained bundles are found by a pruned walk that never enters a job
-    directory, so a manifest planted inside one is never examined.
+    Allowed only once the bundle can no longer be accepted by any destination
+    (``sealed_at + FRESHNESS_WINDOW_NS + CLOCK_SKEW_NS`` has passed). A later
+    transfer of the job mints a new transfer id.
+
+    :param workspace: Provide the source workspace.
+    :param job_id: Identify the transferring job.
+    :return: The reclamation record.
+    :raises ValueError: If the job has no addressed transfer in progress, the window has not passed,
+        the acknowledgement retired it first, or the reclaim could not finish now.
+    """
+
+    identifier = canonical_uuid(job_id, "job_id")
+    found = _transferring_root(workspace, identifier)
+    if found is None or not found[1].addressed:
+        raise ValueError(f"job {identifier} has no addressed transfer in progress to reclaim")
+    marker, txn = found
+    outcome = reclaim(workspace, txn)
+    if outcome == "retired":
+        raise ValueError(
+            f"transfer {txn.transfer_id} of {marker.job_key} was acknowledged before it could be reclaimed; "
+            "it stays retired"
+        )
+    if outcome != "aborted":
+        raise ValueError(f"transfer {txn.transfer_id} of {marker.job_key} could not be reclaimed now ({outcome})")
+    return {"transfer_id": txn.transfer_id, "job_id": identifier, "job_key": marker.job_key, "status": "reclaimed"}
+
+
+def recover_transfers(workspace: Workspace, *, owner: str | None = None) -> list[dict[str, object]]:
+    """Recover every interrupted transfer whose owner is gone (plan 4.7).
+
+    Adoption lineages below ``tmp/`` are taken over and continued; sealing
+    transactions are settled by the phase reader; orphaned transaction
+    directories are swept. Every action is safe if a listing missed something.
+    Lineages of exchange-inbox bundles are left to the exchange pass, which
+    alone has the exchange's directories open.
 
     :param workspace: Provide the workspace whose transfers to recover.
-    :return: The recovered and retained transfer records.
+    :param owner: The recovering actor's owner token (this process when omitted).
+    :return: One record per lineage (``lineage``) or transaction (``transfer_id``) looked at.
     """
 
-    results: list[dict[str, object]] = []
-    _finish_interrupted_adoptions(workspace)
-    for ledger in _ledgers(workspace):
-        if ledger.get("status") == "retired":
-            _retire_sealed_bundle(workspace, str(ledger["transfer_id"]), provenance={})
-        elif ledger.get("destination_workspace_id") is not None:
-            receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
-    for marker in list(workspace.scan_markers(("transferring",))):
-        state = workspace.read_state(marker)
-        try:
-            bundle = _seal_transferring(workspace, marker, state)
-        except (WorkflowError, OSError, ValueError) as exc:
-            _LOGGER.warning(
-                "cannot seal transferring job %s: %s",
-                marker.job_key,
-                exc,
-                extra={"event": "transfer_seal_pending", "transfer_id": state.get("transfer_id")},
-            )
-            continue
-        results.append({"transfer_id": state["transfer_id"], "status": "sealed", "bundle": str(bundle)})
-    for bundle in _sealed_bundle_candidates(workspace):
-        try:
-            manifest = validate_bundle(bundle)
-        except (FormatError, OSError) as exc:
-            _settle_leftover_envelope(workspace, bundle, exc)
-            continue
-        ledger_path = _ledger_path(workspace, str(manifest["transfer_id"]))
-        if not ledger_path.exists() and manifest.get("destination_workspace_id") is None:
-            # An unaddressed bundle without a ledger is either this workspace's
-            # ejection, sealed just before its ledger was written (its fencing
-            # frame records where it goes), or an adoption not yet published,
-            # which its intent record resumes.
-            ejection = _ejection_frame(workspace, manifest)
-            if ejection is not None:
-                write_json_atomic(
-                    ledger_path,
-                    {**manifest, "status": "sealed", "bundle": str(bundle), **ejection, "updated_at": utc_now()},
-                    durable=workspace.durable,
-                )
-                results.append({"transfer_id": manifest["transfer_id"], "status": "sealed", "bundle": str(bundle)})
-                continue
-            _LOGGER.warning(
-                "unaddressed job bundle %s has no transfer ledger; left for adoption recovery",
-                bundle,
-                extra={"event": "transfer_envelope_unaddressed", "transfer_id": manifest["transfer_id"]},
-            )
-            continue
-        if not ledger_path.exists():
-            write_json_atomic(
-                ledger_path,
-                {**manifest, "status": "sealed", "bundle": str(bundle), "updated_at": utc_now()},
-                durable=workspace.durable,
-            )
-        results.append({"transfer_id": manifest["transfer_id"], "status": "sealed", "bundle": str(bundle)})
-    for ejected in _finish_pending_ejections(workspace):
-        results.append({"transfer_id": ejected["transfer_id"], "status": "ejected", "bundle": ejected["eject_to"]})
-    unique = {(str(item["transfer_id"]), str(item["status"])): item for item in results}
-    return list(unique.values())
+    return [*recover_lineages(workspace, owner=owner), *recover(workspace)]
 
 
-def _ejection_frame(workspace: Workspace, manifest: Mapping[str, Any]) -> dict[str, str] | None:
-    """Return the ledger-only ejection fields of a bundle this workspace sealed, if it is an ejection.
+def recover_interrupted_transfers(workspace: Workspace) -> None:
+    """Finish every transfer an interrupted earlier call left unfinished.
 
-    :param workspace: The workspace the bundle is in.
-    :param manifest: The bundle's validated manifest.
-    :return: ``{"eject_to": ...}`` from the bundle's ``transferring`` frame, or ``None``.
+    :param workspace: The workspace whose interrupted transfers to finish.
     """
 
-    if manifest.get("source_workspace_id") != workspace.workspace_id:
-        return None
-    try:
-        frame = read_record(workspace.control, str(manifest["sealed_marker"]).rsplit(".", 1)[-1], deadline_seconds=0)
-    except (WorkflowError, OSError, ValueError):
-        return None
-    if frame.get("kind") != "transferring" or frame.get("transfer_id") != manifest["transfer_id"]:
-        return None
-    if "eject_to" not in frame or frame.get("eject_root") != manifest.get("eject_root"):
-        return None
-    return {"eject_to": str(frame["eject_to"])}
+    recover_transfers(workspace)
 
 
-def _settle_leftover_envelope(workspace: Workspace, bundle: Path, problem: Exception) -> None:
-    """Handle a transfer envelope in the workspace that does not verify as a bundle.
+def _eject_commit(workspace: Workspace, target: str | os.PathLike[str], job_key: str) -> Commit:
+    """Decide where an ejection commits: the exchange outbox, a directory on this filesystem, or an export."""
 
-    An import interrupted after its marker was published leaves the envelope of a
-    job that is live here by that very transfer: it is removed and the
-    acknowledgement completed. Anything else is reported and left alone.
+    absolute = Path(os.path.abspath(Path(target).expanduser()))
+    outbox = exchange_outbox(workspace)
+    if absolute == outbox:
+        # The exchange pass names the outbox literally: nothing in client territory is resolved.
+        return Commit("exchange", name=job_key)
+    real_outbox = os.path.realpath(outbox)
+
+    def is_outbox(path: Path) -> bool:
+        return path == outbox or os.path.realpath(path) == real_outbox
+
+    if is_outbox(absolute):
+        return Commit("exchange", name=job_key)
+    if not os.path.isdir(absolute) and is_outbox(absolute.parent):
+        if absolute.name in {"", ".", ".."}:
+            raise ValueError(f"eject destination {absolute} names no entry of the exchange outbox")
+        return Commit("exchange", name=absolute.name)
+    tmp_device = os.stat(workspace.control / "tmp").st_dev
+    inbox = _inbox_target(absolute, job_key)
+    if inbox is not None and os.stat(inbox[0]).st_dev == tmp_device:
+        # A workspace's exchange inbox is client territory: the commit goes by
+        # descriptor from that workspace's root, never through a resolved path.
+        return Commit("inbox", path=inbox[0], name=inbox[1])
+    destination = _eject_destination(workspace, target, job_key)
+    return Commit("export" if os.stat(destination.parent).st_dev != tmp_device else "path", path=destination)
+
+
+def _inbox_target(absolute: Path, job_key: str) -> tuple[Path, str] | None:
+    """Return ``(workspace root, entry name)`` when *absolute* names an entry of a workspace's exchange inbox.
+
+    The decision is lexical (``<root>/exchange/inbox[/<name>]`` with a workspace
+    at ``<root>``), so a client that replaced ``exchange`` or ``inbox`` by a
+    symlink cannot turn the target into a path elsewhere: the commit then opens
+    the inbox without following it and refuses.
     """
 
-    transfer_id: str | None = None
-    arrival = None
-    try:
-        manifest = _read_manifest(bundle)
-        transfer_id = canonical_uuid(manifest.get("transfer_id"), "transfer_id")
-        arrival = _arrival(workspace, canonical_uuid(manifest.get("job_id"), "job_id"))
-    except (WorkflowError, OSError, ValueError):
-        pass
-    if transfer_id is None or arrival is None or arrival[1].get("transfer_id") != transfer_id:
-        _LOGGER.warning(
-            "transfer envelope %s does not verify and is left in place: %s",
-            bundle,
-            problem,
-            extra={"event": "transfer_envelope_invalid"},
-        )
-        return
-    marker, provenance = arrival
-    if workspace.payload_path(marker.placement, marker.job_key) != bundle:
-        _LOGGER.warning("transfer envelope %s is not at its live job's payload; left in place", bundle)
-        return
-    if _ack_path(workspace, transfer_id).is_file():
-        _remove_tree(bundle / TRANSFER_DIRECTORY)
-    else:
-        _acknowledge_arrival(
-            workspace, marker, transfer_id, str(provenance["source_workspace_id"]), str(provenance["payload_sha256"])
-        )
+    entry = absolute / job_key if absolute.name == "inbox" else absolute
+    box = entry.parent
+    if entry.name in {"", ".", ".."} or box.name != "inbox" or box.parent.name != EXCHANGE_DIRECTORY:
+        return None
+    if os.path.lexists(entry):
+        return None  # an existing entry: resolved like any other target (and refused)
+    root = box.parent.parent
+    if not (root / WORKSPACE_DIRECTORY / "format.json").is_file():
+        return None
+    return root.resolve(), entry.name
+
+
+def eject_job(
+    workspace: Workspace,
+    job_id: str,
+    target: str | os.PathLike[str],
+    *,
+    marker: Marker | None = None,
+    owner: str | None = None,
+    waiting_parent_map: Mapping[str, set[str]] | None = None,
+) -> Path:
+    """Move one quiescent job out of its workspace to a free-standing job directory.
+
+    The job is sealed as a bundle addressed to no workspace and moved to
+    *target* by one rename; the workspace keeps no copy. The directory is the
+    whole job: its payload, seal, tree metadata, prior state, and any shared
+    runner it pins. A job with bound children takes its whole tree along: every
+    descendant, each of which must be paused or terminal, is carried in the
+    directory under ``.httk-transfer/tree/<placement>/<job_key>``. A target on
+    another filesystem is an *export*: the bundle is held below
+    ``transfers/exports/<T>`` and copied out (``httk job eject --resume`` retries a
+    copy-out that did not finish). Interrupted transfers whose owner is gone are
+    recovered first.
+
+    :param workspace: The workspace the job leaves.
+    :param job_id: The job to eject.
+    :param target: The new job directory, or an existing directory to eject into.
+    :param marker: The already resolved job marker, when available.
+    :param owner: The owner token recorded for the transaction (this process when omitted).
+    :param waiting_parent_map: A precomputed child-to-parent map of the waiting joins.
+    :return: The free-standing job directory.
+    :raises ValueError: If the job or its tree cannot leave its workspace or the target is unusable.
+    :raises FileExistsError: If the target job directory already exists.
+    :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+    :raises httk.workflow.errors.FormatError: If the job or a tree member sits at a placement naming
+        a job directory (:func:`~httk.workflow.protocol.check_job_placement`).
+    """
+
+    recover_transfers(workspace, owner=owner)
+    if marker is None:
+        marker = workspace.find_marker_by_id(job_id, kinds=STATE_KINDS)
+        if marker is None:
+            raise ValueError(f"no job {job_id} in this workspace")
+    commit = _eject_commit(workspace, target, marker.job_key)
+    location = seal(workspace, marker, commit, owner=owner, reason="ejected", waiting_parent_map=waiting_parent_map)
+    if commit.kind == "export":
+        return copy_out(workspace, location.parent.name, owner=owner)
+    return location
+
+
+def resume_exports(workspace: Workspace, *, owner: str | None = None) -> list[Path]:
+    """Re-run every pending export copy-out: held exports, and copy-outs whose owner is gone.
+
+    :param workspace: The workspace the jobs left.
+    :param owner: The owner token (this process when omitted).
+    :return: The destinations that now hold their job.
+    """
+
+    recover_transfers(workspace)
+    return resume_copy_outs(workspace, owner=owner)
 
 
 # ---------------------------------------------------------------------------
 # Offering finished work back to whoever sent it
 # ---------------------------------------------------------------------------
-
-
-def _ledgers(workspace: Workspace) -> list[dict[str, Any]]:
-    """Read every transfer ledger of *workspace*, in a stable order."""
-
-    directory = workspace.control / "transfers"
-    return [read_json(path) for path in sorted(directory.glob("*.json"))] if directory.is_dir() else []
 
 
 def _offer_record(ledger: Mapping[str, Any], bundle: Path, tree_root: str | None = None) -> dict[str, object]:
@@ -1929,23 +724,23 @@ def select_transfer_jobs(
     candidates: list[TransferCandidate] = []
     offered_jobs: set[str] = set()
     parent_map = waiting_parent_map if waiting_parent_map is not None else _waiting_parent_map(workspace)
-    for ledger in _ledgers(workspace):
-        if ledger.get("status") != "sealed" or ledger.get("destination_workspace_id") != destination_id:
+    for root_marker, root_frame, txn in pending_outgoing(workspace):
+        if txn.destination_workspace_id != destination_id:
             continue
-        if (
-            destination_remote is not None
-            and ledger.get("destination_remote", destination_remote) != destination_remote
-        ):
+        if destination_remote is not None and txn.destination_remote not in (None, destination_remote):
             continue
-        if ledger.get("prior_kind") not in kinds or str(ledger["job_id"]) in offered_jobs:
+        prior_kind = str(root_frame.get("prior_kind"))
+        if prior_kind not in kinds or root_marker.job_id in offered_jobs:
             continue
-        if selected_ids is not None and str(ledger["job_id"]) not in selected_ids:
+        if selected_ids is not None and root_marker.job_id not in selected_ids:
             continue
-        source_placement = normalize_placement(str(ledger["source_placement"]))
-        if prefix is not None and source_placement.parts[: len(prefix)] != prefix:
+        if prefix is not None and root_marker.placement.parts[: len(prefix)] != prefix:
             continue
-        bundle = Path(str(ledger["bundle"]))
-        if not bundle.is_dir():
+        bundle = outgoing_path(workspace, txn.transfer_id)
+        if not bundle.is_dir() or bundle.is_symlink():
+            # Not committed (yet): its owner, or recovery once the owner is gone,
+            # finishes it; until then it is not offered, and an explicit request for
+            # the job reports the sealed bundle as unavailable.
             continue
         manifest: Mapping[str, Any] | None = None
         problem: str | None = None
@@ -1954,39 +749,27 @@ def select_transfer_jobs(
         except (FormatError, OSError) as exc:
             problem = str(exc)
         if manifest is not None:
-            for field in (
-                "transfer_id",
-                "source_workspace_id",
-                "destination_workspace_id",
-                "job_id",
-                "job_key",
-                "source_placement",
-                "destination_placement",
-                "prior_kind",
+            for field, expected in (
+                ("transfer_id", txn.transfer_id),
+                ("destination_workspace_id", txn.destination_workspace_id),
+                ("job_id", root_marker.job_id),
+                ("job_key", root_marker.job_key),
+                ("prior_kind", prior_kind),
             ):
-                if field in ledger and manifest.get(field) != ledger[field]:
-                    problem = f"sealed transfer manifest disagrees with its ledger on {field}"
+                if manifest.get(field) != expected:
+                    problem = f"sealed transfer manifest disagrees with its transfer on {field}"
                     break
         try:
             job = JobDefinition.from_path(bundle / "job.json")
         except (WorkflowError, OSError) as exc:
             job = None
             problem = str(exc)
-        record = manifest if manifest is not None else ledger
-        candidate_job_id = str(record.get("job_id", ledger["job_id"]))
-        candidate_job_key = str(record.get("job_key", ledger["job_key"]))
-        try:
-            candidate_placement = normalize_placement(str(record.get("source_placement", ledger["source_placement"])))
-        except ValueError as exc:
-            candidate_placement = source_placement
-            problem = str(exc)
-        candidate_kind = str(record.get("prior_kind", ledger["prior_kind"]))
         candidates.append(
             TransferCandidate(
-                candidate_job_id,
-                candidate_job_key,
-                candidate_kind,
-                candidate_placement,
+                root_marker.job_id,
+                root_marker.job_key,
+                prior_kind,
+                root_marker.placement,
                 bundle,
                 None,
                 job,
@@ -1994,16 +777,19 @@ def select_transfer_jobs(
                 problem,
             )
         )
-        offered_jobs.add(str(ledger["job_id"]))
+        offered_jobs.add(root_marker.job_id)
     for marker in marker_source:
         if selected_ids is not None and marker.job_id not in selected_ids:
             continue
         prior_kind = marker.kind
         if marker.kind == "transferring":
             state = workspace.read_state(marker)
-            if state.get("destination_workspace_id") != destination_id:
+            outgoing = state.get("outgoing")
+            if not isinstance(outgoing, Mapping) or outgoing.get("role") != "root":
                 continue
-            if state.get("destination_remote") != destination_remote:
+            if outgoing.get("destination_workspace_id") != destination_id:
+                continue
+            if outgoing.get("destination_remote") != destination_remote:
                 continue
             if state.get("prior_kind") not in kinds:
                 continue
@@ -2042,9 +828,9 @@ def _with_descendants(
 
     A selected root reaches its members through the spawn records in its payload,
     live or already sealed, so re-running an interrupted tree transfer picks up
-    every member the interruption left behind: sealed ones through their ledgers,
-    live ones through their markers. Roots are located among *markers*, the ones
-    the selection scans anyway, so widening adds no workspace scan.
+    every member the interruption left behind: sealed ones in their outgoing
+    bundles, live ones at their placements. Roots are located among *markers*,
+    the ones the selection scans anyway, and the pending outgoing transfers.
 
     :param workspace: The source workspace.
     :param job_ids: The explicitly requested job ids.
@@ -2055,21 +841,29 @@ def _with_descendants(
     widened = set(job_ids)
     root_of: dict[str, str] = {}
     live = {marker.job_id: marker for marker in markers if marker.job_id in job_ids}
-    sealed = {
-        str(ledger.get("job_id")): ledger
-        for ledger in _ledgers(workspace)
-        if ledger.get("status") == "sealed" and str(ledger.get("job_id")) in job_ids
-    }
+    sealed: dict[str, Path] = {}
+    sealed_by_key: dict[str, Path] = {}
+    for marker, _frame, txn in pending_outgoing(workspace):
+        bundle = outgoing_path(workspace, txn.transfer_id)
+        if bundle.is_dir():
+            sealed[marker.job_id] = bundle
+            sealed_by_key[marker.job_key] = bundle
+
+    def locate(placement: PurePosixPath, job_key: str) -> Path:
+        home = workspace.payload_path(placement, job_key)
+        return home if home.is_dir() or job_key not in sealed_by_key else sealed_by_key[job_key]
+
     for job_id in sorted(job_ids):
-        bundle = sealed.get(job_id, {}).get("bundle")
-        if isinstance(bundle, str):
-            payload = Path(bundle)
+        if job_id in sealed:
+            payload = sealed[job_id]
         elif job_id in live:
             payload = workspace.payload_path(live[job_id].placement, live[job_id].job_key)
         else:
             continue
         try:
-            descendants = descendant_ids(workspace, payload, JobDefinition.from_path(payload / "job.json"))
+            descendants = descendant_ids(
+                workspace, payload, JobDefinition.from_path(payload / "job.json"), locate=locate
+            )
         except (WorkflowError, OSError):
             continue
         for descendant in descendants - job_ids:
@@ -2232,7 +1026,11 @@ def _offer_selection_errors(
         return {}
     prefix = None if placement is None else normalize_placement(placement).parts
     reasons: dict[str, str] = {}
-    ledgers = _ledgers(workspace)
+    sealed_roots = {
+        marker.job_id: (marker, frame)
+        for marker, frame, txn in pending_outgoing(workspace)
+        if txn.destination_workspace_id == destination_workspace_id
+    }
     for job_id in sorted(missing):
         marker = workspace.find_marker_by_id(job_id)
         if marker is not None:
@@ -2247,20 +1045,11 @@ def _offer_selection_errors(
             else:
                 reasons[job_id] = "not eligible for offering"
             continue
-        sealed = [
-            ledger
-            for ledger in ledgers
-            if ledger.get("status") == "sealed"
-            and ledger.get("destination_workspace_id") == destination_workspace_id
-            and str(ledger.get("job_id")) == job_id
-        ]
-        if sealed:
-            ledger = sealed[0]
-            if ledger.get("prior_kind") not in states:
-                reasons[job_id] = f"filtered by state (state: {ledger.get('prior_kind')})"
-            elif prefix is not None and (
-                normalize_placement(str(ledger["source_placement"])).parts[: len(prefix)] != prefix
-            ):
+        if job_id in sealed_roots:
+            sealed_marker, sealed_frame = sealed_roots[job_id]
+            if sealed_frame.get("prior_kind") not in states:
+                reasons[job_id] = f"filtered by state (state: {sealed_frame.get('prior_kind')})"
+            elif prefix is not None and sealed_marker.placement.parts[: len(prefix)] != prefix:
                 reasons[job_id] = "filtered by placement"
             else:
                 reasons[job_id] = "sealed bundle is unavailable"
@@ -2414,113 +1203,9 @@ def offer_transfers(
     return sorted(offers.values(), key=lambda item: (str(item["placement"]), str(item["job_key"])))
 
 
-@receipts.serialized
-def retire_transfers(
-    workspace: Workspace,
-    job_ids: Sequence[str],
-    *,
-    destination_workspace_id: str | None = None,
-) -> list[dict[str, object]]:
-    """Retire the sealed source bundle of every named job.
-
-    A fetch retires at the source only once the destination holds an
-    acknowledgement, so the identity of the job is all this side needs; naming
-    the destination as well refuses to retire a bundle that was sealed for
-    somebody else. Retirement renames the bundle, publishes its retired ledger,
-    then reclaims the bundle and unprotected source journal segments unless
-    retention says to keep them. Repeated retirement also retries cleanup.
-
-    :param workspace: Provide the source workspace.
-    :param job_ids: Identify the jobs whose bundles to retire.
-    :param destination_workspace_id: Restrict retirement to one destination.
-    :return: Retirement records for the named jobs.
-    :raises ValueError: If a job id has no matching detached transfer, or is being ejected.
-    """
-
-    destination_id = (
-        None if destination_workspace_id is None else canonical_uuid(destination_workspace_id, "workspace_id")
-    )
-    ledgers = _ledgers(workspace)
-    results: list[dict[str, object]] = []
-    for job_id in job_ids:
-        identifier = canonical_uuid(job_id, "job_id")
-        named = [ledger for ledger in ledgers if ledger.get("job_id") == identifier]
-        # An ejection is never retired by name: its bundle is the job itself
-        # until the ejection has moved it out.
-        matches = [
-            ledger
-            for ledger in named
-            if ledger.get("destination_workspace_id") is not None
-            and (destination_id is None or ledger.get("destination_workspace_id") == destination_id)
-        ]
-        if not matches and any(
-            ledger.get("destination_workspace_id") is None and ledger.get("status") != "retired" for ledger in named
-        ):
-            raise ValueError(
-                f"job {identifier} is not retirable: ejection in progress; "
-                "finish it with `httk job eject` or transfer recovery"
-            )
-        if not matches:
-            if workspace.find_marker_by_id(identifier) is not None:
-                raise ValueError(f"no detached transfer of this workspace names job: {identifier}")
-            continue
-        live = [ledger for ledger in matches if ledger.get("status") != "retired"]
-        if len(live) > 1:
-            raise WorkspaceCorruptionError(f"job {identifier} has several sealed transfers to retire")
-        ledger = live[0] if live else matches[-1]
-        transfer_id = str(ledger["transfer_id"])
-        retired = _retire_sealed_bundle(workspace, transfer_id, provenance={"retired_by": "fetch"})
-        results.append(
-            {
-                "transfer_id": transfer_id,
-                "job_id": identifier,
-                "job_key": str(ledger["job_key"]),
-                "status": "retired",
-                "retired_bundle": str(retired),
-            }
-        )
-    return results
-
-
-def discard_staged_bundle(workspace: Workspace, staging: Path) -> None:
-    """Drop a staged incoming bundle whose payload the workspace now owns.
-
-    The staging tree is renamed out of the incoming directory before it is
-    removed, so an interrupted removal can never leave a partial bundle where a
-    resumed fetch would find one and mistake it for the real thing.
-
-    :param workspace: Provide the workspace owning the staging directory.
-    :param staging: Locate the staged bundle to discard.
-    """
-
-    if not staging.exists():
-        return
-    consumed = workspace.control / "tmp" / f"consumed.{staging.name}"
-    consumed.parent.mkdir(parents=True, exist_ok=True)
-    if consumed.exists():
-        _remove_tree(consumed)
-    os.rename(staging, consumed)
-    _remove_tree(consumed)
-
-
 # ---------------------------------------------------------------------------
 # Ejecting jobs to free-standing directories, and adopting them back
 # ---------------------------------------------------------------------------
-
-
-def exchange_staging(workspace: Workspace) -> Path:
-    """Return the workspace's exchange staging directory.
-
-    It holds ``inbox`` (bundles staged for adoption), ``outbox`` (ejected
-    bundles, ``rejected``, ``status.json``) and ``records``. The workspace root
-    is canonical and every component below it is literal, so a staging directory
-    replaced by a symlink never compares equal to a resolved path.
-
-    :param workspace: The workspace whose staging directory to locate.
-    :return: ``WORKSPACE/.httk-workspace/exchange``.
-    """
-
-    return workspace.control / "exchange"
 
 
 def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job_key: str) -> Path:
@@ -2528,9 +1213,10 @@ def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job
 
     An existing directory receives the job as ``<directory>/<job_key>``; any
     other path names the new job directory itself, whose parent must exist.
-    The result is never inside a workspace, where the directory would read as
-    that workspace's own sealed bundle, except directly inside this workspace's
-    exchange staging outbox, which the workspace daemon drains.
+    The result is never inside a workspace, except directly in a workspace's
+    exchange inbox (``WORKSPACE/exchange/inbox/<name>``), where that
+    workspace's managers adopt it; this workspace's exchange outbox is
+    resolved before this by :func:`_eject_commit`.
     """
 
     path = Path(target).expanduser()
@@ -2541,8 +1227,8 @@ def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job
         raise FileExistsError(f"eject destination already exists: {path}")
     if not path.parent.is_dir():
         raise ValueError(f"eject destination parent is not a directory: {path.parent}")
-    enclosing = None if path.parent == exchange_staging(workspace) / "outbox" else Workspace.discover(path.parent)
-    if enclosing is not None:
+    enclosing = Workspace.discover(path.parent)
+    if enclosing is not None and path.parent != enclosing / EXCHANGE_DIRECTORY / "inbox":
         relation = "this" if enclosing.resolve() == workspace.root.resolve() else "a"
         raise ValueError(
             f"eject destination {path} is inside {relation} workspace ({enclosing}); "
@@ -2551,522 +1237,209 @@ def _eject_destination(workspace: Workspace, target: str | os.PathLike[str], job
     return path
 
 
-def _holds_bundle(path: Path, transfer_id: str, payload_sha256: str | None = None) -> bool:
-    """Report whether *path* is an intact copy of exactly this sealed bundle."""
+def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
+    """Check one bundle's structure, digests and seals, and return its manifest.
 
-    try:
-        manifest = validate_bundle(path)
-    except (FormatError, OSError):
-        return False
-    return manifest.get("transfer_id") == transfer_id and payload_sha256 in (None, manifest.get("payload_sha256"))
+    These are the checks of the bundle's own content that need no importing
+    workspace; every import also checks the destination and its source's rules.
 
-
-def _move_bundle_out(
-    workspace: Workspace,
-    bundle: Path,
-    target: Path,
-    transfer_id: str,
-    digest: str,
-    tree: Sequence[Mapping[str, Any]] = (),
-) -> None:
-    """Move a sealed bundle to *target*, by rename or by verified copy.
-
-    Within one filesystem the move is a single rename. Across filesystems the
-    bundle is copied to a hidden sibling of *target*, verified (with the *tree*
-    members it carries), and renamed into place before the workspace copy is
-    removed, so an interruption leaves either the bundle in the workspace or a
-    complete copy at *target*, never neither.
+    :param bundle: The bundle (root payload) directory.
+    :return: The manifest object.
+    :raises httk.workflow.errors.FormatError: If the bundle's content is refused.
+    :raises OSError: If the bundle cannot be read.
     """
 
-    try:
-        os.rename(bundle, target)
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-    else:
-        if workspace.durable:
-            fsync_directory(target.parent)
-            fsync_directory(bundle.parent)
-        return
-    staging = target.parent / f".{target.name}.eject-{transfer_id}"
-    if staging.exists():
-        _remove_tree(staging)
-    shutil.copytree(bundle, staging, symlinks=True)
-    if not _holds_bundle(staging, transfer_id, digest) or not all(
-        _holds_bundle(_nested_member(staging, entry), str(entry["transfer_id"])) for entry in tree
-    ):
-        _remove_tree(staging)
-        raise FormatError(f"copied ejected bundle does not verify: {staging}")
-    if workspace.durable:
-        fsync_tree(staging)
-    os.rename(staging, target)
-    if workspace.durable:
-        fsync_directory(target.parent)
-    _remove_tree(bundle)
+    return check_bundle(Path(bundle)).as_mapping()
 
 
-def _nested_member(root_bundle: Path, entry: Mapping[str, Any]) -> Path:
-    """Return where an ejected tree root's directory carries one member.
+def _adopted_marker(workspace: Workspace, result: AdoptionResult, where: Path) -> Marker:
+    """Turn one adoption result into the adopted root's marker, or raise what stopped it."""
 
-    :param root_bundle: The root's bundle directory.
-    :param entry: The member's ``eject_tree`` entry.
-    :return: The member's bundle directory inside the root's transfer envelope.
-    :raises httk.workflow.errors.FormatError: If the entry's placement or job key is unsafe.
-    """
-
-    job_key = str(entry.get("job_key"))
-    if parse_job_key(job_key)[1] != entry.get("job_id"):
-        raise FormatError(f"ejected tree entry names the job key of another job: {job_key}")
-    placement = normalize_placement(str(entry.get("placement")))
-    return root_bundle / TRANSFER_DIRECTORY / _EJECTED_TREE / Path(*placement.parts) / job_key
-
-
-def _ejected_tree(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """Return the member entries an ejected job's manifest lists (none for a single job)."""
-
-    tree = manifest.get("eject_tree") or []
-    if not isinstance(tree, list) or not all(isinstance(entry, Mapping) for entry in tree):
-        raise FormatError("ejected job directory has a malformed eject_tree")
-    return tree
-
-
-def _gather_tree(workspace: Workspace, root: Mapping[str, Any]) -> None:
-    """Fence every member of an ejected tree and move it into its root's directory.
-
-    Members are handled top-down under the transfer ids the root reserved for
-    them, so a resumed call finds each one wherever an interruption left it:
-    still live (it is fenced now), sealed in the workspace (it is moved), or
-    already inside the root's directory (only its retirement remains). The root
-    is still in the workspace throughout, so the nested targets are too.
-    """
-
-    root_id = str(root["transfer_id"])
-    root_bundle = Path(str(root["bundle"]))
-    waiting: dict[str, set[str]] | None = None
-    for entry in _ejected_tree(root):
-        job_id, job_key = str(entry["job_id"]), str(entry["job_key"])
-        member_id = canonical_uuid(entry.get("transfer_id"), "transfer_id")
-        nested = _nested_member(root_bundle, entry)
-        ledger_path = _ledger_path(workspace, member_id)
-        if not ledger_path.is_file():
-            marker = workspace.find_marker_by_id(job_id)
-            if marker is None:
-                if root_bundle.exists() and not _holds_bundle(nested, member_id):
-                    raise WorkspaceCorruptionError(
-                        f"ejected tree member {job_key} is neither in the workspace nor in its root's directory"
-                    )
-                continue  # it is inside the root's directory and already retired
-            if waiting is None:
-                waiting = _waiting_parent_map(workspace)
-            try:
-                _detach_job(
-                    workspace,
-                    job_id,
-                    marker=marker,
-                    waiting_parent_map=waiting,
-                    destination_workspace_id=None,
-                    transfer_id=member_id,
-                    with_tree=True,
-                    eject_to=nested,
-                    eject_root=root_id,
-                )
-            except ValueError as exc:
-                raise ValueError(
-                    f"tree member {job_key} cannot leave now ({exc}); its root stays sealed, and the "
-                    "ejection resumes once it can (`httk job eject` again, or any command that recovers transfers)"
-                ) from exc
-        member = read_json(ledger_path)
-        if member.get("job_id") != job_id or member.get("eject_root") != root_id:
-            raise WorkspaceCorruptionError(f"transfer ledger {member_id} is not the ejected tree member {job_key}")
-        member_bundle = Path(str(member["bundle"]))
-        if member.get("status") != "retired" and member_bundle.exists():
-            if not root_bundle.is_dir():
-                raise WorkspaceCorruptionError(f"ejected tree root left without its member {job_key}")
-            digest = str(member["payload_sha256"])
-            if _holds_bundle(nested, member_id, digest):
-                _remove_tree(member_bundle)
-            else:
-                created = [parent for parent in nested.parents if not parent.exists()]
-                nested.parent.mkdir(parents=True, exist_ok=True)
-                if workspace.durable:
-                    for directory in created:
-                        fsync_directory(directory.parent)
-                _move_bundle_out(workspace, member_bundle, nested, member_id, digest)
-        _retire_sealed_bundle(workspace, member_id, provenance={"ejected_into": root_id}, moved_out=True)
-
-
-def _finish_ejection(workspace: Workspace, ledger: Mapping[str, Any]) -> Path:
-    """Move one sealed, unaddressed bundle to its recorded target and retire it.
-
-    Every step is resumable from the ledger alone: the bundle is still in the
-    workspace and is moved, or a complete copy is already at the target and the
-    leftover workspace copy is dropped, or the bundle has left and only the
-    retirement remains. A tree root first gathers its members into its own
-    directory, so the whole tree leaves in one move.
-    """
-
-    transfer_id = str(ledger["transfer_id"])
-    digest = str(ledger["payload_sha256"])
-    bundle = Path(str(ledger["bundle"]))
-    target = Path(str(ledger["eject_to"]))
-    tree = _ejected_tree(ledger)
-    if tree:
-        _gather_tree(workspace, ledger)
-    if bundle.exists():
-        if _holds_bundle(target, transfer_id, digest):
-            _remove_tree(bundle)
-        elif target.exists() or target.is_symlink():
-            raise FileExistsError(
-                f"eject destination {target} was taken by something else; the job stays sealed in its "
-                "workspace until that path is moved away and the ejection is resumed "
-                "(`httk job eject` again, or any command that recovers transfers)"
-            )
-        else:
-            _move_bundle_out(workspace, bundle, target, transfer_id, digest, tree)
-    # A bundle is removed from the workspace only once a verified copy is at the
-    # target, so a bundle that is gone has left; the directory may since have
-    # been moved on or adopted, which is no concern of this workspace.
-    _retire_sealed_bundle(workspace, transfer_id, provenance={"ejected_to": str(target)}, moved_out=True)
-    return target
-
-
-def _finish_pending_ejections(workspace: Workspace) -> list[dict[str, Any]]:
-    """Resume every ejection an earlier process sealed but did not finish.
-
-    Tree members are finished through their root, never on their own.
-
-    :param workspace: The workspace the jobs are leaving.
-    :return: The ledgers of the ejections this call finished.
-    """
-
-    for marker in list(workspace.scan_markers(("transferring",))):
-        state = workspace.read_state(marker)
-        if "eject_to" in state:
-            try:
-                _seal_transferring(workspace, marker, state)
-            except (WorkflowError, OSError, ValueError) as exc:
-                _LOGGER.warning(
-                    "cannot seal transferring job %s: %s",
-                    marker.job_key,
-                    exc,
-                    extra={"event": "transfer_seal_pending", "transfer_id": state.get("transfer_id")},
-                )
-    finished = []
-    for ledger in _ledgers(workspace):
-        if ledger.get("status") != "sealed" or "eject_to" not in ledger:
-            continue
-        if "eject_root" in ledger:
-            if not _ledger_path(workspace, str(ledger["eject_root"])).exists() and Path(str(ledger["bundle"])).exists():
-                # Its root has no record left to gather it by; moving it anywhere
-                # would be a guess, so it stays sealed where it is.
-                _LOGGER.warning(
-                    "ejected tree member %s is still in the workspace, but its root's ejection has no record",
-                    ledger.get("job_key"),
-                    extra={"event": "eject_orphan_member", "transfer_id": ledger.get("transfer_id")},
-                )
-            continue
-        try:
-            _finish_ejection(workspace, ledger)
-        except (WorkflowError, OSError, ValueError) as exc:
-            # One stuck ejection (say, a destination taken meanwhile) must not
-            # block every other job from leaving; it stays sealed and resumable.
-            _LOGGER.warning(
-                "cannot finish ejecting job %s: %s",
-                ledger.get("job_key"),
-                exc,
-                extra={"event": "eject_pending", "transfer_id": ledger.get("transfer_id")},
-            )
-            continue
-        finished.append(ledger)
-    return finished
-
-
-@receipts.serialized
-def recover_interrupted_transfers(workspace: Workspace) -> None:
-    """Finish every ejection and adoption an interrupted earlier call left unfinished.
-
-    This is the recovery :func:`eject_job` and :func:`adopt_job` run first,
-    without ejecting or adopting anything new.
-
-    :param workspace: The workspace whose interrupted transfers to finish.
-    """
-
-    _finish_pending_ejections(workspace)
-    _finish_interrupted_adoptions(workspace)
-
-
-def _eject_tree_of(workspace: Workspace, marker: Marker, waiting: Mapping[str, set[str]]) -> list[dict[str, Any]]:
-    """List the bound descendants an ejected job takes along, top-down, or refuse the tree.
-
-    Each member's transfer id is reserved here, so a resumed ejection fences a
-    member it finds still live under the same id and finds a sealed one by it.
-    """
-
-    try:
-        job = JobDefinition.from_path(workspace.payload_path(marker.placement, marker.job_key) / "job.json")
-        candidate = TransferCandidate(marker.job_id, marker.job_key, marker.kind, marker.placement, None, marker, job)
-        members, blockers = _tree_members(workspace, candidate, waiting)
-    except (WorkflowError, OSError) as exc:
-        raise ValueError(f"job definition or spawn records cannot be read to check its tree: {exc}") from exc
-    if blockers:
-        raise ValueError(f"its tree cannot leave yet: {'; '.join(blockers)} (wait for them to end, or pause them)")
-    return [
-        {
-            "job_id": member.job_id,
-            "job_key": member.job_key,
-            "placement": placement_text(member.source_placement),
-            "parent_job_id": member.tree_parent,
-            "transfer_id": str(uuid.uuid4()),
-        }
-        for member in members
-    ]
-
-
-def _check_eject_placements(marker: Marker, tree: Sequence[Mapping[str, Any]]) -> None:
-    """Refuse an ejection whose root or any tree member sits at a placement naming a job directory.
-
-    Such placements predate the placement rule; a sealed bundle recording one
-    could never be adopted anywhere, so the job is refused before any member
-    is fenced rather than left half-ejected.
-
-    :param marker: The tree root's marker.
-    :param tree: The members :func:`_eject_tree_of` listed.
-    :raises httk.workflow.errors.FormatError: If a placement breaks the placement rule.
-    """
-
-    check_job_placement(marker.placement)
-    for entry in tree:
-        check_job_placement(normalize_placement(str(entry["placement"])))
-
-
-@receipts.serialized
-def eject_job(
-    workspace: Workspace,
-    job_id: str,
-    target: str | os.PathLike[str],
-    *,
-    marker: Marker | None = None,
-) -> Path:
-    """Move one quiescent job out of its workspace to a free-standing job directory.
-
-    The job is fenced and sealed as a detached bundle addressed to no workspace,
-    moved to *target*, and retired from the source, which keeps no copy. The
-    directory is the whole job: its payload, seal, tree metadata, prior state,
-    and any shared runner it pins. A job with bound children takes its whole
-    tree along: every descendant, each of which must be paused or terminal, is
-    sealed the same way and nested in the directory under
-    ``.httk-transfer/tree/<placement>/<job_key>``. Any ejection an interrupted
-    earlier call left unfinished is completed first.
-
-    :param workspace: The workspace the job leaves.
-    :param job_id: The job to eject.
-    :param target: The new job directory, or an existing directory to eject into.
-    :param marker: The already resolved job marker, when available.
-    :return: The free-standing job directory.
-    :raises ValueError: If the job or its tree cannot leave its workspace or the target is unusable.
-    :raises FileExistsError: If the target job directory already exists.
-    :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
-    :raises httk.workflow.errors.FormatError: If the job or a tree member sits at a placement naming
-        a job directory (:func:`~httk.workflow.protocol.check_job_placement`).
-    """
-
-    _finish_pending_ejections(workspace)
-    if marker is None:
-        marker = workspace.find_marker_by_id(job_id)
-        if marker is None:
-            raise ValueError(f"no job {job_id} in this workspace")
-    destination = _eject_destination(workspace, target, marker.job_key)
-    waiting = _waiting_parent_map(workspace)
-    tree = _eject_tree_of(workspace, marker, waiting)
-    _check_eject_placements(marker, tree)
-    transfer_id = str(uuid.uuid4())
-    _detach_job(
-        workspace,
-        job_id,
-        marker=marker,
-        waiting_parent_map=waiting,
-        destination_workspace_id=None,
-        transfer_id=transfer_id,
-        with_tree=bool(tree),
-        eject_to=destination,
-        eject_tree=tree,
-    )
-    return _finish_ejection(workspace, read_json(_ledger_path(workspace, transfer_id)))
-
-
-def _arrival(workspace: Workspace, job_id: str) -> tuple[Marker, Mapping[str, Any]] | None:
-    """Return a live job's marker with the transfer provenance it arrived here by, if any.
-
-    The import frame that starts the job's history here names the transfer it
-    came by; later frames do not repeat it, so the history is walked to its
-    start. An unreadable history answers ``None``, which keeps a directory in place.
-    """
-
-    marker = workspace.find_marker_by_id(job_id)
-    if marker is None:
-        return None
-    first: Mapping[str, Any] | None = None
-    for _reference, frame in iter_record_chain(workspace.control, marker.record_ref, deadline_seconds=0):
-        if frame is None:
-            return None
-        first = frame
-    provenance = None if first is None else first.get("transfer")
-    return (marker, provenance) if isinstance(provenance, Mapping) else None
-
-
-def _adopted_through(workspace: Workspace, job_id: str, transfer_id: str) -> bool:
-    """Report whether this workspace's live copy of a job arrived by *transfer_id*.
-
-    This, not the acknowledgement (which garbage collection expires), is what
-    says an adoption already brought the job here.
-    """
-
-    arrival = _arrival(workspace, job_id)
-    return arrival is not None and arrival[1].get("transfer_id") == transfer_id
-
-
-def _adoption_needed(
-    workspace: Workspace, bundle: Path, manifest: Mapping[str, Any], placement: PurePosixPath | None
-) -> bool:
-    """Decide, without changing anything, whether one verified bundle still has to be imported.
-
-    A job already live here by this very transfer has arrived (an interrupted
-    adoption); an acknowledged transfer whose job has since moved on makes the
-    bundle a stale copy; and a job id or payload path this workspace already
-    uses for something else is a collision.
-
-    :param workspace: The adopting workspace.
-    :param bundle: The verified bundle directory.
-    :param manifest: Its validated manifest.
-    :param placement: Where it is to be placed, when not at its recorded placement.
-    :return: Whether the bundle still has to be imported.
-
-    :raises ValueError: If the bundle is a stale copy.
-    :raises FileExistsError: If its job or its payload path is already taken here.
-    :raises httk.workflow.errors.FormatError: If its placement names a job directory.
-    """
-
-    transfer_id = str(manifest["transfer_id"])
-    if _adopted_through(workspace, str(manifest["job_id"]), transfer_id):
-        return False
-    if _ack_path(workspace, transfer_id).is_file():
+    if result.status in {"imported", "replay"}:
+        assert result.job_id is not None
+        marker = workspace.find_marker_by_id(result.job_id, kinds=STATE_KINDS)
+        if marker is not None:
+            return marker
+        raise ValueError(f"{where} was already adopted into this workspace once and its job has since moved on")
+    if result.status == "refused":
+        assert result.error is not None
+        raise result.error
+    if result.status == "lost":
+        raise FileNotFoundError(f"{where}: {result.reason}")
+    if result.status == "waiting":
         raise ValueError(
-            f"{bundle} was already adopted into this workspace once and its job has since moved on; "
-            "it is a stale copy and was left in place"
+            f"{where} was taken in, but its adoption waits: {result.reason}; it finishes when transfer "
+            "recovery next runs (a manager attaching, or `httk job adopt`/`httk job eject` again)"
         )
-    if workspace.find_marker_by_id(str(manifest["job_id"])) is not None:
-        raise FileExistsError(f"this workspace already holds job {manifest['job_id']}; {bundle} was left in place")
-    effective = (
-        parse_placement_text(manifest["destination_placement"], "destination_placement")
-        if placement is None
-        else placement
-    )
-    check_job_placement(effective)
-    target = workspace.payload_path(effective, str(manifest["job_key"]))
-    if (target.exists() or target.is_symlink()) and not _holds_bundle(target, transfer_id):
-        raise FileExistsError(f"payload path {target} is already taken; {bundle} was left in place")
-    return True
+    raise ValueError(f"{where}: {result.status}: {result.reason}")
 
 
-@receipts.serialized
+def _same_filesystem(workspace: Workspace, path: Path) -> bool:
+    """Report whether *path* can be renamed into the workspace's ``tmp/`` (compared in this process)."""
+
+    return os.lstat(path).st_dev == os.stat(workspace.control / "tmp").st_dev
+
+
 def adopt_job(
     workspace: Workspace,
     directory: str | os.PathLike[str],
     *,
     placement: str | PurePosixPath | None = None,
+    owner: str | None = None,
 ) -> Marker:
-    """Move one free-standing job directory into a workspace.
+    """Move one free-standing job directory (an ejected bundle) into a workspace.
 
-    The directory must be an ejected job (a bundle addressed to no workspace).
-    It is verified, moved in (renamed on one filesystem, else copied, verified,
-    and removed), imported exactly as a transfer is, and restored to the state it
-    was ejected in. An ejected tree brings back every member nested in it, each
-    at the placement it left from, so the parent/child bindings hold again. A
-    copy of a directory whose job has already passed through this workspace is
-    refused and left in place rather than resurrecting a stale job. Before any
-    of its files is opened, the directory is refused if it is a symlink or holds
-    anything but regular files with a single link, directories and symlinks
-    staying inside it. A placement, recorded or given, must not name a job
-    directory (:func:`~httk.workflow.protocol.check_job_placement`).
+    The directory is claimed into a private lineage below ``tmp/`` (renamed on
+    one filesystem, otherwise copied, and the source removed once the job has
+    arrived), verified completely, and published: members first, then the
+    root, each restored to the state it was ejected in. A held export of this
+    workspace (``transfers/exports/<T>/<job_key>``) is taken back the same way,
+    and so is an entry of the workspace's exchange outbox, claimed by
+    descriptor and verified as client content. A refused directory is put back
+    where it was (a refused outbox entry is quarantined instead). A copy of a directory whose
+    job already arrived is a replay; one whose job has since moved on is a
+    stale copy and is refused.
 
     :param workspace: The workspace the job joins.
     :param directory: The free-standing job directory.
     :param placement: Place the job here instead of where it was ejected from (not for a tree).
+    :param owner: The owner token recorded for the lineage (this process when omitted).
     :return: The adopted job's marker (a tree's root).
-    :raises ValueError: If the directory is inside the workspace (other than directly in its
-        exchange staging inbox), addressed to a workspace, or stale, or a placement is given for a tree.
+    :raises ValueError: If the directory is inside the workspace (other than a held export or an
+        entry of the workspace's exchange outbox), an entry of its exchange inbox (the exchange pass
+        adopts those), addressed to a workspace, stale, a placement is given for a tree, or the
+        adoption has to wait.
     :raises FileExistsError: If the workspace already holds this job or its payload path.
-    :raises FileNotFoundError: If the directory does not exist.
-    :raises httk.workflow.errors.FormatError: If the directory or a tree member does not verify, is
-        missing, holds a special entry, a hard-linked file or an escaping symlink, or would be placed
-        inside a job directory.
+    :raises FileNotFoundError: If the directory does not exist or another actor took it first.
+    :raises httk.workflow.errors.FormatError: If the directory does not verify.
     """
 
     workspace._require_unsealed()
-    _finish_interrupted_adoptions(workspace)
-    # The final component is not resolved: a symlinked job directory is refused
-    # below rather than followed.
     absolute = Path(os.path.abspath(Path(directory).expanduser()))
+    # The final component is not resolved: a symlinked job directory is refused, not followed.
     source = absolute.parent.resolve() / absolute.name
     root = workspace.root.resolve()
-    if (source == root or root in source.parents) and source.parent != exchange_staging(workspace) / "inbox":
-        raise ValueError(f"{source} is already inside the workspace")
-    _refuse_unsafe_entries(source)
-    manifest = validate_bundle(source)
-    if manifest.get("destination_workspace_id") is not None:
+    exports = (workspace.control / "transfers" / "exports").resolve()
+    exchange = root / EXCHANGE_DIRECTORY
+
+    # Lexically ``<root>/exchange/<box>/<name>`` with a workspace at ``<root>``:
+    # decided without resolving anything in client territory, so neither a
+    # symlinked prefix nor a client-swapped box turns the entry into an
+    # ordinary path elsewhere.
+    lexical = absolute.parent
+    lexical_root = lexical.parent.parent
+    lexical_box = (
+        lexical.name
+        if lexical.parent.name == EXCHANGE_DIRECTORY
+        and (lexical_root / WORKSPACE_DIRECTORY / "format.json").is_file()
+        and lexical_root.resolve() == root
+        else None
+    )
+
+    def in_exchange(box: str) -> bool:
+        return lexical_box == box or exchange / box in {absolute.parent, source.parent}
+
+    if in_exchange("inbox"):
         raise ValueError(
-            f"{source} is a transfer bundle addressed to workspace {manifest['destination_workspace_id']}; "
-            "move it with `httk job transfer` instead"
+            f"{absolute} is in this workspace's exchange inbox, which the workspace's managers adopt as client "
+            "content; leave it there for them (`httk job eject JOB WORKSPACE/exchange/inbox` is the local way in)"
         )
-    if manifest.get("eject_root") is not None:
-        raise ValueError(f"{source} is a member of an ejected job tree; adopt the tree's root directory instead")
-    transfer_id = str(manifest["transfer_id"])
-    tree = _ejected_tree(manifest)
-    if tree and placement is not None:
-        raise ValueError("a job tree keeps its placements; adopt it without --placement")
-    # Check every member before changing anything, so a refused tree is left
-    # exactly as it was.
-    pending: list[tuple[Path, PurePosixPath | None]] = []
-    root_arrived = _adopted_through(workspace, str(manifest["job_id"]), transfer_id)
-    for entry in tree:
-        member_dir = _nested_member(source, entry)
-        member_id = canonical_uuid(entry.get("transfer_id"), "transfer_id")
-        if _adopted_through(workspace, str(entry["job_id"]), member_id):
-            continue  # an interrupted adoption already brought it here
-        if root_arrived:
-            # The members of one ejected tree arrive before their root does.
-            raise ValueError(
-                f"{source} was already adopted into this workspace once and its tree has since moved on; "
-                "it is a stale copy and was left in place"
-            )
-        if not member_dir.is_dir():
-            raise FormatError(f"tree member {entry['job_key']} is missing from {source}")
-        member = validate_bundle(member_dir)
-        if (
-            member["transfer_id"] != member_id
-            or member["job_id"] != entry["job_id"]
-            or member.get("destination_workspace_id") is not None
-            or member.get("eject_root") != transfer_id
-            or member.get("job_key") != entry["job_key"]
-            or normalize_placement(str(member.get("destination_placement")))
-            != normalize_placement(str(entry.get("placement")))
-        ):
-            raise FormatError(f"tree member {member_dir} does not belong to this ejected tree")
-        if _adoption_needed(workspace, member_dir, member, None):
-            pending.append((member_dir, None))
-    root_placement = None if placement is None else normalize_placement(placement)
-    if _adoption_needed(workspace, source, manifest, root_placement):
-        pending.append((source, root_placement))
-    # Members first: they are nested in the root's transfer envelope, which
-    # importing the root removes.
-    for bundle, target_placement in pending:
-        _import_bundle(workspace, bundle, placement=target_placement, move=True)
-    adopted = workspace.find_marker_by_id(str(manifest["job_id"]))
-    if adopted is None:
-        raise WorkspaceCorruptionError(f"adopted job {manifest['job_key']} has no marker; {source} was left in place")
-    if source.exists():
-        # Only a cross-filesystem copy, or an earlier interrupted adoption, leaves it.
-        _remove_tree(source)
-    if workspace.durable:
-        fsync_directory(source.parent)
-    return adopted
+    if in_exchange("outbox"):
+        return _adopt_from_outbox(workspace, exchange / "outbox" / absolute.name, placement=placement, owner=owner)
+    kind: BundleSource = "adopt"
+    if source.parent.parent == exports:
+        kind = "export"
+    elif source == root or root in source.parents:
+        raise ValueError(f"{source} is already inside the workspace")
+    recover_transfers(workspace)
+    copy = not _same_filesystem(workspace, source)
+    result = adopt(
+        workspace,
+        Source(kind, source, copy=copy, remove_source=copy),
+        placement=placement,
+        owner=owner,
+    )
+    return _adopted_marker(workspace, result, source)
+
+
+def _adopt_from_outbox(
+    workspace: Workspace, entry: Path, *, placement: str | PurePosixPath | None, owner: str | None
+) -> Marker:
+    """Take back one entry of this workspace's exchange outbox, claimed by descriptor.
+
+    The outbox is client territory: it is opened from the workspace root
+    without following a symlink, the entry is claimed by its name relative to
+    that descriptor, it is verified as client content (the exchange checks,
+    no exchange origin), and a refused bundle is never renamed back by path:
+    it stays in the lineage and is quarantined.
+    """
+
+    if entry.name in {"", ".", ".."} or entry.name == "rejected":
+        raise ValueError(f"{entry} names no returned job of the exchange outbox")
+    outbox = _open_outbox(workspace)
+    try:
+        recover_transfers(workspace)
+        result = adopt(
+            workspace,
+            Source("exchange_outbox", entry, directory_fd=outbox),
+            placement=placement,
+            owner=owner,
+        )
+    finally:
+        os.close(outbox)
+    return _adopted_marker(workspace, result, entry)
+
+
+def _import_results(workspace: Workspace, bundles: Sequence[str | os.PathLike[str]]) -> list[AdoptionResult]:
+    incoming = (workspace.control / "transfers" / "incoming").resolve()
+    results: list[AdoptionResult] = []
+    for bundle in bundles:
+        absolute = Path(os.path.abspath(Path(bundle).expanduser()))
+        path = absolute.parent.resolve() / absolute.name
+        try:
+            # A bundle delivered into incoming/ is claimed; any other (a local
+            # transfer's outgoing bundle, still the source's) is copied.
+            result = adopt(workspace, Source("incoming", path, copy=path.parent != incoming))
+        except (WorkflowError, OSError, ValueError) as exc:
+            result = AdoptionResult("failed", reason=str(exc), error=exc)
+        results.append(result)
+    return results
+
+
+def import_bundles(workspace: Workspace, bundles: Sequence[str | os.PathLike[str]]) -> list[dict[str, object]]:
+    """Import addressed bundles, each through the adoption chain; one result never aborts the batch.
+
+    A bundle in this workspace's ``transfers/incoming/`` is claimed by rename;
+    any other path is copied (its owner keeps it until it is acknowledged).
+    Each result's ``status`` is ``imported``, ``replay`` (it had arrived
+    already), ``expired`` (outside its freshness window, discarded), ``refused``
+    (kept where it was, with the reason), ``waiting`` or ``failed``; an imported
+    or replayed bundle carries the ``acknowledgement`` its source retires it with.
+
+    :param workspace: The destination workspace.
+    :param bundles: The bundle directories.
+    :return: One result per bundle, in order.
+    """
+
+    recover_transfers(workspace)
+    return [result.as_mapping() for result in _import_results(workspace, bundles)]
+
+
+def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+    """Import one addressed bundle, or acknowledge its replay.
+
+    :param workspace: The destination workspace.
+    :param bundle: The bundle directory.
+    :return: The acknowledgement document.
+    :raises ValueError: If the bundle expired or its import has to wait.
+    :raises httk.workflow.errors.FormatError: If the bundle is refused for its content.
+    :raises FileExistsError: If the workspace already holds its job or payload path.
+    """
+
+    recover_transfers(workspace)
+    [result] = _import_results(workspace, [bundle])
+    if result.acknowledgement is not None:
+        return result.acknowledgement
+    if result.error is not None:
+        raise result.error
+    raise ValueError(f"transfer bundle {bundle} was not imported ({result.status}): {result.reason}")

@@ -39,15 +39,13 @@ import socket
 import stat
 import time
 import uuid
-from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._jobdir import JobDirectory
+from ._txn import holds_job_payload, trash
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
 from .journal import JournalWriter, iter_record_chain, parse_record_ref
@@ -74,6 +72,9 @@ GC_FRAME_FORMAT = "httk-workflow-gc"
 #: operation, so a day is far beyond any honest in-flight window and this needs
 #: no retention policy to be safe.
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
+#: The ``tmp/`` transaction directories of the transfer protocol (plan decision
+#: 16): only the protocol steps and the transfer orphan sweep remove them.
+TRANSACTION_PREFIXES = ("import.", "eject.", "abort.", "export.", "birth.")
 #: How long a request claimed by a manager that has since died is kept. The
 #: request either was applied — in which case the file is a receipt nobody
 #: reads — or was interrupted, in which case a month is long past the point at
@@ -86,6 +87,7 @@ GC_CATEGORIES = (
     "transaction_trash",
     "retired_bundles",
     "transfer_records",
+    "transfer_receipts",
     "tmp_entries",
     "retired_requests",
     "journal_segments",
@@ -484,9 +486,6 @@ class _Collection:
         # is what decides whether the manager directory naming it is still
         # worth keeping.
         self._surviving_segments: dict[str, int] = {}
-        self._retirement_owners: dict[str, set[tuple[str, int]]] | None = None
-        self._retirement_counts: Counter[tuple[str, int]] = Counter()
-        self._retirement_scanned = False
 
     # -- shared observations -------------------------------------------------
 
@@ -540,7 +539,7 @@ class _Collection:
             return None
         return writer_id if isinstance(writer_id, str) and writer_id else None
 
-    def referenced_segments(self, candidates: set[tuple[str, int]] | None = None) -> set[tuple[str, int]]:
+    def referenced_segments(self) -> set[tuple[str, int]]:
         """Return every journal segment protected by current history.
 
         A terminal marker protects only its current segment. A non-terminal
@@ -548,15 +547,11 @@ class _Collection:
         remove the history a live job may still need. If a chain frame cannot
         be read, its named segment is protected and the walk stops there.
 
-        A sealed transfer bundle keeps its marker inside the payload instead of
-        the state tree, so the ledgers of bundles not yet retired are consulted
-        as well and their segments are protected identically.
+        A job being transferred keeps its ``transferring`` marker in the state
+        tree until its transfer completes, so it is protected like any other
+        non-terminal job.
         """
 
-        if self._retirement_owners is not None and self._retirement_scanned:
-            if candidates is None:
-                return set(self._retirement_counts)
-            return {segment for segment in candidates if self._retirement_counts[segment] > 0}
         referenced: set[tuple[str, int]] = set()
         markers = self.markers()
 
@@ -591,30 +586,6 @@ class _Collection:
             if reference is not None:
                 protect(reference, walk=marker.kind not in TERMINAL_KINDS)
 
-        if self._retirement_owners is not None:
-            self._retirement_counts.update(referenced)
-        for ledger_path in _iterdir(self.control / "transfers"):
-            if not ledger_path.is_file() or ledger_path.suffix != ".json":
-                continue
-            try:
-                ledger = read_json(ledger_path)
-            except WorkflowError:
-                continue
-            if ledger.get("status") == "sealed" and isinstance(ledger.get("sealed_marker"), str):
-                reference = _marker_record_ref(str(ledger["sealed_marker"]))
-                if reference is not None:
-                    if self._retirement_owners is None:
-                        protect(reference, walk=True)
-                    else:
-                        earlier = referenced
-                        referenced = set()
-                        protect(reference, walk=True)
-                        self._retirement_owners[str(ledger["transfer_id"])] = referenced
-                        self._retirement_counts.update(referenced)
-                        earlier.update(referenced)
-                        referenced = earlier
-        if self._retirement_owners is not None:
-            self._retirement_scanned = True
         return referenced
 
     # -- bookkeeping ---------------------------------------------------------
@@ -768,8 +739,10 @@ class _Collection:
         if parents is None:
             return
         candidates: list[tuple[Marker, Path]] = []
+        claims = self.control / "transfers" / "adopting"
         for marker in self.markers():
-            if marker.kind not in REMOVABLE_KINDS:
+            if marker.kind not in REMOVABLE_KINDS or os.path.lexists(claims / marker.job_id):
+                # A job an unfinished adoption is publishing waits for it.
                 continue
             payload = self.workspace.payload_path(marker.placement, marker.job_key)
             if not payload.exists():
@@ -899,10 +872,10 @@ class _Collection:
     def collect_retired_bundles(self) -> None:
         """Collect the transfer bundles a completed handover left behind.
 
-        A retired bundle is a full second copy of a payload the destination has
-        already acknowledged, which makes it the largest thing a busy transfer
-        campaign accumulates. Its ledger is deliberately left untouched, so the
-        audit record of the transfer survives the bytes it describes.
+        A retired bundle (``transfers/retired/<T>``) is a full second copy of a
+        payload the destination has already acknowledged, which makes it the
+        largest thing a busy transfer campaign accumulates. It is kept
+        ``trash_days`` after its acknowledgement.
         """
 
         cutoff = self._cutoff(self.retention.trash_days)
@@ -927,27 +900,51 @@ class _Collection:
         if cutoff is None:
             self._skip("transfer_records", "retention.trash_days is not configured")
             return
-        for name in ("acks", "imported"):
-            for entry in _iterdir(self.control / "transfers" / name):
-                if entry.is_file() and entry.suffix == ".json" and self._aged(entry, cutoff):
-                    self._collect("transfer_records", entry, size=self._entry_size(entry))
+        for entry in _iterdir(self.control / "transfers" / "acks"):
+            if entry.is_file() and entry.suffix == ".json" and self._aged(entry, cutoff):
+                self._collect("transfer_records", entry, size=self._entry_size(entry))
+
+    def collect_transfer_receipts(self) -> None:
+        """Collect the 13.1 receipts no copy of their transfer can be accepted against any more.
+
+        ``transfers/received/<T>`` is deleted once ``now > sealed_at + W + S``
+        (the freshness window plus the clock skew): a copy arriving later is
+        refused as expired by every importer. A receipt that cannot be parsed is
+        never deleted.
+        """
+
+        from ._receipts import read_receipt, receipt_expired
+
+        now_ns = int(self.now * 1e9)
+        for entry in _iterdir(self.control / "transfers" / "received"):
+            try:
+                document = read_receipt(entry)
+            except (OSError, FormatError) as exc:
+                _LOGGER.debug("keeping unreadable transfer receipt %s: %s", entry, exc)
+                continue
+            if receipt_expired(document, now_ns):
+                self._collect("transfer_receipts", entry, size=self._entry_size(entry))
 
     def collect_tmp_entries(self) -> None:
         """Collect abandoned staging entries, which need no retention policy.
 
         Every publication creates its staging entry and renames it away inside
         one operation, so an entry still sitting in a staging directory a day
-        later belongs to a process that died and can never be resumed. The one
-        exception is a moving adoption's staging entry with its intent record:
-        the job's directory is gone, so that entry is kept for recovery.
+        later belongs to a process that died and can never be resumed. The
+        transfer transaction directories are the exception: ``import.*``,
+        ``eject.*``, ``abort.*``, ``export.*`` and ``birth.*`` below ``tmp/`` may be
+        a job's only copy and are only ever removed by the transfer protocol
+        and its recovery, never here. ``trash.*`` is garbage, but one is only
+        removed once it holds no job payload (it may be left by a discarder that
+        died before its own payload check); one that does is quarantined.
         """
-
-        from .transfers import _adoption_intent_path, _staging_path
 
         cutoff = self.now - TMP_MAXIMUM_AGE_SECONDS
         committing: set[str] | None = None
         for staging in (self.control / "tmp", self.control / "requests" / "tmp"):
             for entry in _iterdir(staging):
+                if staging == self.control / "tmp" and entry.name.startswith(TRANSACTION_PREFIXES):
+                    continue
                 if not self._aged(entry, cutoff):
                     continue
                 if staging == self.control / "tmp" and entry.name.startswith(("child.", "runner.")):
@@ -961,17 +958,13 @@ class _Collection:
                     if committing is None or entry.name.split(".", 2)[1] in committing:
                         self._skip("tmp_entries", f"kept staged entry {entry.name} of an unfinished commit")
                         continue
-                transfer_id = entry.name.removeprefix("import.")
-                if (
-                    entry.name != transfer_id
-                    and _staging_path(self.workspace, transfer_id) == entry
-                    and _adoption_intent_path(self.workspace, transfer_id).is_file()
-                ):
-                    # A moving adoption's staging entry may be the job's only copy.
-                    self._skip(
-                        "tmp_entries",
-                        f"kept staged adoption {transfer_id}: finish it with `httk job adopt` or transfer recovery",
-                    )
+                if staging == self.control / "tmp" and entry.name.startswith("trash.") and holds_job_payload(entry):
+                    self._skip("tmp_entries", f"{entry.name} holds a job payload; it is quarantined, not removed")
+                    if not self.dry_run:
+                        try:
+                            trash(entry, control=self.control, holds_payload=lambda _path: True)
+                        except OSError as exc:
+                            _LOGGER.warning("cannot quarantine %s: %s", entry, exc, extra={"event": "gc_quarantine"})
                     continue
                 self._collect("tmp_entries", entry)
 
@@ -1014,41 +1007,32 @@ class _Collection:
             if entry.is_file() and self._aged(entry, cutoff):
                 self._collect("retired_requests", entry, size=self._entry_size(entry))
 
-    def collect_journal_segments(self, *, retired_segments: set[tuple[str, int]] | None = None) -> None:
+    def collect_journal_segments(self) -> None:
         """Collect aged journal segments outside protected frame chains.
 
         Three conditions must hold together: the segment is older than
-        ``journal_days``, no current marker or sealed marker of a bundle
-        awaiting handover protects it, and the writer that produced it belongs
-        to no manager still heartbeating. Terminal jobs protect only their
-        current segment; non-terminal jobs protect every segment in their
-        frame chain. A retirement pass selects only its recorded source-chain
-        segments and bypasses age, retaining every other safety check.
+        ``journal_days``, no current marker protects it, and the writer that
+        produced it belongs to no manager still heartbeating. Terminal jobs
+        protect only their current segment; non-terminal jobs (``transferring``
+        included) protect every segment in their frame chain.
         """
 
         journal = self.control / "journal"
         cutoff = self._cutoff(self.retention.journal_days)
         if cutoff is None:
             self._skip("journal_segments", "retention.journal_days is not configured")
-            if retired_segments is None:
-                self._count_all_segments(journal)
+            self._count_all_segments(journal)
             return
         live = self.live_managers()
         if self._opaque_live_manager:
             self._skip("journal_segments", "a live manager does not name its journal writer")
-            if retired_segments is None:
-                self._count_all_segments(journal)
+            self._count_all_segments(journal)
             return
         live_writers = {writer_id for writer_id in live.values() if writer_id is not None}
         if self.journal_writer is not None:
             live_writers.add(self.journal_writer.writer_id)
-        referenced = self.referenced_segments(retired_segments)
-        writer_dirs = (
-            _iterdir(journal)
-            if retired_segments is None
-            else [journal / writer_id for writer_id in sorted({writer for writer, _ in retired_segments})]
-        )
-        for writer_dir in writer_dirs:
+        referenced = self.referenced_segments()
+        for writer_dir in _iterdir(journal):
             writer_id = _writer_id_of(writer_dir)
             if writer_id is None:
                 continue
@@ -1059,12 +1043,7 @@ class _Collection:
             surviving = 0
             for path in segments:
                 number = _segment_number(path)
-                if (
-                    number is None
-                    or (writer_id, number) in referenced
-                    or (retired_segments is None and not self._aged(path, cutoff))
-                    or (retired_segments is not None and (writer_id, number) not in retired_segments)
-                ):
+                if number is None or (writer_id, number) in referenced or not self._aged(path, cutoff):
                     surviving += 1
                     continue
                 self._collect("journal_segments", path, size=self._entry_size(path))
@@ -1308,55 +1287,6 @@ def _segment_number(path: Path) -> int | None:
         return int(path.stem, 36)
     except ValueError:
         return None
-
-
-_retirement_collections: ContextVar[dict[str, "_Collection"] | None] = ContextVar(
-    "retirement_collections", default=None
-)
-
-
-@contextmanager
-def retirement_batch(workspace: "Workspace") -> Iterator[None]:
-    """Share one protection scan across a batch of already sealed sources."""
-
-    collection = _Collection(workspace, dry_run=False, now=time.time(), sizes=False)
-    collection._retirement_owners = {}
-    collection._retirement_counts = Counter()
-    token = _retirement_collections.set({**(_retirement_collections.get() or {}), str(workspace.control): collection})
-    try:
-        yield
-    finally:
-        _retirement_collections.reset(token)
-
-
-def collect_retired_journal(
-    workspace: "Workspace", references: Sequence[str], *, transfer_id: str | None = None
-) -> None:
-    """Reclaim a retired transfer's unprotected source segments without aging.
-
-    The retired ledger supplies the candidate references and is the cleanup
-    record; this pass deliberately writes no new per-transfer journal stream.
-    Marker chains, sealed transfers, live managers and unlimited journal
-    retention are protected exactly as in ordinary collection.
-
-    :param workspace: The retired transfer's source workspace.
-    :param references: One saved record reference per candidate segment.
-    :param transfer_id: Identify the retired transfer within a shared batch scan.
-    """
-
-    retention = workspace.policy.retention
-    if retention.trash_days is None or retention.journal_days is None or not references:
-        return
-    segments = {parse_record_ref(reference)[:2] for reference in references}
-    collection = (_retirement_collections.get() or {}).get(str(workspace.control))
-    if collection is None:
-        collection = _Collection(workspace, dry_run=False, now=time.time(), sizes=False)
-    if transfer_id is not None and collection._retirement_owners is not None:
-        for segment in collection._retirement_owners.pop(transfer_id, set()):
-            collection._retirement_counts[segment] -= 1
-            if collection._retirement_counts[segment] == 0:
-                del collection._retirement_counts[segment]
-    collection.collect_journal_segments(retired_segments=segments)
 
 
 def collect_garbage(

@@ -26,7 +26,10 @@ from ._util import (
 from .errors import FormatError
 
 CORE_PROFILE = "core-v3"
-SUPPORTED_EXTENSIONS: frozenset[str] = frozenset()
+#: The workspace extension that serves ``WORKSPACE/exchange``: a client-written
+#: inbox of ejected bundles and an outbox of returned ones.
+EXCHANGE_EXTENSION = "exchange"
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({EXCHANGE_EXTENSION})
 RUNNER_SOURCES = frozenset({"payload", "workspace", "installed"})
 PACKAGE_RUNNER_PREFIX = "pkg:"
 RESERVED_WORKFLOW_ENVIRONMENT_PREFIX = "HTTK_WORKFLOW_"
@@ -1236,6 +1239,15 @@ CARRIED_STATE_MEMBERS = (
     # later outcome declares a different one.
     "runner_steps",
 )
+
+#: The provenance members :meth:`~httk.workflow.workspace.Workspace.transition`
+#: repeats in every later state frame of a job, unless the update sets them:
+#: ``transfer`` (how the job arrived: transfer id, source workspace, payload
+#: digest, seal time) and ``origin`` (``"exchange"`` for a job adopted from the
+#: exchange inbox). They are trusted state written only by the import, so
+#: "arrived by this transfer" is one read of the current frame, also after the
+#: import frame itself has been collected.
+CARRIED_PROVENANCE_MEMBERS = ("transfer", "origin")
 
 
 @dataclass(frozen=True)

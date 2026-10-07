@@ -8,8 +8,8 @@ from httk.workflow import (
     TaskManager,
     Workspace,
 )
+from httk.workflow._bundle import _payload_digest
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.transfers import _payload_digest
 
 _SRC = str(Path(__file__).parents[1] / "src")
 

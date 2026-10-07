@@ -91,8 +91,10 @@ def test_import_refuses_a_bundle_whose_destination_placement_nests(tmp_path: Pat
         destination.import_bundle(bundle)
     assert not list(destination.scan_markers())
     assert not (destination.root / "project").exists()
-    # The bundle is untouched and still verifies.
-    assert validate_bundle(bundle)["job_id"] == marker.job_id
+    # The bundle is untouched (the strict manifest check refuses its placement anywhere).
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+    with pytest.raises(FormatError, match="must not name a job directory"):
+        validate_bundle(bundle)
 
 
 def _ejected(tmp_path: Path) -> tuple[Workspace, Path, str]:
@@ -111,7 +113,7 @@ def test_adopt_refuses_a_nesting_manifest_placement_and_leaves_the_directory(tmp
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(FormatError, match="must not name a job directory"):
         destination.adopt(loose)
-    assert loose.is_dir() and validate_bundle(loose)["destination_placement"] == nesting
+    assert loose.is_dir() and json.loads(manifest_path.read_text(encoding="utf-8"))["destination_placement"] == nesting
     assert not list(destination.scan_markers())
     assert not list((destination.control / "transfers").rglob("*.json"))
 

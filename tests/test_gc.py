@@ -35,7 +35,7 @@ from httk.workflow.journal import (
     read_record,
     segment_path,
 )
-from httk.workflow.models import Marker
+from httk.workflow.models import Marker, make_job_key
 from httk.workflow.workflow_cli import command
 
 _DAY = 86400.0
@@ -228,12 +228,14 @@ httk_workflow_main
     assert not controls[0].exists()
 
 
-def _two_segment_writer(workspace: Workspace, *, days: float) -> tuple[str, list[Path], str]:
+def _two_segment_writer(
+    workspace: Workspace, *, days: float, second_frame: dict[str, object] | None = None
+) -> tuple[str, list[Path], str]:
     """Open one writer, force it to rotate, and age both of its segments."""
 
     with workspace.open_journal_writer() as writer:
         writer.append({"filler": "x" * 2000, "index": 0})
-        second = writer.append({"filler": "x" * 2000, "index": 1})
+        second = writer.append({"filler": "x" * 2000, "index": 1, **(second_frame or {})})
     writer_id, segment, _offset, _length, _checksum = parse_record_ref(second)
     assert segment == 1, "the writer was expected to rotate onto a second segment"
     writer_dir = workspace.control / "journal" / writer_id
@@ -243,22 +245,31 @@ def _two_segment_writer(workspace: Workspace, *, days: float) -> tuple[str, list
     return writer_id, segments, second
 
 
-def _sealed_ledger(workspace: Workspace, record_ref: str) -> Path:
-    """Publish a sealed transfer ledger whose marker names *record_ref*."""
+def _transferring_frame(workspace: Workspace, job_key: str) -> dict[str, object]:
+    """Return a ``transferring`` state frame of a job at placement ``sealed``."""
 
-    transfer_id = str(uuid.uuid4())
-    ledger = workspace.control / "transfers" / f"{transfer_id}.json"
-    write_json_atomic(
-        ledger,
-        {
-            "format": "httk-workflow-transfer",
-            "format_version": 2,
-            "transfer_id": transfer_id,
-            "status": "sealed",
-            "sealed_marker": f"{uuid.uuid4()}.p500.g1.{record_ref}",
-        },
-    )
-    return ledger
+    return {
+        "format": "httk-workflow-state",
+        "format_version": 3,
+        "workspace_id": workspace.workspace_id,
+        "job_id": job_key[-36:],
+        "job_key": job_key,
+        "placement": "sealed",
+        "state_generation": 1,
+        "kind": "transferring",
+        "previous_record_ref": None,
+        "created_at": "2026-01-01T00:00:00.000000Z",
+        "priority": 500,
+    }
+
+
+def _transferring_marker(workspace: Workspace, job_key: str, record_ref: str) -> Path:
+    """Publish a ``transferring`` marker naming *record_ref*: a job on its way out protects its history."""
+
+    marker = workspace.control / "state" / "transferring" / "sealed" / f"{job_key}.p500.g1.{record_ref}"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    return marker
 
 
 def _finished_job(workspace: Workspace, root: Path, name: str) -> tuple[str, Marker, Path]:
@@ -562,9 +573,17 @@ class _Fixture:
         self.ack = control / "transfers" / "acks" / f"{uuid.uuid4()}.json"
         write_json_atomic(self.ack, {"format": "httk-workflow-transfer-acknowledgement"})
         _age(self.ack, 30)
-        self.imported = control / "transfers" / "imported" / f"{uuid.uuid4()}.json"
-        write_json_atomic(self.imported, {"status": "imported"})
-        _age(self.imported, 30)
+        # A 13.1 receipt whose freshness window has long passed.
+        self.receipt = control / "transfers" / "received" / str(uuid.uuid4())
+        write_json_atomic(
+            self.receipt,
+            {
+                "sealed_at": 1_000_000_000,
+                "source_workspace_id": str(uuid.uuid4()),
+                "job_id": str(uuid.uuid4()),
+                "payload_sha256": "0" * 64,
+            },
+        )
 
         # A sealed bundle is never collected, however old it looks.
         self.sealed_payload = self.workspace.root / "project" / "deep" / "sealed" / str(uuid.uuid4())
@@ -604,8 +623,11 @@ class _Fixture:
         self.workspace.set_policy({"journal_segment_bytes": 4096})
         self.dead_writer, self.dead_segments, _ = _two_segment_writer(self.workspace, days=60)
         self.dead_manager = _manager_directory(self.workspace, self.dead_writer, live=False, days=60)
-        self.referenced_writer, self.referenced_segments, reference = _two_segment_writer(self.workspace, days=60)
-        self.sealed_ledger = _sealed_ledger(self.workspace, reference)
+        sealed_key = make_job_key(str(uuid.uuid4()), "sealed")
+        self.referenced_writer, self.referenced_segments, reference = _two_segment_writer(
+            self.workspace, days=60, second_frame=_transferring_frame(self.workspace, sealed_key)
+        )
+        self.sealed_marker = _transferring_marker(self.workspace, sealed_key, reference)
         self.live_writer, self.live_segments, _ = _two_segment_writer(self.workspace, days=60)
         self.live_manager = _manager_directory(self.workspace, self.live_writer, live=True, days=0)
 
@@ -665,15 +687,16 @@ def test_each_category_collects_only_the_aged_entries(aged: _Fixture) -> None:
     assert not aged.retired_bundle.exists()
     assert aged.fresh_bundle.is_dir()
     assert report.category("retired_bundles").removed == 1
-    assert not aged.ack.exists() and not aged.imported.exists()
-    assert report.category("transfer_records").removed == 2
-    # The ledger survives its bundle: it is the audit record of the transfer.
-    assert aged.sealed_ledger.is_file()
+    assert not aged.ack.exists() and not aged.receipt.exists()
+    assert report.category("transfer_records").removed == 1
+    assert report.category("transfer_receipts").removed == 1
+    # The marker of a job being transferred is never collected.
+    assert aged.sealed_marker.is_file()
 
     # 4. Journal segments: unreferenced, aged, and written by a dead writer.
     assert not any(path.exists() for path in aged.dead_segments)
     assert not (aged.control / "journal" / aged.dead_writer).exists()
-    # The segment a sealed bundle's marker references survives; the older
+    # The segment a transferring marker references survives; the older
     # segment of the same writer does not.
     assert not aged.referenced_segments[0].exists()
     assert aged.referenced_segments[1].is_file()
@@ -1005,7 +1028,8 @@ def test_default_retention_collects_policy_gated_categories(aged: _Fixture) -> N
     assert report.category("attempt_control").skip_reason == "retention.attempt_control_days is not configured"
     assert report.category("transaction_trash").removed == 1
     assert report.category("retired_bundles").removed == 1
-    assert report.category("transfer_records").removed == 2
+    assert report.category("transfer_records").removed == 1
+    assert report.category("transfer_receipts").removed == 1
     assert report.category("journal_segments").removed == 3
     assert not any(path.exists() for path in aged.dead_segments)
     assert not aged.dead_manager.exists()
@@ -1229,3 +1253,40 @@ def test_selecting_manager_directories_also_selects_manager_logs(tmp_path: Path)
     workspace.collect_garbage(categories=("manager_directories",))
 
     assert not old.exists()
+
+
+def test_an_aged_trash_entry_holding_a_payload_is_quarantined_not_removed(tmp_path: Path) -> None:
+    """A discarder that died between its trash rename and its payload check left ``tmp/trash.*``."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    tmp = workspace.control / "tmp"
+    (tmp / "trash.empty" / "envelope").mkdir(parents=True)
+    (tmp / "trash.payload" / "payload" / "files").mkdir(parents=True)
+    (tmp / "trash.payload" / "payload" / "job.json").write_text("{}")
+    old = time.time() - gc_module.TMP_MAXIMUM_AGE_SECONDS - 60
+    for name in ("trash.empty", "trash.payload"):
+        os.utime(tmp / name, (old, old))
+    dry = workspace.collect_garbage(categories=("tmp_entries",), dry_run=True)
+    assert (tmp / "trash.empty").is_dir() and (tmp / "trash.payload").is_dir()
+    assert dry.category("tmp_entries").candidates == 1
+    report = workspace.collect_garbage(categories=("tmp_entries",))
+    assert report.category("tmp_entries").removed == 1
+    assert not [name for name in os.listdir(tmp) if name.startswith("trash.")]
+    [quarantined] = list((workspace.control / "quarantine").iterdir())
+    assert (quarantined / "entry" / "payload" / "job.json").is_file()
+    assert (quarantined / "report.json").is_file()
+
+
+def test_hygiene_repair_quarantines_an_aged_trash_entry_holding_a_payload(tmp_path: Path) -> None:
+    from httk.workflow.hygiene import _check_tmp_leftovers
+
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    tmp = workspace.control / "tmp"
+    (tmp / "trash.payload" / "payload").mkdir(parents=True)
+    (tmp / "trash.payload" / "payload" / "job.json").write_text("{}")
+    old = time.time() - gc_module.TMP_MAXIMUM_AGE_SECONDS - 60
+    os.utime(tmp / "trash.payload", (old, old))
+    assert _check_tmp_leftovers(workspace.root, repair=True).repaired
+    assert not (tmp / "trash.payload").exists()
+    [quarantined] = list((workspace.control / "quarantine").iterdir())
+    assert (quarantined / "entry" / "payload" / "job.json").is_file()
