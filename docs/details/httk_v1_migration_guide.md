@@ -176,7 +176,7 @@ httk project import-v1 --source ./ht.project .
 
 This imports safe metadata and public identities, not private keys or the v1
 queue. Imported project metadata records `legacy_queue_imported: false`. The
-project can record a workspace default, but the core-v2 workspace itself stays
+project can record a workspace default, but the core-v3 workspace itself stays
 outside the project. Detached transfer and transactional data are available to
 native jobs.
 
@@ -216,7 +216,7 @@ httk workflow run --workspace workflow-workspace --pool vasp --workers 2
 httk workflow run --workspace workflow-workspace --pool vasp-native --workers 2
 ```
 
-The shared core-v2 workspace already provides transactional data and detached
+The shared core-v3 workspace already provides transactional data and detached
 transfer for native jobs.
 
 Give the first native version a new job UUID and preferably a distinct tag and
@@ -322,7 +322,7 @@ Each outcome function publishes one decision and then returns;
 `httk_workflow_main` owns the process exit status. Do not also return a legacy
 decision code or write `ht.nextstep`.
 
-The `collect` step uses transactional data, in a core-v2 workspace:
+The `collect` step uses transactional data, in a core-v3 workspace:
 
 ```console
 httk workspace init native-workspace
@@ -721,7 +721,7 @@ There is no step-dispatch chain or `unknown_step` branch to write.
 `Runner.main` dispatches the step the manager asked for, and reports an
 unimplemented step, a step that published nothing and a step that raised as
 the corresponding outcomes. As in the Bash example, the transaction requires
-a transactional-data job in a core-v2 workspace.
+a transactional-data job in a core-v3 workspace.
 
 ## 12. Converting your `ht.instantiate.py`
 
@@ -893,7 +893,7 @@ still needs it.
 - [ ] Project/configuration/remote imports were reviewed separately.
 - [ ] No live *httk* v1 queue is being treated as an *httk₂* workspace.
 - [ ] Persistent scratch and committed result files are distinguished.
-- [ ] The core-v2 workspace matches the native job's data model.
+- [ ] The core-v3 workspace matches the native job's data model.
 - [ ] Every `HT_TASK_*` and `VASP_*` dependency has an explicit replacement.
 - [ ] Automatic remedies became explicit plan-and-apply decisions.
 - [ ] Child jobs use stable identities and an explicit join condition.

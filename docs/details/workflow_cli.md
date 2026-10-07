@@ -36,7 +36,7 @@ httk workflow remote     list | add | configure | check | import-v1 | show | rem
 httk workflow config     show | set | unset | import-v1
 httk workflow seal       verify [PATH] [--json] [--trusted-key KEY] [--shallow]
 httk workflow campaign   init | show | submit | collect | start-managers
-httk workflow transfer   receive | offer | retire      (hidden protocol only; see `job transfer` for the user-facing verb)
+httk workflow transfer   receive | offer | retire | reclaim | status      (hidden protocol and operator spellings; see `job transfer` for the user-facing verb)
 httk init | identity     (core-owned: per-user configuration and named operator identities)
 httk project             init | show | import-v1 | export | repair | adopt | manifest create | manifest verify | seal | unseal | verify-seal   (core-owned)
 ```
@@ -67,12 +67,13 @@ remote workspace for execution.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init [OPTIONS] PATH...` | create or adopt workspaces, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
-| `workspace daemon init WORKSPACE` | approve global `slurm` launchers and enroll a workspace with a new exchange directory, then check the sandbox | required `--exchange`; `--set KEY=VALUE`, `--add KEY=VALUE` (repeatable; keys as for `configure`, plus `cluster` and `scontrol`), `--state`, `--snapshots` |
+| `workspace init [OPTIONS] PATH...` | create a workspace in a new or empty directory of its own, or adopt an existing one, registering each name (basename or `--name`) centrally and recording it in the project's `members.json` | `--name` (one path only), `--setting`, `--no-durable` |
+| `workspace exchange enable [WORKSPACE]` | enable the `exchange/` extension of a workspace (idempotent) | |
+| `workspace daemon init WORKSPACE` | approve global `slurm` launchers, enable the workspace's exchange extension when needed and enroll it, then check the sandbox | `--set KEY=VALUE`, `--add KEY=VALUE` (repeatable; keys as for `configure`, plus `cluster` and `scontrol`), `--state`, `--snapshots` |
 | `workspace daemon configure WORKSPACE` | change the daemon configuration, activated when the daemon next starts | `--set KEY=VALUE`, `--add KEY=VALUE`, `--remove KEY=VALUE` (repeatable; lists `launchers`, `authorized_keys`; `bwrap`, `python`, `sbatch`, `squeue`, `scancel`, `sacct`, `slurm_conf`, `max_submissions`, `force`), `--state`, `--snapshots` |
 | `workspace daemon show WORKSPACE` | describe the enrollment and its daemon configuration | `--json`, `--state`, `--snapshots` |
 | `workspace daemon check WORKSPACE` | activate the configuration and check the real sandbox and scheduler clients | `--state`, `--snapshots` |
-| `workspace daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker serving the exchange | `--once`, `--state`, `--snapshots` |
+| `workspace daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker that starts, queries and cancels managers on signed requests | `--once`, `--state`, `--snapshots` |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |
@@ -98,8 +99,14 @@ remote workspace for execution.
 
 ### Creating, moving, and removing workspaces
 
-`workspace init` creates and registers an explicit workspace. A canonical path
-may have only one registered name. `--setting KEY=VALUE` seeds an application
+`workspace init` creates and registers an explicit workspace. The workspace is
+a directory of its own, never a project root: `init` refuses a non-empty
+directory, so give it a fresh path such as `workspace` or `runs/NAME`. Inside a
+project, the first local workspace initialized becomes the project's default.
+*httk-workflow* owns the top level of the directory: `.httk-workspace/`,
+`jobs/` (every payload is `jobs/<placement>/<job_key>`, and the empty
+placement, the default, gives `jobs/<job_key>`), `logs/`, `postprocess/` and,
+once enabled, `exchange/`. A canonical path may have only one registered name. `--setting KEY=VALUE` seeds an application
 setting at creation.
 
 ```console
@@ -272,7 +279,9 @@ A `null` or `"keep"` retention member means keep. On a fresh workspace,
 | `attempt_control` | `attempt_control_days` | aged `attempts/*` directories; failed and cancelled jobs retain their newest one, while other quiescent leftovers (including succeeded) also wait one workspace `lease_seconds` grace |
 | `transaction_trash` | `trash_days` | trees a replayed transaction moved aside, once the job left `committing` |
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
-| `transfer_records` | `trash_days` | per-transfer receipts below `transfers/acks/` and `transfers/imported/` |
+| `transfer_records` | `trash_days` | acknowledgements below `transfers/acks/` |
+| `transfer_receipts` | always safe | replay receipts below `transfers/received/` once no importer can accept the bundle any more (the freshness window plus the clock-skew bound after sealing) |
+| `manager_logs` | `trash_days` | `logs/managers/<id>.log` (and `.log.1`) of managers whose directory is gone; `logs/batch/` is never collected |
 | `removed_jobs` | always safe | state markers for jobs that are quiescent and unowned by any manager (`succeeded`, `failed`, `cancelled`, `submitted`, or `ready`) whose payload directories are absent, unless a non-terminal parent still references them as join children |
 | `journal_segments` | `journal_days` | segments outside every current non-terminal frame chain (and outside terminal current segments), written by a writer no live manager owns |
 | `manager_directories` | `journal_days` | directories of dead managers whose segments are gone |
@@ -282,15 +291,14 @@ A `null` or `"keep"` retention member means keep. On a fresh workspace,
 
 ### Retired transfers
 
-Completed transfers are an exception to the retention ages. After
-acknowledgement, retirement durably records the handover, then immediately
-removes the retired payload and its unprotected source journal segments,
-ignoring numeric retention ages. The transfer ledger is then pruned; durable
-epoch-scoped receipt ranges provide replay protection at the destination.
+After acknowledgement, retirement durably records the handover and moves the
+bundle to `transfers/retired/<T>`, from which `workspace gc` removes it after
+`trash_days` (category `retired_bundles`). Replay protection at the destination is a
+per-transfer receipt, which `transfer_receipts` collects once it can no longer
+matter. See {doc}`transfer_reclamation`.
 
-Set `retention.trash_days` to `"keep"` (or `null`) before retirement to keep
-both at retirement; `retention.journal_days: "keep"` independently keeps the
-journal. Ordinary GC still applies each category's own limit, so set both
+Set `retention.trash_days` to `"keep"` (or `null`) to keep retired bundles;
+`retention.journal_days: "keep"` independently keeps the journal. Set both
 members to `"keep"` to preserve both indefinitely:
 
 ```console
@@ -302,8 +310,7 @@ Retirement protects current markers, non-terminal chains, sealed transfers, and
 live manager writers. It deletes only eligible source-chain segments and empty
 writer directories, and creates no replacement journal stream. Shared or
 protected segments remain for a later retirement retry or ordinary GC.
-Repeating retirement resumes cleanup after an interruption. The reported
-`retired_bundle` is an identity path and normally no longer exists.
+Repeating retirement resumes cleanup after an interruption.
 
 ### Removing jobs
 
@@ -478,7 +485,7 @@ without modifying the published source tree.
 | `job seal [--keys REFS] JOB...` | seal the payloads of selected quiescent jobs | `--workspace`, `--keys` overrides the `seal.keys` setting |
 | `job unseal [--force] JOB...` | remove the seals of selected jobs, refused while the workspace is sealed | `--workspace`, `--force` skips the confirmation |
 | `job detach [OPTIONS] JOB...` | make spawned jobs independent of their parents, permanently | `--workspace`, optional `--operator` (recorded; default identity when omitted) |
-| `job eject [OPTIONS] JOB... DEST` | move quiescent jobs out of the workspace to free-standing job directories | `--workspace`; like `mv`, an existing `DEST` directory receives each job as `DEST/<job-key>` |
+| `job eject [OPTIONS] JOB... DEST` | move quiescent jobs out of the workspace to free-standing job directories | `--workspace`, `--resume` (finish pending copy-outs, alone or before ejecting); like `mv`, an existing `DEST` directory receives each job as `DEST/<job-key>` |
 | `job adopt [OPTIONS] DIR...` | move free-standing job directories into the workspace | `--workspace`, `--placement` (default: where each job was ejected from; refused for a job tree) |
 | `job list [OPTIONS]` | list jobs as a cheap table (remote: over the adapter) | `--workspace`, `--kind`, `--placement` (prefix), `--limit`, `--after`, `--tag-contains`, `--counts`, `--json`, `--adapter-timeout` |
 | `job show [OPTIONS] JOB...` | describe jobs from their state (remote: over the adapter) | `--workspace`, `--no-children`, `--json`, `--adapter-timeout` |
@@ -714,7 +721,11 @@ directory under `.httk-transfer/tree/<placement>/<job_key>/`. Each job prints
 `JOB_ID ejected PATH`, and a selected descendant that left inside its root's
 directory prints `JOB_ID ejected with its parent`. `httk workflow seal verify
 DIR` verifies a sealed one in place. A job whose ejection is still in progress
-is not retired by `httk workflow transfer retire`.
+is not retired by `httk workflow transfer retire`. When the destination is on
+another filesystem, the job is first exported to
+`transfers/exports/<T>/<job_key>` and then copied out; if the copy-out was
+interrupted, `httk job eject --resume` (alone, with no JOB or DEST) finishes
+every pending one. The held bundle can also be adopted back from its path.
 
 `job adopt` verifies a directory, moves it in (a rename on one filesystem;
 across filesystems, a copy that is verified before the directory is removed),
@@ -722,8 +733,10 @@ restores the job to the state it was ejected in, and installs a runner it
 carries. It prints `JOB_ID adopted STATE PAYLOAD`. A tree comes back whole, each
 member at the placement it left from, so `--placement` is refused for it, and a
 member's directory nested inside it cannot be adopted on its own. Every member
-is checked before anything is imported. `job adopt` refuses a directory made by
-a transfer to a named workspace (use `httk job transfer`) and a copy of a
+is checked before anything is imported. `job adopt` accepts a directory made by `job eject`, including one under an
+exchange `outbox/` or a workspace's `transfers/exports/`, and refuses one in an
+exchange `inbox/` (the confined manager imports those itself). It also refuses a
+directory made by a transfer to a named workspace (use `httk job transfer`) and a copy of a
 directory whose job already passed through this workspace, which it leaves in
 place. It also refuses a directory that is itself a symlink (adopt its target
 instead) or that contains special files, symlinks pointing outside it, or
@@ -732,7 +745,7 @@ inodes, so a hard link could alias a file outside the job). The adoption walk
 is bounded to 1,000,000 entries and a nesting depth of 256. An adopted job's
 placement must satisfy the [placement rule](workflow_filesystem_api.md#placement-rules).
 
-Both commands are crash-safe: an interrupted `job eject` is finished by the next
+Both commands are crash-safe and take no file locks: an interrupted `job eject` is finished by the next
 `job eject` or transfer recovery in that workspace, and an interrupted
 `job adopt` by adopting the same directory again. Neither works in a sealed
 workspace or project; a sealed job keeps its seal.
@@ -829,9 +842,11 @@ climbing out with `..`, is refused by name, because it would mean something else
 at the destination.
 
 Every step of a fetch is idempotent and the pipeline is resumable: `offer`
-reports an already sealed bundle from its ledger instead of sealing it again, a
+reports an already sealed bundle from `transfers/outgoing/` instead of sealing it again, a
 `pull` onto a matching staged bundle is a no-op, `import` returns the
 acknowledgement it already wrote, and a retired source is never offered again.
+A bundle whose acknowledgement never arrives is settled by the operator with
+`httk workflow transfer retire` or `reclaim` (below).
 An interrupted fetch is finished by running the same command again, and a fetch
 with nothing to collect does nothing.
 
@@ -877,6 +892,38 @@ A fetched job arrives as an ordinary job of the local default workspace, in its
 offered state and at its remote placement, so `httk collect` reports it like a
 job that ran at home.
 
+### Settling a transfer in doubt
+
+A bundle still unacknowledged after the freshness window (7 days) is in doubt;
+`httk workflow transfer status` (below) reports it (as it does held exports and orphaned claims; `httk project repair --dry-run` reports the same for the workspaces registered in a project). Two operator verbs settle it, each taking
+`--workspace WORKSPACE` (default: the resolved workspace) and one or more job
+UUIDs:
+
+```console
+httk workflow transfer retire [--workspace WS] [--json] JOB_ID ...
+httk workflow transfer reclaim [--workspace WS] [--json] JOB_ID ...
+```
+
+```console
+httk workflow transfer status [--workspace WS] [--json]
+```
+
+`status` is read-only. It reports exports held for copy-out (finish them with
+`httk job eject --resume`), outgoing transfers unacknowledged past the
+freshness window (in doubt), and adoption claims without their lineage. The
+text output is a first line `ok: MESSAGE` or `warning: MESSAGE` followed by
+tab-separated item lines; `--json` prints one object including `workspace`, `check`,
+`status`, `message`, `repairable`, `repaired`, `action` and `details` (`held_exports`, `outgoing_in_doubt` as
+`transfer_id`, `job_key`, `sealed_at` entries, and `stale_claims`). It exits 0
+when nothing waits for the operator, 1 when something does, 2 for argument
+errors. The workspace resolves as for `retire` and `reclaim`.
+
+`retire` states that the destination holds the job (verify first): the bundle
+moves to `transfers/retired/` and the job's marker is removed. `reclaim` takes
+the job back to its placement and previous state, and is refused until no
+destination could still import the bundle (the freshness window plus the
+clock-skew bound after sealing). See {doc}`transfer_reclamation`.
+
 ### Far-side protocol commands
 
 The fetch leg runs two far-side protocol commands over the adapter; they can
@@ -906,7 +953,13 @@ copies. The caller must already hold a destination acknowledgement. For
 `retire`, `--destination-workspace-id` is optional and, when given, refuses a
 bundle that was sealed for somebody else.
 
-Both print JSON with `--json` and tab-separated lines otherwise. The fetch reads
+`receive` prints one JSON document `{"results": [...]}` with one entry per
+bundle, and one bundle's result never aborts the others. Each result's status
+is `imported`, `replay` (already imported, acknowledged again), `expired`,
+`refused`, `waiting`, `lost` or `failed`; an acknowledgement, when there is
+one, is returned in the entry.
+
+`offer` and `retire` print JSON with `--json` and tab-separated lines otherwise. The fetch reads
 their answers back over the adapter's `invoke`, so their standard output must
 contain only the JSON document: a login banner or profile greeting on stdout
 stops the fetch with *remote offer did not return a transfer offer document*
@@ -920,7 +973,7 @@ such greetings to stderr or guard them with a non-interactive-shell test.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--exchange` (used by the workspace daemon), `--setting KEY=VALUE` (repeatable), `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--setting KEY=VALUE` (repeatable), `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `run` is the recommended spelling and `manager run` the advanced one. Both
 also take `--setting KEY=VALUE` (repeatable, not shown in `--help`), which pins
@@ -990,12 +1043,19 @@ httk workflow run --workers 4 \
 Pair this with the workflow manifest's per-step resource requirements; see
 {doc}`taskmanager` for the packing and dynamic-requirement example.
 
-The default manager log is the append-only workspace file
-`.httk-workspace/managers.log`. Each text line is prefixed with the manager id,
-and JSON records carry `manager_id`. `--log-file` selects another destination.
-The log is rotated when a manager starts, or every 1000 records once the file
-exceeds 16 MiB. One backup is kept, and a manager that has not yet reopened the
-file keeps appending to that backup.
+Each manager writes its own log, `logs/managers/<manager-id>.log`. Each text
+line is prefixed with the manager id, and JSON records carry `manager_id`.
+`--log-file PATH` selects one fixed file instead; it is only for a single
+in-process manager and is refused with `--count` above 1, `--detach`, remote
+submission and launchers. The owning manager rotates its log when it starts, or
+every 1000 records once the file exceeds 16 MiB, keeping one backup
+(`.log.1`). `workspace gc` removes logs of managers whose directory is gone
+once they are older than `trash_days` (category `manager_logs`); launcher batch
+scripts and Slurm output in `logs/batch/` are never collected.
+
+Every unrestricted confined manager serves the workspace's `exchange/`
+extension when it has been enabled with `httk workspace exchange enable`; there
+is no `--exchange` option.
 
 ### `precheck`: readiness before an attempt
 
@@ -1142,8 +1202,9 @@ httk workflow postprocess --script relaxation-plot <job-id>
 Output is written outside the job payload, so a sealed job, whose seal covers
 only the payload, can be postprocessed. The output root is
 `<workspace>/postprocess` by default, the `postprocess.directory` workspace
-setting when set, or `--output-dir DIR` for one invocation; a relative value
-resolves against the workspace root. Each job's directory below it is
+setting when set, or `--output-dir DIR` for one invocation; either value must
+be outside the workspace. `postprocess.directory` must be absolute;
+`--output-dir` may be relative, resolved against the current directory. Each job's directory below it is
 `<root>/<placement>/<job_key>/<NAME>/`.
 
 An optional `JOB` selector (UUID, key, unique prefix, or workspace path, the
@@ -1198,13 +1259,13 @@ unambiguous.
 | `remote import-v1 [OPTIONS] SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
-| `remote daemon configure REMOTE` | pin the identities in the mounted `endpoint.json` | required `--exchange` |
+| `remote daemon configure REMOTE` | pin the identities in the mounted `exchange.json` and `daemon.json` | required `--exchange` |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
 | `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`, `--request-id`; `--wait-seconds` |
-| `remote daemon status REMOTE` | print the passive exchange status, or with `--handle` inspect a manager by signed request | `--handle`, `--request-id` (only with `--handle`), `--wait-seconds` |
+| `remote daemon status REMOTE` | print the passive `status.json` and `managers.json`, or with `--handle` inspect a manager by signed request | `--handle`, `--request-id` (only with `--handle`), `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
-| `remote daemon log REMOTE` | print a manager's published `outbox/managers/<handle>.log` as is (exit 2 until published) | required `--handle` |
-| `remote daemon withdraw REMOTE` | take your waiting bundles back from `inbox` locally, then send the signed `withdraw` request; both land in `outbox/withdrawn/<name>` | required `--request-id`; `--bundle`, `--wait-seconds` |
+| `remote daemon log REMOTE` | print a manager's published `managers/<handle>.log` as is (exit 2 until published) | required `--handle` |
+| `remote daemon take-back REMOTE NAME [DESTINATION]` | take your bundle back from `inbox` (client-only: rename to a dot name, copy out, remove); if the name is gone a manager took it | `DESTINATION` defaults to `./NAME` |
 
 `remote show NAME` reports which file each setting came from, but never a
 credential value: a setting stored in the manifest-excluded `credentials.json`
@@ -1395,8 +1456,9 @@ A project has `httk_project/project.json` and a standard 32-byte Ed25519 seed
 stored with mode `0600`. Commands discover the nearest project in the working
 directory's parent chain. The project's default workspace for workflows is
 recorded by name and may live outside the project. Create a project with
-`httk project init PATH`, then give it a workspace with
-`httk workspace init PATH`.
+`httk project init PATH`, then give it a workspace in a new directory of its
+own with `httk workspace init PATH/workspace`; the first local workspace
+initialized inside a project becomes its default.
 
 A workspace inside a project is recorded in `httk_project/members.json`:
 registered on `httk workspace init`, unregistered on `workspace delete` or
@@ -1628,8 +1690,8 @@ address another machine's workspace.
 
 ### Removed commands
 
-The pre-release `transfer send`, `transfer fetch`, and `transfer status` verbs
-are **gone** and no longer parse. Use the single `job transfer SRC DST` verb,
+The pre-release `transfer send`, `transfer fetch`, and `transfer status REMOTE` verbs
+are **gone** and no longer parse (`httk workflow transfer status` is a different, local operator report). Use the single `job transfer SRC DST` verb,
 `manager run --workspace NAME` to start managers, and `workspace status NAME` to
 read a remote workspace's markers:
 

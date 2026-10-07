@@ -128,7 +128,7 @@ httk workflow run --workspace kappa:runs --count 4
 with `httk job transfer`; see {doc}`running`. Besides `ssh`, the packaged
 templates are `local` (a second tree on this machine), `mount` (files over a
 shared mount, commands through a separate executor) and `mount-daemon` (files
-as the only channel, through an exchange directory served by a confined broker on the cluster).
+as the only channel, through an exchange directory: the workspace's managers serve it, and the confined broker only starts, queries and cancels managers).
 
 The full guide, {doc}`details/remotes`, covers the mount variants, moving job
 trees, and the Python adapter API; {doc}`details/adapter_authoring` specifies

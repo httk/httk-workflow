@@ -14,8 +14,12 @@ workspace, then the project's recorded default, the registry default, and
 finally the per-user default workspace. A project does not contain workspaces;
 record its routing explicitly with `workspace default NAME`.
 
-`workspace init PATH` creates a named local workspace, or adopts and registers
-an existing path. `REMOTE:PATH` initializes and names a workspace on that
+`workspace init PATH` creates a named local workspace in a directory of its
+own, which must be new or empty (it is never a project root), or adopts and
+registers an existing workspace. The first local workspace initialized inside a
+project becomes the project's default. *httk-workflow* owns the workspace top
+level: `.httk-workspace/`, `jobs/`, `logs/`, `postprocess/` and, once enabled,
+`exchange/`. `REMOTE:PATH` initializes and names a workspace on that
 remote.
 
 ```console
@@ -146,7 +150,7 @@ attribute caching of an aggressively cached mount:
   waited out. `noac` removes the staleness and is correct, but disables
   attribute caching and close-to-open optimization altogether and is usually
   far too slow for a workspace with many jobs. `nolock` is fine: the protocol
-  never takes a POSIX lock. Use NFSv4.1 or newer where available.
+  never takes a POSIX lock (the only kernel locks are on node-local tmpfs). Use NFSv4.1 or newer where available.
 - Lustre and GPFS: no special options; their metadata coherence suits the
   local-filesystem defaults.
 - Mounts backed by an object store, and FUSE caches without rename atomicity,
@@ -376,7 +380,7 @@ invocation once the remote adapter has reached its owning machine.
 
 The launcher receives the manager's complete argument vector, the workspace
 path, the count and the workspace settings. The packaged Slurm launcher writes
-one mode-0700 batch script below `.httk-workspace/batch/`, submits it once per
+one mode-0700 batch script below `logs/batch/`, submits it once per
 manager, and returns the Slurm job ids and the script path. The script is reused
 for the requested count and stays there, beside the scheduler's manager output
 files, for inspection; the directory and scripts are launcher output, not
@@ -402,7 +406,9 @@ starts each attempt inside a Bubblewrap sandbox:
   `.httk-workspace/` or another job;
 - the paths of `confine.readonly_paths` are read-only, `/tmp` is private, with
   `HOME=/tmp/home` and `TMPDIR=/tmp`, and `/proc` and a minimal `/dev` with
-  a private `/dev/shm` and the `confine.devices` nodes are the sandbox's own;
+  a private `/dev/shm` and the `confine.devices` nodes are the sandbox's own.
+  The private tmpfs `/tmp` and `/dev/shm`, and the bound launch lock
+  directory, are node memory; limiting it is a site matter;
 - user, PID, IPC and UTS namespaces are private, the network is too unless
   `confine.isolate_network=false`, capabilities are dropped, and nested user
   namespaces are blocked when Bubblewrap supports it (a warning is logged
@@ -457,13 +463,19 @@ suggesting a longer timeout.
 
 Every claim, launch, transition, recovery decision and refused request is
 logged. The console shows warnings and errors; the complete info-level record
-goes to `.httk-workspace/managers.log`, with the manager id on each record.
-`--log-level` raises or lowers both, `--log-file` moves the file, and
-`--json-logs` writes one JSON object per line for ingestion.
+goes to the manager's own file `logs/managers/<manager-id>.log`, with the
+manager id on each record; no file is shared between managers.
+`--log-level` raises or lowers both and `--json-logs` writes one JSON object
+per line for ingestion. `--log-file PATH` names a fixed file instead. It is
+only for one in-process manager and is refused with `--count` above 1,
+`--detach`, remote submission, and launchers, which cannot give each manager a
+distinct file.
 
-The shared log rotates when a manager starts, or every 1000 records once it
-exceeds 16 MiB, keeping one backup, `managers.log.1`. A manager that has not yet
-reopened the file keeps appending to the backup.
+A manager rotates its own log when it starts, and every 1000 records once it
+exceeds 16 MiB, keeping one backup, `<manager-id>.log.1`. Logs outlive their
+managers so a crash stays diagnosable; garbage collection (category
+`manager_logs`) removes the logs of managers whose directory is gone once they
+are older than `trash_days`. `logs/batch/` is never collected.
 
 ### Draining
 
@@ -836,8 +848,10 @@ then kills the client can return about a second before ranks ignoring
 `SIGTERM` are reaped). A launch counts as finished when the launcher's local
 process group (such as `srun`) is gone; remote tasks of a killed `srun` end
 when Slurm cleans up the step. The attempt keeps
-its placement until every launch is reaped. The client needs `flock` on the
-workspace filesystem (on Lustre, mount with `flock` or `localflock`). ORCA,
+its placement until every launch is reaped. The client keeps its liveness lock
+in `<confine.shm_root>/httk-launch-<attempt_id>/`, a node-local tmpfs
+directory (`confine.shm_root` is assumed to be a tmpfs, not checked), so the workspace filesystem
+needs no lock support. ORCA,
 which starts its own MPI, is supported on one node only under confinement.
 Each launch style needs site acceptance, and stale shared-memory directories
 after a node failure are a site cleanup item; see

@@ -346,11 +346,11 @@ Beyond the standard request envelope, `daemon` accepts exactly:
 
 | Member | Meaning |
 | --- | --- |
-| `daemon_request` | complete signed version-3 command object from {doc}`/details/workspace_daemon` |
+| `daemon_request` | complete signed version-4 command object from {doc}`/details/workspace_daemon` |
 | `wait_seconds` | optional finite number from 0.05 to 120, default 10 |
 
 Before publication, the client checks the workspace and enrollment ids against
-the configured endpoint. Requests carry authorized httk identity signatures.
+the configured endpoint (the enrollment id only when a daemon is pinned). Requests carry authorized httk identity signatures.
 Responses must verify against the pinned daemon public key and match those
 identities, the request id and canonical request digest, an allowed operation
 outcome, and any requested handle. Paths, commands, argv, cwd, environment and
@@ -364,10 +364,12 @@ survives the adapter boundary. Failure to obtain a validated response is an
 adapter error and may leave a live request; callers must keep its id and fields
 for retry.
 
-For this kind, `configure` merges pending settings, validates the four
-settings listed in {doc}`/details/remotes`, and checks mounted workspace
-identity. It publishes nothing. `install` rejects nonempty pending settings and
-sends a health request; success means the matching daemon answered `ready`. It
+For this kind, `configure` merges pending settings, validates the settings
+listed in {doc}`/details/remotes` (`exchange` and `daemon_workspace_id`
+required, the daemon pins optional), and checks the mounted `exchange.json`
+workspace identity. It publishes nothing. `install` rejects nonempty pending settings and
+sends a health request when the daemon is pinned (otherwise it only checks
+`exchange.json`); success means the matching daemon answered `ready`. It
 does not install software or validate compute-node confinement.
 
 ## Settings and credentials

@@ -7,8 +7,9 @@ after the destination has acknowledged the import. `httk job eject` and
 describes what those protocols leave on disk, when `httk workspace gc` collects
 it, and what an operator does with a transfer that never completed. Ordinary
 use needs none of this; it matters when a transfer was interrupted, when a
-filesystem quota counts files, or when `httk workspace check` reports a
-transfer waiting for an operator. The normative protocol is in the
+filesystem quota counts files, or when `httk workflow transfer status [--workspace WS]` reports a
+transfer waiting for an operator (`httk project repair --dry-run` reports the
+same for workspaces registered in a project). The normative protocol is in the
 {doc}`workflow_filesystem_api`.
 
 The protocol takes no file locks and keeps no ledger, epoch or sequence
@@ -82,7 +83,7 @@ $ httk job eject --resume
 finishes every pending copy-out (managers never do this). The held bundle can
 also be taken back with `httk job adopt` of its path under `exports/`. While a
 bundle is held the job is not in the workspace and not at the target:
-`httk workspace check` reports it as an export waiting for copy-out.
+`httk workflow transfer status` reports it as an export waiting for copy-out.
 
 ## Transfers in doubt
 
@@ -93,7 +94,7 @@ lost simply repeats: the destination recognizes the replay and acknowledges
 again without creating a second job.
 
 A bundle still unacknowledged after `W` is *in doubt*: it may have been
-delivered, or it may still be delivered until `W + S` has passed. The check
+delivered, or it may still be delivered until `W + S` has passed. `httk workflow transfer status`
 reports it, and two operator verbs settle it:
 
 - `httk workflow transfer retire [--workspace WS] JOB_ID` when the destination

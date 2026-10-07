@@ -104,7 +104,7 @@ The dispatcher prints one result object:
   "kind": "slurm",
   "count": 2,
   "job_ids": ["501", "502"],
-  "script": "/scratch/me/runs/workspace/.httk-workspace/batch/manager-....sbatch"
+  "script": "/scratch/me/runs/workspace/logs/batch/manager-....sbatch"
 }
 ```
 
@@ -166,7 +166,7 @@ prefixes) there.
 A launcher may use other settings, but should keep its interpretation explicit.
 
 The maintained Slurm dispatcher writes one mode-0700 script below
-`.httk-workspace/batch/`, adds `--chdir`, output, and error paths, and calls
+`logs/batch/`, adds `--chdir`, output, and error paths, and calls
 `sbatch` once per requested manager. The script's final command is an
 argument-quoted `exec` line. If `environment.prelude` is set, the prelude runs
 first under `set -e`, and the manager command is resolved on the resulting
@@ -223,7 +223,7 @@ def main():
         return
     workspace = Path(request["workspace"])
     settings = {**request.get("settings", {}), **request.get("launcher_settings", {})}
-    directory = workspace / ".httk-workspace" / "batch"
+    directory = workspace / "logs" / "batch"
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / ("manager-" + uuid.uuid4().hex + ".pbs")
     directives = [("#PBS -N httk-manager",),

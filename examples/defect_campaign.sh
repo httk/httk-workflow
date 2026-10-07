@@ -6,6 +6,7 @@
 # SDKs. Every child job runs this same file at the "relax" step.
 #
 #     httk project init --name campaign .
+#     httk workspace init --name default workspace
 #     httk job new \
 #         --from-runner examples/defect_campaign.sh --step characterize \
 #         --parameter sites=3 --parameter diverging=1 --tag campaign
