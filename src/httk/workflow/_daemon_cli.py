@@ -4,7 +4,6 @@ import argparse
 import errno
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -41,10 +40,6 @@ def add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]"
         parser = modes.add_parser(mode, help=summary, description=summary[0].upper() + summary[1:])
         parser.set_defaults(daemon_mode=mode, **defaults)
         parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
-        if mode == "init":
-            parser.add_argument(
-                "--exchange", type=Path, required=True, help="client exchange directory, a sibling of the workspace"
-            )
         if mode in ("init", "configure"):
             extra = "; init also takes cluster and scontrol" if mode == "init" else ""
             parser.add_argument(
@@ -76,7 +71,9 @@ def add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]"
             parser.add_argument("--json", action="store_true", help="print the description as one JSON document")
         if mode == "run":
             parser.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
-        parser.add_argument("--state", type=Path, help="broker state directory when not the default")
+        parser.add_argument(
+            "--state", type=Path, help="broker state directory, outside the workspace, when not the default"
+        )
         snapshots = "when not <state>.snapshots" if mode == "init" else "of the enrollment, checked when given"
         parser.add_argument("--snapshots", type=Path, help=f"runtime snapshot directory {snapshots}")
 
@@ -145,7 +142,7 @@ def _check_after_setup(workspace: Path, policy: Path) -> int:
         code = subprocess.run(
             argv, stdin=subprocess.DEVNULL, cwd="/", env=_launch_environment(), close_fds=True, check=False
         ).returncode
-    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         code = 1
     if code == 0:
@@ -186,7 +183,6 @@ def _local(
     if mode == "init":
         snapshot = _daemon_setup.initialize(
             workspace,
-            exchange=_anchored(arguments.exchange, "exchange"),
             changes=arguments.changes or (),
             state=state,
             snapshots=snapshots,
@@ -222,7 +218,7 @@ def launch(arguments: argparse.Namespace) -> int:
         state = None if arguments.state is None else _anchored(arguments.state, "state")
         snapshots = None if arguments.snapshots is None else _anchored(arguments.snapshots, "snapshots")
         result = _local(arguments, workspace, state, snapshots)
-    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:  # LedgerError is a RuntimeError
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2
     if isinstance(result, int):

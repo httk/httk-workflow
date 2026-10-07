@@ -38,7 +38,7 @@ from ..adapters import (
 )
 from ..collecting import COLLECTABLE_KINDS
 from ..errors import ResolutionMiss, WorkflowError
-from ..hygiene import describe_remote, remove_remote
+from ..hygiene import _check_transfers, describe_remote, remove_remote
 from ..introspection import JobSelectorResolver
 from ..models import (
     QUIESCENT_KINDS,
@@ -1057,6 +1057,36 @@ def handle_transfer_reclaim(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
+_TRANSFER_STATUS_DETAILS = ("held_exports", "outgoing_in_doubt", "stale_claims")
+
+
+def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Report the transfer work of one workspace that waits for an operator; read only.
+
+    It names exports held for a copy-out, addressed transfers unacknowledged past
+    their freshness window (in doubt) and adoption claims without their lineage,
+    exactly as the workspace hygiene check does. The exit status is 0 when
+    nothing waits, 1 when something needs the operator.
+    """
+
+    workspace = _operator_workspace(arguments.operator_workspace, context)
+    finding = _check_transfers(workspace.root)
+    if arguments.json:
+        print(json.dumps({"workspace": str(workspace.root), **finding.as_mapping()}, indent=2, sort_keys=True))
+    else:
+        print(f"{finding.status}: {finding.message}")
+        held, in_doubt, stale = (finding.details.get(name, []) for name in _TRANSFER_STATUS_DETAILS)
+        assert isinstance(held, list) and isinstance(in_doubt, list) and isinstance(stale, list)
+        for name in held:
+            print(f"held export\t{name}\t(`httk job eject --resume`)")
+        for entry in in_doubt:
+            assert isinstance(entry, Mapping)
+            print(f"in doubt\t{entry['job_key']}\t{entry['transfer_id']}\t(`httk workflow transfer retire|reclaim`)")
+        for job_id in stale:
+            print(f"stale claim\t{job_id}")
+    return 0 if finding.status == "ok" else 1
+
+
 def _remote_offer(
     target: Any,
     remote_name: str,
@@ -1587,7 +1617,7 @@ def _report_transfer(arguments: argparse.Namespace, report: Mapping[str, object]
 
 
 def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> int:
-    """Parse and run one hidden ``receive``/``offer``/``retire`` protocol command."""
+    """Parse and run one ``receive``/``offer``/``retire`` protocol command or ``reclaim``/``status`` operator verb."""
 
     parser = argparse.ArgumentParser(prog="httk workflow transfer", add_help=True)
     protocol = parser.add_subparsers(dest="_which", required=True)
@@ -1625,6 +1655,11 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
     reclaim.add_argument("--json", action="store_true")
     reclaim.set_defaults(handler=handle_transfer_reclaim)
 
+    status = protocol.add_parser("status")
+    status.add_argument("--workspace", dest="operator_workspace", metavar="WORKSPACE")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=handle_transfer_status)
+
     try:
         arguments = parser.parse_args(list(tokens))
     except SystemExit as exc:
@@ -1648,7 +1683,9 @@ def build_transfer_parser(
             "addresses the directory unambiguously. It works whichever way the workspaces point — local to "
             "remote, remote to local, local to local, or remote to remote (relayed through this client). The "
             "hidden receive/offer/retire spellings remain protocol, under `httk workflow transfer`, for "
-            "remote peers to invoke by exact name."
+            "remote peers to invoke by exact name. Operators use `transfer status [--workspace WS] [--json]` "
+            "(what waits for an operator; exit 1 when something does), `transfer retire [--workspace WS] "
+            "JOB_ID...` and `transfer reclaim [--workspace WS] JOB_ID...`."
         ),
         handler=handle_transfer,
     )

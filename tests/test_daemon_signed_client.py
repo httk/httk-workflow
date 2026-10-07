@@ -47,8 +47,8 @@ def endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Endpoint:
 
 def _write_endpoint(exchange: Path, public_key: str, **changes: object) -> None:
     document: dict[str, object] = {
-        "format": "httk-workspace-daemon-endpoint",
-        "format_version": 2,
+        "format": "httk-workspace-daemon",
+        "format_version": 1,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
@@ -56,9 +56,7 @@ def _write_endpoint(exchange: Path, public_key: str, **changes: object) -> None:
         "request_max_age": 3600,
     }
     document.update(changes)
-    (exchange / "endpoint.json").write_text(
-        json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-    )
+    (exchange / "daemon.json").write_text(json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8")
 
 
 def _intent() -> Request:
@@ -106,7 +104,7 @@ def test_prepare_request_reuses_exact_signature_without_resigning(
 
 
 def test_prepare_request_retry_is_exact_across_processes(endpoint: Endpoint, tmp_path: Path) -> None:
-    settings_path = tmp_path / "endpoint.json"
+    settings_path = tmp_path / "daemon.json"
     settings_path.write_text(json.dumps(_settings(endpoint)), encoding="utf-8")
     script = (
         "import json,sys; from pathlib import Path; "
@@ -135,17 +133,6 @@ def test_prepare_request_retry_is_exact_across_processes(endpoint: Endpoint, tmp
     assert first == second
 
 
-def test_withdraw_bundle_is_signed_cached_and_part_of_the_intent(endpoint: Endpoint) -> None:
-    intent = Request(REQUEST_ID, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID, bundle="alpha")
-    saved = prepare_request(endpoint, intent)
-    assert saved.bundle == "alpha" and saved.signature is not None
-    assert prepare_request(endpoint, intent) == saved
-    with pytest.raises(ValueError, match="intent conflicts"):
-        prepare_request(endpoint, replace(intent, bundle="beta"))
-    with pytest.raises(ValueError, match="intent conflicts"):
-        prepare_request(endpoint, replace(intent, bundle=None))
-
-
 def test_prepare_request_refuses_changed_intent_endpoint_pin_and_signer(endpoint: Endpoint, tmp_path: Path) -> None:
     saved = prepare_request(endpoint, _intent())
 
@@ -167,7 +154,7 @@ def test_prepare_request_refuses_changed_intent_endpoint_pin_and_signer(endpoint
 
 
 def test_prepare_request_uses_live_max_age(endpoint: Endpoint) -> None:
-    _write_endpoint(endpoint.exchange, endpoint.public_key, request_max_age=900)
+    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], request_max_age=900)
 
     signed = prepare_request(endpoint, _intent())
 
@@ -176,7 +163,7 @@ def test_prepare_request_uses_live_max_age(endpoint: Endpoint) -> None:
 
 def test_new_start_uses_live_configuration_digest(endpoint: Endpoint) -> None:
     changed_digest = "c" * 64
-    _write_endpoint(endpoint.exchange, endpoint.public_key, configurations={"cpu": changed_digest})
+    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], configurations={"cpu": changed_digest})
 
     with pytest.raises(ValueError, match="does not match"):
         prepare_request(endpoint, _intent())
@@ -186,7 +173,7 @@ def test_new_start_uses_live_configuration_digest(endpoint: Endpoint) -> None:
 
 
 def test_prepare_request_refuses_changed_enrollment(endpoint: Endpoint) -> None:
-    _write_endpoint(endpoint.exchange, endpoint.public_key, enrollment_id="0" * 32)
+    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], enrollment_id="0" * 32)
 
     with pytest.raises(ValueError, match="enrollment changed"):
         prepare_request(endpoint, _intent())
@@ -195,7 +182,7 @@ def test_prepare_request_refuses_changed_enrollment(endpoint: Endpoint) -> None:
 def test_reload_cannot_retarget_cached_request_id(endpoint: Endpoint) -> None:
     signed = prepare_request(endpoint, _intent())
     changed_digest = "c" * 64
-    _write_endpoint(endpoint.exchange, endpoint.public_key, configurations={"cpu": changed_digest})
+    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], configurations={"cpu": changed_digest})
     changed_intent = replace(_intent(), configuration_digest=changed_digest)
 
     # The original intent still replays its exact cached bytes; a request under the new digest is a conflict.
@@ -285,19 +272,19 @@ def test_fsync_failure_after_install_reuses_exact_request(endpoint: Endpoint, mo
     assert encode_request(retried) == encode_request(signed[0])
 
 
-def test_concurrent_prepare_has_one_writer_and_no_overwrite(
+def test_concurrent_prepare_converges_on_one_cached_request(
     endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls = 0
-    calls_lock = threading.Lock()
+    barrier = threading.Barrier(4)
+    stamps = iter(range(2_000, 2_100))
+    stamp_lock = threading.Lock()
     original = client_module.sign_request
 
     def delayed(request: Request, *, lifetime: int = 3600) -> Request:
-        nonlocal calls
-        with calls_lock:
-            calls += 1
-        time.sleep(0.05)
-        return original(request, now=2_000, lifetime=lifetime)
+        barrier.wait(timeout=5)  # every preparer has missed the cache before any installs
+        with stamp_lock:
+            now = next(stamps)
+        return original(request, now=now, lifetime=lifetime)
 
     monkeypatch.setattr(client_module, "sign_request", delayed)
     results: list[Request] = []
@@ -313,26 +300,13 @@ def test_concurrent_prepare_has_one_writer_and_no_overwrite(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=5)
+        thread.join(timeout=10)
 
-    assert len(errors) == 3
-    assert all(isinstance(error, RuntimeError) and "already active" in str(error) for error in errors)
-    assert calls == 1
-    assert len(results) == 1
+    assert errors == []
+    assert len(results) == 4
+    assert len({encode_request(result) for result in results}) == 1
+    assert len(list(client_module._cache_directory(endpoint.require_daemon()[0]).glob("*.json"))) == 1
     assert prepare_request(endpoint, _intent()) == results[0]
-
-
-def test_active_request_lock_fails_immediately_without_publication(endpoint: Endpoint) -> None:
-    signed = prepare_request(endpoint, _intent())
-
-    with client_module._request_lock(endpoint, signed.request_id):
-        started = time.monotonic()
-        with pytest.raises(RuntimeError, match="already active"):
-            client_module.exchange(endpoint, signed, wait_seconds=120)
-        elapsed = time.monotonic() - started
-
-    assert elapsed < 1
-    assert not list(endpoint.requests.iterdir())
 
 
 def test_response_authentication_precedes_binding_and_cleanup(endpoint: Endpoint, tmp_path: Path) -> None:
@@ -347,12 +321,12 @@ def test_response_authentication_precedes_binding_and_cleanup(endpoint: Endpoint
     )
     signed = sign_response(unsigned, seed_path=tmp_path / "response.seed")
 
-    assert decode_matching_response(encode_response(signed), request, public_key=endpoint.public_key) == signed
+    assert decode_matching_response(encode_response(signed), request, public_key=endpoint.require_daemon()[1]) == signed
     with pytest.raises(ValueError, match="signature"):
         decode_matching_response(
             encode_response(replace(signed, handle="b" * 32)),
             request,
-            public_key=endpoint.public_key,
+            public_key=endpoint.require_daemon()[1],
         )
     other_seed = _seed(tmp_path / "wrong.seed", 10)
     wrong_key = identity_public_key(other_seed)

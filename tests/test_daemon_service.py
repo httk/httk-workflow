@@ -2,34 +2,35 @@
 
 import argparse
 import base64
+import errno
 import json
 import logging
 import os
-import sqlite3
+import shutil
 import subprocess
 import sys
 import threading
+import time
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httk.core.identity import identity_public_key
 
-from httk.workflow import _daemon_exchange as exchange_module
 from httk.workflow import _daemon_service as service_module
+from httk.workflow import _txn
 from httk.workflow._daemon_activation import activation_document
 from httk.workflow._daemon_auth import sign_request, verify_response
-from httk.workflow._daemon_exchange import ExchangeMover
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy
 from httk.workflow._daemon_protocol import Request, Response, decode_response, encode_request
-from httk.workflow._daemon_service import Broker
+from httk.workflow._daemon_service import Broker, ExchangePublisher
 from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
-from httk.workflow._daemon_state import Ledger
+from httk.workflow._daemon_state import Ledger, LedgerError
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
@@ -91,7 +92,6 @@ def _policy(tmp_path: Path, *, max_records: int = 64, max_submissions: int = 8) 
         workspace=tmp_path / "site/workspace",
         workspace_id=WORKSPACE_ID,
         enrollment_id=ENROLLMENT_ID,
-        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
         snapshots=tmp_path / "snapshots",
         bwrap=runtime / "bwrap",
@@ -121,7 +121,6 @@ def _request(
     profile: str | None = None,
     handle: str | None = None,
     configuration_digest: str | None = None,
-    bundle: str | None = None,
 ) -> Request:
     if operation == "start_manager" and configuration_digest is None:
         configuration_digest = _policy(tmp_path).configuration_digest(profile) if profile == "cpu" else "0" * 64
@@ -133,7 +132,6 @@ def _request(
         handle=handle,
         enrollment_id=enrollment_id,
         configuration_digest=configuration_digest,
-        bundle=bundle,
     )
     return sign_request(
         request,
@@ -167,14 +165,14 @@ def _open(tmp_path: Path, policy: Policy, *, initialize: bool = True) -> tuple[E
         ledger,
         requests,
         responses,
-        exchange=_mover(policy),
+        exchange=_publisher(policy),
         response_seed=response_seed_path(policy.state),
     )
     return stack, broker, ledger
 
 
-def _mover(policy: Policy) -> ExchangeMover:
-    return ExchangeMover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
+def _publisher(policy: Policy) -> ExchangePublisher:
+    return ExchangePublisher(policy.exchange, policy.enrollment_id)
 
 
 def _publish(broker: Broker, request: Request) -> str:
@@ -281,7 +279,7 @@ def test_completed_old_configuration_replays_but_new_and_received_old_starts_ref
         stack.close()
 
 
-def test_service_rechecks_protected_activation_after_acquiring_ledger_lock(
+def test_service_rechecks_protected_activation_after_opening_the_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     policy = _policy(tmp_path)
@@ -305,7 +303,7 @@ def test_service_rechecks_protected_activation_after_acquiring_ledger_lock(
 
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
-    monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
+    monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", Gateway)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
     arguments = argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False)
@@ -563,12 +561,14 @@ def test_clock_advance_before_scheduler_action_refuses_without_action(
             broker.process_once(threading.Event())
             handle = _read(broker, start).handle
         checks = 0
+        # A start checks its time once, just before its decision; manager operations again before acting.
+        expiring = 1 if operation == "start_manager" else 2
 
         def advance_clock(_request_value: Request, *, max_age: int) -> None:
             nonlocal checks
             assert max_age == policy.request_max_age
             checks += 1
-            if checks == 2:
+            if checks == expiring:
                 raise ValueError("expired")
 
         monkeypatch.setattr(service_module, "check_request_time", advance_clock)
@@ -583,7 +583,7 @@ def test_clock_advance_before_scheduler_action_refuses_without_action(
             "refused",
             "request_expired",
         )
-        assert checks == 2 and not gateway.statuses and not gateway.cancellations
+        assert checks == expiring and not gateway.statuses and not gateway.cancellations
         assert len(gateway.submissions) == (0 if operation == "start_manager" else 1)
     finally:
         stack.close()
@@ -619,13 +619,16 @@ def test_commit_precedes_publish_and_restart_does_not_resubmit(tmp_path: Path, m
     request = _request(tmp_path, 1, "start_manager", profile="cpu")
     publication = _publish(broker, request)
 
+    class Died(BaseException):
+        """The daemon process dies while installing the response."""
+
     def fail_publish(_name: str, _data: bytes) -> None:
         stored = ledger.lookup_request(request.request_id)
         assert stored is not None and stored.response is not None
-        raise OSError("injected response failure")
+        raise Died
 
     monkeypatch.setattr(broker.responses, "replace", fail_publish)
-    with pytest.raises(OSError, match="response failure"):
+    with pytest.raises(Died):
         broker.process_once(threading.Event())
     assert broker.requests.read(publication) == encode_request(request)
     assert len(gateway.submissions) == 1
@@ -734,7 +737,7 @@ def test_main_reports_state_recovery_guidance_and_scheduler_reasons(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     for error in (
-        sqlite3.DatabaseError("preserve this state, reconcile outstanding work, and initialize a new enrollment"),
+        LedgerError("preserve this state, reconcile outstanding work, and initialize a new enrollment"),
         SchedulerError("squeue timed out: slurm_load_jobs error: Unable to contact slurm controller"),
     ):
         caplog.clear()
@@ -765,7 +768,7 @@ def test_service_logs_check_and_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     policy = _policy(tmp_path)
-    for path in (policy.state, policy.requests, policy.responses, policy.workspace):
+    for path in (policy.state, policy.requests, policy.responses):
         path.mkdir(parents=True)
     initialize_response_seed(policy.state)
     with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
@@ -775,7 +778,7 @@ def test_service_logs_check_and_startup(
     (policy.state / "active.json").chmod(0o600)
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
-    monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
+    monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
@@ -786,10 +789,10 @@ def test_service_logs_check_and_startup(
 
 
 def test_service_uses_the_host_view_tmp_destinations() -> None:
-    assert (service_module._SNAPSHOT_POLICY, service_module._STATE_DIRECTORY, service_module._ROOT_DIRECTORY) == (
+    assert (service_module._SNAPSHOT_POLICY, service_module._STATE_DIRECTORY, service_module._EXCHANGE_DIRECTORY) == (
         Path("/tmp/daemon-policy.json"),
         Path("/tmp/control"),
-        Path("/tmp/daemon-root"),
+        Path("/tmp/daemon-exchange"),
     )
     arguments = argparse.Namespace(policy=Path("/daemon-policy.json"), policy_source=Path("/protected-policy.json"))
     with pytest.raises(ValueError, match="service policy must be /tmp/daemon-policy.json"):
@@ -820,11 +823,11 @@ def test_each_iteration_polls_the_exchange_with_ledger_managers(tmp_path: Path) 
     stack, broker, _ = _open(tmp_path, policy)
     polls: list[list[dict[str, str | None]]] = []
 
-    class Mover(ExchangeMover):
+    class Publisher(ExchangePublisher):
         def poll(self, managers: list[dict[str, str | None]]) -> None:
             polls.append(managers)
 
-    broker.exchange = Mover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
+    broker.exchange = Publisher(policy.exchange, policy.enrollment_id)
     start = _request(tmp_path, 1, "start_manager", profile="cpu")
     try:
         broker.process_once(threading.Event())
@@ -846,12 +849,12 @@ def test_exchange_failure_is_logged_and_does_not_stop_the_loop(
     stack, broker, _ = _open(tmp_path, policy)
     calls: list[None] = []
 
-    class Mover(ExchangeMover):
+    class Publisher(ExchangePublisher):
         def poll(self, managers: list[dict[str, str | None]]) -> None:
             calls.append(None)
             raise OSError("injected exchange failure")
 
-    broker.exchange = Mover(policy.root, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
+    broker.exchange = Publisher(policy.exchange, policy.enrollment_id)
     request = _request(tmp_path, 1)
     stop = threading.Event()
     try:
@@ -885,7 +888,7 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
-    monkeypatch.setattr(service_module, "_ROOT_DIRECTORY", policy.root)
+    monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "MailboxDirectory", record)
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
@@ -904,7 +907,7 @@ def test_ledger_listing_failure_is_logged_and_does_not_stop_the_loop(
     stack, broker, ledger = _open(tmp_path, policy)
 
     def corrupt() -> list[dict[str, str]]:
-        raise sqlite3.DatabaseError("invalid stored manager start")
+        raise LedgerError("invalid stored manager start")
 
     monkeypatch.setattr(ledger, "managers", corrupt)
     request = _request(tmp_path, 1)
@@ -949,10 +952,7 @@ def _observing(
     if sacct:
         policy = replace(policy, sacct=tmp_path / "broker/sacct")
     stack, broker, ledger = _open(tmp_path, policy, initialize=initialize)
-    staging = policy.workspace / ".httk-workspace/exchange"
-    for path in (policy.exchange / "inbox", policy.exchange / "outbox/rejected", staging / "inbox", policy.jobs):
-        path.mkdir(parents=True, exist_ok=True)
-    (staging / "outbox/rejected").mkdir(parents=True, exist_ok=True)
+    policy.jobs.mkdir(parents=True, exist_ok=True)
     gateway = ScriptedGateway(policy)
     observing = Broker(
         policy,
@@ -960,17 +960,17 @@ def _observing(
         ledger,
         broker.requests,
         broker.responses,
-        exchange=_mover(policy),
+        exchange=_publisher(policy),
         response_seed=broker.response_seed,
-        state=policy.state,
+        observe=True,
     )
-    clock = [1_800_000_000.0]
+    clock = [time.time()]
     monkeypatch.setattr(service_module, "time", SimpleNamespace(time=lambda: clock[0]))
     return stack, observing, gateway, clock
 
 
 def _managers(policy: Policy) -> Any:
-    return json.loads((policy.exchange / "outbox/managers.json").read_bytes())
+    return json.loads((policy.exchange / "managers.json").read_bytes())
 
 
 def test_managers_are_followed_to_their_final_state_and_their_log_published_once(
@@ -1020,22 +1020,22 @@ def test_managers_are_followed_to_their_final_state_and_their_log_published_once
         assert row["scheduler_state"] == "FAILED" and row["exit_code"] == "1:0"
         assert (row["started_at"], row["ended_at"]) == ("2026-10-05T10:00:00", "2026-10-05T10:01:00")
         assert row["log"] == f"managers/{handle}.log"
-        assert (policy.exchange / "outbox" / row["log"]).read_bytes() == tail[10:]
+        assert (policy.exchange / row["log"]).read_bytes() == tail[10:]
         assert caplog.text.count("daemon_manager_log ") == 1
-        assert f"path=outbox/managers/{handle}.log" in caplog.text
+        assert f"path=managers/{handle}.log" in caplog.text
         states = [record.getMessage() for record in caplog.records if "daemon_manager_state" in record.getMessage()]
         assert [message.split("state=")[1] for message in states] == [
             "PENDING exit_code=None",
             "RUNNING exit_code=None",
             "FAILED exit_code=1:0",
         ]
-        saved = json.loads((policy.state / "observations.json").read_bytes())
-        assert saved[handle]["final"] is True and saved[handle]["log_published"] is True
+        saved = json.loads((policy.state / "ledger" / "observations" / f"{handle}.json").read_bytes())
+        assert saved["final"] is True and saved["log_published"] is True
     finally:
         stack.close()
 
     # Observations survive a restart: a final manager is neither queried nor published again.
-    (policy.exchange / "outbox/managers.json").unlink()
+    (policy.exchange / "managers.json").unlink()
     caplog.clear()
     stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, initialize=False)
     try:
@@ -1069,7 +1069,7 @@ def test_a_manager_unknown_everywhere_for_thirty_minutes_is_gone_with_a_note(
         assert (row["scheduler_state"], row["exit_code"]) == ("GONE", None)
         source = policy.jobs / "httk-42.out"
         note = f"no Slurm output was found at {source}\n".encode()
-        assert (policy.exchange / "outbox/managers" / f"{handle}.log").read_bytes() == note
+        assert (policy.exchange / "managers" / f"{handle}.log").read_bytes() == note
         assert len(gateway.accountings) == 3
         clock[0] += 3600
         broker.process_once(stop)
@@ -1094,15 +1094,18 @@ def test_scheduler_and_state_failures_are_warnings_that_never_stop_the_loop(
             # The job ID comes from the ledger, before any check has succeeded.
             row = _managers(broker.policy)["managers"][0]
             assert (row["job_id"], row["scheduler_state"]) == ("42", None)
-            (broker.policy.state / "observations.json").unlink()
-            (broker.policy.state / "observations.json").mkdir()
+            stored = broker.policy.state / "ledger" / "observations" / f"{row['handle']}.json"
+            assert not stored.exists()  # the failed check recorded nothing
+            stored.mkdir()
             gateway.status_error = False
             clock[0] += 60
             _publish(broker, health)
             broker.process_once(stop)
         assert _read(broker, health).outcome == "ready"
         assert "daemon_observations_unsaved" in caplog.text
-        assert _managers(broker.policy)["managers"][0]["scheduler_state"] == "PENDING"
+        # The ledger is the instances' shared memory: an observation it could not store stays unpublished.
+        assert len(gateway.statuses) == 2
+        assert _managers(broker.policy)["managers"][0]["scheduler_state"] is None
         assert not [record for record in caplog.records if record.levelno > logging.WARNING]
     finally:
         stack.close()
@@ -1123,159 +1126,11 @@ _TRAVERSING = {
 
 
 @pytest.mark.parametrize(
-    "content", [b"not json", b'{"x": {"final": true}}', b"[]", json.dumps({"x": _TRAVERSING}).encode()]
+    "content", [None, b"not json", b"\xff", b'{"final": true}', b"[]", json.dumps(_TRAVERSING).encode()]
 )
-def test_invalid_observations_read_as_unobserved(tmp_path: Path, content: bytes) -> None:
-    path = tmp_path / "observations.json"
-    path.write_bytes(content)
-    assert service_module._load_observations(path) == {}
-    assert service_module._load_observations(tmp_path / "absent.json") == {}
-
-
-def _withdrawing(tmp_path: Path, **limits: int) -> tuple[ExitStack, Broker, Path, Path]:
-    """Open a broker whose exchange and staging directories exist; return its staging inbox and withdrawn."""
-
-    policy = _policy(tmp_path, **limits)
-    stack, broker, _ = _open(tmp_path, policy)
-    staging = policy.workspace / ".httk-workspace/exchange"
-    for path in (policy.exchange / "inbox", policy.exchange / "outbox/rejected", policy.exchange / "outbox/withdrawn"):
-        path.mkdir(parents=True, exist_ok=True)
-    for path in (staging / "inbox", staging / "outbox/rejected"):
-        path.mkdir(parents=True, exist_ok=True)
-    return stack, broker, staging / "inbox", policy.exchange / "outbox/withdrawn"
-
-
-def _bundle(path: Path, content: str = "content") -> Path:
-    path.mkdir()
-    (path / "payload").write_text(content, encoding="utf-8")
-    return path
-
-
-def test_withdraw_moves_all_or_one_waiting_bundle_back_unchanged(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
-    stop = threading.Event()
-    for name in ("job-a", "job-b", "job-c"):
-        _bundle(inbox / name, name)
-    for name in (".partial", "managers"):
-        _bundle(inbox / name)
-    one = _request(tmp_path, 1, "withdraw", bundle="job-b")
-    every = _request(tmp_path, 2, "withdraw")
-    try:
-        _publish(broker, one)
-        with caplog.at_level(logging.INFO):
-            broker.process_once(stop)
-        response = _read(broker, one)
-        assert (response.outcome, response.detail, response.reason, response.handle) == (
-            "withdrawn",
-            "job-b",
-            None,
-            None,
-        )
-        assert os.listdir(withdrawn) == ["job-b"] and (withdrawn / "job-b/payload").read_text() == "job-b"
-        assert "daemon_withdrawn names=job-b" in caplog.text
-        _publish(broker, every)
-        broker.process_once(stop)
-        assert _read(broker, every).detail == "job-a,job-c"
-        assert sorted(os.listdir(withdrawn)) == ["job-a", "job-b", "job-c"]
-        assert sorted(os.listdir(inbox)) == [".partial", "managers"]
-
-        # A retry with the same request ID replays the recorded response and moves nothing.
-        _bundle(inbox / "job-d")
-        _publish(broker, every)
-        broker.process_once(stop)
-        assert _read(broker, every).detail == "job-a,job-c"
-        assert (inbox / "job-d").is_dir()
-        _publish(broker, nothing := _request(tmp_path, 3, "withdraw", bundle="absent"))
-        broker.process_once(stop)
-        assert (_read(broker, nothing).outcome, _read(broker, nothing).detail) == ("withdrawn", None)
-    finally:
-        stack.close()
-
-
-def test_withdraw_leaves_the_client_inbox_to_the_client(tmp_path: Path) -> None:
-    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
-    fresh = _bundle(broker.policy.exchange / "inbox/fresh")
-    request = _request(tmp_path, 1, "withdraw")
-    try:
-        _publish(broker, request)
-        broker.process_once(threading.Event())
-        assert _read(broker, request).detail is None
-        assert os.listdir(withdrawn) == []
-        # The same pass then forwards the client's bundle: a later withdraw takes it back.
-        assert not fresh.exists() and (inbox / "fresh/payload").is_file()
-    finally:
-        stack.close()
-
-
-def test_withdraw_skips_raced_and_taken_names_and_quarantines_a_swapped_entry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
-    adopted, taken, swapped = _bundle(inbox / "adopted"), _bundle(inbox / "taken"), _bundle(inbox / "swapped")
-    _bundle(withdrawn / "taken", "earlier")
-    _bundle(inbox / "kept")
-    outside = _bundle(tmp_path / "outside")
-    original = exchange_module._rename
-    swaps: list[str] = []
-
-    def race(source: int, name: str, target: int, target_name: str) -> None:
-        if name == "adopted":  # a manager adopts it first
-            (adopted / "payload").unlink()
-            adopted.rmdir()
-        elif name == "swapped" and not swaps:
-            swaps.append(name)
-            (swapped / "payload").unlink()
-            swapped.rmdir()
-            swapped.symlink_to(outside, target_is_directory=True)
-        original(source, name, target, target_name)
-
-    monkeypatch.setattr(exchange_module, "_rename", race)
-    request = _request(tmp_path, 1, "withdraw")
-    try:
-        _publish(broker, request)
-        with caplog.at_level(logging.INFO):
-            broker.process_once(threading.Event())
-        assert _read(broker, request).detail == "kept"
-        assert (withdrawn / "taken/payload").read_text() == "earlier" and (taken / "payload").is_file()
-        assert "daemon_exchange_skipped direction=withdrawn name=taken reason=target_exists" in caplog.text
-        assert "daemon_exchange_quarantined direction=withdrawn name=swapped" in caplog.text
-        (quarantined,) = [name for name in os.listdir(withdrawn) if name.startswith(".quarantine-")]
-        assert (withdrawn / quarantined).is_symlink() and (outside / "payload").is_file()
-        assert "daemon_exchange_moved direction=withdrawn name=adopted" not in caplog.text
-        assert "daemon_exchange_skipped direction=withdrawn name=adopted" not in caplog.text
-    finally:
-        stack.close()
-
-
-def test_withdraw_does_not_count_towards_the_submission_quota(tmp_path: Path) -> None:
-    stack, broker, _, _ = _withdrawing(tmp_path, max_submissions=1)
-    start, withdraw = _request(tmp_path, 1, "start_manager", profile="cpu"), _request(tmp_path, 2, "withdraw")
-    try:
-        _publish(broker, start)
-        _publish(broker, withdraw)
-        broker.process_once(threading.Event())
-        assert (_read(broker, start).outcome, _read(broker, withdraw).outcome) == ("submitted", "withdrawn")
-    finally:
-        stack.close()
-
-
-def test_withdrawn_detail_is_cut_at_whole_names(tmp_path: Path) -> None:
-    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
-    names = [f"{index:03d}" + "x" * 96 for index in range(12)]
-    for name in names:
-        _bundle(inbox / name)
-    request = _request(tmp_path, 1, "withdraw")
-    try:
-        _publish(broker, request)
-        broker.process_once(threading.Event())
-        detail = _read(broker, request).detail
-        assert detail is not None and len(detail) <= 1000 and detail.endswith(",...")
-        assert detail.removesuffix(",...").split(",") == names[:9]
-        assert sorted(os.listdir(withdrawn)) == names
-    finally:
-        stack.close()
+def test_invalid_observations_read_as_unobserved(content: bytes | None) -> None:
+    assert service_module._parse_observation(content) is None
+    assert service_module._parse_observation(json.dumps({**_TRAVERSING, "job_id": "42"}).encode()) is not None
 
 
 def _start(tmp_path: Path, broker: Broker) -> str:
@@ -1379,7 +1234,7 @@ def test_a_non_regular_job_output_is_published_as_a_note(
     gateway.state = "FAILED"
     try:
         handle = _start(tmp_path, broker)
-        published = broker.policy.exchange / "outbox/managers" / f"{handle}.log"
+        published = broker.policy.exchange / "managers" / f"{handle}.log"
         assert published.read_bytes() == f"the Slurm output at {source} is not a regular file\n".encode()
     finally:
         stack.close()
@@ -1388,13 +1243,13 @@ def test_a_non_regular_job_output_is_published_as_a_note(
 def test_a_failed_log_publication_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
     (broker.policy.jobs / "httk-42.out").write_bytes(b"output")
-    outbox = broker.policy.exchange / "outbox"
+    outbox = broker.policy.exchange
     (outbox / "managers").write_text("not a directory", encoding="utf-8")
     gateway.state = "FAILED"
     try:
         handle = _start(tmp_path, broker)
         assert _managers(broker.policy)["managers"][0]["log"] is None
-        assert broker._observations[handle]["log_published"] is False
+        assert broker._observation(handle)["log_published"] is False  # type: ignore[index]
         (outbox / "managers").unlink()
         clock[0] += 60
         broker.process_once(threading.Event())
@@ -1405,15 +1260,439 @@ def test_a_failed_log_publication_is_retried(tmp_path: Path, monkeypatch: pytest
         stack.close()
 
 
-def test_withdraw_creates_a_missing_withdrawn_directory(tmp_path: Path) -> None:
-    stack, broker, inbox, withdrawn = _withdrawing(tmp_path)
-    withdrawn.rmdir()  # an enrollment made before the report directories existed
-    _bundle(inbox / "job")
-    request = _request(tmp_path, 1, "withdraw")
+PUBLISHED = {"handle": "a" * 32, "profile": "cpu", "request_id": "1" * 32, "state": "submitted", "job_id": None}
+
+
+def _exchange(tmp_path: Path) -> tuple[ExchangePublisher, Path]:
+    exchange = tmp_path / "workspace" / "exchange"
+    (exchange / "managers").mkdir(parents=True)
+    return ExchangePublisher(exchange, ENROLLMENT_ID), exchange
+
+
+def test_managers_document_is_pinned_and_rewritten_only_when_rows_change(tmp_path: Path) -> None:
+    publisher, exchange = _exchange(tmp_path)
+    path = exchange / "managers.json"
+    publisher.poll([PUBLISHED])
+    document = json.loads(path.read_bytes())
+    assert set(document) == {"format", "format_version", "enrollment_id", "generated_at", "managers"}
+    assert (document["format"], document["format_version"]) == ("httk-workspace-daemon-managers", 3)
+    assert document["enrollment_id"] == ENROLLMENT_ID and document["generated_at"].endswith("Z")
+    assert document["managers"] == [PUBLISHED]  # no staged / staged_truncated
+    assert path.stat().st_mode & 0o777 == 0o644
+    inode = path.stat().st_ino
+    publisher.poll([dict(PUBLISHED)])
+    assert path.stat().st_ino == inode
+    publisher.poll([{**PUBLISHED, "state": "uncertain"}])
+    assert path.stat().st_ino != inode and json.loads(path.read_bytes())["managers"][0]["state"] == "uncertain"
+    assert sorted(os.listdir(exchange)) == ["managers", "managers.json"]
+
+
+def test_a_client_symlink_at_a_published_name_is_replaced_never_followed(tmp_path: Path) -> None:
+    publisher, exchange = _exchange(tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_text("untouched", encoding="utf-8")
+    (exchange / "managers.json").symlink_to(victim)
+    handle = "b" * 32
+    (exchange / "managers" / f"{handle}.log").symlink_to(victim)
+    publisher.poll([PUBLISHED])
+    assert publisher.publish_log(handle, b"log")
+    assert not (exchange / "managers.json").is_symlink() and not (exchange / "managers" / f"{handle}.log").is_symlink()
+    assert (exchange / "managers" / f"{handle}.log").read_bytes() == b"log"
+    assert victim.read_text(encoding="utf-8") == "untouched"
+
+
+def test_a_hostile_exchange_is_logged_once_and_never_raises(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    publisher, exchange = _exchange(tmp_path)
+    handle = "c" * 32
+    (exchange / "managers.json").mkdir()  # a directory refuses the rename
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (exchange / "managers").rmdir()
+    (exchange / "managers").symlink_to(outside, target_is_directory=True)
+    with caplog.at_level(logging.WARNING):
+        publisher.poll([PUBLISHED])
+        publisher.poll([{**PUBLISHED, "state": "uncertain"}])
+        assert not publisher.publish_log(handle, b"log")
+        assert not publisher.publish_log(handle, b"log")
+    assert os.listdir(outside) == [] and os.listdir(exchange / "managers.json") == []
+    assert caplog.text.count("daemon_exchange_publish_failed name=managers.json") == 1
+    assert caplog.text.count(f"daemon_exchange_publish_failed name={handle}.log") == 1
+
+
+def test_a_removed_managers_directory_is_recreated_by_descriptor(tmp_path: Path) -> None:
+    publisher, exchange = _exchange(tmp_path)
+    (exchange / "managers").rmdir()
+    assert publisher.publish_log("d" * 32, b"log")
+    assert (exchange / "managers" / f"{'d' * 32}.log").read_bytes() == b"log"
+
+
+def test_a_missing_exchange_is_logged_without_raising(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    publisher = ExchangePublisher(tmp_path / "absent", ENROLLMENT_ID)
+    with caplog.at_level(logging.WARNING):
+        publisher.poll([PUBLISHED])
+        assert not publisher.publish_log("e" * 32, b"log")
+    assert "daemon_exchange_publish_failed name=managers.json" in caplog.text
+
+
+def test_the_exchange_path_and_log_handles_are_validated(tmp_path: Path) -> None:
+    publisher, _ = _exchange(tmp_path)
+    for handle in ("../x", "x" * 32, "A" * 32, ""):
+        with pytest.raises(ValueError, match="handle"):
+            publisher.publish_log(handle, b"log")
+    for path in (Path("relative"), tmp_path / ".." / "x"):
+        with pytest.raises(ValueError, match="absolute"):
+            ExchangePublisher(path, ENROLLMENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# Several instances on one lock-free ledger
+# ---------------------------------------------------------------------------
+
+
+class _Crash(BaseException):
+    """An injected process death at one protocol step."""
+
+
+def _instance(broker: Broker, *, gateway: RecordingGateway | None = None) -> Broker:
+    """Open another daemon instance on the same state, mailboxes and exchange."""
+
+    ledger = Ledger(
+        broker.policy.state,
+        broker.policy.workspace_id,
+        broker.policy.enrollment_id,
+        max_records=broker.policy.max_records,
+        max_submissions=broker.policy.max_submissions,
+    )
+    return Broker(
+        broker.policy,
+        RecordingGateway(broker.policy) if gateway is None else gateway,
+        ledger,
+        broker.requests,
+        broker.responses,
+        exchange=broker.exchange,
+        response_seed=broker.response_seed,
+    )
+
+
+@pytest.fixture
+def hook() -> Any:
+    callbacks: list[Any] = []
+
+    def run(step: str) -> None:
+        for callback in callbacks:
+            callback(step)
+
+    _txn._HOOK = run
     try:
-        _publish(broker, request)
-        broker.process_once(threading.Event())
-        assert _read(broker, request).detail == "job"
-        assert withdrawn.stat().st_mode & 0o777 == 0o700 and (withdrawn / "job/payload").is_file()
+        yield callbacks
+    finally:
+        _txn._HOOK = None
+
+
+def _submissions(*brokers: Broker) -> int:
+    return sum(len(cast(RecordingGateway, broker.gateway).submissions) for broker in brokers)
+
+
+@pytest.mark.parametrize("race", ["retransmitted", "concurrent"])
+def test_one_submission_however_two_instances_race_for_the_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook: Any, race: str
+) -> None:
+    policy = _policy(tmp_path)
+    stack, first, _ = _open(tmp_path, policy)
+    second = _instance(first)
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    real_link = os.link
+    raced: list[None] = []
+
+    def link(src: Any, dst: Any, **options: Any) -> None:
+        if not str(dst).endswith("/decision") or raced:
+            real_link(src, dst, **options)
+            return
+        raced.append(None)
+        if race == "concurrent":
+            second.process_once(threading.Event())  # the other instance decides, submits and publishes first
+            real_link(src, dst, **options)
+        else:
+            real_link(src, dst, **options)
+            raise FileExistsError(errno.EEXIST, "NFS retransmission of a successful link")
+
+    def late_instance(step: str) -> None:
+        if step == "ledger.decided" and race == "retransmitted" and len(raced) == 1:
+            raced.append(None)
+            second.process_once(threading.Event())  # sees a decision it did not win: publishes nothing
+
+    monkeypatch.setattr(_txn.os, "link", link)
+    hook.append(late_instance)
+    try:
+        _publish(first, start)
+        first.process_once(threading.Event())
+        assert _submissions(first, second) == 1
+        assert _read(first, start).outcome == "submitted"
+        stored = first.ledger.lookup_request(start.request_id)
+        assert stored is not None and stored.job_id == "42"
+        winner = second if race == "concurrent" else first
+        assert stored.decision is not None and stored.decision.nonce == winner.ledger.nonce
+        _publish(first, start)
+        second.process_once(threading.Event())
+        assert _submissions(first, second) == 1
     finally:
         stack.close()
+
+
+def test_recovery_answers_a_crashed_submission_and_a_late_winner_keeps_the_scheduler_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook: Any
+) -> None:
+    policy = _policy(tmp_path)
+    stack, first, _ = _open(tmp_path, policy)
+    second = _instance(first)
+    clock = [time.time()]
+    monkeypatch.setattr(service_module, "time", SimpleNamespace(time=lambda: clock[0]))
+    crashed = _request(tmp_path, 1, "start_manager", profile="cpu")
+    slow = _request(tmp_path, 2, "start_manager", profile="cpu")
+
+    def crash(step: str) -> None:
+        if step == "ledger.decided":
+            raise _Crash
+
+    try:
+        # The first instance dies between deciding the submission and running sbatch.
+        _publish(first, crashed)
+        hook.append(crash)
+        with pytest.raises(_Crash):
+            first.process_once(threading.Event())
+        hook.clear()
+        second.process_once(threading.Event())  # too early: still pending, nothing published
+        with pytest.raises(FileNotFoundError):
+            second.responses.read(f"{crashed.request_id}.json")
+        clock[0] += policy.command_timeout + service_module.KILL_GRACE_SECONDS + 61
+        second.process_once(threading.Event())
+        response = _read(second, crashed)
+        assert (response.outcome, response.reason) == ("uncertain", "submission_unconfirmed")
+        assert _submissions(first, second) == 0
+
+        # A slow winner: recovery answers while sbatch runs; the winner still records the job.
+        gateway = cast(RecordingGateway, first.gateway)
+        original_submit = gateway.submit
+
+        def slow_submit(launcher: ApprovedLauncher, handle: str) -> Submission:
+            clock[0] += 3600
+            second.process_once(threading.Event())
+            return original_submit(launcher, handle)
+
+        monkeypatch.setattr(gateway, "submit", slow_submit)
+        _publish(first, slow)
+        first.process_once(threading.Event())
+        late = _read(first, slow)
+        assert late.outcome == "uncertain" and late.handle is not None
+        stored = first.ledger.lookup_request(slow.request_id)
+        assert stored is not None and (stored.job_id, stored.state) == ("42", "submitted")
+        # Status prefers the scheduler identity over the premature uncertainty.
+        status = _request(tmp_path, 3, "manager_status", handle=late.handle)
+        _publish(second, status)
+        second.process_once(threading.Event())
+        assert _read(second, status).scheduler_state == "RUNNING"
+        assert cast(RecordingGateway, second.gateway).statuses == [("42", policy.cluster, late.handle)]
+    finally:
+        stack.close()
+
+
+def test_a_refusal_decided_by_a_crashed_instance_is_published_by_another(tmp_path: Path, hook: Any) -> None:
+    policy = _policy(tmp_path)
+    stack, first, _ = _open(tmp_path, policy)
+    second = _instance(first)
+    stale = _request(tmp_path, 1, "start_manager", profile="cpu", configuration_digest="0" * 64)
+
+    def crash(step: str) -> None:
+        if step == "ledger.decided":
+            raise _Crash
+
+    try:
+        _publish(first, stale)
+        hook.append(crash)
+        with pytest.raises(_Crash):
+            first.process_once(threading.Event())
+        hook.clear()
+        second.process_once(threading.Event())
+        response = _read(second, stale)
+        assert (response.outcome, response.reason) == ("refused", "stale_configuration")
+        assert response.handle is not None and _submissions(first, second) == 0
+        with pytest.raises(FileNotFoundError):
+            second.requests.read(f"{stale.request_id}.json")
+    finally:
+        stack.close()
+
+
+def test_a_response_is_installed_only_while_its_request_exists_and_expired_ones_are_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    stack, first, _ = _open(tmp_path, policy)
+    second = _instance(first)
+    request = _request(tmp_path, 1)
+    name = f"{request.request_id}.json"
+    try:
+        _publish(first, request)
+        first.process_once(threading.Event())
+        assert _read(first, request).outcome == "ready"
+        # The client consumed the response; a late instance must not install it again.
+        first.responses.remove(name)
+        stored = second.ledger.lookup_request(request.request_id)
+        assert stored is not None and stored.response is not None
+        second._publish(name, request, stored.response)
+        with pytest.raises(FileNotFoundError):
+            second.responses.read(name)
+
+        # The late instance looked the request up just before the first removed it: it reinstalls.
+        monkeypatch.setattr(second.requests, "lstat", lambda _name: os.lstat(policy.responses))
+        second._publish(name, request, stored.response)
+        assert _read(second, request).outcome == "ready"
+        monkeypatch.undo()
+        abandoned, fresh = f"{9:032x}.json", f"{10:032x}.json"
+        first.responses.replace(abandoned, b"{}")  # an unpersisted answer (busy) nobody fetched
+        first.responses.replace(fresh, b"{}")
+        old = time.time() - policy.request_max_age - service_module.CLOCK_SKEW_SECONDS - 10
+        for stale in (name, abandoned):
+            os.utime(policy.responses / stale, (old, old))
+        first.process_once(threading.Event())
+        assert sorted(os.listdir(policy.responses)) == [fresh]
+    finally:
+        stack.close()
+
+
+def test_an_activation_change_retires_an_instance_at_its_next_admission_without_abandoning_a_submission(
+    tmp_path: Path,
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, policy)
+    gateway = cast(RecordingGateway, broker.gateway)
+    changed: list[None] = []
+    fences: list[None] = []
+
+    def activation() -> None:
+        fences.append(None)
+        if changed:
+            raise ValueError("daemon startup selected a stale or mismatched active policy snapshot")
+
+    original_submit = gateway.submit
+
+    def submit_during_activation(launcher: ApprovedLauncher, handle: str) -> Submission:
+        changed.append(None)  # the operator activates a new configuration while sbatch runs
+        return original_submit(launcher, handle)
+
+    gateway.submit = submit_during_activation  # type: ignore[method-assign]
+    broker.activation = activation
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    health = _request(tmp_path, 2)
+    try:
+        _publish(broker, start)
+        _publish(broker, health)
+        broker.run(threading.Event())  # returns by itself once retired
+        assert broker.retired and len(fences) == 3  # admission and decision of the start, then the health
+        assert _read(broker, start).outcome == "submitted" and len(gateway.submissions) == 1
+        assert ledger.lookup_request(health.request_id) is None
+        assert broker.requests.read(f"{health.request_id}.json") == encode_request(health)
+        assert broker.process_once(threading.Event()) == 0
+    finally:
+        stack.close()
+
+
+def test_an_activation_change_between_admission_and_decision_leaves_the_start_to_the_next_instance(
+    tmp_path: Path,
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, policy)
+    fences: list[None] = []
+
+    def activation() -> None:
+        fences.append(None)
+        if len(fences) > 1:
+            raise OSError("active.json vanished")
+
+    broker.activation = activation
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    try:
+        _publish(broker, start)
+        broker.process_once(threading.Event())
+        assert broker.retired and not cast(RecordingGateway, broker.gateway).submissions
+        stored = ledger.lookup_request(start.request_id)
+        assert stored is not None and stored.state == "received"
+        successor = _instance(broker)
+        successor.process_once(threading.Event())
+        assert _read(successor, start).outcome == "submitted" and _submissions(successor) == 1
+    finally:
+        stack.close()
+
+
+def test_the_decision_is_durable_before_sbatch_and_the_response_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    events: list[str] = []
+    real_fsync = os.fsync
+
+    def fsync(descriptor: int) -> None:
+        events.append("fsync " + os.readlink(f"/proc/self/fd/{descriptor}"))
+        real_fsync(descriptor)
+
+    gateway = cast(RecordingGateway, broker.gateway)
+    original_submit, original_replace = gateway.submit, broker.responses.replace
+
+    def submit(launcher: ApprovedLauncher, handle: str) -> Submission:
+        events.append("sbatch")
+        return original_submit(launcher, handle)
+
+    def replace_response(name: str, data: bytes) -> None:
+        events.append("publish")
+        original_replace(name, data)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(gateway, "submit", submit)
+    monkeypatch.setattr(broker.responses, "replace", replace_response)
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    anchor = policy.state / "ledger" / "req" / start.request_id
+    try:
+        _publish(broker, start)
+        broker.process_once(threading.Event())
+        assert _read(broker, start).outcome == "submitted"
+        sbatch, publish = events.index("sbatch"), events.index("publish")
+        decision = next(i for i, event in enumerate(events) if ".decision.link-" in event)
+        response = next(i for i, event in enumerate(events) if ".response.link-" in event)
+        assert decision < events.index(f"fsync {anchor}", decision) < sbatch
+        assert sbatch < response < events.index(f"fsync {anchor}", response) < publish
+    finally:
+        stack.close()
+
+
+def test_a_blocked_response_name_is_logged_and_never_stops_the_daemon(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    blocked, served = _request(tmp_path, 1), _request(tmp_path, 2)
+    (policy.responses / f"{blocked.request_id}.json").mkdir()
+    (policy.responses / f"{blocked.request_id}.json" / "keep").write_bytes(b"x")
+    try:
+        _publish(broker, blocked)
+        _publish(broker, served)
+        with caplog.at_level(logging.WARNING):
+            assert broker.process_once(threading.Event()) == 2
+        assert f"daemon_response_unpublishable request_id={blocked.request_id}" in caplog.text
+        with pytest.raises(FileNotFoundError):
+            broker.requests.read(f"{blocked.request_id}.json")
+        assert _read(broker, served).outcome == "ready"
+        # The answer stays in the ledger: once the client clears the name, a resubmission replays it.
+        shutil.rmtree(policy.responses / f"{blocked.request_id}.json")
+        _publish(broker, blocked)
+        broker.process_once(threading.Event())
+        assert _read(broker, blocked).outcome == "ready"
+    finally:
+        stack.close()
+
+
+def test_the_policy_module_keeps_the_exchange_directory_name_of_the_models() -> None:
+    # _daemon_policy is loaded by path in the bootstrap (no package, no site-packages), so it cannot import
+    # httk.workflow.models; its own copy of the name is pinned here instead.
+    from httk.workflow import _daemon_policy, models
+
+    assert _daemon_policy.EXCHANGE_DIRECTORY == models.EXCHANGE_DIRECTORY

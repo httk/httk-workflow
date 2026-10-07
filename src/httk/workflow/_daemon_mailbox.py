@@ -200,6 +200,22 @@ class MailboxDirectory:
         os.unlink(name, dir_fd=descriptor)
         os.fsync(descriptor)
 
+    def lstat(self, name: str) -> os.stat_result | None:
+        """Look up one flat publication by name, without following a symlink.
+
+        :param name: A 32-character lower-case hexadecimal publication name.
+        :return: The entry's ``lstat`` result, or ``None`` when no entry has the name.
+        :raises ValueError: If the name is invalid.
+        :raises OSError: If the lookup fails for another reason than absence.
+        """
+
+        descriptor = self._require_open()
+        _validate_name(name)
+        try:
+            return os.lstat(name, dir_fd=descriptor)
+        except FileNotFoundError:
+            return None
+
     def read(self, name: str) -> bytes:
         """Read one bounded regular publication by its flat filename.
 

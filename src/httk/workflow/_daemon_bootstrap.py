@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 # The broker runs only trusted code, so it sees the host read-only; its writable mounts and policy data
 # sit on the private /tmp, since a read-only / takes no new directories.
-_HOST_ROOT_DESTINATION = "/tmp/daemon-root"
+_HOST_EXCHANGE_DESTINATION = "/tmp/daemon-exchange"
 _HOST_STATE_DESTINATION = "/tmp/control"
 _HOST_POLICY_DESTINATION = "/tmp/daemon-policy.json"
 _FIXED_ENVIRONMENT = {
@@ -124,11 +124,11 @@ else:
 def _load_policy_once(path: Path) -> tuple[Any, bytes, Any]:
     api = _policy_api()
     loader: Any = api.get("_load_policy_with_bytes")
-    check_layout: Any = api.get("check_layout")
-    if not callable(loader) or not callable(check_layout):
-        raise RuntimeError("installed daemon policy module has no isolated loader or layout check")
+    check_private_paths: Any = api.get("check_private_paths")
+    if not callable(loader) or not callable(check_private_paths):
+        raise RuntimeError("installed daemon policy module has no isolated loader or private-path check")
     policy, data = cast(tuple[Any, bytes], loader(path))
-    return policy, data, check_layout
+    return policy, data, check_private_paths
 
 
 def _resolve_declared_path(path: Path, *, strict: bool) -> Path:
@@ -139,8 +139,9 @@ def _resolve_declared_path(path: Path, *, strict: bool) -> Path:
 
 
 def _mutable_roots(policy: Any) -> tuple[Path, ...]:
-    # The dedicated parent holds the workspace and the exchange, and the broker binds it read-write.
-    return tuple(_resolve_declared_path(path, strict=False) for path in (policy.root, policy.state))
+    # Trusted code and commands must lie outside the whole workspace (jobs write there, not only the
+    # exchange the broker binds) and outside the broker's private state.
+    return tuple(_resolve_declared_path(path, strict=False) for path in (policy.workspace, policy.state))
 
 
 def _check_command(path: Path, mutable_roots: tuple[Path, ...]) -> None:
@@ -227,17 +228,18 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
 
 
 def _prepare_sandbox(
-    arguments: argparse.Namespace, policy: Any, policy_data: bytes, policy_source: Path, check_layout: Any
+    arguments: argparse.Namespace, policy: Any, policy_data: bytes, policy_source: Path, check_private_paths: Any
 ) -> _PreparedSandbox:
-    mutable_roots = (policy.root, policy.state)
+    mutable_roots = (policy.workspace, policy.state)
     resolved_mutable = _mutable_roots(policy)
     source = _source_path()
     _check_protected_file(source, mutable_roots)
     _check_protected_file(source.with_name("_daemon_policy.py"), mutable_roots)
     _check_protected_file(source.with_name("_sandbox.py"), mutable_roots)
     _check_protected_file(policy_source, mutable_roots)
-    # The broker owns the exchange, so every entry rechecks the layout including the rename probe.
-    check_layout(policy, probe=True)
+    # State and snapshots stay outside the workspace on every entry, symlinks followed: inside the exchange
+    # they would hand the client the ledger and configuration, elsewhere in the workspace the keys to jobs.
+    check_private_paths(policy)
     for command in (policy.python, policy.bwrap, policy.sbatch, policy.squeue, policy.scancel):
         _check_command(command, resolved_mutable)
     if policy.slurm_conf is not None:
@@ -257,13 +259,20 @@ def _prepare_sandbox(
     descriptors: list[int] = []
     argv = _base_bwrap_argv(policy, block_userns=block_userns)
     try:
-        # One writable bind of the dedicated parent; the service reaches the exchange and the
-        # workspace staging area only through descriptor-anchored no-follow opens below it.
+        # Two writable binds, each taken from a no-follow descriptor: the workspace's exchange, the only
+        # client-writable path the broker reaches (it opens everything below it descriptor-anchored and
+        # no-follow), and the broker's private state. The rest of the workspace is not visible for writing.
         for source_path, destination in (
-            (policy.root, _HOST_ROOT_DESTINATION),
+            (policy.exchange, _HOST_EXCHANGE_DESTINATION),
             (policy.state, _HOST_STATE_DESTINATION),
         ):
-            descriptor = _open_directory_nofollow(source_path)
+            try:
+                descriptor = _open_directory_nofollow(source_path)
+            except OSError as exc:
+                raise ValueError(
+                    f"cannot open {source_path} as a real directory ({exc.strerror}); "
+                    "the daemon serves the workspace's exchange, which 'httk workspace exchange enable' creates"
+                ) from exc
             descriptors.append(descriptor)
             argv += ["--dir", destination, "--bind-fd", str(descriptor), destination]
         policy_fd = _policy_snapshot(policy_data)
@@ -337,9 +346,9 @@ def main(argv: list[str] | None = None) -> int:
         policy_path = Path(arguments.policy)
         if not policy_path.is_absolute():
             raise ValueError("--policy must be an absolute local path")
-        policy, policy_data, check_layout = _load_policy_once(policy_path)
+        policy, policy_data, check_private_paths = _load_policy_once(policy_path)
         policy_source = _validate_arguments(arguments, policy)
-        prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source, check_layout)
+        prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source, check_private_paths)
         try:
             _exec_prepared(prepared)
         finally:

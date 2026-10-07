@@ -25,14 +25,13 @@ from ._daemon_policy import (
     _LAUNCHER_NAME,
     ApprovedLauncher,
     Policy,
-    _check_parent_names,
     _object_without_duplicates,
     _open_directory,
     _open_nofollow,
     _overlap,
     _parse_float,
     _reject_constant,
-    check_layout,
+    check_private_paths,
     load_policy,
     policy_document,
 )
@@ -42,25 +41,19 @@ from ._daemon_policy import (
 )
 from ._daemon_slurm import submission
 from ._daemon_state import Ledger
-from ._exchange import enable_exchange
+from ._exchange import ExchangeUnavailableError, enable_exchange, install_document
 from .configuration import launchers_home
 from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
 from .models import EXCHANGE_DIRECTORY
 from .workspace import Workspace
 
-_ENDPOINT_FORMAT = "httk-workspace-daemon-endpoint"
-_ENDPOINT_VERSION = 2
+_DAEMON_DOCUMENT = "daemon.json"
+_DAEMON_FORMAT = "httk-workspace-daemon"
+_DAEMON_VERSION = 1
 _MAX_WORKSPACE_BYTES = 1024 * 1024
 _MAX_LAUNCHER_BYTES = 64 * 1024
 _MAX_DISCOVERY_BYTES = 64 * 1024
 _CLUSTER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_REPORT_DIRECTORIES = ("outbox/managers", "outbox/withdrawn")
-_EXCHANGE_DIRECTORIES = ("requests", "responses", "inbox", "outbox", "outbox/rejected", *_REPORT_DIRECTORIES)
-_STAGING_DIRECTORIES = ("inbox", "outbox", "outbox/rejected", "records")
-#: The enrollment record daemon setup writes into the workspace's staging directory.
-ENROLLMENT_MARKER = "enrollment.json"
-_ENROLLMENT_FORMAT = "httk-workspace-daemon-enrollment"
-_ENROLLMENT_VERSION = 1
 _DEFAULT_SLURM_CONF = Path("/etc/slurm/slurm.conf")
 _DEFAULT_MAX_SUBMISSIONS = 128
 _CANONICAL_INTEGER = re.compile(r"[1-9][0-9]*\Z")
@@ -290,7 +283,7 @@ def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -
     except FileNotFoundError:
         raise ValueError(f"unknown global launcher: {name!r}") from None
     if any(bundle.is_relative_to(path.resolve()) for path in forbidden):
-        raise ValueError(f"daemon launcher {name!r} must not lie inside the daemon parent, state or snapshots")
+        raise ValueError(f"daemon launcher {name!r} must not lie inside the workspace, state or snapshots")
     metadata = _decode_object(
         _read_bounded(bundle / LAUNCHER_METADATA, _MAX_LAUNCHER_BYTES, protected=True), description="launcher metadata"
     )
@@ -514,7 +507,6 @@ def _configuration(document: Mapping[str, object]) -> _Configuration:
 
 def _compile(
     workspace: Path,
-    exchange: Path,
     state: Path,
     snapshots: Path,
     enrollment_id: str,
@@ -530,14 +522,12 @@ def _compile(
         raise ValueError("daemon launcher names must be unique")
     # In name order, the order of the canonical snapshot document.
     approved = tuple(
-        _approved_launcher(name, (exchange.parent, state, snapshots), force=configuration.force)
-        for name in sorted(launchers)
+        _approved_launcher(name, (workspace, state, snapshots), force=configuration.force) for name in sorted(launchers)
     )
     policy = Policy(
         workspace=workspace,
         workspace_id=_workspace_id(workspace),
         enrollment_id=enrollment_id,
-        exchange=exchange,
         state=state,
         snapshots=snapshots,
         launchers=approved,
@@ -713,37 +703,30 @@ def _publish(policy: Policy) -> Path:
     return snapshot
 
 
-def _write_endpoint(policy: Policy) -> None:
-    endpoint = {
-        "format": _ENDPOINT_FORMAT,
-        "format_version": _ENDPOINT_VERSION,
+def _write_daemon_document(policy: Policy) -> None:
+    """Install ``exchange/daemon.json``: the unsigned menu a client reads, never a trust anchor.
+
+    The exchange is opened from a workspace-root descriptor without following symlinks, and the document
+    is installed by an exclusive temporary and a rename, so whatever the client left at the name is
+    replaced rather than followed.
+    """
+
+    document = {
+        "format": _DAEMON_FORMAT,
+        "format_version": _DAEMON_VERSION,
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
         "daemon_public_key": response_public_key(response_seed_path(policy.state)),
         "configurations": {launcher.name: policy.configuration_digest(launcher.name) for launcher in policy.launchers},
         "request_max_age": policy.request_max_age,
     }
-    _write_atomic(policy.exchange / "endpoint.json", _canonical_bytes(endpoint))
-
-
-def _create_staging(workspace: Path) -> None:
-    for name in _STAGING_DIRECTORIES:
-        _mkdir_exclusive(workspace / ".httk-workspace" / "exchange" / name, exist_ok=True)
-
-
-def _write_enrollment(workspace: Path, policy: Policy, *, replace: bool = True) -> None:
-    """Mark the workspace enrolled; with *replace* false, only when the marker is missing."""
-
-    marker = workspace / ".httk-workspace" / "exchange" / ENROLLMENT_MARKER
-    if not replace and os.path.lexists(marker):
-        return
-    document = {
-        "format": _ENROLLMENT_FORMAT,
-        "format_version": _ENROLLMENT_VERSION,
-        "enrollment_id": policy.enrollment_id,
-        "workspace_id": policy.workspace_id,
-    }
-    _write_atomic(marker, _canonical_bytes(document))
+    try:
+        install_document(policy.workspace, _DAEMON_DOCUMENT, _canonical_bytes(document) + b"\n")
+    except (OSError, ExchangeUnavailableError) as exc:
+        raise ValueError(
+            f"cannot publish {policy.exchange / _DAEMON_DOCUMENT}: {exc}; the workspace's exchange must be "
+            "a real directory ('httk workspace exchange enable' creates it)"
+        ) from exc
 
 
 def _snapshots_default(state: Path) -> Path:
@@ -758,22 +741,11 @@ def _load_configuration(policy: Policy) -> _Configuration:
     try:
         data = _read_bounded(policy.state / _CONFIGURATION_FILE, _MAX_CONFIGURATION_BYTES, protected=True)
     except FileNotFoundError:
-        # An enrollment made before the configuration file existed: seed it once from the active snapshot.
-        configuration = _Configuration(
-            launchers=tuple(launcher.name for launcher in policy.launchers),
-            authorized_keys=policy.authorized_keys,
-            bwrap=policy.bwrap,
-            python=policy.python,
-            sbatch=policy.sbatch,
-            squeue=policy.squeue,
-            scancel=policy.scancel,
-            sacct=policy.sacct,
-            slurm_conf=policy.slurm_conf,
-            max_submissions=policy.max_submissions,
-            force=False,
-        )
-        _save_configuration(policy.state, configuration)
-        return configuration
+        raise ValueError(
+            f"the daemon state {policy.state} has no {_CONFIGURATION_FILE}; this enrollment predates the saved "
+            "configuration and is not migrated. Remove its state and snapshots directories and run "
+            "'httk workspace daemon init' again"
+        ) from None
     return _configuration(_decode_object(data, description="daemon configuration"))
 
 
@@ -795,7 +767,6 @@ def _description(policy: Policy, configuration: _Configuration) -> dict[str, obj
 def initialize(
     workspace: Path,
     *,
-    exchange: Path,
     changes: Sequence[tuple[str, str]] = (),
     state: Path | None = None,
     snapshots: Path | None = None,
@@ -803,18 +774,18 @@ def initialize(
 ) -> Path:
     """Compile and publish a fresh enrollment from approved global ``slurm`` launchers.
 
-    The workspace's exchange extension is enabled when it is absent (and *report* told so), just before
-    the enrollment is written: from then on every manager of the workspace must confine its attempts.
+    The exchange is the workspace's own ``exchange`` directory. The workspace's exchange extension is enabled
+    when it is absent (and *report* told so) before ``exchange/daemon.json`` is written: from then on every
+    manager of the workspace must confine its attempts. *state* and *snapshots* must lie outside the workspace.
 
     Configuration values that *changes* does not set are discovered: executables on ``PATH``, the running
     interpreter, the effective Slurm configuration and its cluster, 128 submissions, and ``force=false``.
 
     :param workspace: Workspace data root.
-    :param exchange: Client exchange directory; a missing or empty sibling of the workspace.
     :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set`` or ``add``, applied in order to
         ``CONFIGURATION_KEYS`` and ``INITIALIZE_KEYS``; at least one launcher and one key must result.
-    :param state: Broker state directory, by default under the httk data home.
-    :param snapshots: Snapshot directory, by default ``<state>.snapshots``.
+    :param state: Broker state directory outside the workspace, by default under the httk data home.
+    :param snapshots: Snapshot directory outside the workspace, by default ``<state>.snapshots``.
     :param report: Called with one line when this call enables the workspace's exchange extension.
     :return: Path of the published runtime snapshot.
     :raises ValueError: If a launcher, key, configuration value or the layout is refused.
@@ -822,7 +793,6 @@ def initialize(
     """
 
     workspace = workspace.resolve(strict=True)
-    exchange = exchange.parent.resolve(strict=True) / exchange.name
     state = _state_default(workspace) if state is None else state
     snapshots = _snapshots_default(state) if snapshots is None else snapshots
     document: dict[str, object] = {
@@ -837,26 +807,18 @@ def initialize(
     _discover(document)
     configuration = _configuration(document)
     cluster = _cluster(cluster, configuration.slurm_conf, None if scontrol is None else Path(scontrol))
-    policy = _compile(workspace, exchange, state, snapshots, secrets.token_hex(16), cluster, configuration)
+    policy = _compile(workspace, state, snapshots, secrets.token_hex(16), cluster, configuration)
     home = data_home().resolve()
-    if _overlap(policy.root, home):
-        raise ValueError(f"daemon parent {policy.root} must be disjoint from the httk data home {home}")
+    if _overlap(policy.workspace, home):
+        raise ValueError(f"workspace {policy.workspace} must be disjoint from the httk data home {home}")
+    check_private_paths(policy)
     _runtime_policy_bytes(policy)
-    _check_parent_names(policy, os.listdir(policy.root))
-    if os.path.lexists(exchange) and (exchange.is_symlink() or not exchange.is_dir() or os.listdir(exchange)):
-        raise ValueError(f"exchange must not exist or must be an empty directory: {exchange}")
     leftover = [str(path) for path in (state, snapshots) if os.path.lexists(path)]
     if leftover:
         raise ValueError(
             f"daemon state already exists: {', '.join(leftover)}; remove an earlier enrollment's state "
             "or give a different --state"
         )
-    # The probe runs while the exchange is still empty, so a refused layout can be fixed and retried.
-    _mkdir_exclusive(exchange, exist_ok=True)
-    _create_staging(workspace)
-    check_layout(policy)
-    for name in _EXCHANGE_DIRECTORIES:
-        _mkdir_exclusive(exchange / name)
     for directory in (state, snapshots, policy.jobs):
         _mkdir_exclusive(directory)
     _save_configuration(state, configuration)
@@ -870,12 +832,11 @@ def initialize(
         max_submissions=policy.max_submissions,
     ):
         snapshot = _publish(policy)
-        _write_endpoint(policy)
-        # Last: a failed init leaves no enrolled workspace without a daemon. From here on every
-        # manager of the workspace must be confined.
+        # From here on every manager of the workspace must be confined. The exchange must exist before the
+        # daemon document can be installed in it.
         if enable_exchange(Workspace(workspace)) and report is not None:
             report(f"enabled the exchange extension of {workspace}: {workspace / EXCHANGE_DIRECTORY}")
-        _write_enrollment(workspace, policy)
+        _write_daemon_document(policy)
         return snapshot
 
 
@@ -898,7 +859,6 @@ def _recompile(active: Policy, configuration: _Configuration) -> Policy:
 
     policy = _compile(
         active.workspace,
-        active.exchange,
         active.state,
         active.snapshots,
         active.enrollment_id,
@@ -958,49 +918,44 @@ def activate(
 ) -> tuple[Path, tuple[str, ...] | None]:
     """Compile the saved configuration from the current launcher bundles and activate it when it changed.
 
-    The directories, workspace staging and enrollment marker are recreated when missing. An unchanged
-    compilation publishes nothing and takes no lock; a changed one is published under the ledger lock,
-    which a running daemon holds.
+    The job-output directory is recreated when missing and ``exchange/daemon.json`` is reinstalled every
+    time, since the client may have replaced it. A changed compilation is published as a new active
+    snapshot even while daemon instances run: the ledger holds no lock, and every running instance re-reads
+    the active snapshot before each admission and decision and stops once it changed (never between
+    deciding a submission and submitting it), so the change takes effect when the daemon is started again.
 
     :param workspace: Workspace data root.
     :param state: Broker state directory when not the default.
     :param snapshots: Expected snapshot directory, checked when given.
     :return: The active runtime snapshot, and the names of the launchers whose approval changed, or
         ``None`` when the active snapshot already matched.
-    :raises ValueError: If the configuration is refused or a running daemon holds the ledger.
+    :raises ValueError: If the configuration is refused, or the active snapshot changed during activation.
+    :raises httk.workflow._daemon_state.LedgerError: If the enrollment's ledger is missing, corrupt, or the
+        SQLite ledger of an earlier version.
     """
 
     old_snapshot, old, old_digest = _active(workspace, state, snapshots)
     new = _recompile(old, _load_configuration(old))
     _validate_private_directory(old.snapshots)
     _mkdir_exclusive(new.jobs, exist_ok=True)
-    for name in _REPORT_DIRECTORIES:
-        _mkdir_exclusive(new.exchange / name, exist_ok=True)
-    _create_staging(new.workspace)
-    _write_enrollment(new.workspace, new, replace=False)
+    check_private_paths(new)
+    # Opening the ledger refuses an earlier version's SQLite ledger and an identity mismatch; it takes no lock.
+    with Ledger(
+        old.state,
+        old.workspace_id,
+        old.enrollment_id,
+        max_records=old.max_records,
+        max_submissions=old.max_submissions,
+    ):
+        pass
     if _runtime_policy_bytes(new) == _runtime_policy_bytes(old):
+        _write_daemon_document(new)
         return old_snapshot, None
-    try:
-        ledger = Ledger(
-            old.state,
-            old.workspace_id,
-            old.enrollment_id,
-            max_records=old.max_records,
-            max_submissions=old.max_submissions,
-        )
-    except OSError as exc:
-        if isinstance(exc.__cause__, BlockingIOError):
-            raise ValueError(
-                "the daemon configuration changed, but the daemon is running; stop it and start it again "
-                "to activate the change"
-            ) from exc
-        raise
-    with ledger:
-        if read_active_snapshot(old.state) != (old_snapshot, old_digest):
-            raise ValueError("the active daemon snapshot changed while activation was waiting for its lock")
-        verify_active_snapshot(old.state, old_snapshot, old)
-        snapshot = _publish(new)
-        _write_endpoint(new)
+    if read_active_snapshot(old.state) != (old_snapshot, old_digest):
+        raise ValueError("the active daemon snapshot changed while activation was compiling; activate again")
+    verify_active_snapshot(old.state, old_snapshot, old)
+    snapshot = _publish(new)
+    _write_daemon_document(new)
     return snapshot, tuple(sorted({launcher.name for launcher in set(old.launchers) ^ set(new.launchers)}))
 
 

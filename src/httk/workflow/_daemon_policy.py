@@ -1,13 +1,11 @@
 """Strict runtime policy for the workspace daemon."""
 
 import base64
-import errno
 import hashlib
 import json
 import math
 import os
 import re
-import secrets
 import stat
 import uuid
 from dataclasses import dataclass
@@ -15,13 +13,15 @@ from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 _FORMAT = "httk-workspace-daemon-policy"
-_FORMAT_VERSION = 4
+_FORMAT_VERSION = 5
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _LAUNCHER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SLURM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 _SETTING_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+#: The exchange directory below the workspace root (the bootstrap loads this module by path, so no import).
+EXCHANGE_DIRECTORY = "exchange"
 
 
 def _integer(value: object, name: str, minimum: int, maximum: int) -> int:
@@ -161,11 +161,10 @@ class ApprovedLauncher:
 class Policy:
     """Hold the complete trusted configuration for one daemon enrollment.
 
-    :param workspace: Uploaded workspace root.
+    :param workspace: Uploaded workspace root; its ``exchange`` directory is the one client-writable mount.
     :param workspace_id: Canonical workspace UUID.
     :param enrollment_id: Enrollment identifier as 32 lowercase hexadecimal digits.
-    :param exchange: Client exchange directory, a sibling of the workspace in a dedicated parent.
-    :param state: Broker state root.
+    :param state: Broker state root, outside the workspace.
     :param snapshots: Directory of immutable runtime policy snapshots.
     :param bwrap: Approved Bubblewrap executable for the broker sandbox, run on the host.
     :param python: Approved Python executable that runs the broker and the submitted managers.
@@ -188,7 +187,6 @@ class Policy:
     workspace: Path
     workspace_id: str
     enrollment_id: str
-    exchange: Path
     state: Path
     snapshots: Path
     bwrap: Path
@@ -209,19 +207,16 @@ class Policy:
     sacct: Path | None = None
 
     def __post_init__(self) -> None:
-        for name, value in (("workspace", self.workspace), ("exchange", self.exchange), ("state", self.state)):
+        for name, value in (("workspace", self.workspace), ("state", self.state)):
             _path(value, name)
         snapshots = _path(self.snapshots, "snapshots")
-        if self.exchange.parent != self.workspace.parent or self.exchange == self.workspace:
-            raise ValueError("workspace and exchange must be siblings in a dedicated directory")
-        root = self.root
-        if root == Path("/"):
-            raise ValueError("the daemon parent directory must not be the filesystem root")
+        if self.workspace == Path("/"):
+            raise ValueError("the workspace must not be the filesystem root")
         if _overlap(self.state, snapshots):
             raise ValueError("state and snapshots must be disjoint")
         for name, value in (("state", self.state), ("snapshots", snapshots)):
-            if _overlap(root, value):
-                raise ValueError(f"daemon parent {root} must be disjoint from {name} {value}")
+            if _overlap(self.workspace, value):
+                raise ValueError(f"workspace {self.workspace} must be disjoint from {name} {value}")
 
         if type(self.workspace_id) is not str:
             raise ValueError("invalid workspace_id")
@@ -261,10 +256,10 @@ class Policy:
         _integer(self.request_max_age, "request_max_age", 1, 86_400)
 
     @property
-    def root(self) -> Path:
-        """Dedicated parent directory holding exactly the workspace and the exchange."""
+    def exchange(self) -> Path:
+        """The workspace's exchange directory, the only client-writable path the broker reaches."""
 
-        return self.exchange.parent
+        return self.workspace / EXCHANGE_DIRECTORY
 
     @property
     def jobs(self) -> Path:
@@ -413,7 +408,6 @@ def policy_document(policy: Policy) -> dict[str, object]:
         "workspace": str(policy.workspace),
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
-        "exchange": str(policy.exchange),
         "state": str(policy.state),
         "snapshots": str(policy.snapshots),
         "bwrap": str(policy.bwrap),
@@ -472,7 +466,6 @@ def _decode_policy(data: bytes) -> Policy:
         "workspace",
         "workspace_id",
         "enrollment_id",
-        "exchange",
         "state",
         "snapshots",
         "bwrap",
@@ -496,14 +489,14 @@ def _decode_policy(data: bytes) -> Policy:
     }
     if "authorized_keys" not in value:
         raise ValueError("policy authorized_keys is required and must be a nonempty array")
-    if not required <= set(value) or not set(value) <= required | optional:
-        raise ValueError("policy fields are missing or unknown")
     if (
-        value["format"] != _FORMAT
-        or type(value["format_version"]) is not int
+        value.get("format") != _FORMAT
+        or type(value.get("format_version")) is not int
         or value["format_version"] != _FORMAT_VERSION
     ):
         raise ValueError("unsupported policy format or version")
+    if not required <= set(value) or not set(value) <= required | optional:
+        raise ValueError("policy fields are missing or unknown")
     for name in ("workspace_id", "enrollment_id", "cluster"):
         if type(value[name]) is not str:
             raise ValueError(f"{name} must be a string")
@@ -529,7 +522,6 @@ def _decode_policy(data: bytes) -> Policy:
         workspace=_json_path(value["workspace"], "workspace"),
         workspace_id=value["workspace_id"],
         enrollment_id=value["enrollment_id"],
-        exchange=_json_path(value["exchange"], "exchange"),
         state=_json_path(value["state"], "state"),
         snapshots=_json_path(value["snapshots"], "snapshots"),
         bwrap=_json_path(value["bwrap"], "bwrap"),
@@ -569,95 +561,31 @@ def _open_directory(path: Path, base: int | None = None) -> int:
     return descriptor
 
 
-def _check_parent_names(policy: Policy, names: list[str]) -> None:
-    for name in sorted(names):
-        if name not in (policy.workspace.name, policy.exchange.name):
-            raise ValueError(
-                f"daemon parent {policy.root} must contain only {policy.workspace.name} and "
-                f"{policy.exchange.name}; found {name}"
-            )
+def check_private_paths(policy: Policy) -> None:
+    """Refuse a state or snapshots directory that resolves into the workspace, or into each other.
 
-
-def _remove_probe(name: str, directory: int, probe: int) -> bool:
-    """Unlink the probe from ``directory`` only while that name is still the probe's inode."""
-
-    try:
-        found = os.stat(name, dir_fd=directory, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    mine = os.fstat(probe)
-    if (found.st_dev, found.st_ino) != (mine.st_dev, mine.st_ino):
-        return False
-    # ponytail: a same-principal swap between this stat and the unlink can drop one foreign name inside the
-    # workspace or exchange; client content already owns both, and nothing is ever moved out of the workspace.
-    os.unlink(name, dir_fd=directory)
-    return True
-
-
-def check_layout(policy: Policy, *, probe: bool = True) -> None:
-    """Verify the enforced on-disk layout of the workspace and its exchange.
-
-    The dedicated parent must hold exactly the workspace and the exchange on one device.
-    With ``probe``, a fresh file created in the exchange must also rename into the
-    workspace staging directory, which proves one filesystem and one mount. Nothing is
-    ever renamed from the workspace into the exchange.
+    Inside ``exchange/`` they would hand the client the configuration and ledger; anywhere else in the
+    workspace they would expose the daemon's keys to jobs. Symlinks are followed, so a link that leads
+    into the workspace is caught however the path is spelled.
 
     :param policy: Validated runtime policy.
-    :param probe: Whether to run the rename probe.
-    :raises OSError: If a directory cannot be opened without following symlinks.
-    :raises ValueError: If the parent holds other entries or the probe fails or is tampered with.
+    :raises ValueError: If a path cannot be resolved or overlaps the workspace or the other private path.
     """
 
-    exdev = "workspace and exchange must be renameable into each other (same filesystem, one mount)"
-    staging_path = policy.workspace / ".httk-workspace" / "exchange"
-    descriptors: list[int] = []
     try:
-        root = _open_directory(policy.root)
-        descriptors.append(root)
-        _check_parent_names(policy, os.listdir(root))
-        workspace = _open_directory(Path(policy.workspace.name), root)
-        descriptors.append(workspace)
-        exchange = _open_directory(Path(policy.exchange.name), root)
-        descriptors.append(exchange)
-        if os.fstat(workspace).st_dev != os.fstat(exchange).st_dev:
-            raise ValueError(exdev)
-        try:
-            staging = _open_directory(Path(".httk-workspace", "exchange"), workspace)
-        except FileNotFoundError as exc:
+        workspace = policy.workspace.resolve(strict=False)
+        state = policy.state.resolve(strict=False)
+        snapshots = policy.snapshots.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"cannot resolve the daemon workspace, state or snapshots path: {exc}") from exc
+    for name, resolved, declared in (("state", state, policy.state), ("snapshots", snapshots, policy.snapshots)):
+        if _overlap(workspace, resolved):
             raise ValueError(
-                f"workspace staging directory {staging_path} is missing; restarting with "
-                "'httk workspace daemon run WORKSPACE' recreates it"
-            ) from exc
-        descriptors.append(staging)
-        if not probe:
-            return
-        name = f".probe-{secrets.token_hex(16)}"
-        try:
-            probe_fd = os.open(
-                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=exchange
+                f"daemon {name} {declared} resolves to {resolved}, which overlaps the workspace {workspace}; "
+                f"the private {name} directory must lie outside the workspace"
             )
-        except OSError as exc:
-            raise ValueError(f"cannot create the layout probe in {policy.exchange}: {exc.strerror}") from exc
-        descriptors.append(probe_fd)
-        # The probe uses the movers' plain same-filesystem rename.
-        try:
-            os.rename(name, name, src_dir_fd=exchange, dst_dir_fd=staging)
-        except OSError as exc:
-            _remove_probe(name, exchange, probe_fd)
-            if exc.errno == errno.EXDEV:
-                raise ValueError(exdev) from exc
-            raise ValueError(
-                f"cannot rename the layout probe from {policy.exchange} into {staging_path}: {exc.strerror}"
-            ) from exc
-        try:
-            removed = _remove_probe(name, staging, probe_fd)
-        except OSError as exc:
-            raise ValueError(f"cannot remove the layout probe from {staging_path}: {exc.strerror}") from exc
-        if not removed:
-            raise ValueError("layout probe was tampered with")
-    finally:
-        for descriptor in descriptors:
-            os.close(descriptor)
+    if _overlap(state, snapshots):
+        raise ValueError(f"daemon state {state} and snapshots {snapshots} must be disjoint once symlinks are resolved")
 
 
 def _load_policy_with_bytes(path: Path) -> tuple[Policy, bytes]:
@@ -679,4 +607,4 @@ def load_policy(path: Path) -> Policy:
     return _load_policy_with_bytes(path)[0]
 
 
-__all__ = ["ApprovedLauncher", "Policy", "check_layout", "load_policy", "policy_document"]
+__all__ = ["ApprovedLauncher", "Policy", "check_private_paths", "load_policy", "policy_document"]

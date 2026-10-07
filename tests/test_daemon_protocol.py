@@ -30,7 +30,7 @@ CONFIGURATION_DIGEST = "b" * 64
 def _document(operation: str, **fields: object) -> bytes:
     value: dict[str, object] = {
         "format": "httk-workspace-command",
-        "format_version": 3,
+        "format_version": 4,
         "request_id": REQUEST_ID,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
@@ -101,7 +101,7 @@ def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
         b'"created_at":0,"expires_at":0,"operator_key":null,"signature":null,'
-        b'"format_version":3,"format":"httk-workspace-command" }'
+        b'"format_version":4,"format":"httk-workspace-command" }'
     )
     first = decode_request(ordered)
     second = decode_request(reordered)
@@ -211,12 +211,28 @@ def test_direct_construction_validates_all_fields(kwargs: dict[str, object]) -> 
     assert len(str(error.value)) < 256
 
 
-@pytest.mark.parametrize("version", ["true", "3.0", "3e0", "2", "null", '"3"'])
-def test_version_must_be_exact_integer_three(version: str) -> None:
-    data = _document("health").replace(b'"format_version": 3', f'"format_version": {version}'.encode())
+@pytest.mark.parametrize("version", ["true", "4.0", "4e0", "2", "null", '"4"'])
+def test_version_must_be_exact_integer_four(version: str) -> None:
+    data = _document("health").replace(b'"format_version": 4', f'"format_version": {version}'.encode())
 
     with pytest.raises(ValueError):
         decode_request(data)
+
+
+def test_a_version_three_request_is_refused_with_a_teaching_message() -> None:
+    data = _document("withdraw").replace(b'"format_version": 4', b'"format_version": 3')
+
+    with pytest.raises(ValueError, match=r"unsupported request version 3.*protocol 4.*update the client"):
+        decode_request(data)
+
+
+def test_withdraw_is_no_longer_an_operation() -> None:
+    with pytest.raises(ValueError, match="invalid operation"):
+        Request(REQUEST_ID, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID)
+    with pytest.raises(ValueError, match="invalid operation"):
+        decode_request(_document("withdraw"))
+    with pytest.raises(ValueError, match="invalid outcome"):
+        Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "withdrawn")
 
 
 def test_start_requires_configuration_digest_when_encoded() -> None:
@@ -245,7 +261,7 @@ def test_wire_request_id_rejects_wrong_length_or_newline(request_id: str) -> Non
 
 def test_duplicate_keys_reject_escaped_equivalent_names() -> None:
     data = (
-        b'{"format":"httk-workspace-command","format_version":3,'
+        b'{"format":"httk-workspace-command","format_version":4,'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
@@ -403,7 +419,7 @@ def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
         b'{ "outcome":"ready", "request_digest":"' + REQUEST_DIGEST.encode() + b'",'
         b'"enrollment_id":"' + ENROLLMENT_ID.encode() + b'",'
         b'"workspace_id":"' + WORKSPACE_ID.encode() + b'",'
-        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":3,'
+        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":4,'
         b'"operator_key":null,"signature":null,'
         b'"format":"httk-workspace-response" }'
     )
@@ -463,7 +479,7 @@ def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
     valid = encode_response(Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready"))
     invalid_documents = (
         valid.replace(b"httk-workspace-response", b"httk-workspace-command"),
-        valid.replace(b'"format_version":3', b'"format_version":true'),
+        valid.replace(b'"format_version":4', b'"format_version":true'),
         valid[:-1] + b',"old_field":1}',
         valid[:-1] + b',"handle":null}',
         valid[:-1] + b',"detail":"no reason"}',
@@ -494,9 +510,9 @@ def test_response_signature_covers_a_maximal_detail(tmp_path: Path) -> None:
         verify_response(replace(response, detail="'" * 1000), public_key)
 
 
-def test_response_without_detail_keeps_its_version_three_encoding() -> None:
+def test_response_without_detail_keeps_its_version_four_encoding() -> None:
     stored = (
-        b'{"enrollment_id":"' + ENROLLMENT_ID.encode() + b'","format":"httk-workspace-response","format_version":3,'
+        b'{"enrollment_id":"' + ENROLLMENT_ID.encode() + b'","format":"httk-workspace-response","format_version":4,'
         b'"handle":"' + HANDLE.encode() + b'","operator_key":null,"outcome":"uncertain",'
         b'"reason":"submission_unconfirmed","request_digest":"' + REQUEST_DIGEST.encode() + b'",'
         b'"request_id":"' + REQUEST_ID.encode() + b'","signature":null,"workspace_id":"' + WORKSPACE_ID.encode() + b'"}'
@@ -504,64 +520,3 @@ def test_response_without_detail_keeps_its_version_three_encoding() -> None:
     response = decode_response(stored)
     assert response.detail is None
     assert encode_response(response) == stored
-
-
-@pytest.mark.parametrize("bundle", [None, "job-1.x_y", "A" + "a" * 127])
-def test_withdraw_round_trips_with_and_without_a_bundle(bundle: str | None) -> None:
-    request = Request(REQUEST_ID, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID, bundle=bundle)
-    fields = {} if bundle is None else {"bundle": bundle}
-    assert decode_request(_document("withdraw", **fields)) == request
-    encoded = encode_request(request)
-    assert (b'"bundle"' in encoded) is (bundle is not None)
-    assert decode_request(encoded) == request
-
-
-@pytest.mark.parametrize(
-    "fields",
-    [
-        {"bundle": None},
-        {"bundle": 1},
-        {"bundle": ""},
-        {"bundle": "-dash"},
-        {"bundle": ".hidden"},
-        {"bundle": "a/b"},
-        {"bundle": "a" * 129},
-        {"bundle": "withdrawn"},
-        {"bundle": "managers"},
-        {"bundle": "inbox"},
-        {"bundle": "status.json"},
-        {"handle": HANDLE},
-        {"configuration": "cpu"},
-    ],
-)
-def test_withdraw_refuses_invalid_reserved_or_foreign_fields(fields: dict[str, object]) -> None:
-    with pytest.raises(ValueError):
-        decode_request(_document("withdraw", **fields))
-
-
-@pytest.mark.parametrize("operation", ["health", "manager_status", "start_manager"])
-def test_only_withdraw_takes_a_bundle(operation: str) -> None:
-    extra = {"health": {}, "manager_status": {"handle": HANDLE}, "start_manager": {"profile": "cpu"}}[operation]
-    with pytest.raises(ValueError, match="only withdraw"):
-        Request(REQUEST_ID, WORKSPACE_ID, operation, enrollment_id=ENROLLMENT_ID, bundle="job", **extra)  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        decode_request(_document("health", bundle="job"))
-    health = encode_request(Request(REQUEST_ID, WORKSPACE_ID, "health", enrollment_id=ENROLLMENT_ID))
-    assert b'"bundle"' not in health
-
-
-def test_withdrawn_outcome_lists_names_without_a_reason() -> None:
-    for detail in (None, "job-1,job-2", "a" * 1000):
-        response = Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "withdrawn", detail=detail)
-        assert decode_response(encode_response(response)) == response
-    for fields in (
-        {"handle": HANDLE},
-        {"scheduler_state": "RUNNING"},
-        {"reason": "capacity"},
-        {"detail": "a" * 1001},
-        {"detail": "job,…"},
-    ):
-        with pytest.raises(ValueError):
-            Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "withdrawn", **fields)
-    with pytest.raises(ValueError, match="detail requires reason"):
-        Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready", detail="job")

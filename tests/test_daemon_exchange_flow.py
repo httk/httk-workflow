@@ -1,12 +1,10 @@
 """Mock end-to-end job round trip through an enrolled workspace's exchange extension, without Bubblewrap or Slurm.
 
-The enrollment is real (approved ``slurm`` launcher, layout, endpoint), and enrolling enables the
+The enrollment is real (approved ``slurm`` launcher, ``daemon.json``), and enrolling enables the
 workspace's exchange extension. The client writes into ``WORKSPACE/exchange/inbox`` and fetches from
-``WORKSPACE/exchange/outbox``; the broker no longer moves bundles. The manager is the one the broker's
+``WORKSPACE/exchange/outbox``; the broker never moves bundles. The manager is the one the broker's
 submission would start: a confined manager on the real workspace path (every unrestricted manager serves
 the exchange), whose attempt sandbox is replaced by a pass-through as in ``test_manager_confinement.py``.
-The broker's sibling-layout movers (still present until the daemon is reduced) are exercised by the
-withdraw test.
 """
 
 import base64
@@ -23,8 +21,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace, _confine, _daemon_setup, _exchange
-from httk.workflow._daemon_client import Endpoint, read_endpoint
-from httk.workflow._daemon_exchange import ExchangeMover
+from httk.workflow._daemon_client import Endpoint, read_daemon
 from httk.workflow._daemon_policy import Policy, load_policy
 from httk.workflow._daemon_slurm import submission
 from httk.workflow._exchange import ExchangeService
@@ -40,7 +37,6 @@ HANDLE = "a" * 32
 
 @dataclass
 class _Site:
-    root: Path
     server: Workspace
     policy: Policy
     endpoint: Endpoint
@@ -48,10 +44,6 @@ class _Site:
     @property
     def exchange(self) -> Path:
         return self.policy.exchange
-
-    def mover(self) -> ExchangeMover:
-        # The broker reaches the same parent through its sandbox alias; in process it is the real path.
-        return ExchangeMover(self.root, self.exchange.name, self.server.root.name, self.policy.enrollment_id)
 
 
 def _executable(path: Path) -> Path:
@@ -73,12 +65,10 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Site:
         global_=True,
         settings={"manager.confine": "bwrap", "confine.bwrap": "/usr/bin/bwrap", "manager.allocation": "none"},
     )
-    root = tmp_path / "site"
-    server = Workspace.initialize(root / "workspace")
+    server = Workspace.initialize(tmp_path / "site" / "workspace")
     reports: list[str] = []
     snapshot = _daemon_setup.initialize(
         server.root,
-        exchange=root / "exchange",
         changes=[
             ("add", "launchers=confined"),
             ("add", f"authorized_keys={AUTHORIZED_KEY}"),
@@ -93,8 +83,8 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Site:
     server = Workspace(server.root)
     assert "exchange" in server.extensions and (server.root / "exchange" / "inbox").is_dir()
     policy = load_policy(snapshot)
-    public_key = str(read_endpoint(policy.exchange)["daemon_public_key"])
-    return _Site(root, server, policy, Endpoint(policy.exchange, policy.workspace_id, policy.enrollment_id, public_key))
+    public_key = str(read_daemon(policy.exchange)["daemon_public_key"])
+    return _Site(server, policy, Endpoint(policy.exchange, policy.workspace_id, policy.enrollment_id, public_key))
 
 
 def _submitted_manager(site: _Site) -> list[str]:
@@ -140,10 +130,8 @@ def test_a_job_round_trips_through_the_exchange(
     context = CLIContext("httk", client.root)
     assert command(["job", "eject", marker.job_id, str(exchange / "inbox")], context) == 0
     assert (exchange / "inbox" / marker.job_key).is_dir()
-    # The broker no longer moves bundles: its movers work on the sibling exchange only.
-    site.mover().poll([])
+    # The broker has no part in moving it: the bundle waits for a manager.
     assert (exchange / "inbox" / marker.job_key).is_dir()
-    assert os.listdir(site.exchange / "inbox") == []
 
     # The approved launcher's submission starts a confined manager on the real workspace path; it
     # serves the exchange because the workspace has the extension.
@@ -191,26 +179,3 @@ def test_a_corrupt_bundle_is_rejected_back_to_the_client(tmp_path: Path, monkeyp
     assert (unique / "broken" / "junk").is_file()
     reason = json.loads((unique / "reason.json").read_bytes())
     assert reason["format"] == "httk-workspace-exchange-rejection" and reason["name"] == "broken" and reason["reason"]
-
-
-def test_a_waiting_job_is_withdrawn_and_adopted_back_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    configure_identity()
-    site = _enroll(tmp_path, monkeypatch)
-    client = Workspace.initialize(tmp_path / "client" / "workspace")
-    marker = client.submit(_payload(tmp_path / "payloads", "waiting"), "jobs")
-    client.eject(marker.job_id, site.exchange / "inbox")
-    mover = site.mover()
-    mover.poll([])
-    # The broker's sibling-layout movers still stage into the old directory, which no manager reads.
-    staged = site.server.control / "exchange" / "inbox" / marker.job_key
-    assert staged.is_dir()
-    assert json.loads((site.exchange / "outbox" / "managers.json").read_bytes())["staged"] == [marker.job_key]
-
-    # No manager ever runs, so the client takes the bundle back.
-    assert mover.withdraw(None) == [marker.job_key]
-    assert not staged.exists() and site.server.find_marker_by_id(marker.job_id) is None
-    mover.poll([])
-    assert json.loads((site.exchange / "outbox" / "managers.json").read_bytes())["staged"] == []
-    adopted = client.adopt(site.exchange / "outbox" / "withdrawn" / marker.job_key)
-    assert adopted.job_id == marker.job_id and adopted.kind == marker.kind == "submitted"
-    assert not (site.exchange / "outbox" / "withdrawn" / marker.job_key).exists()

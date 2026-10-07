@@ -18,7 +18,7 @@ _RESULT_FORMAT = "httk-computer-result"
 _METADATA_FILE = "remote.json"
 _MAX_ADAPTER_DOCUMENT_BYTES = 64 * 1024
 _COMMON_FIELDS = frozenset({"format", "format_version", "operation", "adapter_dir", "remote_settings"})
-_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "withdrawn"})
+_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested"})
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
 
@@ -178,6 +178,7 @@ def _endpoint(request: Mapping[str, object], *, pending: bool) -> Endpoint:
     settings = _mapping(request["remote_settings"], "remote_settings")
     if pending:
         settings.update(_mapping(request["settings"], "settings"))
+        settings = {name: value for name, value in settings.items() if value is not None}  # None unpins
     return Endpoint.from_settings(settings)
 
 
@@ -228,13 +229,17 @@ def _configure(request: Mapping[str, object]) -> None:
 
 
 def _install(request: Mapping[str, object]) -> None:
-    """Check daemon health without accepting pending configuration."""
+    """Check the exchange and, when the daemon is pinned, its health without accepting pending configuration."""
 
     fields = frozenset({"settings"}) if "settings" in request else frozenset()
     _require_envelope(request, fields)
     if "settings" in request and _mapping(request["settings"], "settings"):
         raise ValueError("mount-daemon check refuses pending settings; configure them first")
     endpoint = _endpoint(request, pending=False)
+    if endpoint.enrollment_id is None or endpoint.public_key is None:
+        endpoint.check()  # exchange.json only: without daemon pins there is nothing to sign for
+        _result("install", returncode=0, stdout="", stderr="")
+        return
     health = prepare_request(
         endpoint,
         Request(

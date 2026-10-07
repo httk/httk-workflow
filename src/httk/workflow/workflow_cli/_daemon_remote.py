@@ -1,11 +1,8 @@
 """Typed CLI controls for a mounted workspace daemon."""
 
 import argparse
-import errno
 import json
 import math
-import os
-import stat
 import sys
 import uuid
 from collections.abc import Mapping
@@ -19,12 +16,13 @@ from .._daemon_client import (
     Endpoint,
     decode_matching_response,
     prepare_request,
-    read_endpoint,
+    read_daemon,
+    read_exchange,
     read_manager_log,
     read_passive_status,
+    take_back,
 )
-from .._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MailboxDirectory
-from .._daemon_protocol import _BUNDLE_NAME, _RESERVED_NAMES, Request, encode_request, encode_response
+from .._daemon_protocol import Request, encode_request, encode_response
 from .._util import write_json_atomic
 from ..adapters import metadata_path, read_metadata, remote_settings, resolve_remote, run_adapter
 from ._common import _group, _leaf
@@ -34,27 +32,33 @@ _OPERATION_NAMES = {
     "start": "start_manager",
     "status": "manager_status",
     "cancel": "cancel_manager",
-    "withdraw": "withdraw",
 }
-_RACED = frozenset({errno.ENOENT, errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR})
-_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "withdrawn"})
+_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested"})
 
 
 def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Pin the identities of a mounted daemon exchange directory into a mount-daemon remote."""
+    """Pin the workspace (and, when daemon.json exists, daemon) identities of a mounted exchange directory."""
 
     target = resolve_remote(arguments.remote, project=context.cwd)
     metadata = read_metadata(target.bundle)
     if metadata.get("kind") != "mount-daemon":
         raise ValueError(f"remote {arguments.remote!r} is not a mount-daemon remote")
     exchange = _anchored(Path(arguments.exchange), "exchange")
-    exported = read_endpoint(exchange)
     settings: dict[str, object] = {
         "exchange": str(exchange),
-        "daemon_workspace_id": exported["workspace_id"],
-        "daemon_enrollment_id": exported["enrollment_id"],
-        "daemon_public_key": exported["daemon_public_key"],
+        "daemon_workspace_id": read_exchange(exchange)["workspace_id"],
     }
+    try:
+        exported = read_daemon(exchange)
+    except FileNotFoundError:
+        print(
+            "no daemon.json in the exchange: pinned the workspace only; signed requests stay unavailable",
+            file=sys.stderr,
+        )
+        settings.update(daemon_enrollment_id=None, daemon_public_key=None)  # None unpins stale daemon pins
+    else:
+        settings["daemon_enrollment_id"] = exported["enrollment_id"]
+        settings["daemon_public_key"] = exported["daemon_public_key"]
     Endpoint.from_settings(settings).check()
     result = run_adapter(target.bundle, "configure", {"settings": settings})
     if result.get("configured") is not True:
@@ -63,6 +67,8 @@ def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLICo
     if not isinstance(configured, dict):
         raise ValueError("adapter settings are not mutable JSON")
     configured.update(settings)
+    configured = {name: value for name, value in configured.items() if value is not None}
+    metadata["settings"] = configured
     write_json_atomic(metadata_path(target.bundle), metadata)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -107,45 +113,18 @@ def handle_remote_daemon_log(arguments: argparse.Namespace, context: CLIContext)
     return 0
 
 
-def _take_back_waiting(endpoint: Endpoint, only: str | None, moved: list[str]) -> None:
-    """Rename this client's not-yet-moved bundles from ``inbox`` to ``outbox/withdrawn``, appending names to ``moved``."""
+def handle_remote_daemon_take_back(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Take an ejected bundle back out of the exchange inbox before a manager adopts it.
 
-    try:
-        target_directory = MailboxDirectory(endpoint.exchange / "outbox/withdrawn")
-    except FileNotFoundError:
-        raise ValueError(
-            "the exchange has no outbox/withdrawn directory; update the broker and restart it with "
-            "`httk workspace daemon run …`"
-        ) from None
-    with MailboxDirectory(endpoint.exchange / "inbox") as source, target_directory as target:
-        source_fd, target_fd = source._require_open(), target._require_open()
-        if only is not None:
-            names = [only]
-        else:
-            with os.scandir(source_fd) as entries:
-                names = [entry.name for _, entry in zip(range(MAX_DIRECTORY_ENTRIES), entries, strict=False)]
-        for name in sorted(names):
-            if name.startswith(".") or name in _RESERVED_NAMES or _BUNDLE_NAME.fullmatch(name) is None:
-                continue
-            try:
-                if not stat.S_ISDIR(os.stat(name, dir_fd=source_fd, follow_symlinks=False).st_mode):
-                    continue
-            except FileNotFoundError:
-                continue
-            try:
-                os.stat(name, dir_fd=target_fd, follow_symlinks=False)
-                continue  # the target name is taken: leave the bundle where it is
-            except FileNotFoundError:
-                pass
-            # ponytail: no-replace rename is unavailable on network filesystems; a racing empty target directory could
-            # be replaced, losing nothing. Use renameat2(RENAME_NOREPLACE) where available if that ever matters.
-            try:
-                os.rename(name, name, src_dir_fd=source_fd, dst_dir_fd=target_fd)
-            except OSError as exc:
-                if exc.errno in _RACED:
-                    continue  # the broker moved it first, or the target appeared
-                raise
-            moved.append(name)
+    :param arguments: The parsed ``take-back`` command arguments.
+    :param context: The active CLI context.
+    :return: 0 after the bundle is copied out and removed from the inbox.
+    """
+
+    _, endpoint = _mount_endpoint(arguments, context)
+    destination = _anchored(Path(arguments.destination or arguments.name), "destination")
+    print(take_back(endpoint, arguments.name, destination))
+    return 0
 
 
 def _response_returncode(outcome: str) -> int:
@@ -179,9 +158,6 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         return 0
 
     verb = arguments.daemon_verb
-    bundle = getattr(arguments, "bundle", None)
-    if bundle is not None and (_BUNDLE_NAME.fullmatch(bundle) is None or bundle in _RESERVED_NAMES):
-        raise ValueError(f"invalid bundle name: {bundle!r}")
     wait_seconds = arguments.wait_seconds
     if (
         not isinstance(wait_seconds, (int, float))
@@ -199,6 +175,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     if not isinstance(settings, Mapping):
         raise ValueError("mount-daemon remote settings must be an object")
     endpoint = Endpoint.from_settings(settings)
+    enrollment_id, public_key = endpoint.require_daemon()
 
     configuration = getattr(arguments, "configuration", None)
     configuration_digest = None
@@ -210,24 +187,20 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         if configuration_digest is None:
             available = ", ".join(sorted(configurations)) or "(none)"
             raise ValueError(f"unknown approved daemon configuration {configuration!r}; available: {available}")
-    request_id = _request_id(arguments.request_id, required=verb in {"start", "cancel", "withdraw"})
+    request_id = _request_id(arguments.request_id, required=verb in {"start", "cancel"})
     intent = Request(
         request_id,
         endpoint.workspace_id,
         _OPERATION_NAMES[verb],
         profile=configuration,
         handle=getattr(arguments, "handle", None),
-        enrollment_id=endpoint.enrollment_id,
+        enrollment_id=enrollment_id,
         configuration_digest=configuration_digest,
-        bundle=bundle,
     )
     request = prepare_request(endpoint, intent)
     request_document = json.loads(encode_request(request))
     print(f"daemon request ID: {request.request_id}", file=sys.stderr)
-    taken: list[str] = []
     try:
-        if verb == "withdraw":
-            _take_back_waiting(endpoint, bundle, taken)
         result = run_adapter(
             target.bundle,
             "daemon",
@@ -240,14 +213,12 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         response = decode_matching_response(
             response_data.encode("utf-8"),
             request,
-            public_key=endpoint.public_key,
+            public_key=public_key,
         )
         returncode = _response_returncode(response.outcome)
         if result.get("returncode") != returncode or result.get("stderr", "") != "":
             raise ValueError("daemon adapter returned an inconsistent result")
         print(encode_response(response).decode("ascii"))
-        if taken:
-            print(f"taken back locally: {','.join(taken)}")
         return returncode
     except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
         print(
@@ -255,8 +226,6 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
             "If retrying, reuse this request ID with identical fields; do not create a new ID.",
             file=sys.stderr,
         )
-        if taken:
-            print(f"taken back locally: {','.join(taken)}", file=sys.stderr)
         return 2
 
 
@@ -278,26 +247,40 @@ def build_daemon_remote_parser(
         daemon_subparsers,
         "configure",
         summary="pin a mounted daemon exchange",
-        description="Pin the daemon identities published in EXCHANGE/endpoint.json of a mounted exchange directory",
+        description="Pin the workspace published in EXCHANGE/exchange.json and, when present, the daemon identities in EXCHANGE/daemon.json of a mounted exchange directory",
         handler=handle_remote_daemon_configure,
     )
     configure.add_argument("remote", metavar="REMOTE", help="the existing mount-daemon remote")
-    configure.add_argument("--exchange", required=True, metavar="PATH", help="locally mounted exchange directory")
+    configure.add_argument(
+        "--exchange", required=True, metavar="PATH", help="locally mounted WORKSPACE/exchange directory"
+    )
     log = _leaf(
         daemon_subparsers,
         "log",
         summary="print a manager's published log",
-        description="Print EXCHANGE/outbox/managers/<handle>.log, which appears after the manager's Slurm job ends",
+        description="Print EXCHANGE/managers/<handle>.log, which appears when the manager's Slurm job ends",
         handler=handle_remote_daemon_log,
     )
     log.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
     log.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
+    take = _leaf(
+        daemon_subparsers,
+        "take-back",
+        summary="take an ejected bundle back from the inbox",
+        description=(
+            "Rename EXCHANGE/inbox/NAME to a dot name (managers ignore it), copy it to DESTINATION "
+            "(default: ./NAME) and remove it; fails when a manager already took it, then cancel the job instead"
+        ),
+        handler=handle_remote_daemon_take_back,
+    )
+    take.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
+    take.add_argument("name", metavar="NAME", help="bundle name in the exchange inbox")
+    take.add_argument("destination", nargs="?", metavar="DESTINATION", help="local path to copy to (default: ./NAME)")
     for verb, summary in (
         ("health", "check daemon readiness"),
         ("start", "start an approved manager configuration"),
         ("status", "inspect a broker-issued manager handle"),
         ("cancel", "request cancellation of a manager handle"),
-        ("withdraw", "take back waiting job bundles"),
     ):
         parser = _leaf(
             daemon_subparsers,
@@ -326,11 +309,6 @@ def build_daemon_remote_parser(
             )
         elif verb == "cancel":
             parser.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
-            parser.add_argument(
-                "--request-id", required=True, metavar="ID", help="32 lowercase hexadecimal request ID; reuse on retry"
-            )
-        elif verb == "withdraw":
-            parser.add_argument("--bundle", metavar="NAME", help="take back only this bundle (default: all waiting)")
             parser.add_argument(
                 "--request-id", required=True, metavar="ID", help="32 lowercase hexadecimal request ID; reuse on retry"
             )

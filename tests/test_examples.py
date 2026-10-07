@@ -147,7 +147,7 @@ def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subpr
 def _finished(workspace_root: Path) -> tuple[str, Path, Path]:
     """Return the terminal state, payload, and postprocess SVG path of the one job."""
 
-    workspace = Workspace(workspace_root / "workspace", mutable=False)
+    workspace = Workspace(workspace_root, mutable=False)
     markers = list(workspace.scan_markers())
     assert len(markers) == 1, f"expected exactly one job, found {[marker.job_key for marker in markers]}"
     marker = markers[0]
@@ -179,7 +179,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
         environment=_environment(console_scripts),
     )
 
-    kind, payload, postprocess_svg = _finished(work)
+    kind, payload, postprocess_svg = _finished(work / "workspace")
     assert kind == "succeeded"
     # The result lives once in the persistent workdir, with no data copy.
     assert not (payload / "data").exists()
@@ -223,7 +223,7 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
         environment=_environment(empty),
     )
 
-    kind, payload, postprocess_svg = _finished(work)
+    kind, payload, postprocess_svg = _finished(work / "workspace")
     assert kind == "succeeded"
     assert not (payload / "data").exists()
     assert (payload / "run" / "OUTCAR").is_file()

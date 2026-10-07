@@ -38,24 +38,26 @@ def _identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def _endpoint(tmp_path: Path) -> Endpoint:
     exchange = tmp_path / "exchange"
-    for name in ("requests", "responses", "inbox", "outbox"):
+    for name in ("requests", "responses", "inbox", "outbox", "managers"):
         (exchange / name).mkdir(parents=True)
+    (exchange / "exchange.json").write_text(
+        json.dumps({"format": "httk-workspace-exchange", "format_version": 1, "workspace_id": WORKSPACE_ID}),
+        encoding="utf-8",
+    )
     response_seed = tmp_path / "response.seed"
     response_seed.write_text("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n", encoding="ascii")
     public_key = identity_public_key(response_seed)
     assert public_key is not None
     document = {
-        "format": "httk-workspace-daemon-endpoint",
-        "format_version": 2,
+        "format": "httk-workspace-daemon",
+        "format_version": 1,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
         "configurations": {"cpu": CONFIGURATION_DIGEST},
         "request_max_age": 3600,
     }
-    (exchange / "endpoint.json").write_text(
-        json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-    )
+    (exchange / "daemon.json").write_text(json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     return Endpoint(exchange, WORKSPACE_ID, ENROLLMENT_ID, public_key)
 
 
@@ -167,8 +169,21 @@ def test_configure_rejects_unknown_settings(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     bundle = _bundle(tmp_path, endpoint)
 
-    with pytest.raises(RuntimeError, match="four endpoint settings"):
+    with pytest.raises(RuntimeError, match="exchange and daemon_workspace_id"):
         run_adapter(bundle, "configure", {"settings": {"exec_command": "touch /tmp/no"}})
+
+
+def test_install_without_daemon_pins_checks_the_exchange_and_sends_nothing(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    bundle = _bundle(tmp_path, endpoint)
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
+    del metadata["settings"]["daemon_enrollment_id"], metadata["settings"]["daemon_public_key"]
+    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = run_adapter(bundle, "install", {"settings": {}})
+
+    assert result["returncode"] == 0
+    assert not list(endpoint.requests.iterdir())
 
 
 def test_install_rejects_pending_settings_before_publication(tmp_path: Path) -> None:
@@ -257,28 +272,6 @@ def test_real_adapter_subprocess_preserves_confirmed_refusal(tmp_path: Path) -> 
     assert result["returncode"] == 2
     assert json.loads(result["stdout"])["outcome"] == "refused"
     assert result["stderr"] == ""
-
-
-def test_real_adapter_subprocess_passes_withdraw_with_bundle(tmp_path: Path) -> None:
-    endpoint = _endpoint(tmp_path)
-    bundle = _bundle(tmp_path, endpoint)
-    request = sign_request(
-        Request("0" * 32, WORKSPACE_ID, "withdraw", enrollment_id=ENROLLMENT_ID, bundle="alpha"), now=1_000_000
-    )
-    thread, errors = _broker(endpoint, "withdrawn", detail="alpha")
-    try:
-        result = run_adapter(
-            bundle,
-            "daemon",
-            {"daemon_request": json.loads(encode_request(request)), "wait_seconds": 10},
-            timeout=15,
-        )
-    finally:
-        thread.join(timeout=15)
-
-    assert errors == []
-    assert result["ok"] is True and result["returncode"] == 0
-    assert json.loads(result["stdout"])["outcome"] == "withdrawn"
 
 
 @pytest.mark.parametrize("operation", ["invoke", "status", "push", "pull"])

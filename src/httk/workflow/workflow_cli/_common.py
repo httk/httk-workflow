@@ -47,7 +47,7 @@ _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 #: far-side halves one machine invokes on another. A workspace name can never be
 #: one of these, so the verb never mistakes ``transfer offer`` for a move.
 #: ``retire`` and ``reclaim`` are also the operator verbs ``transfer retire|reclaim JOB_ID``.
-_TRANSFER_PROTOCOL = ("receive", "offer", "retire", "reclaim")
+_TRANSFER_PROTOCOL = ("receive", "offer", "retire", "reclaim", "status")
 
 Handler = Callable[[argparse.Namespace, CLIContext], int]
 

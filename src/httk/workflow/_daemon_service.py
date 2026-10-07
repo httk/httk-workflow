@@ -7,39 +7,43 @@ import logging
 import os
 import re
 import signal
-import sqlite3
 import stat
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import TypedDict, cast
 
 from ._daemon_activation import verify_active_snapshot
-from ._daemon_auth import check_request_time, sign_response, verify_request
-from ._daemon_exchange import ExchangeMover, _install
+from ._daemon_auth import CLOCK_SKEW_SECONDS, check_request_time, sign_response, verify_request
 from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_policy import Policy, _open_directory, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
-from ._daemon_slurm import SchedulerError, SlurmGateway, Submission, excerpt
-from ._daemon_state import CapacityError, ConflictError, Entry, Ledger
+from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
+from ._daemon_state import CapacityError, ConflictError, Entry, Ledger, LedgerError, refusal_response
+from ._exchange import ExchangeUnavailableError, publish_file
 
 _LOGGER = logging.getLogger(__name__)
 _SNAPSHOT_POLICY = Path("/tmp/daemon-policy.json")
 _STATE_DIRECTORY = Path("/tmp/control")
-_ROOT_DIRECTORY = Path("/tmp/daemon-root")
+_EXCHANGE_DIRECTORY = Path("/tmp/daemon-exchange")
+_HANDLE = re.compile(r"[0-9a-f]{32}\Z")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_OBSERVATIONS = "observations.json"
 #: The least time between two scheduler checks of the submitted managers.
 _OBSERVE_SECONDS = 60.0
 #: How long a manager may be unknown to both squeue and sacct before it is reported ``GONE``.
 _GONE_SECONDS = 30 * 60.0
+#: Added to the longest a scheduler call can take (``command_timeout`` plus the kill grace of
+#: :func:`httk.workflow._daemon_slurm._run`) before an unanswered submit decision counts as unconfirmed.
+_RECOVERY_MARGIN_SECONDS = 60.0
 _MAX_LOG_BYTES = 1024 * 1024
-_MAX_OBSERVATIONS_BYTES = 16 * 1024 * 1024
+_PUBLISHED = ("scheduler_state", "exit_code", "started_at", "ended_at", "log")
 _FINAL_STATES = frozenset(
     {
         "COMPLETED",
@@ -53,8 +57,10 @@ _FINAL_STATES = frozenset(
         "DEADLINE",
     }
 )
-_PUBLISHED = ("scheduler_state", "exit_code", "started_at", "ended_at", "log")
 _MAX_WARNED = 4096
+_MAX_REPORTED = 4096
+_MANAGERS_FORMAT = "httk-workspace-daemon-managers"
+_MANAGERS_VERSION = 3
 
 
 class _Observation(TypedDict):
@@ -104,38 +110,125 @@ def _read_tail(path: Path, limit: int) -> bytes:
         os.close(descriptor)
 
 
-def _load_observations(path: Path) -> dict[str, _Observation]:
-    """Read the derived observations; anything absent or invalid reads as unobserved."""
+def _parse_observation(data: bytes | None) -> _Observation | None:
+    """Validate one stored scheduler observation; anything absent or invalid reads as unobserved."""
 
+    if data is None:
+        return None
     try:
-        value = json.loads(_read_tail(path, _MAX_OBSERVATIONS_BYTES))
-    except (OSError, ValueError, RecursionError):
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    return {
-        handle: cast(_Observation, entry)
-        for handle, entry in value.items()
-        if isinstance(entry, dict)
-        and set(entry) == set(_OBSERVATION_TYPES)
-        and all(type(entry[key]) in types for key, types in _OBSERVATION_TYPES.items())
-        and _JOB_ID.fullmatch(entry["job_id"]) is not None  # it names the Slurm output file read for the log
-    }
+        entry = json.loads(data)
+    except (ValueError, RecursionError):
+        return None
+    if (
+        not isinstance(entry, dict)
+        or set(entry) != set(_OBSERVATION_TYPES)
+        or not all(type(entry[key]) in types for key, types in _OBSERVATION_TYPES.items())
+        or _JOB_ID.fullmatch(entry["job_id"]) is None  # it names the Slurm output file read for the log
+    ):
+        return None
+    return cast(_Observation, entry)
+
+
+class ExchangePublisher:
+    """Publish ``managers.json`` and the manager logs into the workspace exchange.
+
+    Every call reopens the exchange from its path without following a symlink and installs through the exchange
+    module's descriptor-anchored primitive (an exclusive temporary and a rename), so a name the client planted is
+    replaced, never followed. Nothing in the exchange is read back, and a failure is logged once per name and never
+    raised: the exchange is hostile territory and the daemon's requests do not depend on it.
+
+    :param exchange: Absolute path of the exchange directory, as the broker sandbox sees it.
+    :param enrollment_id: Enrollment identity published in ``managers.json``.
+    :raises ValueError: If ``exchange`` is not absolute or contains ``..``.
+    """
+
+    def __init__(self, exchange: Path, enrollment_id: str) -> None:
+        if not isinstance(exchange, Path) or not exchange.is_absolute() or ".." in exchange.parts:
+            raise ValueError("exchange must be an absolute path without '..'")
+        self._exchange = exchange
+        self._enrollment_id = enrollment_id
+        self._reported: set[tuple[str, str]] = set()
+        self._managers: list[dict[str, str | None]] | None = None
+
+    def _report(self, name: str, reason: str) -> None:
+        # ponytail: one log line per name and reason until 4096 distinct pairs, then the memory resets.
+        if (name, reason) in self._reported:
+            return
+        if len(self._reported) >= _MAX_REPORTED:
+            self._reported.clear()
+        self._reported.add((name, reason))
+        _LOGGER.warning("daemon_exchange_publish_failed name=%s reason=%s", name, reason)
+
+    def _publish(self, name: str, data: bytes, *, directory: str | None = None) -> bool:
+        try:
+            exchange = _open_directory(self._exchange)
+            try:
+                publish_file(exchange, name, data, directory=directory)
+            finally:
+                os.close(exchange)
+        except ExchangeUnavailableError as exc:
+            self._report(name, str(exc))
+            return False
+        except OSError as exc:
+            self._report(name, exc.strerror or type(exc).__name__)
+            return False
+        return True
+
+    def poll(self, managers: list[dict[str, str | None]]) -> None:
+        """Publish ``managers.json`` when its rows changed.
+
+        :param managers: The manager rows to publish.
+        """
+
+        if managers == self._managers:
+            return
+        document = {
+            "format": _MANAGERS_FORMAT,
+            "format_version": _MANAGERS_VERSION,
+            "enrollment_id": self._enrollment_id,
+            "generated_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "managers": managers,
+        }
+        data = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        if self._publish("managers.json", data):
+            self._managers = managers
+
+    def publish_log(self, handle: str, data: bytes) -> bool:
+        """Publish one manager's Slurm output tail as ``managers/<handle>.log``.
+
+        :param handle: The manager's broker-issued handle: 32 lowercase hexadecimal digits.
+        :param data: The bytes to publish.
+        :return: Whether the file was installed; a failure is logged.
+        :raises ValueError: If ``handle`` is not a broker-issued handle.
+        """
+
+        if _HANDLE.fullmatch(handle) is None:
+            raise ValueError("handle must be 32 lowercase hexadecimal digits")
+        return self._publish(f"{handle}.log", data, directory="managers")
+
+
+class _ActivationChanged(Exception):
+    """The active snapshot pointer no longer names the policy this instance serves."""
 
 
 class Broker:
-    """Process bounded mailbox requests against one protected ledger.
+    """Process bounded mailbox requests against the shared lock-free ledger.
+
+    Any number of brokers may serve one enrollment at once. Before every admission and every decision a
+    broker calls *activation*; when it reports a change, the broker finishes its current step and retires
+    (:attr:`retired`), never between a ``submit`` decision and the submission itself.
 
     :param policy: Validated protected daemon policy.
     :param gateway: Fixed Slurm gateway for scheduler operations.
-    :param ledger: Locked durable daemon ledger.
+    :param ledger: The enrollment's durable daemon ledger.
     :param requests: Descriptor-anchored request mailbox.
     :param responses: Descriptor-anchored response mailbox.
-    :param exchange: Mover between the client exchange and the workspace staging area; ``None`` skips
-        the exchange pass.
+    :param exchange: Publisher of ``managers.json`` and manager logs into the workspace exchange; ``None``
+        skips publication.
     :param response_seed: Validated protected response-signing seed.
-    :param state: Protected state directory for the derived ``observations.json``; ``None`` skips following
-        manager jobs.
+    :param observe: Follow submitted manager jobs with the scheduler, keeping each observation in the ledger.
+    :param activation: Check that the active snapshot is still the one this broker serves; raising
+        ``ValueError`` or ``OSError`` retires the broker. ``None`` never retires it.
     """
 
     def __init__(
@@ -146,9 +239,10 @@ class Broker:
         requests: MailboxDirectory,
         responses: MailboxDirectory,
         *,
-        exchange: ExchangeMover | None = None,
+        exchange: ExchangePublisher | None = None,
         response_seed: Path,
-        state: Path | None = None,
+        observe: bool = False,
+        activation: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
             raise ValueError("response_seed must be a Path")
@@ -160,9 +254,10 @@ class Broker:
         self.responses = responses
         self.exchange = exchange
         self.response_seed = response_seed
-        self.state = state
-        self._observations = {} if state is None else _load_observations(state / _OBSERVATIONS)
-        self._saved: bytes | None = None
+        self.observe = observe
+        self.activation = activation
+        #: Set once the active snapshot changed: this broker admits and decides nothing more.
+        self.retired = False
         self._observed_at: float | None = None
         self._warned: set[tuple[str, str]] = set()
 
@@ -177,11 +272,39 @@ class Broker:
             **fields,
         )
 
+    def _fence(self) -> None:
+        """Re-read the active snapshot pointer before an admission or a decision."""
+
+        if self.activation is None:
+            return
+        try:
+            self.activation()
+        except (OSError, ValueError) as exc:
+            raise _ActivationChanged(str(exc)) from exc
+
     def _publish(self, publication: str, request: Request, response: Response) -> None:
-        """Publish a response after state commit, then consume the request."""
+        """Sign a response, install it while its request is still published, then consume the request.
+
+        Signing is deterministic, so every instance publishes identical bytes. The request is looked up by
+        name just before the installation: when the client already consumed the response and removed its
+        request, a late instance installs nothing. A response name the client blocked (a directory there) is
+        logged and its request discarded: the exchange is client territory and must not stop the daemon.
+        """
 
         signed = sign_response(response, seed_path=self.response_seed)
-        self.responses.replace(f"{request.request_id}.json", encode_response(signed))
+        if self.requests.lstat(publication) is None:
+            _LOGGER.debug("daemon_response_skipped request_id=%s: the request is gone", request.request_id)
+            return
+        try:
+            self.responses.replace(f"{request.request_id}.json", encode_response(signed))
+        except OSError as exc:
+            _LOGGER.warning(
+                "daemon_response_unpublishable request_id=%s reason=%s",
+                request.request_id,
+                exc.strerror or type(exc).__name__,
+            )
+            self._discard_invalid(publication, "response_unpublishable")
+            return
         _LOGGER.info(
             "daemon_request request_id=%s operation=%s outcome=%s reason=%s handle=%s",
             request.request_id,
@@ -202,11 +325,21 @@ class Broker:
         except (FileNotFoundError, IsADirectoryError, PermissionError):
             pass
 
-    def _finish_refused(self, entry: Entry, reason: str) -> Response:
+    def _finish(self, entry: Entry, response: Response) -> Response:
+        """Link a response durably and return the stored one (another instance's, when it was first)."""
+
+        stored = self.ledger.finish(entry.request.request_id, response).response
+        if stored is None:
+            raise LedgerError("finished request has no response")
+        return stored
+
+    def _refuse(self, entry: Entry, reason: str, detail: str | None = None) -> Response:
         request = entry.request
-        handle = entry.handle if request.operation == "start_manager" else request.handle
-        response = self._response(request, "refused", reason=reason, **({"handle": handle} if handle else {}))
-        return self._finished_response(self.ledger.finish(request.request_id, response))
+        handle = request.handle
+        return self._finish(
+            entry,
+            self._response(request, "refused", reason=reason, detail=detail, **({"handle": handle} if handle else {})),
+        )
 
     @staticmethod
     def _scheduler_failed(request: Request, handle: str, exc: SchedulerError) -> str | None:
@@ -222,33 +355,56 @@ class Broker:
         )
         return detail
 
-    @staticmethod
-    def _finished_response(entry: Entry) -> Response:
-        if entry.response is None:
-            raise sqlite3.DatabaseError("finished request has no response")
-        return entry.response
+    def _refusal_reason(self, request: Request) -> str | None:
+        """Return why a start must be refused, or ``None`` when it may be submitted."""
 
-    def _start(self, entry: Entry) -> Response:
-        request = entry.request
-        if entry.handle is None or request.profile is None:
-            raise sqlite3.DatabaseError("invalid admitted manager start")
-        try:
-            launcher = self.policy.launcher(request.profile)
-        except ValueError:
-            return self._finish_refused(entry, "invalid_configuration")
-        if request.configuration_digest != self.policy.configuration_digest(request.profile):
-            return self._finish_refused(entry, "stale_configuration")
-
+        assert request.profile is not None
         try:
             check_request_time(request, max_age=self.policy.request_max_age)
         except ValueError:
-            return self._finish_refused(entry, "request_expired")
-
-        submitting = self.ledger.begin_submission(request.request_id)
-        if submitting.handle is None:
-            raise sqlite3.DatabaseError("submission intent has no manager handle")
+            return "request_expired"
         try:
-            submission = self.gateway.submit(launcher, submitting.handle)
+            self.policy.launcher(request.profile)
+        except ValueError:
+            return "invalid_configuration"
+        if request.configuration_digest != self.policy.configuration_digest(request.profile):
+            return "stale_configuration"
+        return None
+
+    def _start(self, entry: Entry) -> Response | None:
+        """Decide a start once across all instances; the submit winner submits it.
+
+        :param entry: The admitted start.
+        :return: The stored response, or ``None`` while another instance's submission is unanswered.
+        """
+
+        request = entry.request
+        handle = entry.handle
+        if handle is None or request.profile is None:
+            raise LedgerError("invalid admitted manager start")
+        won = False
+        if entry.decision is None:
+            # _execute re-read the active snapshot just before: this is the decision's fence.
+            entry, won = self.ledger.decide(request.request_id, reason=self._refusal_reason(request))
+        decision = entry.decision
+        assert decision is not None
+        if decision.kind == "refuse":
+            # Deterministic: any instance links it, also after the decider crashed.
+            assert decision.reason is not None
+            return self._finish(entry, refusal_response(request, handle, decision.reason))
+        if won:
+            return self._submit(entry)
+        return entry.response
+
+    def _submit(self, entry: Entry) -> Response:
+        """Run the submission this instance won, record the scheduler identity, then the response."""
+
+        request = entry.request
+        handle = entry.handle
+        assert handle is not None and request.profile is not None
+        try:
+            launcher = self.policy.launcher(request.profile)
+            submission = self.gateway.submit(launcher, handle)
             if (
                 type(submission) is not Submission
                 or _JOB_ID.fullmatch(submission.job_id) is None
@@ -260,43 +416,37 @@ class Broker:
             response = self._response(
                 request,
                 "uncertain",
-                handle=submitting.handle,
+                handle=handle,
                 reason="submission_unconfirmed",
-                detail=self._scheduler_failed(request, submitting.handle, exc),
+                detail=self._scheduler_failed(request, handle, exc),
             )
-            completed = self.ledger.finish(request.request_id, response)
-            return self._finished_response(completed)
+            return self._finish(entry, response)
 
+        self.ledger.record_scheduler(request.request_id, submission.job_id, submission.cluster)
         _LOGGER.info(
             "daemon_submitted handle=%s job_id=%s cluster=%s log=%s",
-            submitting.handle,
+            handle,
             submission.job_id,
             submission.cluster,
             self.policy.jobs / f"httk-{submission.job_id}.out",
         )
-        response = self._response(request, "submitted", handle=submitting.handle)
-        completed = self.ledger.finish(
-            request.request_id,
-            response,
-            job_id=submission.job_id,
-            cluster=submission.cluster,
-        )
-        return self._finished_response(completed)
+        return self._finish(entry, self._response(request, "submitted", handle=handle))
 
     def _manager(self, entry: Entry) -> Response:
         request = entry.request
         if request.handle is None:
-            raise sqlite3.DatabaseError("manager request has no handle")
+            raise LedgerError("manager request has no handle")
+        # The scheduler identity decides, also when the start's response was a premature "uncertain".
         manager = self.ledger.lookup_manager(request.handle)
-        if manager is None or manager.state != "submitted" or manager.job_id is None or manager.cluster is None:
-            return self._finish_refused(entry, "unknown_manager")
+        if manager is None or manager.job_id is None or manager.cluster is None:
+            return self._refuse(entry, "unknown_manager")
         if manager.cluster != self.policy.cluster:
-            raise sqlite3.DatabaseError("stored scheduler cluster does not match policy")
+            raise LedgerError("stored scheduler cluster does not match policy")
 
         try:
             check_request_time(request, max_age=self.policy.request_max_age)
         except ValueError:
-            return self._finish_refused(entry, "request_expired")
+            return self._refuse(entry, "request_expired")
 
         if request.operation == "manager_status":
             try:
@@ -316,39 +466,27 @@ class Broker:
                     handle=request.handle,
                     scheduler_state="UNKNOWN",
                 )
-        else:
-            try:
-                self.gateway.cancel(manager.job_id, manager.cluster, request.handle)
-                response = self._response(request, "cancel_requested", handle=request.handle)
-            except SchedulerError as exc:
-                response = self._response(
-                    request,
-                    "refused",
-                    handle=request.handle,
-                    reason="scheduler_unavailable",
-                    detail=self._scheduler_failed(request, request.handle, exc),
-                )
-        completed = self.ledger.finish(request.request_id, response)
-        return self._finished_response(completed)
+            return self._finish(entry, response)
+        try:
+            self.gateway.cancel(manager.job_id, manager.cluster, request.handle)
+        except SchedulerError as exc:
+            return self._refuse(entry, "scheduler_unavailable", self._scheduler_failed(request, request.handle, exc))
+        return self._finish(entry, self._response(request, "cancel_requested", handle=request.handle))
 
-    def _withdraw(self, request: Request) -> Response:
-        """Move waiting bundles out of the workspace staging inbox and list them in the response."""
-
-        names = [] if self.exchange is None else self.exchange.withdraw(request.bundle)
-        _LOGGER.info("daemon_withdrawn names=%s", ",".join(names))
-        detail = ",".join(names)
-        if len(detail) > 1000:
-            detail = detail[:996].rsplit(",", 1)[0] + ",..."
-        return self._response(request, "withdrawn", detail=detail or None)
-
-    def _execute(self, entry: Entry) -> Response:
+    def _execute(self, entry: Entry) -> Response | None:
+        if entry.response is not None:
+            return entry.response
+        # Nothing executes, and no start is decided, for a configuration that is no longer active.
+        self._fence()
         request = entry.request
-        if request.operation in {"health", "withdraw"}:
-            response = self._response(request, "ready") if request.operation == "health" else self._withdraw(request)
-            completed = self.ledger.finish(request.request_id, response)
-            return self._finished_response(completed)
         if request.operation == "start_manager":
             return self._start(entry)
+        try:
+            check_request_time(request, max_age=self.policy.request_max_age)
+        except ValueError:
+            return self._refuse(entry, "request_expired")
+        if request.operation == "health":
+            return self._finish(entry, self._response(request, "ready"))
         return self._manager(entry)
 
     def _process(self, publication: str, request: Request) -> None:
@@ -360,59 +498,70 @@ class Broker:
 
         existing = self.ledger.lookup_request(request.request_id)
         if existing is not None and request_digest(existing.request) != request_digest(request):
-            response = self._response(request, "refused", reason="request_conflict")
-            self._publish(publication, request, response)
+            self._publish(publication, request, self._response(request, "refused", reason="request_conflict"))
             return
         if request.workspace_id != self.policy.workspace_id:
-            response = self._response(request, "refused", reason="wrong_workspace")
-            self._publish(publication, request, response)
+            self._publish(publication, request, self._response(request, "refused", reason="wrong_workspace"))
             return
         if request.enrollment_id != self.policy.enrollment_id:
-            response = self._response(request, "refused", reason="wrong_enrollment")
-            self._publish(publication, request, response)
+            self._publish(publication, request, self._response(request, "refused", reason="wrong_enrollment"))
             return
         if existing is None:
-            try:
-                entry = self.ledger.admit(request)
-            except ConflictError:
-                response = self._response(request, "refused", reason="request_conflict")
-                self._publish(publication, request, response)
-                return
-            except CapacityError:
-                response = self._response(request, "busy", reason="capacity")
-                self._publish(publication, request, response)
-                return
-        else:
-            entry = existing
-
-        if entry.response is not None:
-            response = entry.response
-        elif entry.state == "received":
-            try:
-                check_request_time(request, max_age=self.policy.request_max_age)
-            except ValueError:
-                response = self._finish_refused(entry, "request_expired")
-            else:
-                response = self._execute(entry)
-        elif entry.state == "submitting":
-            # Normal startup calls recover(), but this keeps direct broker use
-            # from ever turning a committed intent into another submission.
-            self.ledger.recover()
-            recovered = self.ledger.admit(request)
-            if recovered.response is None:
-                raise sqlite3.DatabaseError("submission recovery did not produce a response")
-            response = recovered.response
-        else:
-            raise sqlite3.DatabaseError("durable request has no response")
+            self._fence()
+        try:
+            entry = self.ledger.admit(request)
+        except ConflictError:
+            self._publish(publication, request, self._response(request, "refused", reason="request_conflict"))
+            return
+        except CapacityError:
+            self._publish(publication, request, self._response(request, "busy", reason="capacity"))
+            return
+        response = self._execute(entry)
+        if response is None:
+            _LOGGER.debug("daemon_request_pending request_id=%s: another instance submits it", request.request_id)
+            return
         self._publish(publication, request, response)
 
+    def _recover(self, now: float) -> None:
+        """Settle starts whose decider crashed: refusals at once, submissions after the longest submission."""
+
+        self.ledger.recover(
+            older_than=self.policy.command_timeout + KILL_GRACE_SECONDS + _RECOVERY_MARGIN_SECONDS,
+            now_ns=int(now * 1_000_000_000),
+        )
+
+    def _sweep_responses(self, now: float) -> None:
+        """Remove mailbox responses no client can still be waiting for.
+
+        A response older than the request lifetime plus the clock skew answers an expired request: it is
+        either one a late instance reinstalled after the client consumed it, or one the client abandoned.
+        """
+
+        limit = self.policy.request_max_age + CLOCK_SKEW_SECONDS
+        try:
+            for name in self.responses.names():
+                information = self.responses.lstat(name)
+                if information is None or now - information.st_mtime <= limit:
+                    continue
+                try:
+                    self.responses.remove(name)
+                except (FileNotFoundError, IsADirectoryError, PermissionError):
+                    continue
+                _LOGGER.info("daemon_response_swept request_id=%s", name.removesuffix(".json"))
+        except (OSError, ValueError) as exc:
+            _LOGGER.warning("daemon_response_sweep_failed reason=%s", excerpt(str(exc)))
+
     def process_once(self, stop: threading.Event) -> int:
-        """Process one bounded sorted mailbox snapshot, then run one exchange pass.
+        """Recover, process one bounded sorted mailbox snapshot, then publish and sweep the exchange.
 
         :param stop: Stop admission before the next request when set.
         :return: Number of request publications considered.
         """
 
+        if self.retired:
+            return 0
+        now = time.time()
+        self._recover(now)
         processed = 0
         for publication in self.requests.names():
             if stop.is_set():
@@ -433,25 +582,38 @@ class Broker:
             if publication != f"{request.request_id}.json":
                 self._discard_invalid(publication, "identifier_mismatch")
                 continue
-            self._process(publication, request)
+            try:
+                self._process(publication, request)
+            except _ActivationChanged as exc:
+                self.retired = True
+                _LOGGER.warning(
+                    "daemon_retired reason=%s: the active daemon configuration changed; this instance admits and "
+                    "decides nothing more and stops; start the daemon again to serve the new configuration",
+                    excerpt(str(exc)),
+                )
+                break
         if self.exchange is not None:
             try:
                 rows = self.ledger.managers()
                 try:
-                    self._observe(rows, time.time())
+                    self._observe(rows, now)
                 except Exception as exc:
                     _LOGGER.warning("daemon_manager_observation_failed reason=%s", excerpt(str(exc)))
                 self.exchange.poll(self._manager_rows(rows))
             except Exception:
                 _LOGGER.exception("daemon_exchange_failed")
+        self._sweep_responses(now)
         return processed
+
+    def _observation(self, handle: str) -> _Observation | None:
+        return _parse_observation(self.ledger.observation(handle))
 
     def _manager_rows(self, rows: list[dict[str, str | None]]) -> list[dict[str, str | None]]:
         """Extend ledger manager rows, which carry the job ID, with what the scheduler last reported."""
 
         result: list[dict[str, str | None]] = []
         for row in rows:
-            observation = self._observations.get(str(row["handle"]))
+            observation = self._observation(str(row["handle"]))
             if observation is None:
                 result.append({**row, **dict.fromkeys(_PUBLISHED)})
                 continue
@@ -470,21 +632,23 @@ class Broker:
     def _observe(self, rows: list[dict[str, str | None]], now: float) -> None:
         """Follow each submitted manager job until it ends, then publish its Slurm output once.
 
-        Runs at most once per 60 seconds; a failed check is logged and retried on the next run.
+        Runs at most once per 60 seconds; a failed check is logged and retried on the next run. Each
+        observation is read from and written to the ledger, so instances share them (last writer wins).
         """
 
-        if self.state is None or self.exchange is None:
+        if not self.observe or self.exchange is None:
             return
         if self._observed_at is not None and 0.0 <= now - self._observed_at < _OBSERVE_SECONDS:
             return
         self._observed_at = now
         for row in rows:
             handle = str(row["handle"])
-            observation = self._observations.get(handle)
-            if row["state"] == "submitted" and (observation is None or not observation["final"]):
+            previous = self._observation(handle)
+            observation = previous
+            if row["job_id"] is not None and (observation is None or not observation["final"]):
                 entry = self.ledger.lookup_manager(handle)
                 if entry is None or entry.job_id is None or entry.cluster is None:
-                    raise sqlite3.DatabaseError("submitted manager has no scheduler identity")
+                    raise LedgerError("submitted manager has no scheduler identity")
                 try:
                     observation = self._check(handle, entry.job_id, entry.cluster, observation, now)
                 except SchedulerError as exc:
@@ -495,22 +659,19 @@ class Broker:
                         excerpt(str(exc), 1000),
                     )
                     continue
-                self._observations[handle] = observation
-            if observation is not None and observation["final"] and not observation["log_published"]:
-                self._publish_log(handle, observation)
-        data = json.dumps(self._observations, sort_keys=True, separators=(",", ":")).encode("ascii")
-        if data == self._saved:
-            return
+            if observation is None:
+                continue
+            if observation["final"] and not observation["log_published"] and self._publish_log(handle, observation):
+                observation = cast(_Observation, {**observation, "log_published": True})
+            if observation != previous:
+                self._save_observation(handle, observation)
+
+    def _save_observation(self, handle: str, observation: _Observation) -> None:
+        data = json.dumps(observation, sort_keys=True, separators=(",", ":")).encode("ascii")
         try:
-            directory = _open_directory(self.state)
-            try:
-                _install(directory, _OBSERVATIONS, ".observations-", data)
-            finally:
-                os.close(directory)
+            self.ledger.record_observation(handle, data)
         except OSError as exc:
-            _LOGGER.warning("daemon_observations_unsaved reason=%s", exc.strerror)
-            return
-        self._saved = data
+            _LOGGER.warning("daemon_observations_unsaved handle=%s reason=%s", handle, exc.strerror)
 
     def _check(self, handle: str, job_id: str, cluster: str, previous: _Observation | None, now: float) -> _Observation:
         """Ask squeue, then sacct once squeue no longer knows the job or reports it ended."""
@@ -579,8 +740,13 @@ class Broker:
             )
         return observation
 
-    def _publish_log(self, handle: str, observation: _Observation) -> None:
-        """Publish the tail of a finished manager's private Slurm output into the exchange outbox."""
+    def _publish_log(self, handle: str, observation: _Observation) -> bool:
+        """Publish the tail of a finished manager's private Slurm output into the exchange.
+
+        :param handle: The manager handle.
+        :param observation: The manager's final observation, naming its job.
+        :return: Whether the log was published.
+        """
 
         assert self.exchange is not None
         source = self.policy.jobs / f"httk-{observation['job_id']}.out"
@@ -593,19 +759,35 @@ class Broker:
         except OSError as exc:
             if exc.errno != errno.ELOOP:
                 _LOGGER.warning("daemon_manager_log_unread handle=%s reason=%s", handle, exc.strerror)
-                return
+                return False
             data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
-        if self.exchange.publish_log(handle, data):
-            observation["log_published"] = True
-            _LOGGER.info("daemon_manager_log handle=%s path=outbox/managers/%s.log", handle, handle)
+        if not self.exchange.publish_log(handle, data):
+            return False
+        _LOGGER.info("daemon_manager_log handle=%s path=managers/%s.log", handle, handle)
+        return True
 
     def run(self, stop: threading.Event, *, once: bool = False) -> None:
-        """Run bounded scans until stopped, or one scan when requested."""
+        """Run bounded scans until stopped or retired, or one scan when requested."""
 
-        while not stop.is_set():
+        while not stop.is_set() and not self.retired:
             self.process_once(stop)
-            if once or stop.wait(self.policy.poll_seconds):
+            if once or self.retired or stop.wait(self.policy.poll_seconds):
                 return
+
+
+def _activation_check(state: Path, snapshot: Path, policy: Policy) -> Callable[[], None]:
+    """Return the check a broker runs before each admission and decision.
+
+    :param state: The protected state directory holding ``active.json``.
+    :param snapshot: The host path of the snapshot this broker serves.
+    :param policy: The policy loaded from that snapshot.
+    :return: A callable that raises when the active snapshot pointer names anything else.
+    """
+
+    def check() -> None:
+        verify_active_snapshot(state, snapshot, policy)
+
+    return check
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -654,21 +836,31 @@ def _run(arguments: argparse.Namespace) -> None:
                 )
             )
             verify_active_snapshot(_STATE_DIRECTORY, policy_source, policy)
+            if arguments.check:
+                # Every record is validated whenever it is read; 'daemon check' also validates them all.
+                ledger.verify()
             try:
                 gateway.check()
             except SchedulerError as exc:
                 # Only the clients' own --version output: safe and needed to diagnose the operator's setup.
                 raise ValueError(f"scheduler client check failed: {exc}") from exc
             _LOGGER.info("daemon_check_passed workspace=%s cluster=%s", policy.workspace_id, policy.cluster)
-            exchange = _ROOT_DIRECTORY / policy.exchange.name
+            exchange = _EXCHANGE_DIRECTORY
             requests = stack.enter_context(MailboxDirectory(exchange / "requests"))
             responses = stack.enter_context(MailboxDirectory(exchange / "responses"))
             if arguments.check:
                 return
-            mover = ExchangeMover(_ROOT_DIRECTORY, policy.exchange.name, policy.workspace.name, policy.enrollment_id)
-            ledger.recover()
+            publisher = ExchangePublisher(exchange, policy.enrollment_id)
             broker = Broker(
-                policy, gateway, ledger, requests, responses, exchange=mover, response_seed=seed, state=_STATE_DIRECTORY
+                policy,
+                gateway,
+                ledger,
+                requests,
+                responses,
+                exchange=publisher,
+                response_seed=seed,
+                observe=True,
+                activation=_activation_check(_STATE_DIRECTORY, policy_source, policy),
             )
             _LOGGER.info(
                 "daemon_started workspace=%s enrollment=%s launchers=%s",
@@ -677,6 +869,8 @@ def _run(arguments: argparse.Namespace) -> None:
                 ",".join(launcher.name for launcher in policy.launchers),
             )
             broker.run(stop, once=arguments.once)
+            if broker.retired:
+                _LOGGER.info("daemon_stopped reason=activation_changed workspace=%s", policy.workspace_id)
     finally:
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
@@ -690,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = _parser().parse_args(argv)
         _run(arguments)
-    except (OSError, ValueError, sqlite3.DatabaseError, SchedulerError) as exc:
+    except (OSError, ValueError, LedgerError, SchedulerError) as exc:
         _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
     return 0
@@ -700,4 +894,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["Broker", "main"]
+__all__ = ["Broker", "ExchangePublisher", "main"]

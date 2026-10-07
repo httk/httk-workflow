@@ -79,6 +79,8 @@ __all__ = [
     "ExchangeUnavailableError",
     "enable_exchange",
     "exchange_directory",
+    "install_document",
+    "publish_file",
 ]
 
 #: The identity document :func:`enable_exchange` writes at the exchange root.
@@ -420,23 +422,24 @@ def _timestamp(now: float) -> str:
     return datetime.fromtimestamp(now, UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _install(directory_fd: int, name: str, data: bytes, *, durable: bool) -> None:
+def _install(directory_fd: int, name: str, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
     """Install one file at *name* by an exclusive temporary and a rename, both relative to *directory_fd*.
 
     The rename replaces whatever is at *name* (a client's symlink is replaced,
-    never followed); a directory there refuses the rename.
+    never followed); a directory there refuses the rename. *mode* is the
+    file's permission bits (``0o644`` for documents a client reads).
     """
 
     temporary = f".{name}.{uuid.uuid4().hex}"
     descriptor = os.open(
-        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=directory_fd
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=directory_fd
     )
     try:
         try:
             view = memoryview(data)
             while view:
                 view = view[os.write(descriptor, view) :]
-            os.fchmod(descriptor, 0o644)
+            os.fchmod(descriptor, mode)
             if durable:
                 os.fsync(descriptor)
         finally:
@@ -450,6 +453,57 @@ def _install(directory_fd: int, name: str, data: bytes, *, durable: bool) -> Non
         raise
     if durable:
         os.fsync(directory_fd)
+
+
+def publish_file(exchange_fd: int, name: str, data: bytes, *, directory: str | None = None) -> None:
+    """Install one file into the exchange, or into one of its direct subdirectories, by descriptor.
+
+    The subdirectory is opened (and recreated, by descriptor, when a client removed it) without following a
+    symlink, and the file goes in through :func:`_install`. Used by the daemon for ``managers.json`` and
+    ``managers/<handle>.log``; nothing in the exchange is ever read back.
+
+    :param exchange_fd: The exchange directory's descriptor.
+    :param name: The file's name in the target directory.
+    :param data: The file's bytes.
+    :param directory: A direct subdirectory of the exchange, or ``None`` for the exchange root.
+    :raises ExchangeUnavailableError: If the subdirectory is a symlink or another file.
+    :raises OSError: If the file cannot be written.
+    """
+
+    if directory is None:
+        _install(exchange_fd, name, data, durable=True)
+        return
+    target = _open_child(exchange_fd, directory, label=f"{EXCHANGE_DIRECTORY}/{directory}")
+    try:
+        _install(target, name, data, durable=True)
+    finally:
+        os.close(target)
+
+
+def install_document(workspace_root: Path, name: str, data: bytes) -> None:
+    """Install one document at the exchange root of the workspace at *workspace_root*.
+
+    The exchange is opened from a workspace-root descriptor without following any
+    symlink, and the document goes in through :func:`_install` (an exclusive
+    temporary and a rename relative to the exchange descriptor), so whatever a
+    client left at *name* is replaced, never followed. Used for ``daemon.json``.
+
+    :param workspace_root: The workspace root directory.
+    :param name: The document's name in the exchange root.
+    :param data: The document's bytes.
+    :raises ExchangeUnavailableError: If the exchange is absent, a symlink or not a directory.
+    :raises OSError: If the document cannot be written.
+    """
+
+    root = os.open(workspace_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        exchange = _open_directory(EXCHANGE_DIRECTORY, root, label=str(workspace_root / EXCHANGE_DIRECTORY))
+    finally:
+        os.close(root)
+    try:
+        _install(exchange, name, data, durable=True)
+    finally:
+        os.close(exchange)
 
 
 def status_document(workspace: Workspace, now: float) -> dict[str, Any]:

@@ -18,6 +18,9 @@ _JOB = re.compile(r"[1-9][0-9]{0,19}\Z")
 _STATE = re.compile(r"[A-Z_]{1,64}\Z")
 _EXIT_CODE = re.compile(r"[0-9]{1,3}:[0-9]{1,3}\Z")
 _TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\Z")
+#: How long :func:`_run` waits for a client's process group after killing it at its deadline: a scheduler
+#: call returns at most ``command_timeout`` plus this grace after it started.
+KILL_GRACE_SECONDS = 5.0
 
 
 class SchedulerError(RuntimeError):
@@ -147,7 +150,10 @@ def _run(argv: list[str], policy: Policy, *, data: bytes = b"") -> tuple[int, by
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait(timeout=5)
+        try:
+            process.wait(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass  # an unkillable (D-state) client: never block the broker on it
         for closing_stream in (process.stdin, process.stdout, process.stderr):
             if closing_stream is not None:
                 closing_stream.close()

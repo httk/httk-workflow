@@ -48,10 +48,10 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
     bwrap = Path(bwrap_text).resolve()
 
     workspace = tmp_path / "site/workspace"
-    exchange = tmp_path / "site/exchange"
+    exchange = workspace / "exchange"
     state = tmp_path / "state"
     broker = tmp_path / "broker"
-    for root in (workspace / ".httk-workspace/exchange", exchange / "requests", exchange / "responses"):
+    for root in (exchange / "requests", exchange / "responses"):
         root.mkdir(parents=True)
     for root in (state, broker):
         root.mkdir()
@@ -93,8 +93,10 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
         "report = {}\n"
         "report['outside_read'] = attempt(lambda: open(outside, encoding='utf-8').read())\n"
         "report['outside_write'] = attempt(lambda: open(outside, 'w', encoding='utf-8').write('changed'))\n"
-        "report['root_write'] = attempt(\n"
-        "    lambda: open('/tmp/daemon-root/workspace/created', 'w', encoding='utf-8').write('inside'))\n"
+        "report['exchange_write'] = attempt(\n"
+        "    lambda: open('/tmp/daemon-exchange/created', 'w', encoding='utf-8').write('inside'))\n"
+        f"report['workspace_write'] = attempt(lambda: open({str(workspace / 'created')!r}, 'w').write('x'))\n"
+        f"report['workspace_exchange_host_write'] = attempt(lambda: open({str(exchange / 'host')!r}, 'w').write('x'))\n"
         "report['state_write'] = attempt(lambda: open('/tmp/control/created', 'w', encoding='utf-8').write('state'))\n"
         "report['policy'] = json.load(open('/tmp/daemon-policy.json', encoding='utf-8'))['enrollment_id']\n"
         "report['sentinel_fd_visible'] = descriptor_visible(outside)\n"
@@ -109,11 +111,10 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
         _write_executable(broker / command)
     policy = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 4,
+        "format_version": 5,
         "workspace": str(workspace),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "2" * 32,
-        "exchange": str(exchange),
         "state": str(state),
         "snapshots": str(tmp_path / "snapshots"),
         "bwrap": str(bwrap),
@@ -144,13 +145,17 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
     # The broker runs trusted code with a read-only host view: it reads the host but writes only its roots.
     assert report["outside_read"] is True
     assert report["outside_write"] is False
-    assert report["root_write"] is True and report["state_write"] is True
+    # Writable: the bound exchange and the state. Not writable: the rest of the workspace, and the exchange
+    # through the host's read-only view (the bind is the only way in).
+    assert report["exchange_write"] is True and report["state_write"] is True
+    assert report["workspace_write"] is False and report["workspace_exchange_host_write"] is False
     assert report["policy"] == "2" * 32
     assert report["sentinel_fd_visible"] is False
     assert report["nested_userns"] is False
     for name, host_namespace in host_namespaces.items():
         # Slurm clients need the host network; every other namespace is private.
         assert (report["namespaces"][name] == host_namespace) == (name == "net")
-    assert (workspace / "created").read_text(encoding="utf-8") == "inside"
+    assert (exchange / "created").read_text(encoding="utf-8") == "inside"
+    assert not (workspace / "created").exists() and not (exchange / "host").exists()
     assert (state / "created").read_text(encoding="utf-8") == "state"
     assert sentinel.read_text(encoding="utf-8") == "host-secret"

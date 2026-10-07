@@ -4,7 +4,6 @@ import argparse
 import base64
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +13,7 @@ from httk.core.cli import CLIContext
 
 from httk.workflow import _daemon_cli, _daemon_setup, workflow_cli
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy, policy_document
+from httk.workflow._daemon_state import LedgerError
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 
@@ -24,7 +24,6 @@ def _snapshot(tmp_path: Path) -> Path:
         workspace=tmp_path / "site/workspace",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="1" * 32,
-        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
         snapshots=tmp_path / "snapshots",
         bwrap=runtime / "bwrap",
@@ -91,10 +90,10 @@ def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
         ["/data", "--once"],
         ["/data", "--reload"],
         ["/data", "--initialize"],
-        ["init", "/data", "--add", "launchers=a"],
         ["run", "/data", "--set", "cluster=c"],
         ["show", "/data", "--add", "launchers=a"],
-        ["init", "/data", "--exchange", "/x", "--remove", "launchers=a"],
+        ["init", "/data", "--remove", "launchers=a"],
+        ["init", "/data", "--exchange", "/x"],
     ],
 )
 def test_daemon_refuses_ambiguous_paths_and_unknown_options(
@@ -111,10 +110,10 @@ def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
 ) -> None:
     cwd = tmp_path / "site" / "data"
     cwd.mkdir(parents=True)
-    calls: list[tuple[Path, Path, Path | None]] = []
+    calls: list[tuple[Path, Path | None]] = []
 
-    def initialize(workspace: Path, *, exchange: Path, state: Path | None, **_options: object) -> Path:
-        calls.append((workspace, exchange, state))
+    def initialize(workspace: Path, *, state: Path | None, **_options: object) -> Path:
+        calls.append((workspace, state))
         return _snapshot(tmp_path)
 
     monkeypatch.setattr(_daemon_setup, "initialize", initialize)
@@ -122,14 +121,9 @@ def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
     monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
     monkeypatch.chdir(cwd)
-    assert (
-        _daemon_cli.command(["init", ".", "--exchange", "../exchange", "--state", "../../state"], program="httk") == 0
-    )
-    assert _daemon_cli.command(["init", "link/x", "--exchange", "./exchange"], program="httk") == 0
-    assert calls == [
-        (cwd, tmp_path / "site" / "exchange", tmp_path / "state"),
-        (cwd / "link" / "x", cwd / "exchange", None),
-    ]
+    assert _daemon_cli.command(["init", ".", "--state", "../../state"], program="httk") == 0
+    assert _daemon_cli.command(["init", "link/x"], program="httk") == 0
+    assert calls == [(cwd, tmp_path / "state"), (cwd / "link" / "x", None)]
 
 
 def test_isolated_handoff_cleans_environment_cwd_and_inherited_descriptors(tmp_path: Path) -> None:
@@ -224,7 +218,7 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
     changes = ["--set", "bwrap=tools/bwrap", "--add", "launchers=small", "--set", "cluster=c1"]
     changes += ["--add", f"authorized_keys={AUTHORIZED_KEY}"]
-    assert _daemon_cli.command(["init", "/workspace", "--exchange", "/exchange", *changes], program="httk") == 0
+    assert _daemon_cli.command(["init", "/workspace", *changes], program="httk") == 0
     arguments = ["configure", "/workspace", "--remove", "launchers=large", "--set", "force=true", "--state", "/state"]
     assert _daemon_cli.command(arguments, program="httk") == 0
     assert calls == [
@@ -232,7 +226,6 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
             "init",
             Path("/workspace"),
             {
-                "exchange": Path("/exchange"),
                 "changes": [
                     ("set", "bwrap=tools/bwrap"),
                     ("add", "launchers=small"),
@@ -296,7 +289,7 @@ def test_incompatible_ledger_is_a_clean_local_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def incompatible(_workspace: Path, *_args: object, **_options: object) -> Path:
-        raise sqlite3.DatabaseError("preserve this state and initialize a new enrollment")
+        raise LedgerError("preserve this state and initialize a new enrollment")
 
     monkeypatch.setattr(_daemon_setup, "configure", incompatible)
     assert _daemon_cli.command(["configure", "/workspace", "--set", "force=true"], program="httk") == 2
@@ -327,7 +320,7 @@ def _init_with_check(
     monkeypatch.setattr(_daemon_setup, "describe", lambda *_a, **_k: {"configuration": {}})
     monkeypatch.setattr(_daemon_cli.subprocess, "run", run)
     monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("setup must not exec"))
-    arguments = ["init", str(workspace), "--exchange", str(tmp_path / "ex"), "--add", "launchers=small"]
+    arguments = ["init", str(workspace), "--add", "launchers=small"]
     status = _daemon_cli.command(arguments, program="httk")
     runs.append({"status": status})
     return snapshot, runs, argvs

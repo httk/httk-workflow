@@ -40,13 +40,12 @@ def _client(path: Path, body: str) -> None:
 def policy(tmp_path: Path) -> Policy:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    for name in ("site/data", "site/exchange/requests", "site/exchange/responses", "state"):
+    for name in ("site/data/exchange/requests", "site/data/exchange/responses", "state"):
         (tmp_path / name).mkdir(parents=True)
     return Policy(
         workspace=tmp_path / "site/data",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="b" * 32,
-        exchange=tmp_path / "site/exchange",
         state=tmp_path / "state",
         snapshots=tmp_path / "snapshots",
         bwrap=Path("/usr/bin/bwrap"),
@@ -387,7 +386,6 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
         _client(policy.squeue, f"print('123|httk-{handle}|{os.getuid()}|RUNNING')\n")
         _client(policy.scancel, f"open({str(cancelled_calls)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
         with Ledger(policy.state, policy.workspace_id, policy.enrollment_id) as ledger:
-            ledger.recover()
             broker = Broker(
                 policy,
                 SlurmGateway(policy),

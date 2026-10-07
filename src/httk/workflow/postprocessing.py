@@ -7,9 +7,10 @@ Postprocess output never lands in the job payload: it is written under a
 workspace-level ``postprocess/`` tree, so a finished job may be sealed
 immediately and still be postprocessed later without disturbing the bytes the
 seal covers. The output root is ``<workspace.root>/postprocess/`` by default,
-the workspace setting ``postprocess.directory`` when set (a relative path
-resolves against the workspace root, an absolute path is used as given), or a
-per-invocation override; the per-job directory below it mirrors payload
+the workspace setting ``postprocess.directory`` when set (an absolute path
+outside the workspace), or a per-invocation override (a relative path
+resolves against the current directory; it must also land outside the
+workspace); the per-job directory below it mirrors payload
 placement as ``<root>/<placement>/<job_key>/<script name>/``.
 
 The script runs with its cwd set to that per-job output directory and receives

@@ -10,30 +10,29 @@ from typing import cast
 _MAX_REQUEST_SIZE = 16 * 1024
 _REQUEST_FORMAT = "httk-workspace-command"
 _RESPONSE_FORMAT = "httk-workspace-response"
-_FORMAT_VERSION = 3
-_OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager", "withdraw"})
+_FORMAT_VERSION = 4
+_OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"})
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _PROFILE_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
 _REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
-_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy", "withdrawn"})
+_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy"})
 #: A job bundle name in the exchange; the reserved names are the exchange's own entries.
 _BUNDLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _RESERVED_NAMES = frozenset(
     {
-        "endpoint.json",
+        "daemon.json",
+        "exchange.json",
         "status.json",
         "managers.json",
         "managers",
-        "withdrawn",
         "rejected",
         "requests",
         "responses",
         "inbox",
         "outbox",
-        "records",
     }
 )
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
@@ -49,7 +48,6 @@ class Request:
     :param profile: Select a configured profile for ``start_manager``.
     :param handle: Identify a broker-issued manager handle.
     :param configuration_digest: Pin the selected approved configuration.
-    :param bundle: Name the one waiting bundle ``withdraw`` takes back, or ``None`` for all of them.
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
 
@@ -64,7 +62,6 @@ class Request:
     operator_key: str | None = field(default=None, kw_only=True)
     signature: str | None = field(default=None, kw_only=True)
     configuration_digest: str | None = field(default=None, kw_only=True)
-    bundle: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
@@ -98,14 +95,6 @@ class Request:
             raise ValueError("invalid profile")
         if self.handle is not None and type(self.handle) is not str:
             raise ValueError("invalid handle")
-        if self.bundle is not None and (
-            type(self.bundle) is not str
-            or _BUNDLE_NAME.fullmatch(self.bundle) is None
-            or self.bundle in _RESERVED_NAMES
-        ):
-            raise ValueError("invalid bundle")
-        if self.bundle is not None and self.operation != "withdraw":
-            raise ValueError("only withdraw takes a bundle")
 
         if self.operation == "health":
             if self.profile is not None or self.handle is not None or self.configuration_digest is not None:
@@ -120,10 +109,17 @@ class Request:
                 raise ValueError("manager operation requires handle only")
             if _ID_PATTERN.fullmatch(self.handle) is None:
                 raise ValueError("invalid handle")
-        elif self.operation == "withdraw" and (
-            self.profile is not None or self.handle is not None or self.configuration_digest is not None
-        ):
-            raise ValueError("withdraw allows only bundle")
+
+
+def _version_message(kind: str, version: object) -> str:
+    """Return the refusal for a *kind* document of an unsupported protocol *version*."""
+
+    if type(version) is int and version < _FORMAT_VERSION:
+        return (
+            f"unsupported {kind} version {version}: this daemon speaks protocol {_FORMAT_VERSION}; "
+            "update the client (the old protocol's withdraw operation no longer exists) and re-enroll"
+        )
+    return f"unsupported {kind} version {version!r}: this daemon speaks protocol {_FORMAT_VERSION}"
 
 
 def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -201,8 +197,6 @@ def _request_fields(request: Request) -> dict[str, object]:
         fields["configuration_digest"] = request.configuration_digest
     elif request.operation in {"manager_status", "cancel_manager"}:
         fields["handle"] = request.handle
-    elif request.bundle is not None:
-        fields["bundle"] = request.bundle
     return fields
 
 
@@ -219,7 +213,7 @@ def decode_request(data: bytes) -> Request:
         raise ValueError("invalid request format")
     version = value.get("format_version")
     if type(version) is not int or version != _FORMAT_VERSION:
-        raise ValueError("unsupported request version")
+        raise ValueError(_version_message("request", version))
 
     operation = value.get("operation")
     if type(operation) is not str or operation not in _OPERATIONS:
@@ -240,8 +234,6 @@ def decode_request(data: bytes) -> Request:
         keys.update({"configuration", "configuration_digest"})
     elif operation in {"manager_status", "cancel_manager"}:
         keys.add("handle")
-    elif operation == "withdraw" and "bundle" in value:
-        keys.add("bundle")
     if set(value) != keys:
         raise ValueError("invalid request fields")
     request_id = value["request_id"]
@@ -250,7 +242,6 @@ def decode_request(data: bytes) -> Request:
     profile = value.get("configuration")
     configuration_digest = value.get("configuration_digest")
     handle = value.get("handle")
-    bundle = value.get("bundle")
     created_at = value["created_at"]
     expires_at = value["expires_at"]
     operator_key = value["operator_key"]
@@ -262,8 +253,6 @@ def decode_request(data: bytes) -> Request:
     if "configuration_digest" in value and type(configuration_digest) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
-        raise ValueError("invalid request fields")
-    if "bundle" in value and type(bundle) is not str:
         raise ValueError("invalid request fields")
     if type(created_at) is not int or type(expires_at) is not int:
         raise ValueError("invalid request fields")
@@ -284,7 +273,6 @@ def decode_request(data: bytes) -> Request:
             operator_key=cast(str | None, operator_key),
             signature=cast(str | None, signature),
             configuration_digest=cast(str | None, configuration_digest),
-            bundle=cast(str | None, bundle),
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
@@ -315,8 +303,7 @@ class Response:
     :param handle: Identify a broker-issued manager handle when applicable.
     :param scheduler_state: Give a bounded normalized scheduler state.
     :param reason: Give a bounded normalized reason code.
-    :param detail: Explain ``reason``, or list the bundles a ``withdrawn`` outcome moved, in at most 1000
-        printable ASCII characters.
+    :param detail: Explain ``reason`` in at most 1000 printable ASCII characters.
     :raises ValueError: If a field is invalid or conflicts with the outcome.
     """
 
@@ -360,7 +347,7 @@ class Response:
             raise ValueError("invalid reason")
         if self.detail is not None and (type(self.detail) is not str or _DETAIL_PATTERN.fullmatch(self.detail) is None):
             raise ValueError("invalid detail")
-        if self.detail is not None and self.reason is None and self.outcome != "withdrawn":
+        if self.detail is not None and self.reason is None:
             raise ValueError("detail requires reason")
         if self.operator_key is not None and type(self.operator_key) is not str:
             raise ValueError("invalid operator_key")
@@ -378,7 +365,6 @@ class Response:
             "uncertain": has_handle and not has_state and has_reason,
             "refused": not has_state and has_reason,
             "busy": not has_handle and not has_state and has_reason,
-            "withdrawn": not has_handle and not has_state and not has_reason,
         }[self.outcome]
         if not valid:
             raise ValueError("invalid outcome fields")
@@ -422,7 +408,7 @@ def decode_response(data: bytes) -> Response:
         raise ValueError("invalid response format")
     version = value.get("format_version")
     if type(version) is not int or version != _FORMAT_VERSION:
-        raise ValueError("unsupported response version")
+        raise ValueError(_version_message("response", version))
     keys = {
         "format",
         "format_version",
