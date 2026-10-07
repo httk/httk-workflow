@@ -35,8 +35,10 @@ from ..manifests import read_maintenance_lock, release_maintenance_lock, workspa
 from ..models import (
     DEFAULT_LEASE_SECONDS,
     POLICY_KEYS,
+    RETENTION_KEYS,
     STATE_KINDS,
     WORKSPACE_DIRECTORY,
+    WorkspacePolicy,
     placement_text,
 )
 from ..packages import load_workflow_package
@@ -65,7 +67,7 @@ from ..seals import (
     unsealed_jobs,
     workspace_seal_path,
 )
-from ..workspace import Workspace
+from ..workspace import Workspace, _validate_setting_key, _validate_settings
 from ._common import (
     _ERRORS,
     _add_by_path_argument,
@@ -457,6 +459,24 @@ def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIConte
     return _print_policy(policy, as_json=arguments.json)
 
 
+def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Restore one policy member's default without removing the required policy section."""
+
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_policy_unset)
+    defaults = WorkspacePolicy()
+    key = arguments.key
+    if key in POLICY_KEYS:
+        value = defaults.as_mapping()[key]
+    elif key.startswith("retention.") and key.split(".", 1)[1] in RETENTION_KEYS:
+        value = getattr(defaults.retention, key.split(".", 1)[1])
+    else:
+        raise ValueError(f"unknown policy key: {key}")
+    item = copy(arguments)
+    item.value = json.dumps(value)
+    return handle_workspace_policy_set(item, context)
+
+
 def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Check, and optionally repair, the marker-to-journal integrity."""
 
@@ -757,6 +777,46 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
     return 0
 
 
+def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove and set application settings, validating local changes before writing."""
+
+    if not arguments.settings and not arguments.unset:
+        raise ValueError("workspace configure requires --set KEY=VALUE or --unset KEY")
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_configure)
+    pairs = _pairs(arguments.settings or (), "--set")
+    changes = {key: _json_value(value, f"setting {key}") for key, value in pairs}
+    _validate_settings(changes)
+    for key in changes:
+        Workspace._check_setting_collision(key, changes)
+    for key in arguments.unset or ():
+        _validate_setting_key(key)
+    _binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        # Existing remote peers expose individual settings operations. Stop on
+        # the first error; earlier remote changes have already been applied.
+        for key in arguments.unset or ():
+            item = copy(arguments)
+            item.key = key
+            item.json = False
+            code = handle_workspace_settings_unset(item, context)
+            if code:
+                return code
+        for key, value in pairs:
+            item = copy(arguments)
+            item.key, item.value = key, value
+            item.json = False
+            with redirect_stdout(StringIO()):
+                code = handle_workspace_settings_set(item, context)
+            if code:
+                return code
+    else:
+        Workspace(root, durable=_durable(arguments)).configure_settings(changes, unset=arguments.unset or ())
+    item = copy(arguments)
+    item.key = None
+    return handle_workspace_settings_show(item, context)
+
+
 def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Store one application setting on a workspace."""
 
@@ -1038,6 +1098,7 @@ def build_workspace_parser(
     )
     _add_workspace_targets(show, help_text="the workspace whose policy to print")
     show.add_argument("--json", action="store_true", help="print the policy as one JSON object")
+    _add_by_path_argument(show)
     store = _leaf(
         policy_actions,
         "set",
@@ -1053,6 +1114,18 @@ def build_workspace_parser(
         action="store_true",
         help="print the resulting policy as one JSON object",
     )
+    _add_by_path_argument(store)
+    reset = _leaf(
+        policy_actions,
+        "unset",
+        summary="restore one policy member's default",
+        description="Restore a policy member or retention.KEY to its default, keeping the policy section",
+        handler=handle_workspace_policy_unset,
+    )
+    _add_workspace_targets(reset, help_text="the workspace whose policy to change")
+    reset.add_argument("--key", required=True, metavar="KEY", help="the policy member or retention.KEY to reset")
+    reset.add_argument("--json", action="store_true", help="print the resulting policy as one JSON object")
+    _add_by_path_argument(reset)
 
     listing = _leaf(
         group,
@@ -1125,6 +1198,38 @@ def build_workspace_parser(
     move.add_argument("workspace", metavar="NAME", help="the local workspace name")
     move.add_argument("destination", metavar="DEST_DIR", help="the new workspace path")
     add_durability_arguments(move)
+
+    configuration_show = _leaf(
+        group,
+        "show",
+        summary="show a workspace's application configuration",
+        description="Print application settings; use workspace policy show for execution policy",
+        handler=handle_workspace_settings_show,
+    )
+    _add_workspace_targets(configuration_show, help_text="the workspace whose settings to read")
+    configuration_show.add_argument("--key", metavar="KEY", help="print only this application setting")
+    configuration_show.add_argument("--json", action="store_true", help="print the settings as JSON")
+    _add_by_path_argument(configuration_show)
+    configure = _leaf(
+        group,
+        "configure",
+        summary="set or remove application configuration",
+        description=(
+            "Remove settings, then store values. Local changes are validated together; remote changes run "
+            "as individual settings operations and stop at the first failure"
+        ),
+        handler=handle_workspace_configure,
+    )
+    _add_workspace_targets(configure, help_text="the workspace to configure")
+    configure.add_argument(
+        "--set", dest="settings", action="append", metavar="KEY=VALUE", help="store a setting (repeatable)"
+    )
+    configure.add_argument(
+        "--unset", action="append", metavar="KEY", help="remove a setting before storing values (repeatable)"
+    )
+    configure.add_argument("--json", action="store_true", help="print the resulting settings as JSON")
+    _add_by_path_argument(configure)
+    add_durability_arguments(configure)
 
     _, settings_actions = _group(
         group,

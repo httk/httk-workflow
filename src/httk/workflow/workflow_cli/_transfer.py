@@ -27,6 +27,7 @@ from ..adapters import (
     list_remotes,
     metadata_path,
     probe_remote_workspace,
+    read_credentials,
     read_metadata,
     resolve_remote,
     run_adapter,
@@ -172,7 +173,12 @@ def _remote_batch(
 def handle_remote_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     """List the remotes this project and this user define."""
 
-    print(json.dumps(list_remotes(context.cwd), indent=2, sort_keys=True))
+    rows = list_remotes(context.cwd)
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+    else:
+        for row in rows:
+            print(f"{row['name']}\t{row['scope']}\t{row['path']}")
     return 0
 
 
@@ -211,28 +217,37 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
     operation = arguments.operation
     target = resolve_remote(arguments.remote, project=context.cwd)
     settings = _settings(arguments.set)
-    if operation == "configure":
-        split_settings(settings)
+    if operation != "configure":
+        result = run_adapter(target.bundle, operation, {"settings": settings}, timeout=arguments.adapter_timeout)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 1 if result.get("returncode") not in (None, 0) else 0
+    unset = arguments.unset
+    if any(not key or "=" in key for key in unset):
+        raise ValueError("--unset requires a nonempty KEY without '='")
+    persistable, credentials = split_settings(settings)
+    metadata = read_metadata(target.bundle)
+    configured = metadata.setdefault("settings", {})
+    if not isinstance(configured, dict):
+        raise ValueError("adapter settings are not mutable JSON")
+    stored_credentials = read_credentials(target.bundle)
+    for key in unset:
+        configured.pop(key, None)
+    configured.update(persistable)
     result = run_adapter(
         target.bundle,
         operation,
         {"settings": settings},
         timeout=arguments.adapter_timeout,
+        unset_settings=unset,
     )
-    if operation == "configure" and settings:
-        persistable, credentials = split_settings(settings)
-        if persistable:
-            metadata = read_metadata(target.bundle)
-            remote_settings = metadata.setdefault("settings", {})
-            if not isinstance(remote_settings, dict):
-                raise ValueError("adapter settings are not mutable JSON")
-            remote_settings.update(persistable)
-            # A bundle that still carries the pre-rename file name keeps it, so
-            # configuring an old definition rewrites what is there rather than
-            # leaving two metadata files behind.
-            write_json_atomic(metadata_path(target.bundle), metadata)
+    if result.get("returncode") not in (None, 0):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 1
+    if persistable or unset:
+        write_json_atomic(metadata_path(target.bundle), metadata)
+    if credentials or set(unset) & stored_credentials.keys():
+        path = store_credentials(target.bundle, credentials, unset=unset)
         if credentials:
-            path = store_credentials(target.bundle, credentials)
             names = ", ".join(sorted(credentials))
             print(
                 f"stored {names} for remote {target.name} in {path}; "
@@ -240,12 +255,11 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
                 file=sys.stderr,
             )
     print(json.dumps(result, indent=2, sort_keys=True))
-    if operation == "configure":
-        print(
-            f"configured; verify httk is available there with: httk workflow remote check {arguments.remote}",
-            file=sys.stderr,
-        )
-    return 1 if result.get("returncode") not in (None, 0) else 0
+    print(
+        f"configured; verify httk is available there with: httk remote check {arguments.remote}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def handle_remote_import_v1(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -333,13 +347,14 @@ def build_remote_parser(
         description="Define, configure, describe, and remove the remote adapters of this project",
     )
 
-    _leaf(
+    listing = _leaf(
         group,
         "list",
         summary="list the remotes this project can reach",
         description="List the remotes this project and this user define",
         handler=handle_remote_list,
     )
+    listing.add_argument("--json", action="store_true", help="print the remotes as one JSON array")
 
     add = _leaf(
         group,
@@ -400,6 +415,14 @@ def build_remote_parser(
             metavar="SECONDS",
             help="bound this adapter operation (default: the remote's timeout_seconds)",
         )
+        if operation == "configure":
+            parser.add_argument(
+                "--unset",
+                action="append",
+                default=[],
+                metavar="KEY",
+                help="remove a stored setting or credential before applying --set (repeatable)",
+            )
 
     imported = _leaf(
         group,
@@ -1089,7 +1112,7 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
             )
         for entry in in_doubt:
             assert isinstance(entry, Mapping)
-            print(f"in doubt\t{entry['job_key']}\t{entry['transfer_id']}\t(`httk workflow transfer retire|reclaim`)")
+            print(f"in doubt\t{entry['job_key']}\t{entry['transfer_id']}\t(`httk transfer retire|reclaim`)")
         for job_id in stale:
             print(f"stale claim\t{job_id}")
     return 0 if finding.status == "ok" else 1
@@ -1733,3 +1756,40 @@ def build_transfer_parser(
         help="block before moving state when destination environment precheck is unavailable or unresolved",
     )
     transfer.add_argument("--json", action="store_true", help="print what moved as one JSON document")
+
+
+def build_transfer_operator_parser(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+) -> None:
+    """Declare operator transfer inspection and recovery commands."""
+
+    _, group = _group(
+        subparsers,
+        "transfer",
+        summary="inspect and resolve workspace transfers",
+        description="Inspect transfers requiring attention and explicitly retire or reclaim them",
+    )
+    for name, summary, handler in (
+        ("status", "report transfers requiring attention", handle_transfer_status),
+        ("retire", "retire acknowledged transfers", handle_transfer_retire),
+        ("reclaim", "reclaim in-doubt transfers after the safety deadline", handle_transfer_reclaim),
+    ):
+        parser = _leaf(group, name, summary=summary, description=summary.capitalize(), handler=handler)
+        parser.add_argument(
+            "--workspace",
+            dest="operator_workspace",
+            metavar="WORKSPACE",
+            help="workspace name (default: selected workspace)",
+        )
+        parser.add_argument("--json", action="store_true", help="print the result as JSON")
+        if name == "retire":
+            parser.add_argument(
+                "words",
+                metavar="JOB_ID",
+                nargs="+",
+                type=lambda value: canonical_uuid(value, "job_id"),
+                help="job IDs whose transfers to retire",
+            )
+            parser.set_defaults(destination_workspace_id=None, acknowledgements_json=None)
+        elif name == "reclaim":
+            parser.add_argument("jobs", metavar="JOB_ID", nargs="+", help="job IDs whose transfers to reclaim")

@@ -675,7 +675,7 @@ def test_signed_verbs_without_daemon_pins_say_how_to_pin(project: Path, tmp_path
 
     code, stdout, stderr = _invoke(project, ["health", "cluster"])
 
-    assert (code, stdout) == (2, "") and "httk workflow remote daemon configure" in stderr
+    assert (code, stdout) == (2, "") and "httk remote daemon configure" in stderr
 
 
 def test_take_back_verb_copies_the_inbox_entry_out(project: Path, tmp_path: Path) -> None:

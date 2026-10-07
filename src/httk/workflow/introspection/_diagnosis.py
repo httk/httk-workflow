@@ -579,7 +579,7 @@ def _manager_checks(
             False,
             "no manager has ever registered in this workspace",
         )
-        report.hint("start one with 'httk workflow manager run --workspace WORKSPACE'")
+        report.hint("start one with 'httk manager run --workspace WORKSPACE'")
         return
     if not live:
         report.check(
@@ -587,7 +587,7 @@ def _manager_checks(
             False,
             f"{len(records)} manager(s) registered here, but none has a live heartbeat",
         )
-        report.hint("start one with 'httk workflow manager run --workspace WORKSPACE'")
+        report.hint("start one with 'httk manager run --workspace WORKSPACE'")
         for record in records:
             report.check("stopped manager", None, record.describe())
         return
@@ -624,7 +624,7 @@ def _manager_checks(
     if not accepting:
         report.hint(
             "run a manager that matches, for example "
-            f"'httk workflow manager run --pool {requirements.pool} --workspace WORKSPACE"
+            f"'httk manager run --pool {requirements.pool} --workspace WORKSPACE"
             + "".join(f" --capability {name}" for name in sorted(requirements.capabilities))
             + "'"
         )

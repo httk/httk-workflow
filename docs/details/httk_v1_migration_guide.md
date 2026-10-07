@@ -18,8 +18,8 @@ You do not need to migrate every workflow at once.
 | --- | --- | --- | --- |
 | Converted package | None, normally | normal `httk workflow run --pool POOL` | Establish an *httk₂* operational baseline quickly |
 | Mixed | Per job type | the normal manager on one workspace | Incremental migration with a direct fallback |
-| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk workflow manager run` | Preserve a shell-oriented workflow |
-| Native Python | Replace the runner with Python calls | `httk workflow manager run` | New development and more structured logic |
+| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk manager run` | Preserve a shell-oriented workflow |
+| Native Python | Replace the runner with Python calls | `httk manager run` | New development and more structured logic |
 
 Start with a converted package unless tests already describe the workflow's
 inputs, outputs, restart behavior and child tasks. A package run gives a
@@ -157,7 +157,7 @@ These imports do not migrate workflow code or task queues.
 Import safe user configuration explicitly:
 
 ```console
-httk workflow config import-v1
+httk config import-v1
 ```
 
 When no identity is configured, this creates a named identity from the legacy
@@ -192,7 +192,7 @@ Recognized v1 computer definitions can be mapped explicitly into *httk₂*
 remotes:
 
 ```console
-httk workflow remote import-v1 --name cluster-a ~/.httk/computers/cluster-a
+httk remote import-v1 --name cluster-a ~/.httk/computers/cluster-a
 httk workspace init --name default cluster-a:/remote/path/to/workflow-workspace
 ```
 
@@ -369,7 +369,7 @@ Submit and run it:
 ```console
 httk job submit --workspace native-workspace \
   --placement migration/native/silicon-relax native-job
-httk workflow manager run --workspace native-workspace \
+httk manager run --workspace native-workspace \
   --pool vasp-native
 ```
 
@@ -860,7 +860,7 @@ collected = collect_finished_tree(
 The CLI equivalent is:
 
 ```console
-httk workflow v1 collect --workflow-dir ./silicon-relax \
+httk v1 collect --workflow-dir ./silicon-relax \
   --into results.sqlite --id-base httk.v1 /archive/ht-results
 ```
 

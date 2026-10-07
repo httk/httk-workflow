@@ -2,7 +2,8 @@
 
 This is the complete command reference, from workspaces and jobs to projects,
 signed manifests, and remotes. Installing *httk-workflow* registers lazy
-`workflow`, `workspace`, and `job` commands with *httk-core*:
+`workflow`, `workspace`, `job`, `launcher`, `remote`, `manager`, `runner`,
+`campaign`, `config`, `seal`, `transfer`, `v1`, and `collect` commands with *httk-core*:
 
 ```console
 httk workflow --help
@@ -16,30 +17,75 @@ action is reported by its group.
 ## The command tree
 
 ```text
-httk workspace          init | adopt | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock | seal | unseal | daemon init | daemon configure | daemon show | daemon check | daemon run
+httk workspace          show | configure | init | adopt | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | policy unset | fsck | gc | unlock | seal | unseal | daemon init | daemon configure | daemon show | daemon check | daemon run
 httk job                 new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug | transfer
 httk collect             [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list       [--json]
 httk workflow describe   TARGET [--json]
 httk workflow install    URI... [--json]
 httk workflow uninstall  SELECTOR... [--json]
-httk workflow runner     publish | describe
+httk runner     publish | describe
 httk workflow build      [--workspace WORKSPACE] TARGET...
 httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow run        [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
-httk workflow manager    run
-httk workflow launcher   list | add | configure | show | check | remove
+httk manager    run
+httk launcher   list | add | configure | show | check | remove
 httk workflow monitor    [--workspace NAME ...] [--refresh SECONDS]
 httk workflow postprocess
-httk workflow v1         collect
-httk workflow remote     list | add | configure | check | import-v1 | show | remove | daemon
-httk workflow config     show | set | unset | import-v1
-httk workflow seal       verify [PATH] [--json] [--trusted-key KEY] [--shallow]
-httk workflow campaign   init | show | submit | collect | start-managers
-httk workflow transfer   receive | offer | retire | reclaim | status      (hidden protocol and operator spellings; see `job transfer` for the user-facing verb)
+httk v1         collect
+httk remote     list | add | configure | check | import-v1 | show | remove | daemon
+httk config     show | configure | set | unset | import-v1
+httk seal       verify [PATH] [--json] [--trusted-key KEY] [--shallow]
+httk campaign   init | show | configure | remove | submit | collect | start-managers
+httk transfer            status | retire | reclaim
+httk workflow transfer   receive | offer | retire      (hidden peer protocol; moves use `job transfer`)
 httk init | identity     (core-owned: per-user configuration and named operator identities)
 httk project             init | show | import-v1 | export | repair | adopt | manifest create | manifest verify | seal | unseal | verify-seal   (core-owned)
 ```
+
+### Configuration conventions
+
+Concept groups live directly below `httk`: use `httk launcher`, `httk remote`,
+`httk manager`, `httk runner`, `httk campaign`, `httk config`, and `httk seal`.
+Their former `httk workflow …` spellings are removed from the public CLI.
+`workflow` retains workflow installation, inspection, building and execution.
+The private peer vectors listed at the end of this page remain accepted.
+
+Use `show [--json]` to inspect configuration and `configure` to change it.
+Repeat `--set KEY=VALUE` to add or replace a value and `--unset KEY` to remove
+an override. Supported list settings also offer `--add KEY=VALUE` and
+`--remove KEY=VALUE`; these change individual members, whereas `--unset`
+removes the whole override. An empty launcher path list is explicit, not a request to restore defaults.
+Removing the last `machine_names` member unsets that key. The detailed help identifies each group's keys and operation order.
+Workspace, launcher and remote configuration removes overrides before setting
+new values (launcher list additions then removals follow); user, campaign and
+daemon configuration applies flags in argument order.
+
+| Configuration | Inspect | Modify | Remove the definition |
+| --- | --- | --- | --- |
+| Workspace application settings | `workspace show [NAME...]` | `workspace configure [NAME...] --set KEY=VALUE --unset KEY` | `workspace forget NAME` keeps files; `workspace delete --force NAME` deletes them |
+| Workspace policy | `workspace policy show` | `workspace policy set --key KEY --value JSON`; `workspace policy unset --key KEY` restores the built-in default | Required format members cannot be deleted |
+| Workflow preludes | `workspace workflow-prelude show` | `workspace workflow-prelude set` / `unset` | Unset a workflow's prelude |
+| Launcher | `launcher show NAME` | `launcher configure NAME --set KEY=VALUE --unset KEY`; `--add` / `--remove` for confinement path lists | `launcher remove NAME` |
+| Remote | `remote show NAME` | `remote configure NAME --set KEY=VALUE --unset KEY`, including private credentials | `remote remove NAME` |
+| User configuration | `config show` | `config configure --set KEY=VALUE --unset KEY`; `--add` / `--remove` for `machine_names` | Unset its configurable keys |
+| Campaign | `campaign show` | `campaign configure --set partitions.NAME=WORKSPACE --unset partitions.NAME`; set or unset `assignment` | `campaign remove` clears the map, keeping jobs and workspaces |
+| Workspace daemon | `workspace daemon show PATH` | `workspace daemon configure PATH --set KEY=VALUE --unset KEY`; `--add` / `--remove` for launchers and authorized keys | Enrollment removal is not provided |
+
+Workspace `show` displays application settings, while `status` displays job
+state. Existing `workspace settings show|set|unset` and `config set|unset`
+remain available. Local workspace batches validate before writing; remote
+workspace batches use the existing single-key peer operations sequentially,
+so a transport failure can leave earlier changes applied.
+
+Daemon `--unset` clears `sacct` and `slurm_conf`, or restores the defaults for
+`max_submissions` and `force`. Required executable and authorization settings
+must remain valid. Removing daemon enrollment or disabling the exchange is a
+separate lifecycle operation and is not offered: exchange clients, running
+managers and retained submission state must be settled first. The exchange's
+existing enable-only contract is unchanged. Published runners are pinned job
+content, rather than editable configuration; installed workflow repositories
+have `workflow uninstall` as the inverse of `workflow install`.
 
 ### Workspace selection
 
@@ -83,6 +129,8 @@ remote workspace for execution.
 | `workspace status [--json] [NAME...]` | summarize authoritative markers (remote: over the adapter) | |
 | `workspace managers [--json] [NAME...]` | list managers serving workspaces, live or stale | |
 | `workspace workflows [--json] [NAME...]` | list the runners a workspace publishes, with each directory package's workflow identity | |
+| `workspace show [--key KEY] [--json] [NAME...]` | print application settings | |
+| `workspace configure [NAME...]` | set and unset application settings | `--set KEY=VALUE`, `--unset KEY` (repeatable) |
 | `workspace settings show [--key KEY] [--json] [NAME...]` | print application settings, or one selected key | |
 | `workspace settings set --key KEY --value VALUE [NAME...]` | store one application setting in each workspace | |
 | `workspace settings unset --key KEY [NAME...]` | remove one application setting from each workspace | |
@@ -90,6 +138,7 @@ remote workspace for execution.
 | `workspace workflow-prelude set --workflow WORKFLOW --value VALUE [--no-durable] [NAME...]` | store one workflow's prelude in each workspace | `VALUE` may be `@FILE` |
 | `workspace workflow-prelude unset --workflow WORKFLOW [--no-durable] [NAME...]` | remove one workflow's prelude from each workspace | |
 | `workspace policy show [--json] [NAME...]` | print workspace policies | |
+| `workspace policy unset --key KEY [--json] [NAME...]` | reset a policy member to its built-in default | |
 | `workspace policy set --key KEY --value VALUE [--json] [NAME...]` | store one policy member in each workspace | |
 | `workspace fsck [OPTIONS] [NAME...]` | check markers against journal frames; repair modes require names | `--repair`, `--quarantine-unrepairable`, `--json` |
 | `workspace gc [--dry-run] [--json] [NAME...]` | collect what retention policies allow (remote: over the adapter) | |
@@ -719,9 +768,9 @@ copy. A job with bound children leaves as the root of its tree: every bound
 descendant, each of which must be paused or terminal, travels inside the same
 directory under `.httk-transfer/tree/<placement>/<job_key>/`. Each job prints
 `JOB_ID ejected PATH`, and a selected descendant that left inside its root's
-directory prints `JOB_ID ejected with its parent`. `httk workflow seal verify
+directory prints `JOB_ID ejected with its parent`. `httk seal verify
 DIR` verifies a sealed one in place. A job whose ejection is still in progress
-is not retired by `httk workflow transfer retire`. When the destination is on
+is not retired by `httk transfer retire`. When the destination is on
 another filesystem, the job is first exported to
 `transfers/exports/<T>/<job_key>` and then copied out; if the copy-out was
 interrupted, `httk job eject --resume` (alone, with no JOB or DEST) finishes
@@ -850,7 +899,7 @@ reports an already sealed bundle from `transfers/outgoing/` instead of sealing i
 `pull` onto a matching staged bundle is a no-op, `import` returns the
 acknowledgement it already wrote, and a retired source is never offered again.
 A bundle whose acknowledgement never arrives is settled by the operator with
-`httk workflow transfer retire` or `reclaim` (below).
+`httk transfer retire` or `reclaim` (below).
 An interrupted fetch is finished by running the same command again, and a fetch
 with nothing to collect does nothing.
 
@@ -861,11 +910,11 @@ verify it with [`remote check`](#httk-on-the-target-remote-check), create its
 workspace, then send and run a job:
 
 ```console
-httk workflow remote add --template ssh kappa
-httk workflow remote configure \
+httk remote add --template ssh kappa
+httk remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
-httk workflow remote check kappa
+httk remote check kappa
 httk workspace init kappa:/scratch/rar/httk/runs
 httk workspace settings set --key slurm.partition --value batch kappa:runs
 httk workspace settings set --key vasp.command --value vasp_std kappa:runs
@@ -880,7 +929,7 @@ registers its basename there. Scheduler settings belong to the workspace.
 `job transfer default kappa:runs` imports each selected job on the remote at the
 placement it had here, unless `--destination-placement` says otherwise.
 `run --workspace kappa:runs` makes the remote run
-`httk workflow manager run --workspace runs --detach` on the owning machine,
+`httk manager run --workspace runs --detach` on the owning machine,
 which uses the workspace's `manager.launch` exactly as a command run on the
 cluster or through a `machine_names` alias would; see
 [Running managers](#running-managers) for `--count` and `--workers`.
@@ -899,17 +948,17 @@ job that ran at home.
 ### Settling a transfer in doubt
 
 A bundle still unacknowledged after the freshness window (7 days) is in doubt;
-`httk workflow transfer status` (below) reports it (as it does held exports and orphaned claims; `httk project repair --dry-run` reports the same for the workspaces registered in a project). Two operator verbs settle it, each taking
+`httk transfer status` (below) reports it (as it does held exports and orphaned claims; `httk project repair --dry-run` reports the same for the workspaces registered in a project). Two operator verbs settle it, each taking
 `--workspace WORKSPACE` (default: the resolved workspace) and one or more job
 UUIDs:
 
 ```console
-httk workflow transfer retire [--workspace WS] [--json] JOB_ID ...
-httk workflow transfer reclaim [--workspace WS] [--json] JOB_ID ...
+httk transfer retire [--workspace WS] [--json] JOB_ID ...
+httk transfer reclaim [--workspace WS] [--json] JOB_ID ...
 ```
 
 ```console
-httk workflow transfer status [--workspace WS] [--json]
+httk transfer status [--workspace WS] [--json]
 ```
 
 `status` is read-only. It reports exports held for copy-out (finish them with
@@ -1235,8 +1284,8 @@ and returned 0; any resolution error or nonzero script return exits 1.
 Harvest old v1 results without submitting them:
 
 ```console
-httk workflow v1 collect --workflow-dir PKG ROOT
-httk workflow v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
+httk v1 collect --workflow-dir PKG ROOT
+httk v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
 ```
 
 `v1 collect` ends with one `httk-workflow-v1-collect-summary` line reporting
@@ -1410,6 +1459,7 @@ earlier `bootstrap=pip` opt-in that attempted a `pip install --user` is retired.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `config show [KEY]` | print the configuration, or one member | |
+| `config configure` | set/unset keys or add/remove machine names | `--set KEY=VALUE`, `--unset KEY`, `--add machine_names=NAME`, `--remove machine_names=NAME` |
 | `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to |
 | `config unset KEY` | remove one member | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
@@ -1429,8 +1479,8 @@ overrides.
 
 ```console
 httk init --name "A User" --email user@example.org
-httk workflow config set machine_names "node-a,node-b"
-httk workflow config unset machine_names
+httk config set machine_names "node-a,node-b"
+httk config unset machine_names
 httk project init --name example .
 ```
 
@@ -1480,7 +1530,7 @@ by a name the local registry does not know falls back to the enclosing project's
 `members.json` for that one invocation, without writing the registry.
 
 To seal a project, run `httk workspace seal` and then `httk project seal`.
-Verify the whole tree with `httk project verify-seal` (or `httk workflow seal verify`).
+Verify the whole tree with `httk project verify-seal` (or `httk seal verify`).
 
 ### Describing and checking a project
 
@@ -1655,6 +1705,8 @@ workspace's request directory can still publish an unsigned request.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
+| `campaign configure` | edit individual partitions or assignment policy | `--set partitions.NAME=WORKSPACE`, `--unset partitions.NAME`, `--set assignment=POLICY`, `--unset assignment` |
+| `campaign remove` | clear campaign configuration, keeping jobs/workspaces | `--force` skips confirmation |
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
@@ -1698,7 +1750,7 @@ address another machine's workspace.
 ### Removed commands
 
 The pre-release `transfer send`, `transfer fetch`, and `transfer status REMOTE` verbs
-are **gone** and no longer parse (`httk workflow transfer status` is a different, local operator report). Use the single `job transfer SRC DST` verb,
+are **gone** and no longer parse (`httk transfer status` is a different, local operator report). Use the single `job transfer SRC DST` verb,
 `manager run --workspace NAME` to start managers, and `workspace status NAME` to
 read a remote workspace's markers:
 
@@ -1709,8 +1761,8 @@ read a remote workspace's markers:
 | `transfer status REMOTE` | `workspace status REMOTE` |
 
 An earlier release also renamed two whole groups. `httk workflow computer …`
-became `httk workflow remote …` (git's word for the same idea). `httk workflow
-tasks …` (once `httk workflow remote send|fetch|…`) became
+became `httk remote …` (git's word for the same idea). `httk workflow
+tasks …` (once `httk remote send|fetch|…`) became
 `httk workflow transfer` and then, when the operator verb moved to the `job`
 group, today's `httk job transfer`; the hidden protocol spellings stayed
 `httk workflow transfer receive|offer|retire`.

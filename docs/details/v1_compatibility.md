@@ -151,8 +151,8 @@ items = collect_finished_tree("old-results", workflow_dir="./legacy-package")
   required. A hook failure degrades that task and the sweep continues.
 
 ```console
-httk workflow v1 collect --workflow-dir PKG ROOT
-httk workflow v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
+httk v1 collect --workflow-dir PKG ROOT
+httk v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
 ```
 
 With a manifest, identity survives moving the tree. Without one, the UUIDv5

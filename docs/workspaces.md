@@ -42,8 +42,9 @@ A workspace carries a flat map of *application settings*, small values a
 runner resolves at run time, such as the VASP command:
 
 ```console
-httk workspace settings set --key vasp.command --value vasp_std default
-httk workspace settings show default
+httk workspace configure default --set vasp.command=vasp_std
+httk workspace show default
+httk workspace configure default --unset vasp.command
 ```
 
 The manager exports each scalar setting into the attempt environment under its
@@ -81,8 +82,8 @@ launcher once, then select it per workspace together with the scheduler
 directives it should use:
 
 ```console
-httk workflow launcher add --template slurm --global cluster
-httk workflow launcher check cluster
+httk launcher add --template slurm --global cluster
+httk launcher check cluster
 httk workspace settings set --key manager.launch --value cluster default
 httk workspace settings set --key slurm.partition --value batch default
 httk workspace settings set --key slurm.time_limit --value 02:00:00 default
@@ -107,10 +108,10 @@ A remote reaches another machine: it moves files and runs `httk` there. It
 does not schedule anything; the destination workspace's launcher does that.
 
 ```console
-httk workflow remote add --template ssh kappa
-httk workflow remote configure --set host=login.example.org --set username=me kappa
-httk workflow remote configure --set prelude='module load Python/3.13' kappa
-httk workflow remote check kappa
+httk remote add --template ssh kappa
+httk remote configure --set host=login.example.org --set username=me kappa
+httk remote configure --set prelude='module load Python/3.13' kappa
+httk remote check kappa
 ```
 
 `ssh` runs commands in a non-interactive shell, so the remote's `prelude`

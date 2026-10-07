@@ -291,7 +291,7 @@ def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -
     if kind != "slurm":
         raise ValueError(
             f"launcher {name!r} is a {kind!r} launcher; the workspace daemon approves only global slurm launchers "
-            "('httk workflow launcher add --template slurm --global')"
+            "('httk launcher add --template slurm --global')"
         )
     settings = _validate_launcher_metadata(bundle, metadata, check_binaries=False).get("settings", {})
     assert isinstance(settings, Mapping)
@@ -417,16 +417,24 @@ def _setting(key: str, value: str) -> object:
 
 
 def _apply(document: dict[str, object], changes: Sequence[tuple[str, str]], keys: tuple[str, ...]) -> None:
-    """Apply ``(operation, "KEY=VALUE")`` changes in order, where operation is ``set``, ``add`` or ``remove``."""
+    """Apply ordered ``set``, ``add``, ``remove`` or ``unset`` configuration changes."""
 
     for operation, item in changes:
         key, separator, value = item.partition("=")
-        if not separator:
+        if operation == "unset" and separator:
+            raise ValueError(f"--unset expects KEY, not KEY=VALUE: {item!r}")
+        if operation != "unset" and not separator:
             raise ValueError(f"--{operation} expects KEY=VALUE: {item!r}")
         if key not in keys:
             if key in INITIALIZE_KEYS:
                 raise ValueError(f"{key} is fixed by the enrollment; changing it requires a new enrollment")
             raise ValueError(f"unknown daemon configuration key {key!r}; valid keys: {', '.join(keys)}")
+        if operation == "unset":
+            defaults = {"sacct": None, "slurm_conf": None, "max_submissions": _DEFAULT_MAX_SUBMISSIONS, "force": False}
+            if key not in defaults:
+                raise ValueError(f"daemon configuration {key} is required; use --set to replace it")
+            document[key] = defaults[key]
+            continue
         if operation == "set":
             document[key] = _setting(key, value)
             continue
@@ -897,7 +905,7 @@ def configure(
 
     :param workspace: Workspace data root.
     :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set``, ``add`` or ``remove``,
-        applied in order to ``CONFIGURATION_KEYS``.
+        or ``("unset", "KEY")`` to clear an optional value or restore a default, applied in order.
     :param state: Broker state directory when not the default.
     :param snapshots: Expected snapshot directory, checked when given.
     :return: The resulting description, as ``describe`` returns it.

@@ -163,6 +163,8 @@ def _absolute(key: str, text: str) -> Path:
 
 def _paths(settings: Mapping[str, object], key: str) -> tuple[Path, ...] | None:
     text = _string(settings, key)
+    if text == "":
+        return ()
     return None if text is None else tuple(_absolute(key, item) for item in text.split(":"))
 
 

@@ -7,7 +7,7 @@ after the destination has acknowledged the import. `httk job eject` and
 describes what those protocols leave on disk, when `httk workspace gc` collects
 it, and what an operator does with a transfer that never completed. Ordinary
 use needs none of this; it matters when a transfer was interrupted, when a
-filesystem quota counts files, or when `httk workflow transfer status [--workspace WS]` reports a
+filesystem quota counts files, or when `httk transfer status [--workspace WS]` reports a
 transfer waiting for an operator (`httk project repair --dry-run` reports the
 same for workspaces registered in a project). The normative protocol is in the
 {doc}`workflow_filesystem_api`.
@@ -83,12 +83,12 @@ $ httk job eject --resume
 finishes every pending copy-out (managers never do this). The held bundle can
 also be taken back with `httk job adopt` of its path under `exports/`. While a
 bundle is held the job is not in the workspace and not at the target:
-`httk workflow transfer status` reports it as an export waiting for copy-out.
+`httk transfer status` reports it as an export waiting for copy-out.
 
 A copy-out interrupted after its publication witness (the `publishing` link
 made just before the publishing rename) may already have delivered the bundle.
 It is then held *in doubt* (`transfers/in-doubt/<T>/<job_key>/`, with `in-doubt.json` beside it) and is never
-copied out again. `httk job eject --resume` and `httk workflow transfer status`
+copied out again. `httk job eject --resume` and `httk transfer status`
 report it (details key `exports_in_doubt`, exit status 1). The operator either
 removes the held copy, once the target is known to hold the job, or takes it
 back with `httk job adopt transfers/in-doubt/<T>/<job_key>` (the full path).
@@ -103,14 +103,14 @@ again without creating a second job.
 
 A bundle still unacknowledged after `W` is *in doubt*: it may have been
 delivered, or it may still be delivered until `W + S` has passed. An in-doubt
-transfer is never resolved automatically. `httk workflow transfer status`
+transfer is never resolved automatically. `httk transfer status`
 reports it, and two operator verbs settle it:
 
-- `httk workflow transfer retire [--workspace WS] JOB_ID` when the destination
+- `httk transfer retire [--workspace WS] JOB_ID` when the destination
   holds the job (verify first). The source behaves as if it had received the
   acknowledgement: the bundle moves to `retired/<T>` and the job's marker is
   removed.
-- `httk workflow transfer reclaim [--workspace WS] JOB_ID` to take the job
+- `httk transfer reclaim [--workspace WS] JOB_ID` to take the job
   back. It is refused until `sealed_at + W + S`, because until then a
   destination could still import the bundle. It first records the operator's
   authorization (`tmp/abort.<T>/reclaim`), and only then moves the bundle home;

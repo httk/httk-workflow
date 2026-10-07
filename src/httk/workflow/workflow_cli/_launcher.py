@@ -11,7 +11,7 @@ from pathlib import Path
 
 from httk.core.cli import CLIContext
 
-from .._confine import default_readonly_paths
+from .._confine import confine_settings, default_readonly_paths
 from ..launchers import (
     add_launcher,
     check_launcher,
@@ -61,7 +61,12 @@ def _launcher_batch(
 def handle_launcher_list(arguments: Namespace, context: CLIContext) -> int:
     """List launchers visible to this project."""
 
-    print(json.dumps(list_launchers(context.cwd), indent=2, sort_keys=True))
+    rows = list_launchers(context.cwd)
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+    else:
+        for row in rows:
+            print(f"{row['name']}\t{row['scope']}\t{row['path']}")
     return 0
 
 
@@ -89,13 +94,13 @@ def handle_launcher_add(arguments: Namespace, context: CLIContext) -> int:
 
 
 def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
-    """Merge settings into one or more launcher bundles."""
+    """Update or remove settings in one or more launcher bundles."""
 
     if isinstance(arguments.name, list):
         return _launcher_batch(arguments, context, handle_launcher_configure)
     settings = _settings(arguments.set)
-    changed = _added_paths(arguments.name, settings, arguments.add_path, context.cwd)
-    print(configure_launcher(arguments.name, {**settings, **changed}, project=context.cwd))
+    changed = _changed_paths(arguments.name, settings, arguments.unset, arguments.add, arguments.remove, context.cwd)
+    print(configure_launcher(arguments.name, {**settings, **changed}, unset=arguments.unset, project=context.cwd))
     for key, value in changed.items():
         print(f"{key}={value}")
     return 0
@@ -104,38 +109,44 @@ def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
 _PATH_LISTS = ("confine.devices", "confine.pmix_roots", "confine.readonly_paths")
 
 
-def _added_paths(name: str, settings: dict[str, str], additions: list[str], project: Path) -> dict[str, str]:
-    """Return the colon-joined path lists that ``--add-path`` extends, after ``--set`` applied.
+def _changed_paths(
+    name: str,
+    settings: dict[str, str],
+    unset: list[str],
+    additions: list[str],
+    removals: list[str],
+    project: Path,
+) -> dict[str, str]:
+    """Apply path additions and removals after unset and set operations."""
 
-    :param name: The launcher to extend.
-    :param settings: The ``--set`` settings, which apply first.
-    :param additions: The ``KEY=PATH[:PATH...]`` arguments.
-    :param project: Project directory used for launcher lookup.
-    :return: The new value of every changed key.
-    :raises ValueError: If a key is not a confinement path list of a slurm launcher.
-    """
-
-    if not additions:
+    if not additions and not removals:
         return {}
     description = describe_launcher(name, project=project)
     stored = description["settings"]
-    current: dict[str, object] = {**(stored if isinstance(stored, dict) else {}), **settings}
+    current = {key: value for key, value in stored.items() if key not in unset} if isinstance(stored, dict) else {}
+    current.update(settings)
     changed: dict[str, str] = {}
-    for item in additions:
-        key, separator, paths = item.partition("=")
-        if description["kind"] != "slurm" or key not in _PATH_LISTS or not separator:
-            raise ValueError(
-                "--add-path only applies to colon-separated path settings of slurm launchers "
-                f"(KEY=PATH[:PATH...]): {', '.join(_PATH_LISTS)}; got {item!r}"
-            )
-        if current.get(key) is not None:
-            entries = str(current[key]).split(":")
-        elif key == "confine.readonly_paths":
-            entries = [str(path) for path in default_readonly_paths()]
-        else:
-            entries = []
-        entries += [path for path in paths.split(":") if path not in entries]
-        current[key] = changed[key] = ":".join(entries)
+    for operation, items in (("--add", additions), ("--remove", removals)):
+        for item in items:
+            key, separator, paths = item.partition("=")
+            if description["kind"] != "slurm" or key not in _PATH_LISTS or not separator or not paths:
+                raise ValueError(
+                    f"{operation} only applies to colon-separated path settings of slurm launchers "
+                    f"(KEY=PATH[:PATH...]): {', '.join(_PATH_LISTS)}; got {item!r}"
+                )
+            confine_settings({key: paths})
+            if current.get(key) is not None:
+                entries = str(current[key]).split(":") if current[key] else []
+            elif key == "confine.readonly_paths":
+                entries = [str(path) for path in default_readonly_paths()]
+            else:
+                entries = []
+            requested = paths.split(":")
+            if operation == "--add":
+                entries = list(dict.fromkeys([*entries, *requested]))
+            else:
+                entries = [path for path in entries if path not in requested]
+            current[key] = changed[key] = ":".join(entries)
     return changed
 
 
@@ -202,13 +213,14 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         description="Define, check, describe, and remove the launcher bundles that start workflow managers",
     )
 
-    _leaf(
+    listing = _leaf(
         group,
         "list",
         summary="list manager launchers",
         description="List the manager launchers this project and this user define",
         handler=handle_launcher_list,
     )
+    listing.add_argument("--json", action="store_true", help="print the launchers as one JSON array")
     add = _leaf(
         group,
         "add",
@@ -238,7 +250,7 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         group,
         "configure",
         summary="configure one launcher",
-        description="Merge settings into one manager launcher bundle",
+        description="Update launcher settings; apply --unset, --set, --add, then --remove",
         handler=handle_launcher_configure,
     )
     configure.add_argument("name", metavar="NAME", nargs="+", help="the launcher to configure")
@@ -250,6 +262,10 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         help="one launcher setting (repeatable)",
     )
     configure.add_argument(
+        "--unset", action="append", default=[], metavar="KEY", help="remove a setting override (repeatable)"
+    )
+    configure.add_argument(
+        "--add",
         "--add-path",
         action="append",
         default=[],
@@ -259,6 +275,14 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
             "already listed (repeatable, applied after --set); an unset confine.readonly_paths starts from the "
             "default computed by this interpreter"
         ),
+    )
+    configure.add_argument(
+        "--remove",
+        "--remove-path",
+        action="append",
+        default=[],
+        metavar="KEY=PATH[:PATH...]",
+        help="remove paths from a confine.* path setting (repeatable, applied after --add; --unset restores defaults)",
     )
 
     show = _leaf(

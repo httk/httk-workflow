@@ -19,11 +19,11 @@ Two rules keep this simple:
 ## The partition map
 
 ```console
-$ httk workflow campaign init \
+$ httk campaign init \
       --partition north=screening-a \
       --partition south=screening-b \
       --assignment hash
-$ httk workflow campaign show
+$ httk campaign show
 assignment	hash
 north	screening-a
 south	screening-b
@@ -33,6 +33,20 @@ Each `--partition NAME=WORKSPACE` names a bucket and the registered workspace
 it points at, and `--assignment` sets how a root job's partition is chosen.
 The workspaces must exist first ({doc}`workspaces`); a partition names a
 workspace the way every other command does, never a bare path.
+
+Change individual entries without restating the whole map:
+
+```console
+httk campaign configure --set partitions.east=screening-c
+httk campaign configure --unset partitions.east
+httk campaign configure --set assignment=explicit
+httk campaign configure --unset assignment
+httk campaign remove --force
+```
+
+Unsetting `assignment` restores `hash`. Removing the campaign clears its
+configuration and leaves its workspaces and jobs on disk. Campaign changes
+are refused while the project is sealed.
 
 ### Assignment policies
 
@@ -48,7 +62,7 @@ an index map to a partition reproducibly, run after run.
 ## Submitting into a campaign
 
 ```console
-$ httk workflow campaign submit --workflow vasp.relax --key silicon \
+$ httk campaign submit --workflow vasp.relax --key silicon \
       --input structure=structures/Si.vasp --tag silicon
 silicon--0c4f…	/…/screening-a/workspace/jobs/silicon--0c4f…
 ```
@@ -80,9 +94,9 @@ remote workspace is submitted to locally and moved with `httk job transfer`
 ## Running and collecting across partitions
 
 ```console
-$ httk workflow campaign start-managers            # every partition
-$ httk workflow campaign start-managers --partition north
-$ httk workflow campaign collect --state succeeded
+$ httk campaign start-managers            # every partition
+$ httk campaign start-managers --partition north
+$ httk campaign collect --state succeeded
 ```
 
 `campaign start-managers` starts managers at each selected partition through

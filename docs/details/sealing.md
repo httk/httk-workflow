@@ -26,7 +26,7 @@ or placement that held it.
 It covers the payload's own files but not the payload-private scratch
 directories `attempts/`, `logs/` and `.httk-job/`. A job legitimately rewrites
 that working state, so it may change without breaking the seal. The seal never
-covers itself. `httk workflow seal verify <payload>` checks a job directory on
+covers itself. `httk seal verify <payload>` checks a job directory on
 its own, whether or not it is inside a workspace.
 
 ### Workspace seal
@@ -144,14 +144,14 @@ rather than block.
 
 ## Verifying
 
-`httk workflow seal verify [PATH]` verifies the seal at `PATH` (a project root,
+`httk seal verify [PATH]` verifies the seal at `PATH` (a project root,
 a workspace root, or a job payload) and, unless `--shallow` is given, every
 seal it references:
 
 ```console
-httk workflow seal verify
-httk workflow seal verify --json
-httk workflow seal verify --trusted-key keys/collaborator.pub some/workspace
+httk seal verify
+httk seal verify --json
+httk seal verify --trusted-key keys/collaborator.pub some/workspace
 ```
 
 Text output is one line per entry, `<level> <subject> <verdict> <reason>`, with

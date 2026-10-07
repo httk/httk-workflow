@@ -9,7 +9,7 @@ machine-level settings such as ``machine_names``.
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +25,7 @@ __all__ = [
     "ConfigKey",
     "config_home",
     "config_path",
+    "configure_config",
     "data_home",
     "import_v1_configuration",
     "launchers_home",
@@ -190,13 +191,7 @@ def set_config_key(key: str, value: str) -> Path:
     """
 
     _settable(key)
-    if key == "machine_names":
-        names = [item.strip() for item in value.split(",")]
-        if any(not item for item in names):
-            raise ValueError("configuration key 'machine_names' contains an empty name")
-    values = read_config()
-    values[key] = value
-    return write_config(values)
+    return configure_config((("set", f"{key}={value}"),))
 
 
 def unset_config_key(key: str) -> Path:
@@ -207,11 +202,60 @@ def unset_config_key(key: str) -> Path:
     :raises ValueError: If the key is not settable or is not configured.
     """
 
-    _settable(key)
+    return configure_config((("unset", key),))
+
+
+def configure_config(changes: Sequence[tuple[str, str]]) -> Path:
+    """Apply ordered configuration changes after validating the complete candidate.
+
+    :param changes: Operation and argument pairs: ``set``, ``add`` and ``remove``
+        take ``KEY=VALUE``; ``unset`` takes ``KEY``. List operations accept comma-separated names.
+    :return: Path of the written configuration file.
+    :raises ValueError: If an operation, key or value is invalid or a removal names an absent value.
+    """
+
+    if not changes:
+        raise ValueError("configuration requires at least one --set, --unset, --add or --remove")
     values = read_config()
-    if key not in values:
-        raise ValueError(f"configuration key is not set: {key}")
-    del values[key]
+    for operation, item in changes:
+        if operation not in {"set", "unset", "add", "remove"}:
+            raise ValueError(f"unknown configuration operation: {operation}")
+        key, separator, value = item.partition("=")
+        if operation == "unset":
+            if separator:
+                raise ValueError(f"--unset expects KEY: {item!r}")
+        elif not separator:
+            raise ValueError(f"--{operation} expects KEY=VALUE: {item!r}")
+        _settable(key)
+        if operation == "unset":
+            if key not in values:
+                raise ValueError(f"configuration key is not set: {key}")
+            del values[key]
+            continue
+        names = [name.strip() for name in value.split(",")]
+        if any(not name for name in names):
+            raise ValueError("configuration key 'machine_names' contains an empty name")
+        if operation == "set":
+            values[key] = value
+            continue
+        existing = values.get(key)
+        if existing is not None and not isinstance(existing, str):
+            raise ValueError("configuration key 'machine_names' must be a comma-separated string")
+        current = [name.strip() for name in existing.split(",")] if existing else []
+        if existing is not None and (not current or any(not name for name in current)):
+            raise ValueError("configuration key 'machine_names' contains an empty name")
+        for name in names:
+            if operation == "add":
+                if name not in current:
+                    current.append(name)
+            elif name not in current:
+                raise ValueError(f"configuration {key} does not contain {name!r}")
+            else:
+                current = [entry for entry in current if entry != name]
+        if current:
+            values[key] = ",".join(current)
+        else:
+            values.pop(key, None)
     return write_config(values)
 
 

@@ -109,7 +109,7 @@ different step. Publish it once in the workspace and every job — parent and
 child — references those bytes by digest:
 
 ```console
-httk workflow runner publish --workspace workflow-workspace --name defects/run.sh defects.sh
+httk runner publish --workspace workflow-workspace --name defects/run.sh defects.sh
 ```
 
 ```python
@@ -394,7 +394,7 @@ job: its workflow, its claim pool, its priority, its resources, and its runner.
 `inherit` copies this job's own `(source, path, sha256)`, which is what a campaign
 whose steps all live in one published runner wants. A payload runner cannot be
 inherited, because a synthesized child has no payload to copy it into: publish it
-with `httk workflow runner publish` and name it with `--runner ws:PATH@SHA256`, or
+with `httk runner publish` and name it with `--runner ws:PATH@SHA256`, or
 prepare a payload directory and spawn that with `--payload`.
 
 ### Calling another workflow

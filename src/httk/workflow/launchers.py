@@ -18,7 +18,7 @@ from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
 from .projects import PROJECT_DIRECTORY, discover_project
-from .workspace import _validate_settings
+from .workspace import _validate_setting_key, _validate_settings
 
 __all__ = [
     "LAUNCHER_EXECUTABLE",
@@ -330,30 +330,33 @@ def configure_launcher(
     name: str,
     settings: Mapping[str, object],
     *,
+    unset: Sequence[str] = (),
     project: str | os.PathLike[str] | None = None,
 ) -> Path:
     """Merge settings into one launcher bundle's metadata.
 
     :param name: Launcher bundle name.
     :param settings: Settings to persist in ``launcher.json``.
+    :param unset: Setting overrides to remove before applying ``settings``.
     :param project: Project directory used for project-local lookup.
     :return: The configured launcher bundle path.
     :raises ValueError: If the launcher or its metadata is invalid.
     """
 
     configured_settings = _validate_settings(settings)
+    unset = tuple(_validate_setting_key(key) for key in unset)
     bundle, _scope = _find_launcher_bundle(name, project)
-    validate_launcher_bundle(bundle)
     path = _metadata_path(bundle)
     metadata = _read_object(path)
     configured = metadata.get("settings", {})
     if not isinstance(configured, dict):
         raise ValueError("launcher settings are not mutable JSON")
+    for key in unset:
+        configured.pop(key, None)
     configured.update(configured_settings)
     metadata["settings"] = configured
-    _validate_launcher_metadata(bundle.resolve(), metadata, check_binaries=False)
+    _validate_launcher_metadata(bundle.resolve(), metadata)
     write_json_atomic(path, metadata)
-    validate_launcher_bundle(bundle)
     return bundle
 
 

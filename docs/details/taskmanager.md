@@ -50,7 +50,7 @@ Manager launch is a property of the workspace. On the cluster, install the
 packaged Slurm launcher and configure the workspace it owns:
 
 ```console
-httk workflow launcher add --template slurm --global cluster
+httk launcher add --template slurm --global cluster
 httk workspace init --name runs /scratch/rar/httk/runs
 httk workspace settings set --key manager.launch --value cluster runs
 httk workspace settings set --key slurm.partition --value batch runs
@@ -62,8 +62,8 @@ From a desk, configure an `ssh` remote to that machine and use the same
 workspace operations through `kappa:`:
 
 ```console
-httk workflow remote add --template ssh kappa
-httk workflow remote configure \
+httk remote add --template ssh kappa
+httk remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
 httk workspace init kappa:/scratch/rar/httk/runs
@@ -74,7 +74,7 @@ httk workflow run --workspace kappa:runs --count 4
 
 The remote is only transport: it moves files and invokes commands on kappa.
 `run --workspace kappa:runs` invokes
-`httk workflow manager run --workspace runs --count 4 --detach` there, which
+the frozen peer vector `httk workflow manager run --workspace runs --count 4 --detach` there, which
 uses the owning workspace's launcher. The result is the same as running on the
 cluster, or addressing that machine through a configured `machine_names` alias.
 Transfer jobs to the workspace as needed, run `transfer kappa:runs default`
@@ -210,9 +210,9 @@ A partitioned campaign should publish its runner once into the workspace runner
 store instead of copying it into every payload:
 
 ```console
-httk workflow runner publish --workspace WORKSPACE --name relax.py ./relax.py
+httk runner publish --workspace WORKSPACE --name relax.py ./relax.py
 # A runner directory is published the same way and pinned by its tree digest.
-httk workflow runner publish --workspace WORKSPACE --name relax-runner ./relax-runner
+httk runner publish --workspace WORKSPACE --name relax-runner ./relax-runner
 ```
 
 The command prints the reference to embed in every `job.json` that uses it:
@@ -299,14 +299,14 @@ in strict mode.
 ### Starting a manager
 
 ```console
-httk workflow manager run --workspace WORKSPACE --workers 8
+httk manager run --workspace WORKSPACE --workers 8
 ```
 
 Without pool configuration, a manager advertises the reserved `default` pool.
 Additional routing and capability labels are explicit:
 
 ```console
-httk workflow manager run --workspace WORKSPACE \
+httk manager run --workspace WORKSPACE \
   --pool vasp \
   --capability gpu \
   --workers 4
@@ -544,7 +544,7 @@ Managers may advertise integer resource capacities, such as
 CPUs and 128000 MB:
 
 ```console
-httk workflow manager run --workspace WORKSPACE --workers 4 \
+httk manager run --workspace WORKSPACE --workers 4 \
   --worker-resource procs 32 --worker-resource mem 128000
 ```
 
@@ -986,7 +986,7 @@ Like pools and capabilities restrict what a manager claims, placement prefixes
 restrict what it scans:
 
 ```console
-httk workflow manager run --workspace WORKSPACE \
+httk manager run --workspace WORKSPACE \
   --placement-prefix project-a \
   --placement-prefix project-b/2026
 ```
@@ -1249,7 +1249,7 @@ A long-lived manager can collect too, which helps where no maintenance job
 exists:
 
 ```console
-httk workflow manager run --workspace WORKSPACE --gc-interval 3600
+httk manager run --workspace WORKSPACE --gc-interval 3600
 ```
 
 It then collects at most once per interval, at the end of a tick and never
@@ -1376,7 +1376,7 @@ exits without executing the runner.
 
 ### Executors and v1 packages
 
-`httk workflow manager run` executes the normal `path` runner executor.
+`httk manager run` executes the normal `path` runner executor.
 Converted `httk-v1` packages use the same path through their packaged v1 runner;
 select their `taskset` claim pool with the manager's `--pool` option. See
 [*httk* v1 task compatibility](v1_compatibility.md).

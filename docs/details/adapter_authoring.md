@@ -215,7 +215,7 @@ The maintained implementation reports `connectivity` as `ok` when a remote
 ### `install`
 
 Checks that the target can run *httk-workflow*. The CLI verb is
-`httk workflow remote check`; the operation keeps its historical protocol name
+`httk remote check`; the operation keeps its historical protocol name
 `install`, but an adapter never installs software. Setting httk up on the
 target is the user's job, done by logging in there.
 
@@ -374,7 +374,7 @@ does not install software or validate compute-node confinement.
 
 ## Settings and credentials
 
-`httk workflow remote configure --set KEY=VALUE NAME` sorts every assignment by
+`httk remote configure --set KEY=VALUE NAME` sorts every assignment by
 key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
@@ -389,7 +389,7 @@ key:
 `remote.json` first and `credentials.json` over it. That single object arrives
 as the request's `remote_settings`. **An adapter never sees the split:** it
 reads one flat settings object and must not depend on which file a value came
-from. `httk workflow remote show NAME` reports which file each setting came
+from. `httk remote show NAME` reports which file each setting came
 from, and shows only the *name* of each credential, never its value.
 
 Two consequences:

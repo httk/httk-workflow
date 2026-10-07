@@ -21,18 +21,20 @@ Create an SSH remote, configure its connection, and check that a compatible
 `httk` answers on the other machine:
 
 ```console
-$ httk workflow remote add --template ssh kappa
-$ httk workflow remote configure \
+$ httk remote add --template ssh kappa
+$ httk remote configure \
       --set host=login.example.org \
       --set username=me \
       --set check_connectivity=yes kappa
-$ httk workflow remote check kappa
+$ httk remote check kappa
 ```
 
 `remote check` invokes the adapter's `install` operation. The name is
 historical: the maintained adapters only verify the remote and install nothing.
 Settings that are credentials go into `credentials.json`, which is excluded from
-signed project manifests. `remote show [--json]` inspects a definition without
+signed project manifests. `remote configure NAME --unset KEY` removes a stored connection setting or
+private credential; use repeatable `--set KEY=VALUE` to add or replace it.
+`remote show [--json]` inspects a definition without
 printing credential values. `remote list`, `remote remove` and
 `remote import-v1` cover the other common management tasks.
 
@@ -45,7 +47,7 @@ setting rather than in `~/.bashrc`, so it applies only to httk's ssh commands
 and not to every other tool that logs in over ssh:
 
 ```text
-$ httk workflow remote configure --set prelude='module load Python/3.13.5-bundle
+$ httk remote configure --set prelude='module load Python/3.13.5-bundle
 source ~/venv/bin/activate' kappa
 ```
 
@@ -78,7 +80,7 @@ $ httk workflow run --workspace kappa:runs --count 4
 ```
 
 The remote invocation asks the owning machine to run
-`httk workflow manager run --workspace runs --detach …`. The target workspace
+`httk manager run --workspace runs --detach …`. The target workspace
 then applies its own `manager.launch`, `manager.workers`, scheduler settings and
 `environment.prelude`, as if the command had been run on the login node. Fetch
 finished jobs back with the reverse transfer:
@@ -96,7 +98,7 @@ through the adapter contract, create a separate remote with the `local`
 template:
 
 ```console
-$ httk workflow remote add --template local local-tree
+$ httk remote add --template local local-tree
 $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 ```
 
@@ -143,8 +145,8 @@ Three settings describe it:
   status.
 
 ```console
-$ httk workflow remote add --template mount sigma
-$ httk workflow remote configure \
+$ httk remote add --template mount sigma
+$ httk remote configure \
       --set mount_root=/home/me/work/mounts/sigma \
       --set remote_root=/proj/x/users/me/httk \
       --set exec_command="/home/me/bin/hpc run" sigma
@@ -158,7 +160,7 @@ as for `ssh`.
 
 A transfer also refuses when `mount_root` does not exist. An empty, unmounted
 mount point looks the same as a mounted but empty one, so run
-`httk workflow remote check sigma` before transfers to confirm that the
+`httk remote check sigma` before transfers to confirm that the
 filesystem is mounted and `httk` answers on the far side.
 
 The mount is for transfers only. Do not run `httk workspace init` on the mount
@@ -189,9 +191,9 @@ mount point must be outside every local workspace. Then pin the identities the
 exchange publishes in `exchange.json` and `daemon.json`:
 
 ```console
-$ httk workflow remote add --template mount-daemon confined
-$ httk workflow remote daemon configure confined --exchange /mnt/cluster/exchange
-$ httk workflow remote check confined
+$ httk remote add --template mount-daemon confined
+$ httk remote daemon configure confined --exchange /mnt/cluster/exchange
+$ httk remote check confined
 ```
 
 The remote's settings are `exchange` and `daemon_workspace_id`, which are
@@ -214,10 +216,10 @@ Jobs move through the exchange with the ordinary `job eject` and `job adopt`:
 ```console
 $ httk job eject JOB /mnt/cluster/exchange/inbox
 $ python -c 'import secrets; print(secrets.token_hex(16))'
-$ httk workflow remote daemon start confined --configuration small --request-id REQUEST_ID
-$ httk workflow remote daemon status confined
-$ httk workflow remote daemon status confined --handle MANAGER_HANDLE
-$ httk workflow remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
+$ httk remote daemon start confined --configuration small --request-id REQUEST_ID
+$ httk remote daemon status confined
+$ httk remote daemon status confined --handle MANAGER_HANDLE
+$ httk remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
 $ httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
 ```
 
@@ -233,10 +235,10 @@ cancels managers. `status` without `--handle` is passive: it prints the
 informational root `status.json` and `managers.json` from the exchange without
 a request. With `--handle` it sends the signed `manager_status` request.
 `managers.json` also reports each manager's outcome (scheduler state, exit
-code, times); once a manager's Slurm job has ended, `httk workflow remote
+code, times); once a manager's Slurm job has ended, `httk remote
 daemon log confined --handle MANAGER_HANDLE` prints its published log.
 
-To give up on a bundle that no manager has adopted, run `httk workflow remote
+To give up on a bundle that no manager has adopted, run `httk remote
 daemon take-back confined NAME [DESTINATION]`. It is client-only: it renames
 `inbox/NAME` to a dot name (managers ignore it), copies it out and removes it.
 If the name is gone, a manager took it, so cancel the job instead. See

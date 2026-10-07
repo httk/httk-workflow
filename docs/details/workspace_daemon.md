@@ -48,7 +48,7 @@ adapter and an unconfined Slurm launcher lack these guarantees.
 | Component | Runs | Can write |
 | --- | --- | --- |
 | broker (`httk workspace daemon`) | in its own Bubblewrap sandbox on the login or service node, with the host filesystem read-only | `WORKSPACE/exchange` and its private state |
-| manager | unconfined, as you, in the Slurm batch job: `httk workflow manager run --idle` | the workspace |
+| manager | unconfined, as you, in the Slurm batch job: `httk manager run --idle` | the workspace |
 | job attempt | in a Bubblewrap sandbox the manager builds, on the manager's node | its own job directory |
 | rank of a confined launch | in a Bubblewrap sandbox the trusted rank helper builds, on every node of the launch | its own job directory, the launch's shared-memory directory |
 
@@ -210,10 +210,10 @@ Approved manager configurations are global `slurm` launchers that set
 counts (see {doc}`launchers`):
 
 ```console
-httk workflow launcher add --template slurm --global small \
+httk launcher add --template slurm --global small \
   --set manager.confine=bwrap --set slurm.cpus_per_task=2 --set slurm.mem=4G \
   --set slurm.time_limit=01:00:00 --set manager.workers=2
-httk workflow launcher configure --add-path confine.readonly_paths=/software small
+httk launcher configure --add-path confine.readonly_paths=/software small
 ```
 
 `--add-path` extends a colon-separated `confine.*` path list without restating
@@ -364,7 +364,7 @@ the login shell and the prelude, not from the daemon; `NIL` was observed to
 break the login-shell Lmod environment on one site, so `NONE` is the default.
 The workspace's own `environment.prelude` does not apply to daemon submissions.
 
-The manager is `httk workflow manager run --by-path --workspace WORKSPACE
+The manager is `httk manager run --by-path --workspace WORKSPACE
 --idle` with the launcher's `--workers` (from `manager.workers`),
 `--allocation` (from `manager.allocation`, default `slurm`) and its pinned
 `--setting` values. Like every unrestricted confined manager it serves the
@@ -374,7 +374,7 @@ until Slurm's time limit drains it; see {doc}`taskmanager`.
 
 ### Configuration changes
 
-Edit a launcher bundle with `httk workflow launcher configure`, or the daemon
+Edit a launcher bundle with `httk launcher configure`, or the daemon
 configuration with `httk workspace daemon configure`, then restart the daemon:
 
 ```console
@@ -428,7 +428,7 @@ holds the reason. Eject errors go to the manager log. With no manager running, b
 wait in `inbox`; the client can take one back before any manager does:
 
 ```console
-httk workflow remote daemon take-back REMOTE NAME [DESTINATION]
+httk remote daemon take-back REMOTE NAME [DESTINATION]
 ```
 
 `take-back` renames the entry to a dot name (managers ignore those), copies it
@@ -454,7 +454,7 @@ daemon's manager starts with their ledger state, Slurm job ID, scheduler state,
 exit code and start and end times. Unknown values are `null`. Both files are
 informational: `status.json` is rewritten at most every 10 seconds while a
 manager runs, and `managers.json` when its rows change. Read them with
-`httk workflow remote daemon status REMOTE`; add `--handle` for the scheduler
+`httk remote daemon status REMOTE`; add `--handle` for the scheduler
 state of one manager through a signed request.
 
 The daemon checks each submitted manager about once a minute: with `squeue`
@@ -719,7 +719,7 @@ Intel MPI under Slurm needs `srun --mpi=pmi2`. Set it on the daemon's approved
 launcher, then restart the daemon so `run` picks up the changed launcher:
 
 ```bash
-httk workflow launcher configure --set manager.launch_mpi=pmi2 small
+httk launcher configure --set manager.launch_mpi=pmi2 small
 ```
 
 The setting is pinned on the managers the daemon starts, and the built-in

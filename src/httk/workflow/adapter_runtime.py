@@ -136,7 +136,11 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
 
 def _settings(request: Mapping[str, object]) -> dict[str, Any]:
     value = request.get("remote_settings")
-    return dict(value) if isinstance(value, Mapping) else {}
+    settings = dict(value) if isinstance(value, Mapping) else {}
+    pending = request.get("settings")
+    if isinstance(pending, Mapping):
+        settings.update({str(key): value for key, value in pending.items()})
+    return settings
 
 
 def _text(settings: Mapping[str, object], key: str) -> str | None:
@@ -571,13 +575,7 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
     if kind == "local":
         _result("configure", configured=True)
         return
-    # The command line stores settings only after this operation succeeds, so the
-    # pending values are merged in here; otherwise the first configuration of a
-    # host could never be verified.
     settings = _settings(request)
-    pending = request.get("settings")
-    if isinstance(pending, Mapping):
-        settings.update({str(key): value for key, value in pending.items()})
     if kind == "mount":
         _configure_mount(settings)
         return

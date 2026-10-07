@@ -2375,9 +2375,9 @@ each run.
 doubt: it may have been delivered, or may still be delivered until
 `sealed_at + W + S`. Two operator verbs decide it:
 
-- `httk workflow transfer retire JOB_ID` records that the destination holds the
+- `httk transfer retire JOB_ID` records that the destination holds the
   job: it behaves as an acknowledgement without a document;
-- `httk workflow transfer reclaim JOB_ID` takes the job back, and is allowed
+- `httk transfer reclaim JOB_ID` takes the job back, and is allowed
   only after `sealed_at + W + S`: it renames `E` to `A` (or, when neither
   exists any more, creates an empty `A`), records the authorization
   `abort.<T>/reclaim`, and runs the abort steps. A later transfer of the job
@@ -2390,7 +2390,7 @@ more, not that none did, so the abort steps take a committed bundle back from
 exists; recovery continues such an authorized reclaim after a crash. An abort
 decided by anything else after the commit (the orphan sweep missing a marker,
 say) leaves `A`, the fenced root and `outgoing/<T>` in place: the bundle stays
-deliverable and retirable, and `httk workflow transfer status` reports it once
+deliverable and retirable, and `httk transfer status` reports it once
 its window has passed. A copy-out is in doubt the same way when it may have
 published: before its publishing rename the owner links a `publishing` witness
 into its staging directory (fenced by that directory's name; an owner whose

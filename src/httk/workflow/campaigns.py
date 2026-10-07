@@ -37,7 +37,7 @@ from pathlib import Path
 from httk.core.cli import CLIContext
 
 from .collecting import DEFAULT_COLLECT_STATES, JobRecord, job_records
-from .errors import FormatError
+from .errors import FormatError, SealedError
 from .models import validate_capacity
 from .projects import read_project_section, write_project_section
 from .registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
@@ -56,6 +56,7 @@ __all__ = [
     "campaign_submit_many",
     "partition_workspace",
     "read_campaign",
+    "remove_campaign",
     "write_campaign",
 ]
 
@@ -130,15 +131,38 @@ def write_campaign(
     :param project: Locate the project whose campaign to write.
     :return: The validated configuration that was stored.
     :raises ValueError: If the configuration is malformed.
+    :raises httk.workflow.errors.SealedError: If the project is sealed.
     """
 
     config = _validate(partitions, assignment)
+    root = _writable_project(project)
     write_project_section(
-        _require_root(project),
+        root,
         CAMPAIGN_SECTION,
         {"partitions": dict(config.partitions), "assignment": config.assignment},
     )
     return config
+
+
+def _writable_project(project: str | os.PathLike[str] | None) -> str:
+    """Locate the campaign project and refuse edits to a sealed project."""
+
+    from .seals import is_project_sealed
+
+    root = _require_root(project)
+    if is_project_sealed(root):
+        raise SealedError(f"project at {root} is sealed; unseal it first")
+    return root
+
+
+def remove_campaign(project: str | os.PathLike[str] | None = None) -> None:
+    """Clear the campaign configuration without removing its workspaces or jobs.
+
+    :param project: Locate the project whose campaign to remove.
+    :raises httk.workflow.errors.SealedError: If the project is sealed.
+    """
+
+    write_project_section(_writable_project(project), CAMPAIGN_SECTION, {})
 
 
 def campaign_partitions(project: str | os.PathLike[str] | None = None) -> dict[str, str]:

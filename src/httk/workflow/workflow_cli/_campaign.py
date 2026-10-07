@@ -13,6 +13,7 @@ from ..campaigns import (
     campaign_submit,
     campaign_submit_many,
     read_campaign,
+    remove_campaign,
     write_campaign,
 )
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES
@@ -26,6 +27,7 @@ from ._common import (
     _leaf,
     _load_inputs,
     _pairs,
+    confirm,
 )
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,46 @@ def handle_campaign_show(arguments: argparse.Namespace, context: CLIContext) -> 
     print(f"assignment\t{config.assignment}")
     for partition in config.ordered_partitions():
         print(f"{partition}\t{config.partitions[partition]}")
+    return 0
+
+
+def handle_campaign_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Validate all requested campaign changes before saving them together."""
+
+    if not arguments.changes:
+        raise ValueError("campaign configure requires at least one --set or --unset")
+    config = read_campaign(context.cwd)
+    partitions = dict(config.partitions)
+    assignment = config.assignment
+    for operation, item in arguments.changes or ():
+        key, separator, value = item.partition("=")
+        if operation == "set" and not separator:
+            raise ValueError(f"--set expects KEY=VALUE: {item!r}")
+        if operation == "unset" and separator:
+            raise ValueError(f"--unset expects KEY: {item!r}")
+        if key == "assignment":
+            assignment = value if operation == "set" else "hash"
+        elif key.startswith("partitions.") and key.removeprefix("partitions."):
+            name = key.removeprefix("partitions.")
+            if operation == "set":
+                partitions[name] = value
+            elif name in partitions:
+                del partitions[name]
+            else:
+                raise ValueError(f"campaign partition is not set: {name}")
+        else:
+            raise ValueError(f"unknown campaign setting {key!r}; use assignment or partitions.NAME")
+    write_campaign(partitions, assignment=assignment, project=context.cwd)
+    arguments.json = True
+    return handle_campaign_show(arguments, context)
+
+
+def handle_campaign_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove this project's campaign map while preserving its jobs and workspaces."""
+
+    if not confirm("remove the campaign configuration?", force=arguments.force):
+        return 1
+    remove_campaign(context.cwd)
     return 0
 
 
@@ -290,6 +332,38 @@ def build_campaign_parser(
         handler=handle_campaign_show,
     )
     show.add_argument("--json", action="store_true", help="print the campaign as one JSON object")
+
+    configure = _leaf(
+        group,
+        "configure",
+        summary="change campaign assignment and partitions",
+        description="Apply campaign changes in argument order, saving only after every change is valid",
+        handler=handle_campaign_configure,
+    )
+    configure.add_argument(
+        "--set",
+        dest="changes",
+        action="append",
+        type=lambda value: ("set", value),
+        metavar="KEY=VALUE",
+        help="set assignment or partitions.NAME (repeatable)",
+    )
+    configure.add_argument(
+        "--unset",
+        dest="changes",
+        action="append",
+        type=lambda value: ("unset", value),
+        metavar="KEY",
+        help="remove partitions.NAME or reset assignment to hash (repeatable)",
+    )
+    remove = _leaf(
+        group,
+        "remove",
+        summary="remove the campaign configuration",
+        description="Clear the project's campaign configuration; workspaces and jobs remain intact",
+        handler=handle_campaign_remove,
+    )
+    remove.add_argument("--force", action="store_true", help="skip the confirmation")
 
     submit = _leaf(
         group,

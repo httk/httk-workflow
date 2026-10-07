@@ -180,7 +180,7 @@ and projects are sealed on top, bottom-up, and unsealed top-down:
 httk job seal silicon
 httk workspace seal --force            # seals the remaining jobs first
 httk project seal
-httk workflow seal verify
+httk seal verify
 httk project unseal
 ```
 

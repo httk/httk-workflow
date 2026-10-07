@@ -759,17 +759,7 @@ class Workspace:
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
-        self._require_unsealed()
-        _validate_setting_key(key)
-        _validate_setting_value(key, value)
-        stored = read_json(self.control / "format.json")
-        settings = _validate_settings(_section(stored, "settings"))
-        self._check_setting_collision(key, settings)
-        settings[key] = value
-        stored["settings"] = settings
-        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
-        self.format = stored
-        return dict(settings)
+        return self.configure_settings({key: value})
 
     def unset_setting(self, key: str) -> dict[str, object]:
         """Remove one application setting, refusing one that is not set.
@@ -777,13 +767,33 @@ class Workspace:
         :param key: Name the application setting to remove.
         :return: The resulting application settings.
         :raises ValueError: If the setting is not set.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        return self.configure_settings({}, unset=(key,))
+
+    def configure_settings(self, changes: Mapping[str, object], *, unset: Sequence[str] = ()) -> dict[str, object]:
+        """Remove named settings, then merge changes after validating the complete candidate.
+
+        :param changes: Application setting values to store.
+        :param unset: Existing setting names to remove before applying changes.
+        :return: The resulting application settings.
+        :raises ValueError: If a name or value is invalid, a setting is absent, or environment names collide.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+        """
+
+        self._require_unsealed()
         stored = read_json(self.control / "format.json")
         settings = _validate_settings(_section(stored, "settings"))
-        if key not in settings:
-            raise ValueError(f"application setting is not set: {key}")
-        del settings[key]
+        for key in unset:
+            if key not in settings:
+                raise ValueError(f"application setting is not set: {key}")
+            del settings[key]
+        for key, value in changes.items():
+            _validate_setting_key(key)
+            _validate_setting_value(key, value)
+            self._check_setting_collision(key, settings)
+            settings[key] = value
         stored["settings"] = settings
         write_json_atomic(self.control / "format.json", stored, durable=self.durable)
         self.format = stored
@@ -840,8 +850,10 @@ class Workspace:
         :param value: Supply the shell prelude text.
         :return: The resulting map of workflow id to prelude text.
         :raises ValueError: If the workflow id or prelude value is invalid.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        self._require_unsealed()
         _validate_workflow_prelude_id(workflow_id)
         _validate_workflow_prelude_value(workflow_id, value)
         stored = read_json(self.control / "format.json")
@@ -858,8 +870,10 @@ class Workspace:
         :param workflow_id: Name the workflow whose prelude to remove.
         :return: The resulting map of workflow id to prelude text.
         :raises ValueError: If the prelude is not set.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        self._require_unsealed()
         stored = read_json(self.control / "format.json")
         preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         if workflow_id not in preludes:

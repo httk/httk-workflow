@@ -479,11 +479,14 @@ def read_credentials(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 def store_credentials(
     bundle: str | os.PathLike[str],
     settings: Mapping[str, str],
+    *,
+    unset: Sequence[str] = (),
 ) -> Path:
     """Merge *settings* into the manifest-excluded remote credentials.
 
     :param bundle: The adapter bundle path.
     :param settings: Credential members to merge.
+    :param unset: Credential members to remove before applying ``settings``.
     :return: The credentials file path.
     :raises ValueError: If the existing credentials file is invalid.
     """
@@ -491,6 +494,8 @@ def store_credentials(
     root = Path(bundle).expanduser().resolve()
     path = root / CREDENTIALS_FILE
     document = _read_object(path) if path.is_file() else {}
+    for key in unset:
+        document.pop(key, None)
     document.update(settings)
     write_json_atomic(path, document)
     os.chmod(path, 0o600)
@@ -603,7 +608,7 @@ def import_v1_remote(
         settings["username"] = selected.get("USERNAME", "")
     if any(key.startswith("SLURM_") for key in selected):
         print(
-            "notice: scheduler settings belong to the workspace: `httk workflow launcher add --template slurm NAME` "
+            "notice: scheduler settings belong to the workspace: `httk launcher add --template slurm NAME` "
             "and `httk workspace settings set --key manager.launch --value NAME`",
             file=sys.stderr,
         )
@@ -636,6 +641,7 @@ def run_adapter(
     request: Mapping[str, object],
     *,
     timeout: float | None = None,
+    unset_settings: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Execute one JSON adapter operation without invoking a shell.
 
@@ -643,6 +649,7 @@ def run_adapter(
     :param operation: The adapter operation name.
     :param request: The operation request members.
     :param timeout: The operation timeout, or the bundle default when omitted.
+    :param unset_settings: Stored settings to omit when validating a configuration change.
     :return: The adapter result document.
     :raises TimeoutError: If the adapter exceeds its timeout.
     :raises ValueError: If the request or result violates the adapter protocol.
@@ -662,7 +669,7 @@ def run_adapter(
         # Persisted settings and their manifest-excluded credentials reach the
         # adapter together, so splitting the two storage locations is invisible.
         **dict(request),
-        "remote_settings": remote_settings(root),
+        "remote_settings": {key: value for key, value in remote_settings(root).items() if key not in unset_settings},
     }
     descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-", suffix=".json")
     request_path = Path(temporary_name)

@@ -60,6 +60,14 @@ def add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]"
             )
         if mode == "configure":
             parser.add_argument(
+                "--unset",
+                dest="changes",
+                action="append",
+                type=_change("unset"),
+                metavar="KEY",
+                help="clear sacct or slurm_conf, or reset max_submissions or force to its default (repeatable)",
+            )
+            parser.add_argument(
                 "--remove",
                 dest="changes",
                 action="append",

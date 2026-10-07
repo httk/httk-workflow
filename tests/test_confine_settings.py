@@ -149,10 +149,15 @@ def test_unknown_confine_keys_are_refused_by_name(key: str) -> None:
 
 
 @pytest.mark.parametrize("key", ["confine.readonly_paths", "confine.devices", "confine.pmix_roots"])
-@pytest.mark.parametrize("value", ["relative/path", "/usr::/opt", "", "/usr:", "/opt/../etc", "/opt/\0x", 7])
+@pytest.mark.parametrize("value", ["relative/path", "/usr::/opt", "/usr:", "/opt/../etc", "/opt/\0x", 7])
 def test_bad_path_lists_are_refused(key: str, value: object) -> None:
     with pytest.raises(ValueError, match=key):
         confine_settings({key: value})
+
+
+@pytest.mark.parametrize("key", ["readonly_paths", "devices", "pmix_roots"])
+def test_explicit_empty_path_lists_are_empty(key: str) -> None:
+    assert getattr(confine_settings({f"confine.{key}": ""}), key) == ()
 
 
 @pytest.mark.parametrize("key", ["confine.bwrap", "confine.shm_root"])

@@ -1,4 +1,4 @@
-"""Assemble the canonical :command:`httk workflow` command tree.
+"""Assemble the top-level workflow module commands.
 
 This package assembles the existing command-group handlers into one parser and
 keeps the supported ``httk.workflow.workflow_cli`` import surface intact. The
@@ -116,6 +116,7 @@ from ._seal import build_seal_parser, handle_seal_verify
 from ._transfer import (
     _dispatch_transfer_protocol,
     build_remote_parser,
+    build_transfer_operator_parser,
     build_transfer_parser,
     handle_remote_adapter_operation,
     handle_remote_add,
@@ -189,11 +190,14 @@ __all__ = [
     "build_run_parser",
     "build_runner_parser",
     "build_seal_parser",
+    "build_transfer_operator_parser",
     "build_transfer_parser",
     "build_v1_parser",
     "build_workspace_parser",
+    "campaign_command",
     "collect_command",
     "command",
+    "config_command",
     "dispatch",
     "ensure_identity_key",
     "handle_build",
@@ -263,11 +267,18 @@ __all__ = [
     "handle_workspace_workflows",
     "job_command",
     "launch_workspace_managers",
+    "launcher_command",
+    "manager_command",
     "publish_job_requests",
+    "remote_command",
     "remote_workspace_output",
     "request_remote_job_result",
     "run_transfer_verb_result",
+    "runner_command",
+    "seal_command",
     "submit_remote_manager_result",
+    "transfer_command",
+    "v1_command",
     "workflow_command",
     "workspace_command",
 ]
@@ -279,7 +290,7 @@ def build_parser(
     *,
     include_workspace_job: bool = True,
 ) -> argparse.ArgumentParser:
-    """Build the canonical command tree, optionally without standalone groups."""
+    """Build the internal dispatcher, or only workflow verbs without standalone groups."""
 
     parser = argparse.ArgumentParser(
         prog=program,
@@ -290,25 +301,28 @@ def build_parser(
     groups = parser.add_subparsers(metavar="GROUP")
     if include_workspace_job:
         build_workspace_parser(groups, program=f"{context.program} workspace")
-    build_runner_parser(groups)
+    if include_workspace_job:
+        build_runner_parser(groups)
     if include_workspace_job:
         build_job_parser(groups, program=f"{context.program} job")
     build_describe_parser(groups)
     build_list_parser(groups)
     build_install_parser(groups)
-    build_seal_parser(groups)
+    if include_workspace_job:
+        build_seal_parser(groups)
     if include_workspace_job:
         build_collect_parser(groups, program=f"{context.program} collect")
     build_build_parser(groups)
     build_postprocess_parser(groups)
     build_precheck_parser(groups)
     build_run_parser(groups)
-    build_manager_parser(groups)
-    build_v1_parser(groups)
-    build_config_parser(groups)
-    build_remote_parser(groups)
-    build_launcher_parser(groups)
-    build_campaign_parser(groups)
+    if include_workspace_job:
+        build_manager_parser(groups)
+        build_v1_parser(groups)
+        build_config_parser(groups)
+        build_remote_parser(groups)
+        build_launcher_parser(groups)
+        build_campaign_parser(groups)
     build_monitor_parser(groups)
     return parser
 
@@ -327,7 +341,12 @@ def dispatch(
     prog = prog or parser.prog
 
     raw_argv = list(argv)
-    if len(raw_argv) > 1 and raw_argv[0] == "transfer" and raw_argv[1] in _TRANSFER_PROTOCOL:
+    if (
+        prog != f"{context.program} transfer"
+        and len(raw_argv) > 1
+        and raw_argv[0] == "transfer"
+        and raw_argv[1] in _TRANSFER_PROTOCOL
+    ):
         try:
             return _dispatch_transfer_protocol(raw_argv[1:], context)
         except _ERRORS as exc:
@@ -357,15 +376,19 @@ def dispatch(
 def command(argv: Sequence[str], context: CLIContext, *, prog: str | None = None) -> int:
     """Handle the internal super-dispatcher for every workflow command group.
 
-    *prog* names the command errors are reported under (default ``httk workflow``).
+    *prog* names the command errors are reported under (default ``httk``).
     """
 
-    return dispatch(build_parser(f"{context.program} workflow", context), argv, context, prog=prog)
+    return dispatch(build_parser(context.program, context), argv, context, prog=prog)
 
 
 def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered ``workflow`` command, excluding standalone groups."""
 
+    # Frozen peer vector: remote launchers still invoke workflow manager run.
+    # Keep it accepted but absent from public workflow help.
+    if list(argv[:2]) == ["manager", "run"]:
+        return manager_command(argv[1:], context)
     return dispatch(build_parser(f"{context.program} workflow", context, include_workspace_job=False), argv, context)
 
 
@@ -389,3 +412,60 @@ def collect_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``collect`` command."""
 
     return command(["collect", *argv], context, prog=f"{context.program} collect")
+
+
+def runner_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``runner`` command."""
+
+    return command(["runner", *argv], context, prog=f"{context.program} runner")
+
+
+def manager_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``manager`` command."""
+
+    return command(["manager", *argv], context, prog=f"{context.program} manager")
+
+
+def remote_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``remote`` command."""
+
+    return command(["remote", *argv], context, prog=f"{context.program} remote")
+
+
+def launcher_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``launcher`` command."""
+
+    return command(["launcher", *argv], context, prog=f"{context.program} launcher")
+
+
+def config_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``config`` command."""
+
+    return command(["config", *argv], context, prog=f"{context.program} config")
+
+
+def campaign_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``campaign`` command."""
+
+    return command(["campaign", *argv], context, prog=f"{context.program} campaign")
+
+
+def seal_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``seal`` command."""
+
+    return command(["seal", *argv], context, prog=f"{context.program} seal")
+
+
+def v1_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``v1`` command."""
+
+    return command(["v1", *argv], context, prog=f"{context.program} v1")
+
+
+def transfer_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle operator transfer inspection, retirement and reclamation."""
+
+    parser = argparse.ArgumentParser(prog=context.program)
+    parser.set_defaults(handler=None, help_parser=parser)
+    build_transfer_operator_parser(parser.add_subparsers())
+    return dispatch(parser, ["transfer", *argv], context, prog=f"{context.program} transfer")

@@ -534,7 +534,7 @@ def test_why_reports_a_submitted_job_that_no_manager_registers(tmp_path: Path) -
     assert "no manager has validated it" in diagnosis.summary
     detail = {check.name: check.detail for check in diagnosis.checks}
     assert detail["registered manager"] == "no manager has ever registered in this workspace"
-    assert any("httk workflow manager run" in hint for hint in diagnosis.hints)
+    assert any("httk manager run" in hint for hint in diagnosis.hints)
 
 
 def test_why_reports_marker_owner_to_a_manager_of_another_user(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
@@ -10,7 +11,7 @@ from typing import Any
 
 from httk.core.cli import CLIContext
 
-from ..configuration import import_v1_configuration, read_config, set_config_key, unset_config_key
+from ..configuration import configure_config, import_v1_configuration, read_config, set_config_key, unset_config_key
 from ._common import (
     _ERRORS,
     _group,
@@ -66,6 +67,16 @@ def _batch(
 def handle_config_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Print the whole user configuration, or one member of it."""
 
+    if getattr(arguments, "json", False):
+        values = read_config()
+        keys = arguments.key
+        if keys:
+            missing = [key for key in keys if key not in values]
+            if missing:
+                raise ValueError(f"configuration key is not set: {missing[0]}")
+            values = {key: values[key] for key in keys}
+        print(json.dumps(values, indent=2, sort_keys=True))
+        return 0
     if isinstance(arguments.key, list):
         return _batch(arguments, context, handle_config_show, "key", "configuration key")
     values = read_config()
@@ -102,6 +113,17 @@ def handle_config_import_v1(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
+def handle_config_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Validate and save all requested per-user configuration changes together."""
+
+    print(configure_config(arguments.changes or ()))
+    return 0
+
+
+def _configuration_change(operation: str) -> Callable[[str], tuple[str, str]]:
+    return lambda value: (operation, value)
+
+
 def build_config_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
@@ -127,6 +149,29 @@ def build_config_parser(
         nargs="*",
         help="one configuration key (default: print everything)",
     )
+    show.add_argument("--json", action="store_true", help="print selected keys as one JSON object")
+
+    configure = _leaf(
+        group,
+        "configure",
+        summary="change per-user configuration",
+        description="Apply configuration changes in argument order and save the validated result",
+        handler=handle_config_configure,
+    )
+    for operation, help_text in (
+        ("set", "set machine_names to comma-separated names"),
+        ("unset", "remove a configured key"),
+        ("add", "append machine_names, skipping existing names"),
+        ("remove", "remove machine_names; removing the last name unsets the key"),
+    ):
+        configure.add_argument(
+            f"--{operation}",
+            dest="changes",
+            action="append",
+            type=_configuration_change(operation),
+            metavar="KEY" if operation == "unset" else "KEY=VALUE",
+            help=f"{help_text} (repeatable)",
+        )
 
     store = _leaf(
         group,

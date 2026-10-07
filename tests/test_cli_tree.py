@@ -126,7 +126,7 @@ def test_every_group_help_exits_zero_and_names_its_subcommands(group: str, tmp_p
 @pytest.mark.parametrize("group", sorted(GROUPS))
 def test_every_group_prints_its_own_help_when_given_no_action(group: str, tmp_path: Path, capsys) -> None:
     assert command([group], _context(tmp_path)) == 0
-    expected = f"usage: httk {group}" if group in {"workspace", "job"} else f"usage: httk workflow {group}"
+    expected = f"usage: httk {group}"
     assert expected in capsys.readouterr().out
 
 
@@ -198,7 +198,7 @@ def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) 
 def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
     assert command(["frobnicate"], _context(tmp_path)) == 2
     captured = capsys.readouterr().err
-    assert "usage: httk workflow" in captured and "invalid choice: 'frobnicate'" in captured
+    assert "usage: httk" in captured and "invalid choice: 'frobnicate'" in captured
 
 
 def test_a_missing_required_argument_names_the_leaf(tmp_path: Path, capsys) -> None:
@@ -363,3 +363,45 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
     with pytest.raises(SystemExit):
         parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"])
+
+
+@pytest.mark.parametrize(
+    "group", ["runner", "manager", "launcher", "remote", "config", "campaign", "seal", "v1", "transfer"]
+)
+def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main([group, "--help"]) == 0
+    assert f"usage: httk {group}" in capsys.readouterr().out
+    assert main([group]) == 0
+    assert f"usage: httk {group}" in capsys.readouterr().out
+    assert main([group, "frobnicate"]) == 2
+    assert f"httk {group}" in capsys.readouterr().err
+    if group != "transfer":
+        assert main(["workflow", group, "--help"]) == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+
+def test_public_workflow_help_only_names_workflow_operations(capsys):
+    assert main(["workflow", "--help"]) == 0
+    help_text = capsys.readouterr().out
+    for name in ("launcher", "remote", "config", "campaign", "runner", "seal", "manager"):
+        assert f"    {name} " not in help_text
+    for name in ("list", "describe", "install", "uninstall", "build", "run"):
+        assert f"    {name} " in help_text
+
+
+def test_frozen_remote_manager_command_still_parses(capsys):
+    assert main(["workflow", "manager", "run", "--help"]) == 0
+    assert "--by-path" not in capsys.readouterr().out
+
+
+def test_operator_transfer_help_and_status(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    initialize_project(tmp_path, name="transfer-help")
+    _init_workspace(tmp_path)
+    assert main(["transfer", "status", "--json"]) == 0
+    import json
+
+    assert isinstance(json.loads(capsys.readouterr().out), dict)
+    assert main(["transfer", "receive", "--help"]) == 2
+    assert "invalid choice" in capsys.readouterr().err
