@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Self
@@ -246,6 +247,14 @@ class MarkerFault:
     reason: str
 
 
+@dataclass(eq=False)
+class _WriterScope:
+    """One installed journal writer scope; *writer* opens on first use when the scope owns it."""
+
+    writer: JournalWriter | None
+    owned: bool
+
+
 @dataclass(frozen=True)
 class _IndexEntry:
     """Where one job's marker was last observed, as a cache of the state tree.
@@ -462,6 +471,8 @@ class Workspace:
         # workspace corruption, and the lookup that meets one must say so rather
         # than pick a winner.
         self._marker_duplicates: frozenset[str] = frozenset()
+        # Installed journal writer scopes, innermost last; see _journal_writer_scope.
+        self._writer_scopes: list[_WriterScope] = []
 
     def __repr__(self) -> str:
         return f"Workspace(root={str(self.root)!r}, workspace_id={self.workspace_id!r})"
@@ -898,6 +909,42 @@ class Workspace:
             durable=self.durable,
             maximum_segment_bytes=self._policy.journal_segment_bytes,
         )
+
+    @contextmanager
+    def _journal_writer_scope(self, writer: JournalWriter | None = None) -> Iterator[None]:
+        """Let every transfer transition of this instance reuse one journal writer.
+
+        Inside the scope :meth:`_transition_writer` yields *writer*, or one writer
+        the scope opens on first use and closes on exit. A scope without a writer
+        inside another scope reuses the outer one. Scopes may exit in any order:
+        each removes only itself. The writer stays unlocked: managers and CLI
+        commands are single-threaded, and a writer never crosses processes.
+        """
+
+        if writer is None and self._writer_scopes:
+            yield
+            return
+        scope = _WriterScope(writer, owned=writer is None)
+        self._writer_scopes.append(scope)
+        try:
+            yield
+        finally:
+            self._writer_scopes.remove(scope)
+            if scope.owned and scope.writer is not None:
+                scope.writer.close()
+
+    @contextmanager
+    def _transition_writer(self) -> Iterator[JournalWriter]:
+        """Yield the innermost scope's journal writer, or open and close one as before scopes."""
+
+        if not self._writer_scopes:
+            with self.open_journal_writer() as writer:
+                yield writer
+            return
+        scope = self._writer_scopes[-1]
+        if scope.writer is None:
+            scope.writer = self.open_journal_writer()
+        yield scope.writer
 
     def check(
         self,

@@ -29,6 +29,7 @@ from httk.workflow._util import read_json, utc_now, write_json_atomic
 from httk.workflow.gc import GcReport
 from httk.workflow.journal import (
     SEGMENT_HEADER,
+    JournalWriter,
     encode_record_ref,
     iter_journal_frames,
     parse_record_ref,
@@ -1295,3 +1296,38 @@ def test_hygiene_repair_quarantines_an_aged_trash_entry_holding_a_payload(tmp_pa
     assert not (tmp / "trash.payload").exists()
     [quarantined] = list((workspace.control / "quarantine").iterdir())
     assert (quarantined / "entry" / "payload" / "job.json").is_file()
+
+
+def test_managers_collect_transfer_records_hourly_whatever_their_gc_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import manager as manager_module
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    calls: list[tuple[tuple[str, ...] | None, JournalWriter | None]] = []
+
+    def collect(
+        *, categories: tuple[str, ...] | None = None, journal_writer: JournalWriter | None = None, **_: object
+    ) -> GcReport:
+        calls.append((categories, journal_writer))
+        if fail:
+            raise OSError("disk gone")
+        return real(categories=categories, journal_writer=journal_writer)
+
+    real, fail = workspace.collect_garbage, False
+    monkeypatch.setattr(workspace, "collect_garbage", collect)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        # Attach collects the always-safe categories, receipts included.
+        assert calls == [(gc_module.ALWAYS_SAFE_CATEGORIES, manager.writer)]
+        assert "transfer_receipts" in gc_module.ALWAYS_SAFE_CATEGORIES
+        manager.tick()
+        assert len(calls) == 1  # first due one interval after the start
+        monkeypatch.setattr(manager_module, "TRANSFER_RECORDS_GC_SECONDS", 0.0)
+        manager.tick()
+        assert calls[1:] == [(("transfer_receipts", "transfer_records"), manager.writer)]
+        fail = True
+        manager.tick()
+        assert "transfer_gc" in manager._reported
+        fail = False
+        manager.tick()
+        assert "transfer_gc" not in manager._reported

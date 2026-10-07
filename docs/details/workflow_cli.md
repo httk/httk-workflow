@@ -290,7 +290,9 @@ manager removes an attempt's control directory when the actual destination is
 `ready`, `waiting`, `paused`, or `succeeded`. Failed and cancelled attempts stay
 as evidence. Transaction trash is normally removed with that control tree; an
 inherited commit is left for `workspace gc`. Managers run the always-safe
-categories at startup and the full policy-gated collection at clean exit.
+categories at startup and the full policy-gated collection at clean exit, and
+collect `transfer_receipts` and `transfer_records` once an hour whatever
+their `--gc-interval`.
 Artefacts orphaned by a crash still require an explicit `workspace gc`, driven
 by the workspace's `policy.retention`:
 

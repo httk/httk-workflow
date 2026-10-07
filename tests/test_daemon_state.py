@@ -1,6 +1,7 @@
 """Layout, validation, quotas, durability and two-instance interleavings of the lock-free daemon ledger."""
 
 import errno
+import json
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -122,7 +123,7 @@ def test_initialize_creates_the_directory_layout_exclusively_and_instances_share
         "req",
         "slots",
     ]
-    assert (root / "format").read_bytes() == f"httk-workspace-daemon-ledger 1 {WORKSPACE_ID} {ENROLLMENT_ID}\n".encode()
+    assert (root / "format").read_bytes() == f"httk-workspace-daemon-ledger 2 {WORKSPACE_ID} {ENROLLMENT_ID}\n".encode()
     assert root.stat().st_mode & 0o777 == 0o700
     assert not [path for path in state.iterdir() if path.name.startswith("birth.")]
     with pytest.raises(FileExistsError):
@@ -163,7 +164,7 @@ def test_missing_wrong_identity_unsupported_and_incomplete_ledgers_fail_closed(t
         Ledger(state, WORKSPACE_ID, "f" * 32)
     format_file = state / "ledger" / "format"
     original = format_file.read_bytes()
-    format_file.write_bytes(original.replace(b" 1 ", b" 2 "))
+    format_file.write_bytes(original.replace(b" 2 ", b" 1 "))  # the previous (three-file anchor) format
     with pytest.raises(LedgerError, match="unsupported daemon ledger format"):
         _open(state)
     format_file.write_bytes(original)
@@ -207,7 +208,7 @@ def test_admission_writes_the_anchor_and_replays_by_canonical_bytes(state: Path)
         health = ledger.admit(_request(1))
         assert (health.state, health.handle, health.owner) == ("received", None, ledger.nonce)
         anchor = state / "ledger" / "req" / f"{1:032x}"
-        assert sorted(path.name for path in anchor.iterdir()) == ["owner", "request"]
+        assert sorted(path.name for path in anchor.iterdir()) == ["envelope"]
         start = ledger.admit(_start(2))
         assert start.handle is not None and start.decision is None
         assert (state / "ledger" / "handles" / start.handle).read_bytes() == f"{2:032x}\n".encode()
@@ -254,20 +255,29 @@ def _stored_start(state: Path) -> tuple[Path, Request, str]:
 
 def _symlinked_response(anchor: Path, _request: Request, _handle: str) -> None:
     (anchor / "response").unlink()
-    (anchor / "response").symlink_to(anchor / "request")
+    (anchor / "response").symlink_to(anchor / "envelope")
+
+
+def _edit_envelope(anchor: Path, **changes: object) -> None:
+    document = json.loads((anchor / "envelope").read_bytes())
+    document.update(changes)
+    (anchor / "envelope").write_bytes(json.dumps(document, sort_keys=True, separators=(",", ":")).encode())
 
 
 _MUTATIONS: dict[str, Callable[[Path, Request, str], object]] = {
-    "noncanonical request": lambda anchor, _r, _h: (anchor / "request").write_bytes(
-        (anchor / "request").read_bytes() + b" "
+    "noncanonical envelope": lambda anchor, _r, _h: (anchor / "envelope").write_bytes(
+        (anchor / "envelope").read_bytes() + b" "
     ),
-    "request of another id": lambda anchor, _r, _h: (anchor / "request").write_bytes(
-        (anchor.parent / f"{2:032x}" / "request").read_bytes()
+    "envelope of another id": lambda anchor, _r, _h: (anchor / "envelope").write_bytes(
+        (anchor.parent / f"{2:032x}" / "envelope").read_bytes()
     ),
-    "missing owner": lambda anchor, _r, _h: (anchor / "owner").unlink(),
-    "uppercase owner": lambda anchor, _r, _h: (anchor / "owner").write_bytes(b"A" * 32 + b"\n"),
-    "owner without newline": lambda anchor, _r, _h: (anchor / "owner").write_bytes(b"a" * 32),
-    "missing handle": lambda anchor, _r, _h: (anchor / "handle").unlink(),
+    "missing envelope": lambda anchor, _r, _h: (anchor / "envelope").unlink(),
+    "uppercase owner": lambda anchor, _r, _h: _edit_envelope(anchor, owner="A" * 32),
+    "short handle": lambda anchor, _r, _h: _edit_envelope(anchor, handle="a" * 31),
+    "missing handle": lambda anchor, _r, _h: _edit_envelope(anchor, handle=None),
+    "extra envelope field": lambda anchor, _r, _h: _edit_envelope(anchor, extra=1),
+    "other envelope version": lambda anchor, _r, _h: _edit_envelope(anchor, format_version=2),
+    "oversized envelope": lambda anchor, _r, _h: (anchor / "envelope").write_bytes(b" " * (17 * 1024)),
     "bad decision": lambda anchor, _r, _h: (anchor / "decision").write_bytes(b"submit 01 " + b"a" * 32 + b"\n"),
     "unknown decision": lambda anchor, _r, _h: (anchor / "decision").write_bytes(b"maybe x " + b"a" * 32 + b"\n"),
     "missing decision": lambda anchor, _r, _h: (anchor / "decision").unlink(),
@@ -459,9 +469,9 @@ def test_files_are_synchronized_before_their_directories_and_the_anchor_before_t
         anchor = root / "req" / request.request_id
         renamed = _index(events, "rename", anchor)
         prepared = [path for kind, path in events[:renamed] if kind == "fsync" and "/prep/" in path]
-        # request, owner and handle, each fsynced, then the prepared directory, all before the rename.
-        assert [Path(path).name for path in prepared[:3]] == ["request", "owner", "handle"]
-        assert Path(prepared[3]).parent == root / "prep"
+        # The one envelope file is fsynced, then the prepared directory, all before the rename.
+        assert Path(prepared[0]).name == "envelope"
+        assert Path(prepared[1]).parent == root / "prep"
         req_synced = _index(events, "fsync", root / "req")
         assert req_synced > renamed
         handle_linked = _index(events, "link", root / "handles" / entry.handle)
@@ -508,6 +518,34 @@ def test_two_instances_racing_to_admit_one_request_leave_one_anchor(
     assert sorted(_slots(state)) == ["record.1", "start.1"]
     assert not list((state / "ledger" / "prep").iterdir())
     assert [row["handle"] for row in first.managers()] == [entry.handle]
+
+
+def test_a_racing_instance_with_different_owner_and_handle_is_adopted_but_different_content_conflicts(
+    state: Path, hook: list[Callable[[str], None]]
+) -> None:
+    first, second = _open(state), _open(state)
+    winner = second.admit(_start(1))
+    assert winner.handle is not None
+    # Equal request bytes, different owner nonce and (never linked) minted handle: one anchor, no conflict.
+    adopted = first.admit(_start(1))
+    assert adopted == winner and adopted.owner == second.nonce != first.nonce
+    assert sorted(path.name for path in (state / "ledger" / "handles").iterdir()) == [winner.handle]
+    assert sorted(path.name for path in (state / "ledger" / "req").iterdir()) == [f"{1:032x}"]
+    conflicting = replace(_start(1), profile="gpu")
+    with pytest.raises(ConflictError):
+        first.admit(conflicting)
+
+    # The same outcome when the other instance installs its anchor while this one is preparing.
+    raced: list[None] = []
+
+    def other_admits_first(step: str) -> None:
+        if step == "ledger.prepared" and not raced:
+            raced.append(None)
+            second.admit(_start(3))
+
+    hook.append(other_admits_first)
+    assert first.admit(_start(3)).owner == second.nonce
+    hook.clear()
 
 
 def test_a_retransmitted_anchor_rename_still_belongs_to_its_instance(
@@ -734,7 +772,7 @@ def test_the_sweep_fences_a_slow_owners_prepared_anchor_and_the_owner_loses_clea
     hook.clear()
     assert swept and entry.owner == owner.nonce and entry.handle is not None
     anchor = state / "ledger" / "req" / request.request_id
-    assert sorted(path.name for path in anchor.iterdir()) == ["handle", "owner", "request"]
+    assert sorted(path.name for path in anchor.iterdir()) == ["envelope"]
     assert list(prep.iterdir()) == []
     # The lost round released its own slots; the settled admission holds one record and one start slot.
     assert len(_slots(state)) == 2

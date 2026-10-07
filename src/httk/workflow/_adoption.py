@@ -854,7 +854,7 @@ def _publish(workspace: Workspace, lineage: Path, plan: _Plan) -> None:
         marker = envelope / TRANSFER_MARKERS / job.job_id
         if not _lexists(marker):
             raise _Fenced()
-        with workspace.open_journal_writer() as writer:
+        with workspace._transition_writer() as writer:
             record_ref = writer.append(_import_frame(workspace, plan, job))
         destination = workspace.marker_path(
             job.prior_kind, job.placement, job.job_key, job.priority, job.source_generation + 1, record_ref

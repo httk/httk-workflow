@@ -12,9 +12,8 @@ Path                                    Content
 ======================================  ==========================================================
 ``format``                              format name, version, workspace and enrollment identity
 ``prep/<nonce>.<rand>/``                an anchor prepared before admission
-``req/<id>/request``                    the canonical request bytes (in the prepared anchor)
-``req/<id>/owner``                      the admitting instance's nonce (in the prepared anchor)
-``req/<id>/handle``                     a start's minted manager handle (in the prepared anchor)
+``req/<id>/envelope``                   canonical JSON: the request, the admitting instance's nonce
+                                        (``owner``) and a start's minted ``handle`` (in the prepared anchor)
 ``req/<id>/decision``                   a start's ``submit <time_ns> <nonce>`` or ``refuse <reason> <nonce>``
 ``req/<id>/scheduler``                  ``<job id> <cluster>``, linked by the submit winner
 ``req/<id>/response``                   the canonical unsigned response
@@ -24,7 +23,7 @@ Path                                    Content
 ======================================  ==========================================================
 
 Every instance has a random nonce. Whatever is not idempotent carries it (the
-anchor's ``owner``, the ``decision``, the slots), so an instance decides
+envelope's ``owner``, the ``decision``, the slots), so an instance decides
 "mine" by nonce equality and never by comparing content another instance may
 have produced identically.
 
@@ -35,6 +34,7 @@ contacted, and ``response`` before the daemon publishes it.
 
 import errno
 import itertools
+import json
 import logging
 import os
 import re
@@ -56,12 +56,12 @@ from ._util import fsync_directory
 _LOGGER = logging.getLogger(__name__)
 
 _FORMAT = "httk-workspace-daemon-ledger"
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _ROOT = "ledger"
 _SUBDIRECTORIES = ("prep", "req", "handles", "slots", "observations")
 #: The files of the SQLite ledger and its instance lock that this ledger replaced.
 _LEGACY = ("ledger.sqlite3", "daemon.lock")
-_ANCHOR_FILES = frozenset({"request", "owner", "handle", "decision", "scheduler", "response"})
+_ANCHOR_FILES = frozenset({"envelope", "decision", "scheduler", "response"})
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
@@ -74,6 +74,10 @@ _SLOT = re.compile(r"(record|start)\.(0|[1-9][0-9]{0,5})\Z")
 #: The largest stored request or response document, with room for the protocol's own bound.
 _MAX_DOCUMENT = 16 * 1024
 _MAX_LINE = 256
+#: The largest stored anchor envelope: a request document plus the owner, handle and format fields.
+_MAX_ENVELOPE = _MAX_DOCUMENT + 512
+_ENVELOPE_FORMAT = "httk-daemon-anchor"
+_ENVELOPE_VERSION = 1
 _MAX_OBSERVATION = 64 * 1024
 #: The absolute bound of every listing of the ledger, whatever the configured quotas.
 _MAX_LISTING = 300_000
@@ -252,6 +256,19 @@ def _line(data: bytes, path: Path) -> str:
     if not text.endswith("\n") or "\n" in text[:-1] or "\r" in text:
         raise LedgerError(f"daemon ledger entry {path} is not one newline-terminated line")
     return text[:-1]
+
+
+def _envelope_bytes(request_bytes: bytes, owner: str, handle: str | None) -> bytes:
+    """Return the canonical envelope bytes of an anchor: the request, its owner and a start's handle."""
+
+    fields = {
+        "format": _ENVELOPE_FORMAT,
+        "format_version": _ENVELOPE_VERSION,
+        "handle": handle,
+        "owner": owner,
+        "request": json.loads(request_bytes),
+    }
+    return json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
 def _write_new(path: Path, data: bytes) -> None:
@@ -518,11 +535,42 @@ class Ledger:
             return "a submitted response requires the recorded scheduler identity"
         return None
 
+    @staticmethod
+    def _envelope(anchor: Path) -> tuple[Request, str, str | None] | None:
+        """Read and validate an anchor's envelope; ``None`` when it does not exist."""
+
+        data = _read(anchor / "envelope", _MAX_ENVELOPE)
+        if data is None:
+            return None
+        try:
+            value = json.loads(data)
+            if type(value) is not dict or set(value) != {"format", "format_version", "handle", "owner", "request"}:
+                raise ValueError("unexpected envelope fields")
+            if value["format"] != _ENVELOPE_FORMAT or type(value["format_version"]) is not int:
+                raise ValueError("unsupported envelope")
+            if value["format_version"] != _ENVELOPE_VERSION:
+                raise ValueError("unsupported envelope version")
+            owner, handle = value["owner"], value["handle"]
+            if type(owner) is not str or _HEX32.fullmatch(owner) is None:
+                raise ValueError("invalid owner")
+            if handle is not None and (type(handle) is not str or _HEX32.fullmatch(handle) is None):
+                raise ValueError("invalid handle")
+            request_bytes = json.dumps(
+                value["request"], sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("ascii")
+            request = decode_request(request_bytes)
+            canonical = encode_request(request)
+            if canonical != request_bytes or _envelope_bytes(canonical, owner, handle) != data:
+                raise ValueError("noncanonical envelope")
+        except (ValueError, RecursionError) as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            raise LedgerError(f"invalid stored envelope {anchor}: {exc}") from exc
+        return request, owner, handle
+
     def _entry(self, request_id: str) -> Entry | None:
         """Read and validate one anchor; ``None`` when it does not exist.
 
         The files are read in the reverse of their write order (response, scheduler, decision, then the
-        anchor's own files), so a file read later always existed when an earlier-read one was written.
+        anchor's envelope), so a file read later always existed when an earlier-read one was written.
         """
 
         anchor = self._anchor(request_id)
@@ -534,32 +582,15 @@ class Ledger:
         response_bytes = _read(anchor / "response", _MAX_DOCUMENT)
         scheduler_bytes = _read(anchor / "scheduler", _MAX_LINE)
         decision_bytes = _read(anchor / "decision", _MAX_LINE)
-        handle_bytes = _read(anchor / "handle", _MAX_LINE)
-        owner_bytes = _read(anchor / "owner", _MAX_LINE)
-        request_bytes = _read(anchor / "request", _MAX_DOCUMENT)
-        if request_bytes is None or owner_bytes is None:
+        envelope = self._envelope(anchor)
+        if envelope is None:
             raise LedgerError(f"daemon ledger anchor {anchor} is incomplete")
-
-        try:
-            request = decode_request(request_bytes)
-        except ValueError as exc:
-            raise LedgerError(f"invalid stored request {anchor}") from exc
-        if encode_request(request) != request_bytes:
-            raise LedgerError(f"noncanonical stored request {anchor}")
+        request, owner, handle = envelope
         if request.request_id != request_id:
             raise LedgerError(f"stored request {anchor} names another request identifier")
         if request.workspace_id != self.workspace_id or request.enrollment_id != self.enrollment_id:
             raise LedgerError(f"invalid stored enrollment identity in {anchor}")
-        owner = _line(owner_bytes, anchor / "owner")
-        if _HEX32.fullmatch(owner) is None:
-            raise LedgerError(f"invalid stored owner in {anchor}")
         start = request.operation == "start_manager"
-
-        handle: str | None = None
-        if handle_bytes is not None:
-            handle = _line(handle_bytes, anchor / "handle")
-            if _HEX32.fullmatch(handle) is None:
-                raise LedgerError(f"invalid stored manager handle in {anchor}")
         if start != (handle is not None):
             raise LedgerError(f"invalid stored manager handle in {anchor}")
 
@@ -774,10 +805,7 @@ class Ledger:
         else:
             raise LedgerError("no fresh name for a prepared anchor")
         try:
-            _write_new(prepared / "request", encode_request(request))
-            _write_new(prepared / "owner", f"{self.nonce}\n".encode("ascii"))
-            if handle is not None:
-                _write_new(prepared / "handle", f"{handle}\n".encode("ascii"))
+            _write_new(prepared / "envelope", _envelope_bytes(encode_request(request), self.nonce, handle))
             fsync_directory(prepared)
         except FileNotFoundError:
             if _probe(prepared) is not None or _probe(prepared.parent) is None:
@@ -877,10 +905,11 @@ class Ledger:
             # From here the anchor may be installed: an error must not free its slots.
             if moved:
                 fsync_directory(anchor.parent)
-            owner_bytes = _read(anchor / "owner", _MAX_LINE)
-            if moved and owner_bytes != f"{self.nonce}\n".encode("ascii"):
+            stored = self._envelope(anchor)
+            owner = None if stored is None else stored[1]
+            if moved and owner != self.nonce:
                 raise LedgerError(f"daemon ledger anchor {anchor} installed by this instance names another owner")
-            if owner_bytes == f"{self.nonce}\n".encode("ascii"):
+            if owner == self.nonce:
                 _hook("ledger.anchored")
                 if handle is not None:
                     self._link_handle(handle, request.request_id)

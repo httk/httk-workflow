@@ -768,89 +768,91 @@ def _send_jobs_to_remote(
     finished by running the same command again.
     """
 
-    destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
-    waiting_parent_map = _waiting_parent_map(source)
-    # One expanded selection drives the whole leg: the requested jobs plus the
-    # bound descendants that travel with them, roots first.
-    precheck_candidates = select_transfer_jobs(
-        source,
-        destination_workspace_id=destination_workspace_id,
-        states=(*QUIESCENT_KINDS, "transferring"),
-        job_ids=jobs,
-        destination_remote=target.name,
-        include_transferring=True,
-        known_markers=known_markers,
-        waiting_parent_map=waiting_parent_map,
-    )
-    _require_whole_trees(precheck_candidates)
-    _refuse_tree_placement(precheck_candidates, destination_placement)
-    if destination_settings is not None:
-        _environment_advisory(
+    # One journal writer serves every transition of this batch.
+    with source._journal_writer_scope():
+        destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
+        waiting_parent_map = _waiting_parent_map(source)
+        # One expanded selection drives the whole leg: the requested jobs plus the
+        # bound descendants that travel with them, roots first.
+        precheck_candidates = select_transfer_jobs(
             source,
-            jobs,
-            destination_settings,
-            strict=strict_environment,
-            candidates=precheck_candidates,
+            destination_workspace_id=destination_workspace_id,
+            states=(*QUIESCENT_KINDS, "transferring"),
+            job_ids=jobs,
+            destination_remote=target.name,
+            include_transferring=True,
+            known_markers=known_markers,
+            waiting_parent_map=waiting_parent_map,
+        )
+        _require_whole_trees(precheck_candidates)
+        _refuse_tree_placement(precheck_candidates, destination_placement)
+        if destination_settings is not None:
+            _environment_advisory(
+                source,
+                jobs,
+                destination_settings,
+                strict=strict_environment,
+                candidates=precheck_candidates,
+                quiet=quiet,
+            )
+        _announce_tree_members(precheck_candidates, jobs, quiet=quiet)
+        source.recover_transfers()
+        pending_by_job: dict[str, list[Transaction]] = {}
+        for root_marker, _frame, txn in pending_outgoing(source):
+            pending_by_job.setdefault(root_marker.job_id, []).append(txn)
+        known_by_id = {
+            candidate.job_id: candidate.marker for candidate in precheck_candidates if candidate.marker is not None
+        }
+        if known_markers is not None:
+            known_by_id.update({marker.job_id: marker for marker in known_markers})
+
+        def seal_and_push(job_id: str, *, with_tree: bool) -> str | None:
+            resumable = [
+                txn
+                for txn in pending_by_job.get(job_id, [])
+                if txn.destination_workspace_id == destination_workspace_id and txn.destination_remote == target.name
+            ]
+            if not resumable and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
+                return None
+            transfer_id = resumable[0].transfer_id if resumable else None
+            if resumable and destination_placement is not None:
+                requested = normalize_placement(str(destination_placement))
+                if resumable[0].destination_placement != requested:
+                    raise ValueError("resumed transfer destination placement disagrees with the request")
+            bundle = source.detach(
+                job_id,
+                marker=known_by_id.get(job_id),
+                waiting_parent_map=waiting_parent_map,
+                destination_workspace_id=destination_workspace_id,
+                destination_remote=target.name,
+                destination_placement=destination_placement,
+                transfer_id=transfer_id,
+                with_tree=with_tree,
+            )
+            incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{bundle.name}"
+            push = run_adapter(
+                target.bundle,
+                "push",
+                {"source": str(bundle), "destination": incoming},
+                timeout=timeout,
+            )
+            return str(push.get("path", incoming))
+
+        selected = {candidate.job_id for candidate in precheck_candidates}
+        # A requested job the selection left out is ineligible or already gone; trying
+        # it first states why before anything else has moved.
+        pushed = [seal_and_push(job_id, with_tree=False) for job_id in jobs if job_id not in selected]
+        pushed += _seal_trees(
+            precheck_candidates,
+            lambda candidate: seal_and_push(candidate.job_id, with_tree=candidate.tree_root is not None),
             quiet=quiet,
         )
-    _announce_tree_members(precheck_candidates, jobs, quiet=quiet)
-    source.recover_transfers()
-    pending_by_job: dict[str, list[Transaction]] = {}
-    for root_marker, _frame, txn in pending_outgoing(source):
-        pending_by_job.setdefault(root_marker.job_id, []).append(txn)
-    known_by_id = {
-        candidate.job_id: candidate.marker for candidate in precheck_candidates if candidate.marker is not None
-    }
-    if known_markers is not None:
-        known_by_id.update({marker.job_id: marker for marker in known_markers})
-
-    def seal_and_push(job_id: str, *, with_tree: bool) -> str | None:
-        resumable = [
-            txn
-            for txn in pending_by_job.get(job_id, [])
-            if txn.destination_workspace_id == destination_workspace_id and txn.destination_remote == target.name
-        ]
-        if not resumable and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
-            return None
-        transfer_id = resumable[0].transfer_id if resumable else None
-        if resumable and destination_placement is not None:
-            requested = normalize_placement(str(destination_placement))
-            if resumable[0].destination_placement != requested:
-                raise ValueError("resumed transfer destination placement disagrees with the request")
-        bundle = source.detach(
-            job_id,
-            marker=known_by_id.get(job_id),
-            waiting_parent_map=waiting_parent_map,
-            destination_workspace_id=destination_workspace_id,
-            destination_remote=target.name,
-            destination_placement=destination_placement,
-            transfer_id=transfer_id,
-            with_tree=with_tree,
-        )
-        incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{bundle.name}"
-        push = run_adapter(
-            target.bundle,
-            "push",
-            {"source": str(bundle), "destination": incoming},
-            timeout=timeout,
-        )
-        return str(push.get("path", incoming))
-
-    selected = {candidate.job_id for candidate in precheck_candidates}
-    # A requested job the selection left out is ineligible or already gone; trying
-    # it first states why before anything else has moved.
-    pushed = [seal_and_push(job_id, with_tree=False) for job_id in jobs if job_id not in selected]
-    pushed += _seal_trees(
-        precheck_candidates,
-        lambda candidate: seal_and_push(candidate.job_id, with_tree=candidate.tree_root is not None),
-        quiet=quiet,
-    )
-    remote_bundles = [bundle for bundle in pushed if bundle is not None]
-    results = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
-    acknowledgements, problems = _acknowledged(results)
-    acknowledge_transfers(source, acknowledgements)
-    _raise_problems(problems)
-    return acknowledgements
+        remote_bundles = [bundle for bundle in pushed if bundle is not None]
+        results = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
+        acknowledgements, problems = _acknowledged(results)
+        acknowledge_transfers(source, acknowledgements)
+        _raise_problems(problems)
+        return acknowledgements
 
 
 def _transfer_endpoint(value: str, context: CLIContext) -> WorkspaceBinding:
@@ -920,7 +922,8 @@ def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) 
 
     workspace = _protocol_workspace(arguments.workspace, context)
     bundles = arguments.bundle if isinstance(arguments.bundle, list) else [arguments.bundle]
-    results = import_bundles(workspace, bundles)
+    with workspace._journal_writer_scope():
+        results = import_bundles(workspace, bundles)
     for result in results:
         acknowledgement = result.get("acknowledgement")
         if isinstance(acknowledgement, Mapping):
@@ -961,13 +964,14 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
             strict=arguments.strict_environment,
             candidates=candidates,
         )
-    offers = offer_transfers(
-        workspace,
-        destination_workspace_id=arguments.destination_workspace_id,
-        states=offer_states,
-        placement=arguments.placement,
-        job_ids=arguments.jobs or None,
-    )
+    with workspace._journal_writer_scope():
+        offers = offer_transfers(
+            workspace,
+            destination_workspace_id=arguments.destination_workspace_id,
+            states=offer_states,
+            placement=arguments.placement,
+            job_ids=arguments.jobs or None,
+        )
     if arguments.json:
         document = {
             "format": TRANSFER_OFFER_FORMAT,
@@ -1071,7 +1075,8 @@ def handle_transfer_reclaim(arguments: argparse.Namespace, context: CLIContext) 
     """Take back undelivered addressed transfers once no destination can accept them any more."""
 
     workspace = _operator_workspace(arguments.operator_workspace, context)
-    reclaimed = [reclaim_transfer(workspace, canonical_uuid(job, "job_id")) for job in arguments.jobs]
+    with workspace._journal_writer_scope():
+        reclaimed = [reclaim_transfer(workspace, canonical_uuid(job, "job_id")) for job in arguments.jobs]
     if arguments.json:
         print(json.dumps({"reclaimed": reclaimed}, sort_keys=True, separators=(",", ":")))
         return 0
@@ -1301,7 +1306,8 @@ def _fetch_jobs_from_remote(
             timeout=timeout,
         )
         pulled_paths.append(str(pulled.get("path", staging)))
-    acknowledgements, problems = _acknowledged(import_bundles(local, pulled_paths))
+    with local._journal_writer_scope():
+        acknowledgements, problems = _acknowledged(import_bundles(local, pulled_paths))
     if not quiet:
         for acknowledgement in acknowledgements:
             _print_build_reminder(local, acknowledgement)
@@ -1333,73 +1339,75 @@ def _transfer_local_to_local(
     child requested without its parent is refused.
     """
 
-    if not jobs:
-        raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
-    waiting_parent_map = _waiting_parent_map(source)
+    # One journal writer per workspace serves every transition of this batch.
+    with source._journal_writer_scope(), destination._journal_writer_scope():
+        if not jobs:
+            raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
+        waiting_parent_map = _waiting_parent_map(source)
 
-    def select(states: Sequence[str], *, include_transferring: bool) -> list[TransferCandidate]:
-        candidates = select_transfer_jobs(
+        def select(states: Sequence[str], *, include_transferring: bool) -> list[TransferCandidate]:
+            candidates = select_transfer_jobs(
+                source,
+                destination_workspace_id=destination.workspace_id,
+                states=states,
+                job_ids=jobs,
+                include_transferring=include_transferring,
+                known_markers=known_markers,
+                waiting_parent_map=waiting_parent_map,
+            )
+            _require_whole_trees(candidates)
+            _refuse_tree_placement(candidates, destination_placement)
+            return candidates
+
+        candidates = select((*QUIESCENT_KINDS, "transferring"), include_transferring=True)
+        _environment_advisory(
             source,
-            destination_workspace_id=destination.workspace_id,
-            states=states,
-            job_ids=jobs,
-            include_transferring=include_transferring,
-            known_markers=known_markers,
-            waiting_parent_map=waiting_parent_map,
+            jobs,
+            destination.read_settings(),
+            strict=strict_environment,
+            candidates=candidates,
+            quiet=quiet,
         )
-        _require_whole_trees(candidates)
-        _refuse_tree_placement(candidates, destination_placement)
-        return candidates
+        source.recover_transfers()
+        if any(candidate.marker is not None and candidate.marker.kind == "transferring" for candidate in candidates):
+            candidates = select(tuple(QUIESCENT_KINDS), include_transferring=False)
+        _announce_tree_members(candidates, jobs, quiet=quiet)
+        known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
+        selected = {candidate.job_id for candidate in candidates}
+        bundles: list[Path] = []
+        for job_id in jobs:
+            if job_id in selected or source.find_marker_by_id(job_id) is None:
+                continue
+            # A requested live job the selection left out is ineligible; detaching it
+            # states why, before anything else has moved.
+            bundles.append(
+                source.detach(
+                    job_id,
+                    marker=known_by_id.get(job_id),
+                    waiting_parent_map=waiting_parent_map,
+                    destination_workspace_id=destination.workspace_id,
+                )
+            )
 
-    candidates = select((*QUIESCENT_KINDS, "transferring"), include_transferring=True)
-    _environment_advisory(
-        source,
-        jobs,
-        destination.read_settings(),
-        strict=strict_environment,
-        candidates=candidates,
-        quiet=quiet,
-    )
-    source.recover_transfers()
-    if any(candidate.marker is not None and candidate.marker.kind == "transferring" for candidate in candidates):
-        candidates = select(tuple(QUIESCENT_KINDS), include_transferring=False)
-    _announce_tree_members(candidates, jobs, quiet=quiet)
-    known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
-    selected = {candidate.job_id for candidate in candidates}
-    bundles: list[Path] = []
-    for job_id in jobs:
-        if job_id in selected or source.find_marker_by_id(job_id) is None:
-            continue
-        # A requested live job the selection left out is ineligible; detaching it
-        # states why, before anything else has moved.
-        bundles.append(
-            source.detach(
-                job_id,
-                marker=known_by_id.get(job_id),
+        def seal(candidate: TransferCandidate) -> Path:
+            if candidate.bundle is not None:
+                return candidate.bundle
+            return source.detach(
+                candidate.job_id,
+                marker=known_by_id.get(candidate.job_id) or candidate.marker,
                 waiting_parent_map=waiting_parent_map,
                 destination_workspace_id=destination.workspace_id,
+                with_tree=candidate.tree_root is not None,
             )
-        )
 
-    def seal(candidate: TransferCandidate) -> Path:
-        if candidate.bundle is not None:
-            return candidate.bundle
-        return source.detach(
-            candidate.job_id,
-            marker=known_by_id.get(candidate.job_id) or candidate.marker,
-            waiting_parent_map=waiting_parent_map,
-            destination_workspace_id=destination.workspace_id,
-            with_tree=candidate.tree_root is not None,
-        )
-
-    bundles += _seal_trees(candidates, seal, quiet=quiet)
-    acknowledgements, problems = _acknowledged(import_bundles(destination, bundles))
-    if not quiet:
-        for acknowledgement in acknowledgements:
-            _print_build_reminder(destination, acknowledgement)
-    acknowledge_transfers(source, acknowledgements)
-    _raise_problems(problems)
-    return acknowledgements
+        bundles += _seal_trees(candidates, seal, quiet=quiet)
+        acknowledgements, problems = _acknowledged(import_bundles(destination, bundles))
+        if not quiet:
+            for acknowledgement in acknowledgements:
+                _print_build_reminder(destination, acknowledgement)
+        acknowledge_transfers(source, acknowledgements)
+        _raise_problems(problems)
+        return acknowledgements
 
 
 def _transfer_remote_to_remote(

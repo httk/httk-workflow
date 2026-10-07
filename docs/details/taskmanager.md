@@ -1255,12 +1255,15 @@ inherits a commit leaves the tree for GC.
 
 A manager is never required to run policy-gated cleanup, so it can disappear
 between any two instructions. It runs always-safe cleanup at startup and the
-full policy-gated collection at a clean exit. A clean manager removes its own
-metadata directory; a crash leaves it for `journal_days` collection
-(`manager_directories`). The trusted launch records of confined launches in
-it are removed first, once the manager has been silent for its lease times the
-takeover grace factor and each recorded process group is provably gone; a
-directory still holding a record is kept as takeover evidence.
+full policy-gated collection at a clean exit. Whatever its `gc_interval`, it
+also collects expired transfer receipts and acknowledgements older than
+`trash_days` (`transfer_receipts`, `transfer_records`) once an hour. A clean
+manager removes its own metadata directory; a crash leaves it for
+`journal_days` collection (`manager_directories`). The trusted launch records
+of confined launches in it are removed first, once the manager has been silent
+for its lease times the takeover grace factor and each recorded process group
+is provably gone; a directory still holding a record is kept as takeover
+evidence.
 
 On a quota'd HPC filesystem, what remains to manage is failed and cancelled
 attempt evidence, retained journal history, interrupted transaction trash and

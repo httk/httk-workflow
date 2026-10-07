@@ -479,6 +479,95 @@ def test_the_status_document_is_rate_limited_and_bounded(site: _Site, monkeypatc
     assert 0 < len(status["jobs"]) < 4 and [job["job_key"] for job in status["jobs"]] == keys[: len(status["jobs"])]
 
 
+def test_a_status_document_another_manager_just_installed_is_not_rendered_again(
+    site: _Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = time.time()
+    site.service.run(now=now)
+    path = site.exchange / "status.json"
+    installed = path.stat().st_ino
+    rendered: list[float] = []
+    recovered: list[object] = []
+    render, recover_lineages = _exchange.status_document, _exchange.recover_lineages
+
+    def counted_render(workspace: Workspace, at: float, **kwargs: Any) -> dict[str, Any]:
+        rendered.append(at)
+        return render(workspace, at, **kwargs)
+
+    def counted_recovery(*args: Any, **kwargs: Any) -> list[dict[str, object]]:
+        recovered.append(args)
+        return recover_lineages(*args, **kwargs)
+
+    monkeypatch.setattr(_exchange, "status_document", counted_render)
+    monkeypatch.setattr(_exchange, "recover_lineages", counted_recovery)
+    _service(site.server).run(now=now + 1)
+    # Fresh: not rendered again, but the freshness never holds recovery back.
+    assert rendered == [] and path.stat().st_ino == installed and len(recovered) == 1
+    # A future modification time (a server clock ahead) never spares a render.
+    os.utime(path, (now + 3600, now + 3600))
+    _service(site.server).run(now=now + 2)
+    assert rendered == [now + 2] and path.stat().st_ino != installed
+
+
+def test_a_recovery_that_unfences_drops_the_shared_listing_for_the_rest_of_the_pass(site: _Site) -> None:
+    marker = site.server.submit(_payload(site.tmp / "payloads", "stale"), "jobs")
+    _hook_at("S3.fenced", _crash)
+    with pytest.raises(Crash):
+        transfers.eject_job(site.server, marker.job_id, site.tmp / "loose")
+    [transfer_id] = _sealing.fenced_transactions(site.server)
+    # A crashed CLI ejection whose transaction directory is gone: its fence is stale.
+    shutil.rmtree(_sealing.eject_directory(site.server, transfer_id))
+    # Recovery, the census and the status are due: they share one listing, which
+    # still shows the job transferring until recovery unfences it.
+    site.service.run(now=time.time())
+    assert _present_once(site.server, marker.job_id).kind == "submitted"
+    assert _status(site)["jobs"] == [{"job_id": marker.job_id, "job_key": marker.job_key, "state": "submitted"}]
+
+
+def test_housekeeping_passes_share_one_marker_listing(
+    site: _Site, monkeypatch: pytest.MonkeyPatch, test_profile: Any
+) -> None:
+    """K managers' passes over M live transfers: one state-marker listing per pass (plan 8 measurement)."""
+
+    managers, live = test_profile.scale(normal=(2, 4), extended=(8, 64))
+    for index in range(live):
+        marker = site.server.submit(_payload(site.tmp / "payloads", f"t{index}"), "jobs")
+        _hook_at("S3.fenced", _crash)
+        with pytest.raises(Crash):
+            transfers.eject_job(site.server, marker.job_id, site.tmp / f"loose-{index}")
+    scans: list[tuple[str, ...]] = []
+    reads: list[str] = []
+    scan_markers, read_state = Workspace.scan_markers, Workspace.read_state
+
+    def counted_scan(self: Workspace, kinds: Any = None) -> Any:
+        scans.append(tuple(kinds or ()))
+        return scan_markers(self, kinds)
+
+    def counted_read(self: Workspace, marker: Marker) -> dict[str, Any]:
+        reads.append(marker.job_id)
+        return read_state(self, marker)
+
+    monkeypatch.setattr(Workspace, "scan_markers", counted_scan)
+    monkeypatch.setattr(Workspace, "read_state", counted_read)
+    services = [_service(site.server) for _ in range(managers)]
+    for index, service in enumerate(services):
+        now = time.time()
+        # Recovery, the census and (for the first only, then it is fresh) the
+        # status are due: one listing, one frame read per transfer.
+        scans.clear()
+        reads.clear()
+        service.run(now=now)
+        listing = [STATE_KINDS] if index == 0 else [("transferring", "cancelled", "failed", "succeeded")]
+        assert scans == listing and len(reads) == live
+        # The until-idle census right after the pass reuses the pass's transfer census.
+        assert service.outstanding(now=now) == live
+        assert scans == listing and len(reads) == live
+        # Nothing due: no listing at all.
+        service.run(now=now + 1)
+        assert scans == listing
+    assert len(list(site.server.scan_markers(("transferring",)))) == live
+
+
 # ---------------------------------------------------------------------------
 # Returning finished exchange-origin trees
 # ---------------------------------------------------------------------------
@@ -897,6 +986,24 @@ def test_an_until_idle_manager_adopts_runs_and_returns_before_it_exits(
     assert adopted.kind == "succeeded" and not returned.exists()
 
 
+def test_a_manager_adopts_and_returns_through_its_own_journal_writer(
+    site: _Site, confined: list[Mapping[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_exchange, "RETURN_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(_exchange, "STEP_INTERVAL", 0.0)
+    sent = _send(site, "trip", kind="succeeded")
+    journal = site.server.control / "journal"
+    before = set(os.listdir(journal))
+    with TaskManager(Workspace(site.server.root), heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        for _ in range(10):
+            manager.tick()
+            if (site.outbox / sent.job_key).exists():
+                break
+        assert site.server.find_marker_by_id(sent.job_id) is None
+        transfers.validate_bundle(site.outbox / sent.job_key)
+        assert set(os.listdir(journal)) - before == {manager.writer.writer_id}
+
+
 def test_the_exchange_flag_is_gone_from_the_manager_command(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
     with pytest.raises(SystemExit):
@@ -995,9 +1102,9 @@ def test_the_census_reuses_its_scan_until_something_changes(site: _Site, monkeyp
     scans: list[float] = []
     scan = ExchangeService._scan
 
-    def counted(self: ExchangeService, now: float) -> None:
+    def counted(self: ExchangeService, now: float, *args: Any) -> None:
         scans.append(now)
-        scan(self, now)
+        scan(self, now, *args)
 
     monkeypatch.setattr(ExchangeService, "_scan", counted)
     service = site.service

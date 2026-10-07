@@ -31,9 +31,10 @@ a fresh ``outbox/rejected/<unique>/``, and the ``status.json`` install.
 import errno
 import logging
 import os
+import stat
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,7 +53,7 @@ from ._adoption import (
 )
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES
 from ._daemon_protocol import _BUNDLE_NAME, _RESERVED_NAMES
-from ._sealing import ejection_members, fenced_transactions, recover
+from ._sealing import Fenced, ejection_members, fenced_transactions, recover
 from ._util import json_bytes, read_json, timestamp_seconds, write_json_atomic
 from .errors import FormatError, SealedError, WorkflowError
 from .manifests import read_maintenance_lock
@@ -506,17 +507,21 @@ def install_document(workspace_root: Path, name: str, data: bytes) -> None:
         os.close(exchange)
 
 
-def status_document(workspace: Workspace, now: float) -> dict[str, Any]:
+def status_document(workspace: Workspace, now: float, *, markers: Iterable[Marker] | None = None) -> dict[str, Any]:
     """Render ``status.json``: every job of the workspace with its state, bounded to :data:`STATUS_LIMIT`.
 
     :param workspace: The workspace.
     :param now: The epoch second the document is dated.
+    :param markers: A listing of every state marker taken this pass, instead of a scan.
     :return: The document; when the jobs do not all fit, the longest prefix
         (in job-key order) that does, with ``truncated`` set.
     """
 
-    markers = sorted(workspace.scan_markers(STATE_KINDS), key=lambda item: item.job_key)
-    jobs = [{"job_id": item.job_id, "job_key": item.job_key, "state": item.kind} for item in markers]
+    listed = workspace.scan_markers(STATE_KINDS) if markers is None else markers
+    jobs = [
+        {"job_id": item.job_id, "job_key": item.job_key, "state": item.kind}
+        for item in sorted(listed, key=lambda item: item.job_key)
+    ]
     document: dict[str, Any] = {
         "format": STATUS_FORMAT,
         "format_version": 1,
@@ -576,6 +581,9 @@ class ExchangeService:
         self._backoff: dict[str, float] = {}
         # The last problem reported per subject, so a persisting one is logged once.
         self._reported: dict[str, str] = {}
+        # The transfer census of this pass's recovery, for the until-idle census
+        # right after it; dropped at the next pass and once used.
+        self._groups: dict[str, Fenced] | None = None
 
     # -- reporting ------------------------------------------------------------------------
 
@@ -617,6 +625,7 @@ class ExchangeService:
         """
 
         now = time.time() if now is None else now
+        self._groups = None
         paused = self._paused()
         if paused is not None:
             self._report("paused", f"the exchange waits: {paused}", event="exchange_paused", level=logging.INFO)
@@ -635,11 +644,35 @@ class ExchangeService:
 
     def _steps(self, descriptors: _Descriptors, now: float) -> bool:
         changed = False
+        recovery = self._due("recovery", now)
+        census = self._scan_due(now)
+        status = self._due("status", now) and not self._status_fresh(descriptors, now)
+        # Two or more due steps share one listing of the kinds they read (every
+        # kind when the status is due), taken now, until a step changes
+        # something (recovery included) or fails; a step due alone scans only
+        # its own kinds, and one not due none.
+        markers: list[Marker] | None = None
+        if recovery + census + status >= 2:
+            kinds = STATE_KINDS if status else ("transferring", *sorted(TERMINAL_KINDS))
+            try:
+                markers = list(self.workspace.scan_markers(kinds))
+            except (WorkflowError, OSError):
+                _LOGGER.debug("the exchange pass could not list the state markers", exc_info=True)
+
+        def recover_step() -> bool:
+            nonlocal markers
+            if recovery and self._recover(descriptors, markers):
+                markers = None
+            # Recovery never counts as a change of the pass: a waiting lineage or
+            # a bundle waiting for its acknowledgement must not keep an
+            # until-idle manager running.
+            return False
+
         steps: tuple[tuple[str, Callable[[], bool]], ...] = (
-            ("recovery", lambda: self._recover(descriptors, now)),
+            ("recovery", recover_step),
             ("adoption", lambda: self._adopt_one(descriptors, now)),
-            ("return", lambda: self._return_one(descriptors, now)),
-            ("status", lambda: self._publish_status(descriptors, now)),
+            ("return", lambda: self._return_one(descriptors, now, markers)),
+            ("status", lambda: status and self._publish_status(descriptors, now, markers)),
         )
         for name, step in steps:
             try:
@@ -654,8 +687,11 @@ class ExchangeService:
                     event="exchange_step_failed",
                     level=logging.ERROR,
                 )
+                markers = None  # it may have changed something before it failed
             else:
                 self._clear(f"step:{name}")
+            if changed:
+                markers = None
             if self.pace is not None:
                 self.pace()
         return changed
@@ -669,17 +705,25 @@ class ExchangeService:
 
         self._stale = True
 
-    def _recover(self, descriptors: _Descriptors, now: float) -> bool:
-        """(a) Recovery at most every :data:`STEP_INTERVAL`, with the exchange's descriptors for exchange lineages."""
+    def _recover(self, descriptors: _Descriptors, markers: list[Marker] | None) -> bool:
+        """(a) Recovery (due at most every :data:`STEP_INTERVAL`), with the exchange's descriptors for exchange lineages.
 
-        if not self._due("recovery", now):
-            return False
+        Returns whether it may have changed a marker. The statuses that recur
+        unchanged on every pass are not changes: a live owner's transaction
+        (``pending``), nothing fenced (``none``), an addressed bundle waiting for
+        its acknowledgement (``committed``) and a lineage still waiting
+        (``waiting``).
+        """
+
         exchange = descriptors.adoption()
         # transfers.recover_transfers, with the exchange's descriptors for exchange-inbox lineages.
-        recover_lineages(self.workspace, owner=self.owner, exchange=exchange)
-        recover(self.workspace)
-        resume_owned(self.workspace, self.owner, exchange=exchange, pace=self.pace)
-        return False
+        lineages = recover_lineages(self.workspace, owner=self.owner, exchange=exchange)
+        self._groups = fenced_transactions(self.workspace, markers=markers)
+        transactions = recover(self.workspace, groups=self._groups)
+        lineages += resume_owned(self.workspace, self.owner, exchange=exchange, pace=self.pace)
+        return any(record["status"] != "waiting" for record in lineages) or any(
+            record["status"] not in {"pending", "none", "committed"} for record in transactions
+        )
 
     def _adopt_one(self, descriptors: _Descriptors, now: float) -> bool:
         """(b) Adopt the first eligible inbox entry through the adoption chain, claimed by descriptor."""
@@ -728,11 +772,16 @@ class ExchangeService:
     def _scan_due(self, now: float) -> bool:
         return self._scanned_at is None or not 0.0 <= now - self._scanned_at < STEP_INTERVAL
 
-    def _scan(self, now: float) -> None:
+    def _scan(self, now: float, markers: list[Marker] | None = None) -> None:
         """Find the terminal jobs whose current frame carries exchange origin; a damaged frame is skipped."""
 
         roots: dict[str, tuple[Marker, float | None]] = {}
-        for marker in self.workspace.scan_markers(tuple(sorted(TERMINAL_KINDS))):
+        found = (
+            self.workspace.scan_markers(tuple(sorted(TERMINAL_KINDS)))
+            if markers is None
+            else (marker for marker in markers if marker.kind in TERMINAL_KINDS)
+        )
+        for marker in found:
             try:
                 frame = self.workspace.read_state(marker)
             except (WorkflowError, OSError):
@@ -850,11 +899,11 @@ class ExchangeService:
             member.marker.kind in TERMINAL_KINDS and self._in_grace(member.marker, now) for member in members
         )
 
-    def _return_one(self, descriptors: _Descriptors, now: float) -> bool:
+    def _return_one(self, descriptors: _Descriptors, now: float, markers: list[Marker] | None = None) -> bool:
         """(c) Eject the next finished exchange-origin tree into the outbox (at most one per pass)."""
 
         if self._scan_due(now):
-            self._scan(now)
+            self._scan(now, markers)
         if not self._returns:
             return False
         waiting = self._waiting_map()
@@ -869,6 +918,7 @@ class ExchangeService:
             if _lexists(marker.job_key, descriptors.outbox):
                 # The client has not fetched an earlier copy yet: retried once it is gone.
                 continue
+            self._groups = None  # this ejection may stay in flight: the census must see it
             try:
                 eject_job(
                     self.workspace,
@@ -897,12 +947,23 @@ class ExchangeService:
             return True
         return False
 
-    def _publish_status(self, descriptors: _Descriptors, now: float) -> bool:
-        """(d) Install ``status.json`` at the exchange root at most every :data:`STEP_INTERVAL`."""
+    def _status_fresh(self, descriptors: _Descriptors, now: float) -> bool:
+        """Report whether ``status.json`` was installed (by any manager) less than :data:`STEP_INTERVAL` ago.
 
-        if not self._due("status", now):
+        It only spares a render: it never authorizes recovery or deletion. A
+        future modification time (a server clock ahead) is never fresh.
+        """
+
+        try:
+            info = os.stat(STATUS_DOCUMENT, dir_fd=descriptors.exchange, follow_symlinks=False)
+        except OSError:
             return False
-        document = status_document(self.workspace, now)
+        return stat.S_ISREG(info.st_mode) and 0.0 <= now - info.st_mtime < STEP_INTERVAL
+
+    def _publish_status(self, descriptors: _Descriptors, now: float, markers: list[Marker] | None = None) -> bool:
+        """(d) Install ``status.json`` at the exchange root (due at most every :data:`STEP_INTERVAL`, and stale)."""
+
+        document = status_document(self.workspace, now, markers=markers)
         _install(descriptors.exchange, STATUS_DOCUMENT, json_bytes(document) + b"\n", durable=self.workspace.durable)
         return False
 
@@ -918,7 +979,11 @@ class ExchangeService:
         acknowledgement). The finished trees come from the last scan, made at
         most every :data:`STEP_INTERVAL` and again after every change
         (:meth:`invalidate`), so a quiet census does not re-read every
-        finished job. A damaged frame is skipped, never raised.
+        finished job. The first count after a pass whose recovery ran takes
+        the transfers in flight from that recovery's census: it counts only
+        those in flight at the pass's listing (and may still count one the
+        recovery settled); later counts scan.
+        A damaged frame is skipped, never raised.
 
         :param now: The current epoch second (the clock when omitted).
         :return: The number of outstanding items; zero while the pass is paused or unavailable.
@@ -950,9 +1015,12 @@ class ExchangeService:
                 "outstanding", f"cannot count the exchange's outstanding work: {exc}", event="exchange_unavailable"
             )
             return 0
+        groups, self._groups = self._groups, None
         try:
             count += len(pending_lineages(self.workspace))
-            for fenced in fenced_transactions(self.workspace).values():
+            if groups is None:
+                groups = fenced_transactions(self.workspace)
+            for fenced in groups.values():
                 root = fenced.root
                 outgoing = root[1].get("outgoing") if root is not None else None
                 target = outgoing.get("target") if isinstance(outgoing, Mapping) else None

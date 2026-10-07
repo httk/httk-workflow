@@ -537,17 +537,24 @@ def _outgoing_of(frame: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return outgoing if isinstance(outgoing, Mapping) and isinstance(outgoing.get("transfer_id"), str) else None
 
 
-def fenced_transactions(workspace: Workspace) -> dict[str, Fenced]:
+def fenced_transactions(workspace: Workspace, *, markers: Iterable[Marker] | None = None) -> dict[str, Fenced]:
     """Group every ``transferring`` marker of the workspace by the transaction it is fenced under.
 
     A marker whose frame cannot be read, or records no transaction, is reported and left out.
 
     :param workspace: The source workspace.
+    :param markers: A marker listing of this pass to take the ``transferring`` markers from,
+        instead of scanning for them.
     :return: The fenced markers by transaction id.
     """
 
     groups: dict[str, Fenced] = {}
-    for marker in workspace.scan_markers(("transferring",)):
+    found = (
+        workspace.scan_markers(("transferring",))
+        if markers is None
+        else (marker for marker in markers if marker.kind == "transferring")
+    )
+    for marker in found:
         try:
             frame = workspace.read_state(marker)
         except (WorkflowError, OSError) as exc:
@@ -848,7 +855,7 @@ def _fence(workspace: Workspace, marker: Marker, outgoing: Mapping[str, object],
     """Move one quiescent marker to ``transferring``, recording its prior state."""
 
     prior_state = workspace.read_state(marker)
-    with workspace.open_journal_writer() as writer:
+    with workspace._transition_writer() as writer:
         return workspace.transition(
             writer,
             marker,
@@ -872,7 +879,7 @@ def _unfence(workspace: Workspace, marker: Marker, frame: Mapping[str, Any]) -> 
     if prior_kind not in QUIESCENT_KINDS or not isinstance(prior_state, Mapping):
         raise WorkspaceCorruptionError(f"transferring frame of {marker.job_key} records no prior state")
     restored = {name: value for name, value in prior_state.items() if name not in _FRAME_HEADER}
-    with workspace.open_journal_writer() as writer:
+    with workspace._transition_writer() as writer:
         return workspace.transition(writer, marker, str(prior_kind), restored, allow_sealed=True)
 
 
@@ -1462,20 +1469,36 @@ def _decide_abort(workspace: Workspace, transfer_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _owner_gone(workspace: Workspace, fenced: Fenced, now: int) -> bool:
+def _owner_gone(workspace: Workspace, fenced: Fenced, now: int, liveness: dict[str, bool] | None = None) -> bool:
     recorded = fenced.owner()
     if recorded is None:
         return True
     owner, started = recorded
+    # Keyed by start too: a CLI owner, and a manager whose heartbeat is
+    # unreadable, are aged from each transaction's own start.
+    key = f"{owner}.{started}"
+    if liveness is not None and key in liveness:
+        return liveness[key]
     try:
-        return _txn.owner_gone(
+        gone = _txn.owner_gone(
             workspace.control, owner, since=started, now=now, lease_seconds=workspace.policy.lease_seconds
         )
     except FormatError:
-        return True
+        gone = True
+    if liveness is not None:
+        liveness[key] = gone
+    return gone
 
 
-def settle(workspace: Workspace, transfer_id: str, *, force: bool = False, now: int | None = None) -> str:
+def settle(
+    workspace: Workspace,
+    transfer_id: str,
+    *,
+    force: bool = False,
+    now: int | None = None,
+    fenced: Fenced | None = None,
+    liveness: dict[str, bool] | None = None,
+) -> str:
     """Read the phase of one transaction from fixed names and move it on (the phase reader).
 
     * ``E`` present (forward): a fenced root continues forward through S7 (or
@@ -1496,6 +1519,12 @@ def settle(workspace: Workspace, transfer_id: str, *, force: bool = False, now: 
     :param transfer_id: The transaction.
     :param force: Act whatever the owner's liveness.
     :param now: The current time in integer UTC nanoseconds (for the owner rule).
+    :param fenced: A census of *T* the caller just took: the first look re-verifies only
+        its markers, by name, instead of rescanning every ``transferring`` marker.
+        A census older than the owner's latest fence (a member fenced after it,
+        the root not yet) can lead to an abort where a fresh scan would have
+        gone forward; both are legal outcomes of the transaction.
+    :param liveness: A per-pass cache of owner liveness, filled and consulted here.
     :return: ``"none"`` (nothing fenced), ``"pending"`` (owner alive), ``"committed"``
         (an addressed bundle waits for its acknowledgement), ``"ejected"``, ``"aborted"``,
         ``"retired"``, ``"unfenced"`` or ``"stuck"`` (reported); ``"committed"`` also for an
@@ -1504,8 +1533,16 @@ def settle(workspace: Workspace, transfer_id: str, *, force: bool = False, now: 
     """
 
     clock = time.time_ns() if now is None else now
+    census = fenced
     for _attempt in range(16):
-        fenced = fenced_under(workspace, transfer_id)
+        # A marker's name carries its frame's reference (checksum included), so a
+        # census marker still at its name still has the census frame; one gone
+        # since, or any look after this one acted, rescans.
+        if census is not None and census.all() and all(_lexists(marker.path) for marker, _frame in census.all()):
+            fenced = census
+        else:
+            fenced = fenced_under(workspace, transfer_id)
+        census = None
         eject = eject_directory(workspace, transfer_id)
         abort = abort_directory(workspace, transfer_id)
         if not fenced.all():
@@ -1514,7 +1551,7 @@ def settle(workspace: Workspace, transfer_id: str, *, force: bool = False, now: 
                 _txn.trash(abort, control=workspace.control, holds_payload=_txn.holds_job_payload)
             return "none"
         if _lexists(eject):
-            if not force and not _owner_gone(workspace, fenced, clock):
+            if not force and not _owner_gone(workspace, fenced, clock, liveness):
                 return "pending"
             if fenced.root is None:
                 _decide_abort(workspace, transfer_id)
@@ -1535,7 +1572,7 @@ def settle(workspace: Workspace, transfer_id: str, *, force: bool = False, now: 
                 continue
             return "committed" if forward.addressed else "ejected"
         if _lexists(abort):
-            if not force and not _owner_gone(workspace, fenced, clock):
+            if not force and not _owner_gone(workspace, fenced, clock, liveness):
                 return "pending"
             root = fenced.root_identity()
             txn = None if fenced.root is None else Transaction.from_root(*fenced.root)
@@ -1723,20 +1760,27 @@ def seal(
 # ---------------------------------------------------------------------------
 
 
-def recover(workspace: Workspace, *, now: int | None = None) -> list[dict[str, object]]:
+def recover(
+    workspace: Workspace, *, now: int | None = None, groups: Mapping[str, Fenced] | None = None
+) -> list[dict[str, object]]:
     """Settle every transaction whose owner is gone, then sweep orphaned transaction directories.
+
+    The ``transferring`` markers are grouped once; each transaction is settled
+    from its group, and each owner's liveness is looked up once per pass.
 
     :param workspace: The source workspace.
     :param now: The current time in integer UTC nanoseconds.
+    :param groups: The :func:`fenced_transactions` census of this pass, when the caller took it.
     :return: One ``{transfer_id, status}`` record per transaction looked at.
     """
 
     clock = time.time_ns() if now is None else now
     results: list[dict[str, object]] = []
-    groups = fenced_transactions(workspace)
+    groups = fenced_transactions(workspace) if groups is None else groups
+    liveness: dict[str, bool] = {}
     for transfer_id in sorted(groups):
         try:
-            status = settle(workspace, transfer_id, now=clock)
+            status = settle(workspace, transfer_id, now=clock, fenced=groups[transfer_id], liveness=liveness)
         except (WorkflowError, OSError) as exc:
             _LOGGER.error(
                 "cannot recover transfer %s: %s",

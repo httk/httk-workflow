@@ -152,6 +152,10 @@ _CANCELLING_MEMBERS = (
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
 #: How long a failed Bubblewrap probe stands before the manager probes again.
 CONFINE_REPROBE_SECONDS = 60.0
+#: How often every manager collects expired transfer receipts and aged
+#: acknowledgements (``transfer_receipts``, ``transfer_records``), whatever its
+#: ``gc_interval``: sustained transfer traffic adds one of each per transfer.
+TRANSFER_RECORDS_GC_SECONDS = 3600.0
 _ENROLLED_MESSAGE = (
     "this workspace has the exchange extension enabled (WORKSPACE/exchange is written by clients), so every "
     "manager on it must confine its attempts: set manager.confine=bwrap as a workspace setting or pin it with "
@@ -529,7 +533,8 @@ class RunningAttempt:
 class TaskManager:
     """Execute and recover jobs in one workflow workspace.
 
-    :param workspace: Attach the manager to this workspace.
+    :param workspace: Attach the manager to this workspace. The manager needs an instance
+        of its own: it installs its journal writer as the instance's writer scope.
     :param pools: Accept jobs assigned to these pools.
     :param capabilities: Advertise these execution capabilities.
     :param resources: Advertise these integer resource capacities.
@@ -711,6 +716,8 @@ class TaskManager:
         # what to do, and at most once per interval.
         self.gc_interval = gc_interval
         self._last_gc = 0.0
+        # The startup collection covers the receipts; the transfer records follow one interval later.
+        self._last_transfer_gc = time.monotonic()
         executors = [PathRunnerExecutor(), *executors]
         self.executors = {executor.name: executor for executor in executors}
         if len(self.executors) != len(executors):
@@ -816,7 +823,8 @@ class TaskManager:
             self.maximum_workers,
             extra=self._event("manager_started", workspace=str(self.workspace.root)),
         )
-        self._recover_transfers()
+        with workspace._journal_writer_scope(self.writer):
+            self._recover_transfers()
         if self.drain_start is not None and self.drain_start <= time.time():
             _LOGGER.warning(
                 "the allocation's drain point passed %.0f s before this manager started; it will claim nothing",
@@ -838,6 +846,10 @@ class TaskManager:
                 continue
         self._warn_unmatched_placement_prefixes()
         self._collect_garbage("startup", categories=ALWAYS_SAFE_CATEGORIES)
+        # From here on every transfer transition this manager drives (the
+        # exchange steps) appends to its own writer; close() uninstalls it.
+        self._writer_scope = contextlib.ExitStack()
+        self._writer_scope.enter_context(workspace._journal_writer_scope(self.writer))
 
     def __repr__(self) -> str:
         return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
@@ -879,6 +891,7 @@ class TaskManager:
 
         if self._closed:
             return
+        self._writer_scope.close()
         clean = not self._running
         if clean:
             try:
@@ -1330,6 +1343,7 @@ class TaskManager:
             return changed
         finally:
             self._collect_garbage_if_due()
+            self._collect_transfer_records_if_due()
             self.heartbeat()
             self._report_tick_duration(time.monotonic() - started)
 
@@ -1372,6 +1386,32 @@ class TaskManager:
                 skipped=list(report.skipped),
             ),
         )
+
+    def _collect_transfer_records_if_due(self) -> None:
+        """Collect expired transfer receipts and aged acknowledgements every :data:`TRANSFER_RECORDS_GC_SECONDS`.
+
+        These two categories list only their own directories and never walk
+        ``state/``. A failure is reported rather than allowed to stop the
+        manager, like :meth:`_collect_garbage_if_due`.
+        """
+
+        now = time.monotonic()
+        if now - self._last_transfer_gc < TRANSFER_RECORDS_GC_SECONDS:
+            return
+        self._last_transfer_gc = now
+        try:
+            self.workspace.collect_garbage(
+                categories=("transfer_receipts", "transfer_records"), journal_writer=self.writer
+            )
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                "transfer_gc",
+                f"collection of the transfer records of {self.workspace.root} failed: {exc}",
+                self._event("gc_error"),
+                level=logging.WARNING,
+            )
+            return
+        self._reported.pop("transfer_gc", None)
 
     def _claim_pass(self, changed: bool) -> bool:
         """Claim and launch eligible work within this manager's worker budget."""

@@ -44,10 +44,21 @@ nobody names and older than a day is aborted, an unused `abort.<T>` and a
 `tmp/birth.*` older than a day are trashed). A completed transaction leaves
 nothing behind in `tmp/`.
 
+One recovery pass lists the `transferring` markers once and looks up each
+owner's liveness once: a transaction whose owner is alive is left after that
+lookup, while stale fences that no transaction directory names any more are
+undone in the same pass, whatever their owner. A manager serving the
+[exchange](workspace_daemon.md) recovers at most every 10 seconds and shares
+one marker listing per pass between recovery, its census of finished trees and
+`status.json`, which it does not render again while any manager installed it
+less than 10 seconds ago.
+
 ## What gc collects, and when
 
 `httk workspace gc` handles transfer state in these categories, all gated the
-same way as the rest of garbage collection:
+same way as the rest of garbage collection. A running manager also collects
+`transfer_receipts` and `transfer_records` once an hour, whatever its
+`--gc-interval`, and `transfer_receipts` at attach:
 
 - `retired_bundles`: `transfers/retired/<T>` older than `trash_days`. This is
   the largest item a busy transfer campaign accumulates, since it holds the

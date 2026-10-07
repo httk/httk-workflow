@@ -96,10 +96,17 @@ GC_CATEGORIES = (
     "manager_logs",
     "placement_directories",
 )
-#: Categories whose entries cannot carry information and are safe to collect
-#: without a retention policy. Managers run exactly these categories when they
-#: attach and before a clean exit.
-ALWAYS_SAFE_CATEGORIES = ("removed_jobs", "tmp_entries", "retired_requests", "placement_directories")
+#: Categories safe to collect without a retention policy: their entries carry
+#: no information, or (``transfer_receipts``) carry it only until an expiry that
+#: is a pure function of the entry and the clock. Managers run exactly these
+#: categories when they attach.
+ALWAYS_SAFE_CATEGORIES = (
+    "removed_jobs",
+    "transfer_receipts",
+    "tmp_entries",
+    "retired_requests",
+    "placement_directories",
+)
 _SECONDS_PER_DAY = 86400.0
 
 

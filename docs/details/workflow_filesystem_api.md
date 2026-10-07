@@ -3251,9 +3251,13 @@ collector MUST NOT prune a category whose limit is unlimited (by default
 `attempt_control_days`; see [Workspace policy](#workspace-policy)).
 
 These always-safe categories are collected regardless of `policy.retention`,
-because their entries carry no information (the last is the one conditional
-case). Every manager collects them after attaching, and runs the full
-policy-gated collection at clean exit; `workspace gc` also collects them.
+because their entries carry no information, or (transfer receipts) carry it
+only until an expiry that is a pure function of the receipt and the clock (the
+last is the one conditional case). Every manager collects them after
+attaching, collects transfer receipts and import acknowledgements
+(`transfer_receipts`, `transfer_records`) once an hour, and runs the full
+policy-gated collection at clean exit and every `--gc-interval` when one is
+configured; `workspace gc` also collects them.
 
 - An empty placement mirror below a state kind, pruned by `rmdir` alone.
 - An entry in `.httk-workspace/tmp/` or `.httk-workspace/requests/tmp/` more
@@ -3263,6 +3267,9 @@ policy-gated collection at clean exit; `workspace gc` also collects them.
   days old whose manager no longer heartbeats.
 - A request in `.httk-workspace/requests/retired/`, with its `.retirement`
   record, more than 30 days old.
+- A transfer receipt below `transfers/received/` once `now > sealed_at + W +
+  S`, when no importer can still accept a copy of the bundle. An unparsable
+  receipt is kept.
 - A removable marker (`succeeded`, `failed`, `cancelled`, `submitted`, or
   `ready`) whose complete payload directory is absent, removed as an
   operator-requested job removal. It is kept when a non-terminal parent's
@@ -3284,7 +3291,6 @@ The remaining categories are gated as follows:
 | Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. |
 | Retired transfer bundle | `trash_days` | Below `transfers/retired/`; kept `trash_days` after its acknowledgement. |
 | Import acknowledgement | `trash_days` | Below `transfers/acks/`; the stale-copy check of an ejected bundle uses it until then. |
-| Transfer receipt | `sealed_at + W + S` | Below `transfers/received/`; removed once no importer can still accept a copy of the bundle. An unparsable receipt is kept. |
 | Journal segment | `journal_days` | No current terminal marker, nor `transferring` marker of a bundle awaiting handover, references it; no frame chain of a current non-terminal marker contains it; and its writer belongs to no manager heartbeating within its lease. |
 | Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
 

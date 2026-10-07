@@ -311,6 +311,56 @@ def test_cli_eject_and_adopt(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert not list(out.iterdir())
 
 
+def _writers(workspace: Workspace) -> set[str]:
+    journal = workspace.control / "journal"
+    return set(os.listdir(journal)) if journal.is_dir() else set()
+
+
+def test_cli_eject_and_adopt_of_a_tree_each_use_one_journal_writer(tmp_path: Path) -> None:
+    from test_sealing import _tree as _four_job_tree  # test_sealing imports this module
+
+    source, destination = _pair(tmp_path)
+    root, members = _four_job_tree(source, tmp_path / "tree")
+    before = [_writers(source), _writers(destination)]
+    out = tmp_path / "out"
+    out.mkdir()
+    assert command(["job", "eject", root.job_id, str(out)], CLIContext("httk", source.root)) == 0
+    assert command(["job", "adopt", str(out / root.job_key)], CLIContext("httk", destination.root)) == 0
+    for workspace, seen in zip((source, destination), before, strict=True):
+        assert len(_writers(workspace) - seen) == 1
+    for job in (root, *members):
+        assert destination.find_marker_by_id(job.job_id) is not None
+
+
+def test_journal_writer_scopes_open_lazily_nest_and_close_only_their_own(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "w")
+    before = _writers(workspace)
+    with workspace._journal_writer_scope():
+        assert _writers(workspace) == before
+        with (
+            workspace._transition_writer() as first,
+            workspace._journal_writer_scope(),
+            workspace._transition_writer() as inner,
+        ):
+            assert inner is first
+        assert len(_writers(workspace) - before) == 1
+    with workspace._transition_writer() as unscoped:
+        assert unscoped is not first
+    assert first._handle.closed and unscoped._handle.closed
+    # A given writer is never closed by its scope; scopes may exit out of order.
+    given = workspace.open_journal_writer()
+    outer = workspace._journal_writer_scope(given)
+    outer.__enter__()
+    inner_scope = workspace._journal_writer_scope(workspace.open_journal_writer())
+    inner_scope.__enter__()
+    outer.__exit__(None, None, None)
+    with workspace._transition_writer() as current:
+        assert current is not given
+    inner_scope.__exit__(None, None, None)
+    assert not workspace._writer_scopes and not given._handle.closed
+    given.close()
+
+
 def test_an_interrupted_adoption_finishes_even_after_the_job_moved_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

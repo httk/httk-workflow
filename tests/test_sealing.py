@@ -562,6 +562,61 @@ def test_recovery_leaves_a_live_owner_alone(workspaces: tuple[Workspace, Workspa
     assert [record["status"] for record in transfers.recover_transfers(source)] == ["pending"]
 
 
+def _crashed_ejections(source: Workspace, tmp_path: Path, count: int) -> list[Marker]:
+    """Eject *count* jobs, each crashing after its fences (``E`` present, this live process its owner)."""
+
+    markers = []
+    for index in range(count):
+        marker = source.submit(_payload(tmp_path / "payloads", f"j{index}"), "jobs")
+        _hook_at("S3.fenced", _crash)
+        with pytest.raises(Crash):
+            transfers.eject_job(source, marker.job_id, tmp_path / f"loose-{index}")
+        markers.append(marker)
+    return markers
+
+
+def test_one_recovery_pass_lists_the_transferring_markers_once(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _destination = workspaces
+    _crashed_ejections(source, tmp_path, 8)
+    scans: list[tuple[str, ...]] = []
+    reads: list[str] = []
+    scan_markers, read_state = Workspace.scan_markers, Workspace.read_state
+
+    def counted_scan(self: Workspace, kinds: Any = None) -> Any:
+        scans.append(tuple(kinds or ()))
+        return scan_markers(self, kinds)
+
+    def counted_read(self: Workspace, marker: Marker) -> dict[str, Any]:
+        reads.append(marker.job_id)
+        return read_state(self, marker)
+
+    monkeypatch.setattr(Workspace, "scan_markers", counted_scan)
+    monkeypatch.setattr(Workspace, "read_state", counted_read)
+    assert [record["status"] for record in _sealing.recover(source)] == ["pending"] * 8
+    assert scans == [("transferring",)] and len(reads) == 8
+
+
+def test_stale_fences_are_undone_in_the_pass_that_leaves_a_live_owner_alone(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path
+) -> None:
+    source, _destination = workspaces
+    live, stale = _crashed_ejections(source, tmp_path, 2)
+    transfer_of = {
+        marker.job_id: transfer_id
+        for transfer_id, fenced in _sealing.fenced_transactions(source).items()
+        for marker, _frame in fenced.all()
+    }
+    # The crashed CLI's transaction directory is gone: neither E nor A names its fences.
+    shutil.rmtree(_sealing.eject_directory(source, transfer_of[stale.job_id]))
+    statuses = {str(record["transfer_id"]): record["status"] for record in _sealing.recover(source)}
+    assert statuses == {transfer_of[live.job_id]: "pending", transfer_of[stale.job_id]: "unfenced"}
+    home = source.find_marker_by_id(stale.job_id)
+    assert home is not None and home.kind == stale.kind and _home(source, stale).is_dir()
+    assert [marker.job_id for marker in _transferring(source)] == [live.job_id]
+
+
 def test_the_orphan_sweep_aborts_old_unfenced_transaction_directories(
     workspaces: tuple[Workspace, Workspace], tmp_path: Path
 ) -> None:
