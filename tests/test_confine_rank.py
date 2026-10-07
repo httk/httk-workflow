@@ -577,8 +577,10 @@ def test_helper_signal_reaches_the_whole_rank_group(launch: _Launch) -> None:
 
 
 def test_helper_keeps_shared_memory_until_the_rank_group_is_gone(launch: _Launch) -> None:
-    survivor = '(trap "" TERM; while [ ! -e release ]; do sleep 0.05; done; touch survived) &'
-    launch.request(("sh", "-c", f"{survivor} touch started; wait"))
+    # The survivor reports "started" only once its TERM trap is in place, so
+    # the signal below cannot arrive before the trap is set.
+    survivor = '(trap "" TERM; touch started; while [ ! -e release ]; do sleep 0.05; done; touch survived) &'
+    launch.request(("sh", "-c", f"{survivor} wait"))
     process = _run_helper(launch, wait=False)
     try:
         _wait_for(launch.job / "started", process)
