@@ -1167,13 +1167,24 @@ def test_a_stale_copy_out_owner_after_a_takeover_publishes_at_most_once(
         [entry] = _sealing.exports_in_doubt(source)
         doubtful = _sealing.in_doubt_directory(source, transfer_id) / marker.job_key
         assert entry["held"] == str(doubtful) and doubtful.is_dir() and not held.parent.exists()
+        _assert_whole_wrapper_in_doubt(source, transfer_id, marker)
     assert len(os.listdir(tmp_path / "far")) <= 1
+
+
+def _assert_whole_wrapper_in_doubt(source: Workspace, transfer_id: str, marker: Marker) -> None:
+    """The one wrapper (bundle, ``copy-to.json``, ``publishing`` witness) is the in-doubt record."""
+
+    wrapper = _sealing.in_doubt_directory(source, transfer_id)
+    assert sorted(os.listdir(wrapper)) == sorted([_sealing.COPY_TO, _sealing.PUBLISHING, marker.job_key])
+    witness = json.loads((wrapper / _sealing.PUBLISHING).read_text())
+    assert Path(witness["temporary"]).name.startswith(".httk-export.")
+    assert _tmp_entries(source) == []
 
 
 def test_a_pending_copy_out_claimant_never_republishes_an_export_held_in_doubt(
     workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Re-review B1: recovery holds the ambiguous bundle where no copy-out claims, while a claimant waits at X1."""
+    """Re-review B1: recovery holds the ambiguous wrapper where no copy-out claims, while a claimant tries one."""
 
     source, _destination = workspaces
     marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
@@ -1187,17 +1198,19 @@ def test_a_pending_copy_out_claimant_never_republishes_an_export_held_in_doubt(
     os.rename(tmp_path / "far" / "job", tmp_path / "consumed")
     # Only the crashed owner is gone; the claimant below is alive.
     monkeypatch.setattr(_txn, "owner_gone", lambda _control, token, **_kwargs: token == first)
-    recovered: list[list[Path]] = []
-    _hook_at(
-        "X1.staged",
-        lambda: recovered.append(
-            _sealing.resume_copy_outs(Workspace(source.root), owner=_txn.owner_token(str(uuid.uuid4())))
-        ),
-    )
-    with pytest.raises(ValueError, match="taken by another actor"):
-        _sealing.copy_out(source, transfer_id)
-    assert recovered == [[]]
+    claims: list[type[BaseException]] = []
+
+    def claim() -> None:
+        # The one wrapper is in the recoverer's staging: nothing is held for a claimant.
+        with pytest.raises(FileNotFoundError) as caught:
+            _sealing.copy_out(Workspace(source.root), transfer_id)
+        claims.append(caught.type)
+
+    _hook_at("copyout.cleanup", claim)
+    assert _sealing.resume_copy_outs(source, owner=_txn.owner_token(str(uuid.uuid4()))) == []
+    assert claims == [FileNotFoundError]
     assert os.listdir(tmp_path / "far") == []
+    assert not held.parent.exists()
     [entry] = _sealing.exports_in_doubt(source)
     assert Path(entry["held"]).is_dir() and Path(entry["held"]).parent == _sealing.in_doubt_directory(
         source, transfer_id
@@ -1237,6 +1250,7 @@ def test_a_second_takeover_still_discards_the_first_owners_witnessed_temporary(
     assert os.listdir(tmp_path / "far") == []
     [entry] = _sealing.exports_in_doubt(source)
     assert Path(entry["held"]).is_dir()
+    _assert_whole_wrapper_in_doubt(source, transfer_id, marker)
 
 
 def test_a_copy_out_published_before_a_crash_and_then_consumed_is_never_republished(
@@ -1262,6 +1276,7 @@ def test_a_copy_out_published_before_a_crash_and_then_consumed_is_never_republis
     [entry] = _sealing.exports_in_doubt(source)
     doubtful = _sealing.in_doubt_directory(source, transfer_id) / marker.job_key
     assert entry["held"] == str(doubtful) and doubtful.is_dir() and entry["transfer_id"] == transfer_id
+    _assert_whole_wrapper_in_doubt(source, transfer_id, marker)
     # Held apart from ordinary exports: no copy-out can claim it again.
     assert not held.parent.exists()
     with pytest.raises(FileNotFoundError):
@@ -1381,6 +1396,195 @@ def test_a_crashed_copy_out_is_resumed(
     assert not (source.control / "transfers" / "exports" / held.parent.name).exists()
 
 
+def _export_crashed_at(source: Workspace, tmp_path: Path, step: str) -> tuple[str, Marker, list[Marker]]:
+    """A tree whose export ejector died at *step*; return the transaction id and the jobs."""
+
+    parent, members = _tree(source, tmp_path / "tree")
+    _hook_at(step, _crash)
+    with pytest.raises(Crash):
+        _export(source, parent, tmp_path / "far" / "job")
+    [name] = _tmp_entries(source)
+    return name.removeprefix("eject."), parent, members
+
+
+@pytest.mark.parametrize("decision", ["forward", "abort"])
+def test_an_export_crashed_between_its_prepare_and_commit_renames_commits_or_aborts_whole(
+    decision: str, workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E1: the payload waits at ``E/export/<key>`` beside its born ``copy-to.json``; nothing is lost either way."""
+
+    source, destination = workspaces
+    transfer_id, parent, members = _export_crashed_at(source, tmp_path, "S6.prepared")
+    wrapper = _sealing.eject_directory(source, transfer_id) / _sealing.EXPORT
+    assert sorted(os.listdir(wrapper)) == sorted([_sealing.COPY_TO, parent.job_key])
+    assert not _sealing.exports_directory(source, transfer_id).exists()
+    _owner_gone(monkeypatch)
+    if decision == "abort":
+        assert _sealing._decide_abort(source, transfer_id)
+        # Crash right after the inverse of the prepare, then let recovery finish.
+        _hook_at("abort.export", _crash)
+        with pytest.raises(Crash):
+            _sealing.recover(source)
+        assert (_sealing.abort_directory(source, transfer_id) / "payload").is_dir()
+        assert [record["status"] for record in transfers.recover_transfers(source)] == ["aborted"]
+        _assert_home(source, [parent, *members])
+        return
+    assert [record["status"] for record in transfers.recover_transfers(source)] == ["ejected"]
+    held = _sealing.exports_directory(source, transfer_id)
+    assert sorted(os.listdir(held)) == sorted([_sealing.COPY_TO, parent.job_key])
+    (tmp_path / "far").mkdir()
+    _assert_ejected(source, destination, [parent, *members], _sealing.copy_out(source, transfer_id))
+
+
+@pytest.mark.parametrize("wrapper", ["held", "copied out"])
+def test_an_export_crashed_after_its_commit_rename_is_read_as_committed(
+    wrapper: str, workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The phase reader sees ``exports/<T>`` holding this T's bundle; a wrapper already copied out is still committed."""
+
+    source, destination = workspaces
+    transfer_id, parent, members = _export_crashed_at(source, tmp_path, "S7.cleanup")
+    eject = _sealing.eject_directory(source, transfer_id)
+    assert eject.is_dir() and not (eject / _sealing.EXPORT).exists()
+    assert len(_transferring(source)) == 1 + len(members)
+    (tmp_path / "far").mkdir()
+    if wrapper == "copied out":
+        # A live `job eject --resume` copies the wrapper out before any recovery runs.
+        assert _sealing.copy_out(source, transfer_id) == tmp_path / "far" / "job"
+    _owner_gone(monkeypatch)
+    assert [record["status"] for record in transfers.recover_transfers(source)] == ["ejected"]
+    assert not _transferring(source) and _tmp_entries(source) == []
+    if wrapper == "held":
+        _sealing.copy_out(source, transfer_id)
+    _assert_ejected(source, destination, [parent, *members], tmp_path / "far" / "job")
+    assert not _sealing.exports_directory(source, transfer_id).exists()
+
+
+def test_an_export_transaction_without_its_wrapper_aborts_instead_of_committing(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``E`` holding the payload but no ``export/`` (an older layout, or damage) can never commit: it aborts."""
+
+    source, _destination = workspaces
+    transfer_id, parent, members = _export_crashed_at(source, tmp_path, "S6.commit")
+    shutil.rmtree(_sealing.eject_directory(source, transfer_id) / _sealing.EXPORT)
+    _owner_gone(monkeypatch)
+    assert [record["status"] for record in transfers.recover_transfers(source)] == ["aborted"]
+    _assert_home(source, [parent, *members])
+    assert not _sealing.exports_directory(source, transfer_id).exists()
+
+
+def test_a_wrapper_left_in_e_with_its_bundle_gone_stops_and_moves_nothing(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``E/export`` leaves ``E`` only by the commit rename: still there with the bundle nowhere is never a commit."""
+
+    source, _destination = workspaces
+    transfer_id, parent, members = _export_crashed_at(source, tmp_path, "S6.prepared")
+    wrapper = _sealing.eject_directory(source, transfer_id) / _sealing.EXPORT
+    os.rename(wrapper / parent.job_key, tmp_path / "elsewhere")
+    _owner_gone(monkeypatch)
+    assert [record["status"] for record in transfers.recover_transfers(source)] == ["failed"]
+    assert sorted(os.listdir(wrapper)) == [_sealing.COPY_TO]
+    assert (
+        len(_transferring(source)) == 1 + len(members) and not _sealing.exports_directory(source, transfer_id).exists()
+    )
+
+
+def test_a_refused_export_adoption_whose_wrapper_was_discarded_is_quarantined_once(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path
+) -> None:
+    """Review M1: the bundle cannot go back into a discarded wrapper; the lineage is quarantined, not retried."""
+
+    source, _destination = workspaces
+    payload = _payload(tmp_path / "payloads")
+    duplicate = tmp_path / "duplicate"
+    shutil.copytree(payload, duplicate)
+    marker = source.submit(payload, "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+
+    def race() -> None:
+        # A copy-out claims the emptied wrapper and discards it; a local job with the
+        # same id appears, so the adoption is refused.
+        with pytest.raises(ValueError, match="taken by another actor"):
+            _sealing.copy_out(Workspace(source.root), transfer_id)
+        source.submit(duplicate, "local")
+
+    _hook_at("V2.claimed", race)
+    with pytest.raises(FileExistsError, match="already holds job"):
+        transfers.adopt_job(source, held)
+    assert not held.parent.exists() and os.listdir(tmp_path / "far") == []
+    [quarantined] = list((source.control / "quarantine").iterdir())
+    assert (quarantined / "report.json").is_file()
+    assert any(path.name == "job.json" for path in (quarantined / "entry").rglob("job.json"))
+    assert _tmp_entries(source) == []
+    assert transfers.recover_transfers(source) == []
+    assert _tmp_entries(source) == [] and len(list((source.control / "quarantine").iterdir())) == 1
+
+
+def test_a_takeover_between_the_witness_unlink_and_the_return_to_held_leaves_one_held_wrapper(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review T1: the takeover re-runs the copy-out and returns the wrapper itself; the owner's rename back loses."""
+
+    source, _destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+    squatter = tmp_path / "far" / "job"
+    taken: list[list[Path]] = []
+
+    def hook(step: str) -> None:
+        if step == "X5.witnessed" and not squatter.exists():
+            squatter.mkdir()
+            (squatter / "someone").write_text("else")
+        elif step == "X5.unwitnessed" and not taken:
+            _txn._HOOK = None
+            with monkeypatch.context() as patch:
+                patch.setattr(_txn, "owner_gone", lambda *args, **kwargs: True)
+                other = _txn.owner_token(str(uuid.uuid4()))
+                taken.append(_sealing.resume_copy_outs(Workspace(source.root), owner=other))
+
+    _txn._HOOK = hook
+    with pytest.raises(ValueError, match="taken over"):
+        _sealing.copy_out(source, transfer_id)
+    assert taken == [[]]
+    assert sorted(os.listdir(held.parent)) == sorted([_sealing.COPY_TO, marker.job_key])
+    assert os.listdir(tmp_path / "far") == ["job"] and os.listdir(squatter) == ["someone"]
+    assert _tmp_entries(source) == [] and _sealing.exports_in_doubt(source) == []
+
+
+def test_a_taken_destination_returns_the_wrapper_held_without_its_witness(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path
+) -> None:
+    """E3: the owner unlinks its witness before the wrapper goes back, so a later copy-out is ordinary."""
+
+    source, destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+    squatter = tmp_path / "far" / "job"
+
+    def squat() -> None:
+        squatter.mkdir()
+        (squatter / "someone").write_text("else")
+
+    _hook_at("X5.witnessed", squat)
+    with pytest.raises(FileExistsError, match="was taken meanwhile"):
+        _sealing.copy_out(source, transfer_id)
+    assert sorted(os.listdir(held.parent)) == sorted([_sealing.COPY_TO, marker.job_key])
+    assert os.listdir(tmp_path / "far") == ["job"] and _tmp_entries(source) == []
+    assert _sealing.exports_in_doubt(source) == [] and _sealing.held_exports(source) == [transfer_id]
+    shutil.rmtree(squatter)
+    assert command(["job", "eject", "--resume"], CLIContext("httk", source.root)) == 0
+    _assert_ejected(source, destination, [marker], squatter)
+    assert not held.parent.exists()
+
+
 def test_a_copy_out_racing_an_adoption_of_the_held_export_loses_cleanly(
     workspaces: tuple[Workspace, Workspace], tmp_path: Path
 ) -> None:
@@ -1390,17 +1594,18 @@ def test_a_copy_out_racing_an_adoption_of_the_held_export_loses_cleanly(
     held = _export(source, marker, tmp_path / "far" / "job")
     adopted = tmp_path / "adopted"
     # The adoption chain's claim is one rename of the held bundle (stubbed until it exists).
-    _hook_at("X1.staged", lambda: os.rename(held, adopted))
+    _hook_at("X2.claim", lambda: os.rename(held, adopted))
     with pytest.raises(ValueError, match="taken by another actor"):
         _sealing.copy_out(source, held.parent.name)
     assert adopted.is_dir() and os.listdir(tmp_path / "far") == []
-    assert _tmp_entries(source) == []
+    # The copy-out claimed the emptied wrapper and discarded it, as the adoption would have.
+    assert _tmp_entries(source) == [] and not held.parent.exists()
 
 
 @pytest.mark.parametrize(
     "step",
     _marked(
-        ("X1.staged", "X2.claimed", "X3.copied", "X4.verified", "X5.published", "trash.renamed"),
+        ("X2.claim", "X2.claimed", "X3.copied", "X4.verified", "X5.published", "trash.renamed"),
         {"X2.claimed", "X5.published"},
     ),
 )

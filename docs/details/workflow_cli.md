@@ -777,8 +777,9 @@ another filesystem, the job is first exported to
 `transfers/exports/<T>/<job_key>` and then copied out; if the copy-out was
 interrupted, `httk job eject --resume` (alone, with no JOB or DEST) finishes
 every pending one. A copy-out interrupted after its publication witness may
-already have delivered the bundle; it is then held in doubt
-(`transfers/in-doubt/<T>/<job_key>/`, with `in-doubt.json` beside it) and never republished. `--resume` and
+already have delivered the bundle; its whole wrapper (bundle, `copy-to.json`
+and the `publishing` witness) is then held in doubt at `transfers/in-doubt/<T>/`
+and never republished. `--resume` and
 `transfer status` report it, and the operator removes the held copy or adopts
 it back with `httk job adopt transfers/in-doubt/<T>/<job_key>` (the full path).
 

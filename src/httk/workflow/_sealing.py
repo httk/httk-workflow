@@ -8,11 +8,13 @@ Step  What happens                                                    Mechanism
 ====  ==============================================================  =================================
 S0    pre-check: kinds, joins, tree, claims, devices, target           read only (plus 13.1 receipts)
 S1    ``E`` is born with ``envelope.partial/{markers,runners,tree}``   :func:`~httk.workflow._txn.birth`
+      (an export also with its wrapper ``export/copy-to.json``)
 S2    every member is fenced (``transferring``), in job-id order       single-source marker renames
 S3    the root is fenced, recording the whole transaction              single-source marker rename
 S4    manifest and runners linked in; member payloads moved in         ``link_new``, single-source renames
 S5    the root payload moved to ``E/payload``, the envelope into it    single-source renames
-S6    commit: ``E/payload`` renamed to the target                      one rename
+S6    commit: ``E/payload`` renamed to the target; an export moves     one rename (an export: two)
+      it into ``E/export``, then ``E/export`` to ``transfers/exports/<T>``
 S7    markers removed, ``E`` trashed (ejection and export only)        unlink, :func:`~httk.workflow._txn.trash`
 ====  ==============================================================  =================================
 
@@ -24,8 +26,9 @@ that finds a marker ``transferring`` under *T* reads the phase from fixed names
 does so only when the recorded owner is evidently gone.
 
 The committed location is the target directory of an ejection (or an entry of
-the exchange outbox, by descriptor), ``transfers/exports/<T>/<job_key>`` for an
-export to another filesystem (copied out by :func:`copy_out`), or
+the exchange outbox, by descriptor), the wrapper ``transfers/exports/<T>``
+(``<job_key>`` and ``copy-to.json``) for an export to another filesystem (copied
+out by :func:`copy_out`, which carries the whole wrapper by renames), or
 ``transfers/outgoing/<T>`` for an addressed transfer, whose markers stay
 ``transferring`` until the destination's acknowledgement.
 """
@@ -84,12 +87,13 @@ _LOGGER = logging.getLogger(__name__)
 ENVELOPE_PARTIAL = "envelope.partial"
 ENVELOPE = "envelope"
 PAYLOAD = "payload"
-#: The record an export directory carries beside the held bundle: where the copy-out goes.
+#: The export wrapper inside ``E``: born with its ``copy-to.json``, committed as ``transfers/exports/<T>``.
+EXPORT = "export"
+#: The record an export wrapper carries beside the held bundle: where the copy-out goes.
 COPY_TO = "copy-to.json"
-#: The publication witness a copy-out owner links into its staging directory before X5.
+#: The publication witness a copy-out owner links into the wrapper before X5; with ``copy-to.json``
+#: it is the record of an export held in doubt (``transfers/in-doubt/<T>``).
 PUBLISHING = "publishing"
-#: The record beside a held bundle in ``transfers/in-doubt/<T>/`` whose copy-out may have published it.
-IN_DOUBT = "in-doubt.json"
 #: How long an ``eject.<T>`` no marker names, or a ``birth.*``, is left alone by the orphan sweep.
 ORPHAN_SECONDS = 24 * 3600
 #: Transfers decided aborted after their commit that this process already reported at warning level.
@@ -179,10 +183,11 @@ def retired_path(workspace: Workspace, transfer_id: str) -> Path:
 
 
 def in_doubt_directory(workspace: Workspace, transfer_id: str) -> Path:
-    """Return ``transfers/in-doubt/<T>``: an export whose copy-out may already have published it.
+    """Return ``transfers/in-doubt/<T>``: the wrapper of an export whose copy-out may already have published it.
 
-    Ordinary copy-out only ever claims ``exports/<T>/<key>``, so a bundle held
-    here is never copied out again; ``httk job adopt`` of it takes it back.
+    It holds the bundle, ``copy-to.json`` and the ``publishing`` witness.
+    Ordinary copy-out only ever claims ``exports/<T>``, so a bundle held here is
+    never copied out again; ``httk job adopt`` of ``in-doubt/<T>/<key>`` takes it back.
 
     :param workspace: The source workspace.
     :param transfer_id: The transaction id.
@@ -193,7 +198,7 @@ def in_doubt_directory(workspace: Workspace, transfer_id: str) -> Path:
 
 
 def exports_directory(workspace: Workspace, transfer_id: str) -> Path:
-    """Return ``transfers/exports/<T>``, which holds an exported bundle until it is copied out.
+    """Return ``transfers/exports/<T>``, the wrapper holding an exported bundle until it is copied out.
 
     :param workspace: The source workspace.
     :param transfer_id: The transaction.
@@ -835,9 +840,16 @@ def _runner_parents(workspace: Workspace, jobs: Sequence[TxnJob]) -> set[PurePos
 
 
 def _skeleton(
-    members: Sequence[TxnJob], jobs: Sequence[TxnJob], runner_parents: Iterable[PurePosixPath] = ()
+    members: Sequence[TxnJob],
+    jobs: Sequence[TxnJob],
+    runner_parents: Iterable[PurePosixPath] = (),
+    copy_to: bytes | None = None,
 ) -> Callable[[Path], None]:
     def build(directory: Path) -> None:
+        if copy_to is not None:
+            # E1: the export wrapper is born complete inside E; only its bundle joins it later.
+            (directory / EXPORT).mkdir()
+            (directory / EXPORT / COPY_TO).write_bytes(copy_to)
         partial = directory / ENVELOPE_PARTIAL
         for name in (TRANSFER_MARKERS, TRANSFER_RUNNERS, TRANSFER_TREE):
             (partial / name).mkdir(parents=True)
@@ -1104,7 +1116,7 @@ def _prepare(workspace: Workspace, txn: Transaction) -> None:
 
 
 def _commit(workspace: Workspace, txn: Transaction) -> Path:
-    """S6: one rename of ``E/payload`` to the committed location."""
+    """S6: one rename of ``E/payload`` to the committed location (an export: prepare, then the wrapper)."""
 
     eject = eject_directory(workspace, txn.transfer_id)
     source = eject / PAYLOAD
@@ -1135,7 +1147,21 @@ def _commit(workspace: Workspace, txn: Transaction) -> Path:
                 assert commit.path is not None
                 location = commit.path
             elif commit.kind == "export":
-                location = _born_exports(workspace, txn) / txn.root.job_key
+                # E1 prepare: the payload joins its wrapper inside E (a no-op once it
+                # is there); then the commit renames the whole wrapper onto an absent name.
+                wrapper = eject / EXPORT
+                if not _lexists(wrapper) and _lexists(source):
+                    # The wrapper is born with E and leaves it only with the payload
+                    # inside: none while the payload is in E/payload (an export begun
+                    # before the wrapper layout, or damage) can never commit. Abort,
+                    # which is always safe before the commit, and say why.
+                    raise _Abort(f"{eject} holds no export wrapper {EXPORT}/ to commit")
+                if _txn.rename_verified(source, wrapper / txn.root.job_key):
+                    _sync(workspace, eject, wrapper)
+                _txn._hook("S6.prepared")
+                source = wrapper
+                location = exports_directory(workspace, txn.transfer_id)
+                location.parent.mkdir(parents=True, exist_ok=True)
             else:
                 location = outgoing_path(workspace, txn.transfer_id)
                 location.parent.mkdir(parents=True, exist_ok=True)
@@ -1154,7 +1180,7 @@ def _commit(workspace: Workspace, txn: Transaction) -> Path:
         if not _lexists(eject):
             raise _PhaseChanged()
     _sync(workspace, eject)
-    return location
+    return committed_location(workspace, txn) if commit.kind == "export" else location
 
 
 def _probe_at(name: str, directory: int) -> bool:
@@ -1165,38 +1191,12 @@ def _probe_at(name: str, directory: int) -> bool:
     return True
 
 
-def _born_exports(workspace: Workspace, txn: Transaction) -> Path:
-    """Create ``transfers/exports/<T>`` with its ``copy-to.json``, born complete by rename."""
+def _copy_to_bytes(txn: Transaction) -> bytes:
+    """The ``copy-to.json`` an export wrapper is born with: where its copy-out goes."""
 
     assert txn.commit.path is not None
-    exports = exports_directory(workspace, txn.transfer_id)
-    record = json_bytes(
-        {"destination": str(txn.commit.path), "job_key": txn.root.job_key, "transfer_id": txn.transfer_id}
-    )
-
-    def build(directory: Path) -> None:
-        (directory / COPY_TO).write_bytes(record + b"\n")
-
-    exports.parent.mkdir(parents=True, exist_ok=True)
-    tmp = workspace.control / "tmp"
-    if not _lexists(exports):
-        staging = tmp / f"birth.{uuid.uuid4().hex}"
-        os.mkdir(staging, 0o755)
-        try:
-            build(staging)
-            if workspace.durable:
-                fsync_tree(staging)
-            try:
-                _txn.rename_verified(staging, exports)
-            except OSError as exc:
-                if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                    raise
-        finally:
-            _txn.remove_tree(staging)
-        _sync(workspace, exports.parent)
-    if _read_regular_file(exports / COPY_TO, 1 << 16) != record + b"\n":
-        raise _Abort(f"{exports} records another copy-out")
-    return exports
+    record = {"destination": str(txn.commit.path), "job_key": txn.root.job_key, "transfer_id": txn.transfer_id}
+    return json_bytes(record) + b"\n"
 
 
 def committed_location(workspace: Workspace, txn: Transaction) -> Path:
@@ -1307,17 +1307,39 @@ def _forward_moves(workspace: Workspace, txn: Transaction) -> Path:
             _sync(workspace, eject, payload)
         _txn._hook("S6.commit")
         return _commit(workspace, txn)
+    if txn.commit.kind == "export":
+        if _lexists(eject / EXPORT / txn.root.job_key):
+            # Prepared, not yet committed: the wrapper's rename is all that is left.
+            _check_identity(eject / EXPORT / txn.root.job_key, txn)
+            return _commit(workspace, txn)
+        held_export = committed_location(workspace, txn)
+        manifest = _read_envelope_manifest(held_export / TRANSFER_DIRECTORY)
+        if manifest is not None:
+            if manifest.transfer_id != txn.transfer_id:
+                raise WorkspaceCorruptionError(
+                    f"transfer {txn.transfer_id}: {held_export} holds transfer {manifest.transfer_id}; stopping"
+                )
+            # Committed, positively observed: E/export is gone and exports/<T> holds this T's bundle.
+            return held_export
     held = [outgoing_path(workspace, txn.transfer_id), retired_path(workspace, txn.transfer_id)]
-    held.append(exports_directory(workspace, txn.transfer_id) / txn.root.job_key)
     if not any(_lexists(path) for path in held):
-        # Not at its placement, not in E/payload, not at a trusted committed
-        # location: committed to client territory, unless E was renamed
-        # meanwhile (E can never reappear, so a present E proves the commit).
+        # Not at its placement, not in E/payload (nor E/export), not at a trusted
+        # committed location: committed to client territory (or, for an export,
+        # its wrapper moved on into a copy-out, in doubt or back by adoption),
+        # unless E was renamed meanwhile (E can never reappear, so a present E
+        # proves the commit: E/export leaves E only by the commit rename).
         # The target itself proves nothing either way: anybody may create a
         # path in client territory, and its user may already have moved the job on.
         _txn._hook("phase.recheck")
         if not _lexists(eject):
             raise _PhaseChanged()
+        if txn.commit.kind == "export" and _lexists(eject / EXPORT):
+            # The wrapper leaves E only by the commit rename, with the bundle inside:
+            # still in E with its bundle nowhere is damage, never a commit.
+            raise WorkspaceCorruptionError(
+                f"transfer {txn.transfer_id}: {eject / EXPORT} is still in place, but its bundle is in none of "
+                "its locations; stopping, nothing was moved"
+            )
         if txn.commit.kind == "path" and txn.commit.path is not None and not _lexists(txn.commit.path):
             _LOGGER.info(
                 "transfer %s committed to %s, which was moved on meanwhile",
@@ -1400,6 +1422,10 @@ def _abort_steps(workspace: Workspace, transfer_id: str, fenced: Fenced) -> str:
         _txn._hook("abort.reclaim")
         _txn.rename_verified(outgoing, abort / PAYLOAD)
         _sync(workspace, outgoing.parent, abort)
+    # (1b) The inverse of an export's prepare (E1): A/export/<key> back to A/payload.
+    if root is not None and _txn.rename_verified(abort / EXPORT / root.job_key, abort / PAYLOAD):
+        _txn._hook("abort.export")
+        _sync(workspace, abort / EXPORT, abort)
     # (2) The inverse of S5, while the payload is still private.
     carried = abort / PAYLOAD / TRANSFER_DIRECTORY
     if _lexists(carried) and not _lexists(abort / ENVELOPE) and not _lexists(abort / ENVELOPE_PARTIAL):
@@ -1505,7 +1531,7 @@ def settle(
       waits for the acknowledgement of an addressed transfer); without a fenced
       root the owner died before S3, and the transaction aborts.
     * ``A`` present (abort): the abort steps run, unless the root payload is in
-      none of ``outgoing/<T>``, ``A/payload`` or its placement — then the commit
+      none of ``outgoing/<T>``, ``A/export/<key>``, ``A/payload`` or its placement — then the commit
       (or acknowledgement) happened before the abort decision, and only the
       clean-up runs, never an unfence.
     * neither: no payload of *T* can move any more; a marker whose payload is at
@@ -1576,11 +1602,14 @@ def settle(
                 return "pending"
             root = fenced.root_identity()
             txn = None if fenced.root is None else Transaction.from_root(*fenced.root)
-            # Probed in the order a payload moves (outgoing/<T> -> A/payload -> home):
-            # one that moves on between two probes is still found at a later one.
+            # Probed in the order a payload moves (outgoing/<T> or A/export/<key>
+            # -> A/payload -> home): one that moves on between two probes is still
+            # found at a later one.
             held_back = []
             if txn is not None and txn.addressed:
                 held_back.append(outgoing_path(workspace, transfer_id))
+            if root is not None:
+                held_back.append(abort / EXPORT / root.job_key)
             held_back.append(abort / PAYLOAD)
             if root is not None:
                 held_back.append(workspace.payload_path(root.placement, root.job_key))
@@ -1709,7 +1738,12 @@ def seal(
     if not _txn.birth(
         workspace.control / "tmp",
         f"eject.{identifier}",
-        _skeleton(txn.members, txn.jobs, _runner_parents(workspace, txn.jobs)),
+        _skeleton(
+            txn.members,
+            txn.jobs,
+            _runner_parents(workspace, txn.jobs),
+            _copy_to_bytes(txn) if commit.kind == "export" else None,
+        ),
         durable=workspace.durable,
     ):
         raise ValueError(f"transfer {identifier} already exists")
@@ -1807,6 +1841,9 @@ def _sweep(workspace: Workspace, fenced: set[str], now: int) -> None:
         kind, _, transfer_id = name.partition(".")
         path = tmp / name
         try:
+            # A wrapper a copy-out already claimed (tmp/export.*) or held in doubt is
+            # missed here; the fenced check below then decides, which is harmless: the
+            # commit happened, so neither E nor A holds a payload of T any more.
             committed = kind in {"eject", "abort"} and any(
                 _lexists(held)
                 for held in (outgoing_path(workspace, transfer_id), exports_directory(workspace, transfer_id))
@@ -1956,10 +1993,17 @@ def _bundle_digest(bundle: Path) -> str | None:
 def copy_out(workspace: Workspace, transfer_id: str, *, owner: str | None = None) -> Path:
     """Copy one held export to its destination on the other filesystem (X1-X6), or finish a taken-over one.
 
+    The copy-out claims the whole wrapper ``exports/<T>`` (bundle and
+    ``copy-to.json``) by one rename into its staging name and carries it by
+    renames from there: trashed after the publication, back to ``exports/<T>``
+    when the destination is taken, or to ``transfers/in-doubt/<T>`` when an
+    interrupted publication may already have delivered it.
+
     :param workspace: The source workspace.
     :param transfer_id: The export's transaction id.
     :param owner: The owner token (this CLI process when omitted).
     :return: The destination directory.
+    :raises FileNotFoundError: If no export of that transaction is held.
     :raises FileExistsError: If the destination is taken by something else; the bundle stays held.
     :raises ValueError: If another actor took the held bundle (an adoption, another copy-out, or a
         recovery that found an earlier copy-out may have delivered it).
@@ -1969,19 +2013,17 @@ def copy_out(workspace: Workspace, transfer_id: str, *, owner: str | None = None
     token = _txn.owner_token() if owner is None else owner
     exports = exports_directory(workspace, transfer_id)
     record = _copy_record(exports)
-    held = exports / record["job_key"]
-    now = time.time_ns()
-    staging = workspace.control / "tmp" / f"export.{token}.{_txn.format_ns(now)}.{transfer_id}"
-    # X1
-    os.mkdir(staging, 0o755)
-    _txn.link_new(staging, COPY_TO, json_bytes(record) + b"\n", durable=workspace.durable)
-    _txn._hook("X1.staged")
-    # X2
-    if not _txn.rename_verified(held, staging / "bundle"):
+    staging = workspace.control / "tmp" / f"export.{token}.{_txn.format_ns(time.time_ns())}.{transfer_id}"
+    # X1-X2: the claim of the whole wrapper (no second record is written).
+    _txn._hook("X2.claim")
+    if not _txn.rename_verified(exports, staging):
+        raise ValueError(f"the exported job {record['job_key']} was taken by another actor")
+    _sync(workspace, exports.parent, staging.parent)
+    _txn._hook("X2.claimed")
+    if not _lexists(staging / record["job_key"]):
+        # `job adopt` claimed the bundle out of the wrapper first; only the record came along.
         _txn.trash(staging, control=workspace.control, holds_payload=_txn.holds_job_payload)
         raise ValueError(f"the exported job {record['job_key']} was taken by another actor")
-    _sync(workspace, exports, staging)
-    _txn._hook("X2.claimed")
     return _finish_copy_out(workspace, staging, transfer_id, record)
 
 
@@ -1993,18 +2035,18 @@ def _in_doubt_message(held: Path, record: Mapping[str, str]) -> str:
 
 
 def _finish_copy_out(workspace: Workspace, staging: Path, transfer_id: str, record: Mapping[str, str]) -> Path:
-    """X3-X6 from a staging directory that holds the claimed bundle.
+    """X3-X6 from a staging directory that holds the claimed wrapper.
 
     Before the publishing rename (X5) the owner links the witness
-    ``publishing`` into its staging directory. That name is the fence: once a
-    takeover renamed the staging directory the link fails and the owner stops,
-    and a later owner that finds the witness never publishes again (the outcome
-    is in doubt, :func:`resume_copy_outs`). The publication itself renames a
+    ``publishing`` into the wrapper. That name is the fence: once a takeover
+    renamed the staging directory the link fails and the owner stops, and a
+    later owner that finds the witness never publishes again (the outcome is in
+    doubt, :func:`resume_copy_outs`). The publication itself renames a
     temporary outside the workspace, which no takeover can fence.
     """
 
     destination = Path(record["destination"])
-    bundle = staging / "bundle"
+    bundle = staging / record["job_key"]
     digest = _bundle_digest(bundle)
     token = staging.name.removeprefix("export.").rsplit(".", 1)[0]
     temporary = _export_temporary(destination, token)
@@ -2041,11 +2083,10 @@ def _finish_copy_out(workspace: Workspace, staging: Path, transfer_id: str, reco
             raise
         _txn.remove_tree(temporary)
         if not _holds_transfer(workspace, destination, transfer_id, digest):
-            exports = exports_directory(workspace, transfer_id)
-            _txn.rename_verified(bundle, exports / record["job_key"])
-            _txn.trash(staging, control=workspace.control, holds_payload=_txn.holds_job_payload)
+            _return_to_held(workspace, staging, transfer_id, record)
             raise FileExistsError(
-                f"export destination {destination} was taken meanwhile; the job stays held in {exports}"
+                f"export destination {destination} was taken meanwhile; the job stays held in "
+                f"{exports_directory(workspace, transfer_id)}"
             ) from exc
         moved = True
     if not moved:
@@ -2055,10 +2096,28 @@ def _finish_copy_out(workspace: Workspace, staging: Path, transfer_id: str, reco
     _txn._hook("X5.published")
     # X6
     _txn.trash(staging, control=workspace.control, holds_payload=None)
-    exports = exports_directory(workspace, transfer_id)
-    if _lexists(exports) and not _lexists(exports / record["job_key"]):
-        _txn.trash(exports, control=workspace.control, holds_payload=_txn.holds_job_payload)
     return destination
+
+
+def _return_to_held(workspace: Workspace, staging: Path, transfer_id: str, record: Mapping[str, str]) -> None:
+    """X5 found the destination taken: drop the witness (E3), then rename the wrapper back to ``exports/<T>``.
+
+    This owner's temporary is already removed and was never published, so the
+    witness goes first: a later copy-out then sees an ordinary held export, not
+    one in doubt. A takeover that renamed the staging directory before the
+    unlink saw the witness and holds the export in doubt instead.
+    """
+
+    try:
+        os.unlink(staging / PUBLISHING)
+    except FileNotFoundError as exc:
+        raise ValueError(f"the copy-out of exported job {record['job_key']} was taken over by another actor") from exc
+    _sync(workspace, staging)
+    _txn._hook("X5.unwitnessed")
+    exports = exports_directory(workspace, transfer_id)
+    if not _txn.rename_verified(staging, exports):
+        raise ValueError(f"the copy-out of exported job {record['job_key']} was taken over by another actor")
+    _sync(workspace, staging.parent, exports.parent)
 
 
 def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int | None = None) -> list[Path]:
@@ -2074,7 +2133,6 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
     clock = time.time_ns() if now is None else now
     done: list[Path] = []
     tmp = workspace.control / "tmp"
-    stagings: dict[str, Path] = {}
     try:
         names = sorted(os.listdir(tmp))
     except FileNotFoundError:
@@ -2086,7 +2144,6 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
         if len(parts) != 4:
             continue
         _, staged_owner, started, transfer_id = parts
-        stagings[transfer_id] = tmp / name
         try:
             since = _txn.parse_ns(started)
             gone = _txn.owner_gone(
@@ -2099,14 +2156,13 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
         mine = tmp / f"export.{token}.{_txn.format_ns(clock)}.{transfer_id}"
         if not _txn.rename_verified(tmp / name, mine):
             continue
-        stagings[transfer_id] = mine
         try:
             record = _copy_record(mine)
             destination = Path(record["destination"])
             witness = _read_witness(mine)
             # The copy a previous owner may still publish: the one its witness names
-            # (carried along by every takeover rename of the staging directory), else
-            # the previous owner's by its exact name. It is renamed away first, so a
+            # (carried along by every takeover rename of the wrapper), else the
+            # previous owner's by its exact name. It is renamed away first, so a
             # stale owner's publishing rename and this removal cannot both happen.
             _txn._hook("copyout.cleanup")
             _discard_temporary(
@@ -2114,13 +2170,11 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
                 if witness is not None
                 else _export_temporary(destination, f"{staged_owner}.{started}")
             )
-            if _lexists(mine / "bundle"):
-                if _holds_transfer(workspace, destination, transfer_id, _bundle_digest(mine / "bundle")):
+            bundle = mine / record["job_key"]
+            if _lexists(bundle):
+                if _holds_transfer(workspace, destination, transfer_id, _bundle_digest(bundle)):
                     # Published before the owner died (X5): only X6 is left.
                     _txn.trash(mine, control=workspace.control, holds_payload=None)
-                    exports = exports_directory(workspace, transfer_id)
-                    if _lexists(exports) and not _lexists(exports / record["job_key"]):
-                        _txn.trash(exports, control=workspace.control, holds_payload=_txn.holds_job_payload)
                     done.append(destination)
                 elif witness is not None or _lexists(mine / PUBLISHING):
                     # The previous owner may have published, and the destination may have
@@ -2129,6 +2183,9 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
                 else:
                     done.append(_finish_copy_out(workspace, mine, transfer_id, record))
             else:
+                # ponytail: a staging from before the wrapper layout (its bundle at
+                # ``bundle/``) is not recognized and lands in quarantine through the
+                # payload check; add a teaching refusal if such workspaces ever exist.
                 _txn.trash(mine, control=workspace.control, holds_payload=_txn.holds_job_payload)
         except (WorkflowError, OSError, ValueError) as exc:
             _LOGGER.warning("cannot resume copy-out %s: %s", transfer_id, exc, extra={"event": "export_pending"})
@@ -2149,8 +2206,9 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
                 done.append(copy_out(workspace, transfer_id, owner=token))
             except (WorkflowError, OSError, ValueError) as exc:
                 _LOGGER.warning("cannot copy out export %s: %s", transfer_id, exc, extra={"event": "export_pending"})
-        elif transfer_id not in stagings and not _lexists(eject_directory(workspace, transfer_id)):
-            # Copied out (or adopted back) already: only the record is left.
+        else:
+            # The wrapper is born and carried with its bundle: an emptied one was
+            # adopted back, and the adoption died before discarding it.
             _txn.trash(exports, control=workspace.control, holds_payload=_txn.holds_job_payload)
     for entry in _in_doubt_entries(workspace):
         if not entry["present"]:
@@ -2164,7 +2222,7 @@ def resume_copy_outs(workspace: Workspace, *, owner: str | None = None, now: int
 
 
 def _read_witness(staging: Path) -> dict[str, str] | None:
-    """Read a staging directory's ``publishing`` witness; an unreadable one still counts as present."""
+    """Read a wrapper's ``publishing`` witness; an unreadable one still counts as present."""
 
     try:
         value = json.loads(_read_regular_file(staging / PUBLISHING, 1 << 16))
@@ -2205,27 +2263,20 @@ def _discard_temporary(temporary: Path) -> None:
 
 
 def _hold_in_doubt(workspace: Workspace, staging: Path, transfer_id: str, record: Mapping[str, str]) -> None:
-    """Move an ambiguous copy-out's bundle to ``transfers/in-doubt/<T>/<key>`` with its record, and report it.
+    """Move an ambiguous copy-out's whole wrapper to ``transfers/in-doubt/<T>``, and report it.
 
-    That path is never claimed by an ordinary copy-out, so no pending or later
-    copy-out can publish the bundle again.
+    The wrapper keeps the bundle, ``copy-to.json`` and the ``publishing``
+    witness, which together are the in-doubt record. That path is never claimed
+    by an ordinary copy-out, so no pending or later copy-out can publish the
+    bundle again.
     """
 
     directory = in_doubt_directory(workspace, transfer_id)
     directory.parent.mkdir(parents=True, exist_ok=True)
-    document = json_bytes({**record, "transfer_id": transfer_id, "recorded_at": time.time_ns()}) + b"\n"
-
-    def build(path: Path) -> None:
-        (path / IN_DOUBT).write_bytes(document)
-
-    _txn.birth(workspace.control / "tmp", transfer_id, build, durable=workspace.durable, parent=directory.parent)
+    if not _txn.rename_verified(staging, directory):
+        raise ValueError(f"the copy-out of exported job {record['job_key']} was taken over by another actor")
+    _sync(workspace, staging.parent, directory.parent)
     held = directory / record["job_key"]
-    _txn.rename_verified(staging / "bundle", held)
-    _sync(workspace, directory, staging)
-    _txn.trash(staging, control=workspace.control, holds_payload=_txn.holds_job_payload)
-    exports = exports_directory(workspace, transfer_id)
-    if _lexists(exports) and not _lexists(exports / record["job_key"]):
-        _txn.trash(exports, control=workspace.control, holds_payload=_txn.holds_job_payload)
     _LOGGER.warning(_in_doubt_message(held, record), extra={"event": "export_in_doubt", "transfer_id": transfer_id})
 
 
@@ -2239,14 +2290,33 @@ def _in_doubt_entries(workspace: Workspace) -> list[dict[str, Any]]:
     for transfer_id in names:
         directory = root / transfer_id
         try:
-            value = json.loads(_read_regular_file(directory / IN_DOUBT, 1 << 16))
-            record = {"destination": str(value["destination"]), "job_key": str(value["job_key"])}
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+            record = _copy_record(directory)
+        except (OSError, ValueError, FormatError) as exc:
             _LOGGER.warning("cannot read %s: %s", directory, exc, extra={"event": "export_pending"})
             continue
         held = directory / record["job_key"]
         result.append({"transfer_id": transfer_id, **record, "held": str(held), "present": _lexists(held)})
     return result
+
+
+def held_exports(workspace: Workspace) -> list[str]:
+    """Return the transaction id of every export waiting for its copy-out: held, or in a copy-out staging.
+
+    :param workspace: The source workspace.
+    :return: The sorted transaction ids.
+    """
+
+    held: set[str] = set()
+    for directory, prefix in (
+        (workspace.control / "transfers" / "exports", ""),
+        (workspace.control / "tmp", "export."),
+    ):
+        try:
+            names = os.listdir(directory)
+        except FileNotFoundError:
+            continue
+        held.update(name.rsplit(".", 1)[-1] for name in names if name.startswith(prefix))
+    return sorted(held)
 
 
 def exports_in_doubt(workspace: Workspace) -> list[dict[str, str]]:

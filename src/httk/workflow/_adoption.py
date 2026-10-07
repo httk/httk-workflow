@@ -1055,11 +1055,13 @@ def _refuse(workspace: Workspace, lineage: Path, source: Source, error: Exceptio
                 source.path,
                 extra={"event": "adopt_refused_kept", "entry": str(source.path)},
             )
-        elif not _lexists(source.path):
+        elif not _lexists(source.path) and _lexists(source.path.parent):
             _txn.rename_verified(bundle, source.path)
         else:
+            # Taken, or its directory is gone (a held export's emptied wrapper was
+            # discarded meanwhile): the trash below quarantines the bundle.
             _LOGGER.error(
-                "refused bundle %s cannot go back to %s, which is taken; it is quarantined",
+                "refused bundle %s cannot go back to %s, which is taken or whose directory is gone; it is quarantined",
                 bundle,
                 source.path,
                 extra={"event": "adopt_refused_kept", "entry": str(source.path)},

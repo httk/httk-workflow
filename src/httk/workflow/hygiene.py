@@ -383,15 +383,14 @@ def _check_transfers(workspace_root: Path) -> Finding:
 
     from ._adoption import stale_claims
     from ._receipts import FRESHNESS_WINDOW_NS
-    from ._sealing import exports_in_doubt, pending_outgoing
+    from ._sealing import exports_in_doubt, held_exports, pending_outgoing
 
     try:
         workspace = Workspace(workspace_root, mutable=False)
     except (WorkflowError, OSError) as exc:
         return Finding("transfers", "ok", f"there is no readable workspace to check transfers in: {exc}")
-    exports_root = workspace.control / "transfers" / "exports"
     doubtful = exports_in_doubt(workspace)
-    held = sorted(os.listdir(exports_root)) if exports_root.is_dir() else []
+    held = held_exports(workspace)
     now = time.time_ns()
     in_doubt = [
         {"transfer_id": txn.transfer_id, "job_key": marker.job_key, "sealed_at": txn.sealed_at}
