@@ -769,7 +769,7 @@ before the rename that makes it authoritative:
 | Running marker directories (source and destination) | the launch gate byte is written, after the verified `running` marker rename and both marker-directory entries are flushed |
 | Attempt context environment value | the runner is launched with it; the compact UTF-8 JSON must be under 100,000 bytes |
 | Outcome bundle (`outcome.json`, `runner_steps`, failure detail, its sealed transaction manifest and staged payload, its child `job.json` bundles) | the `outcome.tmp.<nonce>` → `outcome.ready` rename; the whole draft tree is flushed in one batch, then the attempt-control directory after the rename; cleanup follows the durable destination transition and local process reap |
-| Committed transaction data (`data/`) | the manager appends the destination state frame and renames the marker out of `committing`; every replayed destination and each parent directory it touched, including the trash a removal moved into, is flushed first |
+| Committed transaction data (`data/`) | the manager appends the destination state frame and renames the marker out of `committing`; every replayed destination and each parent directory it touched, including the parents of directories it created, is flushed first; its own trash directories, the evidence that an operation started, are flushed before its first data step |
 | Registered child payloads and their submitted markers | the parent's marker leaves `committing` |
 | Job state (`.httk-job/state.json`), observed declarations | each atomic replace returns |
 | Sealed replayable workdir batch (`.httk-runner/workdir-ready/`) and its replay into the workdir | the batch is published, then retired as applied |
@@ -1968,11 +1968,66 @@ MAY declare an expected old digest or require absence; these preconditions stop
 a replayed or stale transaction from overwriting an unexpected workdir.
 Symlinks, devices, sockets, and FIFOs are forbidden by default.
 
-A removal always goes to `transaction/trash/<operation-id>/removed`, and a
-`replace-tree` moves the old tree to `transaction/trash/<operation-id>/old`
-before installing its deterministic payload source. These destinations MUST NOT
-contain preexisting unrelated data. Replayers create the operation directory
-idempotently; no random name or replayer identity may affect the paths.
+A removal goes to the trash entry `removed`, and a `replace-tree` moves the
+old tree to the trash entry `old` before installing its deterministic payload
+source. These destinations MUST NOT contain preexisting unrelated data, and no
+random name may affect the paths.
+
+A runner replaying a batch into its own workdir uses
+`transaction/trash/<operation-id>/`, created idempotently, and keeps what it
+moved there.
+
+The manager replaying a published transaction uses a trash directory per owner:
+the holder of committing generation `g` uses
+`transaction/trash/<operation-id>.<g>/`. Operation IDs may contain dots; the
+generation is the integer after the last one, and the name is always built,
+never parsed from a listing. The manager:
+
+- creates `transaction/trash/` once before its first operation, below a
+  non-creating open of `transaction/`;
+- for each operation step that moves something aside or creates a directory,
+  opens the draft by name (the fence), creates its own directory (an existing
+  one is fine), then opens the draft by name again and opens its own directory
+  without creating it; every move of the step goes through that descriptor, and
+  nothing after the second fence creates `transaction/`, `trash/` or any
+  `trash/<operation-id>.*`;
+- creates `make-dir` targets and every missing parent of a destination as an
+  empty directory inside its own trash directory and renames it into `data/`,
+  outermost level first; a level that is then the created directory or an
+  existing one counts as created, and only then is the next level's parent
+  opened. Nothing is created through the `data/` descriptor;
+- deletes what it removed or set aside right after the operation; what it
+  cannot delete is left for `transaction_trash` collection.
+
+Before its first data step the manager runs one retirement pass over the
+manifest. For each operation in order it decides whether the operation applies
+(`remove`: target present; `make-dir`: target absent; `put-file`, `put-tree`,
+`replace-tree`: source present or an old tree already set aside), probes
+`trash/<operation-id>.<k>` by fixed-name `lstat` for every generation `k` from
+the attempt's `commit_base_generation` to `g` (every generation that could
+have held this commit, its own included, so its own directory from an earlier
+run at the same generation counts as evidence; never a listing), and creates
+its own directory when the operation applies or a directory of any generation
+exists. Only then does it retire the predecessor directories it found, those of
+generations `commit_base_generation` to `g - 1`: it deletes their content and
+removes them. In the durable profile its own directory is flushed (its parent
+`trash/` synchronized) as soon as it is created, so the evidence is on storage
+before any predecessor directory is removed. Anything other than a directory at a predecessor name is a protocol
+error of the job and is never followed. If a predecessor directory cannot be
+removed in a few passes (for example an NFS `.nfsXXXX` file another process
+keeps open), the commit is deferred: no data step this tick, a retry next
+tick, and a WARNING anomaly (`commit_deferred`) naming the path. Waiting
+decides only when; the replay never proceeds while such a directory exists.
+
+A removed directory accepts no new entry even through a descriptor still open
+to it, so a fenced owner frozen at any point, holding descriptors to its trash
+or to `data/`, can no longer move anything into its trash or any created
+directory into `data/` once a successor has started replaying. This is a
+filesystem assumption: after `rmdir`, `rename`, `mkdir` and creating opens
+through a descriptor to the removed directory fail (`ENOENT` on local
+filesystems, `ESTALE` on NFS v3/v4, Lustre and GPFS). An NFS export whose
+filesystem reuses inode numbers without generation numbers could re-bind a
+stale handle; supported filesystems carry generation numbers.
 
 ### Idempotent replay
 
@@ -1986,16 +2041,22 @@ order with atomic renames and the verified-transition algorithm:
 - source absent, destination has the declared new digest: the put already
   happened;
 - removal target absent, matching trash entry present: removal already
-  happened;
+  happened. For the manager the evidence is a trash directory of the operation
+  of any generation, observed in the retirement pass before any was retired;
+  target absent and no such directory means the target was missing from the
+  start, and `missing_ok` decides;
 - both old tree and new source present during `replace-tree`: continue its
   defined two-rename sequence;
 - any other combination: stop with transaction corruption rather than guess.
 
-Several managers may inspect an abandoned `committing` marker. Deterministic
-source, destination, and trash paths make concurrent replay converge: one
-rename wins and the others verify the same resulting state. A replayer MUST
-perform the bounded visibility retries of the verified-transition algorithm
-before declaring an impossible combination. The manifest and operation IDs
+Only the manager a `committing` frame names replays it; a successor takes an
+abandoned commit over by a marker transition and renames the draft, which
+fences the previous owner at its next access. The retirement pass then ends
+everything a frozen previous owner could still do in `data/`; a `put-file` or
+`put-tree` rename it had in flight before that is recognised by re-observing
+the destination, so replays converge. A replayer MUST perform the bounded
+visibility retries of the verified-transition algorithm before declaring an
+impossible combination. The manifest, the operation IDs and the generations
 carry all replay information; no per-operation progress files are needed.
 
 After all operations validate as applied, the manager:
@@ -3093,7 +3154,7 @@ Recovery from each interruption point:
 | In `submitted` | Revalidate; move the same marker to ready or to failed with `protocol_error`. |
 | Before `outcome.ready` | Ignore temporary outcome; retry under policy. |
 | After outcome publication, before committing | Apply that outcome; do not rerun the step. |
-| While a transaction is replayed | State remains committing; infer completed operations from source, destination, trash, and digests. |
+| While a transaction is replayed | State remains committing; infer completed operations from source, destination, the trash directories observed before predecessors' are retired, and digests. |
 | While children are registered | Verify existing children and register the missing set. |
 | After destination frame, before marker rename | Frame is prepared but not current; replay and rename. |
 | After marker rename | New state is already authoritative; the owning manager cleans up after it reaps the process when the destination is `ready`, `waiting`, `paused`, or `succeeded`. |
@@ -3208,7 +3269,8 @@ Under the retention policy in `policy.retention`, a collector may remove:
 - incomplete outcome directories;
 - obsolete attempt-control directories;
 - abandoned and completed isolated workdirs;
-- transaction trash after the destination marker transition, normally removed
+- transaction trash leftovers (what a replay could not delete, and emptied
+  trash directories) after the destination marker transition, normally removed
   with the attempt-control tree for `ready`, `waiting`, `paused`, and
   `succeeded` destinations;
 - retained diagnostic application files.
@@ -3298,7 +3360,7 @@ The remaining categories are gated as follows:
 | Category | Gate | Additional condition |
 | --- | --- | --- |
 | Attempt-control directory | `attempt_control_days` | Failed and cancelled jobs retain their newest; other quiescent jobs' leftovers (including succeeded) must be older than both this limit and one workspace `lease_seconds` grace. |
-| Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. |
+| Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. The manager's replay deletes removed and set-aside content at once, so this collects only leftovers. |
 | Retired transfer bundle | `trash_days` | Below `transfers/retired/`; kept `trash_days` after its acknowledgement. |
 | Import acknowledgement | `trash_days` | Below `transfers/acks/`; the stale-copy check of an ejected bundle uses it until then. |
 | Journal segment | `journal_days` | No current terminal marker, nor `transferring` marker of a bundle awaiting handover, references it; no frame chain of a current non-terminal marker contains it; and its writer belongs to no manager heartbeating within its lease. |

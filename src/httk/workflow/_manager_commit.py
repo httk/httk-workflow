@@ -37,7 +37,7 @@ from .models import (
     validate_resources,
     validate_step,
 )
-from .transactions import _DisplacedDataError
+from .transactions import _CommitDeferredError, _DisplacedDataError
 from .workspace import _runner_content_digest
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -476,6 +476,9 @@ def process_committing(manager: Any, marker: Marker) -> None:
                     name,
                     data,
                     expected_generation=data_generation,
+                    generation=marker.generation,
+                    # _claim_draft refused a frame without a usable base.
+                    base_generation=state.commit_base_generation or marker.generation,
                     durable=manager.workspace.durable,
                 )
             if changed_data:
@@ -1208,6 +1211,15 @@ def resume(manager: Any, logger: Any) -> bool:
                 # job: whatever this commit observed since is not evidence of
                 # anything, so it records nothing.
                 logger.debug("the commit of %s was fenced: %s", marker.job_key, exc)
+            elif isinstance(exc, _CommitDeferredError):
+                # A predecessor's trash could not be retired before any data
+                # step: not a failure, the next tick tries again.
+                manager._report_anomaly(
+                    f"commit_deferred:{marker.job_key}",
+                    f"deferring the commit of {marker.job_key}: {exc}",
+                    manager._event("commit_deferred", marker),
+                    level=logging.WARNING,
+                )
             elif isinstance(exc, (FormatError, TransactionError)):
                 # FormatError covers JobDirectoryError: a symlink or special file the
                 # job planted in its draft or data, or draft content a digest cannot
@@ -1242,5 +1254,37 @@ def resume(manager: Any, logger: Any) -> bool:
                     f"cannot resume the commit of {marker.job_key}: {exc}",
                     manager._event("commit_error", marker),
                 )
+        else:
+            # Only a commit that moved the job out of this marker is complete;
+            # an early return (local launches still held, no executor) is not.
+            if _fenced(marker):
+                _clear_commit_wedge(manager, marker, state)
         changed = True
     return changed
+
+
+def _clear_commit_wedge(manager: Any, marker: Marker, state: StateFrame) -> None:
+    """Forget the deferral or wedge of a commit that has now completed.
+
+    A later anomaly of the same job is then reported loudly and, if it
+    repeats, recorded again; a ``commit-wedge.json`` this manager recorded is
+    removed so a kept attempt-control directory does not carry a stale one.
+    """
+
+    recorded = False
+    for prefix in ("resume_committing", "commit_deferred"):
+        key = f"{prefix}:{marker.job_key}"
+        manager._reported.pop(key, None)
+        if key in manager._commit_wedge_recorded:
+            manager._commit_wedge_recorded.discard(key)
+            recorded = True
+    if not recorded:
+        return
+    try:
+        with (
+            manager._job_directory(marker) as job_dir,
+            job_dir.directory(manager._attempt_control_name(state)) as control,
+        ):
+            control.unlink("commit-wedge.json")
+    except (FormatError, OSError) as exc:
+        _LOGGER.debug("cannot remove the commit wedge record of %s: %s", marker.job_key, exc)

@@ -328,7 +328,7 @@ A `null` or `"keep"` retention member means keep. On a fresh workspace,
 | Category | Retention limit | What goes |
 | --- | --- | --- |
 | `attempt_control` | `attempt_control_days` | aged `attempts/*` directories; failed and cancelled jobs retain their newest one, while other quiescent leftovers (including succeeded) also wait one workspace `lease_seconds` grace |
-| `transaction_trash` | `trash_days` | trees a replayed transaction moved aside, once the job left `committing` |
+| `transaction_trash` | `trash_days` | leftovers in a replayed transaction's trash (what the replay could not delete, and its emptied trash directories), once the job left `committing` |
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
 | `transfer_records` | `trash_days` | acknowledgements below `transfers/acks/` |
 | `transfer_receipts` | always safe | replay receipts below `transfers/received/` once no importer can accept the bundle any more (the freshness window plus the clock-skew bound after sealing) |

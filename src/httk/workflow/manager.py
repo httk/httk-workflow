@@ -1083,7 +1083,7 @@ class TaskManager:
             # A commit anomaly that repeats unchanged is a wedge, not a
             # transient: the first pass reports it loudly, and once it recurs
             # its text is persisted where 'job why' can surface it.
-            if key.startswith("resume_committing:"):
+            if key.startswith(("resume_committing:", "commit_deferred:")):
                 self._record_commit_wedge(key, text, fields)
             return
         self._reported[key] = text

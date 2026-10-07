@@ -812,8 +812,11 @@ class _Collection:
                     self._removed_jobs.append(marker.job_key)
 
     def collect_transaction_trash(self) -> None:
-        """Collect the trees a replayed transaction moved aside.
+        """Collect what is left in a replayed transaction's trash.
 
+        The manager's replay deletes what it removes or sets aside at once, so
+        this sweeps leftovers: content a replay could not delete, emptied
+        per-owner trash directories, and a runner-side replay's kept trash.
         The trash of a transaction is what makes its replay idempotent, so it
         is only collectable once the job has left ``committing`` for a
         quiescent state: at that point the destination transition has happened

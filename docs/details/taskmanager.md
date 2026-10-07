@@ -548,17 +548,37 @@ The owner of a commit first renames the published `outcome.ready` draft to
 `commit.<generation>` in the attempt-control directory, after the generation of
 the `committing` marker it holds, and reaches the draft by that name for every
 step. A takeover renames the draft again, so the previous owner, should it still
-be running, stops at its next step with nothing recorded; at most the one step
-it had already started can overlap, and the replay tolerates that by checking
-whether the step's result is already in place. A manager may therefore die or
-be replaced at any point of a commit, and the commit completes exactly once.
-One overlap is detected rather than prevented: a `replace-tree` step sets the
-old tree aside only after checking that its trash name is free, but Python
-offers no rename that refuses to replace, so in the gap between that check and
-the rename a stalled previous owner could move the successor's new tree onto an
-*empty* set-aside directory. The previous owner then finds a tree it never
-observed in its trash and reports an error anomaly (`commit_displaced_data`)
-naming both paths, so an operator can move the tree back.
+be running, stops at its next step with nothing recorded.
+
+A previous owner can also be frozen in the middle of a step, holding
+descriptors, and wake at any later time, even after the job has moved on; it
+still cannot change `data/`. Every owner moves removed and replaced data aside,
+and creates new data directories, only through a trash directory of its own,
+`transaction/trash/<operation>.<generation>/`, and a successor removes every
+predecessor's trash directory before its own replay touches `data/`. A removed
+directory accepts no new entry, not even through a descriptor that is still
+open, so the late move fails. A `put-file` or `put-tree` rename the previous
+owner had in flight before that is recognised because the replay checks
+whether a step's result is already in place. A manager may therefore die,
+stall or be replaced at any point of a commit, and the commit completes exactly
+once. If a predecessor's trash directory cannot be removed yet (on NFS, for
+example, while another process on the same client keeps a file in it open),
+the commit is deferred and retried every tick, with a `commit_deferred` warning
+naming the path; it never proceeds while that directory exists. This relies on
+the filesystem refusing new entries in a removed directory, which local
+filesystems, NFS v3/v4, Lustre and GPFS do.
+
+Three residuals remain. Two are confined to the attempt-control directory,
+which no payload digest covers: a frozen previous owner can still create one
+empty trash directory of its own there, or rename a draft that is no longer
+read. The third: a commit creates `data/` itself, if absent, before its first
+fence, so a frozen previous owner can create an empty `data/` only where none
+exists. The
+`replace-tree` check that a tree set aside is the one observed stays as a second
+line of defence: a step that finds a tree it never observed in its own trash
+reports an error anomaly (`commit_displaced_data`) naming both paths, so an
+operator can move the tree back. What a replay removes or replaces is deleted
+right after its step; leftovers wait for `transaction_trash` collection.
 
 A lingering attempt process that publishes a second `outcome.ready` after its
 draft was renamed is ignored: the commit only ever reads its own draft, and the

@@ -641,7 +641,7 @@ def test_a_runner_side_replay_with_paths_still_follows_a_symlinked_workdir_direc
         JobDirectory.at(workdir) as pinned_data,
         pytest.raises(JobDirectoryError),
     ):
-        _replay_pinned(pinned_control, "commit.2", pinned_data, expected_generation=0)
+        _replay_pinned(pinned_control, "commit.2", pinned_data, expected_generation=0, generation=2, base_generation=2)
 
 
 @pytest.mark.parametrize("kind", ["failed", "cancelled"])

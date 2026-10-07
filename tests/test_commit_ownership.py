@@ -334,13 +334,19 @@ def test_a_commit_taken_over_mid_replay_fences_its_old_owner_without_corruption(
     assert workspace.read_state(final)["data_generation"] == 2
 
     # Nothing was created under the old owner's draft name; the draft carries
-    # the successor's, with the trash that makes its replay idempotent.
+    # the successor's. The successor retired the old owner's trash before it
+    # replayed and deleted what it moved aside: only its own, empty trash
+    # directories remain, the evidence that makes its replay idempotent.
     control = workspace.payload_path(final.placement, final.job_key) / str(takeover["attempt_control"])
     owned_generation = int(takeover["state_generation"]) - 1
     assert not (control / f"commit.{owned_generation}").exists()
     trash = control / f"commit.{owned_generation + 1}" / "transaction" / "trash"
-    assert (trash / "replace-tree" / "old" / "inner").read_text(encoding="utf-8") == "old\n"
-    assert (trash / "remove" / "removed").read_text(encoding="utf-8") == "old\n"
+    left = sorted(trash.iterdir())
+    assert {path.name for path in left} <= {
+        f"{operation}.{owned_generation + 1}" for operation in ("put-new-txt", "replace-tree", "remove")
+    }
+    assert f"remove.{owned_generation + 1}" in {path.name for path in left}
+    assert all(not list(path.iterdir()) for path in left)
     assert workspace.check().ok
 
 
@@ -535,10 +541,13 @@ def test_a_replace_tree_rename_onto_an_empty_set_aside_directory_is_detected(
         replace: bool = False,
         attempts: int = 7,
     ) -> None:
-        if destination.name == "old" and not (transaction / "trash" / "replace" / "old").exists():
+        if destination.name == "old" and not (transaction / "trash" / "replace.3" / "old").exists():
             # Between this owner's check that the trash name is free and its
-            # rename, a successor sets the empty old tree aside and installs the new one.
-            os.rename(data / "tree", transaction / "trash" / "replace" / "old")
+            # rename, something sets the empty old tree aside into that name
+            # and installs the new one. A successor never can (each owner's
+            # trash is its own and is retired first); the check stays as a
+            # second line of defence.
+            os.rename(data / "tree", transaction / "trash" / "replace.3" / "old")
             os.rename(transaction / "payload" / "tree", data / "tree")
         real_rename(source, destination, replace=replace, attempts=attempts)
 
@@ -548,11 +557,11 @@ def test_a_replace_tree_rename_onto_an_empty_set_aside_directory_is_detected(
         JobDirectory.at(data) as pinned_data,
         pytest.raises(_DisplacedDataError) as raised,
     ):
-        _replay_pinned(control, "commit.3", pinned_data, expected_generation=0)
+        _replay_pinned(control, "commit.3", pinned_data, expected_generation=0, generation=3, base_generation=3)
     assert str(data / "tree") in str(raised.value)
-    assert str(transaction / "trash" / "replace" / "old") in str(raised.value)
+    assert str(transaction / "trash" / "replace.3" / "old") in str(raised.value)
     # The displaced tree is where the message says it is.
-    assert (transaction / "trash" / "replace" / "old" / "inner").read_text(encoding="utf-8") == "new\n"
+    assert (transaction / "trash" / "replace.3" / "old" / "inner").read_text(encoding="utf-8") == "new\n"
 
 
 _SUCCEED = """#!/usr/bin/env python3
@@ -593,7 +602,7 @@ def test_a_fenced_commit_reports_only_displaced_data(
         )
         fired.append(self._transition(marker, "committing", frame))
         if displaced:
-            raise _DisplacedDataError("replace-tree moved data/tree onto commit.3/transaction/trash/replace/old")
+            raise _DisplacedDataError("replace-tree moved data/tree onto commit.3/transaction/trash/replace.3/old")
         raise CommitFencedError("commit draft commit.3 is gone")
 
     monkeypatch.setattr(TaskManager, "_process_committing", fenced_mid_commit)
@@ -609,7 +618,7 @@ def test_a_fenced_commit_reports_only_displaced_data(
 
     key = f"displaced:{fired[0].job_key}"
     if displaced:
-        assert "displaced data" in reported[key] and "trash/replace/old" in reported[key]
+        assert "displaced data" in reported[key] and "trash/replace.3/old" in reported[key]
     else:
         assert key not in reported
     assert not [name for name in reported if name != key]

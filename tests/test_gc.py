@@ -559,13 +559,14 @@ class _Fixture:
         self.pending_payload = self.workspace.payload_path(pending_marker.placement, pending_marker.job_key)
         self.pending_attempts = [_attempt_directory(self.pending_payload, days=90) for _ in range(2)]
 
-        # Transaction trash inside the attempt directory that survives: in a
-        # draft a commit renamed to commit.<generation>, and in one it never did.
-        self.trash = self.newest_attempts[0] / "commit.7" / "transaction" / "trash" / "replace"
+        # Transaction trash leftovers (what a replay could not delete) inside
+        # the attempt directory that survives: in a draft a commit renamed to
+        # commit.<generation>, and in one it never did.
+        self.trash = self.newest_attempts[0] / "commit.7" / "transaction" / "trash" / "replace.7"
         (self.trash / "old").mkdir(parents=True)
         (self.trash / "old" / "data.txt").write_text("replaced tree\n", encoding="utf-8")
         _age(self.trash, 30)
-        self.fresh_trash = self.newest_attempts[1] / "outcome.ready" / "transaction" / "trash" / "replace"
+        self.fresh_trash = self.newest_attempts[1] / "outcome.ready" / "transaction" / "trash" / "replace.6"
         self.fresh_trash.mkdir(parents=True)
         (self.fresh_trash / "keep.txt").write_text("today\n", encoding="utf-8")
 
