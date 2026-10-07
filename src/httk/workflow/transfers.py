@@ -1293,7 +1293,8 @@ def adopt_job(
     one filesystem, otherwise copied, and the source removed once the job has
     arrived), verified completely, and published: members first, then the
     root, each restored to the state it was ejected in. A held export of this
-    workspace (``transfers/exports/<T>/<job_key>``) is taken back the same way,
+    workspace (``transfers/exports/<T>/<job_key>``, or one held in doubt at
+    ``transfers/in-doubt/<T>/<job_key>``) is taken back the same way,
     and so is an entry of the workspace's exchange outbox, claimed by
     descriptor and verified as client content. A refused directory is put back
     where it was (a refused outbox entry is quarantined instead). A copy of a directory whose
@@ -1320,6 +1321,7 @@ def adopt_job(
     source = absolute.parent.resolve() / absolute.name
     root = workspace.root.resolve()
     exports = (workspace.control / "transfers" / "exports").resolve()
+    in_doubt = (workspace.control / "transfers" / "in-doubt").resolve()
     exchange = root / EXCHANGE_DIRECTORY
 
     # Lexically ``<root>/exchange/<box>/<name>`` with a workspace at ``<root>``:
@@ -1347,7 +1349,8 @@ def adopt_job(
     if in_exchange("outbox"):
         return _adopt_from_outbox(workspace, exchange / "outbox" / absolute.name, placement=placement, owner=owner)
     kind: BundleSource = "adopt"
-    if source.parent.parent == exports:
+    if source.parent.parent in {exports, in_doubt}:
+        # A held export, or one held in doubt: the operator takes it back.
         kind = "export"
     elif source == root or root in source.parents:
         raise ValueError(f"{source} is already inside the workspace")

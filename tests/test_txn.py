@@ -428,3 +428,9 @@ def test_a_cli_owner_is_gone_after_a_day_or_when_its_process_died_here(control: 
     elsewhere = f"c{'f' * 8 if parsed.host != 'f' * 8 else 'e' * 8}{child.pid}{parsed.boot}"
     assert not _txn.owner_gone(control, elsewhere, since=now, now=now, lease_seconds=900.0)
     assert _txn.owner_gone(control, elsewhere, since=now - day - 1, now=now, lease_seconds=900.0)
+
+
+def test_link_new_handles_a_name_near_name_max(tmp_path: Path) -> None:
+    name = "n" * 250
+    assert _txn.link_new(tmp_path, name, b"data", durable=False)
+    assert (tmp_path / name).read_bytes() == b"data" and os.listdir(tmp_path) == [name]

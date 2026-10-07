@@ -815,3 +815,26 @@ def test_a_retransmitted_prepare_mkdir_takes_another_name(state: Path, monkeypat
     assert retransmitted and entry.owner == ledger.nonce
     # The first name is never shared with the second preparation; it is a leftover for the sweep.
     assert [path.name for path in (state / "ledger" / "prep").iterdir()] == [Path(retransmitted[0]).name]
+
+
+def test_an_anchor_another_instance_installed_is_made_durable_before_this_one_executes_it(
+    state: Path, events: list[tuple[str, str]]
+) -> None:
+    first, second = _open(state), _open(state)
+    request = _start(1)
+    first.admit(request)
+    events.clear()
+    entry = second.admit(request)  # the existing-anchor branch: second may now win the decision
+    assert entry.owner == first.nonce
+    assert ("fsync", str(state / "ledger" / "req")) in events
+    second.decide(request.request_id)
+    assert events.index(("fsync", str(state / "ledger" / "req"))) < events.index(
+        ("link", str(state / "ledger" / "req" / request.request_id / "decision"))
+    )
+    # An answered entry needs no further durability work to be replayed.
+    health = _request(2)
+    first.admit(health)
+    first.finish(health.request_id, _response(health, "ready"))
+    events.clear()
+    second.admit(health)
+    assert ("fsync", str(state / "ledger" / "req")) not in events

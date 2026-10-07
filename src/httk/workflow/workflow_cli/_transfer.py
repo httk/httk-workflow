@@ -1057,14 +1057,15 @@ def handle_transfer_reclaim(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
-_TRANSFER_STATUS_DETAILS = ("held_exports", "outgoing_in_doubt", "stale_claims")
+_TRANSFER_STATUS_DETAILS = ("held_exports", "exports_in_doubt", "outgoing_in_doubt", "stale_claims")
 
 
 def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Report the transfer work of one workspace that waits for an operator; read only.
 
-    It names exports held for a copy-out, addressed transfers unacknowledged past
-    their freshness window (in doubt) and adoption claims without their lineage,
+    It names exports held for a copy-out, exports whose interrupted copy-out may
+    already have delivered them (in doubt), addressed transfers unacknowledged
+    past their freshness window (in doubt) and adoption claims without their lineage,
     exactly as the workspace hygiene check does. The exit status is 0 when
     nothing waits, 1 when something needs the operator.
     """
@@ -1075,10 +1076,17 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
         print(json.dumps({"workspace": str(workspace.root), **finding.as_mapping()}, indent=2, sort_keys=True))
     else:
         print(f"{finding.status}: {finding.message}")
-        held, in_doubt, stale = (finding.details.get(name, []) for name in _TRANSFER_STATUS_DETAILS)
-        assert isinstance(held, list) and isinstance(in_doubt, list) and isinstance(stale, list)
+        held, doubtful, in_doubt, stale = (finding.details.get(name, []) for name in _TRANSFER_STATUS_DETAILS)
+        assert isinstance(held, list) and isinstance(doubtful, list)
+        assert isinstance(in_doubt, list) and isinstance(stale, list)
         for name in held:
             print(f"held export\t{name}\t(`httk job eject --resume`)")
+        for entry in doubtful:
+            assert isinstance(entry, Mapping)
+            print(
+                f"export in doubt\t{entry['transfer_id']}\t{entry['held']}\t(may already be at {entry['destination']}: "
+                f"remove the held copy, or `httk job adopt {entry['held']}`)"
+            )
         for entry in in_doubt:
             assert isinstance(entry, Mapping)
             print(f"in doubt\t{entry['job_key']}\t{entry['transfer_id']}\t(`httk workflow transfer retire|reclaim`)")

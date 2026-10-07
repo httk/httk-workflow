@@ -771,13 +771,17 @@ def test_the_orphan_sweep_never_aborts_a_committed_transfer_whose_marker_it_miss
         assert (_sealing.exports_directory(source, transfer_id) / marker.job_key).is_dir()
 
 
-def test_a_spurious_abort_of_an_addressed_transfer_waits_for_the_window(
+def test_a_spurious_abort_of_a_committed_addressed_transfer_is_never_reclaimed_automatically(
     workspaces: tuple[Workspace, Workspace],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An abort decided before ``sealed_at + W + S`` leaves the bundle offered; after it, recovery reclaims it."""
+    """An abort decided after the commit leaves the bundle in doubt: offered, retirable, reclaimed only by an operator.
+
+    The end of the freshness window forbids new acceptance; it does not prove that
+    the destination never accepted it (design 13.1).
+    """
 
     source, destination = workspaces
     marker = _finish(source, source.submit(_payload(tmp_path / "payloads"), "jobs"))
@@ -787,8 +791,8 @@ def test_a_spurious_abort_of_an_addressed_transfer_waits_for_the_window(
     _owner_gone(monkeypatch)
     with caplog.at_level("DEBUG", logger="httk.workflow._sealing"):
         for _ in range(3):
-            assert [record["status"] for record in _sealing.recover(source)] == ["pending"]
-    deferred = [record for record in caplog.records if getattr(record, "event", None) == "transfer_abort_deferred"]
+            assert [record["status"] for record in _sealing.recover(source)] == ["committed"]
+    deferred = [record for record in caplog.records if getattr(record, "event", None) == "transfer_abort_in_doubt"]
     # Reported once at warning level, then only at debug level.
     assert [record.levelname for record in deferred] == ["WARNING", "DEBUG", "DEBUG"]
     assert bundle.is_dir() and _transferring(source)[0].job_id == marker.job_id
@@ -797,7 +801,11 @@ def test_a_spurious_abort_of_an_addressed_transfer_waits_for_the_window(
     [offer] = transfers.offer_transfers(source, destination_workspace_id=destination.workspace_id)
     assert offer["transfer_id"] == transfer_id
     later = time.time_ns() + FRESHNESS_WINDOW_NS + CLOCK_SKEW_NS + 10**9
-    assert [record["status"] for record in _sealing.recover(source, now=later)] == ["aborted"]
+    # Past the window recovery still leaves it alone: only the operator decides.
+    assert [record["status"] for record in _sealing.recover(source, now=later)] == ["committed"]
+    assert bundle.is_dir() and _transferring(source)[0].job_id == marker.job_id
+    monkeypatch.setattr(_sealing.time, "time_ns", lambda: later)
+    assert transfers.reclaim_transfer(source, marker.job_id)["status"] == "reclaimed"
     _assert_home(source, [marker])
     assert not bundle.exists()
 
@@ -1017,7 +1025,11 @@ def test_an_acknowledgement_racing_a_reclaim_never_loses_the_job(
 
 
 @pytest.mark.parametrize(
-    "step", _marked(("abort.decide", "abort.reclaim", "abort.root", "abort.unfence", "abort.trash"), {"abort.reclaim"})
+    "step",
+    _marked(
+        ("abort.decide", "reclaim.authorize", "abort.reclaim", "abort.root", "abort.unfence", "abort.trash"),
+        {"reclaim.authorize", "abort.reclaim"},
+    ),
 )
 def test_a_crash_while_reclaiming_is_finished_by_recovery(
     step: str, workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1032,12 +1044,186 @@ def test_a_crash_while_reclaiming_is_finished_by_recovery(
         transfers.reclaim_transfer(source, marker.job_id)
     _owner_gone(monkeypatch)
     transfers.recover_transfers(source)
-    if step == "abort.decide":
-        # Nothing was decided: the transfer is still waiting for its acknowledgement.
+    if step in {"abort.decide", "reclaim.authorize"}:
+        # No authorization was recorded: recovery never takes the bundle back by itself.
         assert bundle.is_dir() and _transferring(source)
-        transfers.reclaim_transfer(source, marker.job_id)
+        assert transfers.reclaim_transfer(source, marker.job_id)["status"] == "reclaimed"
     _assert_home(source, [marker])
     assert not bundle.exists() and not _sealing.retired_path(source, bundle.name).exists()
+
+
+@pytest.mark.parametrize("probe", [1, 2, 3])
+def test_an_abort_observer_never_misses_a_payload_the_reclaim_is_moving(
+    probe: int, workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The phase reader probes ``outgoing/<T>``, ``A/payload``, home: the order a reclaimed payload moves in."""
+
+    source, destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    bundle = transfers.detach_job(source, marker.job_id, destination_workspace_id=destination.workspace_id)
+    transfer_id = bundle.name
+    abort = _sealing.abort_directory(source, transfer_id)
+    # An operator's reclaim decided and authorized the abort; its first move is still to come.
+    assert _sealing._decide_abort(source, transfer_id)
+    assert _txn.link_new(abort, _sealing.RECLAIM, b"{}\n")
+    _owner_gone(monkeypatch)
+    # The reclaimer moves outgoing/<T> into A/payload just before the observer's probe number *probe*.
+    _hook_at("phase.probe", lambda: os.rename(bundle, abort / "payload"), occurrence=probe)
+    status = _sealing.settle(source, transfer_id, force=True)
+    _txn._HOOK = None
+    assert status == "aborted", status
+    _assert_home(source, [marker])
+    quarantine = source.control / "quarantine"
+    assert not quarantine.is_dir() or not list(quarantine.iterdir())
+
+
+@pytest.mark.parametrize("step", ["X4.verified", "X5.witnessed"])
+def test_a_stale_copy_out_owner_after_a_takeover_publishes_at_most_once(
+    step: str, workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+    taken: list[list[Path]] = []
+
+    def take_over() -> None:
+        # The owner is taken for dead while it is between these steps.
+        with monkeypatch.context() as patch:
+            patch.setattr(_txn, "owner_gone", lambda *args, **kwargs: True)
+            other = _txn.owner_token(str(uuid.uuid4()))
+            taken.append(_sealing.resume_copy_outs(Workspace(source.root), owner=other))
+
+    _hook_at(step, take_over)
+    with pytest.raises(ValueError, match="taken over"):
+        _sealing.copy_out(source, transfer_id)
+    assert taken
+    if step == "X4.verified":
+        # No witness yet: the new owner copied it out, and the stale owner stopped at its witness.
+        assert taken == [[tmp_path / "far" / "job"]]
+        _assert_ejected(source, destination, [marker], tmp_path / "far" / "job")
+        assert _sealing.exports_in_doubt(source) == []
+    else:
+        # The stale owner had witnessed: the new owner never publishes, and the stale
+        # owner's copy was removed before it could be published: in doubt, held.
+        assert taken == [[]]
+        assert not (tmp_path / "far" / "job").exists()
+        [entry] = _sealing.exports_in_doubt(source)
+        doubtful = _sealing.in_doubt_directory(source, transfer_id) / marker.job_key
+        assert entry["held"] == str(doubtful) and doubtful.is_dir() and not held.parent.exists()
+    assert len(os.listdir(tmp_path / "far")) <= 1
+
+
+def test_a_pending_copy_out_claimant_never_republishes_an_export_held_in_doubt(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review B1: recovery holds the ambiguous bundle where no copy-out claims, while a claimant waits at X1."""
+
+    source, _destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+    first = _txn.owner_token(str(uuid.uuid4()))
+    _hook_at("X5.published", _crash)
+    with pytest.raises(Crash):
+        _sealing.copy_out(source, transfer_id, owner=first)
+    os.rename(tmp_path / "far" / "job", tmp_path / "consumed")
+    # Only the crashed owner is gone; the claimant below is alive.
+    monkeypatch.setattr(_txn, "owner_gone", lambda _control, token, **_kwargs: token == first)
+    recovered: list[list[Path]] = []
+    _hook_at(
+        "X1.staged",
+        lambda: recovered.append(
+            _sealing.resume_copy_outs(Workspace(source.root), owner=_txn.owner_token(str(uuid.uuid4())))
+        ),
+    )
+    with pytest.raises(ValueError, match="taken by another actor"):
+        _sealing.copy_out(source, transfer_id)
+    assert recovered == [[]]
+    assert os.listdir(tmp_path / "far") == []
+    [entry] = _sealing.exports_in_doubt(source)
+    assert Path(entry["held"]).is_dir() and Path(entry["held"]).parent == _sealing.in_doubt_directory(
+        source, transfer_id
+    )
+    assert _tmp_entries(source) == []
+
+
+def test_a_second_takeover_still_discards_the_first_owners_witnessed_temporary(
+    workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review B2: the witness carries the original temporary across every takeover generation."""
+
+    source, _destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+    monkeypatch.setattr(_txn, "owner_gone", lambda *args, **kwargs: True)
+    seen: list[list[str]] = []
+
+    def takeovers() -> None:
+        # The owner O has witnessed and is paused before publishing. R1 takes its
+        # staging over and dies before discarding O's temporary; R2 takes R1's over.
+        seen.append(sorted(os.listdir(tmp_path / "far")))
+        _hook_at("copyout.cleanup", _crash)
+        with pytest.raises(Crash):
+            _sealing.resume_copy_outs(Workspace(source.root), owner=_txn.owner_token(str(uuid.uuid4())))
+        _txn._HOOK = None
+        seen.append(sorted(os.listdir(tmp_path / "far")))
+        assert _sealing.resume_copy_outs(Workspace(source.root), owner=_txn.owner_token(str(uuid.uuid4()))) == []
+
+    _hook_at("X5.witnessed", takeovers)
+    with pytest.raises(ValueError, match="taken over"):
+        _sealing.copy_out(source, transfer_id)
+    # O's temporary existed until R2 discarded it; O could not publish it afterwards.
+    assert len(seen[0]) == 1 and seen[0][0].startswith(".httk-export.") and seen[1] == seen[0]
+    assert os.listdir(tmp_path / "far") == []
+    [entry] = _sealing.exports_in_doubt(source)
+    assert Path(entry["held"]).is_dir()
+
+
+def test_a_copy_out_published_before_a_crash_and_then_consumed_is_never_republished(
+    workspaces: tuple[Workspace, Workspace],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source, _destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    held = _export(source, marker, tmp_path / "far" / "job")
+    transfer_id = held.parent.name
+    _hook_at("X5.published", _crash)
+    with pytest.raises(Crash):
+        _sealing.copy_out(source, transfer_id)
+    # The client takes the published job away before anything resumes.
+    os.rename(tmp_path / "far" / "job", tmp_path / "consumed")
+    monkeypatch.setattr(_txn, "owner_gone", lambda *args, **kwargs: True)
+    for _ in range(2):
+        assert _sealing.resume_copy_outs(source) == []
+        assert os.listdir(tmp_path / "far") == []
+    [entry] = _sealing.exports_in_doubt(source)
+    doubtful = _sealing.in_doubt_directory(source, transfer_id) / marker.job_key
+    assert entry["held"] == str(doubtful) and doubtful.is_dir() and entry["transfer_id"] == transfer_id
+    # Held apart from ordinary exports: no copy-out can claim it again.
+    assert not held.parent.exists()
+    with pytest.raises(FileNotFoundError):
+        _sealing.copy_out(source, transfer_id)
+    context = CLIContext("httk", source.root)
+    capsys.readouterr()
+    assert command(["job", "eject", "--resume"], context) == 1
+    assert f"in doubt\t{doubtful}" in capsys.readouterr().out
+    assert command(["transfer", "status", "--json"], context) == 1
+    assert json.loads(capsys.readouterr().out)["details"]["exports_in_doubt"] == [entry]
+    assert os.listdir(tmp_path / "far") == []
+    # The operator takes it back explicitly; the record then goes.
+    adopted = transfers.adopt_job(source, doubtful)
+    assert adopted.job_id == marker.job_id
+    _sealing.resume_copy_outs(source)
+    assert _sealing.exports_in_doubt(source) == [] and not doubtful.parent.exists()
+    assert command(["transfer", "status"], context) == 0
 
 
 def test_an_acknowledgement_of_a_reclaimed_transfer_is_reported_in_doubt(
@@ -1179,6 +1365,33 @@ def test_a_crash_at_any_copy_out_step_is_resumed_exactly_once(
     assert os.listdir(tmp_path / "far") == ["job"]
     assert not held.parent.exists()
     assert _sealing.resume_copy_outs(source) == []
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_a_long_destination_name_never_overflows_a_generated_name(
+    interrupted: bool, workspaces: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Temporaries and cleanup names are siblings named independently of the (client-chosen) destination name."""
+
+    source, destination = workspaces
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    (tmp_path / "far").mkdir()
+    name = "j" * 240  # a name-derived temporary or cleanup name would exceed NAME_MAX (255)
+    held = _export(source, marker, tmp_path / "far" / name)
+    if not interrupted:
+        _assert_ejected(source, destination, [marker], _sealing.copy_out(source, held.parent.name))
+        return
+    _hook_at("X5.witnessed", _crash)
+    with pytest.raises(Crash):
+        _sealing.copy_out(source, held.parent.name)
+    [temporary] = os.listdir(tmp_path / "far")
+    assert len(temporary) < 100
+    monkeypatch.setattr(_txn, "owner_gone", lambda *args, **kwargs: True)
+    assert _sealing.resume_copy_outs(source) == []
+    # The witnessed temporary was discarded and the bundle is held in doubt.
+    assert os.listdir(tmp_path / "far") == []
+    [entry] = _sealing.exports_in_doubt(source)
+    assert Path(entry["held"]).name == marker.job_key and Path(entry["held"]).is_dir()
 
 
 def test_a_job_key_named_like_its_tree_is_never_confused(

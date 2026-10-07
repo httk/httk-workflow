@@ -373,21 +373,24 @@ def _check_workspace_default(project: Path) -> Finding | None:
 def _check_transfers(workspace_root: Path) -> Finding:
     """Report transfer work that waits for an operator (plan 4.7); this check never repairs anything.
 
-    It names exports held for a copy-out (``httk job eject --resume``),
-    addressed bundles still unacknowledged past their freshness window (in
-    doubt: retire them if the destination has the job, reclaim them if not),
-    and per-job adoption claims whose lineage directory is gone.
+    It names exports held for a copy-out (``httk job eject --resume``), exports
+    whose interrupted copy-out may already have delivered them (in doubt: remove
+    the held copy, or take it back with ``httk job adopt``), addressed bundles
+    still unacknowledged past their freshness window (in doubt: retire them if
+    the destination has the job, reclaim them if not), and per-job adoption
+    claims whose lineage directory is gone.
     """
 
     from ._adoption import stale_claims
     from ._receipts import FRESHNESS_WINDOW_NS
-    from ._sealing import pending_outgoing
+    from ._sealing import exports_in_doubt, pending_outgoing
 
     try:
         workspace = Workspace(workspace_root, mutable=False)
     except (WorkflowError, OSError) as exc:
         return Finding("transfers", "ok", f"there is no readable workspace to check transfers in: {exc}")
     exports_root = workspace.control / "transfers" / "exports"
+    doubtful = exports_in_doubt(workspace)
     held = sorted(os.listdir(exports_root)) if exports_root.is_dir() else []
     now = time.time_ns()
     in_doubt = [
@@ -396,12 +399,22 @@ def _check_transfers(workspace_root: Path) -> Finding:
         if now > txn.sealed_at + FRESHNESS_WINDOW_NS
     ]
     orphaned = stale_claims(workspace)
-    details: dict[str, object] = {"held_exports": held, "outgoing_in_doubt": in_doubt, "stale_claims": orphaned}
-    if not (held or in_doubt or orphaned):
+    details: dict[str, object] = {
+        "held_exports": held,
+        "exports_in_doubt": doubtful,
+        "outgoing_in_doubt": in_doubt,
+        "stale_claims": orphaned,
+    }
+    if not (held or doubtful or in_doubt or orphaned):
         return Finding("transfers", "ok", "no transfer waits for an operator", details=details)
     parts = []
     if held:
         parts.append(f"{len(held)} export(s) held for copy-out (`httk job eject --resume`)")
+    if doubtful:
+        parts.append(
+            f"{len(doubtful)} export(s) in doubt, perhaps already delivered "
+            "(remove the held copy, or take it back with `httk job adopt HELD`)"
+        )
     if in_doubt:
         parts.append(
             f"{len(in_doubt)} outgoing transfer(s) unacknowledged past their window "

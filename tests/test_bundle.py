@@ -535,3 +535,17 @@ def test_every_source_checks_each_payloads_job_json_against_its_key(
     _refused(bundle, workspace, "holds the job.json of", source=source)
     with pytest.raises(FormatError, match="holds the job.json of"):
         check_bundle(bundle.root)
+
+
+@pytest.mark.parametrize("value", [[], {}, ["succeeded"], {"kind": "succeeded"}, 1, None])
+@pytest.mark.parametrize("which", ["root", "member"])
+def test_a_prior_kind_of_another_type_is_refused_not_raised(
+    value: object, which: str, tmp_path: Path, workspace: Workspace
+) -> None:
+    bundle = _build(tmp_path, members=1)
+    if which == "root":
+        bundle.manifest["prior_kind"] = value
+    else:
+        bundle.member(0)["prior_kind"] = value
+    bundle.write()
+    _refused(bundle, workspace, "must be a quiescent state kind")

@@ -262,7 +262,8 @@ def link_new(
 
     if not name or name in {".", ".."} or "/" in name or "\0" in name:
         raise ValueError(f"link_new needs one plain file name, not {name!r}")
-    temporary = f".{name}{_LINK_TEMPORARY}{uuid.uuid4().hex}"
+    # At most 64 characters of *name*, so a long name never pushes the temporary past NAME_MAX.
+    temporary = f".{name[:64]}{_LINK_TEMPORARY}{uuid.uuid4().hex}"
     temporary_path, dir_fd = _at(directory, temporary)
     target_path, _ = _at(directory, name)
     descriptor = os.open(

@@ -432,9 +432,10 @@ def _job_placement(value: object, name: str) -> PurePosixPath:
 
 
 def _prior_kind(value: object, name: str) -> str:
-    if value not in QUIESCENT_KINDS:
+    # The type first: an array or object is unhashable, and must be refused, not raise TypeError.
+    if not isinstance(value, str) or value not in QUIESCENT_KINDS:
         raise FormatError(f"{name} must be a quiescent state kind, not {value!r}")
-    return str(value)
+    return value
 
 
 def _prior_state(value: object, name: str) -> Mapping[str, Any]:

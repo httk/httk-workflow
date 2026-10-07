@@ -725,7 +725,11 @@ is not retired by `httk workflow transfer retire`. When the destination is on
 another filesystem, the job is first exported to
 `transfers/exports/<T>/<job_key>` and then copied out; if the copy-out was
 interrupted, `httk job eject --resume` (alone, with no JOB or DEST) finishes
-every pending one. The held bundle can also be adopted back from its path.
+every pending one. A copy-out interrupted after its publication witness may
+already have delivered the bundle; it is then held in doubt
+(`transfers/in-doubt/<T>/<job_key>/`, with `in-doubt.json` beside it) and never republished. `--resume` and
+`transfer status` report it, and the operator removes the held copy or adopts
+it back with `httk job adopt transfers/in-doubt/<T>/<job_key>` (the full path).
 
 `job adopt` verifies a directory, moves it in (a rename on one filesystem;
 across filesystems, a copy that is verified before the directory is removed),
@@ -910,19 +914,22 @@ httk workflow transfer status [--workspace WS] [--json]
 
 `status` is read-only. It reports exports held for copy-out (finish them with
 `httk job eject --resume`), outgoing transfers unacknowledged past the
-freshness window (in doubt), and adoption claims without their lineage. The
+freshness window (in doubt, never resolved automatically), held exports in
+doubt (`exports_in_doubt`, exit 1), and adoption claims without their lineage. The
 text output is a first line `ok: MESSAGE` or `warning: MESSAGE` followed by
 tab-separated item lines; `--json` prints one object including `workspace`, `check`,
 `status`, `message`, `repairable`, `repaired`, `action` and `details` (`held_exports`, `outgoing_in_doubt` as
-`transfer_id`, `job_key`, `sealed_at` entries, and `stale_claims`). It exits 0
+`transfer_id`, `job_key`, `sealed_at` entries, `exports_in_doubt`, and
+`stale_claims`). It exits 0
 when nothing waits for the operator, 1 when something does, 2 for argument
 errors. The workspace resolves as for `retire` and `reclaim`.
 
 `retire` states that the destination holds the job (verify first): the bundle
 moves to `transfers/retired/` and the job's marker is removed. `reclaim` takes
-the job back to its placement and previous state, and is refused until no
+the job back to its placement and previous state. It is refused until no
 destination could still import the bundle (the freshness window plus the
-clock-skew bound after sealing). See {doc}`transfer_reclamation`.
+clock-skew bound after sealing); it records an authorization
+(`tmp/abort.<T>/reclaim`) first and only then moves the bundle home. See {doc}`transfer_reclamation`.
 
 ### Far-side protocol commands
 

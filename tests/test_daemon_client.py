@@ -822,6 +822,59 @@ def test_check_refuses_a_v2_shaped_exchange_with_the_teaching_message(tmp_path: 
         endpoint.check()
 
 
+@pytest.mark.parametrize("failing", ["hide", "publish"])
+def test_take_back_survives_a_retransmitted_enoent_after_a_successful_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    endpoint = _endpoint(tmp_path)
+    (endpoint.exchange / "inbox" / "job-1").mkdir()
+    (endpoint.exchange / "inbox" / "job-1" / "f").write_text("x")
+    real_rename = os.rename
+
+    def retransmitted(src: object, dst: object, **kwargs: object) -> None:
+        real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
+        hide = str(dst).startswith(".takeback-")
+        if hide == (failing == "hide"):
+            raise FileNotFoundError(2, "retransmitted")
+
+    monkeypatch.setattr(os, "rename", retransmitted)
+
+    client_module.take_back(endpoint, "job-1", tmp_path / "out")
+
+    assert (tmp_path / "out" / "f").read_text() == "x"
+    assert not list((endpoint.exchange / "inbox").iterdir())  # not restored, nothing left held
+
+
+@pytest.mark.parametrize("probe_fails", [False, True])
+def test_take_back_keeps_the_original_when_publication_is_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_fails: bool
+) -> None:
+    endpoint = _endpoint(tmp_path)
+    (endpoint.exchange / "inbox" / "job-1").mkdir()
+    destination = tmp_path / "out"
+    real_rename, real_lstat = os.rename, os.lstat
+
+    def rename(src: object, dst: object, **kwargs: object) -> None:
+        real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
+        if dst == destination:
+            if not probe_fails:
+                real_rename(destination, tmp_path / "consumed")  # a consumer moved it before the identity probe
+            raise OSError(5, "reported error after success")
+
+    def lstat(path: object, **kwargs: object) -> os.stat_result:
+        if probe_fails and path == destination:
+            raise PermissionError(13, "probe failed")
+        return real_lstat(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(os, "lstat", lstat)
+
+    with pytest.raises(OSError, match="may or may not have been published"):
+        client_module.take_back(endpoint, "job-1", destination)
+
+    assert [path.name.startswith(".takeback-") for path in (endpoint.exchange / "inbox").iterdir()] == [True]
+
+
 def test_take_back_refuses_destinations_inside_the_exchange(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     (endpoint.exchange / "inbox" / "job-1").mkdir()

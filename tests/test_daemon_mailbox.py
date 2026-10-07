@@ -165,16 +165,44 @@ def test_read_refuses_final_symlink(tmp_path: Path) -> None:
         mailbox.read(name)
 
 
-def test_names_counts_unrelated_entries_toward_scan_bound(tmp_path: Path) -> None:
+def test_scans_skip_unrelated_entries_and_return_bounded_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = _mailbox(tmp_path)
-    for index in range(mailbox_module.MAX_DIRECTORY_ENTRIES):
+    for index in range(mailbox_module.MAX_DIRECTORY_ENTRIES + 1):
         (path / f"unrelated-{index}").touch()
+        (path / f".hidden-{index}").touch()
+    valid = "4" * 32 + ".json"
+    (path / valid).write_bytes(b"ok")
 
     with MailboxDirectory(path) as mailbox:
-        assert mailbox.names() == ()
-        (path / ("4" * 32 + ".json")).write_bytes(b"ok")
-        with pytest.raises(ValueError, match="entries"):
-            mailbox.names()
+        assert mailbox.scan() == ((valid,), False)
+        monkeypatch.setattr(mailbox_module, "MAX_SCANNED_ENTRIES", 10)
+        names, truncated = mailbox.scan()
+        assert truncated and len(names) <= 1
+        monkeypatch.undo()
+        monkeypatch.setattr(mailbox_module, "MAX_DIRECTORY_ENTRIES", 1)
+        (path / ("5" * 32 + ".json")).write_bytes(b"ok")
+        names, truncated = mailbox.scan()
+        assert truncated and len(names) == 1
+
+
+def test_a_child_mailbox_is_opened_without_following_a_symlink(tmp_path: Path) -> None:
+    parent = tmp_path / "exchange"
+    (parent / "requests").mkdir(parents=True)
+    (parent / "linked").symlink_to(parent / "requests", target_is_directory=True)
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with MailboxDirectory.child(descriptor, "requests") as mailbox:
+            name = mailbox.publish(b"ok")
+        assert (parent / "requests" / name).read_bytes() == b"ok"
+        with pytest.raises(OSError):
+            MailboxDirectory.child(descriptor, "linked")
+        for bad in ("", "..", "a/b"):
+            with pytest.raises(ValueError):
+                MailboxDirectory.child(descriptor, bad)
+    finally:
+        os.close(descriptor)
 
 
 def test_names_filters_temporary_and_unrelated_entries_and_sorts(tmp_path: Path) -> None:
@@ -387,3 +415,21 @@ def test_failed_operations_close_descriptors(tmp_path: Path, monkeypatch: pytest
                 mailbox.publish(b"data")
 
     assert len(os.listdir("/proc/self/fd")) == baseline
+
+
+def test_set_aside_moves_any_publication_named_entry_out_of_scans(tmp_path: Path) -> None:
+    path = _mailbox(tmp_path)
+    name = "7" * 32 + ".json"
+    (path / name).mkdir()
+    (path / name / "content").write_bytes(b"x")
+    with MailboxDirectory(path) as mailbox:
+        identity = mailbox.identity()
+        assert mailbox.scan() == ((name,), False)
+        assert mailbox.scan(skip={name}) == ((), False)
+        aside = mailbox.set_aside(name)
+        assert aside.startswith(f".invalid-{name}-") and (path / aside / "content").exists()
+        assert mailbox.scan() == ((), False) and mailbox.identity() == identity
+        with pytest.raises(FileNotFoundError):
+            mailbox.set_aside(name)
+        with pytest.raises(ValueError):
+            mailbox.set_aside("../x")

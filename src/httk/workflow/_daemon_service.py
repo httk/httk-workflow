@@ -21,7 +21,7 @@ from typing import TypedDict, cast
 from ._daemon_activation import verify_active_snapshot
 from ._daemon_auth import CLOCK_SKEW_SECONDS, check_request_time, sign_response, verify_request
 from ._daemon_keys import read_response_seed, response_seed_path
-from ._daemon_mailbox import MailboxDirectory
+from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_SCANNED_ENTRIES, MailboxDirectory
 from ._daemon_policy import Policy, _open_directory, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
 from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
@@ -229,6 +229,9 @@ class Broker:
     :param observe: Follow submitted manager jobs with the scheduler, keeping each observation in the ledger.
     :param activation: Check that the active snapshot is still the one this broker serves; raising
         ``ValueError`` or ``OSError`` retires the broker. ``None`` never retires it.
+    :param mailboxes: Reopen the request and response mailboxes; called at the start of every poll, so a
+        client that replaced either directory is followed (or, for a symlink, refused) at the next poll.
+        The broker then owns and closes the mailboxes it holds. ``None`` keeps *requests* and *responses*.
     """
 
     def __init__(
@@ -243,6 +246,7 @@ class Broker:
         response_seed: Path,
         observe: bool = False,
         activation: Callable[[], None] | None = None,
+        mailboxes: Callable[[], tuple[MailboxDirectory, MailboxDirectory]] | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
             raise ValueError("response_seed must be a Path")
@@ -256,6 +260,11 @@ class Broker:
         self.response_seed = response_seed
         self.observe = observe
         self.activation = activation
+        self.mailboxes = mailboxes
+        self._mailbox_problem: str | None = None
+        #: Rejected publications that could be neither removed nor set aside, in the directory identified.
+        self._stuck: set[str] = set()
+        self._stuck_identity: tuple[int, int] | None = None
         #: Set once the active snapshot changed: this broker admits and decides nothing more.
         self.retired = False
         self._observed_at: float | None = None
@@ -318,12 +327,53 @@ class Broker:
         except FileNotFoundError:
             pass
 
+    def _wrong_type(self, publication: str) -> bool:
+        """Report whether a publication that failed to read is established as not a regular file (by lstat)."""
+
+        try:
+            information = self.requests.lstat(publication)
+        except OSError:
+            return False
+        return information is not None and not stat.S_ISREG(information.st_mode)
+
+    def _unreadable(self, publication: str, exc: OSError) -> None:
+        """Log, once per publication and reason, a read failure that may be transient; the request stays."""
+
+        reason = exc.strerror or type(exc).__name__
+        if ("unreadable:" + publication, reason) in self._warned:
+            return
+        # ponytail: one line per publication and reason until 4096 pairs, then the memory resets.
+        if len(self._warned) >= _MAX_WARNED:
+            self._warned.clear()
+        self._warned.add(("unreadable:" + publication, reason))
+        _LOGGER.warning("daemon_request_unreadable publication=%s reason=%s: retried next poll", publication, reason)
+
     def _discard_invalid(self, publication: str, code: str) -> None:
+        """Remove a rejected publication; set an unremovable one aside, or at least stop scanning it."""
+
         _LOGGER.warning("daemon_request_rejected code=%s publication=%s", code, publication)
         try:
             self.requests.remove(publication)
-        except (FileNotFoundError, IsADirectoryError, PermissionError):
-            pass
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass  # a directory, or an entry this process may not unlink
+        try:
+            aside = self.requests.set_aside(publication)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            # ponytail: remembered per mailbox directory up to the scan bound; beyond it they may starve again.
+            if len(self._stuck) < MAX_SCANNED_ENTRIES:
+                self._stuck.add(publication)
+            _LOGGER.warning(
+                "daemon_request_unremovable publication=%s reason=%s: skipped from now on",
+                publication,
+                exc.strerror or type(exc).__name__,
+            )
+            return
+        _LOGGER.info("daemon_request_set_aside publication=%s name=%s", publication, aside)
 
     def _finish(self, entry: Entry, response: Response) -> Response:
         """Link a response durably and return the stored one (another instance's, when it was first)."""
@@ -530,6 +580,52 @@ class Broker:
             now_ns=int(now * 1_000_000_000),
         )
 
+    def close(self) -> None:
+        """Close the mailboxes this broker currently holds; repeated calls are harmless."""
+
+        self.requests.close()
+        self.responses.close()
+
+    def _mailbox_trouble(self, problem: str | None) -> None:
+        """Log a mailbox problem once until it changes or clears."""
+
+        if problem is not None and problem != self._mailbox_problem:
+            _LOGGER.warning("daemon_mailbox_problem reason=%s", problem)
+        self._mailbox_problem = problem
+
+    def _reopen(self) -> bool:
+        """Reopen the mailboxes for this poll; ``False`` (logged once) when they cannot be opened."""
+
+        if self.mailboxes is None:
+            return True
+        try:
+            requests, responses = self.mailboxes()
+        except (OSError, ValueError) as exc:
+            self._mailbox_trouble(f"the mailboxes cannot be opened without following a symlink: {excerpt(str(exc))}")
+            return False
+        self.close()
+        self.requests, self.responses = requests, responses
+        return True
+
+    def _scan(self) -> tuple[str, ...]:
+        """Return this poll's bounded batch of request publications; a failed scan is logged and skipped."""
+
+        try:
+            identity = self.requests.identity()
+            if identity != self._stuck_identity:
+                self._stuck_identity, self._stuck = identity, set()
+            names, truncated = self.requests.scan(self._stuck)
+        except (OSError, ValueError) as exc:
+            self._mailbox_trouble(f"the request mailbox cannot be scanned: {excerpt(str(exc))}")
+            return ()
+        self._mailbox_trouble(
+            f"the request mailbox holds more than {MAX_DIRECTORY_ENTRIES} publications or {MAX_SCANNED_ENTRIES} "
+            "entries; serving it in batches"
+            if truncated
+            else None
+        )
+        return names
+
     def _sweep_responses(self, now: float) -> None:
         """Remove mailbox responses no client can still be waiting for.
 
@@ -563,7 +659,8 @@ class Broker:
         now = time.time()
         self._recover(now)
         processed = 0
-        for publication in self.requests.names():
+        available = self._reopen()
+        for publication in self._scan() if available else ():
             if stop.is_set():
                 break
             processed += 1
@@ -571,8 +668,14 @@ class Broker:
                 data = self.requests.read(publication)
             except FileNotFoundError:
                 continue
-            except (ValueError, OSError):
+            except ValueError:  # not a regular file, or too large: established as invalid
                 self._discard_invalid(publication, "invalid_publication")
+                continue
+            except OSError as exc:
+                if self._wrong_type(publication):
+                    self._discard_invalid(publication, "invalid_publication")
+                else:
+                    self._unreadable(publication, exc)
                 continue
             try:
                 request = decode_request(data)
@@ -602,7 +705,8 @@ class Broker:
                 self.exchange.poll(self._manager_rows(rows))
             except Exception:
                 _LOGGER.exception("daemon_exchange_failed")
-        self._sweep_responses(now)
+        if available:
+            self._sweep_responses(now)
         return processed
 
     def _observation(self, handle: str) -> _Observation | None:
@@ -846,8 +950,21 @@ def _run(arguments: argparse.Namespace) -> None:
                 raise ValueError(f"scheduler client check failed: {exc}") from exc
             _LOGGER.info("daemon_check_passed workspace=%s cluster=%s", policy.workspace_id, policy.cluster)
             exchange = _EXCHANGE_DIRECTORY
-            requests = stack.enter_context(MailboxDirectory(exchange / "requests"))
-            responses = stack.enter_context(MailboxDirectory(exchange / "responses"))
+            exchange_fd = _open_directory(exchange)
+            stack.callback(os.close, exchange_fd)
+
+            def mailboxes() -> tuple[MailboxDirectory, MailboxDirectory]:
+                # Through the exchange descriptor, never following a symlink the client put in their place.
+                requests = MailboxDirectory.child(exchange_fd, "requests")
+                try:
+                    return requests, MailboxDirectory.child(exchange_fd, "responses")
+                except BaseException:
+                    requests.close()
+                    raise
+
+            requests, responses = mailboxes()
+            stack.callback(responses.close)
+            stack.callback(requests.close)
             if arguments.check:
                 return
             publisher = ExchangePublisher(exchange, policy.enrollment_id)
@@ -861,7 +978,9 @@ def _run(arguments: argparse.Namespace) -> None:
                 response_seed=seed,
                 observe=True,
                 activation=_activation_check(_STATE_DIRECTORY, policy_source, policy),
+                mailboxes=mailboxes,
             )
+            stack.callback(broker.close)
             _LOGGER.info(
                 "daemon_started workspace=%s enrollment=%s launchers=%s",
                 policy.workspace_id,

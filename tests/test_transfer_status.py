@@ -37,7 +37,12 @@ def test_a_quiet_workspace_reports_nothing_and_exits_zero(
     document = json.loads(capsys.readouterr().out)
     assert document["status"] == "ok" and document["check"] == "transfers"
     assert document["workspace"] == str(source.root)
-    assert document["details"] == {"held_exports": [], "outgoing_in_doubt": [], "stale_claims": []}
+    assert document["details"] == {
+        "held_exports": [],
+        "exports_in_doubt": [],
+        "outgoing_in_doubt": [],
+        "stale_claims": [],
+    }
     # The enclosing workspace is the default, with the same text report.
     assert command(["transfer", "status"], CLIContext("httk", source.root)) == 0
     assert capsys.readouterr().out.startswith("ok: ")

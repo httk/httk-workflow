@@ -16,7 +16,7 @@ from conftest import configure_identity
 from httk.workflow import Workspace, _adoption, _bundle, _sealing, _txn, transfers
 from httk.workflow._bundle import TRANSFER_DIRECTORY
 from httk.workflow._receipts import CLOCK_SKEW_NS, FRESHNESS_WINDOW_NS, receipt_path
-from httk.workflow.errors import FormatError
+from httk.workflow.errors import FormatError, WorkspaceCorruptionError
 from httk.workflow.models import STATE_KINDS, Marker
 from httk.workflow.workflow_cli import command
 from test_eject_adopt import _payload
@@ -111,6 +111,7 @@ _STEPS = (
     "V6.claim",
     "V6.claimed",
     "V7.rechecked",
+    "V8.snapshot",
     "V8.envelope",
     "V9.payload",
     "V9.marker",
@@ -156,6 +157,7 @@ _TAKEOVER_STEPS = (
     "V5.checked",
     "V6.claimed",
     "V7.rechecked",
+    "V8.snapshot",
     "V8.envelope",
     "V9.payload",
     "V9.marker",
@@ -582,6 +584,197 @@ def test_nothing_is_made_writable_before_the_bundle_verifies(
     assert result.status == "refused" and "more than 3 entries" in str(result.error)
     assert loose.is_dir() and _lineages(destination) == []
     assert os.stat(loose / "files" / "locked").st_mode & 0o777 == 0o555
+
+
+@pytest.mark.parametrize("shape", ["file", "directory"])
+@pytest.mark.parametrize("same", [False, True])
+def test_concurrent_runner_publications_under_one_name_never_overwrite_the_winner(
+    shape: str, same: bool, pair: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both publishers pass the absence check; the second installs only if it holds the same content."""
+
+    _source, destination = pair
+
+    def runner(tag: str, text: str) -> Path:
+        if shape == "file":
+            path = tmp_path / tag / "run.sh"
+            path.parent.mkdir(parents=True)
+            path.write_text(text)
+            return path
+        path = tmp_path / tag / "tool"
+        path.mkdir(parents=True)
+        (path / "run").write_text(text)
+        (path / "run").chmod(0o755)
+        return path
+
+    winner = runner("winner", "#!/bin/sh\necho winner\n")
+    loser = runner("loser", "#!/bin/sh\necho winner\n" if same else "#!/bin/sh\necho loser\n")
+    name = "shared/run.sh" if shape == "file" else "shared/tool"
+    copy = shutil.copyfile if shape == "file" else shutil.copytree
+    attribute = "copyfile" if shape == "file" else "copytree"
+    won: list[dict[str, object]] = []
+
+    def racing_copy(*args: Any, **kwargs: Any) -> Any:
+        # The loser has passed its absence check; the winner publishes before it installs.
+        monkeypatch.setattr(shutil, attribute, copy)
+        won.append(destination.publish_runner(winner, name=name))
+        return copy(*args, **kwargs)
+
+    monkeypatch.setattr(shutil, attribute, racing_copy)
+    if same:
+        assert destination.publish_runner(loser, name=name)["sha256"] == won[0]["sha256"]
+    else:
+        with pytest.raises(WorkspaceCorruptionError, match="published concurrently"):
+            destination.publish_runner(loser, name=name)
+    target = destination.runner_store_path(name)
+    text = target.read_text() if shape == "file" else (target / "run").read_text()
+    assert text == "#!/bin/sh\necho winner\n"
+    assert not [entry for entry in os.listdir(destination.control / "tmp") if entry.startswith("runner.")]
+    # An explicit replacement still replaces.
+    monkeypatch.undo()
+    if not same:
+        destination.publish_runner(loser, name=name, replace=True)
+        text = target.read_text() if shape == "file" else (target / "run").read_text()
+        assert text == "#!/bin/sh\necho loser\n"
+
+
+def test_a_bundle_whose_prior_kind_is_not_a_string_is_refused_and_put_back(
+    pair: tuple[Workspace, Workspace], tmp_path: Path
+) -> None:
+    source, destination = pair
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    loose = transfers.eject_job(source, marker.job_id, tmp_path / "loose")
+    manifest_path = loose / TRANSFER_DIRECTORY / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["prior_kind"] = []
+    manifest_path.write_text(json.dumps(manifest))
+    result = _adoption.adopt(destination, _adoption.Source("adopt", loose))
+    assert result.status == "refused" and isinstance(result.error, FormatError)
+    assert loose.is_dir() and _lineages(destination) == []
+
+
+@pytest.mark.parametrize("how", ["takeover", "own"])
+def test_a_poisoned_lineage_never_stops_the_lineages_after_it(
+    how: str, pair: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = pair
+    owner = _txn.owner_token(str(uuid.uuid4()))
+    markers = []
+    for tag in ("first", "second"):
+        marker = source.submit(_payload(tmp_path / "payloads", tag), "jobs")
+        loose = transfers.eject_job(source, marker.job_id, tmp_path / tag)
+        _hook_at("V2.claimed", _crash)
+        with pytest.raises(Crash):
+            _adoption.adopt(destination, _adoption.Source("adopt", loose), owner=owner)
+        markers.append(marker)
+    lineages = _lineages(destination)
+    assert len(lineages) == 2
+    real_resume = _adoption.resume
+    poisoned = {lineages[0].name.rsplit(".", 1)[-1]}
+
+    def resume(workspace: Workspace, lineage: Path, **kwargs: Any) -> _adoption.AdoptionResult:
+        if lineage.name.rsplit(".", 1)[-1] in poisoned:
+            raise TypeError("an unexpected defect in one lineage")
+        return real_resume(workspace, lineage, **kwargs)
+
+    monkeypatch.setattr(_adoption, "resume", resume)
+    if how == "takeover":
+        monkeypatch.setattr(_txn, "owner_gone", lambda *_args, **_kwargs: True)
+        records = _adoption.recover_lineages(destination)
+    else:
+        records = _adoption.resume_owned(destination, owner)
+    assert sorted(str(record["status"]) for record in records) == ["failed", "imported"]
+    found = [destination.find_marker_by_id(marker.job_id) for marker in markers]
+    assert [item is not None for item in found].count(True) == 1
+
+
+def test_a_manifest_edited_through_an_old_descriptor_after_v8_never_reaches_a_frame(
+    pair: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review 1: after V8 recovery trusts only ``S/verified.json``, never the client-writable manifest."""
+
+    source, destination = pair
+    local = destination.submit(_payload(tmp_path / "local", "local"), "jobs")
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    with source.open_journal_writer() as writer:
+        marker = source.transition(writer, marker, "paused", {"reason": "operator_pause"})
+    loose = transfers.eject_job(source, marker.job_id, tmp_path / "loose")
+    # The client keeps a writable descriptor on the manifest from before the claim.
+    handle = os.open(loose / TRANSFER_DIRECTORY / "manifest.json", os.O_RDWR)
+    try:
+        _hook_at("V8.envelope", _crash)
+        with pytest.raises(Crash):
+            _adoption.adopt(destination, _adoption.Source("adopt", loose))
+        [lineage] = _lineages(destination)
+        assert (lineage / _adoption.VERIFIED).is_file()
+        forged = json.loads(os.pread(handle, 1 << 20, 0))
+        forged["prior_kind"] = "waiting"
+        forged["prior_state"] = {
+            "kind": "waiting",
+            "join": {"children": [{"job_id": local.job_id, "job_key": local.job_key}]},
+        }
+        data = json.dumps(forged).encode()
+        os.ftruncate(handle, 0)
+        os.pwrite(handle, data, 0)
+    finally:
+        os.close(handle)
+    assert json.loads((lineage / "envelope" / "manifest.json").read_text())["prior_kind"] == "waiting"
+    _owner_gone(monkeypatch)
+    [record] = _adoption.recover_lineages(destination)
+    assert record["status"] == "imported"
+    adopted = destination.find_marker_by_id(marker.job_id)
+    assert adopted is not None and adopted.kind == "paused"
+    state = destination.read_state(adopted)
+    assert "join" not in state and state["reason"] == "operator_pause"
+    assert transfers._waiting_parent_map(destination) == {}
+
+
+def test_a_lineage_past_v8_without_its_snapshot_is_kept_and_reported(
+    pair: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = pair
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    loose = transfers.eject_job(source, marker.job_id, tmp_path / "loose")
+    _hook_at("V8.envelope", _crash)
+    with pytest.raises(Crash):
+        _adoption.adopt(destination, _adoption.Source("adopt", loose))
+    [lineage] = _lineages(destination)
+    (lineage / _adoption.VERIFIED).unlink()
+    _owner_gone(monkeypatch)
+    [record] = _adoption.recover_lineages(destination)
+    assert record["status"] == "failed" and _adoption.VERIFIED in str(record["reason"])
+    [kept] = _lineages(destination)
+    assert (kept / "envelope").is_dir() and destination.find_marker_by_id(marker.job_id) is None
+
+
+def test_a_bundled_runner_changed_after_verification_is_never_installed(
+    pair: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = pair
+    parent, _members = _tree(source, tmp_path / "tree")
+    loose = transfers.eject_job(source, parent.job_id, tmp_path / "loose")
+    runner = loose / TRANSFER_DIRECTORY / "runners" / "tree" / "run.py"
+    os.chmod(runner, 0o644)
+    handle = os.open(runner, os.O_RDWR)
+    try:
+        _hook_at("V8.envelope", lambda: os.pwrite(handle, b"#!/bin/sh\nexit 1\n", 0))
+        with pytest.raises(WorkspaceCorruptionError, match="changed after the bundle was verified"):
+            _adoption.adopt(destination, _adoption.Source("adopt", loose))
+    finally:
+        os.close(handle)
+    assert not destination.runner_store_path("tree/run.py").exists()
+    assert not [name for name in os.listdir(destination.control / "tmp") if name.startswith("birth.")]
+
+
+def test_a_copied_source_with_a_long_name_is_removed_after_the_adoption(
+    pair: tuple[Workspace, Workspace], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = pair
+    marker = source.submit(_payload(tmp_path / "payloads"), "jobs")
+    loose = transfers.eject_job(source, marker.job_id, tmp_path / ("d" * 240))
+    monkeypatch.setattr(transfers, "_same_filesystem", lambda _workspace, path: False)
+    assert transfers.adopt_job(destination, loose).job_id == marker.job_id
+    assert not loose.exists() and not [name for name in os.listdir(tmp_path) if name.startswith(".httk-adopted")]
 
 
 def test_a_refusal_after_the_claims_releases_them_and_puts_the_bundle_back(

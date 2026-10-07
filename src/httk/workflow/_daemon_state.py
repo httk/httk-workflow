@@ -857,6 +857,10 @@ class Ledger:
                     raise ConflictError("request identifier conflict")
                 if existing.handle is not None:
                     self._link_handle(existing.handle, request.request_id)
+                if existing.response is None:
+                    # Another instance may have renamed the anchor in just now: make its directory entry
+                    # durable before this instance executes or decides anything for it.
+                    fsync_directory(anchor.parent)
                 return existing
 
             claim = f"{request.request_id} {self.nonce}\n".encode("ascii")

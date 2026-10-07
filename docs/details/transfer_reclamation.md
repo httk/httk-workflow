@@ -85,6 +85,14 @@ also be taken back with `httk job adopt` of its path under `exports/`. While a
 bundle is held the job is not in the workspace and not at the target:
 `httk workflow transfer status` reports it as an export waiting for copy-out.
 
+A copy-out interrupted after its publication witness (the `publishing` link
+made just before the publishing rename) may already have delivered the bundle.
+It is then held *in doubt* (`transfers/in-doubt/<T>/<job_key>/`, with `in-doubt.json` beside it) and is never
+copied out again. `httk job eject --resume` and `httk workflow transfer status`
+report it (details key `exports_in_doubt`, exit status 1). The operator either
+removes the held copy, once the target is known to hold the job, or takes it
+back with `httk job adopt transfers/in-doubt/<T>/<job_key>` (the full path).
+
 ## Transfers in doubt
 
 A bundle in `transfers/outgoing/<T>` is delivered by the transfer CLI, which
@@ -94,7 +102,8 @@ lost simply repeats: the destination recognizes the replay and acknowledges
 again without creating a second job.
 
 A bundle still unacknowledged after `W` is *in doubt*: it may have been
-delivered, or it may still be delivered until `W + S` has passed. `httk workflow transfer status`
+delivered, or it may still be delivered until `W + S` has passed. An in-doubt
+transfer is never resolved automatically. `httk workflow transfer status`
 reports it, and two operator verbs settle it:
 
 - `httk workflow transfer retire [--workspace WS] JOB_ID` when the destination
@@ -103,7 +112,9 @@ reports it, and two operator verbs settle it:
   removed.
 - `httk workflow transfer reclaim [--workspace WS] JOB_ID` to take the job
   back. It is refused until `sealed_at + W + S`, because until then a
-  destination could still import the bundle. The job returns to its
+  destination could still import the bundle. It first records the operator's
+  authorization (`tmp/abort.<T>/reclaim`), and only then moves the bundle home;
+  recovery continues an authorized reclaim after a crash. The job returns to its
   placement and its previous state; a later transfer starts afresh with a new
   transfer ID.
 

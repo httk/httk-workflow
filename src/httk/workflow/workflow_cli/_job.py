@@ -27,6 +27,7 @@ from httk.core.identity import (
 
 from .._job_tree import bound_parent, is_detached
 from .._logging import LOG_LEVELS, configure_logging
+from .._sealing import exports_in_doubt
 from .._util import read_json, utc_now
 from ..adapters import (
     REMOTE_JOB_DELETE_COMMAND,
@@ -1655,8 +1656,14 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.resume:
         for directory in resume_exports(workspace):
             print(f"-\tcopied out\t{directory}")
+        doubtful = exports_in_doubt(workspace)
+        for entry in doubtful:
+            print(
+                f"-\tin doubt\t{entry['held']}\t(may already be at {entry['destination']}: remove the held copy, "
+                f"or take it back with `httk job adopt {entry['held']}`)"
+            )
         if not targets:
-            return 0
+            return 1 if doubtful else 0
     if len(targets) < 2:
         print("error: eject needs at least one JOB and a DEST (or --resume alone)", file=sys.stderr)
         return 2

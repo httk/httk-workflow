@@ -405,14 +405,15 @@ def test_failed_tree_install_cleans_nested_read_only_staging(tmp_path: Path, mon
     (source / "support" / "nested").mkdir(parents=True)
     (source / "support" / "nested" / "member.txt").write_text("support", encoding="utf-8")
     target = workspace.runner_store_path("toolbox")
-    real_replace = os.replace
+    real_rename = os.rename
 
     def fail_new_tree(source_path: str | os.PathLike[str], target_path: str | os.PathLike[str]) -> None:
         if Path(source_path).name.startswith("runner.") and Path(target_path) == target:
             raise OSError("injected install failure")
-        real_replace(source_path, target_path)
+        real_rename(source_path, target_path)
 
-    monkeypatch.setattr(os, "replace", fail_new_tree)
+    # A new name is installed exclusively, by rename onto the absent name.
+    monkeypatch.setattr(os, "rename", fail_new_tree)
     with pytest.raises(OSError, match="injected install failure"):
         workspace.publish_runner(source, name="toolbox")
     assert not target.exists()

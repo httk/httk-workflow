@@ -2109,7 +2109,7 @@ a job):
 │   ├── birth.<rand>/                 a sealing transaction directory being built
 │   ├── eject.<T>/                    live sealing transaction T
 │   ├── abort.<T>/                    T decided aborted (renamed from eject.<T>)
-│   ├── import.<owner>.<ns>.<L>/      adoption lineage L
+│   ├── import.<owner>.<ns>.<L>/      adoption lineage L (with verified.json from V8 on)
 │   ├── export.<owner>.<ns>.<T>/      copy-out of held export T
 │   └── trash.<rand>/                 garbage, always collectable
 └── transfers/
@@ -2119,7 +2119,8 @@ a job):
     ├── incoming/<T>/                 addressed bundle delivered by the transfer CLI
     ├── outgoing/<T>/                 sealed addressed bundle waiting for its acknowledgement
     ├── retired/<T>/                  acknowledged addressed bundle
-    └── exports/<T>/<job_key>/        held ejected bundle waiting for copy-out
+    ├── exports/<T>/<job_key>/        held ejected bundle waiting for copy-out
+    └── in-doubt/<T>/<job_key>/       held bundle a copy-out may have delivered (never copied out again)
 ```
 
 `T` is a transfer ID (a fresh UUID), `L` a lineage ID (16 random hex digits),
@@ -2241,8 +2242,8 @@ commit (`EXDEV`, non-empty target) or an S4 mismatch makes the actor abort by
 renaming `E` to `A`. That rename is the single abort decision: after it, every
 forward move names a path inside `E` and fails without effect, and `E` never
 exists again. Anyone who finds `A` and a `transferring` marker under `T`, once
-the owner is gone, runs the **abort steps**: (1) for an addressed reclaim,
-rename `transfers/outgoing/<T>` to `A/payload`; (2) rename
+the owner is gone, runs the **abort steps**: (1) for an addressed reclaim
+authorized by `A/reclaim`, rename `transfers/outgoing/<T>` to `A/payload`; (2) rename
 `A/payload/.httk-transfer` to `A/envelope`; (3) move every member payload in
 `A/envelope.partial/tree` or `A/envelope/tree` back to its placement; (4)
 rename `A/payload` to the root's placement; (5) unfence each member and then
@@ -2377,8 +2378,31 @@ doubt: it may have been delivered, or may still be delivered until
 - `httk workflow transfer retire JOB_ID` records that the destination holds the
   job: it behaves as an acknowledgement without a document;
 - `httk workflow transfer reclaim JOB_ID` takes the job back, and is allowed
-  only after `sealed_at + W + S`: it renames `E` to `A` and runs the abort
-  steps. A later transfer of the job mints a new transfer ID.
+  only after `sealed_at + W + S`: it renames `E` to `A` (or, when neither
+  exists any more, creates an empty `A`), records the authorization
+  `abort.<T>/reclaim`, and runs the abort steps. A later transfer of the job
+  mints a new transfer ID.
+
+An in-doubt transfer is never resolved automatically. The end of the
+freshness window proves only that no destination may accept the bundle any
+more, not that none did, so the abort steps take a committed bundle back from
+`outgoing/<T>` only when the operator's authorization `abort.<T>/reclaim`
+exists; recovery continues such an authorized reclaim after a crash. An abort
+decided by anything else after the commit (the orphan sweep missing a marker,
+say) leaves `A`, the fenced root and `outgoing/<T>` in place: the bundle stays
+deliverable and retirable, and `httk workflow transfer status` reports it once
+its window has passed. A copy-out is in doubt the same way when it may have
+published: before its publishing rename the owner links a `publishing` witness
+into its staging directory (fenced by that directory's name; an owner whose
+link fails stops), and an actor that later finds the witness while the
+destination does not hold the transfer never copies again: it first renames
+the temporary the witness names (the original owner's, carried along by every
+takeover of the staging directory) to a unique name and removes it, so a stale
+owner can no longer publish it, and then moves the bundle to
+`transfers/in-doubt/<T>/<key>` beside an `in-doubt.json` record, a path that no
+copy-out ever claims. `httk job eject --resume` and `httk workflow transfer
+status` report it (exit status 1), and the operator either removes the held
+copy or takes it back with `httk job adopt <held path>`.
 
 ### Ejection, export and adoption of free-standing directories
 
@@ -2392,9 +2416,10 @@ a separate **copy-out** moves the held bundle:
 1. create `tmp/export.<owner>.<ns>.<T>` with `copy-to` recorded;
 2. claim by renaming `exports/<T>/<key>` into it (a concurrent `job adopt` of
    the held path or another resume loses cleanly);
-3. copy to `<dest dir>/.<name>.httk-export.<token>`;
+3. copy to `<dest dir>/.httk-export.<token>` (named independently of `<name>`);
 4. verify the copy's manifest `transfer_id` and digests;
-5. rename it to `<dest dir>/<name>`; when the target is non-empty, rename the
+5. link the `publishing` witness into the staging directory, then rename the
+   copy to `<dest dir>/<name>`; when the target is non-empty, rename the
    bundle back to `exports/<T>/<key>` and report;
 6. trash the staging directory only after step 5 succeeded.
 
@@ -2456,8 +2481,9 @@ and attach carry its state tree, journals, and all placements together.
 ## Exchange extension
 
 The exchange extension lets a client that has no workspace access of its own
-(typically a different account behind a daemon, or a service writing jobs) hand
-jobs to a workspace and receive results through plain directories. It is
+(typically a service or a daemon's remote side) hand jobs to a workspace and
+receive results through plain directories. The writer of the exchange must be
+the workspace owner's account (see [Adoption from the inbox](#adoption-from-the-inbox)). It is
 declared by `"exchange"` in the `extensions` array of `format.json`; a
 workspace declaring an extension the implementation does not know refuses to
 attach.
@@ -2484,8 +2510,9 @@ WORKSPACE/exchange/
 ```
 
 `requests/`, `responses/` and `managers/` are created by `enable` and reserved
-for the workspace daemon; the daemon still uses its own sibling exchange
-directory until it moves here (see the daemon guide).
+for the workspace daemon, which serves its signed requests and responses in
+`WORKSPACE/exchange/requests` and `responses`; there is no sibling exchange
+directory (see the daemon guide).
 
 `exchange.json` is `{"format": "httk-workspace-exchange", "format_version": 1,
 "workspace_id": "<uuid>"}`. `status.json` is `{"format":
@@ -2536,6 +2563,23 @@ directory below `outbox/rejected`, which is opened without following links and
 checked for the owner and device of its parent (another is minted otherwise),
 together with a `reason.json` written by a no-replace link through the same
 descriptor; `reason.json` is written only once the bundle has arrived there.
+A claimed bundle is verified in private staging, but the verification is not a
+guarantee against a writer that held a file open before the claim: a write
+handle the client opened on a file before the rename (for example an open SFTP
+handle) can still change that file's bytes after verification. What such a
+write can still reach is limited to the job's own payload files: right after
+the verification and the presence checks, and before the envelope moves (V8),
+the adopter writes the validated plan (the canonical manifest, with the
+filtered `prior_state` of every job, the root's placement and the origin) into
+a fresh private `S/verified.json`, and every later step and every recovery after
+V8 uses only that snapshot, never the bundle's `manifest.json`; a lineage past
+V8 without it is reported and kept. A bundled runner is copied into a private
+directory, and that copy is checked against the snapshot's digest and is what
+is installed. A marker file's contents are never read (only its name), and a
+payload's `job.json` and other files are the job's own content. This is an
+accepted limitation for the client's own confined job, and it is why the
+exchange writer must be the workspace owner's account.
+
 The bundle's spawn records may not name a job of this workspace outside the
 bundle, nor its root a parent present here. An entry the workspace cannot read or
 search (a mode-0 file or directory) refuses the bundle rather than leaving it

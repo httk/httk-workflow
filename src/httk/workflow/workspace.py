@@ -973,6 +973,8 @@ class Workspace:
         :raises FileExistsError: If a different runner already has the target name.
         :raises httk.workflow.errors.FormatError: If the source, target name, or entry type is invalid.
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If a concurrent publication installed
+            different content under the name first (it is kept).
         """
 
         self._require_unsealed()
@@ -993,16 +995,14 @@ class Workspace:
                     f"workspace runner {target.relative_to(self.runners).as_posix()} already holds a "
                     f"different digest {existing}; pass replace to overwrite it"
                 )
+            elif is_directory:
+                self._install_runner_tree(source_path, target, digest=digest, replace=True, exclude=exclude)
             else:
-                if is_directory:
-                    self._install_runner_tree(source_path, target, exclude=exclude)
-                else:
-                    self._install_runner_file(source_path, target)
+                self._install_runner_file(source_path, target, digest=digest, replace=True)
+        elif is_directory:
+            self._install_runner_tree(source_path, target, digest=digest, replace=False, exclude=exclude)
         else:
-            if is_directory:
-                self._install_runner_tree(source_path, target, exclude=exclude)
-            else:
-                self._install_runner_file(source_path, target)
+            self._install_runner_file(source_path, target, digest=digest, replace=False)
         relative = target.relative_to(self.runners)
         _LOGGER.info(
             "published workspace runner %s with digest %s",
@@ -1012,8 +1012,13 @@ class Workspace:
         )
         return {"source": "workspace", "path": relative.as_posix(), "sha256": digest}
 
-    def _install_runner_file(self, source: Path, target: Path) -> None:
-        """Atomically replace one store entry with the bytes of *source*."""
+    def _install_runner_file(self, source: Path, target: Path, *, digest: str, replace: bool) -> None:
+        """Install one store file: replace an existing entry only with *replace*, else link it in exclusively.
+
+        Without *replace* the prepared inode is linked under the name, which
+        fails if anything holds it: a concurrent publication's winner is kept,
+        and accepted only when it holds the same *digest*.
+        """
 
         self.ensure_directory(target.parent)
         staging = self.control / "tmp" / f"runner.{uuid.uuid4()}"
@@ -1021,12 +1026,41 @@ class Workspace:
         shutil.copyfile(source, staging)
         staging.chmod(0o555)
         try:
-            os.replace(staging, target)
+            if replace:
+                os.replace(staging, target)
+                return
+            try:
+                os.link(staging, target, follow_symlinks=False)
+            except FileExistsError:
+                self._require_runner_digest(target, digest, is_directory=False)
         finally:
             staging.unlink(missing_ok=True)
 
-    def _install_runner_tree(self, source: Path, target: Path, *, exclude: Callable[[str], bool] | None = None) -> None:
-        """Install a runner tree, replacing an existing tree when requested."""
+    def _require_runner_digest(self, target: Path, digest: str, *, is_directory: bool) -> None:
+        """Accept a store entry another publication installed first only when it holds *digest*."""
+
+        existing = _existing_runner_digest(target, is_directory)
+        if existing != digest:
+            raise WorkspaceCorruptionError(
+                f"workspace runner {target.relative_to(self.runners).as_posix()} was published concurrently "
+                f"with digest {existing}, not {digest}; it is kept"
+            )
+
+    def _install_runner_tree(
+        self,
+        source: Path,
+        target: Path,
+        *,
+        digest: str,
+        replace: bool,
+        exclude: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Install a runner tree, replacing an existing tree only with *replace*.
+
+        Without *replace* the prepared tree is renamed onto the name, which
+        fails onto a non-empty directory: a concurrent publication's winner is
+        kept, and accepted only when it holds the same *digest*.
+        """
 
         self.ensure_directory(target.parent)
         staging = self.control / "tmp" / f"runner.{uuid.uuid4()}"
@@ -1040,6 +1074,16 @@ class Workspace:
                 # Linux requires write permission on a directory itself to rename it;
                 # the installed root is made read-only immediately after the rename.
                 staging.chmod(0o755)
+                if not replace:
+                    try:
+                        os.rename(staging, target)
+                    except OSError as exc:
+                        if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR, errno.EISDIR}:
+                            raise
+                        self._require_runner_digest(target, digest, is_directory=True)
+                    else:
+                        target.chmod(0o555)
+                    return
                 if target.exists():
                     target.chmod(0o755)
                     old = staging.parent / f"runner-old.{uuid.uuid4()}"

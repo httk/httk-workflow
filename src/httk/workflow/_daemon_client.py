@@ -24,6 +24,7 @@ from httk.core.userdirs import data_home
 from ._daemon_auth import sign_request, verify_request, verify_response
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, request_digest
+from ._txn import rename_verified
 
 _LOGGER = logging.getLogger(__name__)
 _SETTING_NAMES = frozenset({"exchange", "daemon_workspace_id", "daemon_enrollment_id", "daemon_public_key"})
@@ -381,6 +382,51 @@ def read_manager_log(endpoint: "Endpoint", handle: str) -> bytes:
     return bytes(data)
 
 
+def _fsync_directory_path(path: Path) -> None:
+    """Flush one directory's entries to stable storage."""
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Flush every regular file and directory below ``root`` (symlinks are not followed) to stable storage."""
+
+    for directory, _names, files in os.walk(root):
+        for file in files:
+            path = Path(directory, file)
+            if path.is_symlink():
+                continue
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _fsync_directory_path(Path(directory))
+
+
+def _present(path: Path) -> bool:
+    """Report whether a path exists; an unobservable one counts as absent (the caller then stays cautious)."""
+
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
+
+
+def _ambiguous(name: str, held: str, destination: Path) -> str:
+    """Describe a take-back whose publication outcome is unknown, so the original is kept."""
+
+    return (
+        f"take-back of {name!r} may or may not have been published to {destination}; the original is kept as "
+        f"{held}: if the destination is complete, delete the held entry, otherwise rename it back to {name!r}"
+    )
+
+
 def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
     """Take one ejected bundle back out of ``EXCHANGE/inbox`` before a manager adopts it.
 
@@ -417,17 +463,24 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
         try:
             if not stat.S_ISDIR(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
                 raise ValueError(f"inbox entry {name!r} is not a bundle directory")
-            os.rename(name, hidden, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+            hidden_now = rename_verified(name, hidden, src_dir_fd=descriptor, dst_dir_fd=descriptor)
         except FileNotFoundError:
-            raise ValueError(
-                f"inbox entry {name!r} is gone: a manager has taken it, so cancel the job instead"
-            ) from None
+            hidden_now = False
+        if not hidden_now:
+            raise ValueError(f"inbox entry {name!r} is gone: a manager has taken it, so cancel the job instead")
+        publishing = False
         try:
             # ponytail: /proc is Linux-only; elsewhere the copy source is the path, which a swapped inbox could redirect
             source = f"/proc/self/fd/{descriptor}/{hidden}" if os.path.isdir("/proc/self/fd") else held
             shutil.copytree(source, partial, symlinks=True)
-            os.rename(partial, destination)
-        except BaseException:
+            _fsync_tree(partial)
+            publishing = True
+            published = rename_verified(partial, destination)
+        except BaseException as exc:
+            # Restore only when the failure is positively established: before the publish rename, or with the
+            # temporary copy still in place. Otherwise the copy may already be published (and consumed).
+            if publishing and not _present(partial):
+                raise OSError(_ambiguous(name, held, destination)) from exc
             shutil.rmtree(partial, ignore_errors=True)
             try:
                 os.rename(hidden, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
@@ -437,7 +490,10 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
                     f"{held}; rename it back to {name!r} to re-offer it"
                 ) from exc
             raise
+        if not published:
+            raise OSError(_ambiguous(name, held, destination))
         try:
+            _fsync_directory_path(destination.parent)  # the copy must be durable before the original goes
             try:
                 shutil.rmtree(hidden, dir_fd=descriptor)
             except NotImplementedError:
@@ -445,7 +501,8 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
             os.fsync(descriptor)
         except OSError:
             _LOGGER.warning(
-                "take-back copied %r but could not remove the held inbox entry %s; delete it by hand",
+                "take-back copied %r but could not make it durable or remove the held inbox entry %s; "
+                "check the copy, then delete the held entry by hand",
                 name,
                 held,
                 extra={"context": "daemon_take_back"},

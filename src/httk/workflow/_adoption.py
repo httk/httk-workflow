@@ -87,6 +87,9 @@ BUNDLE = "bundle"
 BUNDLE_PARTIAL = "bundle.partial"
 ENVELOPE = "envelope"
 CLAIMS = "claims"
+#: The validated plan, written privately into ``S`` before V8; every step after V8 trusts only it.
+VERIFIED = "verified.json"
+_VERIFIED_FORMAT = "httk-workflow-adoption-verified"
 RELEASED = "released"
 #: The frame members a published job never takes from its prior state: the
 #: header the import writes itself and the provenance it sets itself.
@@ -252,6 +255,56 @@ def _plan(manifest: BundleManifest, root: Path, intent: Mapping[str, Any]) -> _P
     return _Plan(manifest, tuple(jobs), "exchange" if exchange else None)
 
 
+def _snapshot(plan: _Plan) -> bytes:
+    """The validated plan as the private ``verified.json``: the canonical manifest with every job's
+    ``prior_state`` as verified (filtered for exchange sources), the root's placement, and the origin."""
+
+    states = {job.job_id: dict(job.prior_state) for job in plan.jobs}
+    manifest = plan.manifest.as_mapping()
+    manifest["prior_state"] = states[plan.manifest.job_id]
+    members = manifest["members"]
+    assert isinstance(members, list)
+    for member in members:
+        member["prior_state"] = states[member["job_id"]]
+    document = {
+        "format": _VERIFIED_FORMAT,
+        "format_version": 1,
+        "manifest": manifest,
+        "root_placement": placement_text(plan.root.placement),
+        "origin": plan.origin,
+    }
+    return json_bytes(document) + b"\n"
+
+
+def _plan_from_snapshot(lineage: Path) -> _Plan:
+    """Rebuild the plan after V8 from ``S/verified.json`` alone, never from the bundle's own files."""
+
+    try:
+        document = json.loads(_read_regular_file(lineage / VERIFIED, _MANIFEST_LIMIT * 4))
+    except FileNotFoundError:
+        raise WorkspaceCorruptionError(
+            f"adoption {lineage.name} moved its envelope (V8) but holds no {VERIFIED}; it is kept for an operator"
+        ) from None
+    except (OSError, ValueError) as exc:
+        raise WorkspaceCorruptionError(f"{lineage / VERIFIED} cannot be read: {exc}") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("format") != _VERIFIED_FORMAT
+        or document.get("format_version") != 1
+        or document.get("origin") not in (None, "exchange")
+    ):
+        raise WorkspaceCorruptionError(f"{lineage / VERIFIED} is not an adoption snapshot")
+    try:
+        manifest = BundleManifest.from_mapping(document.get("manifest"))
+        placement = parse_placement_text(document.get("root_placement"))
+    except FormatError as exc:
+        raise WorkspaceCorruptionError(f"{lineage / VERIFIED} is malformed: {exc}") from exc
+    # The snapshot's prior states are the verified (already filtered) ones.
+    jobs = verified_jobs(manifest, lineage / BUNDLE, exchange=False)
+    jobs[0] = VerifiedJob(**{**jobs[0].__dict__, "placement": placement})
+    return _Plan(manifest, tuple(jobs), document["origin"])
+
+
 # ---------------------------------------------------------------------------
 # Names and small helpers
 # ---------------------------------------------------------------------------
@@ -311,10 +364,6 @@ def _read_intent(lineage: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FormatError(f"{lineage / INTENT} is not an object")
     return value
-
-
-def _read_manifest(envelope: Path) -> BundleManifest:
-    return BundleManifest.from_mapping(json.loads(_read_regular_file(envelope / TRANSFER_MANIFEST, _MANIFEST_LIMIT)))
 
 
 def lineage_name(owner: str, claimed_at: int, lineage: str) -> str:
@@ -699,6 +748,13 @@ def stale_claims(workspace: Workspace) -> list[str]:
 
 
 def _install_runners(workspace: Workspace, envelope: Path, manifest: BundleManifest) -> None:
+    """Install the bundled runners the store lacks, each from a private copy whose digest is checked first.
+
+    The bundled runner files may still be written through descriptors opened
+    before the claim, so the copy below ``tmp/birth.*`` is what is verified
+    against the snapshot's digest and what is published.
+    """
+
     for runner in manifest.runners:
         target = workspace.runner_store_path(runner.path)
         if target.is_file() or target.is_dir():
@@ -707,7 +763,27 @@ def _install_runners(workspace: Workspace, envelope: Path, manifest: BundleManif
                     f"destination workspace runner {runner.path.as_posix()} changed while the transfer was imported"
                 )
             continue
-        workspace.publish_runner(envelope.joinpath(TRANSFER_RUNNERS, *runner.path.parts), name=runner.path)
+        source = envelope.joinpath(TRANSFER_RUNNERS, *runner.path.parts)
+        private = workspace.control / "tmp" / f"birth.{secrets.token_hex(16)}"
+        os.mkdir(private, 0o700)
+        try:
+            copy = private / runner.path.name
+            mode = os.lstat(source).st_mode
+            if stat.S_ISDIR(mode):
+                shutil.copytree(source, copy, symlinks=True)
+            elif stat.S_ISREG(mode):
+                shutil.copyfile(source, copy, follow_symlinks=False)
+                os.chmod(copy, stat.S_IMODE(mode))
+            else:
+                raise WorkspaceCorruptionError(f"bundled runner {runner.path.as_posix()} is no longer a file or tree")
+            if _runner_digest(copy) != runner.sha256:
+                raise WorkspaceCorruptionError(
+                    f"bundled runner {runner.path.as_posix()} changed after the bundle was verified; "
+                    "the adoption is kept for an operator"
+                )
+            workspace.publish_runner(copy, name=runner.path)
+        finally:
+            _txn.remove_tree(private)
 
 
 def _provenance(plan: _Plan, job: VerifiedJob) -> dict[str, object]:
@@ -859,7 +935,8 @@ def _finish(
     _txn._hook("V11.source")
     source = Path(str(intent.get("path")))
     if intent.get("remove_source") and _source_holds(source, manifest.transfer_id):
-        hidden = source.parent / f".{source.name}.httk-adopted.{lineage.name.rsplit('.', 1)[-1]}"
+        # Named independently of the (client-chosen, possibly long) source name.
+        hidden = source.parent / f".httk-adopted.{lineage.name.rsplit('.', 1)[-1]}"
         if _txn.rename_verified(source, hidden):
             _txn.remove_tree(hidden)
         _sync(workspace, source.parent)
@@ -1124,6 +1201,19 @@ def _from_v3(
     else:
         return _waiting(lineage, plan, reason)
     _txn._hook("V7.rechecked")
+    # The plan every later step (and every recovery after V8) trusts, in a fresh
+    # private inode fenced by S's name: the bundle's own files stay client-writable
+    # through descriptors opened before the claim.
+    snapshot = _snapshot(plan)
+    if (
+        not _txn.link_new(lineage, VERIFIED, snapshot, durable=workspace.durable)
+        and _read_regular_file(lineage / VERIFIED, _MANIFEST_LIMIT * 4) != snapshot
+    ):
+        # Written by an earlier pass over this lineage from another verified content.
+        return _refuse(
+            workspace, lineage, source, FormatError("the bundle changed after an earlier verification of it")
+        )
+    _txn._hook("V8.snapshot")
     if not _txn.rename_verified(bundle / TRANSFER_DIRECTORY, lineage / ENVELOPE):
         raise _Fenced()
     _sync(workspace, lineage, bundle)
@@ -1299,9 +1389,8 @@ def resume(
             _txn.trash(lineage, control=workspace.control, holds_payload=_txn.holds_job_payload)
             return AdoptionResult("lost", reason="an unfinished copy was discarded; the source still holds it")
         if _lexists(lineage / ENVELOPE):
-            manifest = _read_manifest(lineage / ENVELOPE)
-            plan = _plan(manifest, lineage / BUNDLE, intent)
-            return _after_v8(workspace, lineage, intent, plan)
+            # After V8 only the private snapshot is trusted, never the bundle's manifest.
+            return _after_v8(workspace, lineage, intent, _plan_from_snapshot(lineage))
         if _lexists(lineage / BUNDLE):
             return _from_v3(workspace, lineage, intent, source, pace)
         _release(workspace, lineage)
@@ -1371,9 +1460,13 @@ def recover_lineages(
                 continue
             _txn._hook("takeover.renamed")
             result = resume(workspace, mine, exchange=exchange)
-        except (WorkflowError, OSError, ValueError) as exc:
+        except Exception as exc:  # one bad lineage never stops the others
             _LOGGER.warning(
-                "cannot recover adoption %s: %s", name, exc, extra={"event": "adopt_recovery_failed", "entry": name}
+                "cannot recover adoption %s: %s",
+                name,
+                exc,
+                exc_info=not isinstance(exc, (WorkflowError, OSError, ValueError)),
+                extra={"event": "adopt_recovery_failed", "entry": name},
             )
             results.append({"lineage": name, "status": "failed", "reason": str(exc)})
             continue
@@ -1409,11 +1502,12 @@ def resume_owned(
             continue
         try:
             result = resume(workspace, lineage, pace=pace, exchange=exchange)
-        except (WorkflowError, OSError, ValueError) as exc:
+        except Exception as exc:  # one bad lineage never stops the others
             _LOGGER.warning(
                 "cannot continue adoption %s: %s",
                 lineage.name,
                 exc,
+                exc_info=not isinstance(exc, (WorkflowError, OSError, ValueError)),
                 extra={"event": "adopt_recovery_failed", "entry": lineage.name},
             )
             results.append({"lineage": lineage.name, "status": "failed", "reason": str(exc)})

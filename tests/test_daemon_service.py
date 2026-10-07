@@ -879,25 +879,32 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
     selected = tmp_path / "snapshots/selected.json"
     (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
     (policy.state / "active.json").chmod(0o600)
-    opened: list[Path] = []
-    original = service_module.MailboxDirectory
+    opened: list[str] = []
+    original = MailboxDirectory.child.__func__  # type: ignore[attr-defined]
 
-    def record(path: Path) -> MailboxDirectory:
-        opened.append(path)
-        return original(path)
+    def record(cls: type[MailboxDirectory], parent_fd: int, name: str) -> MailboxDirectory:
+        assert os.readlink(f"/proc/self/fd/{parent_fd}") == str(policy.exchange)
+        opened.append(name)
+        return original(cls, parent_fd, name)
 
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
     monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
     monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
-    monkeypatch.setattr(service_module, "MailboxDirectory", record)
+    monkeypatch.setattr(MailboxDirectory, "child", classmethod(record))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
     service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
-    assert opened == [policy.requests, policy.responses]
+    assert opened == ["requests", "responses"]
     policy.requests.rmdir()
     with pytest.raises(FileNotFoundError):
         service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    policy.requests.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError) as refused:
+        service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+    assert refused.value.errno in {errno.ELOOP, errno.ENOTDIR}
 
 
 def test_ledger_listing_failure_is_logged_and_does_not_stop_the_loop(
@@ -1696,3 +1703,229 @@ def test_the_policy_module_keeps_the_exchange_directory_name_of_the_models() -> 
     from httk.workflow import _daemon_policy, models
 
     assert _daemon_policy.EXCHANGE_DIRECTORY == models.EXCHANGE_DIRECTORY
+
+
+def _reopening(broker: Broker) -> list[str]:
+    """Make *broker* reopen its mailboxes through the exchange descriptor every poll, as the service does."""
+
+    exchange_fd = os.open(broker.policy.exchange, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    opened: list[str] = []
+
+    def mailboxes() -> tuple[MailboxDirectory, MailboxDirectory]:
+        opened.append("poll")
+        requests = MailboxDirectory.child(exchange_fd, "requests")
+        return requests, MailboxDirectory.child(exchange_fd, "responses")
+
+    broker.mailboxes = mailboxes
+    return opened
+
+
+def test_junk_beyond_the_scan_bound_never_stops_service_of_a_valid_request(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    for index in range(2500):
+        (policy.requests / f".junk-{index}").touch()
+        (policy.requests / f"junk-{index}").touch()
+    request = _request(tmp_path, 1)
+    try:
+        _publish(broker, request)
+        with caplog.at_level(logging.WARNING):
+            broker.process_once(threading.Event())
+        assert _read(broker, request).outcome == "ready"
+        assert "daemon_mailbox_problem" not in caplog.text
+    finally:
+        stack.close()
+
+
+def test_a_mailbox_over_its_bound_is_served_in_batches_and_reported_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from httk.workflow import _daemon_mailbox
+
+    monkeypatch.setattr(_daemon_mailbox, "MAX_DIRECTORY_ENTRIES", 2)
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    requests = [_request(tmp_path, number) for number in range(1, 6)]
+    try:
+        for request in requests:
+            _publish(broker, request)
+        with caplog.at_level(logging.WARNING):
+            for _ in range(3):
+                broker.process_once(threading.Event())
+        assert [_read(broker, request).outcome for request in requests] == ["ready"] * 5
+        assert caplog.text.count("daemon_mailbox_problem") == 1
+    finally:
+        stack.close()
+
+
+def test_a_scan_failure_is_logged_and_the_poll_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    polls: list[None] = []
+
+    class Publisher(ExchangePublisher):
+        def poll(self, managers: list[dict[str, str | None]]) -> None:
+            polls.append(None)
+
+    broker.exchange = Publisher(policy.exchange, policy.enrollment_id)
+
+    def fail(_skip: object = ()) -> tuple[tuple[str, ...], bool]:
+        raise OSError(errno.EIO, "injected scan failure")
+
+    monkeypatch.setattr(broker.requests, "scan", fail)
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert broker.process_once(threading.Event()) == 0
+            broker.process_once(threading.Event())
+        assert polls == [None, None] and caplog.text.count("daemon_mailbox_problem") == 1
+    finally:
+        stack.close()
+
+
+def test_a_replaced_request_mailbox_is_followed_next_poll_and_a_symlink_is_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    opened = _reopening(broker)
+    first, second, planted = _request(tmp_path, 1), _request(tmp_path, 2), _request(tmp_path, 3)
+    try:
+        _publish(broker, first)
+        broker.process_once(threading.Event())
+        assert _read(broker, first).outcome == "ready"
+
+        # The client replaces requests/ with a fresh directory: the next poll serves the new one.
+        policy.requests.rename(tmp_path / "old-requests")
+        policy.requests.mkdir()
+        (policy.requests / f"{second.request_id}.json").write_bytes(encode_request(second))
+        broker.process_once(threading.Event())
+        assert _read(broker, second).outcome == "ready"
+        assert not (policy.requests / f"{second.request_id}.json").exists()
+
+        # A symlink in its place is refused, never followed: nothing outside the exchange is touched.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / f"{planted.request_id}.json").write_bytes(encode_request(planted))
+        shutil.rmtree(policy.requests)
+        policy.requests.symlink_to(outside, target_is_directory=True)
+        with caplog.at_level(logging.WARNING):
+            broker.process_once(threading.Event())
+            broker.process_once(threading.Event())
+        assert caplog.text.count("daemon_mailbox_problem") == 1
+        assert (outside / f"{planted.request_id}.json").exists()
+        with pytest.raises(FileNotFoundError):
+            broker.responses.read(f"{planted.request_id}.json")
+        assert len(opened) == 4
+    finally:
+        broker.close()
+        stack.close()
+
+
+def test_publication_named_directories_cannot_starve_a_valid_request(tmp_path: Path) -> None:
+    from httk.workflow import _daemon_mailbox
+
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    for index in range(_daemon_mailbox.MAX_DIRECTORY_ENTRIES):
+        (policy.requests / f"{index:032x}.json").mkdir()
+    request = _request(tmp_path, 0xFFFFFFFF)
+    try:
+        _publish(broker, request)
+        for _ in range(3):
+            broker.process_once(threading.Event())
+            if (policy.responses / f"{request.request_id}.json").exists():
+                break
+        assert _read(broker, request).outcome == "ready"
+        broker.process_once(threading.Event())  # whatever the last batch left out
+        remaining = os.listdir(policy.requests)
+        assert len(remaining) == _daemon_mailbox.MAX_DIRECTORY_ENTRIES
+        assert [name for name in remaining if not name.startswith(".invalid-")] == []
+    finally:
+        stack.close()
+
+
+def test_unremovable_publications_are_skipped_until_the_mailbox_is_another_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import _daemon_mailbox
+
+    monkeypatch.setattr(_daemon_mailbox, "MAX_DIRECTORY_ENTRIES", 2)
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    stuck = [f"{index:032x}.json" for index in range(3)]
+    for name in stuck:
+        (policy.requests / name).mkdir()
+
+    def refuse(_name: str) -> str:
+        raise PermissionError(errno.EACCES, "injected: not permitted")
+
+    monkeypatch.setattr(broker.requests, "set_aside", refuse)
+    request = _request(tmp_path, 0xFFFFFFFF)
+    try:
+        _publish(broker, request)
+        for _ in range(3):
+            broker.process_once(threading.Event())
+        assert _read(broker, request).outcome == "ready"
+        assert broker._stuck == set(stuck)
+        assert sorted(os.listdir(policy.requests)) == stuck
+
+        # Reopened onto a different directory, the memory is per directory and starts empty.
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        broker.requests = stack.enter_context(MailboxDirectory(replacement))
+        broker.process_once(threading.Event())
+        assert broker._stuck == set()
+    finally:
+        stack.close()
+
+
+def test_a_transient_read_error_leaves_a_valid_request_for_a_later_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    request = _request(tmp_path, 1)
+    publication = f"{request.request_id}.json"
+    real_read = broker.requests.read
+    failures = [OSError(errno.EIO, "injected I/O error"), OSError(errno.ESTALE, "injected stale handle")]
+
+    def flaky(name: str) -> bytes:
+        if failures:
+            raise failures.pop(0)
+        return real_read(name)
+
+    monkeypatch.setattr(broker.requests, "read", flaky)
+    # Even if removing or setting it aside were attempted and failed, nothing may suppress it.
+    monkeypatch.setattr(broker.requests, "remove", lambda _name: (_ for _ in ()).throw(AssertionError("removed")))
+    try:
+        _publish(broker, request)
+        with caplog.at_level(logging.WARNING):
+            broker.process_once(threading.Event())
+            broker.process_once(threading.Event())
+        assert broker.requests.lstat(publication) is not None and broker._stuck == set()
+        assert caplog.text.count("daemon_request_unreadable") == 2  # two different reasons
+        assert "daemon_request_rejected" not in caplog.text
+        monkeypatch.undo()
+        broker.process_once(threading.Event())
+        assert _read(broker, request).outcome == "ready"
+    finally:
+        stack.close()
+
+
+def test_a_symlink_or_fifo_publication_is_still_discarded(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    target = tmp_path / "target"
+    target.write_bytes(b"{}")
+    symlink, fifo = f"{1:032x}.json", f"{2:032x}.json"
+    (policy.requests / symlink).symlink_to(target)
+    os.mkfifo(policy.requests / fifo)
+    try:
+        broker.process_once(threading.Event())
+        assert os.listdir(policy.requests) == [] and target.read_bytes() == b"{}"
+    finally:
+        stack.close()
