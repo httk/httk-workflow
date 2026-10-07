@@ -1206,9 +1206,11 @@ reread on every pass. A request for a runner executor this manager does not
 serve is left for a manager that does.
 
 A manager claims a request by moving it into
-`.httk-workspace/requests/claimed/<manager-id>/` while it applies it, and a
-restarted manager returns its own claims to `ready`. Claims of a manager that
-never comes back are recovered by the others: at most every 10 seconds a
+`.httk-workspace/requests/claimed/<manager-id>/` while it applies it, and
+returns any claim it still holds to `ready` at its next pass. Claims of a
+manager that never comes back, including the previous incarnation of a
+restarted manager (every incarnation has a fresh manager ID), are recovered by
+the others: at most every 10 seconds a
 manager looks at the other managers' claim directories and, once a manager is
 evidently gone (the same evidence as a
 [commit takeover](#taking-over-another-managers-commit)), moves its claimed

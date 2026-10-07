@@ -159,7 +159,9 @@ on which:
 
 Atomic rename of the exact current marker is the compare-and-swap. The
 protocol never depends on `flock`, advisory locks, PID uniqueness, or an exit
-trap (see [No file locks](#no-file-locks)).
+trap on the workspace filesystem (see [No file locks](#no-file-locks)). The
+only kernel locks are `flock` death notifications between processes of one
+node on node-local tmpfs, used by [confined launches](#confined-launches).
 
 The baseline guarantee is **process-interruption safety**. Storage-crash
 durability additionally requires synchronizing new file contents and affected
@@ -224,8 +226,10 @@ control data live below `WORKSPACE/.httk-workspace/` and every job payload below
 WORKSPACE/
 ├── .httk-workspace/
 │   ├── format.json
+│   ├── maintenance.lock                # only while a maintenance operation runs
+│   ├── seal.json                       # only while the workspace is sealed
 │   ├── tmp/
-│   ├── quarantine/
+│   ├── quarantine/<epoch>-<uuid>/      # entry, report.json
 │   ├── state/
 │   │   ├── submitted/<placement>/
 │   │   ├── ready/<placement>/
@@ -245,12 +249,16 @@ WORKSPACE/
 │   ├── managers/
 │   │   └── <manager-id>/
 │   │       ├── manager.json
-│   │       └── heartbeat.json
-│   └── requests/
-│       ├── tmp/
-│       ├── ready/
-│       ├── claimed/
-│       └── retired/
+│   │       ├── heartbeat.json
+│   │       └── launches/<attempt-id>.<request-id>/   # confined launches only
+│   ├── requests/
+│   │   ├── tmp/
+│   │   ├── ready/
+│   │   ├── claimed/<manager-id>/
+│   │   └── retired/
+│   ├── runners/                        # the workspace runner store
+│   ├── runner-builds/                  # machine-local build registrations
+│   └── transfers/                      # see Transfer artifacts
 ├── jobs/
 │   └── project-17/
 │       └── 0/
@@ -294,7 +302,32 @@ state-kind or placement directory is required.
   process launcher.
 - `.httk-workspace/tmp/` holds unpublished entries. Managers MUST ignore it for
   scheduling. Garbage collection may remove old entries, but correctness MUST
-  NOT depend on cleanup.
+  NOT depend on cleanup. Its transfer transaction directories are specified in
+  [Transfer artifacts](#transfer-artifacts), and the staged copies of a commit
+  in [Child publication](#child-publication).
+- `.httk-workspace/quarantine/<epoch>-<uuid>/` holds one quarantined entry as
+  `entry`, renamed there whole, and a `report.json` with `original_path`,
+  `reason` and `quarantined_at`.
+- `managers/<manager-id>/` is described in
+  [Heartbeats and manager logs](#heartbeats-and-manager-logs), its `launches/`
+  in [Confined launches](#confined-launches), and `requests/` in
+  [Manual continuation and control requests](#manual-continuation-and-control-requests).
+- `runners/` is the workspace runner store of `runner.source: workspace` (see
+  [Shared runners](#shared-runners)); `runner-builds/` holds the machine-local
+  build registrations of compiled workspace runners ({doc}`workflow_packages`),
+  derived state that is rebuilt rather than collected.
+- `maintenance.lock` is the maintenance fence, created exclusively by a
+  maintenance operation (`workspace seal`, `workspace move`, project manifests)
+  with the holder's `pid`, `hostname` and `created` time and removed when it
+  ends. It is an ordinary file whose existence is the fence, not a kernel lock:
+  a manager launches no claimed attempt while a live one exists and releases
+  the claim instead. A lock whose content is malformed or lacks `pid`,
+  `hostname` or `created`, whose same-host process is gone, or that is older
+  than 24 hours is stale: managers ignore it, and the next maintenance
+  operation reclaims it. A lock the reader may not read at all is not stale
+  and is honoured (see {doc}`workflow_cli`).
+- `seal.json` is the workspace seal and `<payload>/.httk-job/seal.json` a job
+  seal; both are specified in {doc}`sealing`.
 - `files/`, `data/`, a workdir, and attempt control are created only when
   required. Empty placeholder directories SHOULD NOT be created.
 
@@ -773,6 +806,8 @@ before the rename that makes it authoritative:
 | Registered child payloads and their submitted markers | the parent's marker leaves `committing` |
 | Job state (`.httk-job/state.json`), observed declarations | each atomic replace returns |
 | Sealed replayable workdir batch (`.httk-runner/workdir-ready/`) and its replay into the workdir | the batch is published, then retired as applied |
+| Process record of a confined launch (`process.json` in its trusted launch directory) | the launch gate line is written; it is always synchronized, whatever the profile |
+| Operator request in `requests/tmp/`, retirement record | the request's rename into `requests/ready/`; the record's rename into place |
 
 The append-only run log (`logs/runlog.jsonl`) and the captured
 `logs/stdio.out` keep only process-interruption safety even in the durable
@@ -1395,14 +1430,22 @@ cannot serve as `no_live_attempt` or as proof that the application never ran.
 
 ### Heartbeats and manager logs
 
-Managers update `managers/<manager-id>/heartbeat.json` by atomic replacement.
-`manager.json` records the manager's identity and what it serves, including
-its `resources` capacity, `end_time`, the epoch second its allocation ends,
-and `drain_start`, the epoch second it stops claiming and drains (both `null`
-when unknown; absent from older managers).
-The directory holds only `manager.json` and `heartbeat.json` and is removed when
-the manager exits cleanly; after a crash it awaits policy-gated
-`manager_directories` collection.
+A manager creates `managers/<manager-id>/` exclusively when it attaches, and
+updates `heartbeat.json` (`{"manager_id", "updated_at"}`) in it by atomic
+replacement. `manager.json` (`httk-workflow-manager` version 2) records the
+manager's identity and what it serves: `writer_id`, `hostname`, `pid`, `uid`,
+its pools, capabilities, placement prefixes, executors and runner search
+paths, its `resources` capacity, `end_time`, the epoch second its allocation
+ends, and `drain_start`, the epoch second it stops claiming and drains (both
+`null` when unknown; absent from older managers).
+
+The directory holds `manager.json`, `heartbeat.json` and, for a manager that
+started [confined launches](#confined-launches), `launches/` with one trusted
+launch directory per launch. A manager exiting cleanly removes it once
+`launches/` is empty; a directory that still holds a launch record is kept,
+because the record is the takeover evidence of a launch that may still run.
+After a crash the directory awaits policy-gated `manager_directories`
+collection.
 
 Manager diagnostics go to the manager's own log,
 `logs/managers/<manager-id>.log`, with the manager id on every record. Each
@@ -1418,6 +1461,25 @@ lease SHOULD also bound the markers of a kind it processes per pass and resume
 the rest next pass, in a stable order so no marker starves. An implementation
 SHOULD report a pass that consumes a large fraction of its own lease, because
 then a healthy manager starts to look abandoned.
+
+### Manager liveness evidence
+
+Protocol work a manager owns (a commit, a claimed operator request, a transfer
+or adoption step) is taken over by another actor only when its owner is
+*evidently gone*. That is one rule, checked in this order:
+
+| Evidence | Meaning |
+| --- | --- |
+| `manager_record_absent` | The work names no manager, `managers/<manager-id>/` does not exist, or its `heartbeat.json` cannot be read (for work whose start time is name-encoded, an unreadable heartbeat is instead aged from that time). |
+| `lease_grace_expired` | The heartbeat is at least the lease times the takeover grace factor old (`2.0` by default). |
+| `manager_process_dead` | `manager.json` names this host and its `pid` is not alive. |
+
+Evidence decides only *when* work is taken over, never whether the result is
+correct: every takeover is itself a rename that fences the previous owner. Two
+hosts with one hostname are an accepted limit, and a reused pid only delays a
+takeover. A CLI process owner (see [Transfer artifacts](#transfer-artifacts))
+is gone 24 hours after it started the work, or at once when it ran on this
+host and boot and its process is not alive.
 
 ### Recovering abandoned attempts
 
@@ -1466,8 +1528,14 @@ Attempt control is separate from the application workdir:
 ```text
 <workspace>/jobs/<placement>/<job-key>/
 ├── attempts/<attempt-id>/
-│   ├── outcome.tmp.<nonce>/
-│   └── outcome.ready/
+│   ├── outcome.tmp.<nonce>/     # runner: an outcome being composed
+│   ├── outcome.ready/           # runner: the published outcome
+│   ├── commit.<generation>/     # manager: the outcome renamed by its commit owner
+│   ├── nodefile                 # manager: with a node binding (advice only)
+│   ├── binding.json             # manager: with a node binding (advice only)
+│   ├── launch/                  # confined launches of this attempt
+│   ├── error.json               # runner SDK: crash breadcrumb (diagnostic)
+│   └── commit-wedge.json        # manager: a repeating commit error (diagnostic)
 ├── logs/
 │   ├── stdio.out               # append-only stdout/stderr chronicle
 │   └── runlog.jsonl             # append-only structured run log
@@ -1487,6 +1555,20 @@ Attempt-control directories are transient metadata. Persistent workdirs are
 application data and MUST NOT be garbage-collected merely because an attempt
 ended; isolated workdirs may be collected under their retention policy. No
 state transition depends on cleanup.
+
+The manager creates the attempt-control directory exclusively (an existing one
+was not made for this attempt and refuses the launch); everything in it is
+job-writable. The manager reads back only the published outcome, by the rules
+of [Publishing an outcome](#publishing-an-outcome) and
+[Commit ownership](#commit-ownership), and the launch requests of
+[Confined launches](#confined-launches). `nodefile` and `binding.json` are
+written for the runner and never read back. `error.json`
+(`httk-workflow-runner-error`) is the breadcrumb a runner SDK leaves when a
+step handler raises, and `commit-wedge.json` (`httk-workflow-commit-wedge`
+version 2: `error`, `manager_id`, `recorded_at`) records a commit error that
+keeps repeating. Only the manager that recorded it removes it, when the commit
+completes; a successor or restarted manager may leave a stale one behind. Both
+are diagnostic operator evidence that nothing reads as protocol state.
 
 ### Run chronicle
 
@@ -1516,7 +1598,7 @@ excluded from every payload digest (submission, child registration, and
 detached transfer), so publishing outcomes and writing job state never disturb
 an immutability check.
 
-Two names inside `.httk-job/` are reserved:
+Three names inside `.httk-job/` are reserved:
 
 - `declarations/<declaration-name>.json` holds the *observed* declaration of
   that name, the runtime-refined counterpart of what `job.json` declared, for
@@ -1528,6 +1610,8 @@ Two names inside `.httk-job/` are reserved:
   the reading tool's damage flag set.
 - `tree/` holds job-tree metadata owned by the manager and operator tools. A
   runner MUST NOT write there.
+- `seal.json` is the job seal of {doc}`sealing`, written by the manager or an
+  operator tool. A runner MUST NOT write it.
 
 `tree/spawns/<attempt-id>.json` records the children one committed outcome
 spawned, as `{"format": "httk-workflow-spawns", "format_version": 1,
@@ -1612,10 +1696,11 @@ member and carries it. `HTTK_WORKFLOW_NODELIST` (the comma-separated hosts),
 `launch` prefix, `HTTK_WORKFLOW_LAUNCH` (that prefix, shell-quoted) are set
 exactly when the context has a `binding` member. In an attempt confined with
 `manager.confine=bwrap`, `HTTK_WORKFLOW_LAUNCH` is instead the shell-quoted
-launch client that asks the manager to start the launch, and
-`HTTK_WORKFLOW_CONFINED` is `1`; the binding's `launch` member keeps the
-rendered prefix as information only, since it cannot start ranks from inside
-the sandbox. When the binding is one node
+launch client that asks the manager to start the launch,
+`HTTK_WORKFLOW_LAUNCH_LOCKS` names the attempt's launch-lock directory, and
+`HTTK_WORKFLOW_CONFINED` is `1` (see [Confined launches](#confined-launches));
+the binding's `launch` member keeps the rendered prefix as information only,
+since it cannot start ranks from inside the sandbox. When the binding is one node
 on the manager's own host with GPUs of known ids, the variable those ids came
 from (`CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` or `ZE_AFFINITY_MASK`) is
 set to exactly them, comma-separated. A local attempt that requests no GPUs on
@@ -1731,6 +1816,151 @@ that a locally executed attempt sees only its GPUs and, with the
 are rendered from the placement in the manager's memory and a manager-owned
 nodefile; the nodefile and `binding.json` in the attempt control directory are
 never read back by the manager.
+
+### Confined launches
+
+An attempt confined with `manager.confine=bwrap` cannot reach the scheduler,
+so its parallel launches are started by its manager through a file protocol.
+Four roles take part:
+
+| Role | Runs | Writes |
+| --- | --- | --- |
+| launch client (`HTTK_WORKFLOW_LAUNCH`, `python -m httk.workflow._launch_client`) | inside the attempt sandbox | its request, stop marker and lock |
+| manager | trusted, unconfined | the launch outputs, the status and the trusted launch directory |
+| rank helper (`python -I -m httk.workflow._confine_rank --launch-dir T`) | trusted, on every rank, started by the rendered launch template | the per-launch shared-memory directory |
+| inner exec (`python -I -m httk.workflow._confine_exec`) | first program inside each rank sandbox | nothing; it execs the requested command |
+
+The files of one launch, with `ID` its request identifier (32 lowercase
+hexadecimal digits the client draws at random):
+
+```text
+<payload>/attempts/<attempt-id>/launch/          job-writable, created by the client
+├── .ID.request.tmp                              client: the request being written
+├── ID.request.json                              client: the published request
+├── ID.stop                                      client: asks the manager to stop the launch
+├── ID.stdout, ID.stderr                         manager: the launch's output, created exclusively
+└── ID.status.json                               manager: the final status, replaced atomically
+<confine.shm_root>/httk-launch-<attempt-id>/     node-local tmpfs, manager-created, mode 0700
+└── ID.lock                                      client: held with flock(LOCK_EX) while it lives
+.httk-workspace/managers/<manager-id>/launches/<attempt-id>.ID/
+├── nodefile                                     manager: rendered from the placement in memory
+├── launch.json                                  manager: the trusted launch description
+└── process.json                                 manager: the started launch's process record
+<confine.shm_root>/httk-<token>/                 per-launch shared memory, joined by the ranks
+└── .lock                                        ranks: held with flock(LOCK_SH)
+```
+
+**Documents.** Three documents share version 1 and one encoding rule: UTF-8
+without a byte-order mark, no duplicate keys, no non-finite numbers, exactly
+the listed members, and canonical JSON (sorted keys, no insignificant
+whitespace, non-ASCII escaped). A reader MUST refuse a document that is not
+byte for byte the canonical encoding of the value it decodes to, and reads each
+file below a no-follow directory descriptor, refusing a symlink or special
+file, within the size bound.
+
+| Document | `format` | Members | Bound |
+| --- | --- | --- | --- |
+| request | `httk-workflow-launch-request` | `request_id`, `attempt_id` (a canonical UUID), `argv` (1 to 1024 entries of at most 64 KiB, the first nonempty), `cwd` (`.` or a canonical relative path without `..`, relative to the job directory, at most 4096 bytes), `environment` (sorted `[name, value]` pairs: at most 2048, names `[A-Za-z_][A-Za-z0-9_]{0,255}`, values at most 128 KiB) | 1 MiB |
+| status | `httk-workflow-launch-status` | `request_id`, `state`, `exit_code`, `error` (at most 4096 bytes or `null`) | 16 KiB |
+| trusted launch | `httk-workflow-launch` | `request_id`, `attempt_id`, `workspace_id`, `workspace_root`, `placement`, `job_key`, `request` (`attempts/<attempt-id>/launch/ID.request.json`), `confine` (`bwrap`, `block_userns`, `readonly_paths`, `devices`, `pmix_roots`, `shm_root`, `environment`, `block_mpi_spawn`), `python`, `token` (32 lowercase hexadecimal digits the manager draws) | 1 MiB |
+
+A request MUST NOT carry an environment name starting with `PMI_`, `PMIX_`,
+`OMPI_`, `OPAL_`, `SLURM_`, `SLURMD_`, `SRUN_`, `SBATCH_`, `SALLOC_` or
+`HTTK_`; the client drops those, and names that are not portable identifiers,
+from its own environment. A status `state` is `refused` (never started, no
+`exit_code`), `exited` (the launch exited by itself; `exit_code` 0 to 255,
+`128+N` for signal `N`), `stopped` (the manager stopped it; `exit_code`
+optional) or `uncertain` (not confirmed reaped, no `exit_code`).
+
+**Client.** The client checks that `HTTK_WORKFLOW_CONTROL_DIR` is
+`attempts/<attempt_id>` of `HTTK_WORKFLOW_JOB_DIR` for the context's
+`attempt_id` and that its working directory lies inside the job directory. It
+creates `ID.lock` exclusively in `HTTK_WORKFLOW_LAUNCH_LOCKS` and holds an
+exclusive `flock` on it for its whole life: the lock is a death notification
+on node-local tmpfs, never mutual exclusion and never on the workspace
+filesystem. It then publishes `ID.request.json` by writing
+`.ID.request.tmp` exclusively and renaming it, copies `ID.stdout` and
+`ID.stderr` to its own output until `ID.status.json` exists and both are
+drained, and exits with the launch's status (`2` for a `refused`,
+`uncertain` or unreadable status, or when `launch/` is removed first; `143`
+for a `stopped` launch without an exit code). `SIGTERM`, `SIGINT` and `SIGHUP` do not end it: it creates
+`ID.stop` and keeps waiting for the `stopped` status.
+
+**Admission.** The manager scans each local confined attempt's `launch/` at
+most once a second, visits at most 4096 entries and decides at most 32
+requests per scan, ignores dot names, and takes the requests without a status
+in arrival order (modification time). It answers `refused` unless the attempt
+is live (not fenced, cancelling, timed out or drained, still owning its
+`running` marker, its process not exited or reaped, no outcome published, and
+its admission not closed by an uncertain launch), the request decodes, names
+its own file's `ID` and this attempt, has no stop marker, and its client lock
+exists and is still held. Only one launch per attempt runs at a time; the
+other requests wait. The manager never interprets the requested command.
+
+**Start.** The manager creates `ID.stdout` and `ID.stderr` exclusively (an
+existing one refuses the request), creates the trusted launch directory
+exclusively with mode 0700, writes `nodefile` and `launch.json`, and starts
+the launch template rendered from the placement it holds in memory, around
+the rank helper, in a new session behind a gate that reads one line from a
+pipe before it execs. It then writes `process.json` (`pid`, which is also the
+process group, `hostname`, `attempt_id`, `started_at`) through a temporary,
+`fsync`, rename and directory `fsync`, and only then releases the gate. If the
+record cannot be written the gate is closed unopened, the launch exits
+without starting anything and is stopped. A trusted launch directory with
+only `launch.json` therefore never hides started ranks.
+
+**Ranks.** Jobs can read but not write `.httk-workspace/`, so `launch.json` is
+trusted input; the rank helper still requires `--launch-dir` to have the shape
+above and to match the description's attempt and request, opens it without
+following symlinks, and requires the described workspace root to be the same
+directory. It refuses an invalid placement or job key, and a job directory
+that is the workspace root or lies below `.httk-workspace`, `exchange`, `logs`
+or `postprocess`. It joins `<confine.shm_root>/httk-<token>/` (mode 0700,
+owner checked; created by the first rank of a node, removed by the last) and
+runs the inner exec in a rank sandbox that binds the workspace and
+`confine.readonly_paths` read-only, and read-write the job directory, the
+shared-memory directory (at `/dev/shm`), the step's PMIx directory (only when
+it lies below `confine.pmix_roots`) and the approved `confine.devices`. The inner exec reads the request inside
+the sandbox, changes to `cwd` without following symlinks below the job
+directory, adds the request's environment, and execs `argv`. The request is
+job-writable throughout: what a rank executes is the job's own choice and
+runs confined, so a request changed after admission gains nothing.
+`confine.shm_root` MUST be a tmpfs directory owned by root or the manager's
+user, and world-writable only as a sticky root-owned one; the manager and every
+rank helper check it.
+
+**Supervision and stop.** A launch whose process group is gone after its
+leader exited gets `exited`. A stop marker, a client whose lock can be taken
+(it died, even by `SIGKILL`), a launch directory that vanished, or an attempt
+that stops being live stops it: `SIGTERM` to its process group, `SIGKILL`
+after the cancellation grace, `stopped` once the group is gone, and
+`uncertain`, with admission closed for the attempt, if it is still not gone a
+further grace later. Every status is written by an exclusive temporary and a
+rename; a started launch's final status is retried every tick until it is
+written. The manager that runs the attempt does not treat it as finished,
+and does not commit, seal or eject it, while any launch it tracks for the
+attempt is unreaped. When an attempt's own process is gone on this host,
+cancellation verification (`process_group_absent`) and an attempt takeover
+that relies on the writer being provably dead also require every launch
+recorded for the attempt in any manager's `launches/` to be provably gone on
+this host; a record with only `launch.json`, or on another host, proves
+nothing. A commit takeover does not consult launch records: it follows
+[Commit ownership](#commit-ownership) alone.
+
+**Cleanup.** Once a launch is reaped and its status written, the manager
+removes its trusted launch directory, so the status file alone marks the
+request as done. The manager removes the attempt's launch-lock directory when
+it stops tracking the attempt; one left by a crashed manager stays on its node
+until reboot. `launch/` goes with the attempt-control directory. A manager
+reading the launch records of an attempt also deletes, on the way, the
+process records of other managers silent for their lease times its takeover
+grace factor whose process group is provably gone on this host. Garbage
+collection removes the trusted launch directories of a manager silent for the
+workspace policy's `lease_seconds` times the default takeover grace factor
+(`2.0`) that hold no process record, a malformed one, or one whose process
+group is provably gone on this host; an I/O error proves nothing (see
+[Retention gates and always-safe collection](#retention-gates-and-always-safe-collection)).
+The sandbox details and site requirements are in {doc}`workspace_daemon`.
 
 ### Executable workflow-hook wire formats
 
@@ -1885,6 +2115,56 @@ Retry policy decides whether these create another attempt or
 `retry_exhausted`. A declared `fail` is permanent by default; a step wanting a
 managed retry uses `retry`.
 
+### Commit ownership
+
+The manager that observes a valid outcome validates it, digests every child
+bundle and checks the spawn labels while the marker is still `running`, then
+appends the `committing` frame and renames the marker. The frame names the
+commit's owner and everything a successor needs: `manager_id`, `writer_id`,
+`attempt_id`, `attempt_control`, `outcome_action`, `child_digests` (child job
+key to the bundle digest taken at acceptance), `child_labels`, the `process`
+identity when one was recorded, and `commit_base_generation`, the generation
+of this first `committing` marker.
+
+**The commit draft.** The holder of the `committing` marker at generation `g`
+renames the published draft to `attempts/<attempt-id>/commit.<g>` before its
+first step and reaches it only by that name, opening it afresh below the
+attempt-control directory for every step and never creating it. It finds the
+current name by fixed names, never by a listing: `commit.<g>`, then
+`commit.<g-1>` down to `commit.<commit_base_generation>` (a previous owner's,
+or the name before a same-kind operator transition advanced the generation),
+then `outcome.ready`; the rename is checked by inode. A draft name that is
+absent stops the step: while the marker is still this owner's, that is a
+`protocol_error` of the job; otherwise the commit was taken over and the
+owner records nothing. A second `outcome.ready` a lingering attempt process
+publishes after the first rename is never read.
+
+**Single owner and takeover.** Only the manager the `committing` frame names
+processes the commit. Another manager serving the job's executor takes it
+over only on [manager liveness evidence](#manager-liveness-evidence) for that
+owner, judged with the frame's lease, by a `committing` → `committing`
+transition whose frame repeats every non-envelope member of the current one
+and sets `manager_id`, `writer_id`, `previous_manager_id`, `takeover_evidence`
+and `reason: "commit_takeover"`. The marker rename decides: of two successors
+one wins, and the previous owner's own later transition loses. The new owner
+then renames the draft to its own `commit.<g>`, which fences the previous
+owner at its next draft access, and retires the previous owners' transaction
+trash before touching `data/` (see [Transaction bundle](#transaction-bundle)).
+Because a takeover advances the generation, an operator request issued
+against the earlier generation is retired as stale.
+
+A manager does not process a commit while a [confined launch](#confined-launches)
+it tracks for the attempt it ran is unreaped; this holds only for launches
+that manager itself started, and a commit takeover does not consult the launch
+records of other managers. A commit that cannot proceed yet (a predecessor's
+trash that cannot be retired) is deferred and retried, and one that keeps
+failing is reported once and recorded in `commit-wedge.json`; neither is a job
+failure. A commit failing on a malformed outcome or draft fails the job with
+`protocol_error`. It fails with `transaction_corruption` when its replay fails
+midway, and also before any replay step when a nontransactional job published
+a transaction or the outcome's or manifest's `expected_data_generation` is
+stale.
+
 ## Optional transactional contributions to `data/`
 
 ### Visibility guarantee
@@ -1978,8 +2258,11 @@ A runner replaying a batch into its own workdir uses
 moved there.
 
 The manager replaying a published transaction uses a trash directory per owner:
-the holder of committing generation `g` uses
-`transaction/trash/<operation-id>.<g>/`. Operation IDs may contain dots; the
+the holder of committing generation `g` replays from its draft
+`attempts/<attempt-id>/commit.<g>/` (see [Commit ownership](#commit-ownership))
+and uses `transaction/trash/<operation-id>.<g>/` in it, holding the entries
+`removed`, `old` and the fresh directories `new<n>` it renames into `data/`.
+Operation IDs may contain dots; the
 generation is the integer after the last one, and the name is always built,
 never parsed from a listing. The manager:
 
@@ -2051,7 +2334,8 @@ order with atomic renames and the verified-transition algorithm:
 
 Only the manager a `committing` frame names replays it; a successor takes an
 abandoned commit over by a marker transition and renames the draft, which
-fences the previous owner at its next access. The retirement pass then ends
+fences the previous owner at its next access (see
+[Commit ownership](#commit-ownership)). The retirement pass then ends
 everything a frozen previous owner could still do in `data/`; a `put-file` or
 `put-tree` rename it had in flight before that is recognised by re-observing
 the destination, so replays converge. A replayer MUST perform the bounded
@@ -2068,8 +2352,9 @@ After all operations validate as applied, the manager:
 3. only then allows transaction trash and, in isolated mode, an old isolated
    workdir to be collected.
 
-If interrupted between the data changes and the final marker rename, a new
-manager sees `committing`, reads the outcome named by the committing frame, and
+If interrupted between the data changes and the final marker rename, the owner
+(or, once it is evidently gone, a successor that took the commit over) sees
+`committing`, reads the draft of the attempt the committing frame names, and
 idempotently completes replay without rerunning the step. This keeps the
 *httk* v1 `ht.atomic.*` principle without one permanent revision and manifest
 hierarchy per step.
@@ -2172,7 +2457,7 @@ a job):
 │   ├── abort.<T>/                    T decided aborted (renamed from eject.<T>)
 │   ├── import.<owner>.<ns>.<L>/      adoption lineage L (with verified.json from V8 on)
 │   ├── export.<owner>.<ns>.<T>/      wrapper of held export T while its copy-out runs
-│   └── trash.<rand>/                 garbage, always collectable
+│   └── trash.<rand>/                 garbage: collected, or quarantined if it holds a job payload
 └── transfers/
     ├── adopting/<job_id>             per-job claim, a hard link of <lineage>/claims/<job_id>
     ├── received/<T>                  receipt of an addressed import
@@ -2187,16 +2472,21 @@ a job):
 
 `T` is a transfer ID (a fresh UUID), `L` a lineage ID (16 random hex digits),
 `<ns>` integer UTC nanoseconds, and `<owner>` an owner token: `m<manager-id>`
-for a manager, or a token made from the host, process ID and boot ID for a CLI
-process. A manager owner is gone when its heartbeat is older than the takeover
-grace or its directory is absent; a CLI owner is gone after 24 hours, or at
-once when it is on this host and boot and its process is not alive. All
-transfer times are integer UTC nanoseconds, parsed strictly.
+(the UUID's 32 hexadecimal digits) for a manager, or
+`c<host-hash8><pid><boot-hash8>` for a CLI process, made from the hostname,
+process ID and boot ID. Whether an owner is gone follows
+[Manager liveness evidence](#manager-liveness-evidence), with an unreadable
+heartbeat aged from the name-encoded start time; a CLI owner is gone after 24
+hours, or at once when it is on this host and boot and its process is not
+alive. All transfer times are integer UTC nanoseconds, parsed strictly.
+`transfers/acks`, `incoming`, `outgoing` and `retired` are created with the
+workspace; the other transfer directories are created on first use.
 
 ### No file locks
 
-The protocol takes no lock of any kind on any configured filesystem. It relies
-on exactly these primitives:
+The protocol takes no lock of any kind on any configured filesystem; the
+`flock` death notifications of [confined launches](#confined-launches) live on
+node-local tmpfs and order nothing. It relies on exactly these primitives:
 
 - **single-source rename**: every move has one source, so of two actors only
   one succeeds; a directory rename onto a non-empty directory fails;
@@ -2570,20 +2860,26 @@ enables the extension when absent and says so.
 
 ```text
 WORKSPACE/exchange/
-├── inbox/                  bundles submitted by the client
-├── outbox/                 finished bundles returned to the client
-│   └── rejected/<unique>/  refused inbox entries with reason.json
-├── requests/               reserved for the daemon's request mailbox
-├── responses/              reserved for the daemon's response mailbox
-├── managers/               reserved for daemon-published manager logs (managers/<handle>.log)
-├── exchange.json           extension marker
-└── status.json             every job of the workspace with its state
+├── inbox/<name>/           bundles submitted by the client
+├── outbox/<job-key>/       finished bundles returned to the client
+│   └── rejected/<unique>/  refused inbox entries: <name>/ and reason.json
+├── requests/<id>.json      daemon mailbox: signed requests, written by the client
+├── responses/<id>.json     daemon mailbox: signed responses, written by the daemon
+├── managers/<handle>.log   manager logs, written by the daemon
+├── exchange.json           extension marker, written by enable
+├── status.json             every job of the workspace with its state, written by managers
+├── daemon.json             the daemon's public menu, written by the daemon
+└── managers.json           the daemon's manager starts, written by the daemon
 ```
 
-`requests/`, `responses/` and `managers/` are created by `enable` and reserved
-for the workspace daemon, which serves its signed requests and responses in
-`WORKSPACE/exchange/requests` and `responses`; there is no sibling exchange
-directory (see the daemon guide).
+`requests/`, `responses/` and `managers/` are created by `enable`; they and
+the root's `daemon.json` and `managers.json` belong to the workspace daemon
+(see [Daemon mailbox](#daemon-mailbox)). There is no sibling exchange
+directory. The trusted side considers only inbox entries whose names match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and are not one of the exchange's own names
+(`daemon.json`, `exchange.json`, `status.json`, `managers.json`, `managers`,
+`rejected`, `requests`, `responses`, `inbox`, `outbox`); dot names are the
+client's own temporaries.
 
 `exchange.json` is `{"format": "httk-workspace-exchange", "format_version": 1,
 "workspace_id": "<uuid>"}`. `status.json` is `{"format":
@@ -2690,6 +2986,71 @@ and `transfers/exports/<T>/<key>`; it refuses this workspace's
 `exchange/inbox`, whose entries only the exchange pass adopts.
 `transfers/exports/` is an adoption source only, never an ejection destination.
 
+### Daemon mailbox
+
+The optional workspace daemon ({doc}`workspace_daemon`) is a broker that
+starts, queries and cancels managers on Slurm. It moves no bundle and reads no
+job content; its only workspace state is in the exchange, and its ledger,
+keys and configuration lie outside the workspace. Managers never read the
+mailbox. The authoritative description of the request operations, signatures,
+time window, ledger and outcomes is the daemon guide; the filesystem rules
+are these:
+
+- **Names and bounds.** A mailbox publication is a regular file named
+  `[0-9a-f]{32}.json`, at most 16 KiB of UTF-8 JSON without a byte-order mark
+  or duplicate keys. A request MUST be named `<request_id>.json` after its own
+  `request_id`; other names are not publications. Every writer installs a
+  publication by writing an exclusive dot-named temporary
+  (`.<random>.tmp`) in the same directory, `fsync`, a rename onto the
+  publication name and a directory `fsync`; the rename replaces an existing
+  file, so one active caller per request ID is the client's obligation.
+- **Requests.** The client publishes `requests/<request_id>.json`
+  (`httk-workspace-command` version 4, signed with an authorized *httk*
+  identity). It does not replace a request that is still present, and before
+  republishing it checks once more for a response, because the daemon
+  publishes the response before it removes the request.
+- **Consumption.** The daemon opens `requests/` and `responses/` afresh for
+  every poll, each component without following symlinks, and works relative
+  to those descriptors. One poll takes the first 4096 publications in
+  directory order, examining at most 1,000,000 entries, and processes that
+  batch sorted by name; temporaries and dot names are skipped. A publication that is not a regular file, is oversized, does not
+  decode, is named after another request ID or is not signed by an authorized
+  key is discarded without a response: removed, or, when it cannot be removed,
+  renamed to `.invalid-<name>-<random>` so later polls skip it. A transient
+  read error leaves the request for the next poll.
+- **Responses.** For every other request the daemon, while the request is
+  still published, installs `responses/<request_id>.json`
+  (`httk-workspace-response` version 4, signed with the daemon's response key
+  and binding the request identities and the canonical request digest), and
+  only then removes the request. A request the daemon admits into its ledger
+  (`ready`, `submitted`, `uncertain`, `status`, `cancel_requested`, and
+  `refused` for an expired request, an unknown manager, an unavailable
+  scheduler or an invalid or stale configuration) has its response recorded
+  there first, and a repeated request ID with identical content gets that
+  recorded response again. The refusals decided before admission
+  (`wrong_workspace`, `wrong_enrollment`, `request_conflict`) and `busy` for
+  exhausted capacity are published without a ledger record and decided afresh
+  on a retry. A response name the client blocked (a directory there) discards
+  the request.
+- **Retirement.** The client consumes a response by verifying it against its
+  request and the pinned daemon key, then removing it. The daemon removes any
+  response older than the request lifetime plus the clock-skew allowance
+  (3600 + 7800 seconds by default), which no client can still be waiting for.
+- **Published state.** `daemon.json` (the daemon's identities, approved
+  configuration digests and request lifetime), `managers.json`
+  (`httk-workspace-daemon-managers` version 3) and `managers/<handle>.log`
+  (the last 1 MiB of a finished manager's Slurm output) are installed by an
+  exclusive temporary and a rename relative to an exchange descriptor, so a
+  client's symlink at the name is replaced, never followed. They are
+  informational: no trusted side reads them back, and a client acts only on
+  signed responses.
+
+A manager the daemon submits is an ordinary manager: it runs the workflow
+manager with `--by-path --workspace WORKSPACE --idle` (as
+`<python> -I -m httk.core.cli workflow manager run`, or the launcher's
+`manager.command` after an `environment.prelude`), and its own state is
+the `managers/<manager-id>/` directory of the workspace, not the exchange.
+
 ## Dynamic branching and joins
 
 ### Child publication
@@ -2701,13 +3062,14 @@ attempts/<attempt-id>/outcome.tmp.<nonce>/
 ├── outcome.json
 └── children/
     ├── spawn.json
-    └── jobs/
-        ├── branch-a--<child-uuid>/
-        │   ├── job.json
-        │   └── ...
-        └── branch-b--<child-uuid>/
-            ├── job.json
-            └── ...
+    ├── jobs/
+    │   ├── branch-a--<child-uuid>/
+    │   │   ├── job.json
+    │   │   └── ...
+    │   └── branch-b--<child-uuid>/
+    │       ├── job.json
+    │       └── ...
+    └── runners/<store-path>      # optional: workspace runners the children pin
 ```
 
 Each child `job.json` names the parent workspace, job, activation, spawn ID,
@@ -2730,15 +3092,35 @@ outcome with `protocol_error` without registering any child of the set.
 
 While the parent is `committing`, the manager:
 
-1. copies each complete child bundle out of the draft into its own staging,
-   verifies the copy against the digest recorded when the outcome was
-   accepted, and moves the copy to its chosen
-   `<workspace>/jobs/<placement>/<job-key>` path, so nothing the attempt still
-   holds open or linked in its draft is published;
-2. creates its one `g0.init` marker at the mirrored target-workspace path below
-   `state/submitted`;
-3. treats an identical existing child plus marker as already registered;
-4. fails on the same UUID with different immutable content.
+1. validates every spawn entry (job key, placement rule, workspace) and
+   publishes the parent's spawn record (see [Runner job state](#runner-job-state))
+   before anything else is written;
+2. copies each complete child bundle out of the draft into its own staging,
+   `.httk-workspace/tmp/child.<attempt-id>.<job-key>`, never renaming it out:
+   every staged file is a fresh inode, so nothing the attempt still holds open
+   or linked in its draft is published. A copy an interrupted commit left
+   behind is removed and made again. It verifies the copy (its `job.json` names
+   the key, and its digest is the `child_digests` entry recorded when the
+   outcome was accepted);
+3. copies each workspace runner a verified child pins and the draft stages
+   under `children/runners/<store-path>` (as `Attempt.call` does) into
+   `tmp/runner.<attempt-id>.<hash>`, checks it against the child's
+   `runner.sha256`, and publishes it into the runner store, a no-op when the
+   store already holds that digest; staged runners no child pins are ignored;
+4. only then moves each verified copy to its chosen
+   `<workspace>/jobs/<placement>/<job-key>` path and publishes its one
+   `g0.init` marker (a zero-length temporary `tmp/child-marker.<uuid>`) at the
+   mirrored path below `state/submitted`;
+5. treats a child whose payload directory and a marker of any kind already
+   exist at the target as registered, without further checks;
+6. for a payload directory already at the target without a marker (an
+   interrupted commit published it), checks it against the recorded digest
+   and its `job.json` key before publishing the marker, and fails the commit
+   with `protocol_error` when either differs, so a different definition under
+   the same key is never registered.
+
+The staging names are deterministic, so garbage collection keeps a staged
+`child.*` or `runner.*` entry while a commit of that attempt is unfinished.
 
 Children are registered before the parent leaves committing. A crash may expose
 only some of them, and replay registers the deterministic missing set;
@@ -3013,17 +3395,22 @@ request and publication is an ordinary verified rename.
 
 ### Request contents and actions
 
-A request names:
+A request is a JSON object named `<uuid>.json`. A writer MUST emit exactly
+these members:
 
-- job UUID, job key, and the job's `placement`;
-- exact expected marker generation and record reference;
-- requested action;
-- operator identity and reason;
-- optionally `force`, the operator's explicit acceptance of a hazard the
-  manager would otherwise refuse;
-- any selected retained files for manual import;
-- for relocation or transfer, the exact destination workspace and placement plus
-  a unique operation ID.
+| Member | Meaning |
+| --- | --- |
+| `format`, `format_version` | `httk-workflow-request`, `2` |
+| `request_id` | a fresh UUID |
+| `job_id`, `job_key`, `placement` | the target job; the job key's UUID MUST equal `job_id` |
+| `expected_generation`, `expected_record_ref` | the exact current marker generation and record reference |
+| `action` | the requested action |
+| `operator`, `reason` | operator identity (a label such as `Name <email>`) and explanation |
+| `created_at` | UTC timestamp of publication |
+| `priority` | optional; the new priority of `set_priority` |
+| `step` | optional; the step of `override_step` |
+| `force` | optional `true`: the operator's explicit acceptance of a hazard the manager would otherwise refuse |
+| `operator_key`, `signature` | optional, together: the *httk* identity signature (below) |
 
 Actions and the states they apply to:
 
@@ -3034,8 +3421,16 @@ Actions and the states they apply to:
 | `cancel` | Cancel; a live attempt uses the fencing and process-termination procedure of [Cancellation](#cancellation). | Any nonterminal state. A second `cancel` of a job in `cancelling` is not an error and changes nothing. |
 | `set_priority` | Rename the marker to a new priority. | Only `submitted`, `ready`, `waiting`, `paused`, `failed` |
 | `pause` | Pause. | Immediately from `submitted`, `ready`, `waiting`; deferred from `claimed`, `running`, `committing` to the next attempt boundary; a handled no-op on `paused`. Terminal outcomes supersede a pending deferred pause. |
-| `relocate` | Change the placement. | Its permitted quiescent states |
-| `transfer` | Move the job between workspaces. | Its permitted quiescent states |
+
+A manager checks only `format` and `format_version` of the envelope and the
+members an action uses; it ignores unknown members. The actions `relocate` and
+`transfer`, with the destination workspace, placement and operation ID they
+would carry, and the import of selected retained files are reserved: a core-v3
+manager rejects a request with any action outside the table as invalid, and
+ignores the reserved members. Relocation is the reserved capability of
+[Relocation within one workspace](#relocation-within-one-workspace), and jobs
+move between workspaces only by the transfer verbs. The exact member set is
+enforced only by the publisher of remote requests (`httk job publish-requests`).
 
 `set_priority` MUST NOT rename a `claimed`, `running`, or `committing` marker
 behind its owning manager. An in-flight `pause` instead records a sticky
@@ -3043,43 +3438,82 @@ behind its owning manager. An in-flight `pause` instead records a sticky
 boundary; a manager older than this additive member quarantines such a request
 as invalid.
 
-`continue` and `override_step` remain subject to job budgets unless the request
-contains an authorized, auditable budget change under site policy, which lives
-in the operator journal frame because `job.json` is immutable. Without `force`,
+`continue` and `override_step` remain subject to the job budgets of the
+immutable `job.json`; no request member changes them (an auditable budget
+change under site policy is reserved). Without `force`,
 both are refused for a job a decided join already consumed (see
 [Reviving a child a decided join consumed](#reviving-a-child-a-decided-join-consumed)).
 
+The signature is the *httk* identity signature of *httk-core*: `operator_key`
+is `ed25519:` and the base64 public key, and `signature` the base64 Ed25519
+signature of `SHA-256(b"httk-identity-v2\0" + J)`, where `J` is the canonical
+JSON (UTF-8, keys sorted, separators `,` and `:` without whitespace, non-ASCII
+not escaped) of every member except `signature`, `operator_key` included. A
+signature is attribution, not authorization: a request without one is
+applied, one whose signature does not verify is invalid, and a verified one
+records its `operator_key` in the resulting state frame beside `operator` and
+`reason` (see {doc}`workflow_cli`). For a remote workspace the owning machine
+builds the unsigned request documents (`httk job request-envelopes`, answered
+as `httk-workflow-request-envelopes` version 1), the client signs them, and
+the owning machine publishes the signed documents verbatim
+(`httk job publish-requests`); on disk they are ordinary requests.
+
 ### Applying requests
 
-A manager claims the request by rename, verifies the exact expected current
-marker, appends the new journal frame, and renames the marker. It finds the
-target by probing the state set at the request's exact `placement`, never by
-scanning the workspace from a scheduling tick (the same clean pre-release break
-as the join ladder). A request without a placement is a protocol error: it is
-claimed and quarantined as malformed rather than allowed to trigger a global
-lookup.
+A manager lists `requests/ready/` and, for each request:
 
-A delayed request cannot apply to a newer state, because its expected
+1. reads it, binding the bytes read to the file's identity (an entry replaced
+   while it was opened is invalid);
+2. resolves the target by probing the state set at the request's exact
+   `placement`, never by scanning the workspace from a scheduling tick (the
+   same clean pre-release break as the join ladder);
+3. checks ownership: a request whose file owner is not the owner of the job's
+   marker is retired, a job of another user than the manager's is left for
+   that user's manager, and a request for a runner executor this manager does not serve is left in
+   `ready/` for a manager that does, and a manager SHOULD remember such
+   decisions rather than reread the file every pass;
+4. claims it by renaming it into `requests/claimed/<manager-id>/` under the
+   same name, deciding a failed rename by looking at the destination, and
+   checks that the claimed file is the inode it read;
+5. verifies the exact expected marker generation and record reference,
+   appends the new journal frame, and renames the marker.
+
+A request without a usable placement, naming a nonexistent job, carrying an
+invalid signature or otherwise violating the protocol is claimed and moved to
+the quarantine as malformed rather than allowed to trigger a global lookup. A
+delayed request cannot apply to a newer state, because its expected
 generation no longer matches. All request-induced marker moves are verified
 transitions. A manager whose live transition loses to cancellation rereads the
-current marker and stops the fenced attempt; it does not infer ownership from an
-errno.
+current marker and stops the fenced attempt; it does not infer ownership from
+an errno. The result is written to the shared journal; there is no per-job
+request directory.
 
-The result is written to the shared journal. The transient request file may be
-removed when retention policy permits; there is no per-job request directory.
+A request stays in `requests/claimed/<manager-id>/` only while its manager
+decides it: an applied request is removed, and an I/O error whose outcome is
+unknown leaves it claimed for a retry. A manager returns its own claims to
+`ready/` at the start of every request pass. Claims of a manager that never
+comes back, including the previous incarnation of a restarted manager (every
+incarnation has a fresh manager ID), are recovered by the others: at most every
+10 seconds a manager lists the other managers' claim directories and, for an owner with
+[manager liveness evidence](#manager-liveness-evidence) (judged with its own
+lease, since a claim records none), renames each claimed request back to
+`ready/`. It is then claimed and checked against its exact preconditions like
+any other, so a request is never applied twice: if the former owner was only
+slow and had applied it, the recovered copy no longer matches and is retired.
 
 ### Retiring requests
 
-A claimed request stays in `requests/claimed/<manager-id>/` until its manager
-decides: an applied request is removed, and one that can never become
-actionable MUST be retired rather than left to be read again. Examples are an
-expected generation or record reference that no longer matches, a job that
-moved while the request was applied, or a request the protocol refuses, such as
-reviving a job a decided join consumed.
+A claimed request that can never become actionable MUST be retired rather
+than left to be read again. Examples are an expected generation or record
+reference that no longer matches, a job that moved while the request was
+applied, or a request the protocol refuses, such as reviving a job a decided
+join consumed.
 
-Retiring writes a retirement record and then moves the claimed file to
-`requests/retired/`, which is never rescanned. The record sits beside the
-request under the request's name plus `.retirement`:
+Retiring moves the claimed file to `requests/retired/`, which is never
+rescanned, and then writes a retirement record beside it, under the request's
+name plus `.retirement`. The move comes first, so a claim another manager
+recovered meanwhile leaves no record describing a retirement that never
+happened:
 
 ```json
 {
@@ -3092,17 +3526,18 @@ request under the request's name plus `.retirement`:
 }
 ```
 
-Both are transient operator evidence, not protocol state; nothing reads them
-back, and they are collected after a month (see
+Both are transient operator evidence, not protocol state; tools such as
+`job why` show the latest reason, and both are collected after a month (see
 [Retention gates and always-safe collection](#retention-gates-and-always-safe-collection)).
 
 These cases MUST NOT be retired:
 
-- a request whose job uses a *runner executor this manager does not serve* is
-  left in `requests/ready/` for a manager that does; a manager SHOULD remember
-  that decision rather than reread the file every pass;
-- a request that cannot be applied *right now* (a held maintenance lock, an
-  unavailable workspace) stays actionable and is retried;
+- a request whose job uses a *runner executor this manager does not serve*, or
+  belongs to another user, is left in `requests/ready/`;
+- a request that cannot be decided *right now* (its bytes, ownership or
+  target cannot be observed, or applying it hit an I/O error of unknown
+  outcome) stays in `ready/` or in this manager's claim and is retried; the
+  maintenance lock does not hold requests back;
 - a request that violates the protocol, including one naming a nonexistent
   job, is quarantined as malformed input.
 
@@ -3120,9 +3555,11 @@ For a valid current outcome, a manager:
 
 1. validates job, activation, and attempt, plus expected data generation when a
    transaction is present;
-2. appends a committing frame;
+2. appends a committing frame naming itself as the commit owner;
 3. renames the exact running marker to committing, fencing the attempt;
-4. applies or verifies the transaction, if present, and in the durable profile
+4. renames the published draft to `commit.<generation>` (see
+   [Commit ownership](#commit-ownership)), then applies or verifies the
+   transaction, if present, and in the durable profile
    synchronizes every replayed destination and the directories it touched;
 5. registers or verifies every child, synchronizing each published payload and
    marker's directory in the durable profile;
@@ -3168,19 +3605,26 @@ A manager:
 2. rejects duplicate workspace IDs and unknown future capabilities before
    mutation;
 3. creates a manager record, fresh writer-incarnation journal, and heartbeat in
-   each attached workspace;
-4. resumes markers in `committing` and, when enabled, `relocating` and
-   `transferring`;
+   each attached workspace, recovers transfer and adoption transactions whose
+   owners are gone, and runs the always-safe collection;
+4. resumes markers in `committing` it owns, taking over those whose owner is
+   evidently gone, and, when enabled, `relocating` and `transferring`;
 5. resumes markers in `cancelling`, each naming a fenced attempt still to be
    stopped and verified, whether this manager fenced it or inherited it from
    one that died mid-cancellation;
 6. examines possibly abandoned claimed and running markers;
 7. evaluates waiting joins, including cross-workspace references when enabled;
-8. handles submitted jobs and operator requests;
+8. handles submitted jobs and operator requests, recovering the claimed
+   requests of departed managers;
 9. claims eligible ready work in pool, capability, priority, and resource
    order, skipping requirements that cannot fit its advertised capacities and
    packing fitting attempts against the reservations of its running attempts;
 10. keeps watching for workspaces being attached, renamed, or detached.
+
+In every tick it also supervises the [confined launches](#confined-launches)
+of its attempts. A manager without placement prefixes that serves the default
+pool, on a workspace with the exchange extension, first runs the exchange pass
+unless it is draining (see [Who serves the exchange](#who-serves-the-exchange)).
 
 There is no separate state index to reconcile: listing `state/` is listing the
 authoritative scheduler state.
@@ -3303,7 +3747,7 @@ remaining evidence of a job that went wrong.
 - Entries in `.httk-workspace/quarantine/` are likewise outside generic orphan
   GC. Only an explicit repair decision or a separately configured
   quarantine-retention policy that keeps an audit record removes them.
-- A collector MUST NOT prune the runner store. Runners are referenced by digest
+- A collector MUST NOT prune the runner store or `runner-builds/`. Runners are referenced by digest
   from `job.json` and transfer manifests, an attached workspace can gain a job
   referring to one at any time, and the store is small. A future version may add
   an explicit runner-retention rule; generic collection never applies one.
@@ -3334,9 +3778,14 @@ configured; `workspace gc` also collects them.
 - An empty placement mirror below a state kind, pruned by `rmdir` alone.
 - An entry in `.httk-workspace/tmp/` or `.httk-workspace/requests/tmp/` more
   than 24 hours old, since every publication renames its staging entry away
-  within one operation.
+  within one operation. The transfer transaction directories
+  (`import.*`, `eject.*`, `abort.*`, `export.*`, `birth.*`) are never collected
+  here; a staged `child.*` or `runner.*` copy is kept while a commit of its
+  attempt is unfinished; and a `trash.*` directory that holds a job payload is
+  moved to the quarantine instead of being removed.
 - A request in `.httk-workspace/requests/claimed/<manager-id>/` more than 30
-  days old whose manager no longer heartbeats.
+  days old whose manager no longer heartbeats (a running manager normally
+  recovers such claims long before).
 - A request in `.httk-workspace/requests/retired/`, with its `.retirement`
   record, more than 30 days old.
 - A transfer receipt below `transfers/received/` once `now > sealed_at + W +
@@ -3364,7 +3813,8 @@ The remaining categories are gated as follows:
 | Retired transfer bundle | `trash_days` | Below `transfers/retired/`; kept `trash_days` after its acknowledgement. |
 | Import acknowledgement | `trash_days` | Below `transfers/acks/`; the stale-copy check of an ejected bundle uses it until then. |
 | Journal segment | `journal_days` | No current terminal marker, nor `transferring` marker of a bundle awaiting handover, references it; no frame chain of a current non-terminal marker contains it; and its writer belongs to no manager heartbeating within its lease. |
-| Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
+| Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. Its trusted launch directories are removed first when the manager has been silent for the policy `lease_seconds` times the default takeover grace factor (`2.0`) and each holds no process record, a malformed one, or one naming a process group provably gone on this host; a directory still holding a launch record is kept. |
+| Manager log | `trash_days` | `logs/managers/<manager-id>.log` and its `.log.1` backup, once the manager's directory is gone. `logs/batch/` is never collected. |
 
 Failed and cancelled jobs keep their newest attempt-control directory
 regardless of age, because it holds the outcome and failure breadcrumb of the
@@ -3463,7 +3913,13 @@ The maintained manager provides such a boundary with `manager.confine=bwrap`:
 each attempt, and each rank it launches through `HTTK_WORKFLOW_LAUNCH`, runs in
 a Bubblewrap sandbox that can write only its own job directory, while the
 manager stays trusted and treats everything a job leaves in its directory as
-hostile input. See {doc}`taskmanager` for the sandbox and its settings.
+hostile input. Everything the manager reads back from an attempt (the outcome
+draft, launch requests) is opened below no-follow descriptors, its JSON
+documents within size bounds, and what it needs to act on is either copied out
+first (child bundles and staged runners, whose digests and copies are not
+size-bounded) or kept in its own memory and manager-owned files (launch
+placement, trusted launch descriptions). See {doc}`taskmanager` for the sandbox and its
+settings, and [Confined launches](#confined-launches) for the launch files.
 
 ## Persistent VASP restart example
 

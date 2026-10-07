@@ -545,9 +545,17 @@ IDs and raw scheduler output are not exposed. Verify the identities and digest
 when consuming a response: the uploader can interfere with mailbox contents,
 and the protected ledger is authoritative.
 
-Responses are committed before publication, and requests are removed only
-after their response is published. Malformed requests are discarded with a
-bounded diagnostic and no response.
+The response to an admitted request is committed to the ledger before
+publication, and requests are removed only after their response is published.
+The refusals decided before admission (`wrong_workspace`, `wrong_enrollment`,
+`request_conflict`) and `busy` are published without a ledger record, so a
+retry is decided afresh. Malformed or unauthorized requests are
+discarded with a bounded diagnostic and no response; one that cannot be
+removed is renamed to a `.invalid-…` dot name that later polls skip. The
+maintained client removes a response once it has verified it, and the daemon
+removes any response older than the request lifetime plus the clock-skew
+allowance. The filesystem rules of the mailbox are specified in
+[the filesystem protocol](workflow_filesystem_api.md#daemon-mailbox).
 
 ### Request IDs
 
@@ -618,7 +626,8 @@ placement held in the manager's memory, with a manager-owned nodefile for
 `{nodefile}` and `SLURM_HOSTFILE` in the trusted launch directory
 `.httk-workspace/managers/<manager_id>/launches/<attempt_id>.<request_id>/`,
 which jobs can only read. The manager never interprets the program
-and arguments. The code run helpers prepend the prefix themselves, so code
+and arguments. The request, status and trusted launch files are specified in
+[the filesystem protocol](workflow_filesystem_api.md#confined-launches). The code run helpers prepend the prefix themselves, so code
 command settings and workflow packages are the same confined and unconfined.
 
 - The client must run from a working directory inside the job directory (the
@@ -645,7 +654,9 @@ command settings and workflow packages are the same confined and unconfined.
   When a killed `srun` leaves remote tasks, they end when Slurm cleans up the
   step, possibly a few seconds later.
 - The attempt keeps its placement and is not committed, sealed or ejected
-  until every launch it made has been reaped. A launch whose processes outlive
+  by its manager until every launch it made has been reaped. A manager that
+  takes over the commit after that manager died does not wait for launches it
+  never tracked. A launch whose processes outlive
   `SIGKILL` is reported as uncertain, and that attempt can start no further
   launches.
 - Commands run without the prefix run inside the attempt sandbox on the

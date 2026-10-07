@@ -1,9 +1,11 @@
 # The filesystem protocol
 
 The engine is built on a language-neutral filesystem protocol, the `core-v3`
-profile. Jobs, state markers, attempts, journals, transactional data, detached
-transfer and replay-after-stop are all defined as files and atomic filesystem
-operations, so any implementation that writes the same trees is a valid peer.
+profile. Jobs, state markers, attempts, journals, transactional data, commit
+ownership, operator requests, confined launches, detached transfer, the
+exchange and its daemon mailbox, and replay-after-stop are all defined as files
+and atomic filesystem operations, so any implementation that writes the same
+trees is a valid peer.
 Runner authors never need it: the SDKs ({doc}`runtime_helpers`,
 {doc}`sdks/index`) speak the protocol for you.
 
