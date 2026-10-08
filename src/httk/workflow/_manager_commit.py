@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import _txn
+from . import _manager_launches, _txn
 from ._job_tree import record_spawns
 from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
 from ._manager_requests import _STATE_ENVELOPE_MEMBERS
@@ -1075,7 +1075,9 @@ def may_commit(manager: Any, marker: Marker, state: StateFrame) -> bool:
     """Report whether this manager may process a committing marker now.
 
     It may when the frame names it, or when the frame names no manager or one
-    that is evidently gone (:meth:`~httk.workflow.TaskManager._owner_gone_evidence`),
+    that is evidently gone (:meth:`~httk.workflow.TaskManager._owner_gone_evidence`)
+    and every launch recorded for the attempt has ended or is a launch on this
+    host it is stopping (:func:`~httk.workflow._manager_launches.launch_end_evidence`),
     so the commit can be taken over.
 
     :param manager: The task manager.
@@ -1091,25 +1093,95 @@ def may_commit(manager: Any, marker: Marker, state: StateFrame) -> bool:
     if owner == manager.manager_id:
         return True
     lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
-    return manager._owner_gone_evidence(owner, lease_seconds=lease_seconds) is not None
+    if manager._commit_owner_gone_evidence(owner, lease_seconds=lease_seconds) is None:
+        return False
+    # A takeover that waits for evidence only a scheduler, the clock or an
+    # operator can give is not work this manager can do now.
+    pending = _manager_launches.launch_end_evidence(
+        manager, state.attempt_id or "", owner=owner, lease_seconds=lease_seconds
+    ).pending
+    return pending is None or pending.rule == "launch_running_here"
+
+
+def outcome_actionable(manager: Any, state: StateFrame) -> bool:
+    """Report whether another manager's published outcome is this manager's work now or soon.
+
+    It is once its manager is gone (:meth:`~httk.workflow.TaskManager._commit_owner_gone_evidence`) and
+    every launch of the attempt has ended or is one on this host being stopped, and also while that
+    manager's heartbeat is older than its lease, since it then becomes gone within the takeover grace. A
+    live manager commits its outcomes itself.
+
+    :param manager: The task manager.
+    :param state: The running frame of the published attempt.
+    :return: Whether the outcome keeps this manager awake.
+    """
+
+    owner = state.manager_id
+    lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
+    if manager._commit_owner_gone_evidence(owner, lease_seconds=lease_seconds) is None:
+        return not manager._manager_alive(owner, lease_seconds=lease_seconds)
+    pending = _manager_launches.launch_end_evidence(
+        manager, state.attempt_id or "", owner=owner, lease_seconds=lease_seconds
+    ).pending
+    return pending is None or pending.rule == "launch_running_here"
+
+
+#: Why a commit takeover waits, by the rule of the launch that blocks it.
+_PENDING_TAKEOVER = {
+    "launch_starting": "launch {record} of its attempt may still be starting: the manager that recorded it may be live",
+    "allocation_active": "the scheduler of launch {record} of its attempt{where} says its allocation is still active",
+    "launch_running_here": "launch {record} of its attempt still runs on this host and is being stopped",
+    "malformed_record_live": "launch record {record} of its attempt is malformed, and the manager that wrote it may be live",
+    "scheduler_unavailable": (
+        "the scheduler of launch {record} of its attempt{where} cannot tell whether its allocation ended; its "
+        "passed end time counts once the scheduler has been unable to answer for an hour"
+    ),
+    "launch_end_unprovable": (
+        "nothing proves that launch {record} of its attempt{where} has ended: its allocation recorded no end "
+        "time that has passed, and no scheduler or site allocation probe confirms that it ended"
+    ),
+    "launch_records_unreadable": "the launch records of its attempt cannot be read",
+}
+
+
+def _report_takeover_pending(
+    manager: Any, marker: Marker, owner: str | None, pending: _manager_launches.LaunchEnd
+) -> None:
+    """Report, rate-limited, a commit takeover that waits for launch end evidence; a repeat is recorded for 'job why'."""
+
+    reason = _PENDING_TAKEOVER[pending.rule].format(
+        record=pending.record, where=f" on host {pending.host}" if pending.host else ""
+    )
+    # A launch running here is being stopped; only what this host cannot check needs an operator.
+    override = (
+        ""
+        if pending.rule == "launch_running_here"
+        else "; an operator who knows every launch of the attempt has ended can say so with "
+        "'httk job confirm-launches-ended'"
+    )
+    manager._report_anomaly(
+        f"takeover_pending:{marker.job_key}",
+        f"not taking over the commit of {marker.job_key} from manager {owner or '-'}, which is gone: {reason}"
+        f"{override}",
+        manager._event("commit_takeover_pending", marker, previous_manager=owner, launch_end_pending=pending.as_json()),
+        level=logging.WARNING,
+    )
 
 
 def _owned_commit(manager: Any, marker: Marker, state: StateFrame, logger: Any) -> Marker | None:
     """Return the committing marker this manager owns, taking an abandoned commit over first.
 
     A commit belongs to the manager its frame names. Another manager takes it
-    over only on evidence that the owner is gone, by a ``committing`` →
-    ``committing`` transition: the rename is the decision, so of two successors
-    one wins and the other loses with
-    :class:`~httk.workflow.errors.TransitionLostError`, and the old owner's own
-    later transition loses the same way. The takeover frame repeats every
-    member of the current frame except the state envelope.
+    over only on evidence that the owner is gone and that every launch recorded
+    for the attempt has ended
+    (:func:`~httk.workflow._manager_launches.launch_end_evidence`), by
+    :func:`take_over`.
 
     :param manager: The task manager.
     :param marker: The committing marker.
     :param state: Its committing frame.
     :param logger: The manager's logger.
-    :return: The marker to process, or ``None`` while the owner may be alive.
+    :return: The marker to process, or ``None`` while the owner may be alive or a launch may run.
     :raises httk.workflow.errors.TransitionLostError: If another actor moved the marker first.
     """
 
@@ -1120,10 +1192,50 @@ def _owned_commit(manager: Any, marker: Marker, state: StateFrame, logger: Any) 
     if owner == manager.manager_id:
         return marker
     lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
-    evidence = manager._owner_gone_evidence(owner, lease_seconds=lease_seconds)
+    evidence = manager._commit_owner_gone_evidence(owner, lease_seconds=lease_seconds)
     if evidence is None:
         logger.debug("leaving the commit of %s to its manager %s", marker.job_key, owner)
         return None
+    # Ranks of a launch the owner started may still write the job directory,
+    # and nothing fences an open descriptor: they must have ended first.
+    launches = _manager_launches.launch_end_evidence(
+        manager, state.attempt_id or "", owner=owner, lease_seconds=lease_seconds
+    )
+    if launches.pending is not None:
+        _report_takeover_pending(manager, marker, owner, launches.pending)
+        return None
+    return take_over(manager, marker, state, owner, evidence, launches.as_json(), logger)
+
+
+def take_over(
+    manager: Any,
+    marker: Marker,
+    state: StateFrame,
+    owner: str | None,
+    evidence: Mapping[str, object],
+    launch_evidence: Sequence[Mapping[str, object]],
+    logger: Any,
+) -> Marker:
+    """Take a commit over from its gone owner.
+
+    The takeover is a ``committing`` → ``committing`` transition: the rename is
+    the decision, so of two successors one wins and the other loses with
+    :class:`~httk.workflow.errors.TransitionLostError`, and the old owner's own
+    later transition loses the same way. The takeover frame repeats every
+    member of the current frame except the state envelope and records both
+    kinds of evidence. Any ``commit-wedge.json`` of the attempt is removed.
+
+    :param manager: The task manager.
+    :param marker: The committing marker.
+    :param state: Its committing frame.
+    :param owner: The gone owner, or ``None`` when the frame names none.
+    :param evidence: The owner's liveness evidence.
+    :param launch_evidence: Why every recorded launch of the attempt has ended, or the operator's attestation.
+    :param logger: The manager's logger.
+    :return: The committing marker this manager now owns.
+    :raises httk.workflow.errors.TransitionLostError: If another actor moved the marker first.
+    """
+
     taken = manager._transition(
         marker,
         "committing",
@@ -1133,9 +1245,11 @@ def _owned_commit(manager: Any, marker: Marker, state: StateFrame, logger: Any) 
             writer_id=manager.writer.writer_id,
             previous_manager_id=owner,
             takeover_evidence=dict(evidence),
+            launch_end_evidence=[dict(item) for item in launch_evidence],
             reason="commit_takeover",
         ),
     )
+    _clear_commit_wedge(manager, taken, state)
     logger.warning(
         "took over the commit of %s from manager %s: %s",
         marker.job_key,
@@ -1264,27 +1378,20 @@ def resume(manager: Any, logger: Any) -> bool:
 
 
 def _clear_commit_wedge(manager: Any, marker: Marker, state: StateFrame) -> None:
-    """Forget the deferral or wedge of a commit that has now completed.
+    """Forget the deferral, wedge or pending takeover of a commit this manager completed or took over.
 
     A later anomaly of the same job is then reported loudly and, if it
-    repeats, recorded again; a ``commit-wedge.json`` this manager recorded is
-    removed so a kept attempt-control directory does not carry a stale one.
+    repeats, recorded again. The attempt's ``commit-wedge.json`` is removed
+    whichever manager recorded it, so neither a successor nor a kept
+    attempt-control directory carries a stale one.
     """
 
-    recorded = False
-    for prefix in ("resume_committing", "commit_deferred"):
+    for prefix in ("resume_committing", "commit_deferred", "takeover_pending"):
         key = f"{prefix}:{marker.job_key}"
         manager._reported.pop(key, None)
-        if key in manager._commit_wedge_recorded:
-            manager._commit_wedge_recorded.discard(key)
-            recorded = True
-    if not recorded:
-        return
+        manager._commit_wedge_recorded.discard(key)
     try:
-        with (
-            manager._job_directory(marker) as job_dir,
-            job_dir.directory(manager._attempt_control_name(state)) as control,
-        ):
-            control.unlink("commit-wedge.json")
+        with manager._job_directory(marker) as job_dir:
+            job_dir.unlink(PurePosixPath(manager._attempt_control_name(state)) / "commit-wedge.json")
     except (FormatError, OSError) as exc:
         _LOGGER.debug("cannot remove the commit wedge record of %s: %s", marker.job_key, exc)

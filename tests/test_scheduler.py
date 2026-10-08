@@ -72,7 +72,7 @@ def test_slurm_allocation_keeps_normalized_cpus_per_proc() -> None:
     }
     allocation = slurm_allocation(environ)
     assert allocation is not None
-    assert allocation == Allocation("slurm", None, (Node("n01", 2, local=True),), {}, 4)
+    assert allocation == Allocation("slurm", None, (Node("n01", 2, local=True),), {}, 4, {"job_id": "42"})
     environ["SLURM_CPUS_PER_TASK"] = "8"
     assert allocation.cpus_per_proc == 4
 

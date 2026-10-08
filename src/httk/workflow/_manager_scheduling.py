@@ -507,6 +507,22 @@ def work_census(manager: Any) -> "WorkCensus":
             if not _manager_commit.may_commit(manager, marker, state):
                 continue
         actionable += 1
+    # Outcomes another manager's attempts published wait for that manager, or for evidence that it is
+    # gone and that their launches ended; the ones that will soon be this manager's keep it awake.
+    outcomes_waiting = 0
+    for marker in manager._walk(("running",)):
+        try:
+            job = manager.workspace.load_job(marker)
+            if manager._executor_for(job) is None:
+                continue
+            state = manager._read_frame(marker)
+            if state.manager_id == manager.manager_id or manager._published_outcome(marker, state) is None:
+                continue
+        except (WorkflowError, OSError):
+            continue
+        outcomes_waiting += 1
+        if _manager_commit.outcome_actionable(manager, state):
+            actionable += 1
     return WorkCensus(
         succeeded=succeeded,
         failed=failed,
@@ -516,4 +532,5 @@ def work_census(manager: Any) -> "WorkCensus":
         paused=paused,
         actionable_count=actionable,
         unreadable=unreadable,
+        outcomes_waiting=outcomes_waiting,
     )

@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _manager_launches
+from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _manager_launches, _manager_requests
 from httk.workflow._allocation import Allocation, Node
 from httk.workflow._launch_protocol import LaunchConfinement, TrustedLaunch, encode_trusted, trusted_name
 from httk.workflow._logging import reset_logging
@@ -403,6 +403,61 @@ def test_a_launch_whose_process_record_cannot_be_written_never_starts_its_prefix
     assert gates and all(process.wait(timeout=_TIMEOUT) in (125, -signal.SIGTERM) for process in gates)
 
 
+def _move_running_marker_at_the_gate(
+    bench: _Bench, monkeypatch: pytest.MonkeyPatch, job_id: str, kind: str
+) -> list[subprocess.Popen[Any]]:
+    """Move the job's running marker to *kind* right after the process record is durable; return the gates."""
+
+    started: list[subprocess.Popen[Any]] = []
+    real_popen = subprocess.Popen
+    real_write = _manager_launches._write_durable
+
+    def recording_popen(*arguments: Any, **options: Any) -> subprocess.Popen[Any]:
+        process = real_popen(*arguments, **options)
+        started.append(process)
+        return process
+
+    def write_then_move(directory: Path, name: str, data: bytes) -> None:
+        real_write(directory, name, data)
+        running = bench.workspace.find_marker_by_id(job_id)
+        assert running is not None and running.kind == "running"
+        state = bench.workspace.read_state(running)
+        members = {key: value for key, value in state.items() if key not in _manager_requests._STATE_ENVELOPE_MEMBERS}
+        with bench.workspace.open_journal_writer() as writer:
+            bench.workspace.transition(writer, running, kind, {**members, "reason": "test_move"})
+
+    monkeypatch.setattr(_manager_launches.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(_manager_launches, "_write_durable", write_then_move)
+    return started
+
+
+def test_a_launch_whose_attempt_was_fenced_at_the_gate_never_starts_its_prefix(
+    bench: _Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A manager frozen since admission wakes after its attempt was fenced: the gate stays closed.
+    _marker, job_id = bench.submit("fenced", _BASIC)
+    started = _move_running_marker_at_the_gate(bench, monkeypatch, job_id, "cancelling")
+    with bench.manager() as manager:
+        manager.run_until_idle(timeout=_TIMEOUT)
+    assert not bench.record.exists()
+    gates = [process for process in started if process.args[1:2] == ["-c"]]  # type: ignore[index]
+    assert gates and all(process.wait(timeout=_TIMEOUT) in (125, -signal.SIGTERM) for process in gates)
+    assert bench.outcome(job_id) == ("cancelled", None)
+
+
+def test_a_launch_whose_running_marker_moved_within_running_still_starts(
+    bench: _Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A same-kind transition (such as a deferred pause request) renames the marker but keeps the attempt.
+    _marker, job_id = bench.submit("moved", _BASIC)
+    _move_running_marker_at_the_gate(bench, monkeypatch, job_id, "running")
+    with bench.manager() as manager:
+        manager.run_until_idle(timeout=_TIMEOUT)
+    assert bench.record.exists()
+    assert bench.outcome(job_id) == ("succeeded", None)
+    assert bench.result(job_id)["first"]["code"] == 3
+
+
 def test_the_launch_gate_runs_nothing_without_its_newline(tmp_path: Path) -> None:
     marker = tmp_path / "ran"
     command = [*_manager_launches._LAUNCH_GATE, "touch", str(marker)]
@@ -752,6 +807,11 @@ def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_i
         )
         (local,) = manager._running.values()
         assert _manager_launches.unreaped(local)
+        # The process record names the allocation, so that another manager can ask whether it ended.
+        (record,) = (manager.manager_directory / _manager_launches.LAUNCHES_DIRECTORY).iterdir()
+        process = json.loads((record / _manager_launches.PROCESS_FILE).read_text())
+        assert process["hostname"] == socket.gethostname() and process["attempt_id"] == local.attempt_id
+        assert process["allocation"] == {"probe": "host", "kind": "host", "identity": None, "end_time": None}
         held = 0
         deadline = time.monotonic() + _TIMEOUT
         while time.monotonic() < deadline:
@@ -784,6 +844,13 @@ def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_i
 # -- takeover evidence ---------------------------------------------------------------------------------
 
 
+def _writer_dead(manager: TaskManager, state: StateFrame) -> bool:
+    """Ask afresh: the launch records are otherwise read once per manager tick."""
+
+    manager._launch_records = None
+    return manager._attempt_writer_dead(state)
+
+
 def test_a_recorded_live_launch_prevents_writer_death_evidence(bench: _Bench) -> None:
     attempt_id = str(uuid.uuid4())
     dead = subprocess.Popen(["true"])
@@ -800,27 +867,27 @@ def test_a_recorded_live_launch_prevents_writer_death_evidence(bench: _Bench) ->
         }
     )
     with bench.manager() as manager:
-        assert manager._attempt_writer_dead(state)
+        assert _writer_dead(manager, state)
         live = subprocess.Popen(["sleep", "60"], start_new_session=True)
         try:
             trusted = bench.workspace.control / "managers" / str(uuid.uuid4()) / "launches" / ("a" * 32)
             trusted.mkdir(parents=True)
             record = {"pid": live.pid, "hostname": socket.gethostname(), "attempt_id": attempt_id}
             (trusted / "process.json").write_text(json.dumps(record))
-            assert not manager._attempt_writer_dead(state)
+            assert not _writer_dead(manager, state)
             # A launch recorded on another host is never provably dead here.
             (trusted / "process.json").write_text(json.dumps(record | {"hostname": "elsewhere.example"}))
-            assert not manager._attempt_writer_dead(state)
+            assert not _writer_dead(manager, state)
             (trusted / "process.json").write_text(json.dumps(record))
         finally:
             live.kill()
             live.wait()
-        assert manager._attempt_writer_dead(state)
+        assert _writer_dead(manager, state)
         # Records of other attempts do not matter.
         other = trusted.parent / ("b" * 32)
         other.mkdir()
         (other / "process.json").write_text(json.dumps(record | {"attempt_id": str(uuid.uuid4()), "pid": os.getpid()}))
-        assert manager._attempt_writer_dead(state)
+        assert _writer_dead(manager, state)
 
 
 _SAME_REQUEST = """
@@ -918,23 +985,22 @@ def test_online_pruning_removes_only_process_records_proven_gone_here(bench: _Be
             expired_foreign = _launch_record(
                 expired, bench.workspace, attempt_id, {"pid": gone.pid, "hostname": "elsewhere.example"}
             )
-            # A launch.json-only record may describe a launch that started: it blocks, online pruning
-            # leaves it to garbage collection, and so does a live group or another host.
-            assert not manager._attempt_writer_dead(state)
+            # A live group here and a record of another host block; online pruning leaves them, and a
+            # launch.json-only record, to garbage collection.
+            assert not _writer_dead(manager, state)
             assert not expired_gone.exists()
             assert fresh_gone.is_dir()
             for kept in (expired_only, expired_live, expired_foreign):
                 assert kept.is_dir()
-            shutil.rmtree(expired_only)
-            assert not manager._attempt_writer_dead(state)
             live.kill()
             live.wait()
-            assert not manager._attempt_writer_dead(state)
+            assert not _writer_dead(manager, state)
             assert not expired_live.exists() and expired_foreign.is_dir()
             shutil.rmtree(expired_foreign)
-            # The fresh manager's record is never pruned, but its group is gone: the evidence holds.
-            assert manager._attempt_writer_dead(state)
-            assert fresh_gone.is_dir()
+            # The fresh manager's record is never pruned, but its group is gone, and a launch.json-only
+            # record never let a rank start: the evidence holds.
+            assert _writer_dead(manager, state)
+            assert fresh_gone.is_dir() and expired_only.is_dir()
     finally:
         live.kill()
         live.wait()
@@ -951,11 +1017,11 @@ def test_an_unreadable_record_is_never_pruned_or_reported_dead(bench: _Bench) ->
     try:
         with bench.manager(lease_seconds=_LONG_LEASE, takeover_grace_factor=2.0) as manager:
             assert _manager_launches.recorded_launches(manager, attempt_id) is None
-            assert not manager._attempt_writer_dead(state)
+            assert not _writer_dead(manager, state)
             live.kill()
             live.wait()
             # Even with the group gone, an unreadable record proves nothing.
-            assert not manager._attempt_writer_dead(state)
+            assert not _writer_dead(manager, state)
             grace = _LONG_LEASE * 2.0
             names = _manager_launches.dead_records(
                 expired, hostname=socket.gethostname(), grace_seconds=grace, now=time.time()

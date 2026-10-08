@@ -278,6 +278,7 @@ stdout:
   "format_version": 1,
   "kind": "pbs",
   "end_time": 1790000000,
+  "identity": {"job_id": "4711.pbs01"},
   "cpus_per_proc": 8,
   "nodes": [
     {"host": "n001", "procs": 4, "mem": 128000, "gpus": 2,
@@ -294,6 +295,7 @@ stdout:
 | `format`, `format_version` | yes | `httk-workflow-allocation`, `1` |
 | `kind` | yes | A label naming the probe, such as `pbs` |
 | `end_time` | no | Epoch second the allocation ends, a positive number or `null` |
+| `identity` | no | The scheduler's identity of the allocation, an object or `null`: at most 16 entries, keys are labels (`[a-z0-9][a-z0-9._-]{0,47}`), values are strings of at most 256 UTF-8 bytes. It is recorded with every confined launch and handed back to the `ended` query below, which is asked only for an allocation that has one |
 | `cpus_per_proc` | no | CPUs per processor slot, a positive integer, default `1` |
 | `nodes` | yes | Non-empty list of nodes with unique `host` names |
 | `nodes[].host` | yes | Non-empty host name |
@@ -319,7 +321,8 @@ naming the probe and the end of its stderr.
 
 Maintained scheduler integrations use the private `_scheduler.Scheduler`
 interface for environment detection, aggregate capacity, allocation end,
-node probing and default application-step arguments. The Slurm implementation
+node probing, whether an allocation has ended, and default application-step
+arguments. The Slurm implementation
 lives in `_slurm`; the manager consumes normalized allocation metadata and
 placement results. Site integrations use the launcher bundle, allocation
 envelope and `manager.launch_template` described here without importing those
@@ -327,13 +330,29 @@ private Python modules.
 
 For the PBS launcher above, save this as `allocation` next to `launcher` and
 make it executable. `$PBS_NODEFILE` lists one line per processor slot, repeating
-each host:
+each host; the job id is the allocation's identity, and the `ended` query
+([below](#has-the-allocation-ended)) is answered from PBS Pro's `qstat -x`:
 
 ```python
 #!/usr/bin/env python3
 import collections
 import json
 import os
+import subprocess
+import sys
+
+if sys.argv[1:] == ["ended"]:
+    # PBS Pro keeps finished jobs with -x (state F) until their history expires, and then
+    # no longer knows them. Any other failure exits non-zero, which tells the manager nothing.
+    job_id = json.load(sys.stdin)["identity"]["job_id"]
+    shown = subprocess.run(["qstat", "-x", "-f", "-F", "json", job_id], capture_output=True, text=True)
+    if shown.returncode != 0 and "Unknown Job Id" in shown.stderr:
+        ended = True
+    else:
+        shown.check_returncode()
+        ended = json.loads(shown.stdout)["Jobs"][job_id]["job_state"] == "F"
+    print(json.dumps({"format": "httk-workflow-allocation-status", "format_version": 1, "ended": ended}))
+    sys.exit()
 
 with open(os.environ["PBS_NODEFILE"]) as nodefile:
     slots = collections.Counter(line.strip() for line in nodefile if line.strip())
@@ -341,6 +360,7 @@ print(json.dumps({
     "format": "httk-workflow-allocation",
     "format_version": 1,
     "kind": "pbs",
+    "identity": {"job_id": os.environ["PBS_JOBID"]},
     "nodes": [{"host": host, "procs": procs} for host, procs in slots.items()],
 }))
 ```
@@ -351,3 +371,43 @@ setting it explicitly is equivalent:
 ```console
 httk launcher configure --set manager.allocation=exec:/home/me/.config/httk/launchers/pbs-cluster/allocation pbs-cluster
 ```
+
+### Has the allocation ended?
+
+Every confined launch records the allocation its ranks run in: the probe
+spec, the kind, the `identity` and the `end_time`. A manager that takes over a
+commit, calls an attempt's writer dead or verifies a cancellation must first
+know that every such launch has ended (see
+[launch end evidence](workflow_filesystem_api.md#launch-end-evidence)), and
+for ranks on other hosts it asks the probe that recorded the allocation (its
+path is recorded absolute), provided the envelope carried an `identity`. It
+runs `PATH ended`, without a shell, with one query on standard input:
+
+```json
+{"format": "httk-workflow-allocation-query", "format_version": 1,
+ "kind": "pbs", "identity": {"job_id": "4711.pbs01"}, "end_time": 1790000000}
+```
+
+and expects exactly one answer on standard output:
+
+```json
+{"format": "httk-workflow-allocation-status", "format_version": 1, "ended": true}
+```
+
+Answer `true` only when the scheduler confirms that the allocation ended,
+which means every process it started has ended, and `false` while it is still
+active. The answer outranks the recorded `end_time`: after `false` the waiting
+manager keeps waiting even once that end time has passed, since the time
+limit may have been extended, and it asks again at most once a minute.
+Anything else, a non-zero exit, or no answer within 30 seconds, means the
+probe cannot tell; the recorded `end_time` then counts once 300 seconds plus
+an hour have passed since it. A probe that ignores its argument and prints
+its allocation envelope is therefore safe, but slow: a launch on another host
+is proven ended an hour after its allocation's end, or earlier by an
+operator's `httk job confirm-launches-ended`. Without an `identity`, or on a
+host where PATH does not exist, the probe is not asked, and the end time plus
+300 seconds counts at once.
+
+A probe whose ranks run on other hosts than the manager's MUST answer the
+`ended` query or report an `end_time`; otherwise a commit takeover after its
+manager died waits for an operator.

@@ -2,9 +2,11 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Self, cast
 
@@ -96,6 +98,7 @@ def test_slurm_allocation_lists_nodes_with_batch_host_gpu_ids() -> None:
             Node("n02", 16, 64000, 2),
         ),
         {},
+        identity={"job_id": "9"},
     )
     assert allocation is not None
     assert allocation.capacity() == slurm_counts(_TWO_NODES) == {"procs": 32, "gpus": 4, "nodes": 2, "mem": 128000}
@@ -284,12 +287,19 @@ def test_envelope_rules_are_strict(envelope: object) -> None:
         allocation_from_envelope(envelope)
 
 
-def test_exec_allocation_runs_a_site_probe(tmp_path: Path) -> None:
+def test_exec_allocation_runs_a_site_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     probe = tmp_path / "allocation"
     probe.write_text(f"#!/bin/sh\ncat <<'EOF'\n{json.dumps(_ENVELOPE)}\nEOF\n", encoding="utf-8")
     probe.chmod(0o755)
     assert exec_allocation(str(probe), {}) == allocation_from_envelope(_ENVELOPE)
-    assert probe_allocation(f"exec:{probe}", {}) == allocation_from_envelope(_ENVELOPE)
+    # The probe is recorded absolute, so a manager in another working directory runs the same one.
+    assert probe_allocation(f"exec:{probe}", {}) == replace(
+        allocation_from_envelope(_ENVELOPE), probe=f"exec:{os.path.realpath(probe)}"
+    )
+    with monkeypatch.context() as moved:
+        moved.chdir(tmp_path)
+        relative = probe_allocation("exec:./allocation", {})
+    assert relative is not None and relative.probe == f"exec:{os.path.realpath(probe)}"
     failing = tmp_path / "failing"
     failing.write_text("#!/bin/sh\necho no PBS_NODEFILE >&2\nexit 3\n", encoding="utf-8")
     failing.chmod(0o755)

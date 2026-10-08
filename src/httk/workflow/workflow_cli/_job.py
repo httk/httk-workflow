@@ -635,8 +635,8 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "action",
         metavar="ACTION",
-        choices=("continue", "override_step", "cancel", "set_priority", "pause"),
-        help="continue, override_step, cancel, set_priority, or pause",
+        choices=("continue", "override_step", "cancel", "set_priority", "pause", "launches_ended"),
+        help="continue, override_step, cancel, set_priority, pause, or launches_ended",
     )
     _add_workspace_option(parser, help_text="the workspace holding the job")
     parser.add_argument(
@@ -688,7 +688,7 @@ def add_job_request_envelopes_arguments(parser: argparse.ArgumentParser) -> None
 
     parser.add_argument(
         "action",
-        choices=("continue", "override_step", "cancel", "set_priority", "pause"),
+        choices=("continue", "override_step", "cancel", "set_priority", "pause", "launches_ended"),
         help="the request action",
     )
     parser.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
@@ -781,6 +781,8 @@ def _build_request_envelopes(
     for marker in markers:
         if arguments.action == "override_step" and arguments.step is not None:
             _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
+        if arguments.action == "launches_ended":
+            _prevalidate_launches_ended(marker)
     return [
         (
             marker.job_id,
@@ -866,9 +868,13 @@ def publish_job_requests(
     ensure_identity_key(selected_identity)
     label = operator or selected_identity.label
     published: list[tuple[str, Marker, Path]] = []
+    # Every job is checked before the first request is published.
     for marker in markers:
         if action == "override_step" and step is not None:
             _prevalidate_override_step(workspace, marker, step, force=force)
+        if action == "launches_ended":
+            _prevalidate_launches_ended(marker)
+    for marker in markers:
         request = _request_document(
             marker,
             action=action,
@@ -889,7 +895,7 @@ def publish_job_requests(
     return published
 
 
-_REQUEST_ACTIONS = frozenset(("continue", "override_step", "cancel", "set_priority", "pause"))
+_REQUEST_ACTIONS = frozenset(("continue", "override_step", "cancel", "set_priority", "pause", "launches_ended"))
 _REQUEST_MEMBERS = frozenset(
     {
         "format",
@@ -1208,6 +1214,44 @@ def request_remote_job_result(
     )
 
 
+#: The reason a ``confirm-launches-ended`` request records when the operator gives none.
+_CONFIRM_LAUNCHES_ENDED_REASON = "the operator confirmed that every launch of the attempt has ended"
+
+
+def add_job_confirm_launches_ended_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare :command:`job confirm-launches-ended`."""
+
+    _add_workspace_option(parser, help_text="the workspace holding the job")
+    parser.add_argument(
+        "job_id",
+        metavar="JOB",
+        nargs="+",
+        help="one or more running or committing jobs: UUIDs, unique prefixes, or paths inside the workspace",
+    )
+    parser.add_argument(
+        "--operator",
+        metavar="IDENTITY",
+        help='configured identity short name or a literal "Name <email>" (default: the configured identity)',
+    )
+    parser.add_argument(
+        "--reason",
+        metavar="TEXT",
+        default=_CONFIRM_LAUNCHES_ENDED_REASON,
+        help="why, recorded in the takeover (default: a plain confirmation)",
+    )
+    _add_adapter_timeout(parser)
+    add_durability_arguments(parser)
+
+
+def handle_job_confirm_launches_ended(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Publish ``launches_ended`` requests: the operator vouches that the launches of committing jobs ended."""
+
+    request = argparse.Namespace(
+        **vars(arguments), action="launches_ended", priority=None, step=None, force=False, wait=False, timeout=None
+    )
+    return handle_job_request(request, context)
+
+
 def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Build unsigned operator request envelopes for the remote protocol."""
 
@@ -1257,6 +1301,20 @@ def handle_job_publish_requests(arguments: argparse.Namespace, context: CLIConte
         resolved.append((job_id, marker, document))
     published = [(job_id, marker, workspace.publish_request(document)) for job_id, marker, document in resolved]
     return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
+
+
+def _prevalidate_launches_ended(marker: Marker) -> None:
+    """Refuse a launches_ended request for a job that is neither running nor committing.
+
+    :param marker: The target job's current marker.
+    :raises ValueError: If the job is in another state, where the request is invalid.
+    """
+
+    if marker.kind not in {"running", "committing"}:
+        raise ValueError(
+            f"job {marker.job_id} is {marker.kind}, not running or committing: confirming that launches ended "
+            "only lets a manager begin or take over a commit"
+        )
 
 
 def _prevalidate_override_step(workspace: Workspace, marker: Marker, step: str, *, force: bool) -> None:
@@ -2070,6 +2128,22 @@ def build_job_parser(
             summary="publish an operator request",
             description="Publish one operator request against a job of a workspace",
             handler=handle_job_request,
+        )
+    )
+    add_job_confirm_launches_ended_arguments(
+        _leaf(
+            group,
+            "confirm-launches-ended",
+            summary="vouch that the launches of a job's attempt have ended",
+            description=(
+                "Vouch that every launch of the current attempt of each running or committing job has ended, "
+                "on every host, so that a manager may begin or take over the commit of a gone manager without "
+                "the launch end evidence it cannot find (see 'httk job why'). You take responsibility for "
+                "this: a rank that still runs "
+                "keeps writing the job directory while the new owner commits, seals or ejects the job, and "
+                "nothing can stop it. Confirm only once the scheduler or the hosts show the ranks are gone"
+            ),
+            handler=handle_job_confirm_launches_ended,
         )
     )
     add_job_request_envelopes_arguments(

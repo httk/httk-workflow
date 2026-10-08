@@ -1,6 +1,7 @@
 """Scheduler hooks reach manager binding without scheduler-specific manager code."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -43,11 +44,15 @@ def test_scheduler_hooks_supply_capacity_and_normalized_step_metadata(
         ) -> list[str]:
             return ["example-run", "--cpus", str(cpus_per_proc), "--nodefile", nodefile]
 
+        def allocation_ended(self, identity: Mapping[str, str], *, run: Run, timeout: float) -> bool | None:
+            return None
+
     scheduler = ExampleScheduler()
     monkeypatch.setattr(_scheduler, "_maintained", lambda: (scheduler,))
     environment = {"EXAMPLE_JOB": "123"}
-    assert probe_allocation("auto", environment) is allocation
-    assert probe_allocation("example", environment) is allocation
+    # The probe records the scheduler it asked, so launch records can ask it again.
+    assert probe_allocation("auto", environment) == replace(allocation, probe="example")
+    assert probe_allocation("example", environment) == replace(allocation, probe="example")
     assert _manager._scheduler_resources(environment) == allocation.capacity()
     assert _scheduler.detect_scheduler(environment) is scheduler
     assert scheduler.end_time(environment) == allocation.end_time

@@ -41,6 +41,10 @@ class _IndeterminateRequestRead(Exception):
     """A request's bytes or identity could not be observed and must be retried."""
 
 
+class _RequestDeferred(Exception):
+    """A valid request cannot be applied yet: it stays this manager's claim and is retried next pass."""
+
+
 def _read_request(path: Any) -> tuple[dict[str, Any], os.stat_result]:
     """Read one request and bind its ownership to the bytes read."""
 
@@ -124,6 +128,8 @@ def action_class(action: object, kind: str) -> str:
         return "continue"
     if action == "override_step" and kind in {"failed", "paused"}:
         return "override_step"
+    if action == "launches_ended" and kind in {"running", "committing"}:
+        return "launches_ended"
     raise FormatError(f"request action {action!r} is invalid from state {kind}")
 
 
@@ -191,6 +197,8 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
         return None
     if action == "pause" and marker.kind == "paused":
         return None
+    if action == "launches_ended" and marker.kind in {"running", "committing"}:
+        return _launches_ended(manager, marker, job, state, request, operator_key_value)
     if action in {"continue", "override_step"} and marker.kind in {"failed", "paused"}:
         hazard = manager._decided_join_hazard(marker, job)
         if hazard is not None:
@@ -223,6 +231,75 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
         )
         return None
     raise FormatError(f"request action {action!r} is invalid from state {marker.kind}")
+
+
+def _launches_ended(
+    manager: Any,
+    marker: Any,
+    job: Any,
+    state: StateFrame,
+    request: Mapping[str, Any],
+    operator_key_value: str | None,
+) -> str | None:
+    """Take a commit over, or begin one, on the operator's word that every launch of its attempt has ended.
+
+    A ``committing`` job is taken over; a ``running`` job whose attempt published its outcome has its
+    commit begun by this manager.
+
+    The operator vouches for what :func:`~httk.workflow._manager_launches.launch_end_evidence`
+    could not prove; the owner must still be gone, and a launch still running
+    on this host is stopped by that evidence first. The takeover records the
+    attestation as its launch end evidence.
+
+    :param manager: The task manager.
+    :param marker: The running or committing marker, at the request's expected generation.
+    :param job: The job definition.
+    :param state: Its frame.
+    :param request: The request.
+    :param operator_key_value: The verified operator key, or ``None`` for an unsigned request.
+    :return: Why the request is not actionable, or ``None`` once the commit is taken over or begun.
+    :raises _RequestDeferred: While the owner may be alive or a launch runs on this host.
+    """
+
+    from . import _manager_commit, _manager_launches
+
+    owner = state.manager_id
+    if owner == manager.manager_id:
+        return "this manager owns the attempt and tracks its launches itself"
+    outcome_path = manager._published_outcome(marker, state) if marker.kind == "running" else None
+    if marker.kind == "running" and outcome_path is None:
+        return "the attempt has not published an outcome; a running attempt is recovered by its lease"
+    lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
+    evidence = manager._commit_owner_gone_evidence(owner, lease_seconds=lease_seconds)
+    if evidence is None:
+        raise _RequestDeferred(f"the commit owner {owner} may be alive")
+    # What this host can check, it checks: its own launches are stopped, not vouched for.
+    launches = _manager_launches.launch_end_evidence(
+        manager, state.attempt_id or "", owner=owner, lease_seconds=lease_seconds
+    )
+    if any(end.rule == "launch_running_here" for end in launches.blocked):
+        raise _RequestDeferred("a launch of the attempt still runs on this host and is being stopped")
+    attestation: dict[str, object] = {
+        "rule": "operator_attested",
+        "request_id": request.get("request_id"),
+        "operator": request.get("operator"),
+    }
+    if operator_key_value is not None:
+        attestation["operator_key"] = operator_key_value
+    if outcome_path is None:
+        _manager_commit.take_over(manager, marker, state, owner, evidence, [attestation], _LOGGER)
+    elif not manager._commit_published_outcome(marker, job, state, outcome_path, attestation=[attestation]):
+        raise _RequestDeferred("the commit cannot begin yet")
+    else:
+        # The outcome may have been unusable (the job failed) or the job may have moved first.
+        current = manager.workspace.find_marker_at(marker.job_key, marker.placement)
+        if (
+            current is None
+            or current.kind != "committing"
+            or manager._read_frame(current).manager_id != manager.manager_id
+        ):
+            return "no commit was begun: the job moved first or its outcome could not be committed"
+    return None
 
 
 def _return_to_ready(claimed_path: Path, ready_path: Path) -> bool:
@@ -437,6 +514,11 @@ def handle(manager: Any) -> bool:
             unactionable = refusal or manager._apply_request(request)
         except TransitionLostError:
             manager._retire_request(claimed_path, "the job moved to another state first")
+        except _RequestDeferred as exc:
+            # Returned to ready at the start of the next pass and applied again then: a stale
+            # one is retired by the generation check.
+            _LOGGER.debug("leaving request %s claimed for retry: %s", claimed_path.name, exc)
+            continue
         except OSError as exc:
             _LOGGER.debug(
                 "leaving request %s claimed for retry after indeterminate application I/O: %s",

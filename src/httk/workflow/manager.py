@@ -274,6 +274,8 @@ class WorkCensus:
     :param unreadable: Committing or cancelling jobs whose definition cannot be read.
     :param exchange: Exchange work this manager still has to do: inbox bundles to
         adopt, finished exchange trees to return, adoptions and ejections in flight.
+    :param outcomes_waiting: Published outcomes of other managers' attempts that wait for that manager,
+        or for evidence that it is gone and that the attempt's launches ended.
     """
 
     succeeded: int
@@ -285,6 +287,7 @@ class WorkCensus:
     actionable_count: int
     unreadable: int = 0
     exchange: int = 0
+    outcomes_waiting: int = 0
 
     @property
     def actionable(self) -> bool:
@@ -335,6 +338,8 @@ class WorkCensus:
         )
         if self.unreadable:
             line += f", {self.unreadable} with an unreadable definition"
+        if self.outcomes_waiting:
+            line += f", {self.outcomes_waiting} outcome(s) waiting for another manager"
         return line
 
     def time_advice(self) -> str | None:
@@ -781,6 +786,16 @@ class TaskManager:
         self._liveness: dict[tuple[str | None, float], dict[str, object] | None] = {}
         # When this manager last looked for requests claimed by departed managers (monotonic).
         self._claim_recovery_at: float | None = None
+        # Live launches recorded on this host that launch end evidence is stopping, by record: when the
+        # first SIGTERM was sent (monotonic) and whether SIGKILL followed.
+        self._launch_signals: dict[str, tuple[float, bool]] = {}
+        # Whether a recorded allocation ended, by allocation: when it was asked (monotonic) and the answer.
+        self._allocation_answers: dict[str, tuple[float, bool | None]] = {}
+        # Every launch record of this uid's managers by attempt, read once per tick (a one-tuple once read,
+        # holding None when unreadable).
+        self._launch_records: tuple[dict[str, list[Any]] | None] | None = None
+        # The closed marker of an owner's manager.json, by manager id, observed once per tick.
+        self._closed_owners: dict[str, dict[str, object] | None] = {}
         self._reset_drain()
         self._closed = False
         write_json_atomic(
@@ -914,6 +929,17 @@ class TaskManager:
             if clean:
                 self._remove_empty_journal_writer()
                 self._remove_manager_directory()
+            else:
+                self._record_closed()
+
+    def _record_closed(self) -> None:
+        """Mark this manager's record closed: another manager may begin and take over its commits."""
+
+        record_path = self._manager_dir / "manager.json"
+        try:
+            write_json_atomic(record_path, {**read_json(record_path), "closed_at": utc_now()})
+        except (WorkflowError, OSError) as exc:
+            _LOGGER.warning("cannot mark manager %s closed: %s", self.manager_id, exc)
 
     def _collect_garbage(self, phase: str, *, categories: Sequence[str] | None = None) -> None:
         """Collect workspace garbage, without affecting manager service."""
@@ -1083,14 +1109,20 @@ class TaskManager:
             # A commit anomaly that repeats unchanged is a wedge, not a
             # transient: the first pass reports it loudly, and once it recurs
             # its text is persisted where 'job why' can surface it.
-            if key.startswith(("resume_committing:", "commit_deferred:")):
+            if key.startswith(("resume_committing:", "commit_deferred:", "takeover_pending:")):
                 self._record_commit_wedge(key, text, fields)
             return
         self._reported[key] = text
+        # A changed anomaly is recorded afresh once it repeats.
+        self._commit_wedge_recorded.discard(key)
         _LOGGER.log(level, "%s", text, extra=dict(fields))
 
     def _record_commit_wedge(self, key: str, text: str, fields: Mapping[str, object]) -> None:
-        """Persist a repeating commit anomaly into the newest attempt control dir."""
+        """Persist a repeating commit anomaly into the newest attempt control dir.
+
+        A commit takeover waiting for launch end evidence also records the
+        blocking launch (``launch_end_pending``: its record, rule and host).
+        """
 
         if key in self._commit_wedge_recorded:
             return
@@ -1098,9 +1130,11 @@ class TaskManager:
         placement = fields.get("placement")
         if not isinstance(job_key, str) or not isinstance(placement, str):
             return
+        pending = fields.get("launch_end_pending")
         try:
             marker = self.workspace.find_marker_at(job_key, normalize_placement(placement))
-            if marker is None or marker.kind != "committing":
+            # A commit another manager may not begin yet waits in running.
+            if marker is None or marker.kind not in {"running", "committing"}:
                 return
             control_name = self._attempt_control_name(self._read_frame(marker))
             with self._job_directory(marker) as job_dir, job_dir.directory(control_name, create=True) as control:
@@ -1113,6 +1147,7 @@ class TaskManager:
                             "error": text,
                             "manager_id": self.manager_id,
                             "recorded_at": utc_now(),
+                            **({"launch_end_pending": dict(pending)} if isinstance(pending, Mapping) else {}),
                         }
                     )
                     + b"\n",
@@ -1313,6 +1348,8 @@ class TaskManager:
         started = time.monotonic()
         self.heartbeat()
         self._liveness.clear()
+        self._launch_records = None
+        self._closed_owners.clear()
         changed = False
         if self._exchange is not None and not self._draining and self._serving_exchange():
             # First, so an adopted job registers and is claimed in this same tick.
@@ -1896,9 +1933,10 @@ class TaskManager:
 
         A ready, waiting or paused job is failed by any manager. A claimed,
         running or committing one is failed only by its own manager, or once
-        its manager is evidently gone (:meth:`_owner_gone_evidence`); a local
-        attempt of it stays tracked, so the orphan sweep stops and reaps its
-        process.
+        its manager is evidently gone (:meth:`_owner_gone_evidence`) and, for
+        a running or committing one, every launch recorded for its attempt has
+        ended; a local attempt of it stays tracked, so the orphan sweep stops
+        and reaps its process.
         """
 
         anomaly = f"unloadable:{marker.job_key}"
@@ -1910,6 +1948,18 @@ class TaskManager:
                     self._report_anomaly(
                         anomaly,
                         f"leaving {marker.kind} job {marker.job_key} to its manager: {message}",
+                        self._event("job_unusable", marker),
+                    )
+                    return
+                # Ranks of a launch of the attempt may still write the job, which failing it hands on.
+                launches = _manager_launches.launch_end_evidence(
+                    self, state.attempt_id or "", owner=state.manager_id, lease_seconds=lease_seconds
+                )
+                if marker.kind != "claimed" and launches.pending is not None:
+                    self._report_anomaly(
+                        anomaly,
+                        f"leaving {marker.kind} job {marker.job_key} until launch {launches.pending.record} of "
+                        f"its attempt is proven to have ended ({launches.pending.rule}): {message}",
                         self._event("job_unusable", marker),
                     )
                     return
@@ -3065,10 +3115,37 @@ class TaskManager:
         job: JobDefinition,
         state: StateFrame,
         outcome_path: Path,
+        *,
+        attestation: Sequence[Mapping[str, object]] | None = None,
     ) -> bool:
-        """Move one job with a published outcome into committing."""
+        """Move one job with a published outcome into committing.
+
+        The manager that ran the attempt commits its outcome. Another manager
+        begins the commit only once that manager is evidently gone
+        (:meth:`_owner_gone_evidence`) and every launch recorded for the
+        attempt has ended, or an operator's *attestation* says so, and records
+        both in the committing frame, as a commit takeover does.
+        """
 
         try:
+            inherited: tuple[str | None, dict[str, object], list[dict[str, object]]] | None = None
+            owner = state.manager_id
+            if owner != self.manager_id:
+                lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
+                evidence = self._commit_owner_gone_evidence(owner, lease_seconds=lease_seconds)
+                if evidence is None:
+                    _LOGGER.debug("leaving the outcome of %s to its manager %s", marker.job_key, owner)
+                    return False
+                if attestation is None:
+                    launches = _manager_launches.launch_end_evidence(
+                        self, state.attempt_id or "", owner=owner, lease_seconds=lease_seconds
+                    )
+                    if launches.pending is not None:
+                        _manager_commit._report_takeover_pending(self, marker, owner, launches.pending)
+                        # Stopping a launch here is progress: stay awake until it is gone.
+                        return any(end.rule == "launch_running_here" for end in launches.blocked)
+                    attestation = launches.as_json()
+                inherited = (owner, dict(evidence), [dict(item) for item in attestation])
             if not self._environment_log_ready(marker, state):
                 return False
             local = self._running.get(state.attempt_id or "")
@@ -3077,7 +3154,7 @@ class TaskManager:
                     action = control.read_json("outcome.ready/outcome.json", CONTROL_DOCUMENT_LIMIT).get("action")
                 if isinstance(action, str):
                     local.outcome_action = action
-            self._begin_commit(marker, state, outcome_path)
+            self._begin_commit(marker, state, outcome_path, inherited=inherited)
         except TransitionLostError:
             return True
         except FormatError as exc:
@@ -3487,7 +3564,14 @@ class TaskManager:
         control_dir.create_exclusive(name, data, mode=0o666)
         return control_dir.path / name
 
-    def _begin_commit(self, marker: Marker, state: StateFrame, outcome_path: Path) -> None:
+    def _begin_commit(
+        self,
+        marker: Marker,
+        state: StateFrame,
+        outcome_path: Path,
+        *,
+        inherited: tuple[str | None, Mapping[str, object], Sequence[Mapping[str, object]]] | None = None,
+    ) -> None:
         # The published draft is read through descriptors pinned without
         # following links; *outcome_path* only names it.
         with (
@@ -3521,11 +3605,21 @@ class TaskManager:
         )
         if "process" in state.members:
             committing = StateFrame.replace(committing, process=state.members["process"])
-        self._transition(
+        if inherited is not None:
+            previous, evidence, launches = inherited
+            committing = StateFrame.replace(
+                committing,
+                previous_manager_id=previous,
+                takeover_evidence=dict(evidence),
+                launch_end_evidence=[dict(item) for item in launches],
+            )
+        begun = self._transition(
             marker,
             "committing",
             committing,
         )
+        # Another manager may have recorded that it waited to begin this commit.
+        _manager_commit._clear_commit_wedge(self, begun, state)
         # The attempt has published everything it will ever publish and its
         # marker has moved, so the local process is finishing rather than
         # orphaned. Reaping it is then routine and silent.
@@ -3690,6 +3784,32 @@ class TaskManager:
             )
         return self._liveness[key]
 
+    def _commit_owner_gone_evidence(self, manager_id: str | None, *, lease_seconds: float) -> dict[str, object] | None:
+        """Return the evidence that the manager owning an outcome or a commit is gone.
+
+        This is :meth:`_owner_gone_evidence`, and also ``manager_closed``: the manager closed while
+        attempts it started were still running and wrote ``closed_at`` into its ``manager.json``, so it
+        will never commit their outcomes. Only beginning and taking over commits accept it; an attempt
+        takeover does not, because a closed manager's attempt may still run.
+
+        :param manager_id: The owning manager, or ``None`` when the work names none.
+        :param lease_seconds: The lease the work was taken under.
+        :return: The evidence mapping, or ``None`` while the owner may still commit.
+        """
+
+        evidence = self._owner_gone_evidence(manager_id, lease_seconds=lease_seconds)
+        if evidence is not None or not manager_id:
+            return evidence
+        if manager_id not in self._closed_owners:
+            try:
+                closed = read_json(self.workspace.control / "managers" / manager_id / "manager.json").get("closed_at")
+            except WorkflowError:
+                closed = None
+            self._closed_owners[manager_id] = (
+                {"evidence": "manager_closed", "closed_at": closed} if isinstance(closed, str) and closed else None
+            )
+        return self._closed_owners[manager_id]
+
     def _manager_alive(self, manager_id: str | None, *, lease_seconds: float) -> bool:
         age = self._heartbeat_age(manager_id)
         return age is not None and age <= lease_seconds
@@ -3707,9 +3827,11 @@ class TaskManager:
         """Report whether the process of the recorded attempt is provably gone.
 
         Only a process this host can ask about proves anything, so an attempt
-        recorded on another host is never called dead here. Absence of proof is
-        reported as ``False``: the caller decides what an unprovable attempt
-        justifies.
+        recorded on another host is never called dead here. Every launch
+        recorded for the attempt must have ended as well
+        (:func:`~httk.workflow._manager_launches.launch_end_evidence`). Absence
+        of proof is reported as ``False``: the caller decides what an
+        unprovable attempt justifies.
         """
 
         process = validate_process(state.members.get("process"))
@@ -3721,8 +3843,11 @@ class TaskManager:
             os.kill(cast(int, process["pid"]), 0)
         except ProcessLookupError:
             # Ranks of a confined launch write the job too, from their own
-            # process groups: each recorded launch must be gone as well.
-            return _manager_launches.recorded_launches_dead(self, state.attempt_id or "")
+            # process groups: each recorded launch must have ended as well.
+            lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
+            return _manager_launches.launch_end_evidence(
+                self, state.attempt_id or "", owner=state.manager_id, lease_seconds=lease_seconds
+            ).ended
         except PermissionError:
             return False
         return False

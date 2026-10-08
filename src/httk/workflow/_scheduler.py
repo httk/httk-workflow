@@ -49,6 +49,35 @@ class Scheduler(Protocol):
 
         ...
 
+    def can_query(self) -> bool:
+        """Return whether the client :meth:`allocation_ended` runs is installed on this host.
+
+        Without it the scheduler is not asked, and a recorded allocation end counts after the plain grace.
+        """
+
+        ...
+
+    def allocation_ended(self, identity: Mapping[str, str], *, run: "Run", timeout: float) -> bool | None:
+        """Report whether the allocation an identity names has ended, as far as the scheduler can confirm.
+
+        This is the hook that lets a launch be taken over without an operator: a
+        commit takeover, an attempt takeover or a cancellation waits until every
+        recorded launch of the attempt is proven to have ended, and launches whose
+        ranks run on other hosts than the manager's are proven ended only by this
+        answer or by their allocation's recorded end time. Any launch technology
+        that places ranks on other hosts must implement it.
+
+        :param identity: The allocation's identity, as its probe recorded it.
+        :param run: The command runner, called without a shell.
+        :param timeout: Seconds the query may take.
+        :return: ``True`` only when the scheduler confirms the allocation ended, which
+            means every process it started has ended; ``False`` while it is still
+            active; ``None`` when the scheduler cannot tell (an error, a timeout,
+            output it cannot parse, or an identity it does not understand).
+        """
+
+        ...
+
 
 def _maintained() -> tuple[Scheduler, ...]:
     from ._slurm import SLURM

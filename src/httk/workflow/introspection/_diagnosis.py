@@ -921,8 +921,8 @@ def _persistent_writer_host(state: Mapping[str, object]) -> str | None:
     return host
 
 
-def _commit_wedge(control: Path | None) -> str | None:
-    """Return a persisted committing-wedge error, when a manager recorded one."""
+def _commit_wedge(control: Path | None) -> Mapping[str, object] | None:
+    """Return a persisted committing-wedge record with its error, when a manager recorded one."""
 
     if control is None:
         return None
@@ -931,7 +931,63 @@ def _commit_wedge(control: Path | None) -> str | None:
     except WorkflowError:
         return None
     error = recorded.get("error")
-    return error if isinstance(error, str) and error else None
+    return recorded if isinstance(error, str) and error else None
+
+
+#: What each pending rule of launch end evidence means for a waiting commit takeover.
+_LAUNCH_END_PENDING = {
+    "launch_starting": "only its launch description exists, and the manager that wrote it may be live and starting it",
+    "allocation_active": "its scheduler or site allocation probe says its allocation is still active",
+    "malformed_record_live": "its record is malformed, and the manager that wrote it may be live",
+    "launch_running_here": "it still runs on the host of the manager that found it and is being stopped",
+    "scheduler_unavailable": (
+        "its scheduler cannot tell whether its allocation ended; its passed end time counts once the "
+        "scheduler has been unable to answer for an hour"
+    ),
+    "launch_end_unprovable": (
+        "its ranks may run on other hosts, and neither a passed allocation end time (plus a 300 s grace) "
+        "nor its scheduler or site allocation probe proves that it ended"
+    ),
+    "launch_records_unreadable": "the launch records below .httk-workspace/managers/ cannot be read",
+}
+
+
+def _launch_end_pending_check(pending: Mapping[str, object], report: _Diagnosing, *, running: bool) -> str:
+    """Explain a commit takeover, or a commit of a gone manager's outcome, that waits for launch end evidence.
+
+    :param pending: The recorded blocking launch: its ``record``, ``rule`` and ``host``.
+    :param report: The diagnosis being built.
+    :param running: Whether the job is still running, its outcome published.
+    :return: The summary.
+    """
+
+    record = pending.get("record")
+    host = pending.get("host")
+    rule = str(pending.get("rule"))
+    where = f" on host {host}" if isinstance(host, str) and host else ""
+    named = f"launch record .httk-workspace/managers/{record}{where}" if isinstance(record, str) else "the launches"
+    report.check(
+        "launch end evidence",
+        False,
+        f"{named} is not proven to have ended ({rule}): {_LAUNCH_END_PENDING.get(rule, 'unknown reason')}",
+    )
+    if rule == "launch_running_here":
+        report.hint("the launch is being stopped; the commit proceeds once its process group is gone")
+    else:
+        report.hint(
+            "if you know that every launch of this attempt has ended on every host, run 'httk job "
+            "confirm-launches-ended --workspace WORKSPACE JOB' so a manager takes the commit over; you then take "
+            "responsibility that no rank still writes the job directory"
+        )
+    if running:
+        return (
+            "this job published an outcome and the manager that ran it is gone, but no manager begins its commit "
+            f"until every launch of its attempt is proven to have ended: {named} is not ({rule})"
+        )
+    return (
+        "this job's commit owner is gone, but no manager takes the commit over until every launch of its attempt "
+        f"is proven to have ended: {named} is not ({rule})"
+    )
 
 
 def _retained_log_path(workspace: Workspace, marker: Marker, state: Mapping[str, object]) -> Path:
@@ -1055,6 +1111,11 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 f"no manager on another host can prove the writer stopped; run a manager on {foreign_host}, "
                 "or pass --unsafe-persistent-takeover"
             )
+        wedge = _commit_wedge(control) if kind == "running" else None
+        pending = None if wedge is None else wedge.get("launch_end_pending")
+        if isinstance(pending, Mapping):
+            blocked = True
+            summary = _launch_end_pending_check(pending, report, running=True)
         if kind == "running" and control is not None:
             report.check(
                 "attempt logs",
@@ -1065,10 +1126,14 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         _flapping_check(job, state, report)
     elif kind == "committing":
         wedge = _commit_wedge(control)
-        if wedge is not None:
+        pending = None if wedge is None else wedge.get("launch_end_pending")
+        if isinstance(pending, Mapping):
             blocked = True
-            summary = f"this job's commit is wedged and keeps failing: {wedge}"
-            report.check("commit", False, wedge)
+            summary = _launch_end_pending_check(pending, report, running=False)
+        elif wedge is not None:
+            blocked = True
+            summary = f"this job's commit is wedged and keeps failing: {wedge['error']}"
+            report.check("commit", False, str(wedge["error"]))
             report.hint(
                 "the commit is not making progress; inspect the outcome in the attempt control directory and "
                 "repair the payload, then a manager can resume it"

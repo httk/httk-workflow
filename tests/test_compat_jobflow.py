@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 from httk.core import DataRecord
 
+from conftest import bury_manager
 from httk.workflow import TaskManager, Workspace, collect, job_records
 from httk.workflow.collecting import JobRecord
 from httk.workflow.compat import LanguageRequest, available_languages, jobflow, match_document
@@ -597,6 +598,8 @@ class Maker:
         assert started.is_file()
     finally:
         first_manager.close()
+    # The session's process ended: only then does another manager commit the outcome its attempt publishes.
+    bury_manager(workspace.control / "managers" / first_manager.manager_id)
     flag.write_text("release", encoding="utf-8")
 
     with TaskManager(

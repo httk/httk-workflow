@@ -532,6 +532,7 @@ without modifying the published source tree.
 | `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--files`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
 | `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job confirm-launches-ended [OPTIONS] JOB...` | vouch that every launch of each running or committing job's attempt has ended, so a manager may begin or take over its commit (remote: over the adapter) | `--workspace`, optional `--operator`, optional `--reason`, `--adapter-timeout` |
 | `job delete [--force] JOB...` | remove selected job payloads and state markers (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal [--keys REFS] JOB...` | seal the payloads of selected quiescent jobs | `--workspace`, `--keys` overrides the `seal.keys` setting |
 | `job unseal [--force] JOB...` | remove the seals of selected jobs, refused while the workspace is sealed | `--workspace`, `--force` skips the confirmation |
@@ -679,6 +680,23 @@ An operator `pause` request against `claimed`, `running`, or `committing` is
 deferred: the manager records it and pauses the job at the next attempt
 boundary, and a terminal outcome supersedes it. An older manager that does not
 understand this in-flight pause request quarantines it as invalid.
+
+`job confirm-launches-ended JOB...` checks every job, then publishes a
+`launches_ended` request for each `running` or `committing` job; any other
+state refuses the whole command. `--reason` defaults to a plain confirmation.
+A commit whose owner is gone is taken over, and the published outcome of a
+gone manager's attempt is committed, only once every launch recorded for its
+attempt is proven to have ended (see
+[launch end evidence](workflow_filesystem_api.md#launch-end-evidence)); for a
+launch on another host whose allocation has neither a passed end time nor a
+scheduler that confirms its end, `job why` names the launch and the takeover
+waits for this request. The operator takes responsibility that no rank of the
+attempt still runs on any host: a live rank would keep writing the job
+directory while the new owner commits, seals or ejects the job. A manager
+applies the request only once the owner is gone and no launch of the attempt
+still runs on its own host (it stops such a launch first), and records the attestation,
+with the request and the operator, in the takeover's state frame. The request
+action is also available as `job request launches_ended`.
 
 `--wait` is valid only for `pause` and exits 0 only when each requested job was
 observed `paused` at some point during the wait. Jobs are confirmed one by one:

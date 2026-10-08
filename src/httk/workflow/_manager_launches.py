@@ -30,6 +30,10 @@ which publishes a request in ``launch/`` of the attempt control directory. The m
 
 The attempt keeps its placement, its control tree and its marker until every launch is reaped; the manager
 checks :func:`unreaped` before it treats an attempt as finished and :func:`holds_commit` before it commits.
+
+Every other decision that needs the launches of an attempt to have ended (a commit takeover, writer death for
+an attempt takeover, verified cancellation) asks :func:`launch_end_evidence`, which walks the launch records
+of every manager and decides each record by one ladder of rules.
 """
 
 import contextlib
@@ -52,6 +56,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from . import _allocation
+from ._allocation import RecordedAllocation
 from ._confine import ConfineSettings, remove_launch_locks
 from ._jobdir import JobDirectory, JobDirectoryError
 from ._launch_protocol import (
@@ -79,7 +85,7 @@ from ._launch_protocol import (
 )
 from ._manager_binding import Placement, nodefile_lines, render_launch
 from ._util import timestamp_seconds, utc_now
-from .errors import FormatError
+from .errors import FormatError, WorkflowError
 from .models import Marker, placement_text
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -101,7 +107,24 @@ MAXIMUM_ENTRIES = 4096
 MAXIMUM_DECISIONS = 32
 #: The most entries a search for the recorded launches of an attempt visits.
 MAXIMUM_RECORD_ENTRIES = 65536
+#: Seconds after its allocation's recorded end a launch counts as ended: Slurm's ``KillWait`` and clock
+#: skew between hosts.
+LAUNCH_END_GRACE = 300.0
+#: Seconds one answer to whether an allocation ended is reused, so a tick never asks twice.
+ALLOCATION_ANSWER_SECONDS = 60.0
+#: Seconds one question whether an allocation ended may take.
+ALLOCATION_QUERY_TIMEOUT = 30.0
+#: Seconds beyond :data:`LAUNCH_END_GRACE` after which a recorded allocation end counts although the
+#: allocation's scheduler, installed here, cannot answer: one failing ``squeue`` is no evidence.
+SCHEDULER_UNAVAILABLE_SECONDS = 3600.0
+#: The rules by which :func:`launch_end_evidence` counts a recorded launch as ended.
+LAUNCH_END_RULES = frozenset(
+    {"not_started", "malformed_record", "process_group_gone", "allocation_end_passed", "scheduler_confirmed_ended"}
+)
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _RECORD_BYTES = 4096
+#: The largest process record: the allocation member carries an identity and the probe path.
+_PROCESS_RECORD_BYTES = 65536
 _REQUEST_SUFFIX = ".request.json"
 _STREAM_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -265,6 +288,44 @@ def _group_alive(process_group: int) -> bool:
     except OSError:
         return True
     return True
+
+
+def _boot_id() -> str | None:
+    """Return this host's boot id, or ``None`` when it cannot be read."""
+
+    try:
+        return _BOOT_ID.read_text(encoding="ascii").strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def _start_time(pid: int) -> int | None:
+    """Return when a process started, in clock ticks after boot (``/proc/<pid>/stat`` field 22), or ``None``."""
+
+    try:
+        data = Path(f"/proc/{pid}/stat").read_bytes()
+        # The command name in field 2 may contain spaces and parentheses; field 3 follows the last ")".
+        return int(data[data.rindex(b")") + 2 :].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _recorded_group_alive(process_group: int, process_start: int | None, boot_id: str | None) -> bool:
+    """Return whether a recorded process group may still be alive on this host.
+
+    A recorded boot id or leader start time that no longer matches means the group is gone: the kernel
+    does not reuse a pid while a process group of that id exists, so a different process under the
+    leader's pid proves the recorded group empty. A record without them is judged by the group alone.
+    """
+
+    current_boot = _boot_id()
+    if boot_id is not None and current_boot is not None and boot_id != current_boot:
+        return False
+    if process_start is not None:
+        started = _start_time(process_group)
+        if started is not None and started != process_start:
+            return False
+    return _group_alive(process_group)
 
 
 def _stop(manager: Any, attempt: Any, launch: ConfinedLaunch, reason: str, now: float) -> None:
@@ -750,16 +811,57 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
         process.pid,
         extra=manager._event("launch_started", attempt.marker, **_fields(attempt, request_id, pid=process.pid)),
     )
-    record = {"pid": process.pid, "hostname": manager.hostname, "attempt_id": attempt.attempt_id}
+    allocation = manager.allocation
+    record: dict[str, object] = {
+        "pid": process.pid,
+        "hostname": manager.hostname,
+        "attempt_id": attempt.attempt_id,
+        "allocation": None if allocation is None else RecordedAllocation.from_allocation(allocation).as_json(),
+    }
+    # The leader's start time and the boot tell a reused pid from the launch.
+    process_start, boot_id = _start_time(process.pid), _boot_id()
+    if process_start is not None and boot_id is not None:
+        record.update(process_start=process_start, boot_id=boot_id)
     try:
         _write_durable(trusted, PROCESS_FILE, json.dumps({**record, "started_at": utc_now()}).encode())
-        os.write(gate_write, b"\n")
+        # A manager frozen since admission may wake after a successor took the attempt over, judging this
+        # record by the gate: only an attempt that still owns its running marker releases it.
+        if _still_running(manager, attempt):
+            os.write(gate_write, b"\n")
+        else:
+            _stop(manager, attempt, launch, "the attempt no longer owns its running marker", time.monotonic())
     except OSError as exc:
         # Closing the gate unopened makes the launch exit 125 without starting anything; stop it anyway.
         _stop(manager, attempt, launch, f"cannot record the launch process: {exc}", time.monotonic())
     finally:
         os.close(gate_write)
     return None
+
+
+def _still_running(manager: Any, attempt: Any) -> bool:
+    """Return whether an attempt still owns a running marker: the one it started with, or after a same-kind move.
+
+    The exact marker path is checked first; only when it is gone is the job's current marker looked up,
+    which must be ``running`` and name this attempt. Anything that cannot be observed releases nothing.
+    """
+
+    try:
+        os.lstat(attempt.marker.path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    else:
+        return True
+    try:
+        current = manager.workspace.find_marker_at(attempt.marker.job_key, attempt.marker.placement)
+        return (
+            current is not None
+            and current.kind == "running"
+            and manager._read_frame(current).attempt_id == attempt.attempt_id
+        )
+    except (WorkflowError, OSError):
+        return False
 
 
 def _admission_refusal(manager: Any, attempt: Any, state: AttemptLaunches, control: JobDirectory) -> str | None:
@@ -862,12 +964,18 @@ class _Record:
     :param attempt_id: The recorded attempt, for ``process`` and ``description``.
     :param host: The recorded host, for ``process``.
     :param process_group: The recorded process group, for ``process``.
+    :param allocation: The recorded allocation, for a ``process`` record that names a usable one.
+    :param process_start: The launch leader's recorded start time, in clock ticks after boot.
+    :param boot_id: The recorded boot id of the launching host.
     """
 
     kind: Literal["process", "description", "garbage", "unknown"]
     attempt_id: str | None = None
     host: str | None = None
     process_group: int | None = None
+    allocation: RecordedAllocation | None = None
+    process_start: int | None = None
+    boot_id: str | None = None
 
 
 _GARBAGE = _Record("garbage")
@@ -884,7 +992,7 @@ def _read_record(launches_fd: int, name: str) -> _Record:
         return _GARBAGE if exc.errno in _ABSENT_ERRNOS else _UNKNOWN
     try:
         try:
-            data = read_bounded(descriptor, PROCESS_FILE, _RECORD_BYTES)
+            data = read_bounded(descriptor, PROCESS_FILE, _PROCESS_RECORD_BYTES)
         except FileNotFoundError:
             data = None
         except ValueError:
@@ -899,11 +1007,22 @@ def _read_record(launches_fd: int, name: str) -> _Record:
             if not isinstance(value, Mapping):
                 return _GARBAGE
             attempt_id, host, pid = value.get("attempt_id"), value.get("hostname"), value.get("pid")
-            if isinstance(attempt_id, str) and isinstance(host, str) and type(pid) is int and pid > 0:
-                return _Record("process", attempt_id, host, pid)
-            return _GARBAGE
-        # A manager that died between the start and the process record leaves only launch.json; that
-        # launch may run, with no process group anyone can prove gone.
+            if not (isinstance(attempt_id, str) and isinstance(host, str) and type(pid) is int and pid > 0):
+                return _GARBAGE
+            # An older record has neither member; an unusable allocation only proves less, as does a
+            # leader identity that is not recorded.
+            process_start, boot_id = value.get("process_start"), value.get("boot_id")
+            return _Record(
+                "process",
+                attempt_id,
+                host,
+                pid,
+                RecordedAllocation.from_record(value.get("allocation")),
+                process_start if type(process_start) is int and process_start >= 0 else None,
+                boot_id if isinstance(boot_id, str) and boot_id else None,
+            )
+        # A manager that died between the start and the process record leaves only launch.json. The launch
+        # process waits at its gate until process.json is durable, so no rank of that launch ever ran.
         try:
             launch = decode_trusted(read_bounded(descriptor, LAUNCH_FILE, MAX_TRUSTED_BYTES))
         except (FileNotFoundError, ValueError, RecursionError):
@@ -952,11 +1071,18 @@ def _gone_here(record: _Record, hostname: str) -> bool:
         record.kind == "process"
         and record.host == hostname
         and record.process_group is not None
-        and not _group_alive(record.process_group)
+        and not _recorded_group_alive(record.process_group, record.process_start, record.boot_id)
     )
 
 
-def dead_records(manager_dir: Path, *, hostname: str, grace_seconds: float, now: float) -> list[str]:
+def dead_records(
+    manager_dir: Path,
+    *,
+    hostname: str,
+    grace_seconds: float,
+    now: float,
+    own_identity: Mapping[str, str] | None = None,
+) -> list[str]:
     """Return the trusted launch directories of an expired manager that provably describe no live launch.
 
     A manager is expired when it has not heartbeated for *grace_seconds* or has no heartbeat; a heartbeat
@@ -969,10 +1095,16 @@ def dead_records(manager_dir: Path, *, hostname: str, grace_seconds: float, now:
     until the manager has made ``process.json`` durable, and only the manager writes it after starting
     the process, so ranks run only once the record exists.
 
+    A gone group does not prove a step of another queryable allocation gone (its ranks run outside the
+    group): such a record is dead only once its allocation's end time and :data:`LAUNCH_END_GRACE` have
+    passed, and is otherwise left to :func:`launch_end_evidence`, which asks the scheduler and prunes it.
+    Garbage collection never asks a scheduler.
+
     :param manager_dir: The manager's directory below ``managers/``.
     :param hostname: This host's name, the only host whose process groups can be proven gone.
     :param grace_seconds: How long the manager must have been silent: its lease times the takeover grace factor.
     :param now: The current epoch second.
+    :param own_identity: The caller's own allocation identity, whose steps a gone group does end, or ``None``.
     :return: The names below ``launches/`` that can be removed.
     """
 
@@ -988,6 +1120,14 @@ def dead_records(manager_dir: Path, *, hostname: str, grace_seconds: float, now:
         dead: list[str] = []
         for name in names:
             record = _read_record(launches_fd, name)
+            allocation = record.allocation
+            if (
+                allocation is not None
+                and allocation.queryable
+                and dict(allocation.identity or {}) != dict(own_identity or {})
+                and not (allocation.end_time is not None and allocation.end_time + LAUNCH_END_GRACE < now)
+            ):
+                continue
             if record.kind in ("description", "garbage") or _gone_here(record, hostname):
                 dead.append(name)
         return dead
@@ -1009,23 +1149,36 @@ def _remove_record(launches_fd: int, name: str) -> None:
         _LOGGER.warning("cannot remove the dead trusted launch record %s: %s", name, exc)
 
 
-def recorded_launches(manager: Any, attempt_id: str) -> list[tuple[str | None, int | None]] | None:
-    """Return the host and process group of every launch any manager recorded for an attempt.
+@dataclass(frozen=True, slots=True)
+class RecordedLaunch:
+    """One launch recorded for an attempt in some manager's ``launches/``.
 
-    Process records of other expired managers (silent for their lease times the takeover grace factor)
-    whose process group is provably gone on this host are removed on the way. Records without a process
-    record are left to garbage collection; records that cannot be read make the answer unprovable.
-
-    :param manager: The task manager.
-    :param attempt_id: The attempt identifier.
-    :return: ``(host, process_group)`` pairs, ``None`` members when only the launch description
-        survived, or ``None`` when a record cannot be read or the records exceed :data:`MAXIMUM_RECORD_ENTRIES`.
+    :param name: The record below ``managers/``: ``<manager_id>/<attempt_id>.<request_id>``.
+    :param manager_id: The directory name of the manager that wrote the record.
+    :param kind: ``process`` (a process record), ``description`` (only ``launch.json``) or ``garbage``
+        (malformed manager files, or gone while it was read).
+    :param host: The recorded host, for ``process``.
+    :param process_group: The recorded process group, for ``process``.
+    :param allocation: The recorded allocation, for a ``process`` record that names a usable one.
+    :param process_start: The launch leader's recorded start time, in clock ticks after boot.
+    :param boot_id: The recorded boot id of the launching host.
     """
 
-    found: list[tuple[str | None, int | None]] = []
+    name: str
+    manager_id: str
+    kind: Literal["process", "description", "garbage"]
+    host: str | None = None
+    process_group: int | None = None
+    allocation: RecordedAllocation | None = None
+    process_start: int | None = None
+    boot_id: str | None = None
+
+
+def _scan_records(manager: Any) -> dict[str, list[RecordedLaunch]] | None:
+    """Read every launch record of the managers of this manager's uid, by attempt; ``None`` when unreadable."""
+
+    found: dict[str, list[RecordedLaunch]] = {}
     visited = 0
-    now = time.time()
-    grace = manager.lease_seconds * manager.takeover_grace_factor
     try:
         managers = os.scandir(manager.workspace.control / "managers")
     except FileNotFoundError:
@@ -1039,6 +1192,8 @@ def recorded_launches(manager: Any, attempt_id: str) -> list[tuple[str | None, i
                 return None
             manager_dir = Path(manager_entry.path)
             try:
+                if manager_entry.stat(follow_symlinks=False).st_uid != manager.uid:
+                    continue
                 launches_fd = os.open(manager_dir / LAUNCHES_DIRECTORY, _DIRECTORY_FLAGS)
             except OSError as exc:
                 if exc.errno in _ABSENT_ERRNOS:
@@ -1049,7 +1204,6 @@ def recorded_launches(manager: Any, attempt_id: str) -> list[tuple[str | None, i
                     names = [
                         entry.name for _index, entry in zip(range(MAXIMUM_RECORD_ENTRIES + 1), entries, strict=False)
                     ]
-                expired = bool(names) and manager_entry.name != manager.manager_id and _expired(manager_dir, grace, now)
                 for name in names:
                     visited += 1
                     if visited > MAXIMUM_RECORD_ENTRIES:
@@ -1057,11 +1211,20 @@ def recorded_launches(manager: Any, attempt_id: str) -> list[tuple[str | None, i
                     record = _read_record(launches_fd, name)
                     if record.kind == "unknown":
                         return None
-                    if expired and _gone_here(record, manager.hostname):
-                        _remove_record(launches_fd, name)
-                        continue
-                    if record.attempt_id == attempt_id:
-                        found.append((record.host, record.process_group))
+                    # A malformed record belongs to the attempt its name starts with.
+                    attempt_id = record.attempt_id if record.kind != "garbage" else name.partition(".")[0]
+                    found.setdefault(attempt_id or "", []).append(
+                        RecordedLaunch(
+                            f"{manager_entry.name}/{name}",
+                            manager_entry.name,
+                            record.kind,
+                            record.host,
+                            record.process_group,
+                            record.allocation,
+                            record.process_start,
+                            record.boot_id,
+                        )
+                    )
             except OSError:
                 return None
             finally:
@@ -1069,29 +1232,253 @@ def recorded_launches(manager: Any, attempt_id: str) -> list[tuple[str | None, i
     return found
 
 
-def recorded_launches_dead(manager: Any, attempt_id: str) -> bool:
-    """Return whether every launch recorded for an attempt is provably gone on this host.
+def recorded_launches(manager: Any, attempt_id: str) -> list[RecordedLaunch] | None:
+    """Return every launch any manager recorded for an attempt.
+
+    A record belongs to the attempt its process record or launch description names; a malformed record
+    belongs to the attempt its name starts with. Only managers of this manager's uid are searched: only they
+    start attempts of the jobs this manager serves, and another user's ``launches/`` is not readable. The
+    records are read once per manager tick (``manager._launch_records``, cleared with the liveness cache).
 
     :param manager: The task manager.
     :param attempt_id: The attempt identifier.
-    :return: ``False`` when a recorded launch is on another host, has no recorded process group, still
-        has a process group here, or the records cannot be read.
+    :return: The records, or ``None`` when a record cannot be read or the records exceed
+        :data:`MAXIMUM_RECORD_ENTRIES`.
     """
 
-    records = recorded_launches(manager, attempt_id)
-    if records is None:
+    if manager._launch_records is None:
+        manager._launch_records = (_scan_records(manager),)
+    scanned = manager._launch_records[0]
+    return None if scanned is None else list(scanned.get(attempt_id, ()))
+
+
+def _prune(manager: Any, launch: RecordedLaunch, expired: dict[str, bool]) -> None:
+    """Remove the process record of an ended launch of another expired manager, which is no evidence any more."""
+
+    if launch.manager_id == manager.manager_id:
+        return
+    manager_dir = manager.workspace.control / "managers" / launch.manager_id
+    if launch.manager_id not in expired:
+        grace = manager.lease_seconds * manager.takeover_grace_factor
+        expired[launch.manager_id] = _expired(manager_dir, grace, time.time())
+    if not expired[launch.manager_id]:
+        return
+    try:
+        launches_fd = os.open(manager_dir / LAUNCHES_DIRECTORY, _DIRECTORY_FLAGS)
+    except OSError:
+        return
+    try:
+        _remove_record(launches_fd, launch.name.partition("/")[2])
+    finally:
+        os.close(launches_fd)
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchEnd:
+    """The rule that decided one recorded launch.
+
+    :param record: The record below ``managers/``, or ``None`` when the records could not be read.
+    :param rule: One of :data:`LAUNCH_END_RULES` for an ended launch; otherwise ``launch_starting``,
+        ``malformed_record_live``, ``launch_running_here``, ``allocation_active``, ``scheduler_unavailable``,
+        ``launch_end_unprovable`` or ``launch_records_unreadable``.
+    :param host: The recorded host, when the record names one.
+    """
+
+    record: str | None
+    rule: str
+    host: str | None = None
+
+    def as_json(self) -> dict[str, object]:
+        """Return the evidence as a state-frame object.
+
+        :return: ``record`` and ``rule``, and ``host`` when known.
+        """
+
+        return {"record": self.record, "rule": self.rule, **({"host": self.host} if self.host is not None else {})}
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchEndEvidence:
+    """Whether every launch recorded for an attempt has ended (see :func:`launch_end_evidence`).
+
+    :param records: Why each ended launch counts as ended, in record order.
+    :param blocked: Every launch not proven ended and why, in record order.
+    """
+
+    records: tuple[LaunchEnd, ...]
+    blocked: tuple[LaunchEnd, ...] = ()
+
+    @property
+    def pending(self) -> LaunchEnd | None:
+        """Return the first launch not proven ended, or ``None`` when every one is."""
+
+        return self.blocked[0] if self.blocked else None
+
+    @property
+    def ended(self) -> bool:
+        """Return whether every recorded launch is proven ended."""
+
+        return not self.blocked
+
+    def as_json(self) -> list[dict[str, object]]:
+        """Return the evidence of every ended launch as the ``launch_end_evidence`` state-frame member.
+
+        :return: One object per record.
+        """
+
+        return [record.as_json() for record in self.records]
+
+
+def _stop_recorded(manager: Any, launch: RecordedLaunch, process_group: int) -> None:
+    """Stop a live launch recorded on this host: ``SIGTERM`` first, ``SIGKILL`` after the cancellation grace."""
+
+    now = time.monotonic()
+    signalled = manager._launch_signals.get(launch.name)
+    if signalled is None:
+        manager._launch_signals[launch.name] = (now, False)
+        _LOGGER.warning(
+            "stopping launch %s, recorded on this host as process group %d: its attempt is being taken over "
+            "or cancelled",
+            launch.name,
+            process_group,
+            extra=manager._event("recorded_launch_stopping", record=launch.name, process_group=process_group),
+        )
+        manager._terminate_process(process_group)
+    elif not signalled[1] and now >= signalled[0] + manager.cancel_grace_seconds:
+        manager._launch_signals[launch.name] = (signalled[0], True)
+        manager._terminate_process(process_group, signal.SIGKILL)
+
+
+def _allocation_answer(manager: Any, allocation: RecordedAllocation) -> bool | None:
+    """Ask whether a queryable allocation ended, at most once a minute per allocation.
+
+    :param manager: The task manager, whose memory holds the answers.
+    :param allocation: The recorded allocation.
+    :return: The answer: ``None`` when the scheduler cannot tell.
+    """
+
+    now = time.monotonic()
+    answers: dict[str, tuple[float, bool | None]] = manager._allocation_answers
+    for key in [key for key, (asked, _) in answers.items() if now - asked >= ALLOCATION_ANSWER_SECONDS]:
+        del answers[key]
+    key = json.dumps(allocation.as_json(), sort_keys=True)
+    if key not in answers:
+        answers[key] = (now, _allocation.allocation_ended(allocation, timeout=ALLOCATION_QUERY_TIMEOUT))
+    return answers[key][1]
+
+
+def _foreign_step(manager: Any, allocation: RecordedAllocation | None) -> bool:
+    """Return whether a launch ran in a queryable allocation other than this manager's own.
+
+    Ranks of such a step (``srun``, or a site launcher's ``mpiexec`` under PBS) run under the scheduler's
+    or launcher's daemons, outside the launch's process group, so its group being gone here does not
+    prove them gone.
+    """
+
+    if allocation is None or not allocation.queryable:
         return False
-    for host, process_group in records:
-        if host != manager.hostname or process_group is None:
-            return False
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            continue
-        except OSError:
-            return False
-        return False
-    return True
+    own = manager.allocation
+    return own is None or own.identity is None or dict(own.identity) != dict(allocation.identity or {})
+
+
+def _recorder_gone(manager: Any, launch: RecordedLaunch, owner: tuple[str | None, float] | None) -> bool:
+    """Return whether the manager that wrote a record is gone by the shared liveness evidence.
+
+    The manager a state frame names is judged with that frame's lease, as everywhere else; any other
+    with this manager's.
+    """
+
+    lease = owner[1] if owner is not None and owner[0] == launch.manager_id else manager.lease_seconds
+    return manager._owner_gone_evidence(launch.manager_id, lease_seconds=lease) is not None
+
+
+def _launch_end(manager: Any, launch: RecordedLaunch, owner: tuple[str | None, float] | None) -> LaunchEnd:
+    """Decide one recorded launch by the first rule of the ladder that applies."""
+
+    name = launch.name
+    if launch.kind == "description":
+        # The launch waits at its gate until process.json is durable, which only its manager writes, right
+        # after the start: once that manager is gone, no rank of the launch ever ran.
+        return LaunchEnd(name, "not_started" if _recorder_gone(manager, launch, owner) else "launch_starting")
+    if launch.kind == "garbage":
+        # A live manager may be writing it, or reading it may have met a write in progress.
+        return LaunchEnd(
+            name, "malformed_record" if _recorder_gone(manager, launch, owner) else "malformed_record_live"
+        )
+    host, process_group, allocation = launch.host, launch.process_group, launch.allocation
+    if host == manager.hostname and process_group is not None:
+        if _recorded_group_alive(process_group, launch.process_start, launch.boot_id):
+            # A live manager stops its own launches; only an abandoned one is stopped here.
+            if _recorder_gone(manager, launch, owner):
+                _stop_recorded(manager, launch, process_group)
+            return LaunchEnd(name, "launch_running_here", host)
+        manager._launch_signals.pop(name, None)
+        if not _foreign_step(manager, allocation):
+            return LaunchEnd(name, "process_group_gone", host)
+    if allocation is None:
+        return LaunchEnd(name, "launch_end_unprovable", host)
+    ended_ago = None if allocation.end_time is None else time.time() - allocation.end_time - LAUNCH_END_GRACE
+    if _allocation.can_ask(allocation):
+        # The scheduler outranks the recorded end: an administrator may have extended the time limit.
+        answer = _allocation_answer(manager, allocation)
+        if answer is True:
+            return LaunchEnd(name, "scheduler_confirmed_ended", host)
+        if answer is False:
+            return LaunchEnd(name, "allocation_active", host)
+        # One failing query is no evidence; a scheduler silent for that long after the end is.
+        if ended_ago is not None and ended_ago > SCHEDULER_UNAVAILABLE_SECONDS:
+            return LaunchEnd(name, "allocation_end_passed", host)
+        if ended_ago is not None and ended_ago > 0:
+            return LaunchEnd(name, "scheduler_unavailable", host)
+    elif ended_ago is not None and ended_ago > 0:
+        return LaunchEnd(name, "allocation_end_passed", host)
+    return LaunchEnd(name, "launch_end_unprovable", host)
+
+
+def launch_end_evidence(
+    manager: Any, attempt_id: str, *, owner: str | None = None, lease_seconds: float | None = None
+) -> LaunchEndEvidence:
+    """Decide whether every launch recorded for an attempt in any manager's ``launches/`` has ended.
+
+    Each record is decided by the first rule that applies. Of a record whose manager is gone by
+    :meth:`~httk.workflow.TaskManager._owner_gone_evidence`, only ``launch.json`` means ``not_started`` (the
+    gate lets no rank run before ``process.json`` is durable) and malformed files mean ``malformed_record``;
+    of a manager that may be live, both are pending (``launch_starting``, ``malformed_record_live``). A record
+    of this host whose process group is alive (judged with its leader's start time and boot id) is pending
+    ``launch_running_here``, and the group gets ``SIGTERM``, then ``SIGKILL`` once the cancellation grace has
+    passed, but only when its manager is gone. A gone group is ``process_group_gone``, unless the launch was
+    a step of another maintained scheduler allocation than this manager's, which needs the evidence below.
+    Then the scheduler or site probe of a queryable allocation whose client is installed here: ended
+    (``scheduler_confirmed_ended``) or active (pending ``allocation_active``), asked at most every
+    :data:`ALLOCATION_ANSWER_SECONDS`. When it cannot tell, a recorded allocation end counts
+    (``allocation_end_passed``) once :data:`LAUNCH_END_GRACE` plus :data:`SCHEDULER_UNAVAILABLE_SECONDS`
+    have passed since (pending ``scheduler_unavailable`` before); for an allocation that cannot be asked
+    here, once :data:`LAUNCH_END_GRACE` has passed. Otherwise pending ``launch_end_unprovable``. Records that cannot be read, or too many of them, are pending
+    ``launch_records_unreadable``.
+
+    The process record of an ended launch of another expired manager is removed on the way.
+
+    :param manager: The task manager.
+    :param attempt_id: The attempt identifier.
+    :param owner: The manager the attempt's state frame names, judged with *lease_seconds* when it wrote a
+        record.
+    :param lease_seconds: The lease of that frame; this manager's when omitted.
+    :return: The evidence.
+    """
+
+    launches = recorded_launches(manager, attempt_id)
+    if launches is None:
+        return LaunchEndEvidence((), (LaunchEnd(None, "launch_records_unreadable"),))
+    frame_owner = (owner, manager.lease_seconds if lease_seconds is None else lease_seconds)
+    decided = [_launch_end(manager, launch, frame_owner) for launch in launches]
+    expired: dict[str, bool] = {}
+    for launch, end in zip(launches, decided, strict=True):
+        if launch.kind == "process" and end.rule in LAUNCH_END_RULES:
+            _prune(manager, launch, expired)
+    return LaunchEndEvidence(
+        tuple(end for end in decided if end.rule in LAUNCH_END_RULES),
+        tuple(end for end in decided if end.rule not in LAUNCH_END_RULES),
+    )
 
 
 def signal_recorded(manager: Any, attempt_id: str, signal_number: int) -> None:
@@ -1102,6 +1489,10 @@ def signal_recorded(manager: Any, attempt_id: str, signal_number: int) -> None:
     :param signal_number: The signal.
     """
 
-    for host, process_group in recorded_launches(manager, attempt_id) or ():
-        if host == manager.hostname and process_group is not None:
-            manager._terminate_process(process_group, signal_number)
+    for launch in recorded_launches(manager, attempt_id) or ():
+        if (
+            launch.host == manager.hostname
+            and launch.process_group is not None
+            and _recorded_group_alive(launch.process_group, launch.process_start, launch.boot_id)
+        ):
+            manager._terminate_process(launch.process_group, signal_number)

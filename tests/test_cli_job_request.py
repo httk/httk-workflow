@@ -17,7 +17,7 @@ from httk.core.identity import (
     write_identity_config,
 )
 
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import TaskManager, Workspace, _manager_launches
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
@@ -487,3 +487,89 @@ def test_wait_is_rejected_for_non_pause_action(tmp_path: Path, capsys) -> None:
 
     assert command(_request_args(workspace_name, job_id, action="cancel") + ["--wait"], _context(tmp_path)) == 2
     assert "--wait is only valid with the pause action" in capsys.readouterr().err
+
+
+def _committing_job(tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch, tag: str) -> str:
+    """Return a job left in committing: its manager holds the commit as it would for a live launch."""
+
+    payload, job_id = _payload(tmp_path / "source", tag)
+    workspace.submit(payload, f"project/{tag}")
+    with monkeypatch.context() as held:
+        held.setattr(_manager_launches, "holds_commit", lambda manager, marker: True)
+        with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+            deadline = time.monotonic() + 30
+            while (marker := workspace.find_marker_by_id(job_id)) is None or marker.kind != "committing":
+                assert time.monotonic() < deadline, "the job reaches committing"
+                manager.tick()
+                time.sleep(0.01)
+            manager._running.clear()
+    return job_id
+
+
+def test_confirm_launches_ended_publishes_a_signed_launches_ended_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _committing_job(tmp_path, workspace, monkeypatch, "committing")
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+
+    assert command(["job", "confirm-launches-ended", "--workspace", workspace_name, job_id], _context(tmp_path)) == 0
+    capsys.readouterr()
+    (path,) = (workspace.control / "requests" / "ready").iterdir()
+    request = json.loads(path.read_text(encoding="utf-8"))
+    assert request["action"] == "launches_ended" and request["job_id"] == job_id
+    assert request["expected_generation"] == marker.generation and request["expected_record_ref"] == marker.record_ref
+    assert request["operator"] == "Test User <tester@example.test>" and "signature" in request
+    assert "every launch" in request["reason"]
+    # The remote publisher accepts it, and the generic request verb names it too.
+    job_cli._validate_request_document(request, index=0, allow_signature=True)
+    assert "launches_ended" in job_cli._REQUEST_ACTIONS
+
+
+def test_confirm_launches_ended_refuses_a_job_that_is_not_committing(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "submitted")
+    workspace.submit(payload, "project/submitted")
+
+    assert command(["job", "confirm-launches-ended", "--workspace", workspace_name, job_id], _context(tmp_path)) == 2
+    assert "not running or committing" in capsys.readouterr().err
+    assert (
+        command(
+            [
+                "job",
+                "request-envelopes",
+                "launches_ended",
+                "--workspace",
+                workspace_name,
+                "--operator=Test User <tester@example.test>",
+                "--reason=protocol",
+                "--json",
+                job_id,
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    assert "not running or committing" in capsys.readouterr().err
+    assert not list((workspace.control / "requests" / "ready").iterdir())
+
+
+def test_confirm_launches_ended_help_states_the_operators_responsibility(capsys) -> None:
+    assert command(["job", "confirm-launches-ended", "--help"], CLIContext("httk", Path.cwd())) == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "You take responsibility" in text and "keeps writing the job directory" in text
+
+
+def test_confirm_launches_ended_checks_every_job_before_publishing_any(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    committing = _committing_job(tmp_path, workspace, monkeypatch, "committing")
+    payload, submitted = _payload(tmp_path / "source", "submitted")
+    workspace.submit(payload, "project/submitted")
+
+    arguments = ["job", "confirm-launches-ended", "--workspace", workspace_name, committing, submitted]
+    assert command(arguments, _context(tmp_path)) == 2
+    assert "not running or committing" in capsys.readouterr().err
+    assert not list((workspace.control / "requests" / "ready").iterdir())

@@ -1340,6 +1340,7 @@ class StateFrame:
         unclean_restart: bool = _UNSET,
         unsafe_persistent_takeover: bool = _UNSET,
         takeover_evidence: Mapping[str, object] = _UNSET,
+        launch_end_evidence: Sequence[Mapping[str, object]] = _UNSET,
         cancellation: Mapping[str, object] = _UNSET,
         previous_attempt_id: str | None = _UNSET,
         operator: object = _UNSET,
@@ -1393,6 +1394,7 @@ class StateFrame:
         :param unclean_restart: Whether the previous attempt ended uncleanly.
         :param unsafe_persistent_takeover: Whether persistent takeover was unsafe.
         :param takeover_evidence: Evidence for the persistent takeover.
+        :param launch_end_evidence: Why every launch of a taken-over commit's attempt has ended.
         :param cancellation: The cancellation record.
         :param previous_attempt_id: The previous attempt identifier.
         :param operator: The operator identity.
@@ -1441,6 +1443,7 @@ class StateFrame:
             ("unclean_restart", unclean_restart),
             ("unsafe_persistent_takeover", unsafe_persistent_takeover),
             ("takeover_evidence", takeover_evidence),
+            ("launch_end_evidence", launch_end_evidence),
             ("cancellation", cancellation),
             ("previous_attempt_id", previous_attempt_id),
             ("operator", operator),

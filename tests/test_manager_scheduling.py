@@ -1015,7 +1015,8 @@ def test_dead_environment_writer_is_reconciled_after_its_grace(tmp_path: Path) -
         workspace,
         payload,
         "project/dead-environment-writer",
-        manager_id=_fake_manager(workspace, heartbeat_age=0.0),
+        # Another manager commits the outcome only once the attempt's manager is gone.
+        manager_id=_fake_manager(workspace, heartbeat_age=None),
         pid=finished.pid,
         lease_seconds=10.0,
     )
@@ -1048,7 +1049,8 @@ def test_pending_environment_outcomes_do_not_sleep_per_outcome(tmp_path: Path) -
             workspace,
             payload,
             f"project/pending-environment/{index}",
-            manager_id=_fake_manager(workspace, heartbeat_age=0.0),
+            # A gone manager's outcomes, so that this manager does read their environment logs.
+            manager_id=_fake_manager(workspace, heartbeat_age=None),
             pid=os.getpid(),
             lease_seconds=10.0,
         )

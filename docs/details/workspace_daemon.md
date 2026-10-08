@@ -655,10 +655,18 @@ command settings and workflow packages are the same confined and unconfined.
   step, possibly a few seconds later.
 - The attempt keeps its placement and is not committed, sealed or ejected
   by its manager until every launch it made has been reaped. A manager that
-  takes over the commit after that manager died does not wait for launches it
-  never tracked. A launch whose processes outlive
-  `SIGKILL` is reported as uncertain, and that attempt can start no further
-  launches.
+  takes over the commit, or begins the commit of its published outcome,
+  after that manager died first needs evidence that every launch recorded
+  for the attempt has ended: its process group is gone on the successor's
+  host (a live one there is stopped), Slurm or the site allocation probe
+  confirms the allocation ended, or, when neither can tell, its allocation's
+  recorded end lies more than 300 seconds (and, for a scheduler that is
+  installed but cannot answer, an hour more) back (see
+  [launch end evidence](workflow_filesystem_api.md#launch-end-evidence)).
+  Otherwise the takeover waits, `httk job why` names the launch, and
+  `httk job confirm-launches-ended` is the operator's override. A launch
+  whose processes outlive `SIGKILL` is reported as uncertain, and that
+  attempt can start no further launches.
 - Commands run without the prefix run inside the attempt sandbox on the
   manager's node, as unconfined commands run on that node.
 

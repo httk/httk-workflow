@@ -39,14 +39,27 @@ def evidence(
     if process.get("hostname") != manager.hostname:
         return None
     group = process["process_group"]
-    if manager._process_group_alive(group) or not _manager_launches.recorded_launches_dead(manager, attempt_id):
+    if manager._process_group_alive(group):
+        return None
+    launches = _launches(manager, state)
+    if not launches.ended:
         return None
     return {
         "verified": "process_group_absent",
         "hostname": manager.hostname,
         "process_group": group,
+        "launch_end_evidence": launches.as_json(),
         "verified_at": utc_now(),
     }
+
+
+def _launches(manager: Any, state: Any) -> Any:
+    """Return the launch end evidence of a frame's attempt, judging its manager with the frame's lease."""
+
+    lease_seconds = manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
+    return _manager_launches.launch_end_evidence(
+        manager, state.attempt_id or "", owner=state.manager_id, lease_seconds=lease_seconds
+    )
 
 
 def should_kill(now: float, kill_at: float | None) -> bool:
@@ -128,7 +141,13 @@ def request_cancel(
         audited = StateFrame.replace(audited, operator_key=operator_key)
     if marker.kind == "cancelling":
         return "the job is already being cancelled"
-    if marker.kind == "running":
+    launches = None
+    if marker.kind == "committing":
+        # The outcome is published, but ranks of a launch of the attempt may still write the job: without
+        # evidence that every launch ended, the cancellation is verified like a running attempt's.
+        manager._terminate_attempt(marker, state)
+        launches = _launches(manager, state)
+    if marker.kind == "running" or (launches is not None and not launches.ended):
         fenced = manager._transition(marker, "cancelling", StateFrame.replace(audited, reason="operator_cancel"))
         logger.warning(
             "cancelling %s: attempt %s is fenced and will be stopped",
@@ -141,13 +160,19 @@ def request_cancel(
             local.cancelling = True
             local.fenced = True
         return None
-    manager._terminate_attempt(marker, state)
+    if launches is None:
+        manager._terminate_attempt(marker, state)
     manager._transition(
         marker,
         "cancelled",
         StateFrame.replace(
             audited,
-            cancellation={"verified": "no_live_attempt", "from_kind": marker.kind, "verified_at": utc_now()},
+            cancellation={
+                "verified": "no_live_attempt",
+                "from_kind": marker.kind,
+                **({} if launches is None else {"launch_end_evidence": launches.as_json()}),
+                "verified_at": utc_now(),
+            },
             reason="operator_cancel",
         ),
     )
@@ -167,6 +192,14 @@ def report_unverifiable(
         detail = "its process identity is missing or malformed, so this manager cannot prove that it stopped"
         if process.get("hostname") != manager.hostname:
             detail = "its process is recorded on another host, so this manager cannot prove that it stopped"
+        elif validate_process(process) is not None and attempt_id not in manager._running:
+            pending = _launches(manager, state).pending
+            if pending is not None:
+                where = f" on host {pending.host}" if pending.host else ""
+                detail = (
+                    f"launch {pending.record} of its attempt{where} is not proven to have ended ({pending.rule}), "
+                    "so this manager cannot prove that the attempt stopped"
+                )
     else:
         detail = "its running frame has no process identity, so this manager cannot prove that it stopped"
     logger.warning(

@@ -1,7 +1,9 @@
 """The maintained Slurm realization of the private scheduler contract."""
 
 import logging
+import os
 import re
+import shutil
 import socket
 import subprocess
 from collections.abc import Mapping
@@ -21,6 +23,23 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 _REPEATED = re.compile(r"([0-9]+)(?:\(x([0-9]+)\))?")
+_JOB_ID = re.compile(r"[1-9][0-9]{0,19}")
+_CLUSTER = re.compile(r"[A-Za-z0-9_.-]{1,256}")
+_STATE = re.compile(r"[A-Z_]{1,64}")
+#: The Slurm job states in which no process of the job runs any more; ``COMPLETING`` is not one.
+ENDED_STATES = frozenset(
+    {
+        "COMPLETED",
+        "CANCELLED",
+        "FAILED",
+        "TIMEOUT",
+        "NODE_FAIL",
+        "PREEMPTED",
+        "BOOT_FAIL",
+        "DEADLINE",
+        "OUT_OF_MEMORY",
+    }
+)
 
 
 def _slurm_gpus(raw: str) -> int:
@@ -109,6 +128,80 @@ def slurm_end_time(environ: Mapping[str, str]) -> float | None:
     return float(text)
 
 
+def slurm_identity(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Return the identity of the enclosing Slurm job: its ``job_id`` and, when exported, its ``cluster``.
+
+    :param environ: Environment containing Slurm job metadata.
+    :return: The identity, or ``None`` outside a job or when a value is malformed.
+    """
+
+    job_id = environ.get("SLURM_JOB_ID", "").strip()
+    cluster = environ.get("SLURM_CLUSTER_NAME", "").strip()
+    if not _JOB_ID.fullmatch(job_id) or (cluster and not _CLUSTER.fullmatch(cluster)):
+        if "SLURM_JOB_ID" in environ:
+            _LOGGER.warning(
+                "ignoring the Slurm job identity SLURM_JOB_ID=%r SLURM_CLUSTER_NAME=%r: not a job id and cluster name",
+                environ.get("SLURM_JOB_ID"),
+                environ.get("SLURM_CLUSTER_NAME"),
+            )
+        return None
+    return {"job_id": job_id, **({"cluster": cluster} if cluster else {})}
+
+
+def slurm_allocation_ended(identity: Mapping[str, str], *, run: Run, timeout: float) -> bool | None:
+    """Ask ``squeue`` whether the Slurm job an identity names has ended.
+
+    ``squeue`` runs with ``--states=all`` and without the ``SQUEUE_*`` and ``SLURM_CLUSTERS``
+    variables, which could hide the job; ``--clusters`` is passed only for a cluster other than
+    this process's ``SLURM_CLUSTER_NAME``.
+
+    :param identity: ``job_id`` and optionally ``cluster``, as :func:`slurm_identity` recorded them.
+    :param run: The command runner, called without a shell.
+    :param timeout: Seconds ``squeue`` may take.
+    :return: ``True`` when ``squeue`` lists no row for the job, only rows in :data:`ENDED_STATES`
+        including the job's own, or reports an invalid job id; ``False`` when a listed row is in
+        any other state, ``COMPLETING`` included; ``None`` for anything else.
+    """
+
+    job_id = identity.get("job_id")
+    cluster = identity.get("cluster")
+    if (
+        identity.keys() - {"job_id", "cluster"}
+        or job_id is None
+        or not _JOB_ID.fullmatch(job_id)
+        or (cluster is not None and not _CLUSTER.fullmatch(cluster))
+    ):
+        return None
+    # --clusters needs slurmdbd: only another cluster than this process's own is named.
+    clusters = [f"--clusters={cluster}"] if cluster and cluster != os.environ.get("SLURM_CLUSTER_NAME") else []
+    argv = ["squeue", "--noheader", f"--jobs={job_id}", *clusters, "--states=all", "--format=%i|%T"]
+    # SQUEUE_* (states, partitions, users, ...) and SLURM_CLUSTERS could filter an active job out of
+    # the answer, which would then read as ended.
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("SQUEUE_") and name != "SLURM_CLUSTERS"
+    }
+    try:
+        completed = run(argv, env=environment, capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        _LOGGER.debug("squeue cannot tell whether Slurm job %s ended: %s", job_id, exc)
+        return None
+    if completed.returncode != 0:
+        # A job Slurm no longer knows, after it left the controller's memory.
+        return True if "Invalid job id specified" in completed.stderr else None
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    # Explicit cluster queries may include a cluster heading.
+    if clusters and lines[:1] == [f"CLUSTER: {cluster}"]:
+        lines = lines[1:]
+    rows = [[item.strip() for item in line.split("|")] for line in lines]
+    if any(len(row) != 2 or _STATE.fullmatch(row[1]) is None for row in rows):
+        return None
+    if any(row[1] not in ENDED_STATES for row in rows):
+        return False
+    if rows and not any(row[0] == job_id for row in rows):
+        return None
+    return True
+
+
 def _expand_per_node(text: str) -> list[int] | None:
     counts: list[int] = []
     for item in text.split(","):
@@ -179,7 +272,8 @@ def slurm_allocation(
     end_time = slurm_end_time(environ)
     counts = slurm_counts(environ)
     cpus_per_proc = slurm_cpus_per_proc(environ)
-    aggregate = Allocation("slurm", end_time, (), counts, cpus_per_proc)
+    identity = slurm_identity(environ)
+    aggregate = Allocation("slurm", end_time, (), counts, cpus_per_proc, identity)
     hosts = _slurm_hosts(environ, run)
     if hosts is None:
         _LOGGER.warning("cannot list the Slurm job's nodes; using its aggregate counts only")
@@ -220,7 +314,7 @@ def slurm_allocation(
         if cpu_slots:
             batch_node = replace(batch_node, cpu_slots=local_cpu_slots(batch_node.procs))
         nodes[batch_index] = batch_node
-    allocation = Allocation("slurm", end_time, tuple(nodes), {}, cpus_per_proc)
+    allocation = Allocation("slurm", end_time, tuple(nodes), {}, cpus_per_proc, identity)
     if allocation.capacity() != counts:
         _LOGGER.warning("the Slurm nodes do not add up to their aggregate counts; using aggregate counts only")
         return aggregate
@@ -251,6 +345,22 @@ class SlurmScheduler:
         """Probe Slurm's node allocation and optional local metadata."""
 
         return slurm_allocation(environ, run=run, cpu_slots=cpu_slots)
+
+    def can_query(self) -> bool:
+        """Return whether ``squeue`` is on this process's ``PATH``."""
+
+        return shutil.which("squeue") is not None
+
+    def allocation_ended(self, identity: Mapping[str, str], *, run: Run, timeout: float) -> bool | None:
+        """Ask ``squeue`` whether a recorded Slurm job has ended (see :func:`slurm_allocation_ended`).
+
+        :param identity: The recorded job identity.
+        :param run: The command runner.
+        :param timeout: Seconds ``squeue`` may take.
+        :return: ``True`` when the job ended, ``False`` while it is active, ``None`` when unknown.
+        """
+
+        return slurm_allocation_ended(identity, run=run, timeout=timeout)
 
     def step_argv(
         self,

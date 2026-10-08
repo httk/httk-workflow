@@ -516,7 +516,10 @@ stopped, so neither workdir mode relaunches on lease expiry alone:
 
 Both unsafe options and the evidence for every takeover (the admitting rule and
 the heartbeat's age) are recorded in the new attempt's state frame, so
-`job log` shows why a job was relaunched.
+`job log` shows why a job was relaunched. A recorded process is provably gone
+only when every confined launch recorded for the attempt has also ended (see
+the launch end evidence below): its ranks write the job from process groups of
+their own.
 
 Only the launching host can ask its kernel whether a process is gone. A manager
 on another host therefore cannot prove a persistent-workdir attempt stopped; it
@@ -527,22 +530,60 @@ lease will be recovered here.
 
 ### Taking over another manager's commit
 
-A `committing` job is committed only by the manager its state frame names.
-Another manager serving the job's runner executor takes the commit over once
-that owner is evidently gone, by one of three kinds of evidence:
+A `committing` job is committed only by the manager its state frame names,
+and a published outcome is moved to `committing` only by the manager that ran
+the attempt. Another manager serving the job's runner executor takes the
+commit over, or begins it, once that manager is evidently gone, by one of
+three kinds of evidence:
 
 | Evidence | Meaning |
 | --- | --- |
 | `manager_process_dead` | The owner's `managers/<id>/manager.json` names this host and its process is gone, so a restarted manager resumes its predecessor's commits at once. |
+| `manager_closed` | The owner closed while attempts it started still ran and wrote `closed_at` into its `manager.json`; it never commits their outcomes. Only commits accept this evidence, never an attempt takeover. |
 | `manager_record_absent` | The owner has no manager directory or readable heartbeat. |
 | `lease_grace_expired` | The owner's heartbeat has been silent for its lease times `--takeover-grace-factor`. |
 
+Ranks of a confined launch the owner started may still write the job
+directory, possibly from other hosts, and nothing can fence a descriptor they
+hold open. A successor therefore also needs *launch end evidence* for every
+launch recorded for the attempt in any manager's `launches/` (the full ladder
+is in [the filesystem API](workflow_filesystem_api.md#launch-end-evidence)): a
+launch that never passed its start gate and whose manager is gone, a process
+group gone on this host (checked against the leader's recorded start time and
+boot, so a reused pid is not mistaken for it), a scheduler (Slurm's `squeue`)
+or site allocation probe confirming that the allocation ended, or, when that
+cannot tell, an allocation whose recorded end lies more than 300 seconds in
+the past (for an allocation whose scheduler is installed here but cannot
+answer, an hour more). A scheduler that says the allocation
+is still active keeps the takeover waiting even past that end, since the time
+limit may have been extended. A live launch of a gone manager recorded on the
+successor's own host is sent `SIGTERM`, and `SIGKILL` after the cancellation
+grace; a live manager's launches are left to it. A launch on another
+host whose allocation neither has a passed end time nor can be confirmed ended
+is never proven ended: the takeover waits, warns once, and records the wait
+in the attempt's `commit-wedge.json`, where `job why` shows the blocking launch
+record, its host and the rule. An operator who knows the ranks are gone runs
+`httk job confirm-launches-ended JOB`, which publishes a `launches_ended`
+request; once the owner is gone, and no launch of the attempt still runs on
+its own host, a manager takes the commit over (or begins it) and records
+that attestation, with the request and the operator, as its evidence. The
+operator takes responsibility that no rank still writes the job.
+
 Until then the commit is left alone and does not count as work for
-`run_until_idle`. The takeover is itself a marker transition, `committing` →
-`committing`, whose frame repeats the commit and records `previous_manager_id`
-and `takeover_evidence`, so of two would-be successors exactly one wins.
-Because it advances the state generation, an operator request issued against
-the earlier generation is retired as stale and must be re-issued.
+`run_until_idle`, except while a successor is stopping a launch on its own
+host. An idle manager may therefore exit while a takeover waits for evidence
+that only time brings, such as an allocation end; the next manager to start
+picks the takeover up. A published outcome of another manager's attempt is
+counted in the idle summary as waiting for another manager; it keeps an
+until-idle manager awake while a launch of it is being stopped here, and
+while its manager's heartbeat is older than its lease (that manager is then
+gone within the takeover grace), but not while that manager is live: it
+commits the outcome itself. The takeover is itself a marker transition, `committing` →
+`committing`, whose frame repeats the commit and records
+`previous_manager_id`, `takeover_evidence` and `launch_end_evidence`, so of
+two would-be successors exactly one wins. Because it advances the state
+generation, an operator request issued against the earlier generation is
+retired as stale and must be re-issued.
 
 The owner of a commit first renames the published `outcome.ready` draft to
 `commit.<generation>` in the attempt-control directory, after the generation of
@@ -752,7 +793,9 @@ count. Multiple GPU nodes require `SLURM_GPUS_PER_NODE` consistent with the
 total; divisibility of the total alone does not establish per-node capacity.
 Unknown or contradictory GPU placement falls back to aggregate counts.
 The probe also records `SLURM_CPUS_PER_TASK` as the allocation's CPUs per
-processor slot. When the nodes cannot be described
+processor slot, and the job's identity (`SLURM_JOB_ID` and, when set,
+`SLURM_CLUSTER_NAME`), which every confined launch records so that another
+manager can later ask `squeue` whether the allocation has ended. When the nodes cannot be described
 consistently with those counts, it warns and keeps the aggregate counts only, so
 its capacity is always exactly the table below.
 
@@ -1141,7 +1184,9 @@ still shown.
   manager resumes, or another manager serving the executor once the owner is
   evidently gone (see the commit takeover above). If a commit anomaly has repeated for the same
   attempt, the recorded error is shown and the job is reported as a blocked,
-  wedged commit rather than as needing no action;
+  wedged commit rather than as needing no action. A takeover that waits for
+  launch end evidence names the launch record, its host and the rule, and
+  points to `httk job confirm-launches-ended` as the operator's override;
 - `waiting`: the join condition, every child with its label and state, which
   children block, and which cannot be resolved in this workspace;
 - `failed`: the failure, whether an operator `continue` still fits in the retry

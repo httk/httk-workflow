@@ -1313,6 +1313,7 @@ Every core-profile transition:
 | `running` | `ready` | Retry within budget after `lease_lost` or `process_failure`. |
 | `running` | `failed` | Retry budget exhausted, or a failure the policy does not retry. |
 | `running` | `cancelling` | Operator `cancel` of a job that may have a live process. |
+| `committing` | `cancelling` | Operator `cancel` while a launch of the attempt is not proven to have ended. |
 | `committing` | `ready` | `advance` to a new activation, or `retry` of this one. |
 | `committing` | `waiting` | A `wait` outcome naming a child join. |
 | `committing` | `succeeded` | A `succeed` outcome. |
@@ -1353,27 +1354,31 @@ may have a live process is three ordered steps, and the order is the guarantee:
    all a recovering manager needs.
 3. **Only then finish, against evidence.** For a `running` or `cancelling`
    attempt with a valid same-host identity, the marker moves to `cancelled`
-   only once the exit is verified, recorded in the terminal frame's
-   `cancellation` member.
+   only once the exit is verified, and every launch recorded for the attempt
+   has [launch end evidence](#launch-end-evidence), recorded in the terminal
+   frame's `cancellation` member.
 
 `cancelling` is neither terminal nor quiescent. An attempt that publishes an
 outcome after being fenced finds its marker in `cancelling`, and the outcome is
 ignored like any other outcome from a fenced attempt.
 
-Cancelling a `committing` job keeps the historical best-effort behavior: the
-manager signals the recorded process group when a valid same-host identity is
-available, then moves directly to `cancelled` with `no_live_attempt`, without
-verifying exit, because the outcome is published and replay may be partially
-applied. Known limitation: the process may still be running after this
-terminal transition.
+Cancelling a `committing` job signals the recorded process group when a valid
+same-host identity is available, and the recorded launches on this host. When
+every launch recorded for the attempt has
+[launch end evidence](#launch-end-evidence), it moves directly to `cancelled`
+with `no_live_attempt` and that evidence (`launch_end_evidence`), without
+verifying the attempt process's exit, because the outcome is published and
+replay may be partially applied. Known limitation: the attempt process itself
+may still be running after this terminal transition. Otherwise the job moves
+to `cancelling` and is verified like a `running` attempt.
 
 Apart from that exception, a manager MUST NOT publish `cancelled` for a
 `running` attempt it has merely signalled. Acceptable evidence is:
 
 | `cancellation.verified` | Meaning |
 | --- | --- |
-| `process_exited` | The manager launched the process and reaped it; the exit status is recorded. |
-| `process_group_absent` | The process was recorded on this host and its process group no longer exists. |
+| `process_exited` | The manager launched the process and reaped it, and every launch it made for the attempt; the exit status is recorded. |
+| `process_group_absent` | The process was recorded on this host, its process group no longer exists, and every launch recorded for the attempt has ended; the evidence is recorded as `launch_end_evidence` (see [Launch end evidence](#launch-end-evidence)). |
 | `no_live_attempt` | The job was cancelled from a state where no exit verification is performed, including `committing` after outcome publication. |
 
 A cancellation whose process cannot be proven stopped, typically one recorded on
@@ -1381,9 +1386,9 @@ another host, MUST leave the marker in `cancelling`, journal why, and retry. A
 missing or malformed `process` member is damage, not evidence that the launch
 gate was never released, and MUST take the same path. The attempt stays fenced,
 and an operator sees a stalled cancellation instead of a terminal state falsely
-asserting that nothing still writes the workdir. A site whose batch system can
-confirm that an allocation ended MAY record that confirmation as evidence in
-the same member.
+asserting that nothing still writes the workdir. While the cancellation waits
+for launch end evidence, the launches recorded on the manager's own host are
+stopped by the same ladder.
 
 ## Claiming, leases, and fencing
 
@@ -1474,6 +1479,13 @@ or adoption step) is taken over by another actor only when its owner is
 | `lease_grace_expired` | The heartbeat is at least the lease times the takeover grace factor old (`2.0` by default). |
 | `manager_process_dead` | `manager.json` names this host and its `pid` is not alive. |
 
+Beginning or taking over a commit (see [Commit ownership](#commit-ownership))
+also accepts `manager_closed`: a manager that closes while attempts it started
+still run keeps its record and writes `closed_at` into its `manager.json`, and
+it never commits their outcomes. Nothing else accepts it: an attempt takeover
+(`lease_lost`) must not, since the closed manager's attempt may still run.
+Launch end evidence is required either way.
+
 Evidence decides only *when* work is taken over, never whether the result is
 correct: every takeover is itself a rename that fences the previous owner. Two
 hosts with one hostname are an accepted limit, and a reused pid only delays a
@@ -1510,6 +1522,11 @@ to relaunch an attempt, in either workdir mode:
   scheduler confirmation that the allocation ended; or a heartbeat silent for a
   configured multiple of the lease, the *takeover grace*, by default twice the
   lease.
+
+The recorded process is *provably gone* (evidence `writer_process_dead`) only
+when it is gone on this host and every launch recorded for the attempt has
+[launch end evidence](#launch-end-evidence): ranks of a confined launch write
+the job directory from their own process groups, possibly on other hosts.
 
 A manager SHOULD terminate the old process group or cancel its batch allocation
 before relaunching when it can. The grace exists because an expired lease only
@@ -1565,10 +1582,13 @@ of [Publishing an outcome](#publishing-an-outcome) and
 written for the runner and never read back. `error.json`
 (`httk-workflow-runner-error`) is the breadcrumb a runner SDK leaves when a
 step handler raises, and `commit-wedge.json` (`httk-workflow-commit-wedge`
-version 2: `error`, `manager_id`, `recorded_at`) records a commit error that
-keeps repeating. Only the manager that recorded it removes it, when the commit
-completes; a successor or restarted manager may leave a stale one behind. Both
-are diagnostic operator evidence that nothing reads as protocol state.
+version 2: `error`, `manager_id`, `recorded_at`, and `launch_end_pending`, the
+`record`, `rule` and `host` of the launch a waiting takeover is blocked on)
+records a commit error, a waiting commit takeover, or a waiting commit of
+another manager's published outcome, that keeps repeating. The manager that
+begins, takes over or completes the commit removes the file, whichever manager
+recorded it. Both are diagnostic operator evidence that nothing reads
+as protocol state.
 
 ### Run chronicle
 
@@ -1904,10 +1924,20 @@ the launch template rendered from the placement it holds in memory, around
 the rank helper, in a new session behind a gate that reads one line from a
 pipe before it execs. It then writes `process.json` (`pid`, which is also the
 process group, `hostname`, `attempt_id`, `started_at`) through a temporary,
-`fsync`, rename and directory `fsync`, and only then releases the gate. If the
-record cannot be written the gate is closed unopened, the launch exits
-without starting anything and is stopped. A trusted launch directory with
-only `launch.json` therefore never hides started ranks.
+`fsync`, rename and directory `fsync`, and then checks that the attempt
+still owns its `running` marker: the exact marker path it started from, or,
+after a same-kind transition renamed it, the job's current `running` marker
+naming the attempt. Only then does it release the gate. If the record cannot
+be written, or the marker has moved on (the manager may have been frozen while
+a successor took the attempt over or it was cancelled), the gate is closed
+unopened, the launch exits without starting anything and is stopped.
+Accepted residual: a manager frozen exactly between that check and the gate
+write releases ranks of a fenced attempt when it wakes; it then stops them at
+its next pass, because the attempt is no longer live. A trusted launch directory with
+only `launch.json` therefore never hides started ranks. `process.json` also
+names the allocation the ranks run in (`allocation`, see
+[Launch end evidence](#launch-end-evidence)), so that another manager can
+later establish that the launch has ended.
 
 **Ranks.** Jobs can read but not write `.httk-workspace/`, so `launch.json` is
 trusted input; the rank helper still requires `--launch-dir` to have the shape
@@ -1939,28 +1969,158 @@ further grace later. Every status is written by an exclusive temporary and a
 rename; a started launch's final status is retried every tick until it is
 written. The manager that runs the attempt does not treat it as finished,
 and does not commit, seal or eject it, while any launch it tracks for the
-attempt is unreaped. When an attempt's own process is gone on this host,
-cancellation verification (`process_group_absent`) and an attempt takeover
-that relies on the writer being provably dead also require every launch
-recorded for the attempt in any manager's `launches/` to be provably gone on
-this host; a record with only `launch.json`, or on another host, proves
-nothing. A commit takeover does not consult launch records: it follows
-[Commit ownership](#commit-ownership) alone.
+attempt is unreaped. Every other manager needs
+[launch end evidence](#launch-end-evidence) for every launch recorded for the
+attempt in any manager's `launches/` before it takes the commit over, calls
+the attempt's writer provably dead, or verifies a cancellation
+(`process_group_absent`).
 
 **Cleanup.** Once a launch is reaped and its status written, the manager
 removes its trusted launch directory, so the status file alone marks the
 request as done. The manager removes the attempt's launch-lock directory when
 it stops tracking the attempt; one left by a crashed manager stays on its node
 until reboot. `launch/` goes with the attempt-control directory. A manager
-reading the launch records of an attempt also deletes, on the way, the
-process records of other managers silent for their lease times its takeover
-grace factor whose process group is provably gone on this host. Garbage
-collection removes the trusted launch directories of a manager silent for the
-workspace policy's `lease_seconds` times the default takeover grace factor
-(`2.0`) that hold no process record, a malformed one, or one whose process
-group is provably gone on this host; an I/O error proves nothing (see
+deciding the [launch end evidence](#launch-end-evidence) of an attempt also
+deletes the process records it found ended of other managers silent for their
+lease times its takeover grace factor. Garbage collection removes the trusted
+launch directories of a manager silent for the workspace policy's
+`lease_seconds` times the default takeover grace factor (`2.0`) that hold no
+process record, a malformed one, or one whose process group is provably gone
+on this host, but never asks a scheduler: a record naming a queryable
+allocation (other than the collector's own) is kept until its `end_time` plus
+`LAUNCH_END_GRACE` has passed, and is otherwise left to the evidence ladder,
+which asks and prunes it; an I/O error proves nothing (see
 [Retention gates and always-safe collection](#retention-gates-and-always-safe-collection)).
 The sandbox details and site requirements are in {doc}`workspace_daemon`.
+
+### Launch end evidence
+
+Ranks of a confined launch write the job directory from process groups of
+their own, possibly on hosts other than the manager's. No path, rename or
+inode can fence a descriptor a rank already holds open on a shared
+filesystem, so a manager that did not start a launch MUST have evidence that
+it has ended before it takes over the attempt's commit, calls the attempt's
+writer provably dead (`writer_process_dead`, see
+[Recovering abandoned attempts](#recovering-abandoned-attempts)), or verifies
+its cancellation (`process_group_absent`), and before it begins the commit
+of an outcome another manager's attempt published (see
+[Commit ownership](#commit-ownership)). The manager that started a launch
+tracks it itself (see [Confined launches](#confined-launches)). Only the
+managers of the evaluating manager's own uid are searched: only they start
+attempts of the jobs it serves, and another user's `launches/` is not
+readable.
+
+**The record.** Besides `pid`, `hostname`, `attempt_id` and `started_at`,
+`process.json` carries `process_start` and `boot_id` where `/proc` provides
+them: the launch leader's start time in clock ticks after boot
+(`/proc/<pid>/stat` field 22) and `/proc/sys/kernel/random/boot_id`. On this
+host, a leader with another start time under the recorded pid, or another
+boot id, means the recorded process group is gone; the kernel does not reuse
+a pid while a process group of that id exists. A record without them is
+judged by its process group alone. `process.json` also carries `allocation`:
+`null` for a manager without an allocation, otherwise an object with these
+members.
+
+| Member | Meaning |
+| --- | --- |
+| `probe` | The recording manager's `--allocation` specification, such as `slurm` or `exec:PATH` (`auto` is recorded as the scheduler it found), at most 4096 bytes |
+| `kind` | The allocation kind, a label |
+| `identity` | The scheduler's identity of the allocation, or `null`: an object of at most 16 entries whose keys are labels and whose values are strings of at most 256 UTF-8 bytes. Slurm records `job_id` (`SLURM_JOB_ID`) and, when set, `cluster` (`SLURM_CLUSTER_NAME`); an `exec:PATH` probe's envelope may carry one |
+| `end_time` | The epoch second the allocation ends, or `null` |
+
+A record without `allocation` (written before the member existed) proves only
+what its host proves. A reader ignores unknown members and drops an
+`identity` or `end_time` it cannot use; an `allocation` without a usable
+`probe` and `kind` counts as `null`. Either only removes evidence.
+
+**The ladder.** For each record of the attempt in every manager's
+`launches/`, the first rule that applies decides:
+
+| Rule | When | Ended |
+| --- | --- | --- |
+| `not_started` | Only `launch.json` survived, and the manager that wrote it is gone by [manager liveness evidence](#manager-liveness-evidence) (judged with this manager's lease): the gate let no rank run before `process.json` was durable, and only that manager writes it. | yes |
+| `launch_starting` | Only `launch.json` survived, and the manager that wrote it may be live: it may be between the start and the process record. | no |
+| `malformed_record` | The record is malformed (it belongs to the attempt its name starts with), and the manager that wrote it is gone; as for garbage collection, it describes no live launch. | yes |
+| `malformed_record_live` | The record is malformed, and the manager that wrote it may be live: it may be writing it. | no |
+| `launch_running_here` | The record names this host and its process group is alive. When the manager that wrote it is gone, the evaluating manager sends the group `SIGTERM`, and `SIGKILL` once its cancellation grace has passed since the first signal; a live manager stops its own launches, and no other manager signals them. | no |
+| `process_group_gone` | The record names this host and its process group is gone, and the launch was not a step of a queryable allocation (a maintained scheduler's, or an `exec:PATH` probe's with an `identity`) other than the evaluating manager's own (such a step falls through to the rules below). | yes |
+| `scheduler_confirmed_ended` | The recorded allocation can be asked here (it has an `identity` and names an `exec:PATH` probe that exists on this host, or a maintained scheduler whose client is installed here), and its scheduler or probe confirms that it ended (below). A manager asks about one allocation at most once a minute and reuses the answer meanwhile. | yes |
+| `allocation_active` | That scheduler or probe says the allocation is still active, even when its recorded `end_time` has passed: an administrator may have extended the time limit. | no |
+| `allocation_end_passed` | The allocation cannot be asked here and its recorded `end_time` lies more than `LAUNCH_END_GRACE` (300 seconds, Slurm's `KillWait` and clock skew) in the past; or it can be asked, its scheduler cannot tell now, and the end lies more than `LAUNCH_END_GRACE` plus `SCHEDULER_UNAVAILABLE_SECONDS` (one hour) in the past. The rule is stateless, so every manager decides alike. | yes |
+| `scheduler_unavailable` | The allocation can be asked, its scheduler cannot tell now, and its end lies less than that hour beyond the grace: one failing query is no evidence. | no |
+| `launch_end_unprovable` | Nothing above applies. | no |
+
+Managers sharing one multi-node allocation cannot commit a dead sibling's
+confined outcome before that allocation ends: Slurm answers that the
+allocation is active, as it is. This is conservative and intended; it is the
+same allocation whose ranks may still run.
+
+`srun` places its ranks under Slurm's step daemons, outside its own process
+group, so a gone `srun` group does not prove a step's ranks gone; the same
+holds for a site launcher such as `mpiexec` under PBS. For a step of another
+queryable allocation the ladder therefore asks its scheduler or probe. For a
+step of the evaluating manager's own allocation, or a launch without a
+queryable allocation, the group decides: an accepted residual, since remote tasks of such
+a step may linger until Slurm has cleaned the step up, and requiring Slurm's
+word would hold a cancellation until the manager's own allocation ends.
+
+Records that cannot be read, or more than 65536 entries, are
+`launch_records_unreadable`, which is not ended either. Every decision is
+recorded: a commit takeover's frame, or the committing frame of an outcome
+another manager's attempt published, lists one object per ended record
+(`record`, `<manager-id>/<attempt-id>.<request-id>` below `managers/`;
+`rule`; `host` when known) as `launch_end_evidence`, and a verified
+cancellation lists the same in its `cancellation` member.
+
+**Asking a scheduler.** A maintained scheduler implements the private
+`Scheduler.allocation_ended(identity, run=..., timeout=...)` hook. It returns
+`True` only when the scheduler confirms that the allocation ended, which means
+that every process it started has ended; `False` while the allocation is
+active; and `None` when it cannot tell. Slurm runs, without a shell and
+without the `SQUEUE_*` and `SLURM_CLUSTERS` variables (they could filter the
+job out of the answer),
+`squeue --noheader --jobs=<job_id> [--clusters=<cluster>] --states=all --format=%i|%T`;
+`--clusters`, which needs `slurmdbd`, is passed only when the recorded
+cluster is not the manager's own `SLURM_CLUSTER_NAME`; a manager outside any
+Slurm allocation has none and always passes it, so without `slurmdbd` every
+answer it gets cannot tell, and the stateless end-time rule above decides. No
+row for the job, or rows only in `COMPLETED`, `CANCELLED`, `FAILED`,
+`TIMEOUT`, `NODE_FAIL`, `PREEMPTED`, `BOOT_FAIL`, `DEADLINE` or
+`OUT_OF_MEMORY` including the job's own, or a failure reporting `Invalid job
+id specified`, is ended; any other state, `COMPLETING` included, is active;
+anything else, errors and timeouts included, cannot tell. `%i` prints a job
+array element as `<base>_<index>`, not as its `SLURM_JOB_ID`, so a finished
+element cannot tell until Slurm forgets it (`MinJobAge`, 300 seconds by
+default) and is then ended.
+
+An `exec:PATH` probe, recorded as an absolute path, is asked only for an
+allocation with an identity, by running `PATH ended`, without a shell, with
+one query on standard input:
+
+```json
+{"format": "httk-workflow-allocation-query", "format_version": 1,
+ "kind": "pbs", "identity": {"job_id": "4711.pbs01"}, "end_time": 1790000000}
+```
+
+It answers with exactly this document on standard output, `ended` a boolean:
+
+```json
+{"format": "httk-workflow-allocation-status", "format_version": 1, "ended": true}
+```
+
+A non-zero exit, a timeout, or any other output, such as the allocation
+envelope an older probe prints whatever its arguments, cannot tell. A `host`
+or `none` allocation, or any allocation without an identity, cannot be asked.
+
+**Requirement.** Any launch technology that places ranks on hosts other than
+the manager's MUST provide an allocation probe whose `ended` query can
+confirm the end of its allocations, or record an allocation end time. A
+launch that has neither is never proven ended by another manager: a commit
+takeover then waits, reported in `commit-wedge.json` and by `job why`, until
+an operator publishes a `launches_ended` request (see
+[Request contents and actions](#request-contents-and-actions)). This is an
+accepted limitation. An operator who issues that request takes responsibility
+that no rank of the attempt still runs.
 
 ### Executable workflow-hook wire formats
 
@@ -2117,9 +2277,21 @@ managed retry uses `retry`.
 
 ### Commit ownership
 
-The manager that observes a valid outcome validates it, digests every child
+The manager the `running` frame names begins the commit of the outcome its
+attempt published. Another manager serving the job's executor begins it only
+on [manager liveness evidence](#manager-liveness-evidence) for that manager,
+judged with the frame's lease, and on
+[launch end evidence](#launch-end-evidence) for every launch recorded for the
+attempt (or an operator's `launches_ended` attestation), and records
+`previous_manager_id`, `takeover_evidence` and `launch_end_evidence` in the
+`committing` frame, as a commit takeover does. A manager that exits with an
+attempt it owns keeps its record, so its outcome waits for that evidence
+(`manager_process_dead` at once on the same host); one that exits with nothing
+owned removes its record, which is `manager_record_absent` evidence at once.
+The manager that begins the commit validates the outcome, digests every child
 bundle and checks the spawn labels while the marker is still `running`, then
-appends the `committing` frame and renames the marker. The frame names the
+appends the `committing` frame and renames the marker, and removes any
+`commit-wedge.json` of the attempt. The frame names the
 commit's owner and everything a successor needs: `manager_id`, `writer_id`,
 `attempt_id`, `attempt_control`, `outcome_action`, `child_digests` (child job
 key to the bundle digest taken at acceptance), `child_labels`, the `process`
@@ -2142,10 +2314,16 @@ publishes after the first rename is never read.
 **Single owner and takeover.** Only the manager the `committing` frame names
 processes the commit. Another manager serving the job's executor takes it
 over only on [manager liveness evidence](#manager-liveness-evidence) for that
-owner, judged with the frame's lease, by a `committing` → `committing`
-transition whose frame repeats every non-envelope member of the current one
-and sets `manager_id`, `writer_id`, `previous_manager_id`, `takeover_evidence`
-and `reason: "commit_takeover"`. The marker rename decides: of two successors
+owner, judged with the frame's lease, and on
+[launch end evidence](#launch-end-evidence) for every launch recorded for the
+attempt, by a `committing` → `committing` transition whose frame repeats
+every non-envelope member of the current one and sets `manager_id`,
+`writer_id`, `previous_manager_id`, `takeover_evidence`,
+`launch_end_evidence` and `reason: "commit_takeover"`. Without launch end
+evidence the takeover waits, and only an operator's `launches_ended` request
+replaces it: the takeover then records
+`[{"rule": "operator_attested", "request_id": ..., "operator": ..., "operator_key": ...}]`
+(`operator_key` only for a signed request) as its launch end evidence. The marker rename decides: of two successors
 one wins, and the previous owner's own later transition loses. The new owner
 then renames the draft to its own `commit.<g>`, which fences the previous
 owner at its next draft access, and retires the previous owners' transaction
@@ -2154,12 +2332,11 @@ Because a takeover advances the generation, an operator request issued
 against the earlier generation is retired as stale.
 
 A manager does not process a commit while a [confined launch](#confined-launches)
-it tracks for the attempt it ran is unreaped; this holds only for launches
-that manager itself started, and a commit takeover does not consult the launch
-records of other managers. A commit that cannot proceed yet (a predecessor's
-trash that cannot be retired) is deferred and retried, and one that keeps
-failing is reported once and recorded in `commit-wedge.json`; neither is a job
-failure. A commit failing on a malformed outcome or draft fails the job with
+it tracks for the attempt it ran is unreaped. A commit that cannot proceed yet
+(a predecessor's trash that cannot be retired) is deferred and retried, a
+takeover that waits for launch end evidence is retried every pass, and one
+that keeps failing or waiting is reported once and recorded in
+`commit-wedge.json`; none of them is a job failure. A commit failing on a malformed outcome or draft fails the job with
 `protocol_error`. It fails with `transaction_corruption` when its replay fails
 midway, and also before any replay step when a nontransactional job published
 a transaction or the outcome's or manifest's `expected_data_generation` is
@@ -3421,6 +3598,7 @@ Actions and the states they apply to:
 | `cancel` | Cancel; a live attempt uses the fencing and process-termination procedure of [Cancellation](#cancellation). | Any nonterminal state. A second `cancel` of a job in `cancelling` is not an error and changes nothing. |
 | `set_priority` | Rename the marker to a new priority. | Only `submitted`, `ready`, `waiting`, `paused`, `failed` |
 | `pause` | Pause. | Immediately from `submitted`, `ready`, `waiting`; deferred from `claimed`, `running`, `committing` to the next attempt boundary; a handled no-op on `paused`. Terminal outcomes supersede a pending deferred pause. |
+| `launches_ended` | The operator takes responsibility that every launch of the current attempt has ended, on every host; once the attempt's manager is gone, a manager takes the commit over, or begins the commit of the attempt's published outcome, with that attestation as its [launch end evidence](#launch-end-evidence). | `committing`, and `running` with a published outcome. Retired as not actionable by the manager that owns the attempt (it tracks its own launches) and for a running attempt without an outcome; left actionable and retried while the owner may be alive or a launch of the attempt runs on the applying manager's host, which that manager stops first. |
 
 A manager checks only `format` and `format_version` of the envelope and the
 members an action uses; it ignores unknown members. The actions `relocate` and
@@ -3535,8 +3713,9 @@ These cases MUST NOT be retired:
 - a request whose job uses a *runner executor this manager does not serve*, or
   belongs to another user, is left in `requests/ready/`;
 - a request that cannot be decided *right now* (its bytes, ownership or
-  target cannot be observed, or applying it hit an I/O error of unknown
-  outcome) stays in `ready/` or in this manager's claim and is retried; the
+  target cannot be observed, applying it hit an I/O error of unknown
+  outcome, or it is a `launches_ended` request whose commit owner may still
+  be alive) stays in `ready/` or in this manager's claim and is retried; the
   maintenance lock does not hold requests back;
 - a request that violates the protocol, including one naming a nonexistent
   job, is quarantined as malformed input.
