@@ -275,7 +275,7 @@ def test_publish_and_replay_never_revalidates(setup: Setup) -> None:
         ("staged", f"attempts/{ATTEMPT}/outcome.ready/children/jobs/other"),
         ("priority", 1000),
         ("placement", "a//b"),
-        ("job_id", str(uuid.uuid4())),
+        ("job_id", "6b7f3f6e-6f7a-4a4b-9a43-4c1f0d6c8e07"),
         ("initial_state", {}),
     ],
 )
