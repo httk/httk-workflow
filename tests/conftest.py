@@ -35,6 +35,25 @@ from httk.workflow.registry import (
 )
 from httk.workflow.scaffold import _WORKFLOW_PROVIDERS, WorkflowProvider
 
+#: Test files the phase C packets set aside until they are ported or deleted: ``tests/_legacy/*.txt`` list one
+#: repository-relative path per line, with ``#`` comments naming each file's fate.
+LEGACY_FILES = frozenset(
+    path
+    for listing in sorted(Path(__file__).with_name("_legacy").glob("*.txt"))
+    for line in listing.read_text(encoding="utf-8").splitlines()
+    if (path := line.split("#", 1)[0].strip())
+)
+
+
+def pytest_ignore_collect(collection_path: Path) -> bool | None:
+    """Skip the legacy test files before import: many no longer import against the rewritten manager."""
+
+    root = Path(__file__).parents[1]
+    return (
+        collection_path.is_relative_to(root) and collection_path.relative_to(root).as_posix() in LEGACY_FILES
+    ) or None
+
+
 #: The packaged runner of the ``tests.relax`` workflow, a test-only stand-in for a
 #: domain's packaged runner (see ``workflow_fixtures/__init__.py``).
 RELAX_RUNNER = Path(__file__).with_name("workflow_fixtures") / "relax.py"

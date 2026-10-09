@@ -1,49 +1,60 @@
-"""Filesystem workflow task manager for the current core profile."""
+"""The workflow task manager on the filesystem job kernel (plan §7.7, note §6).
 
-import contextlib
+A manager is one registered owner (:func:`httk.workflow._kernel.register_owner`).
+Each :meth:`TaskManager.tick` checks that the owner is alive (fail-stop
+otherwise), heals its own claims, recovers owners proven dead, supervises its
+attempts and commits the ones that ended, and claims eligible ready jobs. Every
+write to a job goes through the :class:`~httk.workflow._kernel.OwnedJob` the
+claim returned; every cross-actor move goes through the kernel.
+"""
+
 import dataclasses
 import logging
 import math
 import os
+import random
 import shlex
 import signal
 import socket
 import stat
 import subprocess
+import sys
 import time
-import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
-from typing import Any, Literal, Self, cast
-
-from httk.core.digests import tree_digest
+from typing import Any, Literal, Self
 
 from . import (
     _attempt_process,
+    _children,
     _confine,
-    _manager_cancellation,
-    _manager_commit,
-    _manager_joins,
+    _data,
+    _death,
+    _fs,
+    _joins,
+    _kernel,
     _manager_launches,
-    _manager_requests,
-    _manager_runners,
     _manager_scheduling,
+    _requests,
+    _store,
+    seals,
 )
 from ._allocation import (
     GPU_HIDING_VARIABLES,
     Allocation,
     Node,
+    RecordedAllocation,
     bind_cpus_setting,
     format_cpulist,
     parse_cpulist,
 )
 from ._attempt_env import attempt_context, runner_environment
-from ._attempt_process import append_log_line, start_gated, write_marker
+from ._attempt_process import start_gated, write_marker
 from ._durations import format_duration
-from ._exchange import ExchangeService
-from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
+from ._job import JobDefinition
+from ._kernel import OwnedJob, Release
 from ._launch_protocol import LaunchConfinement
 from ._manager_binding import (
     Inventory,
@@ -55,112 +66,66 @@ from ._manager_binding import (
     release,
     render_launch,
 )
-from ._manager_launches import AttemptLaunches, LaunchContext
-from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
-from ._txn import manager_gone, owner_token
-from ._util import (
-    json_bytes,
-    read_json,
-    timestamp_seconds,
-    utc_now,
-    write_json_atomic,
+from ._manager_commit import (
+    attempt_budget_failure,
+    cancel_intent,
+    decide_join,
+    declared_runner_steps,
+    failure,
+    failure_intent,
+    outcome_intent,
+    read_outcome,
+    settle,
 )
+from ._manager_launches import AttemptLaunches
+from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
+from ._state import TERMINAL_STATES, StateDoc, read_state_unowned
+from ._util import json_bytes, utc_now
 from .codes import code_environment
+from .compat import runner_path
 from .errors import (
     ConfinementUnavailableError,
     FormatError,
     RunnerResolutionError,
-    TransitionLostError,
+    SealError,
     UnsupportedExtensionError,
     WorkflowError,
 )
-from .executors import AttemptLaunch, PathRunnerExecutor, RunnerExecutor
-from .gc import ALWAYS_SAFE_CATEGORIES
-from .journal import SEGMENT_HEADER, parse_record_ref
-from .manifests import read_maintenance_lock
 from .models import (
-    _MAXIMUM_JOB_DOCUMENT_BYTES as MAXIMUM_JOB_DOCUMENT_BYTES,
-)
-from .models import (
-    ATTEMPTS_DIRECTORY,
-    CARRIED_STATE_MEMBERS,
-    CORE_PROFILE,
     EXCHANGE_EXTENSION,
-    LOGS_DIRECTORY,
-    STATE_KINDS,
-    TERMINAL_KINDS,
-    JobDefinition,
-    Marker,
-    StateFrame,
-    canonical_uuid,
     check_job_placement,
+    expand_runner_command,
     normalize_placement,
     placement_text,
-    validate_attempt_control,
     validate_capacity,
-    validate_process,
 )
-from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
+from .packages import read_build_spec
+from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
-DEFAULT_RUNNER_MODULES = ("httk.workflow",)
-#: The largest fraction of its own lease a manager will go without
-#: heartbeating, whatever heartbeat interval it was configured with. A manager
-#: whose interval exceeds its lease would expire its own claims.
-_MAXIMUM_HEARTBEAT_LEASE_FRACTION = 1.0 / 3.0
-#: How many markers of one kind a single tick processes before deferring the
-#: rest to the next tick. Every bounded pass resumes where it stopped, so a
-#: workspace larger than the bound is served round-robin rather than starved.
-DEFAULT_MAXIMUM_PASS_MARKERS = 256
-#: How many directory entries a single bounded pass visits before deferring the
-#: rest to the next tick, whether or not it has filled its marker budget. It
-#: bounds the cost of discovery itself — a tick can neither materialize nor even
-#: walk an unbounded tree — while the marker budget bounds the work that
-#: discovery feeds. A pass resumes its walk where it stopped on the next tick.
+#: How many ready jobs one claim pass reads before claiming; the next pass resumes after them.
 DEFAULT_DISCOVERY_BUDGET = 4096
-#: The multiple of the lease a takeover waits for when nothing else proves that
-#: the previous attempt has stopped. It is deliberately larger than one lease:
-#: an expired lease alone only says that a manager is slow.
-DEFAULT_TAKEOVER_GRACE_FACTOR = 2.0
-#: How long a cancelled attempt has to exit after ``SIGTERM`` before the
-#: process group is killed.
+#: How long a stopped attempt has to exit after ``SIGTERM`` before its process group is killed.
 DEFAULT_CANCEL_GRACE_SECONDS = 10.0
-#: Fractions of the lease at which a long tick is reported as a warning and as
-#: an error. A tick that spends its whole lease scanning invites a peer to take
-#: over jobs this manager is still running.
-_TICK_WARNING_FRACTION = 0.5
-_TICK_ERROR_FRACTION = 0.9
-#: What a `cancelling` frame keeps beyond the carried activation members. Any
-#: manager may have to finish a cancellation another one started, including one
-#: that died holding it, so the frame names the attempt, where its control
-#: directory is, and who was running it.
-_CANCELLING_MEMBERS = (
-    *CARRIED_STATE_MEMBERS,
-    "attempt_control",
-    "manager_id",
-    "writer_id",
-    "lease_seconds",
-    "workdir",
-    "started_at",
-    "process",
-    "operator",
-    "operator_key",
-    "operator_reason",
-    "request_id",
-)
-_ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
+#: Read by the legacy CLI until C5b rewrites it; this manager has no takeover.
+DEFAULT_TAKEOVER_GRACE_FACTOR = 2.0
 #: How long a failed Bubblewrap probe stands before the manager probes again.
 CONFINE_REPROBE_SECONDS = 60.0
-#: How often every manager collects expired transfer receipts and aged
-#: acknowledgements (``transfer_receipts``, ``transfer_records``), whatever its
-#: ``gc_interval``: sustained transfer traffic adds one of each per transfer.
-TRANSFER_RECORDS_GC_SECONDS = 3600.0
+#: At most this many foreign owners are probed per tick (plan §7.7).
+_PROBES_PER_TICK = 3
 _ENROLLED_MESSAGE = (
     "this workspace has the exchange extension enabled (WORKSPACE/exchange is written by clients), so every "
     "manager on it must confine its attempts: set manager.confine=bwrap as a workspace setting or pin it with "
     "--setting manager.confine=bwrap"
 )
+#: Built-in realizations run the runner file shipped beside their consumer package.
+_BUILTIN_RUNNERS = {
+    "cwl": ("httk.workflow.compat.cwl", "cwl_runner.py"),
+    "pwd": ("httk.workflow.compat.pwd", "pwd_runner.py"),
+    "jobflow": ("httk.workflow.compat.jobflow", "jobflow_runner.py"),
+    "httk-v1": ("httk.workflow.compat.v1", "v1_runner.py"),
+}
 
 
 class _ConfinementBlocked(Exception):
@@ -181,50 +146,18 @@ class _Confinement:
     launch: LaunchConfinement | None
 
 
-def _attempt_outcome_action(job_dir: JobDirectory, control_name: str) -> str:
-    """Return an attempt's published action, or ``none`` while it is absent or unreadable.
-
-    The outcome is read from the newest commit draft, or ``outcome.ready``
-    before a commit renamed it (:func:`~httk.workflow._manager_commit.draft_names`).
-    """
-
-    try:
-        with job_dir.directory(control_name) as control:
-            for name in _manager_commit.draft_names(control):
-                if control.exists_dir(name):
-                    action = control.read_json(f"{name}/outcome.json", CONTROL_DOCUMENT_LIMIT).get("action")
-                    return action if isinstance(action, str) else "none"
-    except (FormatError, OSError):
-        pass
-    return "none"
-
-
-def _append_attempt_event(logs: JobDirectory, record: Mapping[str, object], job_key: str) -> None:
-    """Append the manager's attempt evidence without affecting launch progress.
-
-    The line is exactly what :meth:`~httk.workflow.runtime_builders.RunLog.append_record`
-    writes, appended through the pinned log directory with one write.
-    """
-
-    try:
-        logs.append("runlog.jsonl", json_bytes(record) + b"\n")
-    except Exception as exc:
-        _LOGGER.warning("cannot append the attempt runlog event for %s: %s", job_key, exc)
-
-
 @dataclass(frozen=True)
 class WorkCensus:
     """What one manager's scan found, tagged by why each job is or is not its work.
 
-    ``ready_blocked`` groups the ready and unregisterable-submitted jobs this
-    manager cannot progress by the requirement it lacks — ``executor``, ``pool``,
-    ``capability``, ``requirements`` (an unmet ``requires`` entry of the job, checked in
-    this manager's environment), ``resources``, ``time`` (a ``mintime`` beyond the
-    time left before this manager's drain start, or ``drain_point`` once it has passed), or
-    ``confinement`` (every claimable job while a host or operator condition holds back
-    confined attempts) — mapping each requirement to the count of jobs it would
-    turn away. Every such job is attributed to exactly one requirement, so the
-    grouped counts sum to :attr:`ready_blocked_total`.
+    ``ready_blocked`` groups the ready jobs this manager cannot claim by the
+    requirement it lacks — ``pool``, ``capability``, ``calls`` (the workflow or
+    a workflow it calls is not installed or not built here), ``requirements``
+    (an unmet ``requires`` of the installed workflow, checked in this manager's
+    environment), ``resources``, ``time`` (a ``mintime`` beyond the time left
+    before this manager's drain start, or ``drain_point`` once it has passed),
+    or ``confinement`` — mapping each requirement to the count of jobs it turns
+    away. Every such job is attributed to exactly one requirement.
 
     :param succeeded: Terminal jobs that succeeded.
     :param failed: Terminal jobs that failed.
@@ -232,12 +165,10 @@ class WorkCensus:
     :param ready_blocked: Requirement kind to requirement to blocked job count.
     :param waiting: Jobs waiting on their join children.
     :param paused: Jobs paused for an operator.
-    :param actionable_count: Jobs this manager can still make progress on, plus its outstanding exchange work.
-    :param unreadable: Committing or cancelling jobs whose definition cannot be read.
-    :param exchange: Exchange work this manager still has to do: inbox bundles to
-        adopt, finished exchange trees to return, adoptions and ejections in flight.
-    :param outcomes_waiting: Published outcomes of other managers' attempts that wait for that manager,
-        or for evidence that it is gone and that the attempt's launches ended.
+    :param actionable_count: Jobs this manager can still make progress on.
+    :param unreadable: Jobs whose definition cannot be read.
+    :param exchange: Exchange work this manager still has to do.
+    :param outcomes_waiting: Outcomes that wait for another owner.
     """
 
     succeeded: int
@@ -253,25 +184,19 @@ class WorkCensus:
 
     @property
     def actionable(self) -> bool:
-        """Whether this manager still has work it can make progress on.
-
-        :return: Whether any counted job is this manager's to progress.
-        """
+        """Whether this manager still has work it can make progress on."""
 
         return self.actionable_count > 0
 
     @property
     def ready_blocked_total(self) -> int:
-        """The number of jobs no requirement of this manager can claim here.
-
-        :return: The total blocked job count.
-        """
+        """The number of jobs no requirement of this manager can claim here."""
 
         return sum(sum(group.values()) for group in self.ready_blocked.values())
 
     def _blocked_groups(self) -> list[str]:
         groups: list[str] = []
-        for kind in ("executor", "pool", "capability", "requirements", "calls", "resources", "time", "confinement"):
+        for kind in ("pool", "capability", "requirements", "calls", "resources", "time", "confinement"):
             for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
                 label = {
                     "resources": f"resource={name}",
@@ -332,15 +257,14 @@ class WorkCensus:
 
         pools = sorted(self.ready_blocked.get("pool", {}))
         capabilities = sorted(self.ready_blocked.get("capability", {}))
-        executors = sorted(self.ready_blocked.get("executor", {}))
         resources = sorted(self.ready_blocked.get("resources", {}))
         requirements = sorted(self.ready_blocked.get("requirements", {}))
         calls = sorted(self.ready_blocked.get("calls", {}))
         time_advice = self.time_advice()
         timed = time_advice is not None
-        if not (pools or capabilities or executors or resources or requirements or calls):
+        if not (pools or capabilities or resources or requirements or calls):
             return time_advice
-        if resources and not (pools or capabilities or executors or requirements or calls or timed):
+        if resources and not (pools or capabilities or requirements or calls or timed):
             count = sum(self.ready_blocked["resources"].values())
             names = ", ".join(f"`{name}`" for name in resources)
             resource_flags = " ".join(f"--worker-resource {name} COUNT" for name in resources)
@@ -362,23 +286,14 @@ class WorkCensus:
             flags += [f"--worker-resource {name} COUNT" for name in resources]
         if flags:
             remedies.append("start a manager with " + " ".join(flags))
-        # An executor is installed, not passed as a flag, so it gets its own
-        # remedy clause rather than being dropped when a pool or capability also
-        # mismatches.
-        if executors:
-            lacks.append("executor(s) " + ",".join(executors))
-            remedies.append("run a manager that has executor(s) " + ",".join(executors) + " installed")
         if requirements:
             lacks.append("the job requirement(s) " + "; ".join(requirements))
             remedies.append(
                 "install the required distribution versions in this manager's environment and restart the manager"
             )
         if calls:
-            lacks.append("the called workflow(s) " + "; ".join(calls))
-            remedies.append(
-                "install or build the called workflows on this machine as each problem says "
-                "(a running manager notices within a minute)"
-            )
+            lacks.append("the workflow(s) " + "; ".join(calls))
+            remedies.append("install or build the workflows in the workspace as each problem says")
         remedy = "; ".join(remedies) if remedies else "start a manager that serves them"
         advice = (
             f"{self.ready_blocked_total - sum(self.ready_blocked.get('time', {}).values())} job(s) cannot be "
@@ -395,19 +310,8 @@ class WorkCensus:
         """
 
         base = f"workspace is not idle after {seconds:.0f}s"
-        parts: list[str] = []
         advice = self.mismatch_advice()
-        if advice is not None:
-            parts.append(advice)
-        if self.unreadable:
-            parts.append(
-                f"{self.unreadable} job(s) have an unreadable definition — repair them with 'httk workspace fsck'"
-            )
-        if self.exchange:
-            parts.append(
-                f"{self.exchange} exchange item(s) are still to be adopted or returned (see the manager log), "
-                "or pass --idle to keep serving"
-            )
+        parts = [advice] if advice is not None else []
         if not parts:
             parts.append(
                 "jobs are still running or claimable — rerun, raise --idle-timeout, or pass --idle to keep serving"
@@ -418,11 +322,8 @@ class WorkCensus:
 class NotIdleError(TimeoutError):
     """A manager did not become idle within its timeout.
 
-    It carries the :class:`~httk.workflow.manager.WorkCensus` of the final
-    scan so a caller can turn the failure into advice that names the actual
-    pool, capability, or executor mismatches rather than a generic hint. It
-    subclasses :class:`TimeoutError`, so existing ``except TimeoutError``
-    callers keep working.
+    It carries the :class:`~httk.workflow.manager.WorkCensus` of the final scan,
+    so a caller can name the actual mismatches. It subclasses :class:`TimeoutError`.
 
     :param census: The work census of the manager's last scan.
     """
@@ -434,111 +335,101 @@ class NotIdleError(TimeoutError):
 
 @dataclass
 class RunningAttempt:
-    """Track one locally running job attempt.
+    """Track one locally running attempt of an owned job.
 
-    :param marker: Identify the claimed job marker.
-    :param process: Track the launched process group.
-    :param attempt_id: Identify the running attempt.
-    :param resources: Reserve these resources while the attempt is running.
-    :param outcome_action: Remember the published action if control cleanup wins
-        the race with process reaping.
-    :param cleanup_pending: Mark a non-terminal commit waiting for process reap.
-    :param cleanup_request: Retain the commit transition needed at process reap.
-    :param reaped: Record that this manager knows the process return code.
-    :param fenced: Mark an attempt whose marker ownership is already resolved.
-    :param cancelling: Mark an attempt currently being cancelled.
-    :param owner_uid: Record the operating-system owner when known.
-    :param started: Record the monotonic launch time the ``maxtime`` is measured from.
+    :param owned: The job's handle.
+    :param job: The job definition.
+    :param process: The launcher process; its pid is its process group.
+    :param attempt_id: The attempt.
+    :param control: The attempt directory ``attempts/<attempt-id>``.
+    :param resources: The resources reserved while the attempt runs.
+    :param started: The monotonic launch time the ``maxtime`` is measured from.
     :param maxtime: Stop the attempt after this many seconds, or never when ``None``.
-    :param timeout_kill_at: Escalate a timed-out attempt to ``SIGKILL`` at this
-        monotonic time, or ``None`` once escalated or before a timeout.
-    :param timed_out: Mark an attempt this manager stopped for exceeding its ``maxtime``.
-    :param interrupted: Mark an attempt this manager signalled while draining.
-    :param placement: The nodes and slots this attempt was given, or ``None``
-        when the manager has no node inventory; returned to the inventory when
-        the attempt stops being tracked.
-    :param sweep_kill_at: Escalate an untracked (fenced or orphaned) attempt that
-        outlives its ``SIGTERM`` to ``SIGKILL`` at this monotonic time, or
-        ``None`` before the first ``SIGTERM``.
-    :param confined: Mark an attempt started inside the attempt sandbox.
-    :param launches: The confined launches of a confined attempt, or ``None``
-        for an unconfined one; the attempt stays tracked until all are reaped.
+    :param timeout_kill_at: Escalate a timed-out attempt to ``SIGKILL`` at this monotonic time.
+    :param timed_out: Whether this manager stopped the attempt for exceeding its ``maxtime``.
+    :param interrupted: Whether this manager signalled the attempt while draining or closing.
+    :param placement: The nodes and slots the attempt was given, or ``None`` without a node inventory.
+    :param confined: Whether the attempt runs in the attempt sandbox.
+    :param launches: The confined launches of the attempt (C2b), or ``None``.
+    :param cancel: The ``cancel`` request stopping the attempt, which then commits as cancelled.
     """
 
-    marker: Marker
+    owned: OwnedJob
+    job: JobDefinition
     process: subprocess.Popen[bytes]
-    control: Path
     attempt_id: str
+    control: Path
     resources: Mapping[str, int]
     started: float
     maxtime: int | None
-    outcome_action: str | None = None
-    cleanup_pending: bool = False
-    cleanup_request: tuple[Marker, StateFrame, Marker] | None = None
-    reaped: bool = False
-    # Set once this attempt's outcome has been committed or its marker has been
-    # fenced: the process may still be exiting, and reaping it is then routine
-    # rather than the discovery of an orphan.
-    fenced: bool = False
-    # Set while a cancellation is stopping this attempt. It stays tracked until
-    # its exit has been verified, because the verification is exactly what the
-    # cancelled state has to record.
-    cancelling: bool = False
-    owner_uid: int | None = None
     timeout_kill_at: float | None = None
     timed_out: bool = False
     interrupted: bool = False
     placement: Placement | None = None
-    sweep_kill_at: float | None = None
     confined: bool = False
     launches: AttemptLaunches | None = None
+    cancel: _requests.Request | None = None
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
 
 
-class TaskManager:
-    """Execute and recover jobs in one workflow workspace.
+def _real_dir(path: Path) -> bool:
+    """Return whether *path* is a real directory; ``False`` when absent, an error for anything else."""
 
-    :param workspace: Attach the manager to this workspace. The manager needs an instance
-        of its own: it installs its journal writer as the instance's writer scope.
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(mode):
+        raise FormatError(f"{path} is a symlink or not a directory")
+    return True
+
+
+def _make_dir(path: Path) -> Path:
+    """Create *path* when absent; refuse a symlink or non-directory the job left there."""
+
+    if not _real_dir(path):
+        os.mkdir(path)
+    return path
+
+
+def _text(mapping: Mapping[str, object] | None, key: str) -> str | None:
+    value = None if mapping is None else mapping.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _number(mapping: Mapping[str, object] | None, key: str) -> int | None:
+    value = None if mapping is None else mapping.get(key)
+    return value if type(value) is int else None
+
+
+class TaskManager:
+    """Execute and recover jobs in one workflow workspace as one registered owner.
+
+    :param workspace: The workspace.
     :param pools: Accept jobs assigned to these pools.
     :param capabilities: Advertise these execution capabilities.
     :param resources: Advertise these integer resource capacities.
     :param maximum_workers: Limit the number of local attempts.
-    :param lease_seconds: Override the workspace claim lease.
-    :param heartbeat_interval: Set the requested manager heartbeat interval.
-    :param unsafe_persistent_takeover: Permit takeover based on persistent evidence.
-    :param unsafe_isolated_takeover: Permit takeover based on isolated evidence.
-    :param takeover_grace_factor: Multiply the lease to determine takeover grace.
-    :param executors: Add runner executors to the built-in executor.
-    :param allowed_executors: Restrict jobs to these installed executors.
+    :param heartbeat_interval: Seconds between informational heartbeats.
     :param accept_any_pool: Accept jobs without requiring a configured pool match.
     :param join_grace_seconds: Wait this long for unresolved join children.
-    :param cancel_grace_seconds: Wait this long after cancellation before killing.
-    :param maximum_pass_markers: Bound markers processed in one scheduling pass.
-    :param discovery_budget: Bound entries visited in one scheduling pass.
+    :param cancel_grace_seconds: Wait this long after ``SIGTERM`` before killing a stopped attempt.
+    :param discovery_budget: Read at most this many ready jobs per claim pass.
     :param placement_prefixes: Restrict scheduling to these placement subtrees.
-    :param runner_search_paths: Search these locations for installed runners.
-    :param runner_modules: Search these module prefixes for packaged runners.
-    :param gc_interval: Run background collection at this interval when supplied.
-    :param on_attached: Call this after the manager directory and heartbeat are
-        published, before startup collection runs.
+    :param gc_interval: Accepted for compatibility; background collection returns with C5a.
+    :param on_attached: Called with the owner id once the owner is registered.
     :param end_time: The epoch second this manager's allocation ends, or ``None`` when unknown.
     :param deadline_margin: Stop claiming work this many seconds before *end_time*.
-    :param allocation: The probed allocation this manager runs inside, or ``None``;
-        recorded in ``manager.json``. Its capacity and end time are already folded
-        into *resources* and *end_time* by the caller.
+    :param allocation: The probed allocation this manager runs inside, or ``None``; recorded in ``owner.json``.
     :param setting_overrides: Pinned ``manager.confine``, ``manager.confine.block_mpi_spawn``,
-        ``manager.launch_template``, ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings that win over the
-        workspace settings for this manager's lifetime.
-    :raises ValueError: If a manager limit, a pinned setting or the effective
-        confinement settings are invalid, or executor configuration conflicts.
-    :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
-    :raises httk.workflow.errors.ConfinementUnavailableError: If the effective
-        ``manager.confine`` is ``bwrap`` and Bubblewrap cannot build the attempt
-        sandbox here, or the workspace has the exchange extension and the
-        effective ``manager.confine`` is not ``bwrap``.
+        ``manager.launch_template``, ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings
+        that win over the workspace settings for this manager's lifetime.
+    :raises ValueError: If a manager limit, a pinned setting or the effective confinement settings are invalid.
+    :raises httk.workflow.errors.ConfinementUnavailableError: If the effective ``manager.confine`` is ``bwrap``
+        and Bubblewrap cannot build the attempt sandbox here, or the workspace has the exchange extension and
+        attempts are not confined.
     """
 
     def __init__(
@@ -549,21 +440,12 @@ class TaskManager:
         capabilities: Sequence[str] = (),
         resources: Mapping[str, int] | None = None,
         maximum_workers: int = 1,
-        lease_seconds: float | None = None,
         heartbeat_interval: float = 30.0,
-        unsafe_persistent_takeover: bool = False,
-        unsafe_isolated_takeover: bool = False,
-        takeover_grace_factor: float = DEFAULT_TAKEOVER_GRACE_FACTOR,
-        executors: Sequence[RunnerExecutor] = (),
-        allowed_executors: Sequence[str] | None = None,
         accept_any_pool: bool = False,
         join_grace_seconds: float = 3600.0,
         cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
-        maximum_pass_markers: int = DEFAULT_MAXIMUM_PASS_MARKERS,
         discovery_budget: int = DEFAULT_DISCOVERY_BUDGET,
         placement_prefixes: Sequence[str] = (),
-        runner_search_paths: Iterable[str | os.PathLike[str]] = (),
-        runner_modules: Iterable[str] = DEFAULT_RUNNER_MODULES,
         gc_interval: float | None = None,
         on_attached: Callable[[str], None] | None = None,
         end_time: float | None = None,
@@ -587,20 +469,10 @@ class TaskManager:
             raise ValueError("join_grace_seconds cannot be negative")
         if cancel_grace_seconds < 0:
             raise ValueError("cancel_grace_seconds cannot be negative")
-        if maximum_pass_markers < 1:
-            raise ValueError("maximum_pass_markers must be positive")
-        if takeover_grace_factor < 1.0:
-            raise ValueError("takeover_grace_factor cannot be shorter than one lease")
         if end_time is not None and not (math.isfinite(end_time) and end_time > 0):
             raise ValueError("end_time must be a finite positive epoch second")
         if not (math.isfinite(deadline_margin) and deadline_margin >= 0):
             raise ValueError("deadline_margin cannot be negative")
-        if workspace.core_profile != CORE_PROFILE:
-            # Serving a workspace means writing it, so an older profile is
-            # refused here as well as at attach time.
-            raise UnsupportedExtensionError(
-                f"cannot serve a {workspace.core_profile!r} workspace: this manager writes {CORE_PROFILE!r}"
-            )
         overrides = dict(setting_overrides or {})
         for key, value in overrides.items():
             if not isinstance(key, str) or not _confine.is_override_key(key) or not isinstance(value, str):
@@ -612,250 +484,100 @@ class TaskManager:
         self.workspace = workspace
         #: Pinned settings that win over the workspace settings for this manager's lifetime.
         self.setting_overrides: dict[str, str] = overrides
-        # The functional Bubblewrap probe per probed sandbox (executable,
-        # network isolation, user-namespace block): whether attempts block
-        # nested user namespaces, or why confinement is unavailable, and when
-        # it was probed. A manager started confined probes before it attaches,
-        # so an unusable host refuses the start; a workspace switched to bwrap
-        # later is probed at its next claim pass, and a failed probe is
-        # repeated at most every CONFINE_REPROBE_SECONDS.
+        # The functional Bubblewrap probe per probed sandbox, and the confinement settings last validated.
         self._bwrap_probes: dict[tuple[Path, bool, tuple[str, ...]], tuple[bool | str, float]] = {}
-        # The confinement settings last validated, keyed by the confinement
-        # keys of the effective settings, or why they are invalid.
         self._confine_checked: tuple[tuple[tuple[str, str], ...], _confine.ConfineSettings | str] | None = None
         self._confinement(self._effective_settings(), at_start=True)
         self.uid = os.getuid()
-        # Ordered roots for jobs whose runner.source is installed, plus the
-        # module prefixes the reserved pkg: form may name. Both are deployment
-        # policy of this manager and never taken from a job.
-        self.runner_search_paths: tuple[Path, ...] = tuple(Path(item).expanduser() for item in runner_search_paths)
-        self.runner_modules: tuple[str, ...] = tuple(runner_modules)
+        self.hostname = socket.gethostname()
         self.pools = frozenset(pools)
         self.capabilities = frozenset(capabilities)
         self.resources = validated_resources
         self.maximum_workers = maximum_workers
         self.end_time = end_time
         self.allocation = allocation
-        # Per-node free capacity when the allocation lists its nodes; the
-        # placed labels are then scheduled by it instead of by counters.
+        # Per-node free capacity when the allocation lists its nodes; the placed labels are then scheduled by it.
         self._inventory = Inventory.from_allocation(allocation, validated_resources)
         if self._inventory is None and allocation is not None and allocation.nodes:
             _LOGGER.warning(
                 "the manager capacity exceeds the allocation's nodes; scheduling by counts only, without placement"
             )
         if self._inventory is not None:
-            # Advertise what the inventory can place, such as only the kept
-            # nodes' procs under --worker-resource nodes 1.
             totals = self._inventory.empty().free()
             for label in self._inventory.labels & self.resources.keys():
                 self.resources[label] = totals[label]
-        # Placements of attempts whose launch is in progress, by attempt id.
-        self._unlaunched: dict[str, Placement] = {}
-        # The epoch second this manager stops claiming work that cannot fit, or
-        # None when its allocation end is unknown.
+        #: The epoch second this manager stops claiming work that cannot fit, or ``None`` when unknown.
         self.drain_start = None if end_time is None else end_time - deadline_margin
-        # A lease is workspace policy unless this manager overrides it, so two
-        # managers of one workspace expire each other's claims consistently.
-        self.lease_seconds = workspace.policy.lease_seconds if lease_seconds is None else lease_seconds
         self.heartbeat_interval = heartbeat_interval
-        self.unsafe_persistent_takeover = unsafe_persistent_takeover
-        self.unsafe_isolated_takeover = unsafe_isolated_takeover
-        self.takeover_grace_factor = takeover_grace_factor
         self.join_grace_seconds = join_grace_seconds
         self.cancel_grace_seconds = cancel_grace_seconds
-        self.maximum_pass_markers = maximum_pass_markers
         self.discovery_budget = discovery_budget
-        # Placement subtrees this manager restricts every scheduling scan to, as
-        # deployment policy like pools and capabilities. An empty assignment is
-        # the whole workspace. Overlapping assignments stay safe on the
-        # rename-claim; disjoint ones simply stop two managers scanning each
-        # other's trees. The values are project-owned placement semantics; the
-        # engine only validates and filters on them.
         self.placement_prefixes: tuple[PurePosixPath, ...] = tuple(
             normalize_placement(prefix) for prefix in placement_prefixes
         )
         # The empty placement covers the whole state tree: it is no restriction at all.
         if any(not prefix.parts for prefix in self.placement_prefixes):
             self.placement_prefixes = ()
-        # Background collection is off unless a deployment asks for it. It is a
-        # housekeeping timer of this manager, never part of a scheduling
-        # decision: it runs at the end of a tick, after every pass has decided
-        # what to do, and at most once per interval.
-        self.gc_interval = gc_interval
-        self._last_gc = 0.0
-        # The startup collection covers the receipts; the transfer records follow one interval later.
-        self._last_transfer_gc = time.monotonic()
-        executors = [PathRunnerExecutor(), *executors]
-        self.executors = {executor.name: executor for executor in executors}
-        if len(self.executors) != len(executors):
-            raise ValueError("runner executor names must be unique")
-        self.allowed_executors = (
-            frozenset(self.executors) if allowed_executors is None else frozenset(allowed_executors)
-        )
-        unknown_allowed = self.allowed_executors - self.executors.keys()
-        if unknown_allowed:
-            raise ValueError(f"allowed runner executors are not installed: {', '.join(sorted(unknown_allowed))}")
         self.accept_any_pool = accept_any_pool
-        self.manager_id = str(uuid.uuid4())
-        self.hostname = socket.gethostname()
-        # Every manager without a placement-prefix or pool restriction serves
-        # the exchange of a workspace that has the extension (job debug's
-        # scoped workspace never does); whether the extension is enabled, and
-        # attempts are confined, is decided again on every tick.
-        self._exchange: ExchangeService | None = None
-        if (
-            not self.placement_prefixes
-            and (self.accept_any_pool or "default" in self.pools)
-            and workspace._serves_exchange
-        ):
-            self._exchange = ExchangeService(workspace, owner=owner_token(self.manager_id), pace=self.heartbeat)
-        self.writer = workspace.open_journal_writer()
-        self._manager_dir = workspace.control / "managers" / self.manager_id
-        self._manager_dir.mkdir(parents=True, exist_ok=False)
+        self.gc_interval = gc_interval
         self._running: dict[str, RunningAttempt] = {}
-        # The monotonic time of the last scan of the confined attempts' launch
-        # directories; scans are rate limited, launch supervision is not.
-        self._last_launch_scan = -math.inf
-        # Attempts reaped just before their running marker became committing.
-        # This distinguishes a local process exit from an inherited commit;
-        # entries live only until the commit cleanup decision is made.
-        self._reaped_attempts: set[str] = set()
-        # Running markers whose ownership could not be checked this pass are
-        # preserved from orphan sweeping until the next pass can retry them.
-        self._indeterminate_ownership: set[str] = set()
-        # Anomaly keys whose committing-wedge sidecar has already been written,
-        # so a permanently stuck commit records its error into the attempt
-        # control directory once rather than on every poll.
-        self._commit_wedge_recorded: set[str] = set()
-        # Bounded pass name -> its streaming walker. Each keeps a per-root cursor
-        # and rotation in memory so the next tick resumes where this one stopped
-        # and no placement subtree starves; nothing is written to disk.
-        self._streams: dict[str, MarkerStream] = {}
-        # Attempt id -> the monotonic instant after which a cancelled attempt
-        # that has not exited is killed.
-        self._cancel_kill_at: dict[str, float] = {}
-        # Attempt ids whose unverifiable cancellation has already been recorded,
-        # so a foreign-host cancellation warns and journals once, not per tick.
-        self._cancel_unverified: set[str] = set()
-        # Request file names this manager cannot act on but another manager
-        # may, remembered so they are not read again on every tick.
-        self._deferred_requests: set[str] = set()
-        self._last_heartbeat = 0.0
-        # Repeating anomaly key -> last reported text, so a permanently broken
-        # job is reported loudly once instead of once per poll interval.
         self._reported: dict[str, str] = {}
-        # Manager liveness evidence by (manager id, lease), observed once per tick.
-        self._liveness: dict[tuple[str | None, float], dict[str, object] | None] = {}
-        # When this manager last looked for requests claimed by departed managers (monotonic).
-        self._claim_recovery_at: float | None = None
-        # Live launches recorded on this host that launch end evidence is stopping, by record: when the
-        # first SIGTERM was sent (monotonic) and whether SIGKILL followed.
-        self._launch_signals: dict[str, tuple[float, bool]] = {}
-        # Whether a recorded allocation ended, by allocation: when it was asked (monotonic) and the answer.
-        self._allocation_answers: dict[str, tuple[float, bool | None]] = {}
-        # Every launch record of this uid's managers by attempt, read once per tick (a one-tuple once read,
-        # holding None when unreadable).
-        self._launch_records: tuple[dict[str, list[Any]] | None] | None = None
-        # The closed marker of an owner's manager.json, by manager id, observed once per tick.
-        self._closed_owners: dict[str, dict[str, object] | None] = {}
-        self._reset_drain()
+        # The claim pass resumes its window of ready jobs after this cursor.
+        self._cursor: str | None = None
+        # Installed workflows and their closure problems, by workflow id, for one tick.
+        self._workflows: dict[str, tuple[_store.Installed | None, str | None]] = {}
+        self._scheduler = _death.SchedulerQueries()
+        # The joins pass: its cursor, and when each join child was first not found (by job id).
+        self._join_cursor: str | None = None
+        self._unresolved: dict[str, float] = {}
+        # Request ids that wait for a boundary (seal, unseal, eject until phase D), so their jobs are not
+        # claimed on every tick; and the listings of one tick, shared by the requests and joins passes.
+        self._deferred: set[str] = set()
+        self._cache = _kernel.ListingCache()
+        self._recorded_allocation = None if allocation is None else RecordedAllocation.from_allocation(allocation)
+        self._lost = False
         self._closed = False
-        write_json_atomic(
-            self._manager_dir / "manager.json",
-            {
-                "format": "httk-workflow-manager",
-                "format_version": 2,
-                "manager_id": self.manager_id,
-                "writer_id": self.writer.writer_id,
-                "hostname": self.hostname,
-                "pid": os.getpid(),
-                "uid": self.uid,
+        self._last_heartbeat = time.monotonic()
+        self._reset_drain()
+        self.owner = _kernel.register_owner(
+            workspace,
+            kind="manager",
+            label=f"manager on {self.hostname}",
+            allocation=None if self._recorded_allocation is None else self._recorded_allocation.as_json(),
+            advertised={
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
-                "placement_prefixes": [placement_text(prefix) for prefix in self.placement_prefixes],
-                "executors": sorted(self.allowed_executors),
-                "runner_search_paths": [str(path) for path in self.runner_search_paths],
-                "runner_modules": list(self.runner_modules),
-                "accept_any_pool": self.accept_any_pool,
+                "prefixes": [placement_text(prefix) for prefix in self.placement_prefixes],
                 "resources": dict(self.resources),
-                "end_time": self.end_time,
-                "drain_start": self.drain_start,
-                "allocation": None if allocation is None else allocation.kind,
-                "nodes": [] if allocation is None else [node.host for node in allocation.nodes],
-                "started_at": utc_now(),
             },
-            durable=workspace.durable,
         )
-        self.heartbeat(force=True)
+        #: This manager's owner id.
+        self.manager_id = self.owner.owner_id
         if on_attached is not None:
             on_attached(self.manager_id)
         _LOGGER.info(
-            "manager %s attached to workspace %s as %s pools=%s capabilities=%s executors=%s workers=%d",
+            "manager %s attached to workspace %s as %s pools=%s capabilities=%s workers=%d",
             self.manager_id,
-            self.workspace.workspace_id,
+            workspace.workspace_id,
             self.hostname,
             ",".join(sorted(self.pools)) or "-",
             ",".join(sorted(self.capabilities)) or "-",
-            ",".join(sorted(self.allowed_executors)),
             self.maximum_workers,
-            extra=self._event("manager_started", workspace=str(self.workspace.root)),
+            extra=self._event("manager_started", workspace=str(workspace.root)),
         )
-        with workspace._journal_writer_scope(self.writer):
-            self._recover_transfers()
         if self.drain_start is not None and self.drain_start <= time.time():
             _LOGGER.warning(
                 "the allocation's drain point passed %.0f s before this manager started; it will claim nothing",
                 time.time() - self.drain_start,
                 extra=self._event("drain_point_passed", end_time=self.end_time),
             )
-        for name in self.allowed_executors:
-            try:
-                self.executors[name].reconcile(self.workspace)
-            except (WorkflowError, OSError) as exc:
-                # Executor views are derived and must never prevent the manager
-                # from attaching to authoritative marker state.
-                _LOGGER.warning(
-                    "runner executor %s could not reconcile its derived view: %s",
-                    name,
-                    exc,
-                    extra=self._event("executor_error", executor=name),
-                )
-                continue
-        self._warn_unmatched_placement_prefixes()
-        self._collect_garbage("startup", categories=ALWAYS_SAFE_CATEGORIES)
-        # From here on every transfer transition this manager drives (the
-        # exchange steps) appends to its own writer; close() uninstalls it.
-        self._writer_scope = contextlib.ExitStack()
-        self._writer_scope.enter_context(workspace._journal_writer_scope(self.writer))
+        if gc_interval is not None:
+            _LOGGER.info("background collection is not run by this manager yet (it returns with C5a)")
+        if EXCHANGE_EXTENSION in workspace.extensions:
+            _LOGGER.info("this manager does not serve the workspace exchange yet (it returns in phase D)")
 
     def __repr__(self) -> str:
         return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
-
-    def _warn_unmatched_placement_prefixes(self) -> None:
-        """Warn once for each configured prefix that matches no state subtree.
-
-        A prefix that names nothing may be a typo, or simply a manager started
-        before its jobs are submitted. The wording covers both honestly — the
-        manager will serve that subtree once work arrives there — while still
-        surfacing the common typo as one diagnosable line per empty prefix.
-        """
-
-        for prefix in self.placement_prefixes:
-            # ponytail: short-circuit on the first marker below the prefix; a
-            # populated subtree costs one directory read, an empty one a full
-            # (bounded, one-time) walk.
-            try:
-                found = next(iter(self.workspace.walk_markers(roots=(prefix,))), None)
-            except (WorkflowError, OSError) as exc:
-                _LOGGER.debug("cannot check placement prefix %s: %s", placement_text(prefix), exc)
-                continue
-            if found is None:
-                _LOGGER.warning(
-                    "placement prefix %s currently matches no job in this workspace; this manager will serve that "
-                    "subtree when work arrives there, and claim nothing until then — check it if this is unexpected",
-                    placement_text(prefix),
-                    extra=self._event("placement_prefix_empty", placement_prefix=placement_text(prefix)),
-                )
 
     def __enter__(self) -> Self:
         return self
@@ -863,716 +585,11 @@ class TaskManager:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def close(self) -> None:
-        """Close local tracking and clean up after a clean manager exit."""
-
-        if self._closed:
-            return
-        self._writer_scope.close()
-        clean = not self._running
-        if clean:
-            try:
-                clean = not self._has_live_owned_marker()
-            except Exception as exc:
-                _LOGGER.warning("cannot verify manager-owned live markers: %s", exc)
-                clean = False
-        if clean:
-            self._collect_garbage("shutdown")
-        # Attempts may outlive a clean exit. Their launch-lock directories on host tmpfs go with the
-        # manager: no manager serves their launches any more, and a surviving client keeps working on
-        # its already-open lock descriptor.
-        for local in self._running.values():
-            _manager_launches.forget(self, local)
-        self._running.clear()
-        try:
-            self.writer.close()
-        finally:
-            self._closed = True
-            if clean:
-                self._remove_empty_journal_writer()
-                self._remove_manager_directory()
-            else:
-                self._record_closed()
-
-    def _record_closed(self) -> None:
-        """Mark this manager's record closed: another manager may begin and take over its commits."""
-
-        record_path = self._manager_dir / "manager.json"
-        try:
-            write_json_atomic(record_path, {**read_json(record_path), "closed_at": utc_now()})
-        except (WorkflowError, OSError) as exc:
-            _LOGGER.warning("cannot mark manager %s closed: %s", self.manager_id, exc)
-
-    def _collect_garbage(self, phase: str, *, categories: Sequence[str] | None = None) -> None:
-        """Collect workspace garbage, without affecting manager service."""
-
-        try:
-            report = self.workspace.collect_garbage(
-                categories=categories,
-                journal_writer=self.writer,
-            )
-        except Exception as exc:
-            _LOGGER.warning(
-                "garbage collection at %s failed: %s",
-                phase,
-                exc,
-                extra=self._event("always_safe_gc_error", phase=phase),
-            )
-            return
-        _LOGGER.info(
-            "garbage collection at %s removed %d entries and about %d bytes",
-            phase,
-            report.removed,
-            report.bytes_reclaimed,
-            extra=self._event(
-                "always_safe_gc_completed",
-                phase=phase,
-                removed=report.removed,
-                bytes_reclaimed=report.bytes_reclaimed,
-            ),
-        )
-
-    def _has_live_owned_marker(
-        self, kinds: tuple[str, ...] = ("claimed", "running", "committing", "cancelling")
-    ) -> bool:
-        """Return whether this manager still owns a state marker of one of *kinds*."""
-
-        for marker in self.workspace.scan_markers(kinds):
-            try:
-                state = self.workspace.read_state(marker)
-            except (WorkflowError, OSError):
-                return True
-            if state.get("manager_id") == self.manager_id:
-                return True
-        return False
-
-    def _remove_manager_directory(self) -> None:
-        """Remove this manager's metadata directory after its writer closes."""
-
-        try:
-            (self._manager_dir / _manager_launches.LAUNCHES_DIRECTORY).rmdir()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            # A trusted launch directory left behind may record a live launch:
-            # it is takeover evidence, so the whole manager record stays.
-            _LOGGER.warning("manager directory %s keeps launch records: %s", self._manager_dir, exc)
-            return
-        for name in ("heartbeat.json", "manager.json"):
-            try:
-                (self._manager_dir / name).unlink(missing_ok=True)
-            except OSError as exc:
-                _LOGGER.warning("cannot remove manager metadata %s: %s", name, exc)
-                return
-        try:
-            self._manager_dir.rmdir()
-        except OSError as exc:
-            _LOGGER.debug("manager directory %s remains after clean exit: %s", self._manager_dir, exc)
-
-    def _remove_empty_journal_writer(self) -> None:
-        """Remove this manager's writer directory when it has no frames."""
-
-        writer_dir = self.workspace.control / "journal" / self.writer.writer_id
-        if self._writer_has_marker_reference():
-            return
-        try:
-            entries = list(writer_dir.iterdir())
-        except OSError as exc:
-            _LOGGER.debug("cannot inspect empty journal writer %s: %s", writer_dir, exc)
-            return
-        if not entries:
-            return
-        for entry in entries:
-            try:
-                if not entry.is_file() or entry.stat().st_size != len(SEGMENT_HEADER):
-                    return
-            except OSError:
-                return
-        try:
-            for entry in entries:
-                entry.unlink()
-            writer_dir.rmdir()
-        except OSError as exc:
-            _LOGGER.debug("journal writer %s remains after clean exit: %s", writer_dir, exc)
-
-    def _writer_has_marker_reference(self) -> bool:
-        """Return whether a current marker names this writer."""
-
-        for marker in self.workspace.scan_markers(STATE_KINDS):
-            try:
-                writer_id, _segment, _offset, _length, _checksum = parse_record_ref(marker.record_ref)
-            except (FormatError, ValueError):
-                continue
-            if writer_id == self.writer.writer_id:
-                return True
-        return False
-
-    def _write_attempt_end(self, attempt: RunningAttempt, return_code: int) -> None:
-        """Append the end marker for a locally reaped attempt."""
-
-        try:
-            with self._job_directory(attempt.marker) as job_dir:
-                action = attempt.outcome_action or _attempt_outcome_action(
-                    job_dir, f"{ATTEMPTS_DIRECTORY}/{attempt.attempt_id}"
-                )
-                _attempt_process.write_attempt_end(
-                    job_dir, attempt.attempt_id, return_code, action, job_key=attempt.marker.job_key
-                )
-        except Exception as exc:
-            _LOGGER.warning("cannot append the end marker for %s: %s", attempt.marker.job_key, exc)
-
-    def _finish_attempt_cleanup(self, attempt: RunningAttempt) -> None:
-        """Remove a committed attempt control after its process was reaped."""
-
-        request = attempt.cleanup_request
-        if attempt.cleanup_pending and request is not None:
-            _manager_commit._remove_committed_attempt_control(self, *request)
-
     @property
     def manager_directory(self) -> Path:
-        """Return this manager's own directory below ``managers/``.
+        """This manager's owner directory, ``.httk-workspace/owners/<owner-id>``."""
 
-        :return: The manager directory path.
-        """
-
-        return self._manager_dir
-
-    def _event(self, event: str, marker: Marker | None = None, **fields: object) -> dict[str, object]:
-        """Return structured logging fields describing one manager event."""
-
-        data: dict[str, object] = {"event": event, "manager_id": self.manager_id}
-        if marker is not None:
-            data.update(
-                {
-                    "job_key": marker.job_key,
-                    "job_id": marker.job_id,
-                    "placement": placement_text(marker.placement),
-                    "kind": marker.kind,
-                    "generation": marker.generation,
-                }
-            )
-        data.update(fields)
-        return data
-
-    def _report_anomaly(
-        self,
-        key: str,
-        text: str,
-        fields: Mapping[str, object],
-        *,
-        level: int = logging.ERROR,
-    ) -> None:
-        """Report a possibly repeating anomaly loudly once, then quietly."""
-
-        if self._reported.get(key) == text:
-            _LOGGER.debug("%s (unchanged)", text, extra=dict(fields))
-            # A commit anomaly that repeats unchanged is a wedge, not a
-            # transient: the first pass reports it loudly, and once it recurs
-            # its text is persisted where 'job why' can surface it.
-            if key.startswith(("resume_committing:", "commit_deferred:", "takeover_pending:")):
-                self._record_commit_wedge(key, text, fields)
-            return
-        self._reported[key] = text
-        # A changed anomaly is recorded afresh once it repeats.
-        self._commit_wedge_recorded.discard(key)
-        _LOGGER.log(level, "%s", text, extra=dict(fields))
-
-    def _record_commit_wedge(self, key: str, text: str, fields: Mapping[str, object]) -> None:
-        """Persist a repeating commit anomaly into the newest attempt control dir.
-
-        A commit takeover waiting for launch end evidence also records the
-        blocking launch (``launch_end_pending``: its record, rule and host).
-        """
-
-        if key in self._commit_wedge_recorded:
-            return
-        job_key = fields.get("job_key")
-        placement = fields.get("placement")
-        if not isinstance(job_key, str) or not isinstance(placement, str):
-            return
-        pending = fields.get("launch_end_pending")
-        try:
-            marker = self.workspace.find_marker_at(job_key, normalize_placement(placement))
-            # A commit another manager may not begin yet waits in running.
-            if marker is None or marker.kind not in {"running", "committing"}:
-                return
-            control_name = self._attempt_control_name(self._read_frame(marker))
-            with self._job_directory(marker) as job_dir, job_dir.directory(control_name, create=True) as control:
-                control.write_atomic(
-                    "commit-wedge.json",
-                    json_bytes(
-                        {
-                            "format": "httk-workflow-commit-wedge",
-                            "format_version": 2,
-                            "error": text,
-                            "manager_id": self.manager_id,
-                            "recorded_at": utc_now(),
-                            **({"launch_end_pending": dict(pending)} if isinstance(pending, Mapping) else {}),
-                        }
-                    )
-                    + b"\n",
-                    durable=self.workspace.durable,
-                )
-        except (FormatError, WorkflowError, OSError) as exc:
-            _LOGGER.debug("cannot record the commit wedge of %s: %s", job_key, exc)
-            return
-        self._commit_wedge_recorded.add(key)
-
-    @property
-    def heartbeat_period(self) -> float:
-        """Return how long this manager may actually go without heartbeating.
-
-        A configured interval longer than the lease it claims work under would
-        let a manager expire its own claims, so the interval is capped at a
-        fraction of the lease however it was configured.
-
-        :return: The effective heartbeat interval.
-        """
-
-        if self.lease_seconds <= 0.0:
-            return self.heartbeat_interval
-        return min(self.heartbeat_interval, self.lease_seconds * _MAXIMUM_HEARTBEAT_LEASE_FRACTION)
-
-    def _recover_transfers(self) -> None:
-        """Recover interrupted transfers and adoptions whose owner is gone, once, as the manager attaches.
-
-        It lists ``tmp/`` and the ``transferring`` markers only, so it is cheap;
-        a failure is logged and never stops the manager.
-        """
-
-        from ._txn import owner_token
-        from .transfers import recover_transfers
-
-        try:
-            recover_transfers(self.workspace, owner=owner_token(self.manager_id))
-        except Exception:
-            _LOGGER.exception(
-                "transfer recovery at manager attach failed", extra=self._event("transfer_recovery_failed")
-            )
-
-    def heartbeat(self, *, force: bool = False) -> None:
-        """Publish a manager heartbeat when the effective interval has elapsed.
-
-        :param force: Publish immediately instead of honoring the interval.
-        """
-
-        now = time.monotonic()
-        if not force and now - self._last_heartbeat < self.heartbeat_period:
-            return
-        write_json_atomic(
-            self._manager_dir / "heartbeat.json",
-            {"manager_id": self.manager_id, "updated_at": utc_now()},
-            durable=self.workspace.durable,
-        )
-        self._last_heartbeat = now
-
-    def _pace(self) -> None:
-        """Take one heartbeat opportunity between units of scanning work.
-
-        Every pass calls this once per marker. The write itself is rate limited
-        by :attr:`heartbeat_period`, so pacing costs one clock reading per
-        marker — and buys the guarantee that a workspace too large to scan
-        inside one lease can no longer make a peer conclude that this manager
-        has died while it is working perfectly normally.
-        """
-
-        self.heartbeat()
-
-    def _owns(self, marker: Marker) -> bool | None:
-        """Check kernel-enforced same-user provenance, not authentication.
-
-        The conjunction proves that this manager's uid owns the marker, payload
-        directory, and job definition; it deliberately does not authenticate
-        the contents.
-        """
-        try:
-            marker_stat = marker.path.lstat()
-        except FileNotFoundError:
-            _LOGGER.debug("skipping job %s: marker no longer exists", marker.job_key)
-            return False
-        except OSError as exc:
-            _LOGGER.debug("deferring job %s: ownership check is indeterminate: %s", marker.job_key, exc)
-            return None
-        try:
-            if not stat.S_ISREG(marker_stat.st_mode):
-                _LOGGER.debug("skipping job %s: marker is not an owned regular file", marker.job_key)
-                return False
-            if marker_stat.st_uid != self.uid:
-                _LOGGER.debug(
-                    "skipping job %s: marker is owned by uid %d, manager runs uid %d",
-                    marker.job_key,
-                    marker_stat.st_uid,
-                    self.uid,
-                )
-                return False
-            payload = self.workspace.payload_path(marker.placement, marker.job_key)
-            payload_stat = payload.lstat()
-            if stat.S_ISLNK(payload_stat.st_mode) or not stat.S_ISDIR(payload_stat.st_mode):
-                _LOGGER.debug(
-                    "skipping job %s: payload path is not an owned directory (marker/payload ownership mismatch)",
-                    marker.job_key,
-                )
-                return False
-            job_path = payload / "job.json"
-            job_stat = job_path.lstat()
-            # A symlink or special file this uid planted as job.json in its own
-            # payload is not foreign: the job is this manager's, and loading its
-            # refused definition fails it instead of hiding it forever.
-            if payload_stat.st_uid != marker_stat.st_uid or job_stat.st_uid != marker_stat.st_uid:
-                _LOGGER.debug(
-                    "skipping job %s: marker, payload, and job.json ownership mismatch",
-                    marker.job_key,
-                )
-                return False
-            return True
-        except FileNotFoundError as exc:
-            _LOGGER.debug("deferring job %s: ownership check is indeterminate: %s", marker.job_key, exc)
-            return None
-        except OSError as exc:
-            _LOGGER.debug("deferring job %s: ownership check is indeterminate: %s", marker.job_key, exc)
-            return None
-
-    @staticmethod
-    def _request_owner(path: Path) -> int:
-        return path.lstat().st_uid
-
-    def _window(self, pass_name: str, kind: str) -> list[Marker]:
-        """Return the *kind* markers *pass_name* processes this tick.
-
-        Discovery is streaming and bounded: the pass walks its assigned
-        placement subtrees with :class:`MarkerStream`, visiting at most
-        ``discovery_budget`` directory entries and collecting at most
-        ``maximum_pass_markers`` markers, heartbeating from inside the walk. The
-        walker resumes where it stopped on the next tick and rotates its roots,
-        so a workspace larger than one tick's budget is served round-robin and
-        nothing starves — without ever materializing or globally sorting the
-        tree. No terminal kind is ever a *kind* here, so a scheduling scan never
-        opens the succeeded, failed, or cancelled trees.
-        """
-
-        stream = self._streams.get(pass_name)
-        if stream is None:
-            stream = MarkerStream(self.workspace, kind, prefixes=self.placement_prefixes)
-            self._streams[pass_name] = stream
-        return [
-            marker
-            for marker in stream.advance(
-                processing_budget=self.maximum_pass_markers,
-                discovery_budget=self.discovery_budget,
-                heartbeat=self.heartbeat,
-                heartbeat_every=DISCOVERY_HEARTBEAT_STRIDE,
-            )
-            if self._owns(marker) is True
-        ]
-
-    def _walk(self, kinds: Sequence[str]) -> Iterable[Marker]:
-        """Stream every marker of *kinds* this manager may schedule, exhaustively.
-
-        A few passes must see all of their kind at once — polling running
-        attempts to reap orphans, recovering abandoned claims, and the idleness
-        probe — so they cannot be windowed. They still stream through the same
-        scandir walker, restricted to the assigned placement subtrees and
-        heartbeating from inside the walk, so a long exhaustive pass never holds
-        its heartbeat and never touches a placement outside its assignment.
-        """
-
-        self._indeterminate_ownership.clear()
-        for marker in self.workspace.walk_markers(kinds, roots=self.placement_prefixes, heartbeat=self.heartbeat):
-            ownership = self._owns(marker)
-            if ownership is None:
-                self._indeterminate_ownership.add(marker.job_key)
-            elif ownership is True:
-                yield marker
-
-    def _report_tick_duration(self, seconds: float) -> None:
-        """Report a tick that spent a dangerous fraction of the lease."""
-
-        if self.lease_seconds <= 0.0 or seconds < self.lease_seconds * _TICK_WARNING_FRACTION:
-            return
-        level = logging.ERROR if seconds >= self.lease_seconds * _TICK_ERROR_FRACTION else logging.WARNING
-        _LOGGER.log(
-            level,
-            "one scheduling tick took %.1fs of a %.1fs lease; lower the scan cost or raise lease_seconds "
-            "before a peer takes over work this manager is still running",
-            seconds,
-            self.lease_seconds,
-            extra=self._event("tick_slow", seconds=seconds, lease_seconds=self.lease_seconds),
-        )
-
-    def tick(self) -> bool:
-        """Perform one nonblocking scheduling and recovery pass.
-
-        :return: Whether the pass changed or launched workflow state.
-        """
-
-        started = time.monotonic()
-        self.heartbeat()
-        self._liveness.clear()
-        self._launch_records = None
-        self._closed_owners.clear()
-        changed = False
-        if self._exchange is not None and not self._draining and self._serving_exchange():
-            # First, so an adopted job registers and is claimed in this same tick.
-            changed |= self._exchange.run(time.time())
-            self.heartbeat()
-        for step in (
-            self._handle_requests,
-            self._register_submissions,
-            # Cancellation runs before the running pass so that the attempts it
-            # is terminating on purpose are never mistaken for orphans.
-            self._process_cancelling,
-            self._resume_committing,
-            self._evaluate_joins,
-            self._enforce_deadlines,
-            self._poll_running,
-            # Right after the running pass, so a launch is stopped in the tick
-            # that observed its attempt stop.
-            self._supervise_launches,
-            self._recover_abandoned_claims,
-        ):
-            changed |= step()
-            self.heartbeat()
-        try:
-            changed = self._claim_pass(changed)
-            if changed and self._exchange is not None:
-                # A job may just have finished: the next census looks for finished exchange trees afresh.
-                self._exchange.invalidate()
-            return changed
-        finally:
-            self._collect_garbage_if_due()
-            self._collect_transfer_records_if_due()
-            self.heartbeat()
-            self._report_tick_duration(time.monotonic() - started)
-
-    def _collect_garbage_if_due(self) -> None:
-        """Run one background collection when the configured interval elapsed.
-
-        Collection is housekeeping, so it happens after every pass of the tick
-        has made its decisions and never between the observation of a marker and
-        the transition based on it. It is rate limited to once per
-        ``gc_interval``, it obeys the workspace's own ``policy.retention`` like
-        every other collection, and a failure is reported rather than allowed to
-        stop the manager: nothing scheduling depends on it.
-        """
-
-        if self.gc_interval is None:
-            return
-        now = time.monotonic()
-        if self._last_gc and now - self._last_gc < self.gc_interval:
-            return
-        self._last_gc = now
-        try:
-            report = self.workspace.collect_garbage(journal_writer=self.writer)
-        except (WorkflowError, OSError) as exc:
-            self._report_anomaly(
-                "gc",
-                f"background collection of {self.workspace.root} failed: {exc}",
-                self._event("gc_error"),
-                level=logging.WARNING,
-            )
-            return
-        self._reported.pop("gc", None)
-        _LOGGER.info(
-            "background collection removed %d entries and about %d bytes",
-            report.removed,
-            report.bytes_reclaimed,
-            extra=self._event(
-                "gc_completed",
-                removed=report.removed,
-                bytes_reclaimed=report.bytes_reclaimed,
-                skipped=list(report.skipped),
-            ),
-        )
-
-    def _collect_transfer_records_if_due(self) -> None:
-        """Collect expired transfer receipts and aged acknowledgements every :data:`TRANSFER_RECORDS_GC_SECONDS`.
-
-        These two categories list only their own directories and never walk
-        ``state/``. A failure is reported rather than allowed to stop the
-        manager, like :meth:`_collect_garbage_if_due`.
-        """
-
-        now = time.monotonic()
-        if now - self._last_transfer_gc < TRANSFER_RECORDS_GC_SECONDS:
-            return
-        self._last_transfer_gc = now
-        try:
-            self.workspace.collect_garbage(
-                categories=("transfer_receipts", "transfer_records"), journal_writer=self.writer
-            )
-        except (WorkflowError, OSError) as exc:
-            self._report_anomaly(
-                "transfer_gc",
-                f"collection of the transfer records of {self.workspace.root} failed: {exc}",
-                self._event("gc_error"),
-                level=logging.WARNING,
-            )
-            return
-        self._reported.pop("transfer_gc", None)
-
-    def _claim_pass(self, changed: bool) -> bool:
-        """Claim and launch eligible work within this manager's worker budget."""
-
-        if not self._draining and len(self._running) < self.maximum_workers and self._confinement_blocked():
-            # A host or operator condition is not the jobs' fault: they stay
-            # ready rather than failing one by one.
-            return changed
-        return _manager_scheduling.claim_pass(self, changed, _LOGGER)
-
-    def _maintenance_paused(self) -> bool:
-        """Report whether a live maintenance lock forbids launching work."""
-
-        lock = read_maintenance_lock(self.workspace)
-        if lock is None:
-            self._reported.pop("maintenance", None)
-            return False
-        if lock.is_stale():
-            self._report_anomaly(
-                "maintenance",
-                f"ignoring a stale maintenance lock held by {lock.describe()}; clear it with 'httk workspace unlock'",
-                self._event("maintenance_lock_stale", lock=str(lock.path)),
-                level=logging.WARNING,
-            )
-            return False
-        self._report_anomaly(
-            "maintenance",
-            f"launching is paused by the maintenance lock held by {lock.describe()}",
-            self._event("maintenance_lock_held", lock=str(lock.path)),
-            level=logging.INFO,
-        )
-        return True
-
-    def _executor_for(self, job: JobDefinition) -> RunnerExecutor | None:
-        if job.runner_executor not in self.allowed_executors:
-            return None
-        return self.executors.get(job.runner_executor)
-
-    def _transition(
-        self,
-        marker: Marker,
-        kind: str,
-        updates: StateFrame,
-        *,
-        priority: int | None = None,
-    ) -> Marker:
-        pause_member_present = updates.has("pause_requested")
-        pause_requested = updates.pause_requested
-        current: StateFrame | None = None
-        if kind in {"ready", "waiting", "paused"} and not pause_member_present:
-            try:
-                current = self._read_frame(marker)
-            except (WorkflowError, OSError):
-                current = None
-            if current is not None and not pause_member_present:
-                pause_member_present = current.has("pause_requested")
-                pause_requested = current.pause_requested
-        if kind in {"ready", "waiting"} and pause_member_present:
-            retained = {name: value for name, value in updates.members.items() if name != "pause_requested"}
-            if pause_requested is not None:
-                if marker.kind == "committing" and "process" not in retained:
-                    raise FormatError("a deferred pause from committing must retain its process identity")
-                updates = StateFrame.replace(
-                    StateFrame(retained),
-                    operator=pause_requested.get("operator"),
-                    operator_reason=pause_requested.get("reason"),
-                    request_id=pause_requested.get("request_id"),
-                    reason="operator_pause_deferred",
-                )
-                kind = "paused"
-            else:
-                updates = StateFrame(retained)
-        elif kind == "paused" and pause_member_present:
-            retained = {name: value for name, value in updates.members.items() if name != "pause_requested"}
-            updates = StateFrame(retained)
-            if pause_requested is not None:
-                updates = StateFrame.replace(
-                    updates,
-                    operator=pause_requested.get("operator"),
-                    operator_reason=pause_requested.get("reason"),
-                    request_id=pause_requested.get("request_id"),
-                    reason="operator_pause_deferred",
-                )
-        elif kind in {*TERMINAL_KINDS, "cancelling"} and updates.has("pause_requested"):
-            updates = StateFrame({name: value for name, value in updates.members.items() if name != "pause_requested"})
-        moved = self.workspace.transition(self.writer, marker, kind, updates.as_mapping(), priority=priority)
-        _LOGGER.info(
-            "job %s moved from %s to %s (reason %s)",
-            moved.job_key,
-            marker.kind,
-            kind,
-            updates.reason or "-",
-            extra=self._event("transition", moved, previous_kind=marker.kind, reason=updates.reason),
-        )
-        try:
-            job = self.workspace.load_job(moved)
-            executor = self._executor_for(job)
-            if executor is not None:
-                executor.marker_changed(self.workspace, moved)
-        except (WorkflowError, OSError) as exc:
-            # Executor views are recoverable derivatives. The committed marker
-            # transition must remain successful even if refreshing one fails.
-            _LOGGER.warning(
-                "runner executor view for %s could not be refreshed: %s",
-                moved.job_key,
-                exc,
-                extra=self._event("executor_error", moved),
-            )
-        return moved
-
-    def serve(
-        self,
-        *,
-        poll_interval: float = 1.0,
-        drain_timeout: float = 30.0,
-        drain_grace_seconds: float = 10.0,
-    ) -> None:
-        """Run until interrupted, draining running attempts on a stop signal.
-
-        A first ``SIGTERM`` or ``SIGINT`` — what a batch system sends at
-        walltime — stops claiming new work, terminates the local attempts, and
-        keeps ticking so their outcomes are committed. A second signal exits at
-        once. The drain is process-local: everything an interrupted attempt
-        needs is already recorded by the transitions it produces, and any
-        attempt left behind is recovered from its expired lease.
-
-        :param poll_interval: Wait this long between scheduling passes.
-        :param drain_timeout: Stop draining after this much time.
-        :param drain_grace_seconds: Kill attempts after this much drain grace.
-        """
-
-        previous: dict[int, Any] = {}
-        self._reset_drain()
-        for number in _DRAIN_SIGNALS:
-            try:
-                previous[number] = signal.signal(number, self._request_drain)
-            except ValueError:
-                # Only the main thread may install handlers; an embedded
-                # manager still serves, it just cannot drain on a signal.
-                _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", number)
-        try:
-            self._serve_loop(
-                poll_interval=poll_interval,
-                drain_timeout=drain_timeout,
-                drain_grace_seconds=drain_grace_seconds,
-            )
-        except KeyboardInterrupt:
-            _LOGGER.info("interrupted; stopping without a drain", extra=self._event("interrupted"))
-        finally:
-            for installed, handler in previous.items():
-                # None means a handler not installed from Python, which cannot be restored.
-                if handler is not None:
-                    signal.signal(installed, handler)
-            self._draining = False
-
-    def _reset_drain(self) -> None:
-        """Forget any earlier drain before a manager loop starts."""
-
-        self._draining = False
-        self._drain_signals = 0
-        # Why the last drain started, or None while no drain has started.
-        self._drain_reason: str | None = None
-        self._drain_deadline: float | None = None
-        self._drain_kill_at: float | None = None
+        return self.owner.path
 
     @property
     def running_attempts(self) -> int:
@@ -1586,385 +603,672 @@ class TaskManager:
 
         return self._drain_reason
 
-    def _request_drain(self, number: int, frame: FrameType | None) -> None:
-        """Record one drain request from a signal handler."""
+    def close(self) -> None:
+        """Stop and reap the local attempts, commit what they left, and close the owner.
 
-        self._drain_signals += 1
-        self._draining = True
-
-    def _deadline_reached(self) -> bool:
-        """Return whether this manager's drain start has passed."""
-
-        return self.drain_start is not None and time.time() >= self.drain_start
-
-    def _drain_begin(self, *, drain_timeout: float, drain_grace_seconds: float) -> bool:
-        """Start a due drain before one tick, returning whether the loop must stop.
-
-        Both manager loops share this state machine: the allocation's drain start
-        or a stop signal starts the drain, a second signal ends it at once.
+        After a fail-stop nothing is touched: the jobs wait for recovery. A job
+        or launch that cannot be finished here keeps the owner record, so a
+        later probe and recovery handle it.
         """
 
-        end_time = self.end_time
-        if not self._draining and end_time is not None and self._deadline_reached():
-            self._draining = True
-            self._drain_reason = "deadline"
-            _LOGGER.info(
-                "drain point reached with %s left before the allocation ends; draining",
-                format_duration(max(0, int(end_time - time.time()))),
-                extra=self._event("drain_deadline", end_time=end_time),
-            )
-        # A signal during a drain the deadline started is already a second request.
-        if self._drain_signals >= (1 if self._drain_reason == "deadline" else 2):
-            _LOGGER.warning(
-                "%s: killing %d running attempt(s) and exiting",
-                "stop signal during the deadline drain" if self._drain_reason == "deadline" else "second stop signal",
-                len(self._running),
-                extra=self._event("drain_forced", attempts=len(self._running)),
-            )
-            self._signal_running_attempts(signal.SIGKILL)
-            return True
-        if self._draining and self._drain_deadline is None:
-            self._drain_reason = self._drain_reason or "signal"
-            now = time.monotonic()
-            self._drain_deadline = now + drain_timeout
-            self._drain_kill_at = now + drain_grace_seconds
-            _LOGGER.info(
-                "draining: terminating %d running attempt(s) with a %.0fs timeout",
-                len(self._running),
-                drain_timeout,
-                extra=self._event("drain_started", attempts=len(self._running), reason=self._drain_reason),
-            )
+        if self._closed:
+            return
+        self._closed = True
+        if self._lost:
+            return
+        if self._running:
             self._signal_running_attempts(signal.SIGTERM)
-        return False
-
-    def _drain_after_tick(self) -> bool:
-        """Advance a started drain after one tick, returning whether the loop must stop."""
-
-        if not self._draining or self._drain_deadline is None:
-            return False
-        now = time.monotonic()
-        # An outcome already committed may still sit in this manager's committing marker.
-        if not self._running and not self._has_live_owned_marker(("committing",)):
-            _LOGGER.info("drain complete: no local attempt remains", extra=self._event("drain_complete"))
-            return True
-        if now >= self._drain_deadline:
-            _LOGGER.warning(
-                "drain timeout expired with %d attempt(s) unreaped%s; leaving them to lease recovery",
-                len(self._running),
-                "" if self._running else " and a committing marker of this manager pending",
-                extra=self._event("drain_timeout", attempts=len(self._running)),
-            )
+            self._wait_running(self.cancel_grace_seconds)
             self._signal_running_attempts(signal.SIGKILL)
-            return True
-        if self._drain_kill_at is not None and now >= self._drain_kill_at:
-            _LOGGER.warning(
-                "drain grace expired: killing %d running attempt(s)",
-                len(self._running),
-                extra=self._event("drain_kill", attempts=len(self._running)),
-            )
-            self._signal_running_attempts(signal.SIGKILL)
-            self._drain_kill_at = None
-        return False
+            self._wait_running(5.0)
+            self._supervise()
+        try:
+            self.owner.close()
+        except WorkflowError as exc:
+            _LOGGER.warning("owner %s keeps its record for recovery: %s", self.manager_id, exc)
 
-    def _serve_loop(
-        self,
-        *,
-        poll_interval: float,
-        drain_timeout: float,
-        drain_grace_seconds: float,
-    ) -> None:
-        while not self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
-            self.tick()
-            if self._drain_after_tick():
-                return
-            time.sleep(min(poll_interval, 0.25) if self._draining else poll_interval)
-
-    def _signal_running_attempts(self, signal_number: int) -> int:
-        """Signal every local attempt process group and report how many."""
-
-        signalled = 0
-        for attempt in list(self._running.values()):
-            # Launches are stopped with their attempt, also one whose own process already exited.
-            _manager_launches.signal_all(self, attempt, signal_number, "the manager is draining")
-            if attempt.process.poll() is not None:
+    def _wait_running(self, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        for local in self._running.values():
+            try:
+                local.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
                 continue
-            self._terminate_process(attempt.process.pid, signal_number)
-            # Only a drain signals every attempt, and an attempt it stops
-            # without an outcome is lost to the manager, not failed by itself.
-            attempt.interrupted = True
-            signalled += 1
-            _LOGGER.info(
-                "sent signal %d to attempt %s process group %d",
-                signal_number,
-                attempt.attempt_id,
-                attempt.process.pid,
-                extra=self._event(
-                    "attempt_signalled",
-                    attempt.marker,
-                    attempt_id=attempt.attempt_id,
-                    signal=signal_number,
-                ),
-            )
-        return signalled
 
-    def run_until_idle(
-        self,
-        *,
-        timeout: float = 60.0,
-        poll_interval: float = 0.02,
-        drain_timeout: float = 30.0,
-        drain_grace_seconds: float = 10.0,
-    ) -> WorkCensus:
-        """Run until no local process or claimable marker remains, and report it.
+    def heartbeat(self, *, force: bool = False) -> None:
+        """Write the informational ``heartbeat.json`` when the interval has elapsed.
 
-        A job this manager cannot progress — one whose pool, capability, or
-        executor it does not serve, or one waiting on children or paused for an
-        operator — does not keep it awake: it is counted in the returned census
-        instead. The census is what the caller prints as the idle summary.
-
-        A ``SIGTERM`` (not ``SIGINT``) or reaching the allocation's drain start
-        drains the manager as :meth:`serve` does and then returns the census; a
-        ``SIGTERM`` during a deadline drain, or a second one during a signal
-        drain, kills the local attempts and returns at once. When the allocation
-        end time is known, running attempts keep extending *timeout*: the
-        deadline drain bounds them, and the timeout still ends a manager that
-        makes no progress with nothing running.
-
-        :param timeout: Stop waiting after this many seconds.
-        :param poll_interval: Wait this long between scheduling passes.
-        :param drain_timeout: Stop draining after this much time.
-        :param drain_grace_seconds: Kill attempts after this much drain grace.
-        :return: The work census of the settled workspace.
-        :raises httk.workflow.manager.NotIdleError: If the manager does not become idle
-            before the timeout, extended by running attempts when the allocation end is known.
+        :param force: Write immediately instead of honoring the interval.
         """
 
-        self._reset_drain()
-        previous: Any = None
-        try:
-            previous = signal.signal(signal.SIGTERM, self._request_drain)
-        except ValueError:
-            _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", signal.SIGTERM)
-        if self.end_time is not None:
-            _LOGGER.debug("running attempts extend the %.0fs idle timeout up to the allocation's drain point", timeout)
-        try:
-            deadline = time.monotonic() + timeout
-            quiet_passes = 0
-            while True:
-                if self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
-                    return self._work_census()
-                if self.end_time is not None and self._running:
-                    # The drain point bounds running attempts; the timeout
-                    # still ends a manager making no progress with none.
-                    deadline = time.monotonic() + timeout
-                if not self._draining and time.monotonic() >= deadline:
-                    raise NotIdleError(self._work_census())
-                changed = self.tick()
-                if self._draining:
-                    if self._drain_after_tick():
-                        return self._work_census()
-                    time.sleep(min(poll_interval, 0.25))
-                    continue
-                if changed or self._running:
-                    quiet_passes = 0
-                    time.sleep(poll_interval)
-                    continue
-                census = self._work_census()
-                if census.actionable:
-                    quiet_passes = 0
-                else:
-                    quiet_passes += 1
-                    if quiet_passes >= 2:
-                        return census
-                time.sleep(poll_interval)
-        finally:
-            # None means no handler was installed here, or one not installed from Python.
-            if previous is not None:
-                signal.signal(signal.SIGTERM, previous)
-            self._draining = False
+        now = time.monotonic()
+        if force or now - self._last_heartbeat >= self.heartbeat_interval:
+            self.owner.heartbeat()
+            self._last_heartbeat = now
 
-    def _work_census(self) -> WorkCensus:
-        census = _manager_scheduling.work_census(self)
-        if self._exchange is not None and not self._draining and self._serving_exchange():
-            # Exchange work this manager will do: an until-idle manager does
-            # not exit before adopting and returning it.
-            outstanding = self._exchange.outstanding(time.time())
-            census = dataclasses.replace(
-                census, exchange=outstanding, actionable_count=census.actionable_count + outstanding
+    def _event(self, event: str, owned: OwnedJob | None = None, **fields: object) -> dict[str, object]:
+        """Return structured logging fields describing one manager event."""
+
+        data: dict[str, object] = {"event": event, "manager_id": self.manager_id}
+        if owned is not None:
+            data.update({"job_key": owned.job_key, "job_id": owned.job_id})
+        data.update(fields)
+        return data
+
+    def _report_anomaly(self, key: str, text: str, fields: Mapping[str, object], *, level: int = logging.ERROR) -> None:
+        """Report a possibly repeating anomaly loudly once, then quietly."""
+
+        if self._reported.get(key) == text:
+            _LOGGER.debug("%s (unchanged)", text, extra=dict(fields))
+            return
+        self._reported[key] = text
+        _LOGGER.log(level, "%s", text, extra=dict(fields))
+
+    def _owns(self, path: Path) -> bool:
+        """Check that this manager's uid owns a job directory and its ``job.json`` (provenance, not authentication)."""
+
+        try:
+            return all(os.lstat(item).st_uid == self.uid for item in (path, path / "job.json"))
+        except OSError:
+            return False
+
+    # -- the tick ---------------------------------------------------------------------------------------------------
+
+    def tick(self) -> bool:
+        """Perform one nonblocking pass: fail-stop check, self-healing, recovery, supervision, claims.
+
+        :return: Whether the pass changed workflow state.
+        :raises httk.workflow.errors.WorkflowError: When this owner was declared dead or recovered (fail-stop:
+            every attempt it started has been killed and no job was touched), or the manager is closed.
+        """
+
+        if self._lost or self._closed:
+            raise WorkflowError(f"manager {self.manager_id} is closed")
+        self._workflows.clear()
+        try:
+            self.owner.check_alive()
+            changed = self._self_heal()
+            changed |= self._recover_dead_owners()
+            # The exchange pass returns in phase D.
+            self._cache = _kernel.ListingCache()
+            changed |= self._requests_pass()
+            changed |= self._joins_pass()
+            changed |= self._supervise()
+            if not self._draining and self._confinement_blocked() is None:
+                changed |= _manager_scheduling.claim_pass(self)
+            self.heartbeat()
+        except _kernel.OwnerLost:
+            self._fail_stop()
+            raise
+        return changed
+
+    def _fail_stop(self) -> None:
+        """Kill every attempt this owner started and stop serving, touching no job (plan §5.2)."""
+
+        self._lost = True
+        _LOGGER.critical(
+            "owner %s was declared dead or recovered: killing %d attempt(s) and stopping",
+            self.manager_id,
+            len(self._running),
+            extra=self._event("fail_stop"),
+        )
+        for local in self._running.values():
+            _manager_launches.signal_all(self, local, signal.SIGKILL, "the owner was declared dead")
+            _attempt_process.terminate_process(local.process.pid, signal.SIGKILL)
+        self._wait_running(5.0)
+
+    def _self_heal(self) -> bool:
+        """Reconcile every job in ``owned/<self>/`` this process does not hold, then return it (plan §5.4)."""
+
+        running = {local.owned.path for local in self._running.values()}
+        changed = False
+        for ref in self.owner.owned():
+            if ref.path in running:
+                continue
+            owned = self.owner.adopt_owned(ref)
+            owned.append_log("recovered", detail="self-healed")
+            reconciled = self._reconcile_guarded(owned)
+            if reconciled is not None:
+                self._release(owned, reconciled[1], Release(owned.from_state, owned.from_priority))
+            changed = True
+        return changed
+
+    def _recover_dead_owners(self) -> bool:
+        """Probe a few foreign owners, chosen at random, and recover the ones proven dead."""
+
+        candidates = [
+            item.owner_id
+            for item in _kernel.list_owners(self.workspace)
+            if item.owner_id != self.manager_id and item.record is not None
+        ]
+        changed = False
+        for owner_id in random.sample(candidates, min(_PROBES_PER_TICK, len(candidates))):
+            try:
+                if _kernel.probe_owner(self.workspace, owner_id, scheduler=self._scheduler) is not _death.Liveness.DEAD:
+                    continue
+                report = _kernel.recover(self.workspace, self.owner, owner_id)
+            except ValueError:
+                # An owner of this very process (another manager or CLI owner in it) is never probed.
+                continue
+            except WorkflowError as exc:
+                # A concurrent recoverer finished first, or entries keep appearing: the next probe retries.
+                _LOGGER.debug("recovery of owner %s did not finish: %s", owner_id, exc)
+                continue
+            _LOGGER.warning(
+                "recovered dead owner %s: %d job(s) returned, %d quarantined",
+                owner_id,
+                len(report.returned),
+                len(report.quarantined),
+                extra=self._event("owner_recovered", dead_owner=owner_id),
             )
-        if not census.ready_claimable or self._draining or self._confinement_blocked() is None:
-            return census
-        # Held back by a host or operator condition, the ready jobs are not
-        # this manager's work until it clears, and are reported as such.
-        return dataclasses.replace(
-            census,
-            ready_claimable=0,
-            ready_blocked={**census.ready_blocked, "confinement": {"manager.confine": census.ready_claimable}},
-            actionable_count=census.actionable_count - census.ready_claimable,
+            changed = True
+        return changed
+
+    # -- reconcile, commit, release -----------------------------------------------------------------------------------
+
+    def _write(self, owned: OwnedJob, doc: StateDoc) -> StateDoc:
+        doc = doc.updated(owner_id=self.manager_id)
+        owned.write_state(doc)
+        return doc
+
+    def _reconcile_guarded(self, owned: OwnedJob) -> tuple[JobDefinition, StateDoc] | None:
+        """Run :meth:`_reconcile`, reporting a job it cannot finish instead of stopping the tick."""
+
+        try:
+            return self._reconcile(owned)
+        except _kernel.OwnerLost:
+            raise
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                f"reconcile:{owned.job_key}",
+                f"cannot reconcile {owned.job_key}; it stays owned for the next pass: {exc}",
+                self._event("reconcile_error", owned),
+            )
+            return None
+
+    def _reconcile(self, owned: OwnedJob) -> tuple[JobDefinition, StateDoc] | None:
+        """Finish whatever the job's last owner left unfinished (plan §7.7, note §6.2).
+
+        In order: leftover write temporaries go; a pending release is finished
+        and nothing else runs; a ``commit`` intent is resumed from its
+        transactions; an attempt left ``launching`` never ran and is rerun
+        without counting, while one left ``running`` is dead: its valid
+        published outcome is committed, otherwise it is an unclean restart
+        (``owner_lost``) under the retry policy; uncommitted transaction
+        staging is discarded and committed transactions applied; finally the
+        pending requests are applied, the first that takes effect releasing the job.
+
+        :param owned: A quiescent owned job.
+        :return: The job and its state when the job may launch now, or ``None`` once it was released.
+        :raises httk.workflow.errors.WorkflowError: When the job was taken from this owner.
+        """
+
+        owned.remove_leftover_temporaries()
+        try:
+            job = JobDefinition.from_path(owned.path / "job.json")
+            doc = owned.read_state()
+        except FormatError as exc:
+            self._fail_damaged(owned, str(exc))
+            return None
+        if (pending := owned.pending_release()) is not None and doc is not None:
+            owned.append_log("released", **{"from": owned.from_state, "to": pending.state}, detail="pending")
+            owned.release(doc, pending)
+            return None
+        if doc is None or doc.activation is None:
+            # A new job (a published child carries a state.json without an activation) starts its initial step.
+            doc = (doc or StateDoc.empty(owned.job_id)).next_activation(job.initial_step, "initial")
+        kind, attempt_id = doc.phase["kind"], _text(doc.phase, "attempt_id")
+        if (doc.commit is not None or kind != "idle") and doc.owner_id != self.manager_id:
+            owned.append_log("recovered", attempt_id=attempt_id, detail=doc.owner_id)
+        if doc.commit is not None:
+            self._finish_commit(owned, job, doc)
+            return None
+        if kind == "launching" and doc.attempt is not None and attempt_id is not None:
+            # The gate opens only after phase running is written: this attempt never ran. Its directory goes, so
+            # the attempt is launched again under its own id.
+            self._remove_attempt(owned, attempt_id)
+            doc = self._write(owned, doc.with_phase("idle", None).updated(attempt={**doc.attempt, "started_at": None}))
+        elif kind == "running" and attempt_id is not None:
+            outcome_dir = owned.path / "attempts" / attempt_id / "outcome.ready"
+            try:
+                published = all(
+                    _real_dir(path) for path in (outcome_dir.parent.parent, outcome_dir.parent, outcome_dir)
+                )
+                outcome = read_outcome(outcome_dir, doc) if published else None
+            except FormatError:
+                outcome = None
+            if outcome is not None:
+                self._commit_outcome(owned, job, doc, outcome, outcome_dir)
+                return None
+            lost = "the attempt's owner died before it published an outcome"
+            intent = failure_intent(
+                job, doc, attempt_id, "owner_lost", lost, priority=owned.from_priority, unclean=True
+            )
+            self._commit(owned, job, doc, intent)
+            return None
+        try:
+            _data.discard_uncommitted(owned)
+            _data.apply_transactions(owned)
+        except (_data.DataConflict, FormatError) as exc:
+            code = "data_conflict" if isinstance(exc, _data.DataConflict) else "protocol_error"
+            failed = doc.with_phase("idle", None).with_failure(failure(code, f"cannot apply transactions: {exc}"))
+            self._release(owned, failed, Release("failed", owned.from_priority))
+            return None
+        applied = self._apply_requests(owned, job, doc)
+        return None if applied is None else (job, applied)
+
+    def _fail_damaged(self, owned: OwnedJob, message: str) -> None:
+        """Fail a job whose ``job.json`` or ``state.json`` its own processes made unreadable."""
+
+        _LOGGER.error("failing %s: %s", owned.job_key, message, extra=self._event("job_damaged", owned))
+        doc = StateDoc.empty(owned.job_id).with_failure(failure("protocol_error", message))
+        try:
+            self._release(owned, doc, Release("failed", owned.from_priority))
+        except FormatError as exc:
+            # Without a readable placement the kernel cannot release it; fsck and an operator must.
+            self._report_anomaly(
+                f"damaged:{owned.job_key}",
+                f"cannot release damaged job {owned.job_key}: {exc}",
+                self._event("job_damaged", owned),
+            )
+
+    def _commit_outcome(
+        self, owned: OwnedJob, job: JobDefinition, doc: StateDoc, outcome: Mapping[str, Any], outcome_dir: Path
+    ) -> None:
+        """Validate a published outcome and its children (commit step 1), then decide and execute the commit."""
+
+        attempt_id = str(outcome["attempt_id"])
+        owned.append_log("outcome", attempt_id=attempt_id, detail=outcome["action"])
+        workspace_id = self.workspace.workspace_id
+        try:
+            plans = _children.validate_children(owned, job, doc, outcome_dir, workspace_id=workspace_id)
+            intent = outcome_intent(
+                job,
+                doc,
+                outcome,
+                priority=owned.from_priority,
+                plans=plans,
+                workspace_id=workspace_id,
+                seal=self._seal_enabled(job),
+            )
+        except (FormatError, UnsupportedExtensionError) as exc:
+            intent = failure_intent(
+                job,
+                doc,
+                attempt_id,
+                "protocol_error",
+                f"published outcome is unusable: {exc}",
+                priority=owned.from_priority,
+            )
+        steps = declared_runner_steps(owned.job_key, outcome)
+        if steps is not None:
+            doc = doc.updated(runner_steps=steps)
+        self._commit(owned, job, doc, intent)
+
+    def _commit(self, owned: OwnedJob, job: JobDefinition, doc: StateDoc, intent: Mapping[str, object]) -> None:
+        """Write the commit intent (the decision point) and execute it."""
+
+        self._finish_commit(owned, job, self._write(owned, doc.with_commit(intent)))
+
+    def _finish_commit(self, owned: OwnedJob, job: JobDefinition, doc: StateDoc) -> None:
+        """Execute the ``commit`` intent of *doc* from its transactions on; a replay resumes here (plan §7.1)."""
+
+        assert doc.commit is not None
+        intent: dict[str, Any] = dict(doc.commit)
+        attempt_id = str(intent["attempt_id"])
+        if not intent.get("transactions_failed"):
+            try:
+                _data.discard_uncommitted(owned)
+                _data.apply_transactions(owned)
+            except (_data.DataConflict, FormatError) as exc:
+                # The intent is rewritten to the failure, so a replay reaches the same decision without retrying.
+                code = "data_conflict" if isinstance(exc, _data.DataConflict) else "protocol_error"
+                intent.update(
+                    target_state="failed",
+                    failure=failure(code, f"cannot apply the committed transactions: {exc}"),
+                    reason=code,
+                    transactions_failed=True,
+                    children=[],
+                    seal=False,
+                )
+                doc = self._write(owned, doc.with_commit(intent))
+        target = str(intent["target_state"])
+        final = settle(doc, intent)
+        # Step 4: children are published from the intent alone; a staged child that is gone was published.
+        plans = [_children.ChildPlan.from_mapping(entry) for entry in intent.get("children") or ()]
+        if plans:
+            _children.publish_children(owned, plans)
+            members = ("job_id", "job_key", "label", "placement", "spawn_id")
+            entries = [{**{name: getattr(plan, name) for name in members}, "attempt_id": attempt_id} for plan in plans]
+            final = final.with_children([*final.children, *entries])
+        # Step 5: the seal; an error leaves the intent, and the commit is retried at the next claim.
+        if intent.get("seal"):
+            sha256, signed = seals.seal_payload(
+                owned.path,
+                job_id=owned.job_id,
+                job_key=owned.job_key,
+                keys=self._seal_keys(),
+                durable=self.workspace.durable,
+            )
+            owned.append_log("sealed", attempt_id=attempt_id, detail={"sha256": sha256, "signed": signed})
+            final = final.updated(seal={"sha256": sha256, "signed": signed})
+        elif target == "succeeded":
+            final = final.updated(seal={"disabled": True})
+        if target not in ("failed", "cancelled"):
+            self._remove_attempt(owned, attempt_id)
+        owned.append_log("committed", attempt_id=attempt_id, to=target, detail=intent["action"])
+        priority = intent.get("priority")
+        request_id = intent.get("request_id")
+        if isinstance(request_id, str):
+            owned.append_log(
+                "request_applied", attempt_id=attempt_id, detail={"request_id": request_id, "action": "cancel"}
+            )
+        applied = (request_id,) if isinstance(request_id, str) else ()
+        released = Release(target, priority if isinstance(priority, int) else owned.from_priority, applied)
+        self._release(owned, final, released)
+
+    def _remove_attempt(self, owned: OwnedJob, attempt_id: str) -> None:
+        attempts = owned.path / "attempts"
+        try:
+            if _real_dir(attempts) and os.path.lexists(attempts / attempt_id):
+                owned.owner._discard(attempts / attempt_id)
+        except (FormatError, OSError) as exc:
+            _LOGGER.warning("cannot remove attempt %s of %s: %s", attempt_id, owned.job_key, exc)
+            return
+        _fs.remove_empty_dir(_fs.loc(attempts))
+
+    def _release(self, owned: OwnedJob, doc: StateDoc, target: Release) -> _kernel.JobRef:
+        """The release rule with this manager's history entry and run-log events."""
+
+        moved = {"from": owned.from_state, "to": target.state}
+        doc = doc.updated(owner_id=self.manager_id).with_history("released", owner_id=self.manager_id, **moved)
+        attempt_id = _text(doc.attempt, "id")
+        if target.state == "failed":
+            owned.append_log("failed", attempt_id=attempt_id, detail=_text(doc.failure, "code"))
+        owned.append_log("released", **moved, detail={"priority": target.priority})
+        ref = owned.release(doc, target)
+        _LOGGER.info(
+            "job %s moved from %s to %s",
+            owned.job_key,
+            owned.from_state,
+            target.state,
+            extra=self._event("released", owned, to=target.state),
+        )
+        return ref
+
+    def _seal_enabled(self, job: JobDefinition) -> bool:
+        """Decide the seal of a ``succeed`` commit: the job's ``seal_succeeded``, else the ``seal.succeeded`` setting."""
+
+        if job.seal_succeeded is not None:
+            return job.seal_succeeded
+        raw = self._effective_settings().get("seal.succeeded", True)
+        return str(raw).strip().lower() not in {"false", "0", "no", "off"}
+
+    def _seal_keys(self) -> tuple[seals.SealKey, ...]:
+        """Return the signing keys of ``seal.keys``; none resolving means an unsigned seal."""
+
+        try:
+            return seals.default_workspace_keys(self.workspace).keys
+        except SealError:
+            return ()
+
+    def _context_children(self, doc: StateDoc) -> list[dict[str, object]]:
+        """Return the context ``children`` of an activation that follows a join: its observations, located now.
+
+        Each child's ``payload_path``, ``workdir_path`` and ``data_path`` are workspace-relative paths of its
+        current directory (plan §13.3), or ``None`` when it cannot be found at its placement.
+        """
+
+        if doc.activation is None or doc.activation.get("reason") != "join":
+            return []
+        children: list[dict[str, object]] = []
+        observations = doc.as_mapping()["observations"]
+        assert isinstance(observations, list)
+        for observation in observations:
+            assert isinstance(observation, dict)
+            ref = _kernel.locate(
+                self.workspace,
+                str(observation["job_id"]),
+                placement_hint=PurePosixPath(str(observation["placement"])),
+            )
+            path = None if ref is None else ref.path.relative_to(self.workspace.root)
+            located = {
+                name: None if path is None else (path / suffix).as_posix()
+                for name, suffix in (("payload_path", "."), ("workdir_path", "run"), ("data_path", "data"))
+            }
+            children.append(
+                {
+                    **observation,
+                    "workspace_id": self.workspace.workspace_id,
+                    "kind": observation["state"],
+                    "data_generation": None,
+                    **located,
+                }
+            )
+        return children
+
+    # -- requests and joins -------------------------------------------------------------------------------------------
+
+    def _requests_pass(self) -> bool:
+        """Serve the request files of one bounded listing (plan §7.5).
+
+        A ``cancel`` of an attempt this manager runs stops the attempt now; every other request of a running
+        job waits for its boundary. A job found unowned at the request's placement is claimed, reconciled
+        (which applies its requests) and released.
+        """
+
+        directory = self.workspace.control / "requests"
+        try:
+            names = sorted(name for name in os.listdir(directory) if not name.startswith("."))
+        except FileNotFoundError:
+            return False
+        by_job: dict[str, list[Path]] = {}
+        for name in names[: self.discovery_budget]:
+            by_job.setdefault(name.split(".", 1)[0], []).append(directory / name)
+        running = {local.owned.job_id: local for local in self._running.values()}
+        changed = False
+        for job_id, paths in by_job.items():
+            requests = [request for path in paths if (request := self._parse_request(path)) is not None]
+            if not requests or all(request.request_id in self._deferred for request in requests):
+                continue
+            local = running.get(job_id)
+            if local is not None:
+                cancel = next((request for request in requests if request.action == "cancel"), None)
+                if cancel is not None and local.cancel is None:
+                    self._cancel_attempt(local, cancel)
+                    changed = True
+                continue
+            ref = _kernel.locate(
+                self.workspace, job_id, placement_hint=requests[0].placement, include_owned=False, cache=self._cache
+            )
+            if ref is not None and self._owns(ref.path):
+                changed |= self._claim_and_return(ref)
+        return changed
+
+    def _parse_request(self, path: Path) -> _requests.Request | None:
+        try:
+            return _requests.parse(path)
+        except FileNotFoundError:
+            return None
+        except FormatError as exc:
+            # ponytail: a malformed request stays where it is; gc quarantines it (C5a).
+            self._report_anomaly(f"request:{path.name}", f"ignoring malformed request {path}: {exc}", {})
+            return None
+
+    def _cancel_attempt(self, local: RunningAttempt, request: _requests.Request) -> None:
+        """Stop a running attempt for a ``cancel`` request: ``SIGTERM``, then ``SIGKILL`` after the grace."""
+
+        local.cancel = request
+        local.timeout_kill_at = time.monotonic() + self.cancel_grace_seconds
+        _attempt_process.terminate_process(local.process.pid)
+        _manager_launches.stop_all(self, local, "the job is being cancelled")
+        _LOGGER.info(
+            "cancelling attempt %s of %s (request %s)",
+            local.attempt_id,
+            local.owned.job_key,
+            request.request_id,
+            extra=self._event("attempt_cancel", local.owned, attempt_id=local.attempt_id),
         )
 
-    def _serving_exchange(self) -> bool:
-        """Report whether this manager serves the workspace's exchange now.
-
-        The extension is re-read with the settings, and the exchange is served
-        only while attempts are confined: an unconfined manager neither adopts
-        client bundles nor returns them (it does not claim work either).
-
-        :return: Whether the workspace has the exchange extension and attempts are confined.
-        """
+    def _claim_and_return(self, ref: _kernel.JobRef) -> bool:
+        """Claim an unowned job, reconcile it (applying its requests) and release it unless that already did."""
 
         try:
-            self._confinement(self._effective_settings())
-        except (_ConfinementBlocked, WorkflowError, OSError, ValueError):
-            return False
-        return EXCHANGE_EXTENSION in self.workspace.extensions
-
-    def _load_job_and_state(self, marker: Marker, pass_name: str) -> tuple[JobDefinition, StateFrame] | None:
-        """Load one job and its state frame, skipping and reporting damage.
-
-        A job whose ``job.json`` or state frame cannot be read is a local
-        defect of that job. Reporting it and continuing keeps one damaged job
-        from stopping every other job in the workspace. Core-v1 leaves the
-        repair of such a payload to an operator, so nothing is moved: the
-        authoritative marker stays exactly where it is.
-        """
-
-        try:
-            job = self.workspace.load_job(marker)
-        except FormatError as exc:
-            refusal = self._refused_job_document(marker)
-            if refusal is not None:
-                # A job.json the job replaced by a symlink, FIFO or oversized
-                # file never becomes readable again: fail the job instead of
-                # skipping it forever.
-                self._fail_unloadable_job(marker, f"{refusal}: {exc}")
-                return None
-            self._report_anomaly(
-                f"{pass_name}:{marker.job_key}",
-                f"skipping {marker.kind} job {marker.job_key} during {pass_name}: {exc}",
-                self._event("job_unusable", marker, pass_name=pass_name),
-            )
-            return None
+            owned = _kernel.claim(self.workspace, self.owner, ref)
+            if owned is None:
+                return False
+            owned.append_log("claimed", **{"from": ref.state, "to": _kernel.OWNED})
+            reconciled = self._reconcile_guarded(owned)
+            if reconciled is not None:
+                self._release(owned, reconciled[1], Release(owned.from_state, owned.from_priority))
+        except _kernel.OwnerLost:
+            raise
         except (WorkflowError, OSError) as exc:
-            self._report_anomaly(
-                f"{pass_name}:{marker.job_key}",
-                f"skipping {marker.kind} job {marker.job_key} during {pass_name}: {exc}",
-                self._event("job_unusable", marker, pass_name=pass_name),
+            self._report_anomaly(f"claim:{ref.job_key}", f"cannot serve {ref.job_key}: {exc}", {"event": "claim_error"})
+        return True
+
+    def _apply_requests(self, owned: OwnedJob, job: JobDefinition, doc: StateDoc) -> StateDoc | None:
+        """Apply the job's pending requests (the last reconcile step); ``None`` once one released the job."""
+
+        for path in owned.request_files():
+            request = self._parse_request(path)
+            if request is None or request.job_id != owned.job_id:
+                continue
+            new, effect = _requests.apply(
+                job,
+                doc,
+                owned.from_state,
+                owned.from_priority,
+                request,
+                refusal=lambda candidate: self._refusal(job, candidate),
             )
+            if isinstance(effect, (_requests.Defer, _requests.Eject)):
+                if isinstance(effect, _requests.Eject):
+                    self._report_anomaly(
+                        f"eject:{request.request_id}",
+                        f"eject request {request.request_id} waits: ejection returns in phase D",
+                        {},
+                        level=logging.INFO,
+                    )
+                self._deferred.add(request.request_id)
+                continue
+            self._deferred.discard(request.request_id)
+            detail: dict[str, object] = {"request_id": request.request_id, "action": request.action}
+            if isinstance(effect, _requests.Drop):
+                detail["dropped"] = effect.reason
+            owned.append_log("request_applied", detail=detail)
+            if isinstance(effect, _requests.Discard):
+                owned.discard()
+                _LOGGER.info("deleted %s (request %s)", owned.job_key, request.request_id)
+            elif isinstance(effect, _requests.Drop):
+                applied = Release(owned.from_state, owned.from_priority, (request.request_id,))
+                self._release(owned, new, applied)
+            else:
+                self._release(owned, new, effect)
             return None
-        try:
-            state = StateFrame.from_mapping(self.workspace.read_state(marker))
-        except (WorkflowError, OSError) as exc:
-            self._report_anomaly(
-                f"{pass_name}:{marker.job_key}",
-                f"skipping {marker.kind} job {marker.job_key} during {pass_name}: {exc}",
-                self._event("job_unusable", marker, pass_name=pass_name),
-            )
-            return None
-        self._reported.pop(f"{pass_name}:{marker.job_key}", None)
-        return job, state
+        return doc
 
-    def _refused_job_document(self, marker: Marker) -> str | None:
-        """Say why a job's ``job.json`` is refused for good, or ``None`` when it may be transient.
+    def _refusal(self, job: JobDefinition, request: _requests.Request) -> str | None:
+        """The revival guard for ``continue``/``override_step``, and the waiting-parent check for ``delete``."""
 
-        Only what the bounded no-follow read refuses by kind counts: a symlink,
-        a FIFO or other special file, or a document over the size bound. A
-        missing file (a race with removal or transfer) or a malformed document
-        keeps being reported and skipped as before.
-        """
-
-        try:
-            with self._job_directory(marker) as job_dir:
-                information = job_dir.stat("job.json")
-        except (FormatError, OSError):
+        if request.action in ("continue", "override_step"):
+            return _joins.consumed_by_decided_join(self.workspace, job, cache=self._cache)
+        parent = job.parent
+        if request.action != "delete" or parent is None:
             return None
-        if information is None:
+        ref = _kernel.locate(
+            self.workspace,
+            str(parent["job_id"]),
+            placement_hint=PurePosixPath(str(parent["placement"])),
+            cache=self._cache,
+        )
+        if ref is None or ref.state in TERMINAL_STATES:
             return None
-        if stat.S_ISLNK(information.st_mode):
-            return "job.json is a symlink"
-        if not stat.S_ISREG(information.st_mode):
-            return "job.json is not a regular file"
-        if information.st_size > MAXIMUM_JOB_DOCUMENT_BYTES:
-            return f"job.json is larger than {MAXIMUM_JOB_DOCUMENT_BYTES} bytes"
+        parent_doc, _damaged = read_state_unowned(ref.path / "state.json")
+        children = None if parent_doc is None or parent_doc.join is None else parent_doc.join.get("children")
+        if isinstance(children, tuple) and any(
+            isinstance(child, Mapping) and child.get("job_id") == job.id for child in children
+        ):
+            return f"its parent {ref.job_key} ({ref.state}) is waiting on it"
         return None
 
-    def _fail_unloadable_job(self, marker: Marker, message: str) -> None:
-        """Record ``protocol_error`` for a job whose definition is refused, without its definition.
+    def _joins_pass(self) -> bool:
+        """Evaluate one bounded window of waiting parents; claim and release each one whose join is decided."""
 
-        A ready, waiting or paused job is failed by any manager. A claimed,
-        running or committing one is failed only by its own manager, or once
-        its manager is evidently gone (:meth:`_owner_gone_evidence`) and, for
-        a running or committing one, every launch recorded for its attempt has
-        ended; a local attempt of it stays tracked, so the orphan sweep stops
-        and reaps its process.
-        """
+        refs = list(
+            _kernel.list_jobs(
+                self.workspace,
+                "waiting",
+                prefixes=self.placement_prefixes,
+                limit=self.discovery_budget,
+                start=self._join_cursor,
+            )
+        )
+        self._join_cursor = refs[-1].cursor if len(refs) == self.discovery_budget else None
+        changed = False
+        for ref in refs:
+            if not self._owns(ref.path):
+                continue
+            try:
+                decision = _joins.evaluate(
+                    self.workspace,
+                    ref,
+                    cache=self._cache,
+                    unresolved_since=self._unresolved,
+                    grace=self.join_grace_seconds,
+                    now=time.time(),
+                )
+            except FormatError as exc:
+                self._report_anomaly(f"join:{ref.job_key}", f"cannot evaluate the join of {ref.job_key}: {exc}", {})
+                continue
+            if decision is not None:
+                changed |= self._decide_join(ref, decision)
+        return changed
 
-        anomaly = f"unloadable:{marker.job_key}"
+    def _decide_join(self, ref: _kernel.JobRef, decision: _joins.JoinDecision) -> bool:
+        """Claim a waiting parent and release it as its decided join says."""
+
         try:
-            state = self._read_frame(marker)
-            if marker.kind in {"claimed", "running", "committing"} and state.manager_id != self.manager_id:
-                lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
-                if self._owner_gone_evidence(state.manager_id, lease_seconds=lease_seconds) is None:
-                    self._report_anomaly(
-                        anomaly,
-                        f"leaving {marker.kind} job {marker.job_key} to its manager: {message}",
-                        self._event("job_unusable", marker),
-                    )
-                    return
-                # Ranks of a launch of the attempt may still write the job, which failing it hands on.
-                launches = _manager_launches.launch_end_evidence(
-                    self, state.attempt_id or "", owner=state.manager_id, lease_seconds=lease_seconds
-                )
-                if marker.kind != "claimed" and launches.pending is not None:
-                    self._report_anomaly(
-                        anomaly,
-                        f"leaving {marker.kind} job {marker.job_key} until launch {launches.pending.record} of "
-                        f"its attempt is proven to have ended ({launches.pending.rule}): {message}",
-                        self._event("job_unusable", marker),
-                    )
-                    return
-            if marker.kind not in {"ready", "claimed", "running", "committing", "waiting", "paused"}:
-                self._report_anomaly(
-                    anomaly,
-                    f"cannot fail {marker.kind} job {marker.job_key}: {message}",
-                    self._event("job_unusable", marker),
-                )
-                return
-            failed = StateFrame.replace(
-                state.carried(), failure=self._failure("protocol_error", message), reason="protocol_error"
-            )
-            if "process" in state.members:
-                failed = StateFrame.replace(failed, process=state.members["process"])
-            _LOGGER.error(
-                "failing %s: %s", marker.job_key, message, extra=self._event("job_definition_refused", marker)
-            )
-            self._transition(marker, "failed", failed)
-        except TransitionLostError:
-            _LOGGER.debug("failure record for %s was lost to another actor", marker.job_key)
+            owned = _kernel.claim(self.workspace, self.owner, ref)
+            if owned is None:
+                return False
+            owned.append_log("claimed", **{"from": ref.state, "to": _kernel.OWNED})
+            reconciled = self._reconcile_guarded(owned)
+            if reconciled is None:
+                return True
+            job, doc = reconciled
+            if doc.join is None:
+                self._release(owned, doc, Release(owned.from_state, owned.from_priority))
+                return True
+            decided, target = decide_join(job, doc, decision)
+            decided = decided.with_history("join_decided", detail=decision.kind)
+            self._release(owned, decided, Release(target, owned.from_priority))
+        except _kernel.OwnerLost:
+            raise
         except (WorkflowError, OSError) as exc:
-            self._report_anomaly(
-                anomaly,
-                f"cannot record the protocol_error failure of {marker.job_key}: {exc}",
-                self._event("failure_error", marker, failure_code="protocol_error"),
-            )
+            self._report_anomaly(f"join:{ref.job_key}", f"cannot apply the join of {ref.job_key}: {exc}", {})
+        return True
 
-    def _read_frame(self, marker: Marker) -> StateFrame:
-        """Return the typed state frame one marker references."""
+    # -- claiming and launching ---------------------------------------------------------------------------------------
 
-        return StateFrame.from_mapping(self.workspace.read_state(marker))
+    def _workflow(self, workflow_id: str) -> tuple[_store.Installed | None, str | None]:
+        """Return the installed workflow and ``None``, or ``None`` and why its closure is not runnable here."""
 
-    def _register_submissions(self) -> bool:
-        return _manager_scheduling.register_submissions(self)
-
-    def _eligible_ready(self) -> list[Marker]:
-        """Return eligible markers for compatibility with private callers."""
-
-        return [marker for marker, _ in self._eligible_ready_with_requirements()]
-
-    def _eligible_ready_with_requirements(self) -> list[tuple[Marker, dict[str, int]]]:
-        """Return eligible markers paired with their effective requirements."""
-
-        return _manager_scheduling.eligible_ready(self)
+        if workflow_id not in self._workflows:
+            installed: _store.Installed | None = None
+            try:
+                report = _store.closure(self.workspace, workflow_id, check_builds=True)
+                problems = [
+                    *(f"{item} is not installed" for item in report.missing),
+                    *(f"{item} is not built for this platform" for item in report.unbuilt),
+                ]
+                if not problems:
+                    installed = _store.lookup(self.workspace, workflow_id)
+            except (RunnerResolutionError, ValueError) as exc:
+                problems = [str(exc)]
+            problem = None if installed is not None else f"workflow {workflow_id}: {'; '.join(problems)}"
+            self._workflows[workflow_id] = (installed, problem)
+        return self._workflows[workflow_id]
 
     def _available_resources(self) -> dict[str, int]:
         """Return manager capacity after reservations of local attempts."""
@@ -1975,566 +1279,521 @@ class TaskManager:
         return available
 
     def _release_placement(self, placement: Placement | None) -> None:
-        """Return one attempt's placement to the inventory."""
-
         if placement is not None and self._inventory is not None:
             release(self._inventory, placement)
 
-    def _drop_running(self, attempt_id: str) -> RunningAttempt | None:
-        """Stop tracking one local attempt, returning its placement to the inventory.
+    def _claim_and_launch(self, ref: _kernel.JobRef) -> bool:
+        """Claim one ready job, reconcile it and launch its attempt while it is still eligible."""
 
-        Callers drop an attempt only once its launches are reaped; their trusted
-        launch directories, kept until now as takeover evidence, are removed.
-        """
-
-        local = self._running.pop(attempt_id, None)
-        if local is not None:
-            self._release_placement(local.placement)
-            _manager_launches.forget(self, local)
-        return local
-
-    def _claim_and_launch(self, marker: Marker) -> bool:
-        """Claim one ready job and launch its attempt, reporting local faults."""
-
-        ownership = self._owns(marker)
-        if ownership is not True:
-            if ownership is None:
-                return False
-            try:
-                marker.path.lstat()
-            except FileNotFoundError:
-                # Let the verified transition report a stale candidate as a
-                # lost race; a missing marker is not an ownership refusal.
-                pass
-            else:
-                return False
-        loaded = self._load_job_and_state(marker, "claim")
-        if loaded is None:
-            return False
-        job, state = loaded
-        if state.has("pause_requested"):
-            self._transition(marker, "ready", StateFrame.replace(state.carried(), reason="pause_requested"))
-            return True
-        attempt_ordinal = (state.attempt_ordinal or 0) + 1
-        total_attempts = (state.total_attempts or 0) + 1
-        budget_failure = self._attempt_budget_failure(job, attempt_ordinal, total_attempts)
-        if budget_failure is not None:
-            self._transition(
-                marker,
-                "failed",
-                StateFrame.replace(
-                    state.carried(),
-                    failure=self._failure("budget_exhausted", budget_failure),
-                    reason="budget_exhausted",
-                ),
-            )
-            return True
-        attempt_id = str(uuid.uuid4())
-        # The carried ``resources`` keep only the dynamic requirement an outcome
-        # declared. The effective requirement, with this manager's fair share,
-        # is recorded as the non-carried ``reservation``, so a retry or released
-        # claim is not pinned to this manager's capacity.
-        requirement = _manager_scheduling.effective_requirement(
-            job, state, self.resources, self.maximum_workers, whole_nodes=self._inventory is not None
-        )
-        claimed = self._transition(
-            marker,
-            "claimed",
-            StateFrame.replace(
-                state.carried(),
-                manager_id=self.manager_id,
-                writer_id=self.writer.writer_id,
-                claim_id=str(uuid.uuid4()),
-                attempt_id=attempt_id,
-                attempt_control=f"{ATTEMPTS_DIRECTORY}/{attempt_id}",
-                attempt_ordinal=attempt_ordinal,
-                total_attempts=total_attempts,
-                reservation=dict(requirement),
-                lease_seconds=self.lease_seconds,
-                matched_pool=job.claim_pool,
-                matched_capabilities=sorted(job.required_capabilities),
-                reason=state.reason or "claim",
-            ),
-        )
-        _LOGGER.info(
-            "claimed %s for attempt %s (ordinal %d, total %d, pool %s)",
-            claimed.job_key,
-            attempt_id,
-            attempt_ordinal,
-            total_attempts,
-            job.claim_pool,
-            extra=self._event("claim", claimed, attempt_id=attempt_id, pool=job.claim_pool),
-        )
-        if self._maintenance_paused():
-            # The lock appeared between eligibility and the claim. Releasing the
-            # claim keeps the job runnable instead of wedging it for this
-            # manager's lifetime.
-            self._release_claim(claimed, "maintenance_lock")
-            return True
         try:
-            self._launch_claimed(claimed, job, state)
-        except _ConfinementBlocked as exc:
-            self._release_claim(claimed, "confinement_unavailable")
-            self._report_confinement_blocked(str(exc))
-        except TransitionLostError:
+            owned = _kernel.claim(self.workspace, self.owner, ref)
+            if owned is None:
+                return False
+            owned.append_log("claimed", **{"from": ref.state, "to": _kernel.OWNED})
+            reconciled = self._reconcile_guarded(owned)
+            if reconciled is None:
+                return True
+            job, doc = reconciled
+            requirement, blocker = _manager_scheduling.assess(self, job, doc)
+            if requirement is None or not _manager_scheduling.fits_now(self, requirement):
+                _LOGGER.debug("returning %s: no longer eligible here (%s)", owned.job_key, blocker)
+                self._release(owned, doc, Release(owned.from_state, owned.from_priority))
+                return True
+            self._launch(owned, job, doc, requirement)
+        except _kernel.OwnerLost:
             raise
         except (WorkflowError, OSError) as exc:
-            self._fail_attempt_preparation(claimed, job, exc)
-        finally:
-            # A launch that did not start a tracked attempt returns its placement.
-            self._release_placement(self._unlaunched.pop(attempt_id, None))
+            self._report_anomaly(
+                f"claim:{ref.job_key}", f"cannot claim or launch {ref.job_key}: {exc}", {"event": "claim_error"}
+            )
         return True
 
-    def _release_claim(self, marker: Marker, reason: str, state: StateFrame | None = None) -> None:
-        """Return one claimed job to ready without consuming its budget."""
+    def _launch(self, owned: OwnedJob, job: JobDefinition, doc: StateDoc, requirement: Mapping[str, int]) -> None:
+        """Launch the job's next attempt, or return the job when a host condition holds it back."""
 
-        if state is None:
-            try:
-                state = self._read_frame(marker)
-            except (WorkflowError, OSError) as exc:
-                self._report_anomaly(
-                    f"release:{marker.job_key}",
-                    f"cannot release claim on {marker.job_key}: {exc}",
-                    self._event("release_error", marker, reason=reason),
-                )
-                return
-        try:
-            self._transition(
-                marker,
-                "ready",
-                StateFrame.replace(
-                    state.carried(),
-                    reason=reason,
-                    attempt_ordinal=max(0, (state.attempt_ordinal if state.attempt_ordinal is not None else 1) - 1),
-                    total_attempts=max(0, (state.total_attempts if state.total_attempts is not None else 1) - 1),
-                ),
-            )
-        except TransitionLostError:
-            _LOGGER.debug("release of %s was lost to another actor", marker.job_key)
-
-    def _fail_attempt_preparation(self, marker: Marker, job: JobDefinition, exc: Exception) -> None:
-        """Fail one claimed job whose attempt could not be prepared."""
-
-        if isinstance(exc, RunnerResolutionError):
-            code = exc.code
-            message = str(exc)
-        else:
-            code = "protocol_error" if isinstance(exc, FormatError) else "process_failure"
-            message = f"cannot prepare attempt: {exc}"
-        _LOGGER.error(
-            "cannot prepare an attempt for %s: %s",
-            marker.job_key,
-            exc,
-            extra=self._event("launch_error", marker, failure_code=code),
-        )
-        self._handle_attempt_failure(marker, job, code, message)
-
-    def _resolve_shared_runner(self, job: JobDefinition) -> Path:
-        return _manager_runners.resolve_shared_runner(self, job)
-
-    def _resolve_package_runner(self, module: str, resource: PurePosixPath) -> Path:
-        return _manager_runners.resolve_package_runner(module, resource, self.runner_modules)
-
-    @staticmethod
-    def _contained(root: Path, parts: Sequence[str]) -> Path | None:
-        return _manager_runners.contained(root, parts)
-
-    def _launch_claimed(
-        self,
-        marker: Marker,
-        job: JobDefinition,
-        previous_state: StateFrame,
-    ) -> None:
-        # Every directory and file descriptor the launch pins in the job
-        # directory is closed when the launch returns, however it returns.
-        with contextlib.ExitStack() as handles:
-            self._launch_attempt(handles, marker, job, previous_state)
-
-    def _launch_attempt(
-        self,
-        handles: contextlib.ExitStack,
-        marker: Marker,
-        job: JobDefinition,
-        previous_state: StateFrame,
-    ) -> None:
-        """Prepare and launch one claimed attempt through the pinned job directory.
-
-        The attempt container, the attempt-control directory, the workdir, the
-        logs and the payload runner are all reached through descriptors opened
-        without following links, so a job that planted a symlink, FIFO or other
-        special file on one of them fails with ``protocol_error`` instead of
-        redirecting a manager write or blocking the manager.
-        """
-
-        claimed_state = self._read_frame(marker)
-        try:
-            launch_job = self.workspace.load_job(marker)
-        except (WorkflowError, OSError) as exc:
-            raise RunnerResolutionError(
-                "payload.tampered", f"cannot re-validate job.json for {marker.job_key}: {exc}"
-            ) from exc
-        if launch_job.digest != job.digest:
-            raise RunnerResolutionError(
-                "payload.tampered",
-                f"job.json digest changed for {marker.job_key} after claim",
-            )
-        executor = self._executor_for(job)
-        if executor is None:
-            raise FormatError(f"runner executor is unavailable: {job.runner_executor}")
-        attempt_id = claimed_state.attempt_id
-        control_name = claimed_state.attempt_control
-        if attempt_id is None or control_name is None:
-            raise FormatError("a claimed frame must name its attempt and attempt control directory")
-        # The manager decides by its effective settings (workspace settings with
-        # its pinned overrides), and the runner sees the same mapping. A host or
-        # operator confinement condition releases the claim before anything is
-        # created for the attempt.
+        self.owner.check_alive()
         settings = self._effective_settings()
-        checked = self._confinement(settings)
-        confinement = checked.settings
-        confined = confinement is not None
-        block_userns = checked.block_userns
-        # Same manager and inputs as the claim, so this equals the claimed
-        # frame's ``reservation``.
-        requirement = _manager_scheduling.effective_requirement(
-            job, claimed_state, self.resources, self.maximum_workers, whole_nodes=self._inventory is not None
-        )
+        try:
+            checked = self._confinement(settings)
+        except _ConfinementBlocked as exc:
+            self._report_confinement_blocked(str(exc))
+            self._release(owned, doc, Release(owned.from_state, owned.from_priority))
+            return
         placement = None
         if self._inventory is not None:
             placement = assign(self._inventory, requirement)
             if placement is None:
-                # The claim pass checked the fit, so only a changed inventory gets here.
-                self._release_claim(marker, "resources_changed", claimed_state)
+                self._release(owned, doc, Release(owned.from_state, owned.from_priority))
                 return
-            self._unlaunched[attempt_id] = placement
-        payload = self.workspace.payload_path(marker.placement, marker.job_key)
-        control = payload / control_name
-        job_dir = handles.enter_context(self._job_directory(marker))
-        # The attempt container is created when missing, but the attempt's own
-        # control directory must be new: a pre-existing one was not made here.
-        control_dir = handles.enter_context(job_dir.directory(control_name, create=True, exclusive=True))
-        runner = payload.joinpath(*job.runner_path.parts)
-        verified: _manager_runners.VerifiedRunner | None = None
-        if job.workdir_mode == "persistent":
-            workdir_name = job.workdir_path
-            workdir_reused = job_dir.exists_dir(workdir_name)
-        else:
-            workdir_name = job.workdir_path.parent / f"{job.workdir_path.name}.{attempt_id}"
-            workdir_reused = False
-        # A symlinked workdir, or a symlinked component above it, is refused.
-        job_dir.directory(workdir_name, create=True).close()
-        workdir = payload.joinpath(*workdir_name.parts)
-        if confined:
-            self._check_confinement_start(marker)
-        workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
-        deadline = self._attempt_deadline(requirement)
-        binding, binding_environment, pin = (
-            (None, {}, None)
-            if placement is None
-            else self._attempt_binding(placement, control, settings, requirement.get("mem"), control_dir=control_dir)
-        )
-        launch_context: LaunchContext | None = None
-        if confined and "HTTK_WORKFLOW_LAUNCH" in binding_environment:
-            # A rendered prefix would start ranks outside the sandbox: a
-            # confined attempt gets the launch client instead, and the manager
-            # renders each launch from this in-memory context, never from the
-            # job-writable nodefile or binding.json.
-            assert placement is not None and self.allocation is not None and checked.launch is not None
-            template = settings.get("manager.launch_template")
-            launch_context = LaunchContext(
-                placement=placement,
-                template=template if isinstance(template, str) else None,
-                kind=self.allocation.kind,
-                gpus_present=self.resources.get("gpus", 0) > 0,
-                cpus_per_proc=self.allocation.cpus_per_proc,
-                mem=requirement.get("mem"),
-                # Already validated by the binding above, which rendered the prefix.
-                mpi=_confine.launch_mpi_setting(settings),
-                confinement=checked.launch,
-            )
-            binding_environment["HTTK_WORKFLOW_LAUNCH"] = _manager_launches.client_prefix()
-            # The client's liveness lock lives on host tmpfs, never on the shared workspace
-            # filesystem; the directory is created just before the sandbox is built.
-            binding_environment["HTTK_WORKFLOW_LAUNCH_LOCKS"] = str(
-                _confine.launch_locks_path(checked.launch.shm_root, attempt_id)
-            )
-        context = attempt_context(
-            workspace_id=self.workspace.workspace_id,
-            job_id=job.id,
-            job_key=job.job_key,
-            placement=placement_text(marker.placement),
-            payload=str(payload.resolve()),
-            step=claimed_state.step,
-            activation_id=claimed_state.activation_id,
-            activation_ordinal=claimed_state.activation_ordinal,
-            attempt_id=attempt_id,
-            attempt_ordinal=claimed_state.attempt_ordinal,
-            total_attempts=claimed_state.total_attempts,
-            is_unclean_restart=previous_state.unclean_restart,
-            attempt_reason=claimed_state.reason,
-            previous_attempt_id=previous_state.attempt_id,
-            activation_reason=previous_state.reason,
-            workdir_mode=job.workdir_mode,
-            workdir_reused=workdir_reused,
-            unsafe_persistent_takeover=previous_state.unsafe_persistent_takeover,
-            data_generation=claimed_state.data_generation,
-            durable=self.workspace.durable,
-            settings=settings,
-            resources=requirement,
-            deadline=deadline,
-            binding=binding,
-            join=claimed_state.join_summary,
-            children=self._context_children(claimed_state.join_summary),
-        )
-        environment = runner_environment(
-            base=os.environ.copy(),
-            context=context,
-            control=control,
-            workspace_root=self.workspace.root,
-            payload=payload,
-            workdir=workdir,
-            durable=self.workspace.durable,
-            deadline=deadline,
-            binding_environment=binding_environment,
-            code_variables=code_environment(),
-            data_dir=payload / "data" if job.data_mode == "transactional" else None,
-            declared_environment=job.environment.get("declared", {}),
-            settings=settings,
-        )
-        if job.runner_source != "payload":
-            verified = _manager_runners.verify_runner(self, job)
-            runner = Path(f"/dev/fd/{verified.fd}") if verified.fd is not None else verified.path
-            environment["HTTK_WORKFLOW_RUNNER_ROOT"] = str(verified.root)
-            if verified.artifacts is not None:
-                environment["HTTK_WORKFLOW_RUNNER_ARTIFACTS"] = str(verified.artifacts)
-        stdio_fd = -1
-        gate_read = -1
-        gate_write = -1
-        process: subprocess.Popen[bytes] | None = None
-        running: Marker | None = None
-        payload_runner_sha256: str | None = None
-        sandbox: PreparedSandbox | None = None
-        launch_locks: tuple[int, Path] | None = None
-        launch_locks_kept = False
         try:
-            logs = handles.enter_context(job_dir.directory(LOGS_DIRECTORY, create=True))
-            stdio_fd = logs.open_append("stdio.out")
-            if job.runner_source == "payload":
-                # The manager hashes the payload runner through a no-follow,
-                # non-blocking descriptor; the attempt still executes it by its
-                # path, so ``$0`` and ``__file__`` name the real runner.
-                payload_runner_sha256 = self._hash_payload_runner(job_dir, job)
-            start_marker = (
-                f"=== httk attempt {attempt_id} step {context['step']} ordinal {context['attempt_ordinal']} "
-                f"started {utc_now()}\n"
+            if self._start_attempt(owned, job, doc, requirement, settings, checked, placement):
+                placement = None
+        finally:
+            self._release_placement(placement)
+
+    def _runner_command(self, installed: _store.Installed) -> tuple[list[str], Path | None]:
+        """Return an installed workflow's runner argv and its build artifacts directory (``None`` when unbuilt)."""
+
+        artifacts = None
+        if installed.record.get("build") is True:
+            spec = read_build_spec(installed.package)
+            built = None if spec is None else installed.build_dir(_store.platform_tag(spec))
+            artifacts = None if built is None else built / "artifacts"
+        runner = installed.record.get("runner")
+        runner = runner if isinstance(runner, Mapping) else {}
+        command, builtin, entry = runner.get("command"), runner.get("builtin"), runner.get("entry")
+        if isinstance(command, list):
+            try:
+                return list(
+                    expand_runner_command([str(item) for item in command], installed.package, artifacts)
+                ), artifacts
+            except ValueError as exc:
+                raise RunnerResolutionError("runner_unavailable", f"workflow {installed.id}: {exc}") from exc
+        if isinstance(builtin, str) and builtin in _BUILTIN_RUNNERS:
+            return [str(runner_path(*_BUILTIN_RUNNERS[builtin]))], artifacts
+        if isinstance(entry, str):
+            return [str(installed.package / entry)], artifacts
+        raise RunnerResolutionError("runner_unavailable", f"workflow {installed.id} declares no runner")
+
+    def _start_attempt(
+        self,
+        owned: OwnedJob,
+        job: JobDefinition,
+        doc: StateDoc,
+        requirement: Mapping[str, int],
+        settings: Mapping[str, Any],
+        checked: _Confinement,
+        placement: Placement | None,
+    ) -> bool:
+        """The launch sequence of plan §7.7: phase launching, attempt directory, launch record, gated start,
+        phase running, ``begin_attempt``, open gate. Returns whether the attempt runs."""
+
+        attempt = doc.attempt
+        if attempt is None or attempt.get("started_at") is not None:
+            doc = doc.next_attempt("claim" if attempt is None else "launch", unclean=False)
+        attempt_id = str(_text(doc.attempt, "id"))
+        if (exhausted := attempt_budget_failure(job, doc)) is not None:
+            budget = doc.with_failure(failure("budget_exhausted", exhausted))
+            self._release(owned, budget, Release("failed", owned.from_priority))
+            return False
+        try:
+            installed, problem = self._workflow(job.workflow_id)
+            if installed is None:
+                raise RunnerResolutionError("runner_unavailable", problem or f"workflow {job.workflow_id} is gone")
+            command, artifacts = self._runner_command(installed)
+        except RunnerResolutionError as exc:
+            self._commit(
+                owned, job, doc, failure_intent(job, doc, attempt_id, exc.code, str(exc), priority=owned.from_priority)
             )
-            write_marker(stdio_fd, start_marker, marker.job_key)
-            runner_command = list(
-                executor.command(
-                    AttemptLaunch(
-                        job=job,
-                        marker=marker,
-                        payload=payload,
-                        workdir=workdir,
-                        control=control,
-                        context=context,
-                        runner=runner,
-                        workflow_prelude=workflow_prelude,
-                        command=verified.command if verified is not None else None,
-                        control_writer=lambda name, data: self._write_control_file(control_dir, name, data),
-                    )
-                )
-            )
-            if not runner_command:
-                raise FormatError(f"runner executor {job.runner_executor!r} returned an empty command")
-            gate_read, gate_write = os.pipe()
-            runner_sha256: str | None
-            if verified is not None:
-                runner_sha256 = verified.sha256
-            else:
-                runner_sha256 = job.runner_sha256 or payload_runner_sha256
-            _append_attempt_event(
-                logs,
-                {
-                    "format": "httk-workflow-runlog-event",
-                    "format_version": 2,
-                    "timestamp": utc_now(),
-                    "kind": "attempt",
-                    "message": f"attempt {attempt_id} step {context['step']} launched",
-                    "attempt_id": attempt_id,
-                    "activation_id": claimed_state.activation_id,
-                    "step": context["step"],
-                    "runner_source": job.runner_source,
-                    "runner_path": str(
-                        verified.path if verified is not None else payload.joinpath(*job.runner_path.parts)
-                    ),
-                    "runner_sha256": runner_sha256,
-                    **(
-                        {"runner_command": list(verified.command)}
-                        if verified is not None and verified.command is not None
-                        else {}
-                    ),
-                    "files": [],
-                },
-                marker.job_key,
+            return False
+        pin = {"id": installed.id, "tree_sha256": installed.record.get("tree_sha256")}
+        doc = self._write(owned, doc.updated(workflow_pin=pin).with_phase("launching", attempt_id))
+        payload = owned.path
+        control = payload / "attempts" / attempt_id
+        confinement = checked.settings
+        activation = doc.activation
+        step = str(_text(activation, "step"))
+        stdio_fd = gate_read = gate_write = -1
+        process: subprocess.Popen[bytes] | None = None
+        launch_dir: Path | None = None
+        sandbox: PreparedSandbox | None = None
+        try:
+            _make_dir(payload / "attempts")
+            try:
+                os.mkdir(control)
+            except FileExistsError as exc:
+                raise FormatError(f"attempt directory {control} already exists") from exc
+            workdir = _make_dir(payload / "run")
+            if confinement is not None:
+                check_job_placement(job.placement)
+            deadline = self._attempt_deadline(requirement)
+            binding, binding_environment, pin_cpus = (
+                (None, {}, None)
+                if placement is None
+                else self._attempt_binding(placement, control, settings, requirement.get("mem"))
             )
             if confinement is not None:
-                # The filtered environment is the launcher's env, which Bubblewrap
-                # passes through to the sandboxed command; it never appears on
-                # Bubblewrap's world-readable argv.
+                # ponytail: confined launches (the launch client) return with C2b; until then a confined attempt
+                # gets no launch prefix, since a rendered one would start ranks outside the sandbox.
+                binding_environment.pop("HTTK_WORKFLOW_LAUNCH", None)
+            children = self._context_children(doc)
+            context = attempt_context(
+                workspace_id=self.workspace.workspace_id,
+                job_id=job.id,
+                job_key=job.job_key,
+                placement=placement_text(job.placement),
+                payload=str(payload.resolve()),
+                step=step,
+                activation_id=_text(activation, "id"),
+                activation_ordinal=_number(activation, "ordinal"),
+                attempt_id=attempt_id,
+                attempt_ordinal=_number(doc.attempt, "ordinal"),
+                total_attempts=_number(doc.counters, "attempts_total"),
+                is_unclean_restart=bool(doc.attempt and doc.attempt.get("unclean")),
+                attempt_reason=_text(doc.attempt, "reason"),
+                previous_attempt_id=_text(doc.attempt, "previous_attempt_id"),
+                activation_reason=_text(activation, "reason"),
+                durable=self.workspace.durable,
+                settings=settings,
+                resources=requirement,
+                deadline=deadline,
+                binding=binding,
+                join=children or None,
+                children=children,
+            )
+            environment = runner_environment(
+                base=os.environ.copy(),
+                context=context,
+                control=control,
+                workspace_root=self.workspace.root,
+                payload=payload,
+                workdir=workdir,
+                durable=self.workspace.durable,
+                deadline=deadline,
+                binding_environment=binding_environment,
+                code_variables=code_environment(),
+                data_dir=payload / "data",
+                declared_environment=job.environment.get("declared", {}),
+                settings=settings,
+            )
+            environment["HTTK_WORKFLOW_RUNNER_ROOT"] = str(installed.package)
+            if artifacts is not None:
+                environment["HTTK_WORKFLOW_RUNNER_ARTIFACTS"] = str(artifacts)
+            command = self._with_prelude(control, job, command)
+            stdio_fd = self._open_chronicle(owned)
+            started_line = (
+                f"=== httk attempt {attempt_id} step {step} ordinal {context['attempt_ordinal']} started {utc_now()}\n"
+            )
+            write_marker(stdio_fd, started_line, job.job_key)
+            owned.append_log(
+                "attempt_started",
+                attempt_id=attempt_id,
+                activation_id=context["activation_id"],
+                step=step,
+                detail={"command": command},
+            )
+            gate_read, gate_write = os.pipe()
+            if confinement is not None:
+                # The filtered environment is the launcher's env, which Bubblewrap passes through.
                 environment = _confine.filtered_attempt_environment(environment)
-                if launch_context is not None:
-                    try:
-                        launch_locks = _confine.create_launch_locks(launch_context.confinement.shm_root, attempt_id)
-                    except ConfinementUnavailableError as exc:
-                        raise FormatError(f"cannot confine the attempt: {exc}") from exc
-                sandbox = self._prepare_sandbox(
-                    confinement, job_dir, workdir, environment, block_userns, launch_locks=launch_locks
-                )
+                sandbox = self._prepare_sandbox(confinement, payload, workdir, environment, checked.block_userns)
             process = start_gated(
-                runner_command,
+                command,
                 gate_read=gate_read,
                 cwd=workdir,
                 environment=environment,
                 stdio_fd=stdio_fd,
-                confined=confined,
+                confined=confinement is not None,
                 sandbox=sandbox,
-                runner_fd=verified.fd if verified else None,
+                runner_fd=None,
             )
-            if sandbox is not None:
-                sandbox.close()
-            os.close(stdio_fd)
-            stdio_fd = -1
-            os.close(gate_read)
-            gate_read = -1
-            running = self._transition(
-                marker,
-                "running",
-                StateFrame.replace(
-                    claimed_state.carried(),
-                    manager_id=self.manager_id,
-                    writer_id=self.writer.writer_id,
-                    attempt_id=attempt_id,
-                    reservation=dict(requirement),
-                    lease_seconds=self.lease_seconds,
-                    started_at=utc_now(),
-                    workdir=str(workdir.relative_to(payload)),
-                    attempt_control=control_name,
-                    process={
-                        "pid": process.pid,
-                        "process_group": process.pid,
-                        "hostname": self.hostname,
-                        "launched_at": utc_now(),
-                    },
-                    reason="launched",
-                ),
-            )
-            if pin is not None:
-                # The launcher is blocked on the gate, so the runner it execs
-                # inherits this mask.
-                try:
-                    os.sched_setaffinity(process.pid, pin)
-                except (AttributeError, OSError) as exc:
-                    _LOGGER.warning(
-                        "cannot pin attempt %s to CPUs %s: %s",
-                        attempt_id,
-                        format_cpulist(pin),
-                        exc,
-                        extra=self._event("attempt_pin_failed", running, attempt_id=attempt_id),
-                    )
-            _attempt_process.release_gate(gate_write)
-            started = time.monotonic()
-            if verified is not None and verified.fd is not None:
-                os.close(verified.fd)
-                verified = _manager_runners.VerifiedRunner(
-                    verified.path, verified.root, verified.sha256, None, verified.artifacts
-                )
-            launch_locks_kept = True
+            # The launch record is durable before the gate opens (plan §3.6): a probe of a dead owner then finds it.
+            launch_dir = self.owner.launch_dir(attempt_id, "0")
+            self._write_process_record(launch_dir, attempt_id, process.pid)
+            doc = self._write(owned, doc.with_phase("running", attempt_id))
         except Exception as exc:
-            if gate_read >= 0:
-                os.close(gate_read)
-                gate_read = -1
-            if gate_write >= 0:
+            if process is not None:
+                # The gate stays closed, so the launcher reads end-of-file and exits; reap it.
                 os.close(gate_write)
                 gate_write = -1
-            if launch_locks is not None and launch_context is not None:
-                _confine.remove_launch_locks(launch_context.confinement.shm_root, attempt_id)
-            if process is not None:
-                # The gate is closed, so the launcher observes end-of-file and
-                # exits, but an unreaped launcher must never be left behind.
                 self._reap_launcher(process)
-            reason = str(exc).replace("\n", "\\n")
-            append_log_line(
-                job_dir,
-                f"=== httk attempt {attempt_id} ended {utc_now()} launch-failed {reason}\n",
-                job_key=marker.job_key,
-            )
-            if isinstance(exc, TransitionLostError):
+            if launch_dir is not None:
+                self.owner.remove_launch(attempt_id, "0")
+            if isinstance(exc, _kernel.OwnerLost):
                 raise
+            reason = str(exc).replace("\n", "\\n")
+            self._chronicle(owned, f"=== httk attempt {attempt_id} ended {utc_now()} launch-failed {reason}\n")
+            code = (
+                exc.code
+                if isinstance(exc, RunnerResolutionError)
+                else "protocol_error"
+                if isinstance(exc, FormatError)
+                else "process_failure"
+            )
             _LOGGER.error(
                 "cannot launch an attempt for %s: %s",
-                marker.job_key,
+                owned.job_key,
                 exc,
-                extra=self._event("launch_error", marker, attempt_id=attempt_id),
+                extra=self._event("launch_error", owned, attempt_id=attempt_id),
             )
-            failure_code = "protocol_error" if isinstance(exc, FormatError) else "process_failure"
-            self._handle_attempt_failure(running or marker, job, failure_code, f"cannot launch runner: {exc}")
-            return
+            message = f"cannot launch runner: {exc}"
+            self._commit(
+                owned, job, doc, failure_intent(job, doc, attempt_id, code, message, priority=owned.from_priority)
+            )
+            return False
         finally:
-            if stdio_fd >= 0:
-                os.close(stdio_fd)
-            if gate_read >= 0:
-                os.close(gate_read)
-            if gate_write >= 0:
-                os.close(gate_write)
-            if verified is not None and verified.fd is not None:
-                os.close(verified.fd)
+            for descriptor in (stdio_fd, gate_read):
+                if descriptor >= 0:
+                    os.close(descriptor)
             if sandbox is not None:
                 sandbox.close()
-            if launch_locks is not None and not launch_locks_kept:
-                os.close(launch_locks[0])
-        assert process is not None
-        assert running is not None
+        # From here on the attempt's processes may run: the job is not quiescent until end_attempt (P5).
+        owned.begin_attempt(attempt_id)
+        if pin_cpus is not None:
+            try:
+                os.sched_setaffinity(process.pid, pin_cpus)
+            except (AttributeError, OSError) as exc:
+                _LOGGER.warning("cannot pin attempt %s to CPUs %s: %s", attempt_id, format_cpulist(pin_cpus), exc)
+        try:
+            _attempt_process.release_gate(gate_write)
+        except OSError as exc:
+            # The launcher then reads end-of-file and exits; its reap fails the attempt.
+            _LOGGER.warning("cannot open the gate of attempt %s: %s", attempt_id, exc)
+        finally:
+            os.close(gate_write)
         self._running[attempt_id] = RunningAttempt(
-            running,
+            owned,
+            job,
             process,
+            attempt_id,
             control,
-            attempt_id,
             dict(requirement),
-            started,
+            time.monotonic(),
             requirement.get("maxtime"),
-            owner_uid=self.uid,
-            placement=self._unlaunched.pop(attempt_id, None),
-            confined=confined,
-            launches=(AttemptLaunches(control_name, launch_context, launch_locks=launch_locks) if confined else None),
+            placement=placement,
+            confined=confinement is not None,
         )
-        launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
-        if confined:
-            launch_fields["confined"] = True
-        if job.runner_source == "payload":
-            # A payload-source runner lives in the mutable payload, so record the
-            # payload digest at launch: it makes post-hoc mutation of the runner
-            # at least visible in the journal.
-            # ponytail: full payload tree digest per payload launch; cache or cap
-            # if payload launches ever dominate the manager's cost.
-            payload_digest = self._launch_payload_digest(running)
-            if payload_digest is not None:
-                launch_fields["payload_digest"] = payload_digest
+        owned.append_log("launched", attempt_id=attempt_id, activation_id=context["activation_id"], step=step)
         _LOGGER.info(
-            "launched attempt %s for %s as pid %d in %s",
+            "launched attempt %s for %s as pid %d",
             attempt_id,
-            running.job_key,
+            owned.job_key,
             process.pid,
-            workdir,
-            extra=self._event("launch", running, **launch_fields),
+            extra=self._event("launch", owned, attempt_id=attempt_id, pid=process.pid, step=step),
         )
+        return True
+
+    def _with_prelude(self, control: Path, job: JobDefinition, command: list[str]) -> list[str]:
+        """Wrap *command* in a login shell running the workflow's prelude (under ``set -e``), when it has one.
+
+        The login profiles may reset ``PATH``, so the manager's interpreter directory is put first again
+        before the prelude, which keeps the last word.
+        """
+
+        prelude = self.workspace.read_workflow_preludes().get(job.workflow_name, "")
+        if not prelude.strip():
+            return command
+        interpreter = shlex.quote(os.path.dirname(sys.executable))
+        script = control / "prelude.sh"
+        text = f'set -e\nexport PATH={interpreter}:"$PATH"\n' + prelude + '\nexec "$@"\n'
+        _fs.write_file(_fs.loc(script), text.encode("utf-8"), durable=self.workspace.durable)
+        return ["bash", "-l", str(script), *command]
+
+    def _open_chronicle(self, owned: OwnedJob) -> int:
+        """Open ``logs/stdio.out`` for appending without following a symlink or blocking on a FIFO."""
+
+        path = _make_dir(owned.path / "logs") / "stdio.out"
+        try:
+            # append_file creates the chronicle once; this open never creates.
+            _fs.append_file(_fs.loc(path), b"", durable=False)
+            descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except (_fs.UnsafePath, OSError) as exc:
+            raise FormatError(f"cannot open the stdio chronicle {path}: {exc}") from exc
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise FormatError(f"{path} is not a regular file")
+        return descriptor
+
+    def _chronicle(self, owned: OwnedJob, line: str) -> None:
+        """Append one marker to the stdio chronicle; a failure is logged, never raised."""
+
+        try:
+            descriptor = self._open_chronicle(owned)
+        except (FormatError, OSError) as exc:
+            _LOGGER.warning("cannot append the stdio chronicle of %s: %s", owned.job_key, exc)
+            return
+        try:
+            write_marker(descriptor, line, owned.job_key)
+        finally:
+            os.close(descriptor)
+
+    def _write_process_record(self, launch_dir: Path, attempt_id: str, pid: int) -> None:
+        """Write ``process.json`` of the attempt runner (``n = 0``) for the death proof (plan §3.6)."""
+
+        identity = _death.process_identity(pid)
+        record = {
+            "attempt_id": attempt_id,
+            "n": "0",
+            "pid": identity.pid,
+            "pgid": pid,
+            "hostname": identity.hostname,
+            "boot_id": identity.boot_id,
+            "process_start_ticks": identity.start_ticks,
+            "started_at": utc_now(),
+            "allocation": None if self._recorded_allocation is None else self._recorded_allocation.as_json(),
+            "ranks_local_only": True,
+        }
+        _fs.write_file(_fs.loc(launch_dir / "process.json"), json_bytes(record), durable=self.workspace.durable)
+
+    # -- supervision ------------------------------------------------------------------------------------------------
+
+    def _supervise(self) -> bool:
+        """Enforce deadlines, reap ended attempts and commit them (plan §7.7 step 7)."""
+
+        changed = self._enforce_deadlines()
+        for local in list(self._running.values()):
+            return_code = local.process.poll()
+            if return_code is None:
+                continue
+            if _manager_launches.unreaped(local):
+                # The attempt is not over while a launch of it runs: it is handled once every launch is reaped.
+                _manager_launches.stop_all(self, local, "the attempt process exited")
+                continue
+            if _attempt_process.process_group_alive(local.process.pid):
+                # A process the runner left in its group may still write the job: the job is quiescent only
+                # once the whole group is gone.
+                _attempt_process.terminate_process(local.process.pid, signal.SIGKILL)
+                continue
+            try:
+                self._finish_attempt(local, return_code)
+            except _kernel.OwnerLost:
+                raise
+            except (WorkflowError, OSError) as exc:
+                # The job stays owned with its intent; self-healing resumes the commit on a later tick.
+                self._report_anomaly(
+                    f"commit:{local.owned.job_key}",
+                    f"cannot commit attempt {local.attempt_id} of {local.owned.job_key}; it is retried: {exc}",
+                    self._event("commit_error", local.owned),
+                )
+            changed = True
+        return changed
+
+    def _finish_attempt(self, local: RunningAttempt, return_code: int) -> None:
+        """End a reaped attempt (``end_attempt``) and commit its outcome or its failure."""
+
+        owned, attempt_id, job = local.owned, local.attempt_id, local.job
+        self._running.pop(attempt_id, None)
+        self._release_placement(local.placement)
+        owned.end_attempt(attempt_id)
+        try:
+            self.owner.remove_launch(attempt_id, "0")
+        except OSError as exc:
+            # The record describes a reaped process group, which the death proof counts as dead.
+            _LOGGER.warning("cannot remove the launch record of attempt %s: %s", attempt_id, exc)
+        doc = owned.read_state()
+        assert doc is not None
+        outcome: Mapping[str, Any] | None = None
+        problem: str | None = None
+        try:
+            outcome_dir = local.control / "outcome.ready"
+            if all(_real_dir(path) for path in (local.control.parent, local.control, outcome_dir)):
+                outcome = read_outcome(outcome_dir, doc)
+        except FormatError as exc:
+            problem = str(exc)
+        action = "none" if outcome is None else str(outcome["action"])
+        self._chronicle(owned, f"=== httk attempt {attempt_id} ended {utc_now()} exit {return_code} outcome {action}\n")
+        owned.append_log("attempt_ended", attempt_id=attempt_id, detail={"exit_status": return_code})
+        _LOGGER.info(
+            "attempt %s of %s exited with status %d",
+            attempt_id,
+            owned.job_key,
+            return_code,
+            extra=self._event("attempt_exit", owned, attempt_id=attempt_id, exit_status=return_code),
+        )
+        if local.cancel is not None:
+            # A cancelled attempt commits as cancelled whatever it published; its committed data still applies.
+            self._commit(owned, job, doc, cancel_intent(attempt_id, owned.from_priority, local.cancel.request_id))
+            return
+        if outcome is not None:
+            self._commit_outcome(owned, job, doc, outcome, local.control / "outcome.ready")
+            return
+        if problem is not None:
+            code, message, unclean = "protocol_error", f"published outcome is unusable: {problem}", False
+        elif local.timed_out and local.maxtime is not None:
+            code, message, unclean = "timeout", f"attempt exceeded its maxtime {format_duration(local.maxtime)}", False
+        elif local.interrupted:
+            reason = self._drain_reason or "the manager stopped"
+            code, message, unclean = (
+                "owner_lost",
+                f"the manager stopped the attempt before it finished ({reason})",
+                True,
+            )
+        else:
+            code = "protocol_error" if return_code == 0 else "process_failure"
+            message, unclean = f"runner exited with status {return_code} without an outcome", False
+        _LOGGER.warning(
+            "attempt of %s failed with %s: %s",
+            owned.job_key,
+            code,
+            message,
+            extra=self._event("attempt_failure", owned, failure_code=code, exit_status=return_code),
+        )
+        intent = failure_intent(
+            job,
+            doc,
+            attempt_id,
+            code,
+            message,
+            priority=owned.from_priority,
+            exit_status=return_code,
+            unclean=unclean,
+        )
+        self._commit(owned, job, doc, intent)
+
+    def _attempt_deadline(self, requirement: Mapping[str, int]) -> int | None:
+        """Return the epoch second an attempt launched now must finish by: its ``maxtime`` or the drain start."""
+
+        candidates: list[int] = []
+        if "maxtime" in requirement:
+            candidates.append(int(time.time()) + requirement["maxtime"])
+        if self.drain_start is not None:
+            candidates.append(int(self.drain_start))
+        return min(candidates, default=None)
+
+    def _enforce_deadlines(self) -> bool:
+        """Stop every local attempt that has run longer than its ``maxtime``: ``SIGTERM``, then ``SIGKILL``.
+
+        A timed-out attempt is reaped like any other; an outcome it still published is committed, and
+        otherwise it fails with ``timeout``.
+        """
+
+        if self._draining:
+            # The drain is already stopping every attempt on its own clock.
+            return False
+        changed = False
+        now = time.monotonic()
+        for local in self._running.values():
+            if local.process.poll() is not None:
+                continue
+            if local.timeout_kill_at is not None and now >= local.timeout_kill_at:
+                local.timeout_kill_at = None
+                _attempt_process.terminate_process(local.process.pid, signal.SIGKILL)
+                continue
+            if local.maxtime is None or local.timed_out or local.cancel is not None:
+                continue
+            if now < local.started + local.maxtime:
+                continue
+            local.timed_out = True
+            local.timeout_kill_at = now + self.cancel_grace_seconds
+            _attempt_process.terminate_process(local.process.pid)
+            _manager_launches.stop_all(self, local, "the attempt exceeded its maxtime")
+            _LOGGER.warning(
+                "attempt %s of %s exceeded its maxtime %s; terminating it",
+                local.attempt_id,
+                local.owned.job_key,
+                format_duration(local.maxtime),
+                extra=self._event("attempt_timeout", local.owned, attempt_id=local.attempt_id),
+            )
+            changed = True
+        return changed
+
+    def _reap_launcher(self, process: subprocess.Popen[bytes], *, grace_seconds: float = 5.0) -> None:
+        """Terminate and reap a launcher whose gate never opened."""
+
+        for signal_number in (signal.SIGTERM, signal.SIGKILL):
+            if process.poll() is None:
+                _attempt_process.terminate_process(process.pid, signal_number)
+            try:
+                process.wait(timeout=grace_seconds)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+        _LOGGER.warning("abandoned launcher pid %d could not be reaped", process.pid)
+
+    # -- binding --------------------------------------------------------------------------------------------------------
 
     def _local_share(self, placement: Placement) -> tuple[NodeShare, Node] | None:
-        """Return a placement's only share and its node when that is this manager's host, else ``None``.
-
-        The node is local when its probe marked it so or its host name matches,
-        exactly or up to the first dot.
-        """
+        """Return a placement's only share and its node when that is this manager's host, else ``None``."""
 
         if len(placement.nodes) != 1 or self._inventory is None:
             return None
@@ -2544,38 +1803,14 @@ class TaskManager:
         return (share, node) if node.local or same else None
 
     def _attempt_binding(
-        self,
-        placement: Placement,
-        control: Path,
-        settings: Mapping[str, Any],
-        mem: int | None,
-        *,
-        control_dir: JobDirectory | None = None,
+        self, placement: Placement, control: Path, settings: Mapping[str, Any], mem: int | None
     ) -> tuple[dict[str, Any], dict[str, str], set[int] | None]:
-        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs.
+        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs."""
 
-        Both files are written through *control_dir*, the pinned attempt-control
-        directory, when the launch supplies it; otherwise *control* is opened as
-        the anchor.
-        """
-
-        with contextlib.ExitStack() as handles:
-            if control_dir is None:
-                control_dir = handles.enter_context(JobDirectory.at(control))
-            return self._write_attempt_binding(placement, control, control_dir, settings, mem)
-
-    def _write_attempt_binding(
-        self,
-        placement: Placement,
-        control: Path,
-        control_dir: JobDirectory,
-        settings: Mapping[str, Any],
-        mem: int | None,
-    ) -> tuple[dict[str, Any], dict[str, str], set[int] | None]:
+        durable = self.workspace.durable
         nodefile = control / "nodefile"
-        control_dir.write_atomic(
-            "nodefile", "".join(f"{host}\n" for host in nodefile_lines(placement)).encode("utf-8"), mode=0o666
-        )
+        lines = "".join(f"{host}\n" for host in nodefile_lines(placement)).encode("utf-8")
+        _fs.write_file(_fs.loc(nodefile), lines, durable=durable, mode=0o666)
         template = settings.get("manager.launch_template")
         if template is not None and not isinstance(template, str):
             raise FormatError("workspace setting manager.launch_template must be a string")
@@ -2602,9 +1837,8 @@ class TaskManager:
         full: dict[str, Any] = {"nodes": nodes, "nodefile": str(nodefile)}
         if launch is not None:
             full["launch"] = launch
-        # The per-slot cpulists and GPU ids can be large, so the context keeps
-        # only the counts and points at the full binding.
-        control_dir.write_atomic("binding.json", json_bytes(full) + b"\n")
+        # The per-slot cpulists and GPU ids can be large, so the context keeps only the counts.
+        _fs.write_file(_fs.loc(control / "binding.json"), json_bytes(full) + b"\n", durable=durable)
         binding = {
             **full,
             "nodes": [{key: value for key, value in node.items() if key not in ("cpus", "gpu_ids")} for node in nodes],
@@ -2616,8 +1850,7 @@ class TaskManager:
         }
         if launch is not None:
             environment["HTTK_WORKFLOW_LAUNCH"] = shlex.join(launch)
-        # Device identity holds only for a runner executed here; an srun step
-        # chooses its own CPUs and GPUs.
+        # Device identity holds only for a runner executed here; an srun step chooses its own CPUs and GPUs.
         local = self._local_share(placement)
         pin: set[int] | None = None
         if local is not None:
@@ -2631,479 +1864,197 @@ class TaskManager:
                 pin = set[int]().union(*(parse_cpulist(slot) for slot in share.cpu_slots))
         return binding, environment, pin
 
-    def _attempt_deadline(self, requirement: Mapping[str, int]) -> int | None:
-        """Return the epoch second an attempt launched now must finish by.
+    # -- serving and draining --------------------------------------------------------------------------------------------
 
-        It is the earlier of its ``maxtime`` deadline and this manager's drain start.
+    def serve(
+        self, *, poll_interval: float = 1.0, drain_timeout: float = 30.0, drain_grace_seconds: float = 10.0
+    ) -> None:
+        """Run until interrupted, draining running attempts on a stop signal.
+
+        A first ``SIGTERM`` or ``SIGINT`` stops claiming new work, terminates the
+        local attempts and keeps ticking so their outcomes are committed. A second
+        signal exits at once.
+
+        :param poll_interval: Wait this long between scheduling passes.
+        :param drain_timeout: Stop draining after this much time.
+        :param drain_grace_seconds: Kill attempts after this much drain grace.
         """
 
-        candidates: list[int] = []
-        if "maxtime" in requirement:
-            candidates.append(int(time.time()) + requirement["maxtime"])
-        if self.drain_start is not None:
-            candidates.append(int(self.drain_start))
-        return min(candidates, default=None)
-
-    def _enforce_deadlines(self) -> bool:
-        """Stop every local attempt that has run longer than its ``maxtime``.
-
-        A timed-out attempt gets ``SIGTERM`` and, after the cancel grace, one
-        ``SIGKILL``. It is neither cancelled nor fenced: its exit is reaped by the
-        running pass like any other, which commits an outcome the runner still
-        published and otherwise fails the attempt with ``timeout``.
-        """
-
-        if self._draining:
-            # The drain is already stopping every attempt on its own clock.
-            return False
-        changed = False
-        now = time.monotonic()
-        for local in self._running.values():
-            if local.maxtime is None or local.reaped or local.cancelling or local.fenced:
-                continue
-            if not local.timed_out:
-                if now < local.started + local.maxtime:
-                    continue
-                if local.process.poll() is not None:
-                    # A delayed manager tick must not turn an observed normal
-                    # exit into a timeout and select the wrong retry policy.
-                    continue
-                local.timed_out = True
-                local.timeout_kill_at = now + self.cancel_grace_seconds
-                if local.process.poll() is None:
-                    self._terminate_process(local.process.pid)
-                _manager_launches.stop_all(self, local, "the attempt exceeded its maxtime")
-                _LOGGER.warning(
-                    "attempt %s of %s exceeded its maxtime %s; terminating it",
-                    local.attempt_id,
-                    local.marker.job_key,
-                    format_duration(local.maxtime),
-                    extra=self._event(
-                        "attempt_timeout", local.marker, attempt_id=local.attempt_id, maxtime=local.maxtime
-                    ),
-                )
-                changed = True
-            elif local.timeout_kill_at is not None and now >= local.timeout_kill_at:
-                local.timeout_kill_at = None
-                if local.process.poll() is None:
-                    self._terminate_process(local.process.pid, signal.SIGKILL)
-                    _LOGGER.warning(
-                        "attempt %s of %s outlived the %.1fs grace after its timeout; killing it",
-                        local.attempt_id,
-                        local.marker.job_key,
-                        self.cancel_grace_seconds,
-                        extra=self._event("attempt_timeout_kill", local.marker, attempt_id=local.attempt_id),
-                    )
-        return changed
-
-    @staticmethod
-    def _context_children(join_summary: object) -> list[dict[str, object]]:
-        return _manager_commit.context_children(join_summary)
-
-    def _reap_launcher(self, process: subprocess.Popen[bytes], *, grace_seconds: float = 5.0) -> None:
-        """Terminate and reap a launcher whose attempt was never committed."""
-
-        if process.poll() is None:
-            self._terminate_process(process.pid)
-        try:
-            process.wait(timeout=grace_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            self._terminate_process(process.pid, signal.SIGKILL)
-        try:
-            process.wait(timeout=grace_seconds)
-        except subprocess.TimeoutExpired:
-            _LOGGER.warning("abandoned launcher pid %d could not be reaped", process.pid)
-
-    def _poll_running(self) -> bool:
-        changed = False
-        current_by_attempt: dict[str, Marker] = {}
-        # Job keys whose running state could not be read this pass. Their local
-        # attempts must be preserved: an unreadable marker is not evidence that
-        # the attempt it describes has disappeared.
-        unreadable: set[str] = set()
-        for marker in list(self._walk(("running",))):
-            self._pace()
-            loaded = self._load_job_and_state(marker, "poll_running")
-            if loaded is None:
-                unreadable.add(marker.job_key)
-                continue
-            job, state = loaded
-            if self._executor_for(job) is None:
-                _LOGGER.debug(
-                    "skipping running job %s: runner executor %s is not served here",
-                    marker.job_key,
-                    job.runner_executor,
-                )
-                continue
+        previous: dict[int, Any] = {}
+        self._reset_drain()
+        for number in _DRAIN_SIGNALS:
             try:
-                changed |= self._poll_one_running(marker, job, state, current_by_attempt)
-            except FormatError as exc:
-                # A frame whose attempt identity cannot be used, or an attempt
-                # directory the job tampered with (JobDirectoryError, which also
-                # covers a tree a digest cannot describe), is a protocol
-                # violation of that job, recorded against it alone rather than
-                # allowed to stop the pass.
-                self._handle_attempt_failure(marker, job, "protocol_error", f"running state is unusable: {exc}")
-                changed = True
-        unreadable.update(self._indeterminate_ownership)
-        self._sweep_untracked_attempts(current_by_attempt, unreadable)
-        return changed
+                previous[number] = signal.signal(number, self._request_drain)
+            except ValueError:
+                _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", number)
+        try:
+            while not self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
+                self.tick()
+                if self._drain_after_tick():
+                    return
+                time.sleep(min(poll_interval, 0.25) if self._draining else poll_interval)
+        except KeyboardInterrupt:
+            _LOGGER.info("interrupted; stopping without a drain", extra=self._event("interrupted"))
+        finally:
+            for installed, handler in previous.items():
+                if handler is not None:
+                    signal.signal(installed, handler)
+            self._draining = False
 
-    def _poll_one_running(
-        self,
-        marker: Marker,
-        job: JobDefinition,
-        state: StateFrame,
-        current_by_attempt: dict[str, Marker],
-    ) -> bool:
-        """Observe one running job's outcome, process, and lease."""
+    def _reset_drain(self) -> None:
+        self._draining = False
+        self._drain_signals = 0
+        self._drain_reason: str | None = None
+        self._drain_deadline: float | None = None
+        self._drain_kill_at: float | None = None
 
-        attempt_id = state.attempt_id or ""
-        current_by_attempt[attempt_id] = marker
-        outcome_path = self._published_outcome(marker, state)
-        if outcome_path is not None:
-            return self._commit_published_outcome(marker, job, state, outcome_path)
-        local = self._running.get(attempt_id)
-        if local is not None:
-            return_code = local.process.poll()
-            if return_code is None:
-                return False
-            if _manager_launches.unreaped(local):
-                # The attempt is not finished while a launch of it runs: its
-                # exit is handled once every launch is reaped.
-                _manager_launches.stop_all(self, local, "the attempt process exited")
-                return False
-            self._write_attempt_end(local, return_code)
-            local.reaped = True
+    def _request_drain(self, number: int, frame: FrameType | None) -> None:
+        self._drain_signals += 1
+        self._draining = True
+
+    def _drain_begin(self, *, drain_timeout: float, drain_grace_seconds: float) -> bool:
+        """Start a due drain before one tick, returning whether the loop must stop."""
+
+        end_time = self.end_time
+        if not self._draining and self.drain_start is not None and time.time() >= self.drain_start:
+            self._draining = True
+            self._drain_reason = "deadline"
             _LOGGER.info(
-                "attempt %s of %s exited with status %d",
-                attempt_id,
-                marker.job_key,
-                return_code,
-                extra=self._event("attempt_exit", marker, attempt_id=attempt_id, exit_status=return_code),
+                "drain point reached with %s left before the allocation ends; draining",
+                format_duration(max(0, int((end_time or time.time()) - time.time()))),
+                extra=self._event("drain_deadline", end_time=end_time),
             )
-            outcome_path = self._published_outcome(marker, state)
-            if outcome_path is not None:
-                self._reaped_attempts.add(attempt_id)
-                self._commit_published_outcome(marker, job, state, outcome_path)
-            elif local.timed_out and local.maxtime is not None:
-                self._handle_attempt_failure(
-                    marker,
-                    job,
-                    "timeout",
-                    f"attempt exceeded its maxtime {format_duration(local.maxtime)}",
-                    exit_status=return_code,
-                )
-            elif local.interrupted:
-                self._handle_attempt_failure(
-                    marker,
-                    job,
-                    "lease_lost",
-                    f"the manager drained before the attempt finished ({self._drain_reason or 'signal'})",
-                    exit_status=return_code,
-                    unclean=True,
-                )
-            else:
-                code = "protocol_error" if return_code == 0 else "process_failure"
-                self._handle_attempt_failure(
-                    marker,
-                    job,
-                    code,
-                    f"runner exited with status {return_code} without an outcome",
-                    exit_status=return_code,
-                )
-            self._finish_attempt_cleanup(local)
-            self._drop_running(attempt_id)
+        # A signal during a drain the deadline started is already a second request.
+        if self._drain_signals >= (1 if self._drain_reason == "deadline" else 2):
+            _LOGGER.warning("stop signal during a drain: killing %d running attempt(s)", len(self._running))
+            self._signal_running_attempts(signal.SIGKILL)
             return True
-        lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
-        if self._manager_alive(state.manager_id, lease_seconds=lease_seconds):
-            return False
-        evidence = self._takeover_evidence(marker, job, state, lease_seconds=lease_seconds)
-        if evidence is None:
-            return False
-        _LOGGER.warning(
-            "taking over %s: the lease of manager %s expired (%s)",
-            marker.job_key,
-            state.manager_id or "-",
-            evidence.get("evidence"),
-            extra=self._event("lease_takeover", marker, previous_manager=state.manager_id, **evidence),
-        )
-        self._handle_attempt_failure(
-            marker,
-            job,
-            "lease_lost",
-            "owning manager heartbeat expired",
-            unclean=True,
-            takeover_evidence=evidence,
-        )
-        return True
-
-    def _takeover_evidence(
-        self,
-        marker: Marker,
-        job: JobDefinition,
-        state: StateFrame,
-        *,
-        lease_seconds: float,
-    ) -> dict[str, object] | None:
-        """Return why the previous attempt may be replaced, or ``None``.
-
-        An expired lease says that a manager stopped heartbeating, which is not
-        the same as an attempt having stopped. Replacing a live attempt costs a
-        second allocation for one activation whichever workdir mode it uses, so
-        both modes ask for the same evidence: the writing process is provably
-        gone, or the lease has been silent for a configured multiple of itself.
-        A persistent workdir is stricter still — a second writer would corrupt
-        the shared directory rather than merely waste a node — so only proof
-        that the writer is gone, or an explicitly unsafe site policy, admits it.
-        """
-
-        age = self._heartbeat_age(state.manager_id)
-        grace = lease_seconds * self.takeover_grace_factor
-        if self._attempt_writer_dead(state):
-            return {"evidence": "writer_process_dead", "heartbeat_age_seconds": age}
-        if job.workdir_mode == "persistent":
-            if self.unsafe_persistent_takeover:
-                return {"evidence": "unsafe_persistent_takeover", "heartbeat_age_seconds": age, "unsafe": True}
-            writer_host = self._recorded_writer_host(state)
-            where = f" on host {writer_host}" if writer_host and writer_host != self.hostname else ""
-            self._report_anomaly(
-                f"persistent_takeover:{marker.job_key}",
-                f"leaving persistent-workdir job {marker.job_key} to its writer{where}: an expired lease alone "
-                "cannot prove the writer stopped, and a second writer would corrupt the shared directory. "
-                f"Run a manager on that host, or pass --unsafe-persistent-takeover to override.",
-                self._event(
-                    "persistent_takeover_deferred",
-                    marker,
-                    previous_manager=state.manager_id,
-                    writer_host=writer_host,
-                ),
-                level=logging.INFO,
+        if self._draining and self._drain_deadline is None:
+            self._drain_reason = self._drain_reason or "signal"
+            now = time.monotonic()
+            self._drain_deadline = now + drain_timeout
+            self._drain_kill_at = now + drain_grace_seconds
+            _LOGGER.info(
+                "draining: terminating %d running attempt(s) with a %.0fs timeout",
+                len(self._running),
+                drain_timeout,
+                extra=self._event("drain_started", attempts=len(self._running), reason=self._drain_reason),
             )
-            return None
-        if self.unsafe_isolated_takeover:
-            return {"evidence": "unsafe_isolated_takeover", "heartbeat_age_seconds": age, "unsafe": True}
-        evidence = self._owner_gone_evidence(state.manager_id, lease_seconds=lease_seconds)
-        # A dead manager process does not prove its attempt stopped: the attempt
-        # runs in a session of its own, and only writer evidence covers it.
-        if evidence is not None and evidence["evidence"] != "manager_process_dead":
-            return dict(evidence)
-        self._report_anomaly(
-            f"takeover:{marker.job_key}",
-            f"not taking over {marker.job_key}: manager {state.manager_id or '-'} "
-            f"{'has no readable heartbeat' if age is None else f'last heartbeated {age:.0f}s ago'}, "
-            f"short of the {grace:.0f}s takeover grace",
-            self._event("takeover_deferred", marker, previous_manager=state.manager_id, heartbeat_age_seconds=age),
-            level=logging.INFO,
-        )
-        return None
+            self._signal_running_attempts(signal.SIGTERM)
+        return False
 
-    def _sweep_untracked_attempts(self, current_by_attempt: Mapping[str, Marker], unreadable: set[str]) -> None:
-        """Reap every local attempt that no running marker names any more.
+    def _drain_after_tick(self) -> bool:
+        """Advance a started drain after one tick, returning whether the loop must stop."""
 
-        An attempt whose outcome was committed, or whose marker was fenced by a
-        cancellation, is expected to be here: its marker has moved on by design
-        and the process is finishing or already gone. Only an attempt that is
-        none of those is a genuine orphan, and only that case is loud.
-        """
-
-        for attempt_id, local in list(self._running.items()):
-            if attempt_id in current_by_attempt or local.marker.job_key in unreadable:
-                continue
-            # owner_uid is stamped with self.uid at launch, so this differs only
-            # when the uid test seam was reassigned after the attempt started.
-            if local.owner_uid is not None and local.owner_uid != self.uid:
-                _LOGGER.debug(
-                    "skipping sweep of attempt %s of %s: attempt belongs to another user",
-                    attempt_id,
-                    local.marker.job_key,
-                )
-                continue
-            if local.cancelling:
-                # A cancellation owns this attempt until it has proven that the
-                # process is gone, which is what its cancelled frame records.
-                continue
-            exited = local.process.poll() is not None
-            if local.fenced:
-                if not exited and local.sweep_kill_at is None:
-                    _LOGGER.debug(
-                        "terminating fenced attempt %s of %s after its outcome was committed",
-                        attempt_id,
-                        local.marker.job_key,
-                    )
-                elif exited:
-                    _LOGGER.debug("reaped fenced attempt %s of %s", attempt_id, local.marker.job_key)
-            elif local.sweep_kill_at is None:
-                _LOGGER.warning(
-                    "attempt %s of %s no longer owns a running marker; terminating it",
-                    attempt_id,
-                    local.marker.job_key,
-                    extra=self._event("attempt_orphaned", local.marker, attempt_id=attempt_id),
-                )
-            if not exited:
-                self._stop_untracked_attempt(local)
-            _manager_launches.stop_all(
-                self,
-                local,
-                "the attempt's outcome is committed" if local.fenced else "the attempt no longer owns a running marker",
-            )
-            return_code = local.process.poll()
-            if return_code is None or _manager_launches.unreaped(local):
-                # A signal sent successfully is not proof that the process has
-                # exited. Keep tracking it until poll() supplies its returncode
-                # and every launch of it is reaped; in particular, never clean a
-                # control tree before that point.
-                continue
-            self._write_attempt_end(local, return_code)
-            local.reaped = True
-            self._finish_attempt_cleanup(local)
-            self._drop_running(attempt_id)
-
-    def _stop_untracked_attempt(self, local: RunningAttempt) -> None:
-        """Signal an attempt no running marker names: ``SIGTERM``, then ``SIGKILL`` after the grace.
-
-        A fenced attempt has published its outcome and may keep running, and
-        writing its job directory, for as long as it likes after ``SIGTERM``;
-        once ``cancel_grace_seconds`` have passed since the first ``SIGTERM``
-        its process group is killed.
-        """
-
+        if not self._draining or self._drain_deadline is None:
+            return False
         now = time.monotonic()
-        if local.sweep_kill_at is None:
-            local.sweep_kill_at = now + self.cancel_grace_seconds
-            self._terminate_process(local.process.pid)
-        elif now >= local.sweep_kill_at:
-            _LOGGER.warning(
-                "attempt %s of %s outlived the %.1fs grace after SIGTERM; killing its process group",
-                local.attempt_id,
-                local.marker.job_key,
-                self.cancel_grace_seconds,
-                extra=self._event("attempt_sweep_kill", local.marker, attempt_id=local.attempt_id),
-            )
-            # One kill is enough; the attempt stays tracked until it is reaped.
-            local.sweep_kill_at = math.inf
-            self._terminate_process(local.process.pid, signal.SIGKILL)
+        if not self._running:
+            _LOGGER.info("drain complete: no local attempt remains", extra=self._event("drain_complete"))
+            return True
+        if now >= self._drain_deadline:
+            _LOGGER.warning("drain timeout expired with %d attempt(s) unreaped", len(self._running))
+            self._signal_running_attempts(signal.SIGKILL)
+            return True
+        if self._drain_kill_at is not None and now >= self._drain_kill_at:
+            _LOGGER.warning("drain grace expired: killing %d running attempt(s)", len(self._running))
+            self._signal_running_attempts(signal.SIGKILL)
+            self._drain_kill_at = None
+        return False
 
-    def _commit_published_outcome(
+    def _signal_running_attempts(self, signal_number: int) -> int:
+        """Signal every local attempt's process group, marking it interrupted, and report how many."""
+
+        signalled = 0
+        for local in self._running.values():
+            _manager_launches.signal_all(self, local, signal_number, "the manager is stopping")
+            if local.process.poll() is not None:
+                continue
+            _attempt_process.terminate_process(local.process.pid, signal_number)
+            # An attempt a drain stops without an outcome is lost to the manager, not failed by itself.
+            local.interrupted = True
+            signalled += 1
+        return signalled
+
+    def run_until_idle(
         self,
-        marker: Marker,
-        job: JobDefinition,
-        state: StateFrame,
-        outcome_path: Path,
         *,
-        attestation: Sequence[Mapping[str, object]] | None = None,
-    ) -> bool:
-        """Move one job with a published outcome into committing.
+        timeout: float = 60.0,
+        poll_interval: float = 0.02,
+        drain_timeout: float = 30.0,
+        drain_grace_seconds: float = 10.0,
+    ) -> WorkCensus:
+        """Run until no local attempt or claimable job remains, and report the census.
 
-        The manager that ran the attempt commits its outcome. Another manager
-        begins the commit only once that manager is evidently gone
-        (:meth:`_owner_gone_evidence`) and every launch recorded for the
-        attempt has ended, or an operator's *attestation* says so, and records
-        both in the committing frame, as a commit takeover does.
+        A job this manager cannot progress (another pool, capability or
+        workflow, waiting on children or paused) does not keep it awake: it is
+        counted in the returned census. A ``SIGTERM`` or the allocation's drain
+        start drains the manager as :meth:`serve` does and then returns.
+
+        :param timeout: Stop waiting after this many seconds (extended by running attempts when the
+            allocation end is known).
+        :param poll_interval: Wait this long between scheduling passes.
+        :param drain_timeout: Stop draining after this much time.
+        :param drain_grace_seconds: Kill attempts after this much drain grace.
+        :return: The work census of the settled workspace.
+        :raises httk.workflow.manager.NotIdleError: If the manager does not become idle before the timeout.
         """
 
+        self._reset_drain()
+        previous: Any = None
         try:
-            inherited: tuple[str | None, dict[str, object], list[dict[str, object]]] | None = None
-            owner = state.manager_id
-            if owner != self.manager_id:
-                lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
-                evidence = self._commit_owner_gone_evidence(owner, lease_seconds=lease_seconds)
-                if evidence is None:
-                    _LOGGER.debug("leaving the outcome of %s to its manager %s", marker.job_key, owner)
-                    return False
-                if attestation is None:
-                    launches = _manager_launches.launch_end_evidence(
-                        self, state.attempt_id or "", owner=owner, lease_seconds=lease_seconds
-                    )
-                    if launches.pending is not None:
-                        _manager_commit._report_takeover_pending(self, marker, owner, launches.pending)
-                        # Stopping a launch here is progress: stay awake until it is gone.
-                        return any(end.rule == "launch_running_here" for end in launches.blocked)
-                    attestation = launches.as_json()
-                inherited = (owner, dict(evidence), [dict(item) for item in attestation])
-            if not self._environment_log_ready(marker, state):
-                return False
-            local = self._running.get(state.attempt_id or "")
-            if local is not None:
-                with self._open_attempt_control(marker, state) as control:
-                    action = control.read_json("outcome.ready/outcome.json", CONTROL_DOCUMENT_LIMIT).get("action")
-                if isinstance(action, str):
-                    local.outcome_action = action
-            self._begin_commit(marker, state, outcome_path, inherited=inherited)
-        except TransitionLostError:
-            return True
-        except FormatError as exc:
-            # A malformed or tampered outcome, or an undescribable child bundle
-            # (JobDirectoryError from a digest), is a protocol violation of the
-            # runner, never a reason to stop the manager.
-            self._handle_attempt_failure(marker, job, "protocol_error", f"published outcome is unusable: {exc}")
-        except (WorkflowError, OSError) as exc:
-            self._report_anomaly(
-                f"commit:{marker.job_key}",
-                f"cannot begin the commit of {marker.job_key}: {exc}",
-                self._event("commit_error", marker),
-            )
-        return True
-
-    def _environment_log_ready(self, marker: Marker, state: StateFrame) -> bool:
-        """Report whether a published outcome may be committed this tick.
-
-        :param marker: The running job whose outcome is published.
-        :param state: Its running state frame.
-        :return: Whether the commit may begin now.
-        :raises JobDirectoryError: If the environment-resolution marker is a
-            symlink, special file, or oversized.
-        """
-
-        with self._open_attempt_control(marker, state) as control:
-            information = control.stat(_ENVIRONMENT_MARKER)
-            if information is None:
-                return True
-            if not stat.S_ISREG(information.st_mode):
-                raise JobDirectoryError(f"{control.path / _ENVIRONMENT_MARKER} is not a regular file")
-            try:
-                recorded = control.read_json(_ENVIRONMENT_MARKER, CONTROL_DOCUMENT_LIMIT)
-            except JobDirectoryError:
-                raise
-            except (FormatError, OSError):
-                return True
-            if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
-                return True
-            deadline = recorded.get("log_deadline")
-            deadline_expired = (
-                isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and time.time() >= deadline
-            )
-            if not self._attempt_writer_dead(state) and not deadline_expired:
-                return False
-            return self._reconcile_environment_log_absence(control)
-
-    def _reconcile_environment_log_absence(self, control: JobDirectory) -> bool:
-        """Clear pending logging after writer death or its persisted grace."""
-
-        # Re-read immediately before the atomic update so a runner that won the
-        # race to clear the handshake is never overwritten by stale state.
+            previous = signal.signal(signal.SIGTERM, self._request_drain)
+        except ValueError:
+            _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", signal.SIGTERM)
         try:
-            recorded = control.read_json(_ENVIRONMENT_MARKER, CONTROL_DOCUMENT_LIMIT)
-        except JobDirectoryError:
-            raise
-        except (FormatError, OSError):
-            return True
-        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
-            return True
-        recorded["log_pending"] = False
-        recorded["log_absent"] = True
-        control.write_atomic(_ENVIRONMENT_MARKER, json_bytes(recorded) + b"\n", durable=self.workspace.durable)
-        return True
+            deadline = time.monotonic() + timeout
+            quiet_passes = 0
+            while True:
+                if self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
+                    return self._work_census()
+                if self.end_time is not None and self._running:
+                    deadline = time.monotonic() + timeout
+                if not self._draining and time.monotonic() >= deadline:
+                    raise NotIdleError(self._work_census())
+                changed = self.tick()
+                if self._draining:
+                    if self._drain_after_tick():
+                        return self._work_census()
+                    time.sleep(min(poll_interval, 0.25))
+                    continue
+                if changed or self._running:
+                    quiet_passes = 0
+                    time.sleep(poll_interval)
+                    continue
+                census = self._work_census()
+                quiet_passes = 0 if census.actionable else quiet_passes + 1
+                if quiet_passes >= 2:
+                    return census
+                time.sleep(poll_interval)
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+            self._draining = False
+
+    def _work_census(self) -> WorkCensus:
+        census = _manager_scheduling.work_census(self)
+        if not census.ready_claimable or self._draining or self._confinement_blocked() is None:
+            return census
+        # Held back by a host or operator condition, the ready jobs are not this manager's work until it clears.
+        return dataclasses.replace(
+            census,
+            ready_claimable=0,
+            ready_blocked={**census.ready_blocked, "confinement": {"manager.confine": census.ready_claimable}},
+            actionable_count=census.actionable_count - census.ready_claimable,
+        )
+
+    # -- confinement -----------------------------------------------------------------------------------------------
 
     def _effective_settings(self) -> dict[str, Any]:
         """Return the settings this manager decides by: the workspace's, with its pinned overrides applied.
 
-        Workspace values are read live, and the enabled extensions are re-read
-        with them (:meth:`~httk.workflow.workspace.Workspace.read_settings`);
-        pinned keys are fixed for the manager's lifetime. Nothing a job carries
-        — its parameters, declared environment or spawned children — enters
-        this mapping.
+        Workspace values are read live, and the enabled extensions are re-read with them; nothing a job
+        carries enters this mapping.
 
         :return: The effective settings.
         """
@@ -3112,13 +2063,6 @@ class TaskManager:
 
     @staticmethod
     def _confine_mode(settings: Mapping[str, Any]) -> Literal["none", "bwrap"]:
-        """Return the effective ``manager.confine`` mode without validating the ``confine.*`` settings.
-
-        :param settings: The effective settings.
-        :return: ``none`` (the default) or ``bwrap``.
-        :raises ValueError: If ``manager.confine`` has another value.
-        """
-
         raw = settings.get("manager.confine")
         if raw is None or raw == "none":
             return "none"
@@ -3126,30 +2070,15 @@ class TaskManager:
             return "bwrap"
         raise ValueError(f"setting manager.confine must be none or bwrap: {raw!r}")
 
-    def _enrolled(self) -> bool:
-        """Return whether the workspace has the exchange extension, as last re-read with the settings.
-
-        The extension is re-read from ``format.json`` with the settings on every
-        claim pass (:meth:`_effective_settings`), and an unreadable
-        ``format.json`` holds back claims, so this fails closed.
-        """
-
-        return EXCHANGE_EXTENSION in self.workspace.extensions
-
     def _confinement(self, settings: Mapping[str, Any], *, at_start: bool = False) -> _Confinement:
         """Check how attempts started now are confined, validating and probing only what changed.
 
-        ``manager.confine`` is parsed first; the ``confine.*`` settings are
-        validated only in ``bwrap`` mode, and again only when they change. A
-        workspace with the exchange extension requires ``bwrap``.
-
         :param settings: The effective settings.
-        :param at_start: Whether this is the manager's start, which refuses a
-            condition instead of reporting it.
+        :param at_start: Whether this is the manager's start, which refuses a condition instead of reporting it.
         :return: The checked confinement.
         :raises ValueError: At start, if a confinement setting is invalid.
-        :raises httk.workflow.errors.ConfinementUnavailableError: At start, if
-            Bubblewrap is unusable or a workspace with the exchange extension is not confined.
+        :raises httk.workflow.errors.ConfinementUnavailableError: At start, if Bubblewrap is unusable or a
+            workspace with the exchange extension is not confined.
         :raises _ConfinementBlocked: After start, for any of those conditions.
         """
 
@@ -3160,7 +2089,7 @@ class TaskManager:
                 raise
             raise _ConfinementBlocked(f"invalid confinement setting: {exc}") from exc
         if mode == "none":
-            if self._enrolled():
+            if EXCHANGE_EXTENSION in self.workspace.extensions:
                 if at_start:
                     raise ConfinementUnavailableError(f"refusing to start: {_ENROLLED_MESSAGE}")
                 raise _ConfinementBlocked(_ENROLLED_MESSAGE)
@@ -3196,16 +2125,7 @@ class TaskManager:
     def _bwrap_block_userns(self, confinement: _confine.ConfineSettings, *, at_start: bool = False) -> bool:
         """Probe the attempt sandbox once and return whether attempts block nested user namespaces.
 
-        Results are cached per Bubblewrap executable, network isolation and
-        user-namespace block options; a failed probe is repeated at most every
-        :data:`CONFINE_REPROBE_SECONDS`.
-
-        :param confinement: The effective confinement settings, in ``bwrap`` mode.
-        :param at_start: Whether this is the manager's start, where an unusable
-            Bubblewrap refuses the start instead of holding back claims.
-        :return: Whether attempts block nested user namespaces.
-        :raises httk.workflow.errors.ConfinementUnavailableError: At start, if Bubblewrap is unusable.
-        :raises _ConfinementBlocked: After start, if Bubblewrap is unusable.
+        A failed probe is repeated at most every :data:`CONFINE_REPROBE_SECONDS`.
         """
 
         key = (confinement.bwrap or Path(), confinement.isolate_network, tuple(BWRAP_USERNS_BLOCK))
@@ -3232,8 +2152,6 @@ class TaskManager:
         return cached[0]
 
     def _report_confinement_blocked(self, reason: str) -> None:
-        """Report once that claims are held back by a confinement condition."""
-
         self._report_anomaly(
             "confinement",
             f"not claiming work until confinement is available: {reason}",
@@ -3258,817 +2176,35 @@ class TaskManager:
         self._report_confinement_blocked(reason)
         return reason
 
-    def _check_confinement_start(self, marker: Marker) -> None:
-        """Refuse to confine a job whose directory is not a disjoint job directory.
-
-        A placement component that parses as a job key would put a second job
-        inside the directory the sandbox makes writable.
-
-        :param marker: The claimed job.
-        :raises httk.workflow.errors.FormatError: If the placement violates the rule.
-        """
-
-        check_job_placement(marker.placement)
-
-    def _job_directory(self, marker: Marker) -> JobDirectory:
-        """Open one job's directory without following any link below the workspace root."""
-
-        return JobDirectory.open(jobs=self.workspace.jobs, placement=marker.placement, job_key=marker.job_key)
-
-    @staticmethod
-    def _attempt_control_name(state: StateFrame) -> str:
-        """Return the validated attempt-control path one frame names, relative to the payload.
-
-        The component is validated before it is used, so a damaged or hostile
-        frame is a protocol error of that job rather than a path that reaches
-        outside its payload.
-        """
-
-        control_name = state.attempt_control
-        if control_name is None:
-            attempt_id = state.attempt_id
-            if attempt_id is None:
-                raise FormatError("state frame names neither an attempt control directory nor an attempt")
-            control_name = validate_attempt_control(f"{ATTEMPTS_DIRECTORY}/{attempt_id}")
-        return control_name
-
-    def _open_attempt_control(self, marker: Marker, state: StateFrame) -> JobDirectory:
-        """Open the attempt-control directory one frame names, through no-follow descriptors.
-
-        :param marker: The job whose attempt control is opened.
-        :param state: The frame naming the attempt.
-        :return: The pinned attempt-control directory; the caller closes it.
-        :raises httk.workflow.errors.FormatError: If the directory is missing, or
-            it or a component above it is a symlink or not a directory.
-        """
-
-        control_name = self._attempt_control_name(state)
-        try:
-            with self._job_directory(marker) as job_dir:
-                return job_dir.directory(control_name)
-        except FileNotFoundError as exc:
-            missing = self.workspace.payload_path(marker.placement, marker.job_key) / control_name
-            raise FormatError(f"attempt directory is missing: {missing}") from exc
-
-    def _attempt_control_path(self, marker: Marker, state: StateFrame) -> Path:
-        """Return the attempt-control directory one frame names, once it is verified to be real."""
-
-        with self._open_attempt_control(marker, state) as control:
-            return control.path
-
-    def _outcome_path(self, marker: Marker, state: StateFrame) -> Path:
-        return self._attempt_control_path(marker, state) / "outcome.ready"
-
-    def _published_outcome(self, marker: Marker, state: StateFrame) -> Path | None:
-        """Return the published outcome directory of a running attempt, or ``None`` before it publishes.
-
-        :param marker: The running job.
-        :param state: Its running state frame.
-        :return: The ``outcome.ready`` path, or ``None``.
-        :raises JobDirectoryError: If ``outcome.ready`` is a symlink or not a
-            real directory, which no runner publishes.
-        """
-
-        with self._open_attempt_control(marker, state) as control:
-            return control.path / "outcome.ready" if control.exists_dir("outcome.ready") else None
-
     def _prepare_sandbox(
         self,
         confinement: _confine.ConfineSettings,
-        job_dir: JobDirectory,
+        job_path: Path,
         workdir: Path,
         environment: Mapping[str, str],
         block_userns: bool,
-        launch_locks: tuple[int, Path] | None = None,
     ) -> PreparedSandbox:
-        """Build one attempt's Bubblewrap sandbox from the pinned workspace root and job directory.
-
-        :param confinement: The effective confinement settings.
-        :param job_dir: The job directory, pinned without following links.
-        :param workdir: The attempt's working directory.
-        :param environment: The filtered attempt environment.
-        :param block_userns: Whether to block nested user namespaces.
-        :param launch_locks: The descriptor and host path of the attempt's launch-lock directory, or ``None``
-            for an attempt without the launch client.
-        :return: The sandbox; the caller closes it after the spawn.
-        :raises httk.workflow.errors.FormatError: If the sandbox cannot be built
-            for this job, for instance when its directory is not inside the
-            workspace's real path.
-        """
+        """Build one attempt's Bubblewrap sandbox from the workspace root and the owned job directory."""
 
         workspace_fd = os.open(self.workspace.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            job_fd = _fs.open_dir(job_path)
+        except BaseException:
+            os.close(workspace_fd)
+            raise
         try:
             return _confine.prepare_attempt_sandbox(
                 confinement,
                 workspace_root=self.workspace.root,
                 workspace_fd=workspace_fd,
-                job_path=job_dir.path,
-                job_fd=job_dir.fd,
+                job_path=job_path,
+                job_fd=job_fd,
                 workdir=workdir,
                 environment=environment,
                 block_userns=block_userns,
-                launch_locks=launch_locks,
             )
-        except ValueError as exc:
-            raise FormatError(f"cannot confine the attempt: {exc}") from exc
-        except ConfinementUnavailableError as exc:
+        except (ValueError, ConfinementUnavailableError) as exc:
             raise FormatError(f"cannot confine the attempt: {exc}") from exc
         finally:
             os.close(workspace_fd)
-
-    def _hash_payload_runner(self, job_dir: JobDirectory, job: JobDefinition) -> str | None:
-        """Hash a payload runner through a no-follow, non-blocking descriptor.
-
-        The runner is only hashed when the job does not pin its digest, but it
-        is always checked: a symlink or special file planted at the runner path
-        is the job's protocol error. A runner the manager cannot read (an
-        execute-only file) or cannot open for another ordinary reason is still
-        launched by its path, as before, just without a recorded digest.
-
-        :param job_dir: The pinned job directory.
-        :param job: The job whose payload runner is hashed.
-        :return: The runner's SHA-256, or ``None`` when it is pinned or unreadable.
-        :raises JobDirectoryError: If the runner or a directory above it is a
-            symlink, or the runner is not a regular file.
-        """
-
-        try:
-            descriptor = job_dir.open_read(job.runner_path)
-        except JobDirectoryError:
-            raise
-        except PermissionError as exc:
-            _LOGGER.debug("cannot read the runner of %s to hash it: %s", job.job_key, exc)
-            return None
-        except OSError as exc:
-            _LOGGER.warning("cannot hash the runner for %s: %s", job.job_key, exc)
-            return None
-        try:
-            return None if job.runner_sha256 else _manager_runners._hash_fd(descriptor)
-        except OSError as exc:
-            _LOGGER.warning("cannot hash the runner for %s: %s", job.job_key, exc)
-            return None
-        finally:
-            os.close(descriptor)
-
-    def _launch_payload_digest(self, marker: Marker) -> str | None:
-        """Digest a payload at launch for the journal, or ``None`` when it cannot be described.
-
-        The digest is informational. A payload that legitimately holds a
-        contained symlink (a previous attempt may leave one in a persistent
-        workdir), or that the job made undescribable, is logged and the launch
-        proceeds without it.
-
-        :param marker: The launched job.
-        :return: The payload digest, or ``None``.
-        """
-
-        try:
-            return self.workspace.payload_digest(marker)
-        except (ValueError, OSError) as exc:
-            _LOGGER.warning(
-                "cannot record the launch payload digest of %s: %s",
-                marker.job_key,
-                exc,
-                extra=self._event("payload_digest_unavailable", marker),
-            )
-            return None
-
-    @staticmethod
-    def _write_control_file(control_dir: JobDirectory, name: str, data: bytes) -> Path:
-        """Create one new file in the pinned attempt-control directory for an executor."""
-
-        control_dir.create_exclusive(name, data, mode=0o666)
-        return control_dir.path / name
-
-    def _begin_commit(
-        self,
-        marker: Marker,
-        state: StateFrame,
-        outcome_path: Path,
-        *,
-        inherited: tuple[str | None, Mapping[str, object], Sequence[Mapping[str, object]]] | None = None,
-    ) -> None:
-        # The published draft is read through descriptors pinned without
-        # following links; *outcome_path* only names it.
-        with (
-            self._open_attempt_control(marker, state) as control,
-            _manager_commit._open_draft(control) as draft,
-        ):
-            outcome = self._read_outcome(draft, marker, state)
-            child_digests = self._child_digests(draft)
-            # The spawn set is validated before the marker leaves running, so a
-            # missing or ambiguous child label is a protocol error of the published
-            # outcome rather than a commit failure of an accepted one.
-            child_labels = self._spawn_labels(draft)
-        attempt_id = state.attempt_id
-        attempt_control = state.attempt_control
-        if attempt_id is None or attempt_control is None:
-            raise FormatError("a running frame must name its attempt and attempt control directory")
-        committing = StateFrame.replace(
-            state.carried(),
-            manager_id=self.manager_id,
-            writer_id=self.writer.writer_id,
-            attempt_id=attempt_id,
-            attempt_control=attempt_control,
-            outcome_action=str(outcome["action"]),
-            child_digests=child_digests,
-            child_labels=child_labels,
-            # The generation the transition below creates: the first name the
-            # commit draft takes (commit.<generation>), and the lower bound of
-            # the names a later owner looks it up by.
-            commit_base_generation=marker.generation + 1,
-            reason="outcome_published",
-        )
-        if "process" in state.members:
-            committing = StateFrame.replace(committing, process=state.members["process"])
-        if inherited is not None:
-            previous, evidence, launches = inherited
-            committing = StateFrame.replace(
-                committing,
-                previous_manager_id=previous,
-                takeover_evidence=dict(evidence),
-                launch_end_evidence=[dict(item) for item in launches],
-            )
-        begun = self._transition(
-            marker,
-            "committing",
-            committing,
-        )
-        # Another manager may have recorded that it waited to begin this commit.
-        _manager_commit._clear_commit_wedge(self, begun, state)
-        # The attempt has published everything it will ever publish and its
-        # marker has moved, so the local process is finishing rather than
-        # orphaned. Reaping it is then routine and silent.
-        local = self._running.get(attempt_id)
-        if local is not None:
-            local.fenced = True
-
-    def _resume_committing(self) -> bool:
-        return _manager_commit.resume(self, _LOGGER)
-
-    def _supervise_launches(self) -> bool:
-        return _manager_launches.supervise(self)
-
-    def _process_committing(self, marker: Marker) -> None:
-        if _manager_launches.holds_commit(self, marker):
-            # Auto-seal and the exchange's eject follow the commit, so neither
-            # happens while ranks of the attempt may still write the job.
-            _LOGGER.debug("deferring the commit of %s until its launches are reaped", marker.job_key)
-            return
-        _manager_commit.process_committing(self, marker)
-
-    def _declared_runner_steps(self, marker: Marker, outcome: Mapping[str, Any]) -> list[str] | None:
-        return _manager_commit.declared_runner_steps(marker, outcome, _LOGGER)
-
-    def _read_outcome(self, source: Path | JobDirectory, marker: Marker, state: StateFrame) -> dict[str, Any]:
-        return _manager_commit.read_outcome(source, marker, state)
-
-    def _child_digests(self, outcome: JobDirectory) -> dict[str, str]:
-        return _manager_commit.child_digests(outcome, tree_digest)
-
-    def _spawn_labels(self, outcome: JobDirectory) -> dict[str, str]:
-        return _manager_commit.spawn_labels(outcome)
-
-    def _labeled_join(self, join: Mapping[str, Any], outcome: JobDirectory) -> dict[str, object]:
-        return _manager_commit.labeled_join(join, outcome)
-
-    def _register_children(self, marker: Marker, state: StateFrame, control: JobDirectory, draft: str) -> None:
-        _manager_commit.register_children(self, marker, state, control, draft, tree_digest)
-
-    def _advance(
-        self,
-        marker: Marker,
-        job: JobDefinition,
-        state: StateFrame,
-        next_step: str,
-        progress: StateFrame,
-        *,
-        reason: str = "advance",
-        join_summary: Sequence[object] | None = None,
-        resources: Mapping[str, int] | None = None,
-        priority: int | None = None,
-    ) -> Marker:
-        return _manager_commit.advance(
-            self,
-            marker,
-            job,
-            state,
-            next_step,
-            progress,
-            reason=reason,
-            join_summary=join_summary,
-            resources=resources,
-            priority=priority,
-        )
-
-    def _retry(
-        self,
-        marker: Marker,
-        job: JobDefinition,
-        state: StateFrame,
-        progress: StateFrame,
-        reason: str,
-        *,
-        unclean: bool,
-        takeover_evidence: Mapping[str, object] | None = None,
-        priority: int | None = None,
-    ) -> Marker:
-        return _manager_commit.retry(
-            self,
-            marker,
-            job,
-            state,
-            progress,
-            reason,
-            unclean=unclean,
-            takeover_evidence=takeover_evidence,
-            priority=priority,
-        )
-
-    def _retry_budget_available(self, job: JobDefinition, state: StateFrame) -> bool:
-        return _manager_commit.retry_budget_available(job, state)
-
-    def _handle_attempt_failure(
-        self,
-        marker: Marker,
-        job: JobDefinition,
-        code: str,
-        message: str,
-        *,
-        exit_status: int | None = None,
-        unclean: bool = True,
-        takeover_evidence: Mapping[str, object] | None = None,
-    ) -> None:
-        """Record one attempt failure, retrying it when the policy allows.
-
-        Recording a failure is itself recovery, so a lost transition or an
-        unreadable state frame is reported and never raised at a caller that is
-        still processing other jobs.
-        """
-
-        _manager_commit.handle_attempt_failure(
-            self,
-            marker,
-            job,
-            code,
-            message,
-            exit_status=exit_status,
-            unclean=unclean,
-            takeover_evidence=takeover_evidence,
-            logger=_LOGGER,
-        )
-
-    def _recover_abandoned_claims(self) -> bool:
-        return _manager_scheduling.recover_abandoned_claims(self, _LOGGER)
-
-    def _heartbeat_age(self, manager_id: str | None) -> float | None:
-        """Return how long ago *manager_id* heartbeated, or ``None`` if never.
-
-        The identifier is joined below ``managers/``, so it is validated as a
-        canonical UUID before it becomes a path component; anything else is
-        reported as the protocol violation it is and treated as no record.
-        """
-
-        if not manager_id:
-            return None
-        try:
-            canonical_uuid(manager_id, "state.manager_id")
-            heartbeat = read_json(self.workspace.control / "managers" / manager_id / "heartbeat.json")
-            updated = timestamp_seconds(str(heartbeat["updated_at"]))
-        except (WorkflowError, KeyError, ValueError):
-            return None
-        return time.time() - updated
-
-    def _owner_gone_evidence(self, manager_id: str | None, *, lease_seconds: float) -> dict[str, object] | None:
-        """Return the evidence that a manager owning work is gone, observed once per tick.
-
-        This is :func:`~httk.workflow._txn.manager_gone` with this manager's
-        takeover grace factor; it decides only *when* work is taken over.
-
-        :param manager_id: The owning manager, or ``None`` when the work names none.
-        :param lease_seconds: The lease the work was taken under.
-        :return: The evidence mapping, or ``None`` while the owner may be alive.
-        """
-
-        key = (manager_id, lease_seconds)
-        if key not in self._liveness:
-            self._liveness[key] = manager_gone(
-                self.workspace.control,
-                manager_id,
-                lease_seconds=lease_seconds,
-                grace_factor=self.takeover_grace_factor,
-            )
-        return self._liveness[key]
-
-    def _commit_owner_gone_evidence(self, manager_id: str | None, *, lease_seconds: float) -> dict[str, object] | None:
-        """Return the evidence that the manager owning an outcome or a commit is gone.
-
-        This is :meth:`_owner_gone_evidence`, and also ``manager_closed``: the manager closed while
-        attempts it started were still running and wrote ``closed_at`` into its ``manager.json``, so it
-        will never commit their outcomes. Only beginning and taking over commits accept it; an attempt
-        takeover does not, because a closed manager's attempt may still run.
-
-        :param manager_id: The owning manager, or ``None`` when the work names none.
-        :param lease_seconds: The lease the work was taken under.
-        :return: The evidence mapping, or ``None`` while the owner may still commit.
-        """
-
-        evidence = self._owner_gone_evidence(manager_id, lease_seconds=lease_seconds)
-        if evidence is not None or not manager_id:
-            return evidence
-        if manager_id not in self._closed_owners:
-            try:
-                closed = read_json(self.workspace.control / "managers" / manager_id / "manager.json").get("closed_at")
-            except WorkflowError:
-                closed = None
-            self._closed_owners[manager_id] = (
-                {"evidence": "manager_closed", "closed_at": closed} if isinstance(closed, str) and closed else None
-            )
-        return self._closed_owners[manager_id]
-
-    def _manager_alive(self, manager_id: str | None, *, lease_seconds: float) -> bool:
-        age = self._heartbeat_age(manager_id)
-        return age is not None and age <= lease_seconds
-
-    def _recorded_writer_host(self, state: StateFrame) -> str | None:
-        """Return the host that launched the recorded attempt, when it named one."""
-
-        process = validate_process(state.members.get("process"))
-        if process is None:
-            return None
-        host = process["hostname"]
-        return host if isinstance(host, str) else None
-
-    def _attempt_writer_dead(self, state: StateFrame) -> bool:
-        """Report whether the process of the recorded attempt is provably gone.
-
-        Only a process this host can ask about proves anything, so an attempt
-        recorded on another host is never called dead here. Every launch
-        recorded for the attempt must have ended as well
-        (:func:`~httk.workflow._manager_launches.launch_end_evidence`). Absence
-        of proof is reported as ``False``: the caller decides what an
-        unprovable attempt justifies.
-        """
-
-        process = validate_process(state.members.get("process"))
-        if process is None:
-            return False
-        if process.get("hostname") != self.hostname:
-            return False
-        try:
-            os.kill(cast(int, process["pid"]), 0)
-        except ProcessLookupError:
-            # Ranks of a confined launch write the job too, from their own
-            # process groups: each recorded launch must have ended as well.
-            lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
-            return _manager_launches.launch_end_evidence(
-                self, state.attempt_id or "", owner=state.manager_id, lease_seconds=lease_seconds
-            ).ended
-        except PermissionError:
-            return False
-        return False
-
-    @staticmethod
-    def _join_children(join: Mapping[str, Any]) -> Sequence[object]:
-        return _manager_joins.children(join)
-
-    def _observe_join_children(self, children: Sequence[object]) -> tuple[list[dict[str, object]], str | None]:
-        return _manager_joins.observe_children(self, children)
-
-    def _child_evidence(self, marker: Marker) -> dict[str, object]:
-        return _manager_joins.child_evidence(self, marker)
-
-    def _child_workdir_path(
-        self,
-        marker: Marker,
-        state: StateFrame,
-        payload: PurePosixPath,
-    ) -> str | None:
-        return _manager_joins.child_workdir_path(self, marker, state, payload)
-
-    def _handle_unresolved_join(self, marker: Marker, state: StateFrame, child_id: str) -> bool:
-        """Persist or apply the grace for a waiting job with an unresolvable child.
-
-        The first instant a child is found unresolvable is written into the
-        waiting frame, so the grace is measured from that instant and survives a
-        manager restart instead of resetting to zero the way an in-memory clock
-        did. When the grace has elapsed the join fails; otherwise the frame is
-        left recording when the wait began.
-
-        :param marker: The waiting job whose join child is unresolvable.
-        :param state: The waiting job's current state frame.
-        :param child_id: The identifier of the unresolvable child.
-        :return: Whether this pass changed state.
-        """
-
-        now = time.time()
-        recorded = state.join_unresolved
-        # The instant is stored as an ISO timestamp like every other frame time,
-        # not a raw epoch float, so 'job why' can render it readably; it is
-        # parsed back to seconds only for the grace comparison.
-        first_at_iso: str | None = None
-        if isinstance(recorded, Mapping) and recorded.get("child_id") == child_id:
-            candidate = recorded.get("first_unresolved_at")
-            if isinstance(candidate, str) and candidate:
-                first_at_iso = candidate
-        already_recorded = first_at_iso is not None
-        try:
-            first_at = timestamp_seconds(first_at_iso) if first_at_iso is not None else now
-        except ValueError:
-            first_at, first_at_iso, already_recorded = now, None, False
-        if now - first_at >= self.join_grace_seconds:
-            self._fail_waiting(
-                marker,
-                state,
-                "dependency_failure",
-                f"join child {child_id} cannot be resolved in this workspace",
-                "join_unresolvable",
-            )
-            return True
-        if already_recorded:
-            _LOGGER.debug("join child %s of %s is still within the grace", child_id, marker.job_key)
-            return False
-        # Record the first-unresolved instant exactly once, rewriting the waiting
-        # frame in place so a restart reads the same deadline. The members a
-        # waiting frame legitimately holds — the carried activation, its join,
-        # and its next step — are preserved verbatim.
-        base = state.select([*CARRIED_STATE_MEMBERS, "next_step", "join"])
-        self._transition(
-            marker,
-            "waiting",
-            StateFrame.replace(
-                base,
-                join_unresolved={"child_id": child_id, "first_unresolved_at": utc_now()},
-                reason="join_child_unresolved",
-            ),
-        )
-        return True
-
-    def _fail_waiting(
-        self,
-        marker: Marker,
-        state: StateFrame,
-        code: str,
-        message: str,
-        reason: str,
-    ) -> None:
-        try:
-            self._transition(
-                marker,
-                "failed",
-                StateFrame.replace(
-                    state.carried(),
-                    failure=self._failure(code, message),
-                    reason=reason,
-                ),
-            )
-        except TransitionLostError:
-            _LOGGER.debug("join failure record for %s was lost to another actor", marker.job_key)
-
-    def _evaluate_joins(self) -> bool:
-        changed = False
-        for marker in self._window("evaluate_joins", "waiting"):
-            self._pace()
-            loaded = self._load_job_and_state(marker, "evaluate_joins")
-            if loaded is None:
-                continue
-            parent_job, state = loaded
-            if self._executor_for(parent_job) is None:
-                _LOGGER.debug(
-                    "skipping waiting job %s: runner executor %s is not served here",
-                    marker.job_key,
-                    parent_job.runner_executor,
-                )
-                continue
-            try:
-                changed |= self._evaluate_join(marker, parent_job, state)
-            except TransitionLostError:
-                pass
-            except FormatError as exc:
-                # A waiting job whose own join cannot be read would otherwise
-                # wait forever with no diagnostic.
-                self._fail_waiting(marker, state, "protocol_error", f"join is unusable: {exc}", "protocol_error")
-                changed = True
-            except (WorkflowError, OSError) as exc:
-                self._report_anomaly(
-                    f"join:{marker.job_key}",
-                    f"cannot evaluate the join of {marker.job_key}: {exc}",
-                    self._event("join_error", marker),
-                )
-        return changed
-
-    def _evaluate_join(self, marker: Marker, parent_job: JobDefinition, state: StateFrame) -> bool:
-        return _manager_joins.evaluate(self, marker, parent_job, state)
-
-    @staticmethod
-    def _join_satisfied(condition: str, join: Mapping[str, Any], kinds: Sequence[str]) -> bool:
-        return _manager_joins.satisfied(condition, join, kinds)
-
-    @staticmethod
-    def _join_impossible(condition: str, join: Mapping[str, Any], kinds: Sequence[str]) -> bool:
-        return _manager_joins.impossible(condition, join, kinds)
-
-    def _resolve_request_marker(self, request: Mapping[str, Any]) -> Marker | None:
-        return _manager_requests.resolve_marker(self, request)
-
-    def _handle_requests(self) -> bool:
-        return _manager_requests.handle(self)
-
-    def _retire_request(self, claimed_path: Path, reason: str) -> None:
-        """Retire one processed request that can never become actionable.
-
-        A request names an exact marker generation, so one that no longer
-        matches — or whose job moved while it was being applied — can never
-        apply to anything later either. Removing it silently would leave an
-        operator wondering; rereading it every tick would be a permanent cost.
-        It is therefore moved out of the request flow with the reason recorded
-        beside it, and never scanned again.
-        """
-
-        retired_dir = self.workspace.control / "requests" / "retired"
-        # The request is moved first and its reason written beside it after, so
-        # a claim another manager recovered meanwhile leaves no reason behind
-        # that would describe a request this manager never retired.
-        try:
-            retired_dir.mkdir(parents=True, exist_ok=True)
-            os.replace(claimed_path, retired_dir / claimed_path.name)
-        except OSError as exc:
-            if not os.path.lexists(claimed_path):
-                _LOGGER.debug("request %s is no longer claimed by this manager: %s", claimed_path.name, exc)
-                return
-            self._report_anomaly(
-                f"request:{claimed_path.name}",
-                f"cannot retire the unactionable request {claimed_path.name}: {exc}",
-                self._event("request_error", request=claimed_path.name),
-            )
-            return
-        try:
-            write_json_atomic(
-                retired_dir / f"{claimed_path.name}.retirement",
-                {
-                    "format": "httk-workflow-retired-request",
-                    "format_version": 2,
-                    "request": claimed_path.name,
-                    "manager_id": self.manager_id,
-                    "reason": reason,
-                    "retired_at": utc_now(),
-                },
-                durable=self.workspace.durable,
-            )
-        except OSError as exc:
-            self._report_anomaly(
-                f"request:{claimed_path.name}",
-                f"retired request {claimed_path.name} without recording why ({reason}): {exc}",
-                self._event("request_error", request=claimed_path.name),
-            )
-            return
-        _LOGGER.info(
-            "retired request %s: %s",
-            claimed_path.name,
-            reason,
-            extra=self._event("request_retired", request=claimed_path.name, reason=reason),
-        )
-
-    def _request_operator_key(self, request: Mapping[str, Any]) -> str | None:
-        return _manager_requests.operator_key(request, _LOGGER, self._event)
-
-    def _apply_request(self, request: Mapping[str, Any]) -> str | None:
-        """Apply one operator request, or say why it can never be applied."""
-
-        return _manager_requests.apply(self, request)
-
-    def _decided_join_hazard(self, marker: Marker, job: JobDefinition) -> dict[str, object] | None:
-        """Return why reviving *marker* would race a join that already used it.
-
-        A join decision is final: once the parent's transition committed, its
-        observation vector is history and a later revival of a child never
-        retracts it. What a revival *can* do is start writing the child's workdir
-        and payload again while the parent activation that consumed it is reading
-        them — a data race with no protocol answer, only an operator decision.
-
-        The check is deliberately cheap and exact. A child's own ``job.json``
-        names its parent, and the parent's current state frame carries the
-        ``join_summary`` of the activation it is in, so one lookup and one frame
-        read say whether this child is among the observations that activation was
-        given. Nothing is inferred from history: a parent that has moved on to an
-        activation with no join is not reading these outputs any more.
-        """
-
-        parent = job.parent
-        if not parent:
-            return None
-        try:
-            parent_id = canonical_uuid(parent.get("job_id"), "parent.job_id")
-        except FormatError:
-            return None
-        parent_key = parent.get("job_key")
-        parent_placement = parent.get("placement")
-        if not isinstance(parent_key, str) or not isinstance(parent_placement, str):
-            raise FormatError("parent must carry job_key and placement")
-        try:
-            parent_marker = self.workspace.find_marker_at(parent_key, normalize_placement(parent_placement))
-            if parent_marker is None or parent_marker.job_id != parent_id:
-                return None
-            summary = self._read_frame(parent_marker).join_summary
-        except (WorkflowError, OSError) as exc:
-            # The guard is advisory: a parent whose state cannot be read is not
-            # evidence that a join consumed this child.
-            _LOGGER.debug("cannot check the join summary of parent %s: %s", parent_id, exc)
-            return None
-        if not isinstance(summary, Sequence) or isinstance(summary, (str, bytes)):
-            return None
-        for observation in summary:
-            if not isinstance(observation, Mapping) or observation.get("job_id") != marker.job_id:
-                continue
-            return {
-                "parent_job_id": parent_id,
-                "parent_job_key": parent_marker.job_key,
-                "parent_kind": parent_marker.kind,
-                "parent_generation": parent_marker.generation,
-                "observed_kind": str(observation.get("kind")),
-                "observed_generation": observation.get("state_generation"),
-            }
-        return None
-
-    def _request_cancel(
-        self,
-        marker: Marker,
-        state: StateFrame,
-        request: Mapping[str, Any],
-        operator_key: str | None = None,
-    ) -> str | None:
-        return _manager_cancellation.request_cancel(
-            self,
-            marker,
-            state,
-            request,
-            operator_key,
-            _CANCELLING_MEMBERS,
-            utc_now=utc_now,
-            logger=_LOGGER,
-        )
-
-    def _process_cancelling(self) -> bool:
-        return _manager_cancellation.process(self, _LOGGER)
-
-    def _finish_cancellation(self, marker: Marker, state: StateFrame) -> bool:
-        return _manager_cancellation.finish(self, marker, state, _CANCELLING_MEMBERS, utc_now=utc_now, logger=_LOGGER)
-
-    def _cancellation_evidence(self, state: StateFrame) -> dict[str, object] | None:
-        return _manager_cancellation.evidence(self, state, utc_now=utc_now)
-
-    def _report_unverifiable_cancellation(self, marker: Marker, state: StateFrame) -> None:
-        _manager_cancellation.report_unverifiable(
-            self, marker, state, _CANCELLING_MEMBERS, utc_now=utc_now, logger=_LOGGER
-        )
-
-    def _terminate_attempt(
-        self,
-        marker: Marker,
-        state: StateFrame,
-        signal_number: int = signal.SIGTERM,
-    ) -> None:
-        """Signal the process group of one attempt without forgetting it.
-
-        A locally tracked attempt stays in ``_running`` until it has been reaped
-        and its exit verified: dropping it here is exactly what used to leave a
-        cancelled process alive with nothing watching it.
-        """
-
-        attempt_id = state.attempt_id or ""
-        local = self._running.get(attempt_id)
-        if local is not None:
-            local.cancelling = True
-            local.fenced = True
-            if local.process.poll() is None:
-                self._terminate_process(local.process.pid, signal_number)
-            _manager_launches.signal_all(self, local, signal_number, "the attempt is being cancelled")
-            return
-        # Launches a dead manager left behind are stopped with the attempt.
-        _manager_launches.signal_recorded(self, state.attempt_id or "", signal_number)
-        process = validate_process(state.members.get("process"))
-        if process is None or process["hostname"] != self.hostname:
-            return
-        self._terminate_process(cast(int, process["process_group"]), signal_number)
-
-    _process_group_alive = staticmethod(_attempt_process.process_group_alive)
-    _terminate_process = staticmethod(_attempt_process.terminate_process)
-
-    @staticmethod
-    def _failure(
-        code: str,
-        message: str,
-        *,
-        exit_status: int | None = None,
-    ) -> dict[str, object]:
-        """Return one canonical manager failure object."""
-
-        return _manager_commit.failure(code, message, exit_status=exit_status)
-
-    @staticmethod
-    def _nested_reason(outcome: Mapping[str, Any], key: str) -> str:
-        return _manager_commit.nested_reason(outcome, key)
-
-    @staticmethod
-    def _attempt_budget_failure(job: JobDefinition, attempt_ordinal: int, total_attempts: int) -> str | None:
-        return _manager_commit.attempt_budget_failure(job, attempt_ordinal, total_attempts)
+            os.close(job_fd)

@@ -1,68 +1,83 @@
-"""Private scheduling decisions used by :mod:`httk.workflow.manager`."""
+"""Private scheduling decisions used by :mod:`httk.workflow.manager`: eligibility, resources and the census."""
 
 import functools
 import logging
 import time
-import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from httk.core.requirements import parse_requirements, unmet_requirements
 
-from . import _manager_commit
-from ._calls import unready_calls
+from . import _kernel
 from ._durations import TIME_RESOURCES
+from ._job import JobDefinition
 from ._manager_binding import INVENTORY_LABELS, can_assign, fits
-from .errors import (
-    FormatError,
-    TransitionLostError,
-    UnsupportedExtensionError,
-    WorkflowError,
-)
-from .models import JobDefinition, Marker, StateFrame
+from ._state import StateDoc, read_state_unowned
+from .errors import FormatError
 
 if TYPE_CHECKING:
-    from .manager import WorkCensus
+    from .manager import TaskManager, WorkCensus
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
+
+#: Why a job is not this manager's work: ``(kind, name)``, the :class:`~httk.workflow.manager.WorkCensus` keys.
+type Blocker = tuple[str, str]
 
 
 @functools.cache
 def unmet_job_requirements(requires: tuple[str, ...]) -> tuple[str, ...]:
-    """Return which of a job's ``requires`` this process's environment does not meet.
+    """Return which of a workflow's ``requires`` this process's environment does not meet.
 
     Memoized for the process lifetime: installed distributions do not change
     under a running manager, and one campaign repeats one requirement tuple.
+
+    :param requires: The requirement strings.
+    :return: The unmet ones.
     """
 
     return unmet_requirements(parse_requirements(list(requires), "requires")) if requires else ()
 
 
+def current_step(job: JobDefinition, doc: StateDoc | None) -> str:
+    """Return the step the job's next attempt runs: its activation's, or the initial step before any.
+
+    :param job: The job.
+    :param doc: Its ``state.json``, or ``None`` before the first claim.
+    :return: The step name.
+    """
+
+    step = None if doc is None or doc.activation is None else doc.activation.get("step")
+    return step if isinstance(step, str) else job.initial_step
+
+
 def effective_requirement(
     job: JobDefinition,
-    state: StateFrame,
+    doc: StateDoc | None,
     capacity: Mapping[str, int],
     maximum_workers: int,
     *,
     whole_nodes: bool = False,
 ) -> dict[str, int]:
-    """Return the resource requirement selected for one ready activation.
+    """Return the resource requirement selected for the job's next attempt.
 
-    Consumable resources resolve wholesale (dynamic frame, then step, then job)
-    and gain this manager's fair share of ``procs`` and ``mem``; a mapping that
-    names only time labels leaves that choice to the next level. The time labels
-    resolve one label at a time through the same precedence. With *whole_nodes*
-    (a manager placing on a node inventory), a requirement of ``nodes`` gets no
-    fair share: it is given its nodes whole.
+    Consumable resources resolve wholesale (the dynamic requirement an outcome
+    declared, then the step's, then the job's) and gain this manager's fair
+    share of ``procs`` and ``mem``; a mapping that names only time labels leaves
+    that choice to the next level. The time labels resolve one label at a time
+    through the same precedence. With *whole_nodes* (a manager placing on a node
+    inventory), a requirement of ``nodes`` gets no fair share.
+
+    :param job: The job.
+    :param doc: Its ``state.json``, or ``None``.
+    :param capacity: The manager's capacity.
+    :param maximum_workers: The manager's worker count.
+    :param whole_nodes: Whether nodes are given whole.
+    :return: The requirement.
     """
 
-    step = job.step_resources.get(state.step) if state.step is not None else None
-    selected = next(
-        mapping
-        for mapping in (state.resources, step, job.resources, {})
-        if mapping is not None and (not mapping or mapping.keys() - TIME_RESOURCES)
-    )
+    levels = _levels(job, doc)
+    selected = next(mapping for mapping in (*levels, {}) if not mapping or mapping.keys() - TIME_RESOURCES)
     requirement = consumable(selected)
     for name in ("procs", "mem"):
         if whole_nodes and requirement.get("nodes", 0) >= 1:
@@ -72,36 +87,40 @@ def effective_requirement(
             if share == 0 and capacity[name] > 0:
                 share = capacity[name]
             requirement[name] = share
-    return requirement | time_requirement(job, state)
+    times: dict[str, int] = {}
+    for name in sorted(TIME_RESOURCES):
+        found = next((mapping[name] for mapping in levels if name in mapping), None)
+        if found is not None:
+            times[name] = found
+    if "maxtime" in times and times.get("mintime", 0) > times["maxtime"]:
+        times["mintime"] = times["maxtime"]
+    return requirement | times
+
+
+def _levels(job: JobDefinition, doc: StateDoc | None) -> list[Mapping[str, int]]:
+    # The frozen JSON values below are validated resource mappings: names to integers.
+    step = job.step_resources.get(current_step(job, doc))
+    candidates: list[object] = [None if doc is None else doc.resources, step, job.resources]
+    return [mapping for mapping in candidates if isinstance(mapping, Mapping)]
 
 
 def consumable(requirement: Mapping[str, int]) -> dict[str, int]:
-    """Return the part of *requirement* counted against manager capacity."""
+    """Return the part of *requirement* counted against manager capacity.
+
+    :param requirement: A requirement.
+    :return: Its non-time labels.
+    """
 
     return {name: value for name, value in requirement.items() if name not in TIME_RESOURCES}
 
 
-def time_requirement(job: JobDefinition, state: StateFrame) -> dict[str, int]:
-    """Return the time labels of one activation, each resolved frame, then step, then job.
-
-    Labels from different levels may disagree, so a resolved ``mintime`` above
-    the resolved ``maxtime`` is lowered to it.
-    """
-
-    step = job.step_resources.get(state.step, {}) if state.step is not None else {}
-    result: dict[str, int] = {}
-    for name in sorted(TIME_RESOURCES):
-        for mapping in (state.resources or {}, step, job.resources):
-            if name in mapping:
-                result[name] = mapping[name]
-                break
-    if "maxtime" in result and result.get("mintime", 0) > result["maxtime"]:
-        result["mintime"] = result["maxtime"]
-    return result
-
-
 def unfit_resource(requirement: Mapping[str, int], capacity: Mapping[str, int]) -> str | None:
-    """Return the first sorted consumable resource key that cannot fit the capacity."""
+    """Return the first sorted consumable resource key that cannot fit the capacity.
+
+    :param requirement: A requirement.
+    :param capacity: A capacity.
+    :return: The resource, or ``None``.
+    """
 
     for name in sorted(consumable(requirement)):
         value = requirement[name]
@@ -110,26 +129,36 @@ def unfit_resource(requirement: Mapping[str, int], capacity: Mapping[str, int]) 
     return None
 
 
-def unplaceable_resource(manager: Any, requirement: Mapping[str, int]) -> str | None:
+def unplaceable_resource(manager: "TaskManager", requirement: Mapping[str, int]) -> str | None:
     """Return the first resource that keeps *requirement* from ever fitting this manager.
 
     Beyond :func:`unfit_resource`, a manager with a node inventory also needs the
     labels it places to fit its nodes; the first of ``nodes``, ``procs``, ``gpus``,
     ``mem`` whose addition makes them not fit is reported.
+
+    :param manager: The manager.
+    :param requirement: A requirement.
+    :return: The resource, or ``None``.
     """
 
     missing = unfit_resource(requirement, manager.resources)
-    if missing is not None or manager._inventory is None:
+    inventory = manager._inventory
+    if missing is not None or inventory is None:
         return missing
-    labels = [name for name in INVENTORY_LABELS if name in requirement and name in manager._inventory.labels]
+    labels = [name for name in INVENTORY_LABELS if name in requirement and name in inventory.labels]
     for index, label in enumerate(labels):
-        if not fits(manager._inventory, {name: requirement[name] for name in labels[: index + 1]}):
+        if not fits(inventory, {name: requirement[name] for name in labels[: index + 1]}):
             return label
     return None
 
 
 def available_resources(capacity: Mapping[str, int], running: Iterable[Any]) -> dict[str, int]:
-    """Return capacity remaining after reservations of locally running attempts."""
+    """Return capacity remaining after reservations of locally running attempts.
+
+    :param capacity: The manager's capacity.
+    :param running: The running attempts (each with ``resources``).
+    :return: The remaining capacity.
+    """
 
     available = dict(capacity)
     for attempt in running:
@@ -139,398 +168,187 @@ def available_resources(capacity: Mapping[str, int], running: Iterable[Any]) -> 
     return available
 
 
-def time_left(manager: Any) -> float | None:
-    """Return the seconds until the manager's drain start, negative once past, or ``None`` when unknown."""
+def time_left(manager: "TaskManager") -> float | None:
+    """Return the seconds until the manager's drain start, negative once past, or ``None`` when unknown.
+
+    :param manager: The manager.
+    :return: The seconds left.
+    """
 
     return None if manager.drain_start is None else manager.drain_start - time.time()
 
 
-def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
-    """Filter and order ready work, pairing each marker with its requirement."""
+def assess(
+    manager: "TaskManager", job: JobDefinition, doc: StateDoc | None
+) -> tuple[dict[str, int] | None, Blocker | None]:
+    """Decide whether this manager may run the job's next attempt, before claiming it (plan §7.7).
 
-    eligible: list[tuple[Marker, dict[str, int]]] = []
-    for marker in manager._window("eligible_ready", "ready"):
-        manager._pace()
-        loaded = manager._load_job_and_state(marker, "ready")
-        if loaded is None:
-            continue
-        job, state = loaded
-        manager._reported.pop(f"ready:{marker.job_key}", None)
-        if manager._executor_for(job) is None:
-            _LOGGER.debug(
-                "skipping ready job %s: runner executor %s is not served here",
-                marker.job_key,
-                job.runner_executor,
-            )
-            continue
-        if not manager.accept_any_pool and job.claim_pool not in manager.pools:
-            _LOGGER.debug(
-                "skipping ready job %s: pool %s is not served here",
-                marker.job_key,
-                job.claim_pool,
-            )
-            continue
-        if not job.required_capabilities <= manager.capabilities:
-            _LOGGER.debug(
-                "skipping ready job %s: missing capabilities %s",
-                marker.job_key,
-                ",".join(sorted(job.required_capabilities - manager.capabilities)),
-            )
-            continue
-        unmet = unmet_job_requirements(job.requires)
-        if unmet:
-            _LOGGER.debug("skipping ready job %s: unmet requirements %s", marker.job_key, "; ".join(unmet))
-            continue
-        unready = unready_calls(manager.workspace, job)
-        if unready:
-            _LOGGER.debug("skipping ready job %s: %s", marker.job_key, "; ".join(unready))
-            continue
-        try:
-            requirement = effective_requirement(
-                job, state, manager.resources, manager.maximum_workers, whole_nodes=manager._inventory is not None
-            )
-        except (WorkflowError, OSError) as exc:
-            manager._report_anomaly(
-                f"ready:{marker.job_key}",
-                f"skipping ready job {marker.job_key}: {exc}",
-                manager._event("job_unusable", marker, pass_name="ready"),
-            )
-            continue
-        missing_resource = unplaceable_resource(manager, requirement)
-        if missing_resource is not None:
-            _LOGGER.debug(
-                "skipping ready job %s: resource %s does not fit manager capacity",
-                marker.job_key,
-                missing_resource,
-            )
-            continue
-        left = time_left(manager)
-        if left is not None and requirement.get("mintime", 0) > left:
-            _LOGGER.debug(
-                "skipping ready job %s: mintime %ds exceeds the %.0fs left before draining",
-                marker.job_key,
-                requirement.get("mintime", 0),
-                left,
-            )
-            continue
-        eligible.append((marker, requirement))
-    eligible.sort(key=lambda item: (item[0].priority, item[0].path.as_posix()))
-    return eligible
+    The checks run in a fixed order, so a job this manager cannot run is
+    attributed to exactly one blocker: pool, capability, the installed workflow
+    and its call closure (``calls``), the installed manifest's ``requires``,
+    resources, and ``mintime`` against the drain point.
 
-
-def attempt_budget_failure(job: JobDefinition, attempt_ordinal: int, total_attempts: int) -> str | None:
-    per_activation = job.retry_policy.maximum_attempts_per_activation
-    if per_activation is not None and attempt_ordinal > per_activation:
-        return "maximum_attempts_per_activation exceeded"
-    total = job.retry_policy.maximum_total_attempts
-    if total is not None and total_attempts > total:
-        return "maximum_total_attempts exceeded"
-    return None
-
-
-def retry_budget_available(job: JobDefinition, state: Any) -> bool:
-    """Report whether another attempt of this activation is permitted."""
-
-    attempts = state.attempt_ordinal if state.attempt_ordinal is not None else 1
-    total = state.total_attempts if state.total_attempts is not None else attempts
-    per_activation = job.retry_policy.maximum_attempts_per_activation
-    if per_activation is not None and attempts >= per_activation:
-        return False
-    maximum_total = job.retry_policy.maximum_total_attempts
-    return maximum_total is None or total < maximum_total
-
-
-def window_policy(maximum_pass_markers: int, discovery_budget: int) -> tuple[int, int]:
-    """Return the bounded-pass limits as one explicit scheduling decision."""
-
-    return maximum_pass_markers, discovery_budget
-
-
-def register_submissions(manager: Any) -> bool:
-    changed = False
-    for marker in manager._window("register_submissions", "submitted"):
-        manager._pace()
-        try:
-            job = manager.workspace.validate_job_payload(marker)
-            executor = manager._executor_for(job)
-            if executor is None:
-                _LOGGER.debug(
-                    "skipping submitted job %s: runner executor %s is not served here",
-                    marker.job_key,
-                    job.runner_executor,
-                )
-                continue
-            executor.validate(job, manager.workspace.payload_path(marker.placement, marker.job_key))
-            manager._transition(
-                marker,
-                "ready",
-                StateFrame.replace(
-                    step=job.initial_step,
-                    activation_id=str(uuid.uuid4()),
-                    activation_ordinal=1,
-                    attempt_ordinal=0,
-                    total_attempts=0,
-                    data_generation=0 if job.data_mode == "transactional" else None,
-                    reason="submitted",
-                    job_digest=job.digest,
-                ),
-            )
-        except TransitionLostError:
-            pass
-        except (FormatError, UnsupportedExtensionError) as exc:
-            try:
-                manager._transition(
-                    marker,
-                    "failed",
-                    StateFrame.replace(
-                        failure=manager._failure("protocol_error", str(exc)),
-                        data_generation=None,
-                        reason="submission_invalid",
-                    ),
-                )
-            except TransitionLostError:
-                pass
-        changed = True
-    return changed
-
-
-def recover_abandoned_claims(manager: Any, logger: Any) -> bool:
-    changed = False
-    for marker in list(manager._walk(("claimed",))):
-        manager._pace()
-        loaded = manager._load_job_and_state(marker, "recover_claims")
-        if loaded is None:
-            continue
-        job, state = loaded
-        if manager._executor_for(job) is None:
-            logger.debug(
-                "skipping claimed job %s: runner executor %s is not served here", marker.job_key, job.runner_executor
-            )
-            continue
-        if state.pause_requested is not None:
-            logger.info("pausing claimed job %s before launching its attempt", marker.job_key)
-            manager._release_claim(marker, "operator_pause_deferred", state)
-            changed = True
-            continue
-        try:
-            owner = state.manager_id
-        except FormatError as exc:
-            manager._report_anomaly(
-                f"claim_owner:{marker.job_key}",
-                f"claimed job {marker.job_key} does not name a usable manager: {exc}",
-                manager._event("protocol_error", marker),
-            )
-            owner = None
-        if manager._manager_alive(
-            owner, lease_seconds=manager.lease_seconds if state.lease_seconds is None else state.lease_seconds
-        ):
-            continue
-        logger.warning(
-            "recovering %s: the claim of manager %s was abandoned",
-            marker.job_key,
-            owner or "-",
-            extra=manager._event("claim_recovered", marker, previous_manager=owner),
-        )
-        manager._release_claim(marker, "claim_abandoned", state)
-        changed = True
-    return changed
-
-
-def claim_pass(manager: Any, changed: bool, logger: Any) -> bool:
-    if manager._draining:
-        logger.debug("draining: not claiming new work")
-        return changed
-    if manager._maintenance_paused():
-        return changed
-    if len(manager._running) >= manager.maximum_workers:
-        logger.debug("worker capacity full: not claiming new work")
-        return changed
-    available = manager._available_resources()
-    if ("procs" in manager.resources and available["procs"] == 0) or (
-        "mem" in manager.resources and available["mem"] == 0
-    ):
-        logger.debug("resource capacity exhausted: not claiming new work")
-        return changed
-    for marker, requirement in manager._eligible_ready_with_requirements():
-        if len(manager._running) >= manager.maximum_workers:
-            break
-        available = manager._available_resources()
-        if ("procs" in manager.resources and available["procs"] == 0) or (
-            "mem" in manager.resources and available["mem"] == 0
-        ):
-            break
-        inventory = manager._inventory
-        if any(
-            value > available.get(name, 0)
-            for name, value in consumable(requirement).items()
-            if inventory is None or name not in inventory.labels
-        ):
-            continue
-        if inventory is not None and not can_assign(inventory, requirement):
-            continue
-        try:
-            changed |= manager._claim_and_launch(marker)
-        except TransitionLostError as exc:
-            logger.debug("claim of %s was lost to another actor: %s", marker.job_key, exc)
-            continue
-        except (WorkflowError, OSError) as exc:
-            manager._report_anomaly(
-                f"claim:{marker.job_key}",
-                f"cannot claim or launch {marker.job_key}: {exc}",
-                manager._event("claim_error", marker),
-            )
-            changed = True
-    return changed
-
-
-def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[str]]) -> bool:
-    """Classify one submitted or ready marker, returning whether it is actionable.
-
-    A submitted job only needs its executor served to register; a ready job must
-    also match the pool, capabilities, ``requires``, static resource capacity, and fit its
-    ``mintime`` in the time left before the manager's drain start. A job this
-    manager cannot progress is attributed to exactly one missing requirement, in the same order
-    :func:`eligible_ready` checks them.
+    :param manager: The manager.
+    :param job: The job.
+    :param doc: Its ``state.json``, or ``None``.
+    :return: ``(requirement, None)`` when eligible, otherwise ``(None, blocker)``.
     """
 
-    try:
-        job = manager.workspace.load_job(marker)
-    except (WorkflowError, OSError):
-        # An unreadable submitted job may still register once repaired; an
-        # unreadable ready job is a local defect the scheduler already reports.
-        return marker.kind == "submitted"
-    if manager._executor_for(job) is None:
-        blocked["executor"][job.runner_executor] += 1
-        return False
-    if marker.kind == "submitted":
-        return True
     if not manager.accept_any_pool and job.claim_pool not in manager.pools:
-        blocked["pool"][job.claim_pool] += 1
-        return False
-    missing = job.required_capabilities - manager.capabilities
-    if missing:
-        blocked["capability"][min(missing)] += 1
-        return False
-    unmet = unmet_job_requirements(job.requires)
+        return None, ("pool", job.claim_pool)
+    if missing := job.required_capabilities - manager.capabilities:
+        return None, ("capability", min(missing))
+    installed, problem = manager._workflow(job.workflow_id)
+    if installed is None:
+        return None, ("calls", problem or f"workflow {job.workflow_id} is not installed")
+    requires = installed.record.get("requires")
+    unmet = unmet_job_requirements(tuple(str(item) for item in requires) if isinstance(requires, list) else ())
     if unmet:
-        blocked["requirements"][unmet[0]] += 1
-        return False
-    unready = unready_calls(manager.workspace, job)
-    if unready:
-        blocked["calls"][unready[0]] += 1
-        return False
-    try:
-        state = manager._read_frame(marker)
-    except (WorkflowError, OSError):
-        return False
-    try:
-        requirement = effective_requirement(
-            job, state, manager.resources, manager.maximum_workers, whole_nodes=manager._inventory is not None
-        )
-    except (WorkflowError, OSError):
-        return False
-    missing_resource = unplaceable_resource(manager, requirement)
-    if missing_resource is not None:
-        blocked["resources"][missing_resource] += 1
-        return False
+        return None, ("requirements", unmet[0])
+    requirement = effective_requirement(
+        job, doc, manager.resources, manager.maximum_workers, whole_nodes=manager._inventory is not None
+    )
+    if (resource := unplaceable_resource(manager, requirement)) is not None:
+        return None, ("resources", resource)
     left = time_left(manager)
     if left is not None and requirement.get("mintime", 0) > left:
-        blocked["time"]["drain_point" if left <= 0 else "mintime"] += 1
+        return None, ("time", "drain_point" if left <= 0 else "mintime")
+    return requirement, None
+
+
+def read_ready(manager: "TaskManager", ref: _kernel.JobRef) -> tuple[JobDefinition, StateDoc | None] | None:
+    """Read an unowned job's ``job.json`` and ``state.json`` before claiming it; the reads are hints.
+
+    :param manager: The manager.
+    :param ref: The job reference.
+    :return: The job and its state, or ``None`` for a job this manager may not or cannot read.
+    """
+
+    if not manager._owns(ref.path):
+        return None
+    try:
+        job = JobDefinition.from_path(ref.path / "job.json")
+    except FormatError as exc:
+        if ref.path.exists():
+            manager._report_anomaly(
+                f"ready:{ref.job_key}", f"skipping ready job {ref.job_key}: {exc}", {"event": "job_unusable"}
+            )
+        return None
+    # A damaged state.json is claimed anyway: reconcile fails the job with protocol_error.
+    doc, _damaged = read_state_unowned(ref.path / "state.json")
+    return job, doc
+
+
+def claim_pass(manager: "TaskManager") -> bool:
+    """Claim and launch eligible ready jobs within the manager's workers and capacity (plan §7.7 step 8).
+
+    One bounded window of ``ready`` (``discovery_budget`` jobs, resumed from a
+    cursor on the next pass) is read and assessed before any claim; the
+    eligible jobs are claimed in priority order.
+
+    :param manager: The manager.
+    :return: Whether a job was claimed.
+    """
+
+    if manager._draining or not _has_room(manager):
         return False
-    return True
+    refs = list(
+        _kernel.list_jobs(
+            manager.workspace,
+            "ready",
+            prefixes=manager.placement_prefixes,
+            limit=manager.discovery_budget,
+            start=manager._cursor,
+        )
+    )
+    # A short window reached the end: the next pass starts over.
+    manager._cursor = refs[-1].cursor if len(refs) == manager.discovery_budget else None
+    # ponytail: every job of the window is read before claiming; cap the window if wide queues make ticks slow.
+    candidates: list[_kernel.JobRef] = []
+    for ref in refs:
+        loaded = read_ready(manager, ref)
+        if loaded is None:
+            continue
+        job, doc = loaded
+        requirement, blocker = assess(manager, job, doc)
+        if blocker is not None:
+            _LOGGER.debug("skipping ready job %s: %s %s", ref.job_key, *blocker)
+            continue
+        assert requirement is not None
+        if fits_now(manager, requirement):
+            candidates.append(ref)
+    changed = False
+    for ref in sorted(candidates, key=lambda item: (item.priority, item.cursor)):
+        if not _has_room(manager):
+            break
+        changed |= manager._claim_and_launch(ref)
+    return changed
 
 
-def work_census(manager: Any) -> "WorkCensus":
-    """Scan the workspace once and tag every job by why it is this manager's work.
+def _has_room(manager: "TaskManager") -> bool:
+    if len(manager._running) >= manager.maximum_workers:
+        return False
+    available = manager._available_resources()
+    return not any(name in manager.resources and available[name] == 0 for name in ("procs", "mem"))
 
-    Actionability applies exactly the claim predicates of :func:`eligible_ready`:
-    a ready job counts as actionable only if this manager could claim it. A
-    wrong-pool, missing-capability, unmet-requirement, resource-unfit, too-long, or unserved-executor job is not actionable
-    — the manager can do nothing about it — so it is reported for the operator
-    instead of silently keeping the manager awake or silently letting it exit.
+
+def fits_now(manager: "TaskManager", requirement: Mapping[str, int]) -> bool:
+    """Return whether *requirement* fits what the manager has free right now.
+
+    :param manager: The manager.
+    :param requirement: The requirement.
+    :return: Whether it fits.
+    """
+
+    available = manager._available_resources()
+    inventory = manager._inventory
+    if any(
+        value > available.get(name, 0)
+        for name, value in consumable(requirement).items()
+        if inventory is None or name not in inventory.labels
+    ):
+        return False
+    return inventory is None or can_assign(inventory, requirement)
+
+
+def work_census(manager: "TaskManager") -> "WorkCensus":
+    """Scan the workspace once and tag every job by why it is or is not this manager's work.
+
+    Actionability applies exactly the claim predicates of :func:`assess`: a
+    ready job counts as actionable only if this manager could claim it.
+
+    :param manager: The manager.
+    :return: The census.
     """
 
     from .manager import WorkCensus
 
-    # ponytail: succeeded/failed are counted by an exhaustive marker walk. It is
-    # cheap per entry and runs only on a settled tick or at idle exit, never in
-    # the hot claim path, so no cursor or cache is warranted.
-    succeeded = failed = waiting = paused = 0
-    for marker in manager._walk(("succeeded", "failed", "waiting", "paused")):
-        if marker.kind == "succeeded":
-            succeeded += 1
-        elif marker.kind == "failed":
-            failed += 1
-        elif marker.kind == "waiting":
-            waiting += 1
-        else:
-            paused += 1
-    blocked: dict[str, Counter[str]] = {
-        "executor": Counter(),
-        "pool": Counter(),
-        "capability": Counter(),
-        "requirements": Counter(),
-        "calls": Counter(),
-        "resources": Counter(),
-        "time": Counter(),
+    workspace, prefixes = manager.workspace, manager.placement_prefixes
+    # ponytail: the terminal and resting states are counted by an exhaustive listing; it runs only on a
+    # settled tick or at idle exit, never in the hot claim path.
+    counts = {
+        state: sum(1 for _ in _kernel.list_jobs(workspace, state, prefixes=prefixes))
+        for state in ("succeeded", "failed", "waiting", "paused")
     }
-    ready_claimable = 0
-    actionable = 0
-    for marker in manager._walk(("submitted", "ready")):
-        if _classify_pending(manager, marker, blocked):
-            actionable += 1
-            if marker.kind == "ready":
-                ready_claimable += 1
-    unreadable = 0
-    for marker in manager._walk(("committing", "cancelling")):
-        try:
-            job = manager.workspace.load_job(marker)
-        except (WorkflowError, OSError):
-            # A committing/cancelling job whose definition cannot be read is not
-            # this manager's work: no pass can advance it, so counting it
-            # actionable used to spin the manager to its idle timeout. The
-            # scheduler already reports the damage as an anomaly; here it is a
-            # named census bucket so the operator sees it and idle exit is prompt.
-            unreadable += 1
+    blocked: dict[str, Counter[str]] = {}
+    claimable = 0
+    for ref in _kernel.list_jobs(workspace, "ready", prefixes=prefixes):
+        loaded = read_ready(manager, ref)
+        if loaded is None:
             continue
-        if manager._executor_for(job) is None:
-            continue
-        if marker.kind == "committing":
-            # Another manager's commit is this manager's work only once it may
-            # take it over; until then counting it would keep this manager awake
-            # for work it must leave alone.
-            try:
-                state = manager._read_frame(marker)
-            except (WorkflowError, OSError):
-                unreadable += 1
-                continue
-            if not _manager_commit.may_commit(manager, marker, state):
-                continue
-        actionable += 1
-    # Outcomes another manager's attempts published wait for that manager, or for evidence that it is
-    # gone and that their launches ended; the ones that will soon be this manager's keep it awake.
-    outcomes_waiting = 0
-    for marker in manager._walk(("running",)):
-        try:
-            job = manager.workspace.load_job(marker)
-            if manager._executor_for(job) is None:
-                continue
-            state = manager._read_frame(marker)
-            if state.manager_id == manager.manager_id or manager._published_outcome(marker, state) is None:
-                continue
-        except (WorkflowError, OSError):
-            continue
-        outcomes_waiting += 1
-        if _manager_commit.outcome_actionable(manager, state):
-            actionable += 1
+        job, doc = loaded
+        _, blocker = assess(manager, job, doc)
+        if blocker is None:
+            claimable += 1
+        else:
+            blocked.setdefault(blocker[0], Counter())[blocker[1]] += 1
     return WorkCensus(
-        succeeded=succeeded,
-        failed=failed,
-        ready_claimable=ready_claimable,
-        ready_blocked={kind: dict(counter) for kind, counter in blocked.items() if counter},
-        waiting=waiting,
-        paused=paused,
-        actionable_count=actionable,
-        unreadable=unreadable,
-        outcomes_waiting=outcomes_waiting,
+        succeeded=counts["succeeded"],
+        failed=counts["failed"],
+        ready_claimable=claimable,
+        ready_blocked={kind: dict(counter) for kind, counter in blocked.items()},
+        waiting=counts["waiting"],
+        paused=counts["paused"],
+        # Every job in owned/<self>/ (running, or left for self-healing) is still this manager's work.
+        actionable_count=claimable + len(manager.owner.owned()),
     )

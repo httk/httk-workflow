@@ -42,10 +42,6 @@ def attempt_context(
     attempt_reason: str | None,
     previous_attempt_id: str | None,
     activation_reason: str | None,
-    workdir_mode: str,
-    workdir_reused: bool,
-    unsafe_persistent_takeover: bool,
-    data_generation: int | None,
     durable: bool,
     settings: Mapping[str, Any],
     resources: Mapping[str, int],
@@ -71,10 +67,6 @@ def attempt_context(
     :param attempt_reason: Why this attempt started; ``None`` reads as ``claim``.
     :param previous_attempt_id: The previous attempt's identifier.
     :param activation_reason: Why the activation started.
-    :param workdir_mode: The job's workdir mode.
-    :param workdir_reused: Whether a persistent workdir already existed.
-    :param unsafe_persistent_takeover: Whether a persistent takeover was unsafe.
-    :param data_generation: The transactional data generation.
     :param durable: The workspace durability mode.
     :param settings: The effective workspace settings.
     :param resources: The attempt's resource reservation.
@@ -104,10 +96,6 @@ def attempt_context(
         "attempt_reason": attempt_reason or "claim",
         "previous_attempt_id": previous_attempt_id,
         "activation_reason": activation_reason,
-        "workdir_mode": workdir_mode,
-        "workdir_reused": workdir_reused,
-        "unsafe_persistent_takeover": unsafe_persistent_takeover,
-        "data_generation": data_generation,
         # The workspace durability mode, so every artifact the runner
         # publishes is synchronized to the same standard as the marker and
         # journal that will reference it.
@@ -160,7 +148,7 @@ def runner_environment(
     :param deadline: The epoch second the attempt must finish by, or ``None``.
     :param binding_environment: The binding, GPU and launch-client variables.
     :param code_variables: The installed codes' Bash API variables.
-    :param data_dir: The transactional data directory, or ``None`` for a job without transactional data.
+    :param data_dir: The job's data directory, or ``None`` to leave ``HTTK_WORKFLOW_DATA_DIR`` unset.
     :param declared_environment: The job's declared environment; settings it consumes are not exported.
     :param settings: The effective workspace settings, exported as ``HTTK_<KEY>`` variables.
     :return: The environment mapping.

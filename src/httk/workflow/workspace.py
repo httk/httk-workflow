@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Self
 
 from httk.core.digests import sha256_file, tree_digest
 
+from ._kernel import OWNED
+from ._state import UNOWNED_STATES
 from ._util import (
     fsync_directory,
     read_json,
@@ -62,6 +64,9 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
 
 _LOGGER = logging.getLogger(__name__)
 RUNNER_TREE_ENTRY = "run"
+#: The ``format.json`` ``layout`` of a workspace with ``jobs/<state>/`` job directories and owners (plan §3).
+LAYOUT = "jobs-v3"
+WORKFLOWS_DIRECTORY = "workflows"
 
 
 def _validate_setting_key(key: str) -> str:
@@ -447,6 +452,12 @@ class Workspace:
         self.core_profile = self.format.get("core_profile")
         if self.core_profile != CORE_PROFILE:
             raise _refuse_format(self.root, self.format.get("format_version"), self.format.get("core_profile"))
+        if self.format.get("layout") != LAYOUT:
+            # Plan P8: the jobs-v3 layout replaces the unreleased one under the same format number, without migration.
+            raise FormatError(
+                f"workspace at {self.root} uses an older job layout (format.json has no \"layout\": \"{LAYOUT}\"); "
+                "there is no migration: re-create the workspace with `httk workspace init` and submit its jobs again"
+            )
         self._policy = WorkspacePolicy.from_mapping(_section(self.format, "policy"))
         _validate_settings(_section(self.format, "settings"))
         _validate_workflow_preludes(_section(self.format, "workflow_preludes"))
@@ -545,25 +556,24 @@ class Workspace:
         control = root_path / WORKSPACE_DIRECTORY
         control.mkdir(exist_ok=False)
         for relative in (
+            "owners",
+            "requests",
             "tmp",
             "quarantine",
-            "journal",
-            "managers",
-            "runners",
-            "requests/tmp",
-            "requests/ready",
-            "requests/claimed",
-            "state/submitted",
+            "transfers/outgoing",
+            "transfers/incoming",
+            "exchange-jobs",
         ):
             (control / relative).mkdir(parents=True, exist_ok=True)
-        (root_path / JOBS_DIRECTORY).mkdir(exist_ok=True)
-        for relative in ("transfers/acks", "transfers/incoming", "transfers/outgoing", "transfers/retired"):
-            (control / relative).mkdir(parents=True, exist_ok=True)
+        for state in (*UNOWNED_STATES, OWNED):
+            (root_path / JOBS_DIRECTORY / state).mkdir(parents=True, exist_ok=True)
+        (root_path / WORKFLOWS_DIRECTORY).mkdir(exist_ok=True)
         write_json_atomic(
             control / "format.json",
             {
                 "format": "httk-workflow-filesystem",
                 "format_version": 3,
+                "layout": LAYOUT,
                 "core_profile": CORE_PROFILE,
                 # The exchange extension is recorded by enabling it below, once its directory exists.
                 "extensions": sorted(extension_set - {EXCHANGE_EXTENSION}),
@@ -634,6 +644,15 @@ class Workspace:
         """
 
         return self._policy
+
+    @property
+    def workflows(self) -> Path:
+        """Return the store of installed workflows, ``<root>/workflows``.
+
+        :return: The store directory.
+        """
+
+        return self.root / WORKFLOWS_DIRECTORY
 
     @property
     def visibility_deadline(self) -> float:
