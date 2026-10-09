@@ -3,7 +3,7 @@
 Collecting is the read-only counterpart of running work. A manager decides what
 happens next; a job_records reports what already happened, once, per job that
 stopped, in a shape a data layer can store without knowing anything about
-markers, journals, or leases.
+job directories, owners, or run logs.
 
 That shape — :class:`~httk.workflow.collecting.JobRecord` — is the layering boundary of *httk₂*.
 *httk-workflow* has no database dependency and never will: it produces records,
@@ -15,25 +15,27 @@ and nothing in this module knows what ``store`` or ``load_vasp`` are:
     for record in job_records(workspace):
         store.save(load_vasp(record))
 
-Every member of a record is derived from exactly the authoritative state a
-manager reads — the marker below ``state/``, the journal frames that marker's
-chain names, and the immutable ``job.json`` — so a record never says anything the
+Every member of a record is derived from exactly the authoritative state of the
+job directory — its immutable ``job.json``, the owner-written ``state.json`` and
+the owner run log ``logs/runlog.jsonl`` — so a record never says anything the
 workspace does not. Two properties follow from that and are the reason this
 module exists at all:
 
 * **The executed code is pinned.** A record carries the immutable job digest and
-  the complete runner identity: executor, source, path, and the SHA-256 the job
-  pinned for every runner that lives outside its payload. For a runner named by
-  the reserved ``pkg:`` form the installed distribution and its version are
-  reported as well, so a stored result names the software that produced it.
-* **Damage is reported, never guessed.** A job whose journal chain is broken is
-  still collected, with whatever remains readable and ``gaps`` set, because a
+  the installed workflow the job ran (its id and the SHA-256 of its installed
+  package tree), so a stored result names the software that produced it.
+* **Damage is reported, never guessed.** A job whose run log or state is damaged
+  is still collected, with whatever remains readable and ``gaps`` set, because a
   result that exists must not become invisible just because part of its history
   did not survive.
 
-:func:`job_records` is lazily evaluated over one scan of the workspace. By design it
-iterates jobs without materializing the workspace, and building one record reads
-only that job's own payload and journal chain.
+A record identifies its job by workspace id and job id, never by path: a job's
+directory moves with every state change, so ``payload_path`` is only where the
+job was when it was read.
+
+:func:`job_records` is lazily evaluated over one listing of the requested states. By
+design it iterates jobs without materializing the workspace, and building one
+record reads only that job's own directory.
 """
 
 from __future__ import annotations
@@ -48,42 +50,28 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
-from functools import cache
-from importlib import metadata
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import unquote
 
 from httk.core.datastream.compression import known_compressions, split_compression_suffix
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.storage import content_id
 
-from . import compat
+from . import _kernel, _store, compat
+from ._job import JobDefinition
+from ._kernel import JobRef
+from ._state import TERMINAL_STATES, UNOWNED_STATES, StateDoc, _thaw
 from ._util import read_json, require_mapping, require_string
-from .errors import FormatError, WorkflowError
+from .errors import FormatError
 from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
-from .introspection import (
-    _job_of,
-    _optional_int,
-    _optional_string,
-    _state_of,
-    _workdir_relative,
-    job_frames,
-)
+from .introspection import job_events, read_job, read_state
 from .models import (
     JOB_STATE_DIRECTORY,
-    STATE_KINDS,
-    TERMINAL_KINDS,
     Failure,
-    JobDefinition,
-    Marker,
     canonical_uuid,
     normalize_placement,
-    parse_job_key,
-    parse_package_runner,
     parse_placement_text,
-    payload_relative,
     placement_text,
     validate_declaration_name,
     validate_failure,
@@ -113,18 +101,16 @@ __all__ = [
     "declarations_of",
     "existing_file",
     "job_records",
-    "module_distribution",
     "record_of",
-    "runner_provenance",
     "timeline",
 ]
 
 COLLECT_FORMAT = "httk-workflow-collect"
-COLLECT_FORMAT_VERSION = 2
-#: The state kinds a job_records may read: a job that stopped. The terminal kinds are
+COLLECT_FORMAT_VERSION = 3
+#: The states job_records may read: a job that stopped. The terminal states are
 #: final, and ``paused`` is included because a paused job published a real outcome
 #: and produced real results before an operator was asked to look at it.
-COLLECTABLE_KINDS = tuple(kind for kind in STATE_KINDS if kind in TERMINAL_KINDS or kind == "paused")
+COLLECTABLE_KINDS = tuple(state for state in UNOWNED_STATES if state in TERMINAL_STATES or state == "paused")
 #: The default selection: the jobs that finished the way they were meant to.
 DEFAULT_COLLECT_STATES = ("succeeded",)
 _FILE_URL_PREFIX = "file://"
@@ -206,195 +192,84 @@ class CollectedJob:
 
 
 # ---------------------------------------------------------------------------
-# Runner provenance
+# The run-log timeline
 # ---------------------------------------------------------------------------
 
 
-def _editable_root(distribution: metadata.Distribution) -> Path | None:
-    """Return the source directory one editable installation was made from."""
-
-    try:
-        raw = distribution.read_text("direct_url.json")
-    except OSError:
-        return None
-    if raw is None:
-        return None
-    try:
-        recorded = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(recorded, Mapping):
-        return None
-    directory = recorded.get("dir_info")
-    if not isinstance(directory, Mapping) or not directory.get("editable"):
-        return None
-    url = recorded.get("url")
-    if not isinstance(url, str) or not url.startswith(_FILE_URL_PREFIX):
-        return None
-    return Path(unquote(url[len(_FILE_URL_PREFIX) :]))
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
-def _provides_module(root: Path, relative: PurePosixPath) -> bool:
-    """Report whether *root* is the source tree holding one importable module."""
-
-    for prefix in ((), ("src",)):
-        base = root.joinpath(*prefix, *relative.parts)
-        try:
-            if (base / "__init__.py").is_file() or base.with_suffix(".py").is_file():
-                return True
-        except OSError:  # pragma: no cover - unreadable installation metadata
-            continue
-    return False
-
-
-@cache
-def module_distribution(module: str) -> tuple[str, str] | None:
-    """Return the ``(name, version)`` of the distribution installing *module*.
-
-    The answer is read from installation metadata alone and never by importing
-    anything: a module name comes out of an untrusted ``job.json``, and importing
-    it to ask which package it belongs to would execute code during a read-only
-    job_records. A wheel installation is recognized by the module path recorded in
-    its file list, and an editable installation by the source tree its
-    ``direct_url.json`` names. Anything else — a module on ``PYTHONPATH`` that no
-    installed distribution owns — is reported as unknown rather than guessed.
-
-    :param module: Name the module whose installed distribution to locate.
-    :return: The distribution name and version, or ``None`` when ownership is
-        unknown.
-    """
-
-    relative = PurePosixPath(*module.split("."))
-    recorded = {(relative / "__init__.py").as_posix(), f"{relative.as_posix()}.py"}
-    for distribution in metadata.distributions():
-        try:
-            name = distribution.name
-            if not name:
-                continue
-            if any(entry.as_posix() in recorded for entry in distribution.files or ()):
-                return name, distribution.version
-            root = _editable_root(distribution)
-            if root is not None and _provides_module(root, relative):
-                return name, distribution.version
-        except (OSError, metadata.PackageNotFoundError):  # pragma: no cover - damaged metadata
-            continue
-    return None
-
-
-def runner_provenance(job: JobDefinition) -> dict[str, object] | None:
-    """Return what installation provenance exists for one job's runner.
-
-    Only the reserved ``pkg:<module>/<resource>`` form of an installed runner
-    resolves to a Python distribution, so every other runner reports ``None``: a
-    payload runner is pinned by the job digest, and a workspace or plain
-    installed runner is pinned by ``runner.sha256`` and nothing else is known
-    about where it came from.
-
-    :param job: Supply the validated job definition and runner identity.
-    :return: Installation metadata for a reserved package runner, or ``None``.
-    """
-
-    if job.runner_source != "installed":
-        return None
-    try:
-        package = parse_package_runner(job.runner_path.as_posix())
-    except FormatError:  # pragma: no cover - a stored job was validated already
-        return None
-    if package is None:
-        return None
-    module, resource = package
-    distribution = module_distribution(module)
-    return {
-        "module": module,
-        "resource": resource.as_posix(),
-        "distribution": None if distribution is None else distribution[0],
-        "version": None if distribution is None else distribution[1],
-    }
-
-
-# ---------------------------------------------------------------------------
-# The journal-derived timeline
-# ---------------------------------------------------------------------------
-
-
-def _attempt(frame: Mapping[str, Any]) -> dict[str, object]:
-    """Open one attempt record from the ``claimed`` frame that started it."""
-
-    return {
-        "attempt_id": _optional_string(frame.get("attempt_id")),
-        "ordinal": _optional_int(frame.get("attempt_ordinal")),
-        "manager_id": _optional_string(frame.get("manager_id")),
-        "writer_id": _optional_string(frame.get("writer_id")),
-        "record_ref": _optional_string(frame.get("record_ref")),
-        "claimed_at": _optional_string(frame.get("created_at")),
-        "started_at": None,
-        "finished_at": None,
-        "outcome_action": None,
-        "failure": None,
-    }
-
-
-def _activation(frame: Mapping[str, Any]) -> dict[str, object]:
-    """Open one activation record from the frame that started it."""
-
-    return {
-        "activation_id": _optional_string(frame.get("activation_id")),
-        "activation_ordinal": _optional_int(frame.get("activation_ordinal")),
-        "step": _optional_string(frame.get("step")),
-        "reason": _optional_string(frame.get("reason")),
-        "attempts": [],
-    }
-
-
-def timeline(frames: Sequence[Mapping[str, Any]]) -> dict[str, object]:
+def timeline(events: Sequence[Mapping[str, Any]], doc: StateDoc | None = None) -> dict[str, object]:
     """Return the activation and attempt timeline of one job, oldest first.
 
-    The frames are exactly the ones the workspace's ``job_frames`` reader
-    walked, so this is a pure regrouping of recorded history: an activation is
-    every consecutive frame sharing one ``activation_id``, and an attempt is
-    opened by the ``claimed`` frame that consumed a budget and closed by the
-    first frame that reported how it ended. A frame the journal could not return
-    sets ``gaps`` and is skipped, which keeps a job with a damaged history
+    The events are the owner run log ``logs/runlog.jsonl`` (see
+    :func:`~httk.workflow.introspection.job_events`), so this is a pure
+    regrouping of recorded history: every ``attempt_started`` opens an attempt,
+    and a change of its ``activation_id`` opens an activation. ``attempt_ended``
+    closes the attempt; ``outcome`` and ``failed`` record how it ended. Ordinals
+    count in log order; the current activation's ``reason`` comes from
+    *doc*, and so does the full failure of its last attempt. An unreadable run-log
+    line sets ``gaps`` and is skipped, which keeps a job with a damaged history
     collectable instead of silent.
 
-    :param frames: Supply the journal frames read for one job.
-    :return: The oldest-first activation and attempt timeline with its damage
-        flag.
+    :param events: The owner run-log events of one job.
+    :param doc: The job's ``state.json``, when readable.
+    :return: The oldest-first activation and attempt timeline with its damage flag.
     """
 
     activations: list[dict[str, object]] = []
+    attempts: dict[str, dict[str, object]] = {}
     current: dict[str, object] | None = None
-    attempt: dict[str, object] | None = None
+    claimed_at: str | None = None
     gaps = False
-    for frame in frames:
-        if frame.get("error") is not None:
+    for event in events:
+        if event.get("error") is not None:
             gaps = True
             continue
-        activation_id = _optional_string(frame.get("activation_id"))
-        if current is None or current["activation_id"] != activation_id:
-            current = _activation(frame)
-            activations.append(current)
-            attempt = None
-        created = _optional_string(frame.get("created_at"))
-        kind = _optional_string(frame.get("kind"))
+        kind, at, attempt_id = event.get("event"), _text(event.get("at")), _text(event.get("attempt_id"))
         if kind == "claimed":
-            attempt = _attempt(frame)
-            attempts = current["attempts"]
-            if isinstance(attempts, list):
-                attempts.append(attempt)
-            continue
-        if attempt is None or _optional_string(frame.get("attempt_id")) != attempt["attempt_id"]:
-            continue
-        if kind == "running":
-            attempt["started_at"] = _optional_string(frame.get("started_at")) or created
-            continue
-        if kind == "committing":
-            attempt["outcome_action"] = _optional_string(frame.get("outcome_action"))
-        failure = frame.get("failure")
-        if attempt["failure"] is None and isinstance(failure, Mapping):
-            attempt["failure"] = dict(failure)
-        if attempt["finished_at"] is None:
-            attempt["finished_at"] = created
+            claimed_at = at
+        elif kind == "attempt_started" and attempt_id is not None:
+            activation_id = _text(event.get("activation_id"))
+            if current is None or current["activation_id"] != activation_id:
+                current = {
+                    "activation_id": activation_id,
+                    "activation_ordinal": len(activations) + 1,
+                    "step": _text(event.get("step")),
+                    "reason": None,
+                    "attempts": [],
+                }
+                activations.append(current)
+            listed = cast(list[dict[str, object]], current["attempts"])
+            attempt: dict[str, object] = {
+                "attempt_id": attempt_id,
+                "ordinal": len(listed) + 1,
+                "owner_id": _text(event.get("owner_id")),
+                "claimed_at": claimed_at,
+                "started_at": at,
+                "finished_at": None,
+                "outcome_action": None,
+                "failure": None,
+            }
+            listed.append(attempt)
+            attempts[attempt_id] = attempt
+        elif attempt_id in attempts:
+            attempt = attempts[attempt_id]
+            detail = event.get("detail")
+            if kind == "attempt_ended" and attempt["finished_at"] is None:
+                attempt["finished_at"] = at
+            elif kind == "outcome" and isinstance(detail, str):
+                attempt["outcome_action"] = detail
+            elif kind == "failed" and attempt["failure"] is None and isinstance(detail, str):
+                attempt["failure"] = {"code": detail}
+    if doc is not None and doc.activation is not None:
+        for activation in activations:
+            if activation["activation_id"] == doc.activation.get("id"):
+                activation["reason"] = doc.activation.get("reason")
+        last = attempts.get(str(None if doc.attempt is None else doc.attempt.get("id")))
+        if last is not None and last["failure"] is not None and doc.failure is not None:
+            last["failure"] = _thaw(doc.failure)
     return {"activations": activations, "gaps": gaps}
 
 
@@ -403,72 +278,31 @@ def timeline(frames: Sequence[Mapping[str, Any]]) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-def _job_id_of(job_key: str) -> str | None:
-    try:
-        return parse_job_key(job_key)[1]
-    except FormatError:
-        return None
-
-
-def _observed_children(value: object) -> Iterator[tuple[str, str | None, str | None, str | None]]:
-    """Yield ``(label, job_id, job_key, kind)`` of every labeled child reference."""
-
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return
-    for raw in value:
-        if not isinstance(raw, Mapping):
-            continue
-        label = _optional_string(raw.get("label"))
-        if label is None:
-            continue
-        yield (
-            label,
-            _optional_string(raw.get("job_id")),
-            _optional_string(raw.get("job_key")),
-            _optional_string(raw.get("kind")),
-        )
-
-
-def _frame_children(frame: Mapping[str, Any]) -> Iterator[tuple[str, str | None, str | None, str | None]]:
-    """Yield every labeled child one state frame names."""
-
-    labels = frame.get("child_labels")
-    if isinstance(labels, Mapping):
-        # The spawn set of the outcome being committed: the label is declared
-        # there, and the child identity is its job key.
-        for job_key, label in labels.items():
-            if isinstance(job_key, str) and isinstance(label, str) and label:
-                yield label, _job_id_of(job_key), job_key, None
-    join = frame.get("join")
-    if isinstance(join, Mapping):
-        yield from _observed_children(join.get("children"))
-    yield from _observed_children(frame.get("join_summary"))
-
-
-def children_of(frames: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, object]]:
-    """Return the labeled children one job registered, keyed by spawn label.
+def children_of(doc: StateDoc | None) -> dict[str, dict[str, object]]:
+    """Return the labeled children one job published, keyed by spawn label.
 
     A campaign therefore collects as a tree: every record names the children it
-    spawned, and each of those is a job a consumer collects in its own right. A
-    label is mandatory, so an unlabeled child reference is left out rather than
-    given an invented name. A label reused by a later activation names the child
-    of the most recent spawn under it.
+    spawned, and each of those is a job a consumer collects in its own right. The
+    children are ``state.json``'s published ``children``; ``kind`` is the state a
+    join last observed the child in, or ``None``. A label reused by a later
+    activation names the child of the most recent spawn under it.
 
-    :param frames: Supply the state and journal frames for one job.
+    :param doc: The job's ``state.json``, when readable.
     :return: Child records keyed by their spawn labels.
     """
 
-    children: dict[str, dict[str, object]] = {}
-    for frame in frames:
-        if frame.get("error") is not None:
-            continue
-        for label, job_id, job_key, kind in _frame_children(frame):
-            existing = children.get(label)
-            if existing is None or existing.get("job_id") != job_id:
-                children[label] = {"job_id": job_id, "job_key": job_key, "kind": kind}
-            elif kind is not None:
-                existing["kind"] = kind
-    return children
+    if doc is None:
+        return {}
+    observed = {item.get("job_id"): _text(item.get("state")) for item in doc.observations}
+    return {
+        str(child["label"]): {
+            "job_id": child.get("job_id"),
+            "job_key": child.get("job_key"),
+            "kind": observed.get(child.get("job_id")),
+        }
+        for child in doc.children
+        if _text(child.get("label")) is not None
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +315,8 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
 
     This is the definition as the protocol validated it, not the stored bytes:
     those are what ``digest`` pins, and a consumer that needs them reads
-    ``job.json`` at ``payload_path``.
+    ``job.json`` at ``payload_path``. ``workflow`` is the installed workflow's
+    id and ``workflow_name`` its short name.
     """
 
     policy = job.retry_policy
@@ -490,19 +325,11 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
         "tag": job.tag,
         "job_key": job.job_key,
         "name": job.name,
-        "workflow": job.workflow,
+        "workflow": job.workflow_id,
+        "workflow_name": job.workflow_name,
         "digest": job.digest,
         "initial_step": job.initial_step,
         "priority": job.priority,
-        "runner": {
-            "executor": job.runner_executor,
-            "source": job.runner_source,
-            "path": job.runner_path.as_posix(),
-            "sha256": job.runner_sha256,
-            "arguments": list(job.runner_arguments),
-        },
-        "workdir": {"mode": job.workdir_mode, "path": job.workdir_path.as_posix()},
-        "data": {"mode": job.data_mode},
         "claim": {"pool": job.claim_pool, "required_capabilities": sorted(job.required_capabilities)},
         "retry_policy": {
             "maximum_attempts_per_activation": policy.maximum_attempts_per_activation,
@@ -510,12 +337,12 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
             "maximum_activations": policy.maximum_activations,
             "retry_on": sorted(policy.retry_on),
         },
-        "resources": dict(job.resources),
-        "parameters": dict(job.parameters),
-        "parent": None if job.parent is None else dict(job.parent),
+        "resources": _thaw(job.resources),
+        "parameters": _thaw(job.parameters),
+        "parent": _thaw(job.parent),
     }
     if job.environment:
-        result["environment"] = dict(job.environment)
+        result["environment"] = _thaw(job.environment)
     return result
 
 
@@ -523,12 +350,12 @@ def _optional_posix(value: object) -> PurePosixPath | None:
     return PurePosixPath(value) if isinstance(value, str) and value else None
 
 
-def _failure_of(state: Mapping[str, Any]) -> tuple[Failure | None, bool]:
-    """Return the unified failure of one terminal state, reporting damage."""
+def _failure_of(recorded: Mapping[str, object] | None) -> tuple[Failure | None, bool]:
+    """Return the unified failure ``state.json`` records, reporting damage."""
 
-    raw = state.get("failure")
-    if not isinstance(raw, Mapping):
+    if recorded is None:
         return None, False
+    raw = cast(dict[str, Any], _thaw(recorded))
     try:
         return validate_failure(raw), False
     except FormatError as exc:
@@ -578,22 +405,24 @@ class JobRecord:
     stored record must hold so it survives moving the workspace; the properties
     :attr:`payload`, :attr:`workdir`, and :attr:`data` resolve them against the
     workspace this record was collected from, which is what code reading result
-    files wants.
+    files wants. A job directory moves with every state change, so these paths
+    say where the job was when it was read; the job's identity is
+    ``workspace_id`` and ``job_id``, never a path.
 
     :param workspace_root: Identify the absolute workspace root.
     :param workspace_id: Identify the workspace.
     :param job_id: Identify the job.
     :param job_key: Preserve the complete job key.
     :param job: Preserve the validated immutable job definition.
-    :param runner_provenance: Preserve installed package provenance, when known.
-    :param state: Record the terminal state in which the job stopped.
+    :param runner_provenance: Preserve the installed workflow the job ran
+        (``{"id", "tree_sha256"}``), when known.
+    :param state: Record the state in which the job stopped.
     :param failure: Record the terminal failure, when one exists.
     :param placement: Locate the job within the workspace hierarchy.
-    :param payload_path: Locate the workspace-relative job payload.
-    :param workdir_path: Locate the last workspace-relative workdir, when known.
-    :param data_path: Locate transactional data, when the job has it.
-    :param data_generation: Record the committed data generation, when present.
-    :param provenance: Preserve the journal-derived timeline and damage flag.
+    :param payload_path: Locate the workspace-relative job directory as it was read.
+    :param workdir_path: Locate the workspace-relative workdir, when known.
+    :param data_path: Locate the job's committed data, when it has any.
+    :param provenance: Preserve the run-log timeline and damage flag.
     :param runner_steps: Preserve the runner steps, when recorded.
     :param children: Preserve labeled child references.
     :param declarations: Preserve declared and observed workflow documents.
@@ -609,17 +438,16 @@ class JobRecord:
     #: The validated job definition, including its immutable digest and the
     #: complete identity of the runner that executed it.
     job: Mapping[str, object]
-    #: The installed distribution behind a ``pkg:`` runner, or ``None``.
+    #: The installed workflow the job ran (``{"id", "tree_sha256"}``), or ``None``.
     runner_provenance: Mapping[str, object] | None
-    #: The terminal state kind this job stopped in.
+    #: The state this job stopped in.
     state: str
     failure: Failure | None
     placement: PurePosixPath
     payload_path: PurePosixPath
     workdir_path: PurePosixPath | None
     data_path: PurePosixPath | None
-    data_generation: int | None
-    #: The activation and attempt timeline derived from the journal, oldest
+    #: The activation and attempt timeline derived from the run log, oldest
     #: first, plus the ``gaps`` flag of :func:`timeline`.
     provenance: Mapping[str, object]
     #: The step set this job's runner declared, when one was ever recorded.
@@ -651,7 +479,7 @@ class JobRecord:
 
     @property
     def data(self) -> Path | None:
-        """The absolute transactional data directory, for a job that has one."""
+        """The absolute data directory, for a job that committed data."""
 
         return None if self.data_path is None else self.workspace_root.joinpath(*self.data_path.parts)
 
@@ -686,10 +514,10 @@ class JobRecord:
     def result_file(self, name: str, *, data_prefix: str = "", published: str | None = None) -> Path:
         """Locate one result file of this job.
 
-        A job with transactional data is read from its committed data, at
-        ``published`` (default ``name``) below ``data_prefix``; any other job is
-        read from its persistent workdir, at ``name``. A transactional job without
-        committed data fails rather than falling back to unpublished workdir files.
+        A job with committed data is read from that data, at ``published``
+        (default ``name``) below ``data_prefix``, and never falls back to
+        unpublished workdir files; any other job is read from its workdir, at
+        ``name``.
         When the exact file is absent, a compressed copy (``name`` plus a
         registered compression suffix, tried in registry order) is returned.
 
@@ -704,12 +532,7 @@ class JobRecord:
         identity = f"{self.workspace_id}:{self.job_id}"
         data = self.data
         if data is not None:
-            relative = str(PurePosixPath(data_prefix, published or name))
-            if self.data_generation is None:
-                raise ValueError(
-                    f"{identity}: expected published data file {relative!r}, but the job has no published data"
-                )
-            path = data / relative
+            path = data / PurePosixPath(data_prefix, published or name)
             found = existing_file(path)
             if found is None:
                 raise ValueError(f"{identity}: expected published data file {path}")
@@ -741,7 +564,6 @@ class JobRecord:
             "payload_path": self.payload_path.as_posix(),
             "workdir_path": None if self.workdir_path is None else self.workdir_path.as_posix(),
             "data_path": None if self.data_path is None else self.data_path.as_posix(),
-            "data_generation": self.data_generation,
             "provenance": dict(self.provenance),
             "runner_steps": None if self.runner_steps is None else list(self.runner_steps),
             "runner_description": None if self.runner_description is None else dict(self.runner_description),
@@ -784,7 +606,6 @@ class JobRecord:
             payload_path=PurePosixPath(require_string(value.get("payload_path"), "payload_path")),
             workdir_path=_optional_posix(value.get("workdir_path")),
             data_path=_optional_posix(value.get("data_path")),
-            data_generation=_optional_int(value.get("data_generation")),
             provenance={} if provenance is None else dict(require_mapping(provenance, "provenance")),
             runner_steps=_steps(value.get("runner_steps")),
             children=_children(value.get("children")),
@@ -802,7 +623,7 @@ def _steps(value: object) -> tuple[str, ...] | None:
 
 
 def _recorded_steps(value: object) -> tuple[str, ...] | None:
-    """Return the step set a state frame recorded, tolerating a damaged one."""
+    """Return the step set ``state.json`` recorded, tolerating a damaged one."""
 
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return None
@@ -844,7 +665,8 @@ def declarations_of(
     """
 
     result: dict[str, dict[str, Mapping[str, object] | None]] = {
-        name: {"declared": dict(document), "observed": None} for name, document in sorted(job.declarations.items())
+        name: {"declared": cast(dict[str, object], _thaw(document)), "observed": None}
+        for name, document in sorted(job.declarations.items())
     }
     damaged = False
     directory = payload / JOB_STATE_DIRECTORY / "declarations"
@@ -876,58 +698,54 @@ def _children(value: object) -> dict[str, Mapping[str, object]]:
     }
 
 
-def record_of(workspace: Workspace, marker: Marker) -> JobRecord | None:
-    """Return the job_records record of the one job *marker* names.
+def record_of(workspace: Workspace, ref: JobRef) -> JobRecord | None:
+    """Return the record of the one job *ref* names.
 
-    ``None`` means this job has no readable ``job.json`` and therefore no
-    definition to report: the whole contract of a record is the *validated* job
-    behind a result, so an unusable payload is reported through the module logger
-    and left to a workspace tool instead of being described by guesswork.
+    ``None`` means this job has no readable ``job.json`` (or it moved away while
+    being read) and therefore no definition to report: the whole contract of a
+    record is the *validated* job behind a result, so an unusable payload is
+    reported through the module logger and left to a workspace tool instead of
+    being described by guesswork.
 
-    :param workspace: Read the workspace containing the marked job.
-    :param marker: Identify the stopped job to read.
+    :param workspace: Read the workspace containing the job.
+    :param ref: Identify the stopped job to read.
     :return: The validated job record, or ``None`` when its payload is unreadable.
     """
 
-    job, job_error = _job_of(workspace, marker)
+    job, job_error = read_job(ref)
     if job is None:
         _LOGGER.error(
             "not collecting %s: %s (repair the payload with a workspace tool)",
-            marker.job_key,
+            ref.job_key,
             job_error,
-            extra={"event": "collect_unusable", "job_key": marker.job_key},
+            extra={"event": "collect_unusable", "job_key": ref.job_key},
         )
         return None
-    state, state_error = _state_of(workspace, marker)
+    doc, state_error = read_state(ref)
     if state_error is not None:
-        _LOGGER.warning("collecting %s without its state frame: %s", marker.job_key, state_error)
-    frames = job_frames(workspace, marker)
-    provenance = timeline(frames)
-    failure, failure_damaged = _failure_of(state)
-    if state_error is not None or failure_damaged:
+        _LOGGER.warning("collecting %s without its state.json: %s", ref.job_key, state_error)
+    provenance = timeline(job_events(ref), doc)
+    failure, failure_damaged = _failure_of(None if doc is None else doc.failure)
+    declarations, declarations_damaged = declarations_of(job, ref.path)
+    if state_error is not None or failure_damaged or declarations_damaged:
         provenance["gaps"] = True
-    payload_path = payload_relative(marker.placement, marker.job_key)
-    workdir = _workdir_relative(job, state)
-    declarations, declarations_damaged = declarations_of(job, workspace.payload_path(marker.placement, marker.job_key))
-    if declarations_damaged:
-        provenance["gaps"] = True
+    payload_path = PurePosixPath(ref.path.relative_to(workspace.root).as_posix())
     return JobRecord(
         workspace_root=workspace.root,
         workspace_id=workspace.workspace_id,
-        job_id=marker.job_id,
-        job_key=marker.job_key,
+        job_id=ref.job_id,
+        job_key=ref.job_key,
         job=_job_mapping(job),
-        runner_provenance=runner_provenance(job),
-        state=marker.kind,
+        runner_provenance=None if doc is None or doc.workflow_pin is None else dict(doc.workflow_pin),
+        state=ref.state,
         failure=failure,
-        placement=marker.placement,
+        placement=job.placement,
         payload_path=payload_path,
-        workdir_path=None if workdir is None else payload_path / workdir,
-        data_path=payload_path / "data" if job.data_mode == "transactional" else None,
-        data_generation=_optional_int(state.get("data_generation")),
+        workdir_path=payload_path / "run",
+        data_path=payload_path / "data" if (ref.path / "data").is_dir() else None,
         provenance=provenance,
-        runner_steps=_recorded_steps(state.get("runner_steps")),
-        children=children_of(frames),
+        runner_steps=None if doc is None else _recorded_steps(doc.runner_steps),
+        children=children_of(doc),
         declarations=declarations,
     )
 
@@ -967,11 +785,12 @@ def job_records(
     job_records to the jobs at or below one placement, exactly as
     ``httk job list --placement`` does.
 
-    The result is a lazy iterator over one scan of the requested state
+    The result is a lazy iterator over one listing of the requested state
     directories. Nothing is materialized, and building a record reads only that
-    job's own ``job.json`` and journal chain, so collecting is a single pass over
-    a workspace of any size. Attach read-only — ``Workspace(root,
-    mutable=False)`` — when nothing else in the process needs to write.
+    job's own ``job.json``, ``state.json`` and run log, so collecting is a single
+    pass over a workspace of any size. A job that moves between listing and
+    reading is skipped like an unreadable one. Attach read-only —
+    ``Workspace(root, mutable=False)`` — when nothing else in the process needs to write.
 
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.
@@ -983,16 +802,15 @@ def job_records(
     """
 
     kinds = collect_kinds(states)
-    prefix = None if placement is None else normalize_placement(placement).parts
-    for marker in workspace.scan_markers(kinds):
-        if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
-            continue
-        record = record_of(workspace, marker)
-        if record is None:
-            if on_skipped is not None:
-                on_skipped(marker.job_key)
-            continue
-        yield record
+    prefixes = () if placement is None else (normalize_placement(placement),)
+    for state in kinds:
+        for ref in _kernel.list_jobs(workspace, state, prefixes=prefixes):
+            record = record_of(workspace, ref)
+            if record is None:
+                if on_skipped is not None:
+                    on_skipped(ref.job_key)
+                continue
+            yield record
 
 
 def _overlay_edges(
@@ -1568,80 +1386,49 @@ def _run_executable_collector(
 def _job_collector(
     workspace: Workspace, record: JobRecord, workflow_id: str
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
-    """Resolve a collector from the job's pinned directory runner tree."""
+    """Resolve a collector from the job's installed workflow package, verified against the job's pin."""
 
-    runner = record.job.get("runner")
-    if not isinstance(runner, Mapping):
-        return None, None, "job-pinned collector requires a runner mapping"
-    if runner.get("source") != "workspace":
-        return None, None, "job-pinned collector requires runner.source='workspace'"
-    path_value = runner.get("path")
-    if not isinstance(path_value, str):
-        return None, None, "job-pinned collector requires a workspace runner path"
-    try:
-        store_tree = workspace.runner_store_path(path_value)
-    except Exception as exc:
-        return None, None, f"job-pinned collector runner path is invalid: {exc}"
-    store_root = workspace.runners.resolve()
-    try:
-        resolved_tree = store_tree.resolve()
-    except OSError as exc:
-        return None, None, f"job-pinned collector runner tree cannot be resolved: {exc}"
-    if store_tree.is_symlink() or not resolved_tree.is_relative_to(store_root) or not store_tree.is_dir():
-        return None, None, f"job-pinned collector requires a directory runner tree: {store_tree}"
-    pinned = runner.get("sha256")
+    pinned = (record.runner_provenance or {}).get("tree_sha256")
     if not isinstance(pinned, str):
-        return None, None, "job-pinned collector requires runner.sha256"
+        return None, None, "the job records no pinned installed workflow"
     try:
-        actual = tree_digest(store_tree)
+        installed = _store.lookup(workspace, workflow_id)
+    except ValueError as exc:
+        return None, None, f"job workflow {workflow_id!r} cannot be looked up: {exc}"
+    if installed is None or installed.id != workflow_id:
+        return None, None, f"job workflow {workflow_id!r} is not installed in this workspace"
+    if installed.record.get("tree_sha256") != pinned:
+        return (
+            None,
+            None,
+            f"pinned runner tree was modified: workflow {workflow_id!r} was reinstalled since the job ran",
+        )
+    try:
+        actual = tree_digest(installed.package)
     except Exception as exc:
-        return None, None, f"pinned runner tree was modified: {store_tree} could not be verified: {exc}"
+        return None, None, f"pinned runner tree was modified: {installed.package} could not be verified: {exc}"
     if actual != pinned:
         return (
             None,
             None,
-            f"pinned runner tree was modified: {store_tree} digest {actual} does not match pinned {pinned}",
+            f"pinned runner tree was modified: {installed.package} digest {actual} does not match pinned {pinned}",
         )
-    manifest = store_tree / "httk_workflow.toml"
-    if not manifest.is_file():
-        return None, None, f"job-pinned collector manifest is missing: {manifest}"
     try:
-        from .packages import _tree_hook, parse_workflow_manifest
-
-        provider = parse_workflow_manifest(store_tree)
+        provider = installed.provider()
     except ImportError:
         raise
     except Exception as exc:
         return None, None, f"job-pinned collector manifest is invalid: {exc}"
-    expected: str | None = workflow_id
-    if workflow_id.startswith("git+"):
-        # An installed git workflow's manifest name is its short name. The tree is already
-        # digest-verified against the job's runner pin, so when the URI is not
-        # installed here there is no short name to compare and none is required.
-        from .scaffold import workflow_provider
-
-        installed = workflow_provider(workflow_id)
-        expected = installed.name if installed is not None else None
-    if expected is not None and provider.workflow_id != expected:
-        return (
-            None,
-            None,
-            f"job-pinned collector manifest name {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
-        )
     if provider.collect_file is None:
         # The verified pinned provider is returned so a caller can tell a
         # workflow with nothing to collect from one whose collector is missing.
         return None, provider, "job-pinned workflow tree has no collect hook"
     if provider.collector_exec is not None:
         return None, provider, None
-    return (
-        cast(
-            Callable[[JobRecord], Mapping[str, object]],
-            _tree_hook(store_tree, pinned, provider.collect_file, "collect"),
-        ),
-        provider,
-        None,
-    )
+    from .packages import _tree_hook
+
+    hook = _tree_hook(installed.package, pinned, provider.collect_file, "collect")
+    return cast(Callable[[JobRecord], Mapping[str, object]], hook), provider, None
 
 
 def _attach_product_of(
@@ -1813,21 +1600,36 @@ def _nothing_to_collect(record: JobRecord, provider: WorkflowProvider) -> bool:
 
 
 def _child_runs(record: JobRecord) -> tuple[tuple[str, str], ...]:
-    """Return the ``(label, run source id)`` of every child this job spawned.
+    """Return the ``(label, run source id)`` of every child this job published.
 
-    The parent's spawn records name each child it registered, so linking the
-    parent's run to its children's runs needs no scan. A child's run source id is
-    ``"<workspace_id>:<job_id>"``, exactly as :func:`~httk.workflow.provenance.run_record` forms it.
+    A child's run source id is ``"<workspace_id>:<job_id>"``, exactly as
+    :func:`~httk.workflow.provenance.run_record` forms it, so linking the
+    parent's run to its children's runs needs no scan.
     """
 
-    from ._job_tree import spawned_children
+    return tuple(
+        (label, f"{record.workspace_id}:{child['job_id']}")
+        for label, child in record.children.items()
+        if isinstance(child.get("job_id"), str)
+    )
 
-    try:
-        children = spawned_children(Path(record.payload))
-    except (WorkflowError, OSError) as exc:
-        _LOGGER.warning("ignoring unreadable spawn records of job %s: %s", record.job_id, exc)
-        return ()
-    return tuple((str(entry["label"]), f"{record.workspace_id}:{entry['job_id']}") for entry in children)
+
+def _registered_provider(record: JobRecord) -> WorkflowProvider | None:
+    """Return the provider registered in this process for the record's workflow.
+
+    A pinned git id selects its installed git workflow; any other job is matched
+    by its workflow's short name, then by its id.
+    """
+
+    from .scaffold import workflow_provider
+
+    workflow_id, name = record.job.get("workflow"), record.job.get("workflow_name")
+    if isinstance(workflow_id, str) and workflow_id.startswith("git+"):
+        return workflow_provider(workflow_id)
+    for candidate in (name, workflow_id):
+        if isinstance(candidate, str) and candidate and (provider := workflow_provider(candidate)) is not None:
+            return provider
+    return None
 
 
 def _validate_batch_size(value: object) -> int:
@@ -1853,8 +1655,8 @@ def collect(
     Edge ids of not-yet-stored outputs are content ids; ``--into`` rewrites
     them to the store-minted ids.
 
-    A fallback reads and verifies the package manifest from the pinned runner
-    tree itself. Per-job collector, load, and assembly failures degrade that job
+    The fallback reads the collector from the job's installed workflow package
+    in the workspace store, verified against the tree digest the job ran with. Per-job collector, load, and assembly failures degrade that job
     and do not stop the sweep unless *fail_fast* is set. Records are consumed in
     bounded windows; executable collectors run once per matching collector in
     each window, and yielded results retain scan order.
@@ -1862,8 +1664,8 @@ def collect(
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.
     :param placement: Restrict results to this placement and its descendants.
-    :param allow_job_collector: Permit digest-verified collectors from
-        job-pinned workspace package trees.
+    :param allow_job_collector: Permit digest-verified collectors from the
+        job's installed workflow package in the workspace store.
     :param on_skipped: Receive the job key of every selected job dropped for an
         unreadable ``job.json``, forwarded to :func:`job_records`.
     :param fail_fast: Use single-job windows and raise the first per-job
@@ -1876,7 +1678,6 @@ def collect(
     """
 
     from .provenance import _definition_uri, run_record
-    from .scaffold import workflow_provider
 
     batch_size = _validate_batch_size(batch_size)
     # Fail-fast must not execute later collectors after observing a failed job.
@@ -1891,7 +1692,7 @@ def collect(
             identity = f"{record.workspace_id}:{record.job_id}"
             workflow_id = record.job.get("workflow")
             workflow_id = workflow_id if isinstance(workflow_id, str) else ""
-            provider = workflow_provider(workflow_id)
+            provider = _registered_provider(record)
             try:
                 run = run_record(record)
             except ValueError as exc:
@@ -1984,11 +1785,11 @@ def collect(
             if adapter is None:
                 if not allow_job_collector:
                     reason = (
-                        f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use a pinned "
-                        "workspace workflow tree"
+                        f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use the "
+                        "job's installed workflow package"
                         if provider is None
                         else f"no collector registered for workflow {workflow_id!r}; pass "
-                        "allow_job_collector=True to use a pinned workspace workflow tree"
+                        "allow_job_collector=True to use the job's installed workflow package"
                     )
                     results[index] = _degraded_job(record, provider, run, reason)
                     continue
@@ -1999,12 +1800,8 @@ def collect(
                     key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
                     executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
                     continue
-                # A job pinned to a workspace tree is decided by that verified
-                # tree (a refused one decides nothing); any other job by the
-                # registered provider.
-                runner = record.job.get("runner")
-                pinned = isinstance(runner, Mapping) and runner.get("source") == "workspace"
-                deciding = fallback_provider if pinned else provider
+                # The verified installed tree decides; a refused one leaves it to the registered provider.
+                deciding = fallback_provider or provider
                 if adapter is None and deciding is not None and _nothing_to_collect(record, deciding):
                     results[index] = CollectedJob(workflow_id, {}, (), run, (), record, run_only=True)
                     continue

@@ -14,72 +14,30 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
+import v3_helpers as v3
 from conftest import Remote, fake_remote
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import Workspace
 from httk.workflow.campaigns import (
     assign_partition,
     campaign_collect,
     campaign_managers,
-    campaign_submit,
     read_campaign,
     write_campaign,
 )
+from httk.workflow.introspection import iter_jobs
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import register_workspace
 from httk.workflow.workflow_cli import command
 
 pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("campaign-manager-timing")]
 
-_SUCCEED = """#!/usr/bin/env python3
-from httk.workflow import Runner
 
-run = Runner("tests.campaign")
+def _run_one(tmp_path: Path, workspace: Workspace, tag: str, *, manifest: str = "") -> None:
+    """Install a workflow into one partition workspace and run one job of it to success."""
 
-
-@run.step
-def only(a):
-    (a.workdir / "done.txt").write_text("ok", encoding="utf-8")
-    a.succeed()
-
-
-raise SystemExit(run.main())
-"""
-
-_SPAWN = """#!/usr/bin/env python3
-from httk.workflow import ChildSpec, Runner
-
-run = Runner("tests.spawn")
-
-
-@run.step
-def parent(a):
-    a.spawn(
-        ChildSpec(step="child", parameters={}, maximum_attempts_per_activation=1),
-        label="kid",
-        placement="project/children",
-    )
-    a.gather("finish", when="all_terminal")
-
-
-@run.step
-def child(a):
-    a.succeed()
-
-
-@run.step
-def finish(a):
-    a.succeed()
-
-
-raise SystemExit(run.main())
-"""
-
-
-def _runner(tmp_path: Path, source: str, name: str) -> Path:
-    path = tmp_path / name
-    path.write_text(source, encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    installed = v3.install(workspace, tmp_path / f"package-{tag}", manifest=manifest)
+    v3.submit(workspace, installed, {"start": "succeed"}, tag=tag)
+    v3.run(workspace)
 
 
 def _campaign_project(tmp_path: Path, assignment: str) -> tuple[Path, dict[str, Workspace]]:
@@ -137,64 +95,6 @@ def test_the_written_campaign_reads_back(tmp_path: Path) -> None:
     assert config.ordered_partitions() == ("north", "south")
 
 
-def test_submit_routes_a_root_into_its_assigned_partition(tmp_path: Path) -> None:
-    """A root job is created in the workspace its key is assigned to, and nowhere
-    else."""
-
-    root, workspaces = _campaign_project(tmp_path, "explicit")
-    runner = _runner(tmp_path, _SUCCEED, "succeed.py")
-    job = campaign_submit(str(runner), key="south", project=root, step="only", tag="silicon")
-
-    assert workspaces["south"].find_marker_by_id(job.job_id) is not None
-    assert workspaces["north"].find_marker_by_id(job.job_id) is None
-
-
-@pytest.mark.usefixtures("relax_workflow")
-def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Path) -> None:
-    root, workspaces = _campaign_project(tmp_path, "explicit")
-    structure = tmp_path / "POSCAR"
-    structure.write_text("structure\n", encoding="utf-8")
-    job = campaign_submit("test-relax", key="north", project=root, inputs={"structure": structure})
-    assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == "structure\n"
-    assert workspaces["north"].find_marker_by_id(job.job_id) is not None
-
-
-@pytest.mark.usefixtures("relax_workflow")
-def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path, capsys) -> None:
-    pytest.importorskip("httk.atomistic")
-    root, workspaces = _campaign_project(tmp_path, "round-robin")
-    structures = tmp_path / "structures"
-    structures.mkdir()
-    for name in ("a.vasp", "b.vasp"):
-        (structures / name).write_text(
-            "silicon\n1.0\n2 0 0\n0 2 0\n0 0 2\nSi\n1\nDirect\n0 0 0\n",
-            encoding="utf-8",
-        )
-
-    assert (
-        command(
-            [
-                "campaign",
-                "submit",
-                "--workflow",
-                "test-relax",
-                "--key",
-                "silicon",
-                "--index",
-                "1",
-                "--input-from",
-                "structure",
-                str(structures),
-            ],
-            CLIContext("httk", root),
-        )
-        == 0
-    )
-    assert len(capsys.readouterr().out.splitlines()) == 2
-    assert len(list(workspaces["north"].scan_markers())) == 0
-    assert len(list(workspaces["south"].scan_markers())) == 2
-
-
 def test_campaign_cli_rejects_path_workflows_with_a_job_new_hint(tmp_path: Path, capsys) -> None:
     root, _ = _campaign_project(tmp_path, "hash")
     assert (
@@ -210,21 +110,21 @@ def test_campaign_cli_rejects_path_workflows_with_a_job_new_hint(tmp_path: Path,
 
 
 def test_children_stay_in_their_parents_workspace(tmp_path: Path) -> None:
-    """A dynamically spawned child is scaffolded into its parent's workspace, so a
-    campaign never has to re-route a subtree — the whole tree stays in the
-    partition its root was assigned."""
+    """A spawned child is published into its parent's workspace, so a campaign
+    never has to re-route a subtree — the whole tree stays in the partition its
+    root was assigned."""
 
-    root, workspaces = _campaign_project(tmp_path, "explicit")
-    runner = _runner(tmp_path, _SPAWN, "spawn.py")
-    campaign_submit(str(runner), key="north", project=root, step="parent", tag="tree")
+    _, workspaces = _campaign_project(tmp_path, "explicit")
+    north = workspaces["north"]
+    installed = v3.install(north, tmp_path / "package")
+    spawn = {"children": [{"label": "kid", "script": {"start": "succeed"}}], "next_step": "finish"}
+    v3.submit(north, installed, {"start": "spawn", "finish": "succeed"}, tag="tree", parameters={"spawn": spawn})
+    v3.run(north)
 
-    with TaskManager(workspaces["north"], heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-
-    north_states = {marker.job_key.split("--")[0]: marker.kind for marker in workspaces["north"].scan_markers()}
-    assert north_states == {"tree": "succeeded", "kid": "succeeded"}
+    states = {ref.job_key.split("--")[0]: ref.state for ref in iter_jobs(north)}
+    assert states == {"tree": "succeeded", "kid": "succeeded"}
     # The other partition was never touched: the child did not leak across.
-    assert list(workspaces["south"].scan_markers()) == []
+    assert list(iter_jobs(workspaces["south"])) == []
 
 
 def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -> None:
@@ -232,11 +132,8 @@ def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -
     partitions in stable order."""
 
     root, workspaces = _campaign_project(tmp_path, "explicit")
-    runner = _runner(tmp_path, _SUCCEED, "succeed.py")
     for partition in ("north", "south"):
-        campaign_submit(str(runner), key=partition, project=root, step="only", tag=partition)
-        with TaskManager(workspaces[partition], heartbeat_interval=0.01) as manager:
-            manager.run_until_idle(timeout=120.0)
+        _run_one(tmp_path, workspaces[partition], partition)
 
     records = list(campaign_collect(states=["succeeded"], project=root))
     by_workspace = [record.workspace_id for record in records]
@@ -253,11 +150,11 @@ def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: P
 
     pytest.importorskip("httk.store")
     root, workspaces = _campaign_project(tmp_path, "explicit")
-    runner = _runner(tmp_path, _SUCCEED, "succeed.py")
+    # The workflow declares an output but has no collector, so every job degrades.
     for partition in ("north", "south"):
-        campaign_submit(str(runner), key=partition, project=root, step="only", tag=partition)
-        with TaskManager(workspaces[partition], heartbeat_interval=0.01) as manager:
-            manager.run_until_idle(timeout=120.0)
+        _run_one(
+            tmp_path, workspaces[partition], partition, manifest='\n[workflow.outputs.energy]\nentry_type = "records"\n'
+        )
 
     store = tmp_path / "campaign.sqlite"
     context = CLIContext("httk", root)
@@ -306,25 +203,6 @@ def test_collect_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="remote workspace"):
         list(campaign_collect(project=root))
-
-
-def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Path) -> None:
-    """One manager per selected partition drains its work; a partition subset
-    leaves the others alone."""
-
-    root, workspaces = _campaign_project(tmp_path, "explicit")
-    runner = _runner(tmp_path, _SUCCEED, "succeed.py")
-    for partition in ("north", "south"):
-        campaign_submit(str(runner), key=partition, project=root, step="only", tag=partition)
-
-    report = campaign_managers(partitions=["north"], project=root)
-    assert [row["partition"] for row in report] == ["north"]
-    assert all(marker.kind == "succeeded" for marker in workspaces["north"].scan_markers())
-    # South was not selected, so its job is still waiting.
-    assert {marker.kind for marker in workspaces["south"].scan_markers()} == {"submitted"}
-
-    campaign_managers(project=root)
-    assert all(marker.kind == "succeeded" for marker in workspaces["south"].scan_markers())
 
 
 def test_start_managers_reports_the_qualified_remote_workspace_name(

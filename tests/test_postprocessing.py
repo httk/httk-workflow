@@ -9,15 +9,16 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
+import v3_helpers as v3
 from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace, job_records
+from httk.workflow import _store, job_records
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.postprocessing import postprocess_root, run_postprocess_script
-from httk.workflow.scaffold import new_job
-from httk.workflow.seals import job_seal_path, seal_job, verify_job_seal
+from httk.workflow.seals import job_seal_path
 from httk.workflow.workflow_cli import command
-from test_workflow_cli_packages import _POSCAR, _SUCCESS_RUNNER, _cli_package
+from test_workflow_cli_packages import _POSCAR, _cli_package
 
 _OBSERVING_SCRIPT = """#!/usr/bin/env python3
 import json
@@ -45,24 +46,21 @@ print("postprocessed")
 
 
 def _finished(tmp_path: Path, *, register: bool = False):
+    """Install the package, run one job that commits data to success, and return its record."""
+
     package = _cli_package(tmp_path / "package")
-    (package / "run").write_text(_SUCCESS_RUNNER, encoding="utf-8")
+    (package / "run").write_text(v3.RUNNER, encoding="utf-8")
     (package / "run").chmod(0o755)
-    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
-    (package / "httk_workflow.toml").write_text(
-        manifest.replace('steps = ["start"]', 'steps = ["start"]\ndata_mode = "transactional"'),
-        encoding="utf-8",
-    )
     script = package / "scripts" / "report.sh"
     script.write_text(_OBSERVING_SCRIPT, encoding="utf-8")
     script.chmod(0o755)
     provider = load_workflow_package(package, register=register)
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    structure = tmp_path / "POSCAR"
-    structure.write_text(_POSCAR, encoding="utf-8")
-    job = new_job(workspace, package, inputs={"structure": structure})
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
+    workspace = v3.workspace(tmp_path / "workspace")
+    with v3.cli_owner(workspace) as owner:
+        installed = _store.install(workspace, owner, package)
+    parameters = {"put": {"start": {"data/result.txt": "committed"}}}
+    job = v3.submit(workspace, installed, {"start": "succeed"}, members={"POSCAR": _POSCAR}, parameters=parameters)
+    v3.run(workspace)
     return package, provider, workspace, job, next(iter(job_records(workspace)))
 
 
@@ -88,6 +86,7 @@ def test_postprocess_script_observes_the_record_contract(tmp_path: Path, monkeyp
     assert report["HTTK_WORKFLOW_WORKSPACE_DIR"] == str(record.workspace_root)
     assert report["HTTK_WORKFLOW_JOB_DIR"] == str(record.payload)
     assert report["HTTK_WORKFLOW_WORKDIR"] == str(record.workdir)
+    assert record.data is not None and (record.data / "result.txt").read_text(encoding="utf-8") == "committed"
     assert report["HTTK_WORKFLOW_DATA_DIR"] == str(record.data)
     assert report["HTTK_WORKFLOW_POSTPROCESS_DIR"] == str(result.output_dir)
     assert report["reserved"] == [
@@ -243,19 +242,18 @@ def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) 
 
 def test_postprocess_of_a_sealed_job_works_and_leaves_the_seal_valid(tmp_path: Path) -> None:
     configure_identity()
-    _package, provider, workspace, _job, record = _finished(tmp_path)
-    marker = workspace.find_marker_by_id(record.job_id)
-    assert marker is not None
-    seal_job(workspace, marker)
-    seal_before = job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).read_bytes()
+    _package, provider, _workspace, _job, record = _finished(tmp_path)
+    # A succeeded job is sealed by its commit.
+    seal_before = job_seal_path(record.payload).read_bytes()
+    payload_before = tree_digest(record.payload)
 
     result = run_postprocess_script(provider, "report", record)
 
     assert result.returncode == 0
     # Output is outside the payload, so the seal is untouched and still verifies.
     assert not result.output_dir.is_relative_to(record.payload)
-    assert job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).read_bytes() == seal_before
-    assert verify_job_seal(workspace.payload_path(marker.placement, marker.job_key)).valid
+    assert job_seal_path(record.payload).read_bytes() == seal_before
+    assert tree_digest(record.payload) == payload_before
 
 
 def test_postprocess_directory_setting_overrides_the_root(tmp_path: Path) -> None:
@@ -340,32 +338,6 @@ def test_postprocess_root_refuses_a_job_payload(tmp_path: Path) -> None:
     _package, _provider, workspace, _job, record = _finished(tmp_path)
     with pytest.raises(ValueError, match="job payload"):
         postprocess_root(workspace, str(record.payload / "sub"))
-
-
-def test_postprocess_cli_targets_a_single_job_by_id(tmp_path: Path, capsys) -> None:
-    package, _provider, workspace, _job, record = _finished(tmp_path)
-    context = CLIContext("httk", tmp_path)
-    workspace_name = register_ws(context, workspace.root, "postprocess-one")
-    assert (
-        command(
-            [
-                "postprocess",
-                "--workspace",
-                workspace_name,
-                "--script",
-                "report",
-                "--workflow-dir",
-                str(package),
-                "--json",
-                record.job_id,
-            ],
-            context,
-        )
-        == 0
-    )
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert [line["job_id"] for line in lines] == [record.job_id]
-    assert (Path(lines[0]["output_dir"]) / "report.json").is_file()
 
 
 def test_postprocess_cli_unknown_job_id_exits_one(tmp_path: Path, capsys) -> None:

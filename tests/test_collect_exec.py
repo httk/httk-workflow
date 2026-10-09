@@ -57,7 +57,6 @@ def _record(root: Path, job_id: str = "job-1") -> JobRecord:
         payload_path=PurePosixPath("."),
         workdir_path=PurePosixPath("."),
         data_path=None,
-        data_generation=None,
         provenance={},
         runner_steps=None,
         children={},

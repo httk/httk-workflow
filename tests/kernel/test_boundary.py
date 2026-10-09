@@ -53,7 +53,6 @@ LEGACY_RAW = frozenset(
         "compat/v1/v1_runner.py",
         "gc.py",
         "hygiene.py",
-        "introspection/_debug.py",
         "launchers.py",
         "manifests.py",
         "registry.py",

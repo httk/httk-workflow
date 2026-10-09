@@ -1,18 +1,15 @@
-"""The results-collect contract, produced by one real campaign.
+"""The results-collect contract, produced by one real campaign on the filesystem kernel.
 
 Nothing here fabricates protocol state: a real campaign — a parent that spawns
-two labeled children of which one fails, a second job sharing another published
-runner, and one job running a packaged ``pkg:`` runner — is driven to completion
-by a real :class:`httk.workflow.TaskManager`, and every assertion reads what
-:func:`httk.workflow.collect` reports about the workspace that campaign left
-behind.
+two labeled children of which one fails, a second succeeding job and one job
+whose runner exits without an outcome — is driven to completion by a real
+:class:`httk.workflow.TaskManager`, and every assertion reads what
+:func:`httk.workflow.job_records` reports about the workspace it left behind.
 """
 
 import json
 from collections.abc import Iterator
 from dataclasses import replace
-from importlib import metadata
-from pathlib import Path
 from typing import Any, cast
 
 import httk.core
@@ -21,180 +18,81 @@ from httk.core.cli import CLIContext
 from httk.core.digests import sha256_file
 
 from conftest import register_ws
-from httk.workflow import (
-    FormatError,
-    JobRecord,
-    TaskManager,
-    Workspace,
-    job_records,
-)
+from httk.workflow import FormatError, JobRecord, Workspace, job_records
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
-from httk.workflow.collecting import COLLECT_FORMAT, module_distribution
-from httk.workflow.compat import runner_path, runner_reference
-from httk.workflow.compat.pwd import PACKAGE, RUNNER
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow.collecting import COLLECT_FORMAT, COLLECT_FORMAT_VERSION
+from httk.workflow.compat.pwd import PACKAGE
 from httk.workflow.scaffold import WorkflowProvider
 from httk.workflow.workflow_cli import command
+from v3_helpers import find, install, run, submit, workspace
 
 pytestmark = pytest.mark.xdist_group("collect-campaign")
 
-_SRC = str(Path(__file__).parents[1] / "src")
-
-# One published runner implements the whole campaign: the children are
-# synthesized from a step name and their inputs, and they inherit the runner of
-# the parent that spawned them.
-_CAMPAIGN_RUNNER = f'''#!/usr/bin/env python3
-import json
-import sys
-
-sys.path.insert(0, {_SRC!r})
-
-from httk.workflow import ChildSpec, Runner
-
-run = Runner("tests.collect")
-
-
-@run.step
-def branch(a):
-    for label, failing in (("alpha", False), ("beta", True)):
-        a.spawn(
-            ChildSpec(
-                step="calculate",
-                parameters={{"failing": failing}},
-                maximum_attempts_per_activation=1,
-            ),
-            label=label,
-            placement="project/children",
-        )
-    a.gather("collect", when="all_terminal")
-
-
-@run.step
-def calculate(a):
-    (a.workdir / "energy.txt").write_text("-10.5", encoding="utf-8")
-    if a.parameter("failing"):
-        a.fail("calculate.diverged", "the calculation did not converge", details={{"cycles": 3}})
-    else:
-        a.succeed()
-
-
-@run.step
-def collect(a):
-    (a.workdir / "report.json").write_text(
-        json.dumps({{"succeeded": [child.label for child in a.children.succeeded]}}),
-        encoding="utf-8",
-    )
-    a.succeed()
-
-
-raise SystemExit(run.main())
-'''
-
-_SINGLE_RUNNER = f'''#!/usr/bin/env python3
-import sys
-
-sys.path.insert(0, {_SRC!r})
-
-from httk.workflow import Runner
-
-run = Runner("tests.collect.single")
-
-
-@run.step
-def only(a):
-    (a.workdir / "result.txt").write_text("done", encoding="utf-8")
-    a.succeed()
-
-
-raise SystemExit(run.main())
-'''
-
-_CAMPAIGN_STEPS = ("branch", "calculate", "collect")
-
-
-def _publish(workspace: Workspace, source: Path, text: str, name: str) -> dict[str, object]:
-    """Publish one runner into the workspace store and return its reference."""
-
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text(text, encoding="utf-8")
-    return workspace.publish_runner(source, name=name)
+_SPAWN = {
+    "children": [
+        {
+            "label": "alpha",
+            "script": {"start": "succeed"},
+            "placement": "project/children",
+            "parameters": {"files": {"start": {"energy.txt": "-10.5"}}},
+        },
+        {
+            "label": "beta",
+            "script": {"start": "fail:calculate.diverged"},
+            "placement": "project/children",
+            "parameters": {"files": {"start": {"energy.txt": "-10.5"}}},
+        },
+    ],
+    "condition": "all_terminal",
+    "next_step": "gather",
+}
 
 
 @pytest.fixture(scope="module")
-def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[Workspace, dict[str, str]]:
+def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[Workspace, dict[str, Any]]:
     """Run one complete campaign and return its finished workspace."""
 
     root = tmp_path_factory.mktemp("collect")
-    workspace = Workspace.initialize(root / "workspace")
-    identifiers: dict[str, str] = {}
-
-    campaign_runner = _publish(workspace, root / "runners" / "campaign.py", _CAMPAIGN_RUNNER, "campaign/run.py")
-    parent = prepare_job_payload(
-        root / "parent",
-        JobSpec(
-            name="Collect campaign",
-            workflow="tests.collect",
-            runner_path=str(campaign_runner["path"]),
-            runner_source="workspace",
-            runner_sha256=str(campaign_runner["sha256"]),
-            tag="campaign",
-            initial_step="branch",
-            maximum_attempts_per_activation=1,
-            parameters={"structure": "Si"},
-            environment={
-                "declared": {"timeout": {"type": "integer", "setting": "httk_v1.timeout"}},
-                "overrides": {"timeout": 60},
-            },
-        ),
+    ws = workspace(root / "workspace")
+    installed = install(ws, root / "package")
+    parent = submit(
+        ws,
+        installed,
+        {"start": "spawn", "gather": "succeed"},
+        tag="campaign",
+        placement="project/campaign",
+        parameters={
+            "structure": "Si",
+            "spawn": _SPAWN,
+            "files": {"gather": {"report.json": json.dumps({"succeeded": ["alpha"]})}},
+            "runner_steps": ["start", "gather"],
+        },
+        environment={"declared": {"timeout": {"type": "integer"}}, "overrides": {"timeout": 60}},
     )
-    workspace.submit(root / "parent", "project/campaign")
-    identifiers["parent"] = parent.id
-
-    single_runner = _publish(workspace, root / "runners" / "single.py", _SINGLE_RUNNER, "single/run.py")
-    single = prepare_job_payload(
-        root / "single",
-        JobSpec(
-            name="Collect single",
-            workflow="tests.collect.single",
-            runner_path=str(single_runner["path"]),
-            runner_source="workspace",
-            runner_sha256=str(single_runner["sha256"]),
-            tag="single",
-            initial_step="only",
-            maximum_attempts_per_activation=1,
-        ),
+    single = submit(
+        ws,
+        installed,
+        {"start": "succeed"},
+        tag="single",
+        placement="project/single",
+        parameters={"files": {"start": {"result.txt": "done"}}},
     )
-    workspace.submit(root / "single", "project/single")
-    identifiers["single"] = single.id
-
-    # A packaged runner named by the reserved pkg: form, resolved by the manager
-    # inside its own module allowlist. Its payload has no document, so the runner
-    # exits without an outcome after one real attempt.
-    reference = runner_reference(PACKAGE, RUNNER)
-    packaged = prepare_job_payload(
-        root / "packaged",
-        JobSpec(
-            name="Collect packaged",
-            workflow="tests.collect.packaged",
-            runner_path=str(reference["path"]),
-            runner_source="installed",
-            runner_sha256=str(reference["sha256"]),
-            tag="packaged",
-            initial_step="execute",
-            maximum_attempts_per_activation=1,
-        ),
-    )
-    workspace.submit(root / "packaged", "project/packaged")
-    identifiers["packaged"] = packaged.id
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=180.0)
-    identifiers["runner_sha256"] = str(campaign_runner["sha256"])
+    crashed = submit(ws, installed, {"start": "exit"}, tag="crashed", placement="project/crashed")
+    run(ws)
+    identifiers: dict[str, Any] = {"parent": parent.job_id, "single": single.job_id, "crashed": crashed.job_id}
+    identifiers["installed"] = installed
     for label in ("alpha", "beta"):
-        marker = next(found for found in workspace.scan_markers() if found.job_key.startswith(f"{label}--"))
-        identifiers[label] = marker.job_id
-    return workspace, identifiers
+        ref = next(found for found in _all(ws) if found.job_key.startswith(f"{label}--"))
+        identifiers[label] = ref.job_id
+    return ws, identifiers
+
+
+def _all(ws: Workspace) -> Iterator[Any]:
+    from httk.workflow import _kernel
+
+    for state in ("succeeded", "failed"):
+        yield from _kernel.list_jobs(ws, state)
 
 
 def _by_label(records: list[JobRecord]) -> dict[str, JobRecord]:
@@ -208,83 +106,62 @@ def _by_label(records: list[JobRecord]) -> dict[str, JobRecord]:
 # ---------------------------------------------------------------------------
 
 
-def test_a_default_collect_yields_only_the_succeeded_jobs(
-    campaign: tuple[Workspace, dict[str, str]],
-) -> None:
-    workspace, identifiers = campaign
-    records = _by_label(list(job_records(workspace)))
+def test_a_default_collect_yields_only_the_succeeded_jobs(campaign: tuple[Workspace, dict[str, Any]]) -> None:
+    ws, identifiers = campaign
+    records = _by_label(list(job_records(ws)))
 
-    # The failed child and the refused packaged job are not part of a default
-    # collect; everything that succeeded is.
+    # The failed child and the crashed job are not part of a default collect; everything that succeeded is.
     assert sorted(records) == ["alpha", "campaign", "single"]
     assert {record.state for record in records.values()} == {"succeeded"}
 
     parent = records["campaign"]
-    assert parent.job_id == identifiers["parent"]
+    ref = find(ws, identifiers["parent"])
+    assert parent.job_id == identifiers["parent"] == ref.job_id
     assert parent.job_key == f"campaign--{identifiers['parent']}"
     assert parent.placement.as_posix() == "project/campaign"
-    assert parent.payload_path.as_posix() == f"jobs/project/campaign/{parent.job_key}"
+    # The payload path is where the job was read: its current directory, relative to the workspace.
+    assert parent.payload_path.as_posix() == f"jobs/succeeded/project/campaign/{ref.path.name}"
+    assert parent.payload == ref.path
     assert parent.workdir_path is not None
     assert parent.workdir_path.as_posix() == f"{parent.payload_path.as_posix()}/run"
-    # The workspace-relative members resolve into the workspace they came from.
-    assert parent.payload == workspace.jobs / "project" / "campaign" / parent.job_key
     assert parent.payload.is_dir() and parent.workdir is not None and parent.workdir.is_dir()
-    assert parent.payload_path.parts[:3] == ("jobs", "project", "campaign")
     from httk.workflow.collecting import _workspace_file_record
 
     url = _workspace_file_record(parent, "report.json").url  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
     assert url == f"{parent.payload_path.as_posix()}/run/report.json"
     assert json.loads((parent.workdir / "report.json").read_text(encoding="utf-8")) == {"succeeded": ["alpha"]}
-    # This job publishes no transactional data, so it has no data directory.
-    assert parent.data_path is None and parent.data is None and parent.data_generation is None
+    # This job committed no data, so it has no data directory.
+    assert parent.data_path is None and parent.data is None
     assert parent.failure is None and not parent.gaps
-    assert parent.runner_steps == _CAMPAIGN_STEPS
-    assert parent.declarations["environment"] == {
-        "declared": None,
-        "observed": {
-            "format": "httk-workflow-environment-resolution",
-            "format_version": 2,
-            "values": {"timeout": {"value": 60, "source": "override"}},
-        },
-    }
+    assert parent.runner_steps == ("start", "gather")
     assert parent.runner_description is None
 
 
-def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
-    campaign: tuple[Workspace, dict[str, str]],
-) -> None:
-    workspace, identifiers = campaign
-    parent = _by_label(list(job_records(workspace)))["campaign"]
+def test_a_record_pins_the_job_digest_and_the_installed_workflow(campaign: tuple[Workspace, dict[str, Any]]) -> None:
+    ws, identifiers = campaign
+    installed = identifiers["installed"]
+    parent = _by_label(list(job_records(ws)))["campaign"]
 
     # The digest of a record is the digest of the stored job.json bytes, so a
     # consumer can verify the definition it was handed against the payload.
     assert parent.job["digest"] == sha256_file(parent.payload / "job.json")
     assert parent.job["id"] == identifiers["parent"]
-    assert parent.job["workflow"] == "tests.collect"
-    assert parent.job["initial_step"] == "branch"
-    assert parent.job["parameters"] == {"structure": "Si"}
-    assert parent.job["environment"] == {
-        "declared": {"timeout": {"type": "integer", "setting": "httk_v1.timeout"}},
-        "overrides": {"timeout": 60},
-    }
-    assert parent.job["runner"] == {
-        "executor": "path",
-        "source": "workspace",
-        "path": "campaign/run.py",
-        "sha256": identifiers["runner_sha256"],
-        "arguments": [],
-    }
+    assert parent.job["workflow"] == installed.id and parent.job["workflow_name"] == "demo"
+    assert parent.job["initial_step"] == "start"
+    assert cast(dict[str, object], parent.job["parameters"])["structure"] == "Si"
+    assert parent.job["environment"] == {"declared": {"timeout": {"type": "integer"}}, "overrides": {"timeout": 60}}
+    assert "runner" not in parent.job and "workdir" not in parent.job
     assert parent.job["claim"] == {"pool": "default", "required_capabilities": []}
     policy = parent.job["retry_policy"]
     assert isinstance(policy, dict) and policy["maximum_attempts_per_activation"] == 1
-    # A shared runner is pinned by its digest, not by a distribution.
-    assert parent.runner_provenance is None
+    # The installed workflow the job ran is pinned by its tree digest.
+    pin = {"id": installed.id, "tree_sha256": installed.record["tree_sha256"]}
+    assert parent.runner_provenance == pin
 
-    # Every child inherited exactly the runner of the parent that spawned it.
-    children = _by_label(list(job_records(workspace, states=("succeeded", "failed"))))
+    children = _by_label(list(job_records(ws, states=("succeeded", "failed"))))
     for label in ("alpha", "beta"):
-        assert children[label].job["runner"] == parent.job["runner"]
-        assert children[label].job["workflow"] == "tests.collect"
+        assert children[label].job["workflow"] == installed.id
+        assert children[label].runner_provenance == pin
 
 
 # ---------------------------------------------------------------------------
@@ -293,102 +170,113 @@ def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
 
 
 def test_collecting_several_states_includes_the_failure_of_a_failed_job(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
 ) -> None:
-    workspace, identifiers = campaign
-    records = _by_label(list(job_records(workspace, states=("succeeded", "failed"))))
-    assert sorted(records) == ["alpha", "beta", "campaign", "packaged", "single"]
+    ws, identifiers = campaign
+    records = _by_label(list(job_records(ws, states=("succeeded", "failed"))))
+    assert sorted(records) == ["alpha", "beta", "campaign", "crashed", "single"]
 
     failed = records["beta"]
     assert failed.state == "failed" and failed.job_id == identifiers["beta"]
     assert failed.failure is not None
     assert failed.failure.code == "calculate.diverged"
-    assert failed.failure.message == "the calculation did not converge"
+    assert failed.failure.message == "did not converge"
     assert failed.failure.details == {"cycles": 3}
     assert failed.failure.retryable is False
-    # The unified failure shape is exactly what the record serializes.
     assert failed.as_mapping()["failure"] == {
         "code": "calculate.diverged",
-        "message": "the calculation did not converge",
+        "message": "did not converge",
         "details": {"cycles": 3},
     }
     # A failed job is still a result: its workdir holds what the attempt wrote.
     assert failed.workdir is not None
     assert (failed.workdir / "energy.txt").read_text(encoding="utf-8") == "-10.5"
 
+    crashed = records["crashed"]
+    assert crashed.failure is not None and crashed.failure.code == "process_failure"
+    assert crashed.failure.details is not None and crashed.failure.details["exit_status"] == 3
 
-def test_a_collect_refuses_a_state_no_finished_job_can_be_in(
-    campaign: tuple[Workspace, dict[str, str]],
-) -> None:
-    workspace, _ = campaign
+
+def test_a_collect_refuses_a_state_no_finished_job_can_be_in(campaign: tuple[Workspace, dict[str, Any]]) -> None:
+    ws, _ = campaign
     with pytest.raises(ValueError, match="cannot be collected"):
-        list(job_records(workspace, states=("ready",)))
+        list(job_records(ws, states=("ready",)))
     with pytest.raises(ValueError, match="at least one state kind"):
-        list(job_records(workspace, states=()))
+        list(job_records(ws, states=()))
 
 
-def test_a_collect_is_a_lazy_iterator_over_one_scan(
-    campaign: tuple[Workspace, dict[str, str]],
-) -> None:
-    workspace, _ = campaign
-    records = job_records(workspace)
+def test_a_collect_is_a_lazy_iterator_over_one_listing(campaign: tuple[Workspace, dict[str, Any]]) -> None:
+    ws, _ = campaign
+    records = job_records(ws)
     assert isinstance(records, Iterator) and not isinstance(records, list)
-    first = next(records)
-    assert isinstance(first, JobRecord)
+    assert isinstance(next(records), JobRecord)
     assert sum(1 for _ in records) == 2
 
 
 # ---------------------------------------------------------------------------
-# The journal-derived timeline
+# The run-log timeline
 # ---------------------------------------------------------------------------
 
 
 def test_the_provenance_timeline_lists_activations_and_attempts_in_order(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
 ) -> None:
-    workspace, _ = campaign
-    parent = _by_label(list(job_records(workspace)))["campaign"]
+    ws, _ = campaign
+    parent = _by_label(list(job_records(ws)))["campaign"]
     provenance = parent.provenance
     assert provenance["gaps"] is False
-    activations = provenance["activations"]
-    assert isinstance(activations, list)
+    activations = cast(list[dict[str, Any]], provenance["activations"])
 
-    # Two activations: the step that spawned and waited, then the step the
-    # satisfied join started.
-    assert [entry["step"] for entry in activations] == ["branch", "collect"]
+    # Two activations: the step that spawned and waited, then the step the satisfied join started.
+    assert [entry["step"] for entry in activations] == ["start", "gather"]
     assert [entry["activation_ordinal"] for entry in activations] == [1, 2]
-    assert [entry["reason"] for entry in activations] == ["submitted", "join_satisfied"]
+    # state.json names the reason of the current activation only.
+    assert [entry["reason"] for entry in activations] == [None, "join"]
     assert len({str(entry["activation_id"]) for entry in activations}) == 2
-
     for entry in activations:
         attempts = entry["attempts"]
         assert isinstance(attempts, list) and len(attempts) == 1
         attempt = attempts[0]
-        assert attempt["ordinal"] == 1
-        assert attempt["manager_id"] and attempt["writer_id"] and attempt["record_ref"]
-        assert attempt["failure"] is None
-        # Every timestamp is what the frame recorded, in the order they happened.
+        assert attempt["ordinal"] == 1 and attempt["owner_id"] and attempt["failure"] is None
+        # Every timestamp is what the run log recorded, in the order it happened.
         assert str(attempt["claimed_at"]) <= str(attempt["started_at"]) <= str(attempt["finished_at"])
     assert activations[0]["attempts"][0]["outcome_action"] == "wait"
     assert activations[1]["attempts"][0]["outcome_action"] == "succeed"
 
 
 def test_the_provenance_of_a_failed_attempt_records_the_outcome_and_the_failure(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
 ) -> None:
-    workspace, _ = campaign
-    failed = _by_label(list(job_records(workspace, states=("failed",))))["beta"]
-    activations = failed.provenance["activations"]
-    assert isinstance(activations, list) and len(activations) == 1
+    ws, _ = campaign
+    failed = _by_label(list(job_records(ws, states=("failed",))))["beta"]
+    activations = cast(list[dict[str, Any]], failed.provenance["activations"])
+    assert len(activations) == 1 and activations[0]["step"] == "start"
     attempts = activations[0]["attempts"]
     assert len(attempts) == 1
     assert attempts[0]["outcome_action"] == "fail"
-    assert attempts[0]["failure"] == {
-        "code": "calculate.diverged",
-        "message": "the calculation did not converge",
-        "details": {"cycles": 3},
-    }
-    assert activations[0]["step"] == "calculate"
+    assert attempts[0]["failure"]["code"] == "calculate.diverged"
+    assert attempts[0]["failure"]["details"] == {"cycles": 3}
+
+
+def test_a_torn_last_run_log_line_is_skipped_and_a_damaged_one_is_a_gap(
+    campaign: tuple[Workspace, dict[str, Any]],
+) -> None:
+    ws, identifiers = campaign
+    from httk.workflow.collecting import record_of
+
+    ref = find(ws, identifiers["single"])
+    log = ref.path / "logs" / "runlog.jsonl"
+    original = log.read_bytes()
+    try:
+        log.write_bytes(original + b'{"at": "torn')
+        record = record_of(ws, ref)
+        assert record is not None and not record.gaps
+        log.write_bytes(b"not json\n" + original)
+        record = record_of(ws, ref)
+        assert record is not None and record.gaps
+        assert len(cast(list[object], record.provenance["activations"])) == 1
+    finally:
+        log.write_bytes(original)
 
 
 # ---------------------------------------------------------------------------
@@ -397,13 +285,13 @@ def test_the_provenance_of_a_failed_attempt_records_the_outcome_and_the_failure(
 
 
 def test_children_carry_their_spawn_labels_so_a_campaign_collects_as_a_tree(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
 ) -> None:
-    workspace, identifiers = campaign
-    records = _by_label(list(job_records(workspace, states=("succeeded", "failed"))))
+    ws, identifiers = campaign
+    records = _by_label(list(job_records(ws, states=("succeeded", "failed"))))
     parent = records["campaign"]
 
-    assert list(parent.children) == ["alpha", "beta"]
+    assert sorted(parent.children) == ["alpha", "beta"]
     assert parent.children["alpha"] == {
         "job_id": identifiers["alpha"],
         "job_key": f"alpha--{identifiers['alpha']}",
@@ -416,53 +304,15 @@ def test_children_carry_their_spawn_labels_so_a_campaign_collects_as_a_tree(
     assert records["single"].children == {}
 
 
-def test_the_placement_filter_collects_one_subtree(
-    campaign: tuple[Workspace, dict[str, str]],
-) -> None:
-    workspace, _ = campaign
-    children = list(job_records(workspace, states=("succeeded", "failed"), placement="project/children"))
+def test_the_placement_filter_collects_one_subtree(campaign: tuple[Workspace, dict[str, Any]]) -> None:
+    ws, _ = campaign
+    children = list(job_records(ws, states=("succeeded", "failed"), placement="project/children"))
     assert sorted(_by_label(children)) == ["alpha", "beta"]
     assert {record.placement.as_posix() for record in children} == {"project/children"}
-    single = list(job_records(workspace, placement="project/single"))
+    single = list(job_records(ws, placement="project/single"))
     assert [record.job_key.split("--")[0] for record in single] == ["single"]
     # A placement no job sits below collects nothing rather than everything.
-    assert list(job_records(workspace, placement="project/absent")) == []
-
-
-# ---------------------------------------------------------------------------
-# Runner provenance
-# ---------------------------------------------------------------------------
-
-
-def test_a_packaged_runner_record_names_the_distribution_that_installs_it(
-    campaign: tuple[Workspace, dict[str, str]],
-) -> None:
-    workspace, _ = campaign
-    packaged = _by_label(list(job_records(workspace, states=("failed",))))["packaged"]
-
-    assert packaged.state == "failed"
-    assert packaged.failure is not None and packaged.failure.code == "process_failure"
-    # The pwd runner itself ran: its own refusal is in the attempt log.
-    assert "carries no PWD document" in (packaged.payload / "logs" / "stdio.out").read_text(encoding="utf-8")
-    assert packaged.job["runner"] == {
-        "executor": "path",
-        "source": "installed",
-        "path": f"pkg:{PACKAGE}/{RUNNER}",
-        "sha256": sha256_file(runner_path(PACKAGE, RUNNER)),
-        "arguments": [],
-    }
-    assert packaged.runner_provenance == {
-        "module": PACKAGE,
-        "resource": RUNNER,
-        "distribution": "httk-workflow",
-        "version": metadata.version("httk-workflow"),
-    }
-
-
-def test_a_module_no_installed_distribution_owns_has_no_provenance() -> None:
-    assert module_distribution(PACKAGE) == ("httk-workflow", metadata.version("httk-workflow"))
-    assert module_distribution("json") is None
-    assert module_distribution("tests.no_such_module") is None
+    assert list(job_records(ws, placement="project/absent")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -471,70 +321,53 @@ def test_a_module_no_installed_distribution_owns_has_no_provenance() -> None:
 
 
 def test_the_command_streams_one_record_per_line_and_round_trips(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    workspace, _ = campaign
-    context = CLIContext("httk", workspace.root)
-    ws = register_ws(context, workspace.root)
+    ws, _ = campaign
+    context = CLIContext("httk", ws.root)
+    name = register_ws(context, ws.root)
 
-    assert command(["collect", "--workspace", ws, "--raw"], context) == 0
+    assert command(["collect", "--workspace", name, "--raw"], context) == 0
     lines = capsys.readouterr().out.splitlines()
     summary = json.loads(lines[-1])
-    assert summary["format"] == "httk-workflow-collect-summary" and summary["format_version"] == 2
+    assert summary["format"] == "httk-workflow-collect-summary"
     assert summary["collected"] == 3 and summary["skipped_unreadable"] == 0
-    record_lines = lines[:-1]
-    assert len(record_lines) == 3
     labels = []
-    for line in record_lines:
+    for line in lines[:-1]:
         mapping = json.loads(line)
-        assert mapping["format"] == COLLECT_FORMAT and mapping["format_version"] == 2
+        assert mapping["format"] == COLLECT_FORMAT and mapping["format_version"] == COLLECT_FORMAT_VERSION
         record = JobRecord.from_mapping(mapping)
         # A record survives the wire: what came back serializes to what went out.
         assert record.as_mapping() == mapping
-        assert record.workspace_root == workspace.root
+        assert record.workspace_root == ws.root
         labels.append(record.job_key.split("--")[0])
     assert sorted(labels) == ["alpha", "campaign", "single"]
 
 
 def test_the_command_selects_states_and_placements(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    workspace, identifiers = campaign
-    context = CLIContext("httk", workspace.root)
-    ws = register_ws(context, workspace.root)
+    ws, identifiers = campaign
+    context = CLIContext("httk", ws.root)
+    name = register_ws(context, ws.root)
 
-    assert (
-        command(
-            [
-                "collect",
-                "--workspace",
-                ws,
-                "--state",
-                "failed",
-                "--placement",
-                "project/children",
-                "--raw",
-            ],
-            context,
-        )
-        == 0
-    )
+    argv = ["collect", "--workspace", name, "--state", "failed", "--placement", "project/children", "--raw"]
+    assert command(argv, context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert json.loads(lines[-1])["format"] == "httk-workflow-collect-summary"
-    record_lines = lines[:-1]
-    assert len(record_lines) == 1
-    record = JobRecord.from_mapping(json.loads(record_lines[0]))
+    assert len(lines[:-1]) == 1
+    record = JobRecord.from_mapping(json.loads(lines[0]))
     assert record.job_id == identifiers["beta"] and record.state == "failed"
 
     # An unusable state is refused by the parser rather than silently ignored.
-    assert command(["collect", "--workspace", ws, "--state", "ready"], context) == 2
+    assert command(["collect", "--workspace", name, "--state", "ready"], context) == 2
     assert "invalid choice" in capsys.readouterr().err
 
 
 def test_collect_assembles_overlay_edges_and_products(
-    campaign: tuple[Workspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, _ = campaign
@@ -650,4 +483,4 @@ def test_collect_assembles_overlay_edges_and_products(
 
 def test_a_record_refuses_a_mapping_of_another_format() -> None:
     with pytest.raises(FormatError, match="httk-workflow-collect"):
-        JobRecord.from_mapping({"format": "something-else", "format_version": 2})
+        JobRecord.from_mapping({"format": "something-else", "format_version": COLLECT_FORMAT_VERSION})

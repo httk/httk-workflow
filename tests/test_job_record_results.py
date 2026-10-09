@@ -13,7 +13,6 @@ def _record(
     root: Path,
     *,
     data: bool = True,
-    generation: int | None = 1,
     workdir: bool = True,
     job: dict[str, object] | None = None,
 ) -> JobRecord:
@@ -30,7 +29,6 @@ def _record(
         payload_path=PurePosixPath(f"jobs/job--{JOB_ID}"),
         workdir_path=PurePosixPath("run") if workdir else None,
         data_path=PurePosixPath("data") if data else None,
-        data_generation=generation,
         provenance={},
         runner_steps=None,
         children={},
@@ -82,16 +80,15 @@ def test_missing_file_names_the_job_and_file(tmp_path: Path, data: bool) -> None
         _record(tmp_path, data=data).result_file("OUTCAR")
 
 
-@pytest.mark.parametrize("generation", [None, 1])
-def test_transactional_job_never_falls_back_to_the_workdir(tmp_path: Path, generation: int | None) -> None:
+def test_a_job_with_committed_data_never_falls_back_to_the_workdir(tmp_path: Path) -> None:
     _touch(tmp_path, "run", "OUTCAR")
     with pytest.raises(ValueError, match="expected published data file"):
-        _record(tmp_path, generation=generation).result_file("OUTCAR")
+        _record(tmp_path).result_file("OUTCAR")
 
 
 def test_job_without_data_or_workdir_fails(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="OUTCAR.*no workdir"):
-        _record(tmp_path, data=False, workdir=False, generation=None).result_file("OUTCAR")
+        _record(tmp_path, data=False, workdir=False).result_file("OUTCAR")
 
 
 @pytest.mark.parametrize("value", ["", "x", 3, None, ["a"]])

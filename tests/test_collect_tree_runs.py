@@ -15,57 +15,14 @@ import pytest
 from httk.core import Run
 from httk.core.cli import CLIContext
 
+import v3_helpers as v3
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import Workspace, _kernel, _store
 from httk.workflow.packages import load_workflow_package
-from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli import command
+from v3_helpers import RUNNER, cli_owner, submit, workspace
 
-_SRC = str(Path(__file__).parents[1] / "src")
 _DECLARATIONS = "https://example.org/httk/tests/declarations"
-
-_PARENT = f'''#!/usr/bin/env python3
-import sys
-
-sys.path.insert(0, {_SRC!r})
-
-from httk.workflow import Runner
-
-run = Runner("tests.tree_runs.parent")
-
-
-@run.step
-def start(a):
-    for index in range(2):
-        a.call(a.parameter("child"), label="child-%d" % index)
-    a.gather("done", when="all_succeeded")
-
-
-@run.step
-def done(a):
-    a.succeed()
-
-
-raise SystemExit(run.main())
-'''
-
-_CHILD = f'''#!/usr/bin/env python3
-import sys
-
-sys.path.insert(0, {_SRC!r})
-
-from httk.workflow import Runner
-
-run = Runner("tests.tree_runs.child")
-
-
-@run.step
-def work(a):
-    a.succeed()
-
-
-raise SystemExit(run.main())
-'''
 
 
 def _package(root: Path, name: str, steps: list[str], runner: str) -> Path:
@@ -106,14 +63,31 @@ def _runs(path: Path) -> list[Run]:
 @pytest.fixture
 def tree(tmp_path: Path) -> tuple[Workspace, Any]:
     pytest.importorskip("httk.store")
-    child = _package(tmp_path / "child", "tests.tree_runs.child", ["work"], _CHILD)
-    _package(tmp_path / "parent", "tests.tree_runs.parent", ["start", "done"], _PARENT)
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, "tests.tree_runs.parent", parameters={"child": str(child)})
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    assert {marker.kind for marker in workspace.scan_markers()} == {"succeeded"}
-    return workspace, job
+    child = _package(tmp_path / "child", "tests.tree_runs.child", ["start"], RUNNER)
+    parent = _package(tmp_path / "parent", "tests.tree_runs.parent", ["start", "done"], RUNNER)
+    ws = workspace(tmp_path / "workspace")
+    with cli_owner(ws) as owner:
+        child_installed = _store.install(ws, owner, child)
+        parent_installed = _store.install(ws, owner, parent)
+    # Each job carries its own workflow's declaration, as job creation and calls embed it.
+    called = {
+        "workflow": {"id": child_installed.id, "name": child_installed.name},
+        "declarations": {"workflow": child_installed.provider().declarations["workflow"]},
+    }
+    spawn = {
+        "children": [{"label": f"child-{index}", "script": {"start": "succeed"}, **called} for index in range(2)],
+        "next_step": "done",
+    }
+    job = submit(
+        ws,
+        parent_installed,
+        {"start": "spawn", "done": "succeed"},
+        parameters={"spawn": spawn},
+        declarations={"workflow": parent_installed.provider().declarations["workflow"]},
+    )
+    v3.run(ws)
+    assert len(list(_kernel.list_jobs(ws, "succeeded"))) == 3
+    return ws, job
 
 
 def test_a_called_tree_collects_one_linked_run_per_job(tmp_path: Path, tree: tuple[Workspace, Any]) -> None:

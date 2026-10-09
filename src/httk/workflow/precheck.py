@@ -1,20 +1,19 @@
 """Read-only readiness checks for jobs before an attempt starts."""
 
-import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from importlib.machinery import ModuleSpec, PathFinder
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
+from typing import Any, cast
 
-from httk.core.digests import sha256_file, tree_digest
-
-from . import compat
-from ._calls import unready_calls
-from ._manager_runners import check_runner_reference, contained, runner_command_problem, runner_module_allowed
+from . import _store, compat
+from ._job import JobDefinition
+from ._kernel import JobRef
 from ._manager_scheduling import unmet_job_requirements
-from .errors import WorkflowError
+from .errors import RunnerResolutionError, WorkflowError
+from .introspection import JOB_STATES, iter_jobs, job_placement, read_job, read_state
 from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
-from .models import STATE_KINDS, JobDefinition, Marker, parse_package_runner, placement_text
+from .models import placement_text
 from .scaffold import payload_relative
 from .sdk import resolve_declared_environment
 from .workspace import Workspace
@@ -22,7 +21,7 @@ from .workspace import Workspace
 ENVIRONMENT_VARIABLE_CAVEAT = (
     "HTTK_* environment variables are read from this process; compute-node environments may differ."
 )
-DEFAULT_PRECHECK_STATES = ("submitted", "ready", "waiting", "paused")
+DEFAULT_PRECHECK_STATES = ("ready", "waiting", "paused")
 
 
 def _find_module_spec_without_import(module: str) -> ModuleSpec | None:
@@ -67,8 +66,9 @@ def _environment_entries(
             environment={"declared": {name: metadata}, "overrides": single_overrides},
         )
         try:
+            # C3: the SDK's environment resolution reads only ``environment``; it moves to the v3 job model there.
             values, unresolved = resolve_declared_environment(
-                single_job,
+                cast(Any, single_job),
                 settings,
                 include_process_environment=include_process_environment,
             )
@@ -106,116 +106,58 @@ def environment_findings(
     return {"entries": entries, "problems": problems}
 
 
-def _runner_problem(
-    workspace: Workspace,
-    marker: Marker,
-    job: JobDefinition,
-    runner_search_paths: Iterable[str | Path],
-) -> tuple[str, str] | None:
-    """Check a runner, using a non-importing path for packaged runners."""
+def _strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
 
-    if job.runner_source == "installed":
-        package = parse_package_runner(job.runner_path.as_posix())
-        if package is None and not tuple(runner_search_paths):
-            return (
-                "indeterminate",
-                f"installed runner {job.runner_path.as_posix()} needs --runner-search-path to be checked",
-            )
-        if package is not None:
-            module, resource = package
-            if not runner_module_allowed(module):
-                return "problem", f"runner module {module} is not in this precheck's allowlist"
-            try:
-                spec = _find_module_spec_without_import(module)
-            except (ImportError, ModuleNotFoundError, ValueError) as exc:
-                return "problem", f"runner module {module} cannot be inspected: {exc}"
-            if spec is None:
-                return "problem", f"runner module {module} is not importable"
-            locations = spec.submodule_search_locations
-            root = Path(next(iter(locations))) if locations is not None else None
-            if root is None and spec.origin is not None:
-                root = Path(spec.origin).parent
-            if root is None:
-                return "problem", f"runner module {module} has no filesystem location"
-            candidate = contained(root, resource.parts)
-            if candidate is None or not candidate.exists():
-                return "problem", f"installed runner pkg:{module}/{resource.as_posix()} does not exist"
-            if candidate.is_dir() and job.runner_command is not None:
-                problem = runner_command_problem(job, candidate, None)
-                if problem is not None:
-                    return "problem", problem
-            else:
-                executable = candidate / "run" if candidate.is_dir() else candidate
-                if not executable.is_file():
-                    return "problem", f"runner tree {resource.as_posix()} has no run entry point"
-                if not os.access(executable, os.X_OK):
-                    return "problem", "runner is not executable"
-            actual = tree_digest(candidate) if candidate.is_dir() else sha256_file(candidate)
-            if actual != job.runner_sha256:
-                return "problem", f"runner digest {actual} does not match pinned {job.runner_sha256}"
-            return None
 
-    problem = check_runner_reference(
-        workspace,
-        job,
-        placement=marker.placement,
-        runner_search_paths=runner_search_paths,
-    )
-    if problem is not None:
-        return "problem", problem
-    if job.runner_source == "workspace":
-        candidate = workspace.runner_store_path(job.runner_path)
-        try:
-            from ._runner_builds import registered_artifacts, workspace_build_command
-            from .packages import read_build_spec
+def _workflow_problems(
+    workspace: Workspace, job: JobDefinition
+) -> tuple[tuple[str, str] | None, list[str], _store.Installed | None]:
+    """Check the job's workflow and its call closure: installed here, and built for this platform.
 
-            build_spec = read_build_spec(candidate) if candidate.is_dir() else None
-        except ValueError as exc:
-            return "problem", f"published runner manifest is malformed: {exc}"
-        if build_spec is not None:
-            if build_spec.platform is not None:
-                return (
-                    "indeterminate",
-                    (
-                        "declares platform-specific builds; registration is checked at manager start — run: "
-                        f"{workspace_build_command(workspace, job.runner_path)}"
-                    ),
-                )
-            artifacts = registered_artifacts(
-                workspace,
-                job.runner_path,
-                "any",
-                expected_source_sha256=job.runner_sha256,
-            )
-            if artifacts is None:
-                return (
-                    "problem",
-                    (
-                        f"workflow package {job.runner_path.as_posix()} is not built on this machine for platform any; "
-                        f"run: {workspace_build_command(workspace, job.runner_path)}"
-                    ),
-                )
-            if job.runner_command is not None:
-                problem = runner_command_problem(job, candidate, artifacts)
-                if problem is not None:
-                    return "problem", problem
-    return None
+    :param workspace: The workspace.
+    :param job: The job.
+    :return: The root workflow's ``(status, problem)`` or ``None``, one problem per callee, and the installation.
+    """
+
+    try:
+        closure = _store.closure(workspace, job.workflow_id, check_builds=True)
+        installed = _store.lookup(workspace, job.workflow_id)
+    except (RunnerResolutionError, ValueError) as exc:
+        return ("problem", f"workflow {job.workflow_id} cannot be checked: {exc}"), [], None
+    root: tuple[str, str] | None = None
+    calls: list[str] = []
+    for missing in closure.missing:
+        problem = f"workflow {missing} is not installed in this workspace; run 'httk workflow install'"
+        if missing == job.workflow_id:
+            root = ("problem", problem)
+        else:
+            calls.append(f"called {problem}")
+    for unbuilt in closure.unbuilt:
+        problem = f"workflow {unbuilt} is not built for this platform; run 'httk workflow build {unbuilt}'"
+        if unbuilt == job.workflow_id:
+            root = ("problem", problem)
+        else:
+            calls.append(f"called {problem}")
+    return root, calls, installed
 
 
 def _claim_finding(
-    marker: Marker,
+    ref: JobRef,
     job: JobDefinition,
     managers: Sequence[ManagerRecord],
 ) -> dict[str, object] | None:
     """Return a claimability problem when no live manager could claim *job*.
 
-    Every live manager is measured against the same refusal checks ``job why``
-    renders — executor, pool, capabilities, placement, ownership, and runner
-    reachability — and the closest manager's unmet requirements name what to
+    Every manager not proven dead is measured against the same refusal checks
+    ``job why`` renders — pool, capabilities, placement, ownership and the
+    allocation's end — and the closest manager's unmet requirements name what to
     fix. When no manager is live at all, claimability cannot be judged here, so
     this is left to the workspace-level notice.
 
-    :param marker: The authoritative marker of the job.
+    :param ref: The job.
     :param job: The parsed job definition.
     :param managers: Every manager registered in the workspace.
     :return: A claim finding, or ``None`` when a live manager could claim it.
@@ -225,9 +167,9 @@ def _claim_finding(
     if not live:
         return None
     requirements = claim_requirements(job)
-    placement = placement_text(marker.placement)
+    placement = placement_text(job.placement)
     try:
-        owner_uid: int | None = marker.path.lstat().st_uid
+        owner_uid: int | None = ref.path.lstat().st_uid
     except OSError:
         owner_uid = None
     closest: list[str] | None = None
@@ -240,33 +182,31 @@ def _claim_finding(
     return {"status": "problem", "problem": "no live manager can claim this job: " + "; ".join(closest or ())}
 
 
-def _language_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> dict[str, object] | None:
-    """Return an engine-importability finding for a language job, if any.
+def _language_finding(
+    installed: _store.Installed | None, managers: Sequence[ManagerRecord]
+) -> dict[str, object] | None:
+    """Return an engine-importability finding for a job of a built-in language realization, if any.
 
-    A language job is the one the collect gate recognizes: ``workflow_realization``
-    is ``language`` and ``workflow_language`` names the engine. The engine is
+    The realization is the installed workflow's ``runner.builtin``. The engine is
     resolved without importing its runtime; only the non-importing spec finder
     checks that each module is present, and the pip extra is named. Because the
     extras belong on the machine that runs the job, a missing module is only a
-    problem when no live manager serves this job's executor; when one does, its
-    environment may differ from this process's, so it is reported as
-    ``indeterminate`` and does not fail the run.
+    problem when no manager is live; otherwise its environment may differ from
+    this process's, so it is reported as ``indeterminate``.
 
-    :param job: The parsed job definition.
+    :param installed: The job's installed workflow, when installed.
     :param managers: Every manager registered in the workspace.
     :return: A language finding, or ``None`` when nothing is missing.
     """
 
-    if job.parameters.get("workflow_realization") != "language":
-        return None
-    name = job.parameters.get("workflow_language")
+    runner = None if installed is None else installed.record.get("runner")
+    name = runner.get("builtin") if isinstance(runner, Mapping) else None
     if not isinstance(name, str):
         return None
     try:
         language = compat.language(name)
     except ValueError:
-        problem = f"workflow format {name!r} is not available in this installation"
-        return {"status": "problem", "problem": problem}
+        return {"status": "problem", "problem": f"workflow format {name!r} is not available in this installation"}
     missing = [module for module in language.required_modules if _find_module_spec_without_import(module) is None]
     if not missing:
         return None
@@ -276,34 +216,34 @@ def _language_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> 
     )
     if language.name == "jobflow":
         problem += " (pymatgen is additionally required when the workflow has structure inputs)"
-    served = any(record.alive() and job.runner_executor in record.executors for record in managers)
-    if served:
+    if any(record.alive() for record in managers):
         return {
             "status": "indeterminate",
-            "problem": problem
-            + "; the engine could not be found in this process, but the serving manager's environment may "
+            "problem": problem + "; the engine could not be found in this process, but a manager's environment may "
             "differ — this is verified only at run time",
         }
     return {"status": "problem", "problem": problem}
 
 
-def _requirements_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> dict[str, object] | None:
-    """Return a finding for ``requires`` entries this process's environment does not meet.
+def _requirements_finding(
+    installed: _store.Installed | None, managers: Sequence[ManagerRecord]
+) -> dict[str, object] | None:
+    """Return a finding for the installed manifest's ``requires`` this process's environment does not meet.
 
     A manager checks ``requires`` in its own environment and leaves an unmet job
     unclaimed, so, as for a language engine, a miss here is only a problem when no
-    live manager serves this job's executor; otherwise it is ``indeterminate``.
+    manager is live; otherwise it is ``indeterminate``.
 
-    :param job: The parsed job definition.
+    :param installed: The job's installed workflow, when installed.
     :param managers: Every manager registered in the workspace.
     :return: A requirements finding, or ``None`` when every requirement is met here.
     """
 
-    unmet = unmet_job_requirements(job.requires)
+    unmet = unmet_job_requirements(() if installed is None else _strings(installed.record.get("requires")))
     if not unmet:
         return None
     problem = f"unmet requirement(s) {'; '.join(unmet)}"
-    if any(record.alive() and job.runner_executor in record.executors for record in managers):
+    if any(record.alive() for record in managers):
         return {
             "status": "indeterminate",
             "problem": problem + " in this process; a manager claims this job only if its own environment meets them",
@@ -311,23 +251,22 @@ def _requirements_finding(job: JobDefinition, managers: Sequence[ManagerRecord])
     return {"status": "problem", "problem": problem}
 
 
-def _input_problems(workspace: Workspace, marker: Marker, job: JobDefinition) -> list[str]:
+def _input_problems(ref: JobRef, job: JobDefinition) -> list[str]:
     """Return one problem per required declared input missing from the payload.
 
     A declared required input with a staged ``destination`` must still be a
     member of the payload; an absent one is a tamper or relocation the runner
     would only discover mid-attempt.
 
-    :param workspace: The workspace holding the payload.
-    :param marker: The authoritative marker of the job.
+    :param ref: The job.
     :param job: The parsed job definition.
     :return: Human-readable problems, one per missing required destination.
     """
 
     declared_inputs = job.declared.get("inputs", {})
-    if not declared_inputs:
+    if not isinstance(declared_inputs, Mapping) or not declared_inputs:
         return []
-    payload = workspace.payload_path(marker.placement, marker.job_key)
+    payload = ref.path
     problems: list[str] = []
     for name in sorted(declared_inputs):
         metadata = declared_inputs[name]
@@ -346,33 +285,26 @@ def _input_problems(workspace: Workspace, marker: Marker, job: JobDefinition) ->
     return problems
 
 
-def _step_finding(workspace: Workspace, marker: Marker, job: JobDefinition) -> str | None:
-    """Return a step problem when the job's step is outside its recorded step set.
+def _step_finding(ref: JobRef, job: JobDefinition) -> str | None:
+    """Return a step problem when the job's next step is outside the runner's recorded step set.
 
-    A runner records the steps it actually implements in the job's state frame as
-    ``runner_steps`` after its first attempt. When that list is present and the
-    step this job would run next is not in it, the next attempt cannot succeed.
-    This is frame-based only: the runner is never executed, so a job that has not
-    recorded its steps yet is never faulted here. The frame reflects the last
-    attempt's runner, so the finding is advisory — a mutated payload runner may
-    implement a different set by the next attempt.
+    An outcome records the steps its runner implements as ``runner_steps`` in
+    ``state.json``. When that list is present and the step this job would run
+    next is not in it, the next attempt cannot succeed. The runner is never
+    executed, so a job that has not recorded its steps yet is never faulted
+    here; the finding is advisory.
 
-    :param workspace: The workspace holding the job's state frame.
-    :param marker: Identify the job to check.
+    :param ref: The job.
     :param job: The job's immutable definition, for its initial step.
     :return: A step problem message, or ``None`` when nothing can be faulted.
     """
 
-    try:
-        state = workspace.read_state(marker)
-    except (WorkflowError, OSError):
+    doc, _ = read_state(ref)
+    known = [] if doc is None else list(_strings(doc.runner_steps))
+    if not known:
         return None
-    runner_steps = state.get("runner_steps")
-    if not isinstance(runner_steps, list) or not runner_steps:
-        return None
-    known = [str(item) for item in runner_steps]
-    step = state.get("step")
-    step = str(step) if isinstance(step, str) and step else job.initial_step
+    step = None if doc is None or doc.activation is None else doc.activation.get("step")
+    step = step if isinstance(step, str) and step else job.initial_step
     if step in known:
         return None
     return f"step {step!r} is not one of the runner's recorded steps: {', '.join(known)}"
@@ -380,25 +312,24 @@ def _step_finding(workspace: Workspace, marker: Marker, job: JobDefinition) -> s
 
 def _finding(
     workspace: Workspace,
-    marker: Marker,
+    ref: JobRef,
     settings: Mapping[str, object],
-    runner_search_paths: Iterable[str | Path],
     managers: Sequence[ManagerRecord],
 ) -> dict[str, object]:
-    """Build one finding from one current marker."""
+    """Build one finding from one job."""
 
-    try:
-        job = workspace.load_job(marker)
-    except (WorkflowError, OSError) as exc:
+    job, error = read_job(ref)
+    if job is None:
+        placement = job_placement(ref)
         return {
-            "job_key": marker.job_key,
-            "job_id": marker.job_id,
+            "job_key": ref.job_key,
+            "job_id": ref.job_id,
             "workflow": None,
-            "state": marker.kind,
-            "placement": placement_text(marker.placement),
+            "state": ref.state,
+            "placement": None if placement is None else placement_text(placement),
             "environment": [],
-            "environment_problems": [str(exc)],
-            "runner": {"problem": str(exc)},
+            "environment_problems": [str(error)],
+            "runner": {"status": "problem", "problem": str(error)},
             "claim": None,
             "language": None,
             "requirements": None,
@@ -407,26 +338,26 @@ def _finding(
             "step": None,
         }
     environment = environment_findings(job, settings)
-    runner_problem = _runner_problem(workspace, marker, job, runner_search_paths)
+    workflow_problem, call_problems, installed = _workflow_problems(workspace, job)
     runner: dict[str, object] = {"status": "ok", "ok": True}
-    if runner_problem is not None:
-        status, problem = runner_problem
+    if workflow_problem is not None:
+        status, problem = workflow_problem
         runner = {"status": status, "problem": problem}
     return {
         "job_key": job.job_key,
         "job_id": job.id,
-        "workflow": job.workflow,
-        "state": marker.kind,
-        "placement": placement_text(marker.placement),
+        "workflow": job.workflow_id,
+        "state": ref.state,
+        "placement": placement_text(job.placement),
         "environment": environment["entries"],
         "environment_problems": environment["problems"],
         "runner": runner,
-        "claim": _claim_finding(marker, job, managers),
-        "language": _language_finding(job, managers),
-        "requirements": _requirements_finding(job, managers),
-        "calls": list(unready_calls(workspace, job)),
-        "inputs": _input_problems(workspace, marker, job),
-        "step": _step_finding(workspace, marker, job),
+        "claim": _claim_finding(ref, job, managers),
+        "language": _language_finding(installed, managers),
+        "requirements": _requirements_finding(installed, managers),
+        "calls": call_problems,
+        "inputs": _input_problems(ref, job),
+        "step": _step_finding(ref, job),
     }
 
 
@@ -436,40 +367,32 @@ def precheck_jobs(
     states: Iterable[str] = DEFAULT_PRECHECK_STATES,
     placement: str | PurePosixPath | None = None,
     settings: Mapping[str, object] | None = None,
-    runner_search_paths: Iterable[str | Path] = (),
 ) -> Iterator[dict[str, object]]:
-    """Yield read-only environment and runner findings for pending jobs.
+    """Yield read-only environment, workflow and claimability findings for pending jobs.
 
     :param workspace: Workspace to inspect.
-    :param states: Current marker kinds to inspect.
+    :param states: The job states to inspect.
     :param placement: Optional placement subtree.
     :param settings: Destination settings, or the workspace's current settings.
-    :param runner_search_paths: Roots for plain installed runner references.
     :yields: Lazy per-job findings.
+    :raises ValueError: For an unknown state.
     """
 
     selected = tuple(dict.fromkeys(states))
-    unknown = [state for state in selected if state not in STATE_KINDS]
-    if unknown:
-        raise ValueError(f"unknown precheck state kind: {', '.join(unknown)}")
-    prefix = None if placement is None else PurePosixPath(placement).parts
+    if unknown := [state for state in selected if state not in JOB_STATES]:
+        raise ValueError(f"unknown precheck state: {', '.join(unknown)}")
     current_settings = workspace.read_settings() if settings is None else settings
-    search_paths = tuple(runner_search_paths)
     managers = read_managers(workspace)
-    for entry in workspace.scan_marker_entries(selected):
-        if not isinstance(entry, Marker):
-            continue
-        if prefix is not None and entry.placement.parts[: len(prefix)] != prefix:
-            continue
-        yield _finding(workspace, entry, current_settings, search_paths, managers)
+    for ref in iter_jobs(workspace, selected, placement_prefix=placement):
+        yield _finding(workspace, ref, current_settings, managers)
 
 
 def manager_availability_notice(workspace: Workspace) -> str | None:
     """Return one workspace-level manager-availability notice, or ``None``.
 
-    Per-job claimability can only be judged against a live manager. When none is
-    live, one notice replaces per-job claim spam: whether no manager ever
-    registered, or every registered one has a stale heartbeat.
+    Per-job claimability can only be judged against a manager that is not proven
+    dead. When none is, one notice replaces per-job claim spam: whether no
+    manager is registered, or every registered one is proven dead.
 
     :param workspace: The workspace to inspect.
     :return: The notice, or ``None`` when a live manager exists.
@@ -479,8 +402,8 @@ def manager_availability_notice(workspace: Workspace) -> str | None:
     if any(record.alive() for record in managers):
         return None
     if not managers:
-        return "no manager has ever registered in this workspace; claimability was not checked"
-    return f"{len(managers)} manager(s) registered here, but none has a live heartbeat; claimability was not checked"
+        return "no manager is registered in this workspace; claimability was not checked"
+    return f"{len(managers)} manager(s) registered here, all proven dead; claimability was not checked"
 
 
 def has_claim_problem(finding: Mapping[str, object]) -> bool:
@@ -535,7 +458,7 @@ def has_environment_problem(finding: Mapping[str, object]) -> bool:
 
 
 def has_runner_problem(finding: Mapping[str, object]) -> bool:
-    """Return whether a finding has a broken runner reference."""
+    """Return whether a finding's workflow is not installed or not built here."""
 
     runner = finding.get("runner")
     return isinstance(runner, Mapping) and runner.get("status", "problem") == "problem"

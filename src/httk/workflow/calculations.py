@@ -368,7 +368,6 @@ def _record(root: Path, relative: PurePosixPath, collector: _Collector, identity
         payload_path=relative,
         workdir_path=relative,
         data_path=None,
-        data_generation=None,
         provenance={"activations": [], "gaps": False},
         runner_steps=None,
         children={},

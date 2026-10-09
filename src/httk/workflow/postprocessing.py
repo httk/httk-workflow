@@ -65,16 +65,13 @@ def _default_root(workspace_root: Path) -> Path:
 
 
 def _reject_reserved_root(workspace: Workspace, base: Path) -> None:
-    """Refuse a postprocess root inside the control dir or any job payload."""
+    """Refuse a postprocess root inside the control dir or the jobs directory (every job payload lives there)."""
 
     resolved = base.resolve()
-    control = workspace.control.resolve()
-    if resolved == control or resolved.is_relative_to(control):
+    if resolved.is_relative_to(workspace.control.resolve()):
         raise ValueError(f"postprocess output root must not be inside the workspace control directory: {base}")
-    for marker in workspace.scan_markers():
-        payload = workspace.payload_path(marker.placement, marker.job_key).resolve()
-        if resolved == payload or resolved.is_relative_to(payload):
-            raise ValueError(f"postprocess output root must not be inside a job payload: {base}")
+    if resolved.is_relative_to(workspace.jobs.resolve()):
+        raise ValueError(f"postprocess output root must not be inside a job payload: {base}")
 
 
 def postprocess_root(workspace: Workspace, override: str | None = None) -> Path:

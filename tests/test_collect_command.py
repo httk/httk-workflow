@@ -7,9 +7,9 @@ import pytest
 from httk.core.cli import CLIContext
 from httk.core.register import codes
 
+import v3_helpers as v3
 from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow import Workspace
 from httk.workflow.workflow_cli import collect_command, command, job_command, workflow_command
 from test_calculations import _calculation, _collector
 
@@ -88,38 +88,11 @@ def test_tree_summary_counts_unreadable_jobs_in_nested_workspaces(
 ) -> None:
     package = _collector(tmp_path / "pkg")
     tree = tmp_path / "tree"
-    workspace = Workspace.initialize(tree / "ws")
-    source = tmp_path / "job"
-    runner = source / "files" / "run.py"
-    runner.parent.mkdir(parents=True)
-    runner.write_text(
-        "#!/usr/bin/env python3\n"
-        "from httk.workflow import Runner\n"
-        "run = Runner('tests.collect.skipped')\n"
-        "@run.step\n"
-        "def only(a):\n"
-        "    a.succeed()\n"
-        "raise SystemExit(run.main())\n",
-        encoding="utf-8",
-    )
-    runner.chmod(0o755)
-    payload = prepare_job_payload(
-        source,
-        JobSpec(
-            name="Unreadable after completion",
-            workflow="tests.collect.skipped",
-            runner_path="files/run.py",
-            tag="skipped",
-            initial_step="only",
-            maximum_attempts_per_activation=1,
-        ),
-    )
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=60.0)
-    marker = workspace.find_marker_by_id(payload.id)
-    assert marker is not None
-    (workspace.payload_path(marker.placement, marker.job_key) / "job.json").write_text("{", encoding="utf-8")
+    workspace = v3.workspace(tree / "ws")
+    installed = v3.install(workspace, tmp_path / "workflow")
+    v3.submit(workspace, installed, {"start": "succeed"}, tag="skipped", placement="jobs")
+    v3.run(workspace)
+    (v3.only(workspace, "succeeded").path / "job.json").write_text("{", encoding="utf-8")
     _calculation(tree / "calc")
     context = CLIContext("httk", tmp_path)
 

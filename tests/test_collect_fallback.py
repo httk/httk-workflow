@@ -1,4 +1,4 @@
-"""Job-pinned collector fallback coverage."""
+"""The installed-workflow collector fallback (``allow_job_collector``) and ``collect --into``."""
 
 import json
 from collections.abc import Mapping
@@ -9,18 +9,16 @@ from typing import Any
 import pytest
 from httk.core import ProductLink, Run
 from httk.core.cli import CLIContext
-from httk.core.digests import tree_digest
 from httk.core.storage import content_id
 
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, collect, job_records
+from httk.workflow import Workspace, _store, collect, job_records
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow.collecting import CollectedJob, JobRecord
-from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli import command
-from test_workflow_cli_packages import _SUCCESS_RUNNER
 from test_workflow_packages import _MANIFEST, _package
+from v3_helpers import RUNNER, cli_owner, run, submit, workspace
 
 _DATA_MANIFEST = _MANIFEST.replace("tests.package", "tests.fallback.package").replace(
     'entry_type = "structures"\nref = "https://example.test/structures"\ndescription = "The output structure."',
@@ -54,26 +52,21 @@ _POSCAR = "silicon\n1.0\n"
 
 def _finished(
     tmp_path: Path, *, manifest: str = _DATA_MANIFEST, collect: str = _DATA_POSTPROCESS
-) -> tuple[Workspace, Path]:
+) -> tuple[Workspace, _store.Installed]:
+    """Install the package into a fresh workspace and run one of its jobs to success."""
+
     package = _package(tmp_path / "package", manifest)
-    (package / "run").write_text(_SUCCESS_RUNNER, encoding="utf-8")
+    (package / "run").write_text(RUNNER, encoding="utf-8")
     (package / "run").chmod(0o755)
     (package / "collect.py").write_text(collect, encoding="utf-8")
-    structure = tmp_path / "POSCAR"
-    structure.write_text(_POSCAR, encoding="utf-8")
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    new_job(workspace, package, inputs={"structure": structure})
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    return workspace, package
-
-
-def _runner_path(workspace: Workspace, record: JobRecord) -> Path:
-    job = record.job
-    assert isinstance(job, Mapping)
-    runner = job["runner"]
-    assert isinstance(runner, Mapping)
-    return workspace.runner_store_path(str(runner["path"]))
+    ws = workspace(tmp_path / "workspace")
+    with cli_owner(ws) as owner:
+        installed = _store.install(ws, owner, package)
+    # A job carries its workflow's declaration, as job creation embeds it from the manifest.
+    declarations = {"workflow": installed.provider().declarations["workflow"]}
+    submit(ws, installed, {"start": "succeed"}, members={"POSCAR": _POSCAR}, declarations=declarations)
+    run(ws)
+    return ws, installed
 
 
 def _synthetic_item(
@@ -396,8 +389,8 @@ def test_collect_degraded_filters_to_the_degraded_lines_only(tmp_path: Path, cap
     assert len(lines) == 1
 
 
-def test_collect_uses_a_pinned_tree_collector_when_allowed(tmp_path: Path) -> None:
-    workspace, package = _finished(tmp_path)
+def test_collect_uses_the_installed_workflow_collector_when_allowed(tmp_path: Path) -> None:
+    workspace, installed = _finished(tmp_path)
     record = next(job_records(workspace))
 
     without = next(collect(workspace))
@@ -408,9 +401,8 @@ def test_collect_uses_a_pinned_tree_collector_when_allowed(tmp_path: Path) -> No
     assert with_fallback.missing_collector is None
     assert set(with_fallback.outputs) == {"relaxed_structure"}
     assert with_fallback.run.outputs[0].entry_id == content_id(with_fallback.outputs["relaxed_structure"])
-    runner = record.job["runner"]
-    assert isinstance(runner, Mapping)
-    assert runner["sha256"] == tree_digest(package)
+    # The job pinned the installed tree it ran; the fallback verified that same tree.
+    assert record.runner_provenance == {"id": installed.id, "tree_sha256": installed.record["tree_sha256"]}
 
 
 def test_fallback_uses_pinned_manifest_curation_for_output_products(
@@ -500,9 +492,8 @@ def test_collect_into_stores_product_of_edges_with_minted_ids_and_they_join(tmp_
 
 
 def test_collect_degrades_a_tampered_pinned_tree_loudly(tmp_path: Path) -> None:
-    workspace, _ = _finished(tmp_path)
-    record = next(job_records(workspace))
-    runner = _runner_path(workspace, record)
+    workspace, installed = _finished(tmp_path)
+    runner = installed.package
     runner.chmod(0o755)
     (runner / "collect.py").chmod(0o644)
     (runner / "collect.py").write_text(_DATA_POSTPROCESS + "\n# tampered\n", encoding="utf-8")
@@ -514,9 +505,8 @@ def test_collect_degrades_a_tampered_pinned_tree_loudly(tmp_path: Path) -> None:
 
 
 def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Path) -> None:
-    workspace, _ = _finished(tmp_path)
-    record = next(job_records(workspace))
-    runner = _runner_path(workspace, record)
+    workspace, installed = _finished(tmp_path)
+    runner = installed.package
     runner.chmod(0o755)
     (runner / "httk_workflow.toml").chmod(0o644)
     manifest = (
@@ -534,28 +524,16 @@ def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Pat
     assert "pinned runner tree was modified" in item.missing_collector
 
 
-def test_collect_refuses_a_file_runner_for_the_job_fallback(tmp_path: Path) -> None:
-    runner = tmp_path / "runner.py"
-    runner.write_text(
-        """#!/usr/bin/env python3
-from httk.workflow import Runner
-run = Runner("tests.fallback.file")
-@run.step
-def start(attempt):
-    attempt.succeed()
-if __name__ == "__main__":
-    raise SystemExit(run.main())
-""",
-        encoding="utf-8",
-    )
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    new_job(workspace, runner)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
+def test_collect_degrades_a_reinstalled_workflow(tmp_path: Path) -> None:
+    workspace, _ = _finished(tmp_path)
+    (tmp_path / "package" / "collect.py").write_text(_DATA_POSTPROCESS + "\n# changed\n", encoding="utf-8")
+    with cli_owner(workspace) as owner:
+        _store.install(workspace, owner, tmp_path / "package")
 
     item = next(collect(workspace, allow_job_collector=True))
+    assert item.outputs == {}
     assert item.missing_collector is not None
-    assert "requires a directory runner tree" in item.missing_collector
+    assert "reinstalled since the job ran" in item.missing_collector
 
 
 def test_collect_degrades_an_unknown_language_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

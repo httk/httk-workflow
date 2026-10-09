@@ -4,9 +4,10 @@ import json
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from pathlib import PurePosixPath
 from typing import Any
 
+from .. import _kernel
+from .._kernel import JobRef
 from ..adapters import (
     REMOTE_JOB_LIST_COMMAND,
     REMOTE_JOB_LOG_COMMAND,
@@ -14,16 +15,16 @@ from ..adapters import (
     REMOTE_JOB_WHY_COMMAND,
 )
 from ..introspection import (
-    STATE_KINDS,
+    JOB_STATES,
     JobListPage,
-    count_markers,
+    count_jobs,
     describe_job,
     explain_job,
-    job_frames,
+    job_events,
     list_jobs,
     read_managers,
 )
-from ..models import Marker
+from ..models import normalize_placement
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from ..workspace import Workspace
 
@@ -64,7 +65,7 @@ class WorkspaceView:
         remote-qualified name.
     :param context: CLI context needed for registry and remote adapter reads.
     :param refresh_interval: Seconds for count, manager, and detail cache expiry.
-    :param detail_frames: Maximum number of history frames loaded by default detail.
+    :param detail_frames: Maximum number of run-log events loaded by default detail.
     :param adapter_timeout: Optional timeout for one remote adapter read.
     """
 
@@ -162,7 +163,7 @@ class WorkspaceView:
         :return: Counts keyed by selected state kind.
         """
 
-        selected = tuple(kinds or STATE_KINDS)
+        selected = tuple(kinds or JOB_STATES)
         prefix = placement_prefix
         key = (selected, prefix)
         now = time.monotonic()
@@ -180,7 +181,7 @@ class WorkspaceView:
             result = {kind: int(raw.get(kind, 0)) for kind in selected} if isinstance(raw, Mapping) else {}
         else:
             assert self.workspace is not None
-            result = {kind: count_markers(self.workspace, kind, prefix) for kind in selected}
+            result = {kind: count_jobs(self.workspace, kind, prefix) for kind in selected}
         self._remember_counts(selected, prefix, result)
         return dict(result)
 
@@ -218,7 +219,7 @@ class WorkspaceView:
 
         if limit < 1:
             raise ValueError("page limit must be positive")
-        kinds = tuple(kind_filter or STATE_KINDS)
+        kinds = tuple(kind_filter or JOB_STATES)
         if self.remote:
             document = _first_mapping(
                 self._remote_json(
@@ -256,30 +257,34 @@ class WorkspaceView:
                 if isinstance(row, Mapping) and isinstance(row.get("job_id"), str)
             }
 
-    def marker_for(self, job_id: str) -> Marker:
-        """Resolve a selected row using its known placement."""
+    def ref_for(self, job_id: str) -> JobRef:
+        """Locate a selected row's job, listing its known placement first.
+
+        :param job_id: The job UUID.
+        :return: The job's current reference.
+        :raises ValueError: For a remote view, or a job no longer present.
+        """
 
         if self.workspace is None:
-            raise ValueError("remote jobs have no local marker")
+            raise ValueError("remote jobs have no local job directory")
         row = self._rows.get(job_id)
-        marker = None
-        if row is not None:
-            marker = self.workspace.find_marker_at(str(row["job_key"]), PurePosixPath(str(row["placement"])))
-        if marker is None:
-            marker = self.workspace.find_marker_by_id(job_id)
-        if marker is None:
+        placement = row.get("placement") if row is not None else None
+        hint = normalize_placement(placement) if isinstance(placement, str) else None
+        ref = _kernel.locate(self.workspace, job_id, placement_hint=hint)
+        if ref is None:
+            ref = _kernel.locate(self.workspace, job_id, placement_hint=None, exhaustive=True)
+        if ref is None:
             raise ValueError(f"job {job_id} is no longer present")
-        return marker
+        return ref
 
-    def _read_stdio(self, marker: Marker, *, follow: bool = False, size: int = 8192) -> str:
+    def _read_stdio(self, ref: JobRef, *, follow: bool = False, size: int = 8192) -> str:
         """Read a bounded tail of a local job's stdio log."""
 
-        assert self.workspace is not None
-        path = self.workspace.payload_path(marker.placement, marker.job_key) / "logs" / "stdio.out"
+        path = ref.path / "logs" / "stdio.out"
         try:
             with path.open("rb") as handle:
                 if follow:
-                    offset = self._tail_offsets.get(marker.job_id, 0)
+                    offset = self._tail_offsets.get(ref.job_id, 0)
                     length = path.stat().st_size
                     if offset > length:
                         offset = 0
@@ -288,7 +293,7 @@ class WorkspaceView:
                     handle.seek(0, 2)
                     handle.seek(max(0, handle.tell() - size))
                 data = handle.read(min(size, 256 * 1024))
-                self._tail_offsets[marker.job_id] = handle.tell()
+                self._tail_offsets[ref.job_id] = handle.tell()
         except OSError:
             return ""
         return data.decode("utf-8", "replace")
@@ -305,16 +310,16 @@ class WorkspaceView:
             result = _first_mapping(
                 self._remote_json(REMOTE_JOB_SHOW_COMMAND, tail=(job_id, "--no-children", "--workspace"))
             )
-            result.setdefault("frames", [])
+            result.setdefault("events", [])
             result.setdefault("stdio_tail", "")
         else:
-            marker = self.marker_for(job_id)
+            ref = self.ref_for(job_id)
             assert self.workspace is not None
-            report = describe_job(self.workspace, marker, include_children=False)
+            report = describe_job(self.workspace, ref, include_children=False)
             result = {
                 **report,
-                "frames": job_frames(self.workspace, marker, limit=self.detail_frames),
-                "stdio_tail": self._read_stdio(marker),
+                "events": job_events(ref, limit=self.detail_frames),
+                "stdio_tail": self._read_stdio(ref),
             }
         with self._lock:
             if generation is None or generation == self._generation:
@@ -332,22 +337,15 @@ class WorkspaceView:
         if self.remote:
             result = _first_mapping(self._remote_json(REMOTE_JOB_WHY_COMMAND, tail=(job_id, "--workspace")))
         else:
-            marker = self.marker_for(job_id)
             assert self.workspace is not None
-            diagnosis = explain_job(self.workspace, marker)
-            if hasattr(diagnosis, "as_mapping"):
-                result = diagnosis.as_mapping()
-            elif isinstance(diagnosis, Mapping):
-                result = dict(diagnosis)
-            else:
-                raise TypeError("job diagnosis is not a mapping")
+            result = explain_job(self.workspace, self.ref_for(job_id)).as_mapping()
         with self._lock:
             if generation is None or generation == self._generation:
                 self._whys[job_id] = (self._generation, result)
         return dict(result)
 
     def log(self, job_id: str, *, generation: int | None = None) -> list[dict[str, Any]]:
-        """Load and cache the full transition history for one selected job."""
+        """Load and cache the full owner run log of one selected job."""
 
         with self._lock:
             accepted_generation = self._generation if generation is None else generation
@@ -361,12 +359,10 @@ class WorkspaceView:
                     tail=(job_id, "--workspace"),
                 )
             )
-            frames = document.get("frames", [])
-            result = [dict(item) for item in frames if isinstance(item, Mapping)] if isinstance(frames, list) else []
+            events = document.get("events", [])
+            result = [dict(item) for item in events if isinstance(item, Mapping)] if isinstance(events, list) else []
         else:
-            marker = self.marker_for(job_id)
-            assert self.workspace is not None
-            result = job_frames(self.workspace, marker, limit=None)
+            result = job_events(self.ref_for(job_id))
         with self._lock:
             if generation is None or generation == self._generation:
                 self._logs[job_id] = (self._generation, result)
@@ -377,7 +373,7 @@ class WorkspaceView:
 
         if self.remote:
             return "remote stdio tail unavailable (remote payload is not exposed)"
-        return self._read_stdio(self.marker_for(job_id), follow=True, size=256 * 1024)
+        return self._read_stdio(self.ref_for(job_id), follow=True, size=256 * 1024)
 
     def managers(self) -> list[Mapping[str, Any]]:
         """Return manager records, cached until the refresh interval expires."""

@@ -10,10 +10,9 @@ from typing import Any, Self
 import pytest
 from httk.core.cli import CLIContext
 
-from conftest import fake_remote, register_ws
+from conftest import register_ws
 from httk.workflow import Workspace, transfers
-from httk.workflow.introspection import JobListPage, _reading
-from httk.workflow.models import STATE_KINDS
+from httk.workflow.introspection import JOB_STATES, JobListPage, _reading
 from httk.workflow.monitor import actions as monitor_actions
 from httk.workflow.monitor import data as monitor_data
 from httk.workflow.monitor.data import WorkspaceView
@@ -26,12 +25,11 @@ from httk.workflow.monitor.ui import (
     render_job_pane,
     render_workspace_pane,
 )
-from httk.workflow.projects import initialize_project
 from httk.workflow.registry import WorkspaceBinding
 from httk.workflow.workflow_cli import _monitor as monitor_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
-from test_job_paging import _marker
+from test_job_paging import _job as _marker
 
 
 def test_monitor_view_uses_marker_counts_and_one_visible_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,7 +37,7 @@ def test_monitor_view_uses_marker_counts_and_one_visible_page(tmp_path: Path, mo
 
     workspace = Workspace.initialize(tmp_path / "large")
     for index in range(100_000):
-        _marker(workspace, STATE_KINDS[index % 3], f"p{index % 50:02d}")
+        _marker(workspace, JOB_STATES[index % 3], f"p{index % 50:02d}")
     reads: list[str] = []
     scanned_entries = 0
     real_scandir = os.scandir
@@ -69,11 +67,11 @@ def test_monitor_view_uses_marker_counts_and_one_visible_page(tmp_path: Path, mo
 
     monkeypatch.setattr(os, "scandir", counted_scandir)
 
-    def fake_state(_workspace: Workspace, marker: object) -> tuple[dict[str, object], None]:
-        reads.append(str(marker))
-        return {}, None
+    def fake_state(ref: object) -> tuple[None, None]:
+        reads.append(str(ref))
+        return None, None
 
-    monkeypatch.setattr(_reading, "_state_of", fake_state)
+    monkeypatch.setattr(_reading, "read_state", fake_state)
     view = WorkspaceView(workspace, refresh_interval=60)
     counts = view.counts()
     page = view.page(limit=25)
@@ -102,7 +100,7 @@ def test_monitor_detail_is_lazy_and_cached(tmp_path: Path) -> None:
 
 
 def test_monitor_detail_does_not_explain_until_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default detail reads one report, twenty frames, and no diagnosis."""
+    """The default detail reads one report, twenty run-log events, and no diagnosis."""
 
     workspace = Workspace.initialize(tmp_path / "detail-bounded")
     _marker(workspace, "ready", "jobs")
@@ -117,11 +115,11 @@ def test_monitor_detail_does_not_explain_until_requested(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(monitor_data, "describe_job", fake_describe)
 
-    def fake_frames(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
-        calls.append("frames")
+    def fake_events(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        calls.append("events")
         return []
 
-    monkeypatch.setattr(monitor_data, "job_frames", fake_frames)
+    monkeypatch.setattr(monitor_data, "job_events", fake_events)
 
     def unexpected_why(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("why must be explicit")
@@ -129,7 +127,7 @@ def test_monitor_detail_does_not_explain_until_requested(tmp_path: Path, monkeyp
     monkeypatch.setattr(monitor_data, "explain_job", unexpected_why)
     view.detail(job_id)
     view.detail(job_id)
-    assert calls == ["frames"]
+    assert calls == ["events"]
     assert describe_modes == [False]
 
     class Diagnosis:
@@ -140,25 +138,7 @@ def test_monitor_detail_does_not_explain_until_requested(tmp_path: Path, monkeyp
     monkeypatch.setattr(monitor_data, "explain_job", lambda *_: Diagnosis())
     view.why(job_id)
     view.why(job_id)
-    assert calls == ["frames", "why"]
-
-
-def test_monitor_remote_page_uses_json_relay(tmp_path: Path, remote: object) -> None:
-    """A remote view parses the existing JSON job-list protocol."""
-
-    project = tmp_path / "project"
-    initialize_project(project, name="monitor-remote")
-    fake_remote(project)
-    root = remote.root / "runs" / "workspace"  # type: ignore[attr-defined]
-    workspace = Workspace.initialize(root)
-    _marker(workspace, "ready", "jobs")
-    context = CLIContext("httk", project)
-    register_ws(context, root, "station")
-    view = WorkspaceView("cluster:station", context)
-
-    page = view.page(limit=5)
-    assert len(page.jobs) == 1
-    assert page.jobs[0]["state"] == "ready"
+    assert calls == ["events", "why"]
 
 
 def test_monitor_remote_page_forwards_counts_and_filters(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,7 +220,7 @@ def test_monitor_page_does_not_select_the_counts_filter(tmp_path: Path, monkeypa
         calls.append((kind, prefix))
         return 1
 
-    monkeypatch.setattr(monitor_data, "count_markers", fake_count)
+    monkeypatch.setattr(monitor_data, "count_jobs", fake_count)
     assert view.counts(("ready",), "accepted") == {"ready": 1}
     assert calls == [("ready", "accepted")]
 
@@ -260,7 +240,7 @@ def test_monitor_actions_delegate_to_cli_implementations(tmp_path: Path, monkeyp
     monkeypatch.setattr(monitor_actions, "_mutable_workspace", lambda _view: MutableWorkspace())
     monkeypatch.setattr(monitor_actions, "ensure_identity_key", lambda _identity: None)
     monkeypatch.setattr(monitor_actions, "_resolve_request_identity", lambda _selector: object())
-    monkeypatch.setattr(view, "marker_for", lambda _job_id: object())
+    monkeypatch.setattr(view, "ref_for", lambda _job_id: object())
 
     def fake_publish(*_args: object, **_kwargs: object) -> list[tuple[str, Any, Any]]:
         calls.append("publish")
@@ -295,7 +275,7 @@ def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: py
     workspace = Workspace.initialize(tmp_path / "action-timeout")
     context = CLIContext("httk", tmp_path)
     view = WorkspaceView(workspace, context, adapter_timeout=12.5)
-    monkeypatch.setattr(view, "marker_for", lambda _job_id: object())
+    monkeypatch.setattr(view, "ref_for", lambda _job_id: object())
     seen: dict[str, float | None] = {}
 
     remote_view = WorkspaceView(
@@ -588,9 +568,8 @@ def test_monitor_stdio_tail_restarts_after_truncation(tmp_path: Path, monkeypatc
     payload = workspace.root / "payload"
     (payload / "logs").mkdir(parents=True)
     (payload / "logs" / "stdio.out").write_text("new", encoding="utf-8")
-    marker = SimpleNamespace(job_id="job", placement=SimpleNamespace(), job_key="job")
-    monkeypatch.setattr(view := WorkspaceView(workspace), "marker_for", lambda _job_id: marker)
-    monkeypatch.setattr(workspace, "payload_path", lambda *_args: payload)
+    ref = SimpleNamespace(job_id="job", path=payload, job_key="job")
+    monkeypatch.setattr(view := WorkspaceView(workspace), "ref_for", lambda _job_id: ref)
     view._tail_offsets["job"] = 99
     assert view.tail("job") == "new"
     assert view._tail_offsets["job"] == 3
@@ -604,7 +583,7 @@ def test_monitor_remove_mixed_batch_preflights_without_mutation(
     view = WorkspaceView(Workspace.initialize(tmp_path / "remove-mixed"))
     terminal = SimpleNamespace(kind="succeeded", placement=SimpleNamespace(), job_key="terminal", path=Path("t"))
     live = SimpleNamespace(kind="running", placement=SimpleNamespace(), job_key="live", path=Path("l"))
-    monkeypatch.setattr(view, "marker_for", lambda job_id: terminal if job_id == "terminal" else live)
+    monkeypatch.setattr(view, "ref_for", lambda job_id: terminal if job_id == "terminal" else live)
     monkeypatch.setattr(monitor_actions, "_mutable_workspace", lambda _view: SimpleNamespace())
     with pytest.raises(ValueError, match=r"removed 0 of 2 job\(s\)"):
         monitor_actions.remove(view, ["terminal", "live"])

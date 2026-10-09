@@ -6,7 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..models import STATE_KINDS
+from ..introspection import JOB_STATES
 from ..removal import REMOVABLE_KINDS
 from .actions import Actions
 from .data import WorkspaceView
@@ -83,7 +83,7 @@ def render_workspace_pane(state: MonitorState, *, width: int = 28, height: int |
         lines.append(f"{marker} {_clip(view.name, width - 3)}")
         counts = state.counts if index == state.active_workspace else {}
         if counts:
-            for kind in STATE_KINDS:
+            for kind in JOB_STATES:
                 if kind in counts:
                     lines.append(f"    {kind:<12} {counts[kind]}")
         if index == state.active_workspace and view.remote:
@@ -125,7 +125,7 @@ def render_detail_pane(detail: dict[str, Any] | None, *, width: int = 60, height
         lines = ["DETAIL", "  press Enter to inspect the selected job"]
     else:
         lines = ["DETAIL"]
-        for key in ("job_id", "job_key", "state", "step", "placement", "reason"):
+        for key in ("job_id", "job_key", "state", "step", "placement"):
             if key in detail:
                 lines.append(f"  {key}: {detail[key]}")
         why = detail.get("why")
@@ -133,9 +133,9 @@ def render_detail_pane(detail: dict[str, Any] | None, *, width: int = 60, height
             summary = why.get("summary") or why.get("message")
             if summary:
                 lines.append(f"  why: {summary}")
-        lines.append("  frames:")
-        frames = detail.get("frames", [])
-        lines.extend(f"    {item}" for item in frames[-5:] if item)
+        lines.append("  events:")
+        events = detail.get("events", [])
+        lines.extend(f"    {item}" for item in events[-5:] if item)
         lines.append("  stdio tail:")
         lines.extend(f"    {line}" for line in str(detail.get("stdio_tail", "")).splitlines()[-12:])
     result = [line[:width] for line in lines]
@@ -291,7 +291,7 @@ class MonitorApp:
                 self.state.detail = None
             generation = self.state.generation
             view = self.state.view
-            kinds = self.state.kind_filter or tuple(STATE_KINDS)
+            kinds = self.state.kind_filter or tuple(JOB_STATES)
             self.future = self.executor.submit(
                 self._load,
                 generation,
@@ -353,7 +353,7 @@ class MonitorApp:
                     if kind == "why":
                         self.state.detail = {**(self.state.detail or {}), "why": value}
                     else:
-                        self.state.detail = {**(self.state.detail or {}), "frames": value}
+                        self.state.detail = {**(self.state.detail or {}), "events": value}
             except Exception as exc:
                 self.state.status = f"detail error: {exc}"
             self.extra_future = None
@@ -540,7 +540,7 @@ class MonitorApp:
                 if normalized == "f":
                     value = self._prompt("filter kind placement tag (blank clears): ")
                     parts = value.split()
-                    self.state.kind_filter = tuple(part for part in parts if part in STATE_KINDS)
+                    self.state.kind_filter = tuple(part for part in parts if part in JOB_STATES)
                     self.state.placement_prefix = next((part[5:] for part in parts if part.startswith("path=")), None)
                     self.state.tag_contains = next((part[4:] for part in parts if part.startswith("tag=")), None)
                     self.state.page_cursor = None

@@ -1,33 +1,27 @@
-"""Authoritative job, marker, state, and journal readers."""
+"""Read-only views of jobs on the filesystem kernel: selectors, listings, state and run logs."""
 
 import glob
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .. import _kernel
+from .._job import JobDefinition
+from .._kernel import OWNED, JobRef
+from .._state import UNOWNED_STATES, StateDoc, read_state_unowned
 from .._util import read_json
-from ..errors import FormatError, WorkflowError, WorkspaceCorruptionError
-from ..journal import read_record
-from ..models import (
-    ATTEMPTS_DIRECTORY,
-    LOGS_DIRECTORY,
-    STATE_KINDS,
-    JobDefinition,
-    Marker,
-    normalize_placement,
-    parse_job_key,
-    placement_text,
-    validate_attempt_control,
-)
-from ..workspace import MarkerFault, Workspace, _marker_shaped, _safe_is_dir, _scandir_sorted
+from ..errors import FormatError, WorkflowError
+from ..models import ATTEMPTS_DIRECTORY, JOB_STATE_DIRECTORY, normalize_placement, parse_job_key, placement_text
+from ..workspace import Workspace
 
 JOB_HISTORY_FORMAT = "httk-workflow-job-history"
 JOB_LIST_FORMAT = "httk-workflow-job-list"
-_HISTORY_READ_DEADLINE_SECONDS = 0.1
-#: How much of a runlog's tail to read when surfacing its last headline. A
-#: runlog can grow without bound, so the report reads only the final slice.
+#: Every state a job directory can be in, in listing order: the six unowned states, then owned.
+JOB_STATES = (*UNOWNED_STATES, OWNED)
+#: How much of a run log's tail to read when surfacing its last headline. A
+#: run log can grow without bound, so the report reads only the final slice.
 _RUNLOG_TAIL_BYTES = 65536
 
 
@@ -35,27 +29,24 @@ _RUNLOG_TAIL_BYTES = 65536
 class JobListPage:
     """A page of job rows and the cursor needed to request the next page.
 
-    :param jobs: The rows in stable state-kind, placement, and job-key order.
+    Enumeration is weakly consistent while owners move jobs: a job can appear
+    twice or be missed if it changes state between page requests. Clients
+    should deduplicate pages by ``job_id``. When ``tag_contains`` is active with
+    a finite ``limit``, a page may be partial: at most ``max(limit * 100,
+    10_000)`` jobs are examined before the returned cursor resumes the filter
+    scan.
+
+    :param jobs: The rows in state, placement and directory-name order.
     :param next_after: The cursor of the last row when more matching rows exist.
     :param counts: Optional counts carried by a remote page response.
-
-    Enumeration is weakly consistent while managers transition jobs: a job can
-    appear twice or be missed if it changes kind between page requests. Clients
-    should deduplicate pages by ``job_id``. A flat placement directory is read
-    and sorted as one directory listing, so a page over 100,000 markers in one
-    placement legitimately pays that directory's listing/sort cost. When
-    ``tag_contains`` is active with a finite ``limit``, a page may be partial:
-    at most ``max(limit * 100, 10_000)`` markers are examined before the
-    returned cursor resumes the filter scan. With ``limit=None`` the filtered
-    human-table read scans the complete selected stream.
     """
 
     jobs: list[dict[str, Any]]
     next_after: str | None
     counts: dict[str, int] | None = None
 
-    def __iter__(self):
-        """Iterate over rows, retaining the historical list-like API."""
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        """Iterate over the rows."""
 
         return iter(self.jobs)
 
@@ -65,291 +56,206 @@ class JobListPage:
         return len(self.jobs)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        """Return one row by its page index."""
+        """Return one row by its page index.
+
+        :param index: The row index.
+        :return: The row.
+        """
 
         return self.jobs[index]
 
 
-def read_last_headline(payload: str | Path | None) -> str | None:
-    """Return the message of the last ``headline`` run-log event, if any.
+def _check_states(states: Iterable[str] | None) -> tuple[str, ...]:
+    requested = set(JOB_STATES if states is None else states)
+    if unknown := requested - set(JOB_STATES):
+        raise ValueError(f"unknown job state {', '.join(sorted(unknown))}; states are {', '.join(JOB_STATES)}")
+    return tuple(state for state in JOB_STATES if state in requested)
 
-    The runlog is JSON lines a runner appends in its payload; a ``headline``
-    event is the runner's own one-line summary of where it is. Only the tail of
-    the file is read, so a long-running runner's headline is cheap to surface.
 
-    :param payload: The job payload whose ``logs/runlog.jsonl`` to read.
-    :return: The last headline message, or ``None`` when there is none to read.
+def _owned_refs(workspace: Workspace, after: tuple[str, str] | None = None) -> Iterator[JobRef]:
+    """Yield the owned jobs in ``(owner id, directory name)`` order, strictly after *after*."""
+
+    root = workspace.jobs / OWNED
+    try:
+        owners = sorted(entry.name for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink())
+    except OSError:
+        return
+    for owner_id in owners:
+        try:
+            names = sorted(entry.name for entry in (root / owner_id).iterdir())
+        except OSError:
+            continue
+        for name in names:
+            if after is not None and (owner_id, name) <= after:
+                continue
+            try:
+                yield JobRef.from_path(root / owner_id / name, state=OWNED, owner_id=owner_id)
+            except FormatError:
+                continue
+
+
+def job_placement(ref: JobRef) -> PurePosixPath | None:
+    """Return a job's placement: from its name for an unowned job, from ``job.json`` for an owned one.
+
+    :param ref: The job.
+    :return: The placement, or ``None`` when an owned job's ``job.json`` cannot be read.
     """
 
-    if payload is None:
-        return None
-    path = Path(payload) / LOGS_DIRECTORY / "runlog.jsonl"
+    if ref.placement is not None:
+        return ref.placement
+    job, _ = read_job(ref)
+    return None if job is None else job.placement
+
+
+def iter_jobs(
+    workspace: Workspace,
+    states: Iterable[str] | None = None,
+    *,
+    placement_prefix: str | PurePosixPath | None = None,
+) -> Iterator[JobRef]:
+    """Stream the jobs of the selected states, in :data:`JOB_STATES` and then placement order.
+
+    :param workspace: The workspace.
+    :param states: The states to list; every state when ``None``.
+    :param placement_prefix: Restrict the listing to this placement subtree.
+    :yields: The job references (hints: a job may move right after it is listed).
+    :raises ValueError: For an unknown state.
+    """
+
+    prefix = None if placement_prefix is None else normalize_placement(placement_prefix)
+    for state in _check_states(states):
+        if state != OWNED:
+            yield from _kernel.list_jobs(workspace, state, prefixes=() if prefix is None else (prefix,))
+            continue
+        for ref in _owned_refs(workspace):
+            placement = job_placement(ref) if prefix is not None else None
+            if prefix is None or (placement is not None and placement.is_relative_to(prefix)):
+                yield ref
+
+
+def count_jobs(workspace: Workspace, state: str, placement_prefix: str | PurePosixPath | None = None) -> int:
+    """Count the jobs of one state by listing, reading nothing but owned jobs' placements.
+
+    :param workspace: The workspace.
+    :param state: One of :data:`JOB_STATES`.
+    :param placement_prefix: Restrict the count to this placement subtree.
+    :return: The number of jobs.
+    :raises ValueError: For an unknown state.
+    """
+
+    return sum(1 for _ in iter_jobs(workspace, (state,), placement_prefix=placement_prefix))
+
+
+def read_job(ref: JobRef) -> tuple[JobDefinition | None, str | None]:
+    """Return a job's definition, reporting rather than raising on damage.
+
+    :param ref: The job.
+    :return: The definition and ``None``, or ``None`` and the reason it is unreadable.
+    """
+
+    try:
+        return JobDefinition.from_path(ref.path / "job.json"), None
+    except (WorkflowError, OSError, ValueError) as exc:
+        return None, str(exc)
+
+
+def read_state(ref: JobRef) -> tuple[StateDoc | None, str | None]:
+    """Return a job's ``state.json``, absent before its first claim, reporting damage instead of raising.
+
+    :param ref: The job.
+    :return: The document (or ``None``) and the damage description (or ``None``).
+    """
+
+    doc, damaged = read_state_unowned(ref.path / "state.json")
+    if damaged:
+        return None, f"{ref.path / 'state.json'} is damaged"
+    if doc is not None and doc.job_id != ref.job_id:
+        return None, f"{ref.path / 'state.json'} names job {doc.job_id}"
+    return doc, None
+
+
+def _jsonl(path: Path, *, tail: int | None = None) -> list[dict[str, Any]]:
+    """Read a JSON-lines log, skipping a torn last line; an unreadable earlier line becomes an ``error`` entry."""
+
+    start = 0
     try:
         with path.open("rb") as handle:
-            handle.seek(0, 2)
-            handle.seek(max(0, handle.tell() - _RUNLOG_TAIL_BYTES))
+            if tail is not None:
+                start = max(0, handle.seek(0, 2) - tail)
+                handle.seek(start)
             data = handle.read()
     except OSError:
-        return None
-    headline: str | None = None
-    for raw in data.split(b"\n"):
+        return []
+    lines = data.split(b"\n")
+    # A file that does not end in a newline ends in a line still being written.
+    lines.pop()
+    if start and lines:
+        lines.pop(0)  # the slice starts mid-line
+    events: list[dict[str, Any]] = []
+    for number, raw in enumerate(lines, 1):
         if not raw.strip():
             continue
         try:
             event = json.loads(raw)
         except ValueError:
-            continue
-        if isinstance(event, Mapping) and event.get("kind") == "headline" and isinstance(event.get("message"), str):
+            event = None
+        events.append(event if isinstance(event, dict) else {"error": f"{path}: line {number} is not a JSON object"})
+    return events
+
+
+def job_events(ref: JobRef, *, limit: int | None = None) -> list[dict[str, Any]]:
+    """Return the owner run log ``logs/runlog.jsonl`` of one job, oldest first.
+
+    Each event is the object an owner appended (``at``, ``event``,
+    ``owner_id`` and, as relevant, ``attempt_id``, ``activation_id``, ``step``,
+    ``from``, ``to``, ``detail``). A torn last line is skipped; an unreadable
+    earlier line is reported in place as ``{"error": ...}``.
+
+    :param ref: The job.
+    :param limit: Keep only the newest *limit* events.
+    :return: The events.
+    """
+
+    events = _jsonl(ref.path / "logs" / "runlog.jsonl")
+    return events if limit is None else events[-limit:]
+
+
+def read_last_headline(payload: str | Path | None) -> str | None:
+    """Return the message of the runner's last ``headline`` record in ``.httk-job/runlog.jsonl``, if any.
+
+    Only the tail of the file is read, so a long-running runner's headline is cheap to surface.
+
+    :param payload: The job directory.
+    :return: The last headline message, or ``None`` when there is none to read.
+    """
+
+    if payload is None:
+        return None
+    headline: str | None = None
+    for event in _jsonl(Path(payload) / JOB_STATE_DIRECTORY / "runlog.jsonl", tail=_RUNLOG_TAIL_BYTES):
+        if event.get("kind") == "headline" and isinstance(event.get("message"), str):
             headline = event["message"]
     return headline
 
 
-def resolve_job(workspace: Workspace, selector: str) -> Marker:
-    """Return the marker of the one job *selector* names.
+def attempt_control(ref: JobRef, doc: StateDoc | None) -> Path | None:
+    """Return the attempt directory of a job's current (or last) attempt.
 
-    A selector is a job UUID, a complete ``tag--uuid`` job key, or any unique
-    prefix of either. An ambiguous selector is refused with the candidates it
-    matched rather than resolved arbitrarily.
+    :param ref: The job.
+    :param doc: Its state.
+    :return: ``attempts/<attempt-id>``, or ``None`` without a recorded attempt.
     """
 
-    markers = list(workspace.scan_markers(STATE_KINDS))
-    exact = [marker for marker in markers if selector in {marker.job_id, marker.job_key}]
-    if len(exact) > 1:
-        raise WorkspaceCorruptionError(f"job {selector} has more than one state marker")
-    if exact:
-        return exact[0]
-    if not selector:
-        raise ValueError("a job selector cannot be empty")
-    matches = [
-        marker for marker in markers if marker.job_id.startswith(selector) or marker.job_key.startswith(selector)
-    ]
-    if not matches:
-        raise ValueError(f"no job in {workspace.root} matches {selector!r}")
-    if len(matches) > 1:
-        candidates = ", ".join(sorted(marker.job_key for marker in matches)[:5])
-        raise ValueError(f"job selector {selector!r} matches {len(matches)} jobs: {candidates}")
-    return matches[0]
-
-
-def selector_is_path(cwd: Path, selector: str) -> bool:
-    """Return whether *selector* must be interpreted as a local path."""
-
-    return any(character in selector for character in "*?[") or (cwd / selector).exists()
-
-
-def selector_uses_remote_path(cwd: Path, selector: str) -> bool:
-    """Return whether a selector cannot be forwarded to a remote workspace."""
-
-    return "/" in selector or selector_is_path(cwd, selector)
-
-
-class JobSelectorResolver:
-    """Resolve job selectors while sharing one marker scan for a batch."""
-
-    def __init__(self, workspace: Workspace, cwd: Path) -> None:
-        self.workspace = workspace
-        self.cwd = cwd.resolve()
-        self._markers: list[Marker] | None = None
-
-    def _all_markers(self) -> list[Marker]:
-        if self._markers is None:
-            self._markers = list(self.workspace.scan_markers(STATE_KINDS))
-        return self._markers
-
-    def _resolve_id(self, selector: str) -> Marker:
-        markers = self._all_markers()
-        exact = [marker for marker in markers if selector in {marker.job_id, marker.job_key}]
-        if len(exact) > 1:
-            raise WorkspaceCorruptionError(f"job {selector} has more than one state marker")
-        if exact:
-            return exact[0]
-        if not selector:
-            raise ValueError("a job selector cannot be empty")
-        matches = [
-            marker for marker in markers if marker.job_id.startswith(selector) or marker.job_key.startswith(selector)
-        ]
-        if not matches:
-            raise ValueError(f"no job in {self.workspace.root} matches {selector!r}")
-        if len(matches) > 1:
-            candidates = ", ".join(sorted(marker.job_key for marker in matches)[:5])
-            raise ValueError(f"job selector {selector!r} matches {len(matches)} jobs: {candidates}")
-        return matches[0]
-
-    def _resolve_job_definition(self, path: Path, display_path: str) -> list[Marker]:
-        job = JobDefinition.from_path(path)
-        matches = [marker for marker in self._all_markers() if marker.job_id == job.id]
-        if len(matches) > 1:
-            raise WorkspaceCorruptionError(f"job {job.id} has more than one state marker")
-        if not matches:
-            raise ValueError(f"{display_path} is a job directory without a state marker (removed job?)")
-        return matches
-
-    def _resolve_path(self, path_name: str) -> list[Marker]:
-        path = Path(path_name)
-        resolved = (path if path.is_absolute() else self.cwd / path).resolve()
-        root = self.workspace.root.resolve()
-        if not resolved.is_relative_to(root):
-            raise ValueError(f"{path_name} is not inside workspace {root}")
-        if not resolved.is_relative_to(self.workspace.jobs.resolve()):
-            raise ValueError(
-                f"{path_name} is not below the jobs directory {self.workspace.jobs}; job payloads live in jobs/"
-            )
-
-        if resolved.is_file():
-            raise ValueError(f"{path_name} is a file, not a job directory")
-        if not resolved.is_dir():
-            raise ValueError(f"{path_name} is not a job directory or placement directory")
-        job_json = resolved / "job.json"
-        if job_json.is_file():
-            return self._resolve_job_definition(job_json, path_name)
-
-        matches = [
-            marker
-            for marker in self._all_markers()
-            if self.workspace.payload_path(marker.placement, marker.job_key).resolve().is_relative_to(resolved)
-        ]
-        if not matches:
-            raise ValueError(f"no jobs below {path_name}")
-        return sorted(
-            matches,
-            key=lambda marker: str(self.workspace.payload_path(marker.placement, marker.job_key).resolve()),
-        )
-
-    def resolve_one(self, selector: str) -> list[Marker]:
-        """Resolve one selector, expanding a glob or returning matching jobs."""
-
-        if any(character in selector for character in "*?["):
-            paths = sorted(glob.glob(selector, root_dir=self.cwd))
-            if not paths:
-                raise ValueError(f"no path matches {selector!r} below {self.cwd}")
-            markers: list[Marker] = []
-            for path in paths:
-                markers.extend(self._resolve_path(path))
-            return self._deduplicate(markers)
-        if (self.cwd / selector).exists():
-            return self._deduplicate(self._resolve_path(selector))
-        return [self._resolve_id(selector)]
-
-    @staticmethod
-    def _deduplicate(markers: Iterable[Marker]) -> list[Marker]:
-        """Remove repeated jobs while retaining their first expansion order."""
-
-        unique: list[Marker] = []
-        seen: set[str] = set()
-        for marker in markers:
-            if marker.job_id not in seen:
-                seen.add(marker.job_id)
-                unique.append(marker)
-        return unique
-
-
-def resolve_job_selector(workspace: Workspace, cwd: Path, selector: str) -> list[Marker]:
-    """Resolve one job selector relative to *cwd*.
-
-    :param workspace: Provide the jobs and their live state markers.
-    :param cwd: Resolve relative path selectors from this directory.
-    :param selector: Name, prefix, path, or glob naming jobs.
-    :return: The live markers named by the selector, in payload-path order for globs.
-    """
-
-    return JobSelectorResolver(workspace, cwd).resolve_one(selector)
-
-
-def resolve_job_selectors(workspace: Workspace, cwd: Path, selectors: Iterable[str]) -> list[Marker]:
-    """Resolve and deduplicate job selectors relative to *cwd*.
-
-    :param workspace: Provide the jobs and their live state markers.
-    :param cwd: Resolve relative path selectors from this directory.
-    :param selectors: Selectors in the order supplied by the operator.
-    :return: Unique live markers preserving selector and expansion order.
-    """
-
-    resolver = JobSelectorResolver(workspace, cwd)
-    resolved: list[Marker] = []
-    seen: set[str] = set()
-    for selector in selectors:
-        for marker in resolver.resolve_one(selector):
-            if marker.job_id not in seen:
-                seen.add(marker.job_id)
-                resolved.append(marker)
-    return resolved
-
-
-def _state_of(workspace: Workspace, marker: Marker) -> tuple[dict[str, Any], str | None]:
-    """Return one job's state frame, reporting rather than raising on damage."""
-
-    try:
-        return workspace.read_state(marker), None
-    except (WorkflowError, OSError) as exc:
-        return {}, str(exc)
-
-
-def _job_of(workspace: Workspace, marker: Marker) -> tuple[JobDefinition | None, str | None]:
-    """Return one job's immutable definition, reporting rather than raising."""
-
-    try:
-        return workspace.load_job(marker), None
-    except (WorkflowError, OSError) as exc:
-        return None, str(exc)
-
-
-def _optional_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def _optional_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
-def _optional_string(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
-def _workdir_relative(job: JobDefinition | None, state: Mapping[str, Any]) -> PurePosixPath | None:
-    """Return the payload-relative workdir of one job's current attempt."""
-
-    recorded = _optional_string(state.get("workdir"))
-    if recorded is not None:
-        return PurePosixPath(recorded)
-    if job is None:
-        return None
-    if job.workdir_mode == "persistent":
-        return job.workdir_path
-    attempt_id = _optional_string(state.get("attempt_id"))
-    if attempt_id is None:
-        return None
-    base = job.workdir_path
-    return base.parent / f"{base.name}.{attempt_id}"
-
-
-def _attempt_control(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path | None:
-    """Return the attempt control directory of one job's last attempt."""
-
-    name = _optional_string(state.get("attempt_control"))
-    if name is None:
-        attempt_id = _optional_string(state.get("attempt_id"))
-        name = None if attempt_id is None else f"{ATTEMPTS_DIRECTORY}/{attempt_id}"
-    if name is None:
-        return None
-    try:
-        name = validate_attempt_control(name, "state.attempt_control")
-    except FormatError:
-        return None
-    return workspace.payload_path(marker.placement, marker.job_key) / name
+    attempt_id = None if doc is None or doc.attempt is None else doc.attempt.get("id")
+    return ref.path / ATTEMPTS_DIRECTORY / attempt_id if isinstance(attempt_id, str) else None
 
 
 def read_error_breadcrumb(control: Path | None) -> dict[str, Any] | None:
-    """Return the ``error.json`` breadcrumb of one attempt, when it left one."""
+    """Return the ``error.json`` breadcrumb of one attempt, when it left one.
+
+    :param control: The attempt directory.
+    :return: The breadcrumb, or ``None``.
+    """
 
     if control is None:
         return None
@@ -359,212 +265,196 @@ def read_error_breadcrumb(control: Path | None) -> dict[str, Any] | None:
         return None
 
 
-def job_frames(workspace: Workspace, marker: Marker, *, limit: int | None = None) -> list[dict[str, Any]]:
-    """Return the state frames of one job, oldest first.
+def _matches(ref: JobRef, selector: str) -> bool:
+    return ref.job_id.startswith(selector) or ref.job_key.startswith(selector)
 
-    The walk starts at the frame the authoritative marker names and follows
-    ``previous_record_ref`` backward, which is the only ordering the protocol
-    guarantees. A frame that cannot be read is reported in place as an ``error``
-    entry and ends the walk: whatever history remains readable is still shown.
+
+def _resolve_id(workspace: Workspace, selector: str, refs: Iterable[JobRef]) -> JobRef:
+    if not selector:
+        raise ValueError("a job selector cannot be empty")
+    try:
+        job_id = parse_job_key(selector)[1]
+    except FormatError:
+        job_id = None
+    if job_id is not None:
+        ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
+        if ref is not None and selector in {ref.job_id, ref.job_key}:
+            return ref
+    matches = {ref.job_id: ref for ref in refs if _matches(ref, selector)}
+    if not matches:
+        raise ValueError(f"no job in {workspace.root} matches {selector!r}")
+    if len(matches) > 1:
+        candidates = ", ".join(sorted(ref.job_key for ref in matches.values())[:5])
+        raise ValueError(f"job selector {selector!r} matches {len(matches)} jobs: {candidates}")
+    return next(iter(matches.values()))
+
+
+def resolve_job(workspace: Workspace, selector: str) -> JobRef:
+    """Return the one job *selector* names.
+
+    A selector is a job UUID, a complete ``tag--uuid`` job key, or any unique
+    prefix of either. An ambiguous selector is refused with the candidates it
+    matched rather than resolved arbitrarily.
+
+    :param workspace: The workspace.
+    :param selector: The selector.
+    :return: The job.
+    :raises ValueError: For an empty, unknown or ambiguous selector.
     """
 
-    frames: list[dict[str, Any]] = []
-    record_ref: str | None = None if marker.record_ref == "init" else marker.record_ref
-    seen: set[str] = set()
-    while record_ref is not None:
-        if record_ref in seen:
-            frames.append(
-                {
-                    "record_ref": record_ref,
-                    "error": "the journal chain of this job is cyclic",
-                }
-            )
-            break
-        seen.add(record_ref)
-        try:
-            frame = read_record(
-                workspace.control,
-                record_ref,
-                deadline_seconds=_HISTORY_READ_DEADLINE_SECONDS,
-            )
-        except (WorkflowError, ValueError) as exc:
-            frames.append({"record_ref": record_ref, "error": str(exc)})
-            break
-        frames.append({**frame, "record_ref": record_ref})
-        if limit is not None and len(frames) >= limit:
-            break
-        record_ref = _optional_string(frame.get("previous_record_ref"))
-    frames.reverse()
-    return frames
+    return _resolve_id(workspace, selector, iter_jobs(workspace))
 
 
-def _parse_marker_cursor(cursor: str) -> tuple[tuple[str, ...], str]:
-    """Parse the placement and job key in an enumeration cursor."""
+def selector_is_path(cwd: Path, selector: str) -> bool:
+    """Return whether *selector* must be interpreted as a local path.
 
-    text, _separator, job_key = cursor.rpartition("/")
-    if not job_key:
-        raise ValueError("marker cursor must be '<placement>/<job_key>' or, for the empty placement, '<job_key>'")
-    placement = normalize_placement(text).parts
-    parse_job_key(job_key)
-    return placement, job_key
-
-
-def _cursor_text(kind: str, placement: str, job_key: str) -> str:
-    """Build a paging cursor; the empty placement contributes no ``/``."""
-
-    return f"{kind}:{placement}/{job_key}" if placement else f"{kind}:{job_key}"
-
-
-def _directory_after_relation(rel: tuple[str, ...], after: tuple[str, ...] | None) -> str:
-    """Classify one placement directory against a placement cursor."""
-
-    if after is None:
-        return "all"
-    if rel == after:
-        return "equal"
-    if len(rel) < len(after) and after[: len(rel)] == rel:
-        return "ancestor"
-    if rel < after:
-        return "skip"
-    return "all"
-
-
-def _iter_ordered_marker_directory(
-    workspace: Workspace,
-    directory: Path,
-    rel: tuple[str, ...],
-    after: tuple[tuple[str, ...], str] | None,
-) -> Iterable[Marker]:
-    """Yield one placement directory, then its child placements, lazily."""
-
-    entries = _scandir_sorted(directory)
-    marker_entries = []
-    child_entries = []
-    for entry in entries:
-        if _safe_is_dir(entry):
-            child_entries.append(entry)
-        elif _marker_shaped(entry.name):
-            try:
-                if entry.is_file(follow_symlinks=False):
-                    marker_entries.append(entry)
-            except OSError:
-                continue
-
-    after_placement = None if after is None else after[0]
-    relation = _directory_after_relation(rel, after_placement)
-    if relation != "skip":
-        seen_job_keys: set[str] = set()
-        for entry in marker_entries:
-            try:
-                marker = Marker.from_path(workspace.control / "state", directory / entry.name)
-            except (WorkflowError, ValueError) as exc:
-                workspace.report_marker_fault(MarkerFault(path=directory / entry.name, reason=str(exc)))
-                continue
-            if marker.job_key in seen_job_keys:
-                workspace.report_marker_fault(
-                    MarkerFault(
-                        path=marker.path,
-                        reason="duplicate current marker for job key; skipping this marker",
-                    )
-                )
-                continue
-            seen_job_keys.add(marker.job_key)
-            if after is not None:
-                if relation in {"ancestor", "skip"}:
-                    continue
-                if relation == "equal" and marker.job_key <= after[1]:
-                    continue
-            yield marker
-
-    for entry in child_entries:
-        child_rel = rel + (entry.name,)
-        if _directory_after_relation(child_rel, after_placement) == "skip":
-            continue
-        yield from _iter_ordered_marker_directory(workspace, directory / entry.name, child_rel, after)
-
-
-def iter_markers(
-    workspace: Workspace,
-    kinds: Iterable[str] | None = None,
-    *,
-    placement_prefix: str | None = None,
-    after: str | None = None,
-) -> Iterable[Marker]:
-    """Yield markers in stable kind, placement, and job-key order.
-
-    Each kind is walked in :data:`STATE_KINDS` order. Within a kind, placements
-    use lexicographic path order and markers at one placement use job-key order.
-    If duplicate current markers share a kind, placement, and job key, the
-    lexically first marker basename is retained; later markers are reported as
-    faults and skipped, so a cursor never compares equal to two rows.
-    A placement prefix starts the walk directly at that state subtree. ``after``
-    is a ``<placement>/<job_key>`` cursor and is exclusive; the walk prunes
-    placement subtrees that cannot contain a later marker.
-
-    :param workspace: Provide the workspace to inspect.
-    :param kinds: Restrict the walk to these state kinds.
-    :param placement_prefix: Restrict the walk to this placement subtree.
-    :param after: Resume strictly after this placement/job-key cursor.
-    :yield: Valid markers in cursor-stable order.
+    :param cwd: The directory relative selectors resolve from.
+    :param selector: The selector.
+    :return: Whether it is a glob or an existing path.
     """
 
-    requested = set(kinds or STATE_KINDS)
-    selected = tuple(kind for kind in STATE_KINDS if kind in requested)
-    prefix = None if placement_prefix is None else normalize_placement(placement_prefix).parts
-    after_kind: str | None = None
-    after_local = after
-    if after is not None:
-        possible_kind, separator, possible_local = after.partition(":")
-        if separator and possible_kind in STATE_KINDS:
-            after_kind = possible_kind
-            after_local = possible_local
-            if after_kind not in selected:
-                selected_names = ", ".join(selected) or "none"
-                raise ValueError(
-                    f"job list cursor kind {after_kind!r} is not among the selected kinds ({selected_names})"
-                )
-    parsed_after = None if after_local is None else _parse_marker_cursor(after_local)
-    for kind in selected:
-        if after_kind is not None and STATE_KINDS.index(kind) < STATE_KINDS.index(after_kind):
-            continue
-        base = workspace.control / "state" / kind
-        start = base if prefix is None else base.joinpath(*prefix)
-        yield from _iter_ordered_marker_directory(
-            workspace,
-            start,
-            prefix or (),
-            parsed_after if after_kind is None or kind == after_kind else None,
+    return any(character in selector for character in "*?[") or (cwd / selector).exists()
+
+
+def selector_uses_remote_path(cwd: Path, selector: str) -> bool:
+    """Return whether a selector cannot be forwarded to a remote workspace.
+
+    :param cwd: The directory relative selectors resolve from.
+    :param selector: The selector.
+    :return: Whether it names a local path.
+    """
+
+    return "/" in selector or selector_is_path(cwd, selector)
+
+
+class JobSelectorResolver:
+    """Resolve job selectors while sharing one listing of the workspace for a batch.
+
+    A path selector names a job directory, or any directory below ``jobs/``
+    (a state, a placement), meaning every job below it.
+
+    :param workspace: The workspace.
+    :param cwd: The directory relative path selectors resolve from.
+    """
+
+    def __init__(self, workspace: Workspace, cwd: Path) -> None:
+        self.workspace = workspace
+        self.cwd = cwd.resolve()
+        self._refs: list[JobRef] | None = None
+
+    def _all(self) -> list[JobRef]:
+        if self._refs is None:
+            self._refs = list(iter_jobs(self.workspace))
+        return self._refs
+
+    def _resolve_path(self, path_name: str) -> list[JobRef]:
+        path = Path(path_name)
+        resolved = (path if path.is_absolute() else self.cwd / path).resolve()
+        if not resolved.is_relative_to(self.workspace.root.resolve()):
+            raise ValueError(f"{path_name} is not inside workspace {self.workspace.root}")
+        jobs = self.workspace.jobs.resolve()
+        if not resolved.is_relative_to(jobs):
+            raise ValueError(f"{path_name} is not below the jobs directory {self.workspace.jobs}; jobs live in jobs/")
+        if resolved.is_file():
+            raise ValueError(f"{path_name} is a file, not a job directory")
+        if not resolved.is_dir():
+            raise ValueError(f"{path_name} is not a job directory or a directory of jobs")
+        matches = sorted(
+            (ref for ref in self._all() if ref.path.resolve().is_relative_to(resolved)), key=lambda ref: str(ref.path)
         )
+        if not matches:
+            raise ValueError(f"no jobs below {path_name}")
+        return matches
+
+    def resolve_one(self, selector: str) -> list[JobRef]:
+        """Resolve one selector, expanding a glob or a directory into the jobs below it.
+
+        :param selector: A job id, key, unique prefix, path or glob.
+        :return: The jobs, without repeats.
+        :raises ValueError: When the selector names no job or is ambiguous.
+        """
+
+        if any(character in selector for character in "*?["):
+            paths = sorted(glob.glob(selector, root_dir=self.cwd))
+            if not paths:
+                raise ValueError(f"no path matches {selector!r} below {self.cwd}")
+            return _unique(ref for path in paths for ref in self._resolve_path(path))
+        if (self.cwd / selector).exists():
+            return _unique(self._resolve_path(selector))
+        return [_resolve_id(self.workspace, selector, self._all())]
 
 
-def _count_marker_directory(directory: Path) -> int:
-    """Count marker-shaped regular files below one directory without reading them."""
-
-    count = 0
-    for entry in _scandir_sorted(directory):
-        if _safe_is_dir(entry):
-            count += _count_marker_directory(directory / entry.name)
-        elif _marker_shaped(entry.name):
-            try:
-                count += int(entry.is_file(follow_symlinks=False))
-            except OSError:
-                pass
-    return count
+def _unique(refs: Iterable[JobRef]) -> list[JobRef]:
+    seen: dict[str, JobRef] = {}
+    for ref in refs:
+        seen.setdefault(ref.job_id, ref)
+    return list(seen.values())
 
 
-def count_markers(workspace: Workspace, kind: str, placement_prefix: str | None = None) -> int:
-    """Count marker-shaped regular files by name, without parsing or reading them.
+def resolve_job_selector(workspace: Workspace, cwd: Path, selector: str) -> list[JobRef]:
+    """Resolve one job selector relative to *cwd*.
 
-    :param workspace: Provide the workspace to inspect.
-    :param kind: Select the state kind.
-    :param placement_prefix: Restrict the count to this placement subtree.
-    :return: The number of marker-shaped regular files.
+    :param workspace: The workspace.
+    :param cwd: Resolve relative path selectors from this directory.
+    :param selector: Name, prefix, path, or glob naming jobs.
+    :return: The jobs, in path order for paths and globs.
     """
 
-    if kind not in STATE_KINDS:
-        raise ValueError(f"unknown state kind: {kind}")
-    prefix = () if placement_prefix is None else normalize_placement(placement_prefix).parts
-    return _count_marker_directory((workspace.control / "state" / kind).joinpath(*prefix))
+    return JobSelectorResolver(workspace, cwd).resolve_one(selector)
+
+
+def resolve_job_selectors(workspace: Workspace, cwd: Path, selectors: Iterable[str]) -> list[JobRef]:
+    """Resolve and deduplicate job selectors relative to *cwd*.
+
+    :param workspace: The workspace.
+    :param cwd: Resolve relative path selectors from this directory.
+    :param selectors: Selectors in the order supplied by the operator.
+    :return: Unique jobs preserving selector and expansion order.
+    """
+
+    resolver = JobSelectorResolver(workspace, cwd)
+    return _unique(ref for selector in selectors for ref in resolver.resolve_one(selector))
+
+
+def _ref_cursor(ref: JobRef) -> str:
+    """Return ``<state>:<placement>/<name>`` (unowned) or ``owned:<owner-id>/<name>``."""
+
+    tail = f"{ref.owner_id}/{ref.path.name}" if ref.state == OWNED else ref.cursor
+    return f"{ref.state}:{tail}"
+
+
+def _stream_after(
+    workspace: Workspace, states: tuple[str, ...], prefix: PurePosixPath | None, after: str | None
+) -> Iterator[JobRef]:
+    after_state, after_tail = None, ""
+    if after is not None:
+        after_state, separator, after_tail = after.partition(":")
+        if not separator or after_state not in JOB_STATES or not after_tail:
+            raise ValueError("job list cursor must be '<state>:<placement>/<name>' or 'owned:<owner-id>/<name>'")
+        if after_state not in states:
+            raise ValueError(f"job list cursor state {after_state!r} is not among the selected states")
+    started = after_state is None
+    for state in states:
+        if not started and state != after_state:
+            continue
+        resume = None if started else after_tail
+        started = True
+        if state != OWNED:
+            prefixes = () if prefix is None else (prefix,)
+            yield from _kernel.list_jobs(workspace, state, prefixes=prefixes, start=resume)
+            continue
+        owner_id, _, name = (resume or "").partition("/")
+        for ref in _owned_refs(workspace, (owner_id, name) if resume else None):
+            placement = job_placement(ref) if prefix is not None else None
+            if prefix is None or (placement is not None and placement.is_relative_to(prefix)):
+                yield ref
+
+
+def _tag_matches(ref: JobRef, tag_contains: str | None) -> bool:
+    if tag_contains is None:
+        return True
+    tag = parse_job_key(ref.job_key)[0]
+    return tag is not None and tag_contains in tag
 
 
 def list_jobs(
@@ -576,87 +466,57 @@ def list_jobs(
     limit: int | None = None,
     tag_contains: str | None = None,
 ) -> JobListPage:
-    """Return one page of cheap rows, reading state only for that page."""
+    """Return one page of rows, reading ``state.json`` only for the rows of that page.
+
+    :param workspace: The workspace.
+    :param kinds: The states to list; every state when ``None``.
+    :param placement_prefix: Restrict the listing to this placement subtree.
+    :param after: The ``next_after`` cursor of the previous page.
+    :param limit: The most rows on the page.
+    :param tag_contains: Only list jobs whose tag contains this text.
+    :return: The page.
+    :raises ValueError: For a nonpositive limit, an unknown state or a malformed cursor.
+    """
 
     if limit is not None and limit < 1:
         raise ValueError("--limit must be positive")
-    requested = set(kinds or STATE_KINDS)
-    selected = tuple(kind for kind in STATE_KINDS if kind in requested)
-    after_kind: str | None = None
-    after_local: str | None = None
-    if after is not None:
-        after_kind, separator, after_local = after.partition(":")
-        if not separator or after_kind not in STATE_KINDS or not after_local:
-            raise ValueError("job list cursor must be '<kind>:<placement>/<job_key>' or '<kind>:<job_key>'")
-        if after_kind not in selected:
-            selected_names = ", ".join(selected) or "none"
-            raise ValueError(f"job list cursor kind {after_kind!r} is not among the selected kinds ({selected_names})")
-        _parse_marker_cursor(after_local)
-    rows: list[dict[str, Any]] = []
-    stop_reason: str | None = None
-    examined = 0
-    last_seen: Marker | None = None
+    prefix = None if placement_prefix is None else normalize_placement(placement_prefix)
+    stream = _stream_after(workspace, _check_states(kinds), prefix, after)
     scan_limit = max(limit * 100, 10_000) if tag_contains is not None and limit is not None else None
-    after_index = None if after_kind is None else STATE_KINDS.index(after_kind)
-
-    def selected_stream() -> Iterable[Marker]:
-        """Yield the selected marker streams as one cursor-ordered stream."""
-
-        for kind in selected:
-            if after_index is not None and STATE_KINDS.index(kind) < after_index:
-                continue
-            local_after = after_local if kind == after_kind else None
-            yield from iter_markers(workspace, (kind,), placement_prefix=placement_prefix, after=local_after)
-
-    stream = iter(selected_stream())
-    for marker in stream:
-        examined += 1
-        last_seen = marker
-        if tag_contains is not None:
-            tag, _ = parse_job_key(marker.job_key)
-            if tag is None or tag_contains not in tag:
-                if scan_limit is not None and examined >= scan_limit:
-                    stop_reason = "scan_budget"
-                    break
-                continue
-        state, _ = _state_of(workspace, marker)
-        rows.append(
-            {
-                "job_key": marker.job_key,
-                "job_id": marker.job_id,
-                "state": marker.kind,
-                "step": state.get("step"),
-                "placement": placement_text(marker.placement),
-                "priority": marker.priority,
-                "generation": marker.generation,
-                "reason": state.get("reason"),
-            }
-        )
+    rows: list[dict[str, Any]] = []
+    examined = 0
+    last: JobRef | None = None
+    next_after: str | None = None
+    for ref in stream:
         if limit is not None and len(rows) >= limit:
-            if scan_limit is not None and examined >= scan_limit:
-                stop_reason = "scan_budget"
+            # The page is full; it has a next page only if another matching job follows.
+            if _tag_matches(ref, tag_contains):
+                next_after = _ref_cursor(last) if last is not None else None
                 break
-            for candidate in stream:
-                examined += 1
-                last_seen = candidate
-                if tag_contains is None:
-                    stop_reason = "page_full"
-                    break
-                tag, _ = parse_job_key(candidate.job_key)
-                if tag is not None and tag_contains in tag:
-                    stop_reason = "page_full"
-                    break
-                if scan_limit is not None and examined >= scan_limit:
-                    stop_reason = "scan_budget"
-                    break
-            break
+            examined += 1
+            if scan_limit is not None and examined >= scan_limit:
+                next_after = _ref_cursor(ref)
+                break
+            continue
+        examined += 1
+        if _tag_matches(ref, tag_contains):
+            doc, _ = read_state(ref)
+            placement = job_placement(ref)
+            rows.append(
+                {
+                    "job_key": ref.job_key,
+                    "job_id": ref.job_id,
+                    "state": ref.state,
+                    "step": None if doc is None or doc.activation is None else doc.activation.get("step"),
+                    "phase": None if doc is None else doc.phase.get("kind"),
+                    "placement": None if placement is None else placement_text(placement),
+                    "priority": ref.priority,
+                    "token": ref.token,
+                    "owner_id": ref.owner_id,
+                }
+            )
+            last = ref
         if scan_limit is not None and examined >= scan_limit:
-            stop_reason = "scan_budget"
+            next_after = _ref_cursor(ref)
             break
-    next_after = None
-    if stop_reason == "scan_budget" and last_seen is not None:
-        next_after = _cursor_text(last_seen.kind, placement_text(last_seen.placement), last_seen.job_key)
-    elif stop_reason == "page_full" and rows:
-        last = rows[-1]
-        next_after = _cursor_text(last["state"], last["placement"], last["job_key"])
     return JobListPage(rows, next_after)

@@ -3,6 +3,7 @@
 from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any, cast
 
 from ..removal import remove_jobs
 from ..workflow_cli import (
@@ -75,8 +76,9 @@ def request(view: WorkspaceView, action: str, job_ids: Sequence[str], reason: st
         return f"requested {action} for {len(job_ids)} job(s)"
 
     workspace = _mutable_workspace(view)
-    markers = [view.marker_for(job_id) for job_id in job_ids]
-    published = publish_job_requests(workspace, markers, action=action, reason=reason)
+    # C5b: the request publisher still types its targets as legacy markers; it takes job references there.
+    refs = cast(Any, [view.ref_for(job_id) for job_id in job_ids])
+    published = publish_job_requests(workspace, refs, action=action, reason=reason)
     return f"requested {action} for {len(published)} job(s)"
 
 
@@ -133,22 +135,24 @@ def transfer(view: WorkspaceView, job_ids: Sequence[str], destination: str) -> s
         strict_environment=False,
         json=True,
     )
-    markers = None
+    refs = None
     if not view.remote:
-        markers = [view.marker_for(job_id) for job_id in job_ids]
-    run_transfer_verb_result(arguments, view.context, True, markers)
+        # D3: the transfer verbs still type their targets as legacy markers; they take job references there.
+        refs = cast(Any, [view.ref_for(job_id) for job_id in job_ids])
+    run_transfer_verb_result(arguments, view.context, True, refs)
     return f"transferred {len(job_ids)} job(s) to {destination}"
 
 
 def remove(view: WorkspaceView, job_ids: Sequence[str]) -> str:
-    """Remove selected removable payloads and their markers."""
+    """Remove selected removable jobs."""
 
     if view.remote:
         raise ValueError("removing remote payloads is not supported by the monitor")
     if not job_ids:
         raise ValueError("select at least one job")
     workspace = _mutable_workspace(view)
-    report = remove_jobs(workspace, [view.marker_for(job_id) for job_id in job_ids], force=False)
+    # C5a: removal still types its targets as legacy markers; it takes job references there.
+    report = remove_jobs(workspace, cast(Any, [view.ref_for(job_id) for job_id in job_ids]), force=False)
     if report.refused:
         reason = report.refused[0].reason or "removal refused"
         raise ValueError(f"removed {report.removed_count} of {len(report.outcomes)} job(s); {reason}")
