@@ -9,65 +9,28 @@ import pytest
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.runtime import AttemptContext
-from test_manager_scheduling import _payload
+from test_manager_scheduling import _doc, _failure, _job, _state
+from v3_helpers import find
+from v3_helpers import workspace as initialize_workspace
 
 pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("heartbeat-timing")]
-
-_PUBLISH = """
-def publish(action):
-    temporary = control / "outcome.tmp.test"
-    temporary.mkdir()
-    (temporary / "outcome.json").write_text(json.dumps({
-        "format": "httk-workflow-outcome",
-        "format_version": 2,
-        "job_id": context["job_id"],
-        "activation_id": context["activation_id"],
-        "attempt_id": context["attempt_id"],
-        "action": action,
-    }))
-    os.rename(temporary, control / "outcome.ready")
-"""
-
-_HEADER = (
-    """#!/usr/bin/env python3
-import json
-import os
-import signal
-import sys
-import time
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-"""
-    + _PUBLISH
-)
 
 
 def _run(tmp_path: Path, body: str, **job: object) -> tuple[Workspace, str, float]:
     """Run one job with *body* as its runner and return the workspace, job id, and wall time."""
 
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _HEADER + body, tag="timed", **job)  # type: ignore[arg-type]
-    workspace.submit(payload, "project/timed")
+    workspace = initialize_workspace(tmp_path / "workspace")
+    job_id = _job(workspace, tmp_path, body, tag="timed", **job)
     started = time.monotonic()
     with TaskManager(workspace, cancel_grace_seconds=0.5, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=20.0)
     return workspace, job_id, time.monotonic() - started
 
 
-def _final(workspace: Workspace, job_id: str) -> tuple[str, dict[str, object]]:
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    return marker.kind, workspace.read_state(marker)
-
-
 def test_attempt_over_maxtime_fails_with_timeout(tmp_path: Path) -> None:
     workspace, job_id, seconds = _run(tmp_path, "time.sleep(30)\n", resources={"maxtime": 1})
-    kind, state = _final(workspace, job_id)
-    assert kind == "failed" and seconds < 10
-    failure = state["failure"]
-    assert isinstance(failure, dict)
+    assert _state(workspace, job_id) == "failed" and seconds < 10
+    failure = _failure(workspace, job_id)
     assert failure["code"] == "timeout"
     assert failure["message"] == "attempt exceeded its maxtime 00:00:01"
     assert failure["details"]["exit_status"] == -signal.SIGTERM
@@ -76,10 +39,8 @@ def test_attempt_over_maxtime_fails_with_timeout(tmp_path: Path) -> None:
 def test_attempt_ignoring_sigterm_is_killed_after_the_grace(tmp_path: Path) -> None:
     body = "signal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)\n"
     workspace, job_id, seconds = _run(tmp_path, body, resources={"maxtime": 1})
-    kind, state = _final(workspace, job_id)
-    assert kind == "failed" and seconds < 10
-    failure = state["failure"]
-    assert isinstance(failure, dict)
+    assert _state(workspace, job_id) == "failed" and seconds < 10
+    failure = _failure(workspace, job_id)
     assert failure["code"] == "timeout"
     assert failure["details"]["exit_status"] == -signal.SIGKILL
 
@@ -94,46 +55,35 @@ signal.signal(signal.SIGTERM, on_term)
 time.sleep(30)
 """
     workspace, job_id, seconds = _run(tmp_path, body, resources={"maxtime": 1})
-    kind, _ = _final(workspace, job_id)
-    assert kind == "succeeded" and seconds < 10
+    assert _state(workspace, job_id) == "succeeded" and seconds < 10
 
 
 def test_timeout_is_retried_when_listed_in_retry_on(tmp_path: Path) -> None:
     body = 'if context["attempt_ordinal"] == 1:\n    time.sleep(30)\npublish("succeed")\n'
     workspace, job_id, seconds = _run(tmp_path, body, resources={"maxtime": 1}, retry_on=("timeout",))
-    kind, state = _final(workspace, job_id)
-    assert kind == "succeeded" and seconds < 10
-    assert state["attempt_ordinal"] == 2
+    assert _state(workspace, job_id) == "succeeded" and seconds < 10
+    attempt = _doc(workspace, job_id).attempt
+    assert attempt is not None and attempt["ordinal"] == 2
 
 
 @pytest.mark.parametrize(("status", "code"), [(7, "process_failure"), (0, "protocol_error")])
 def test_already_exited_attempt_is_not_retried_as_a_timeout(tmp_path: Path, status: int, code: str) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _HEADER + f"sys.exit({status})\n",
-        tag="exited",
-        resources={"maxtime": 1},
-        retry_on=("timeout",),
+    workspace = initialize_workspace(tmp_path / "workspace")
+    job_id = _job(
+        workspace, tmp_path, f"sys.exit({status})\n", tag="exited", resources={"maxtime": 1}, retry_on=("timeout",)
     )
-    workspace.submit(payload, "project/exited")
     with TaskManager(workspace) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None
-        assert manager._claim_and_launch(marker)
+        assert manager._claim_and_launch(find(workspace, job_id))
         (attempt,) = manager._running.values()
         assert attempt.process.wait(timeout=10) == status
         # Model a delayed next tick after a known exit, without a timed sleep.
         attempt.started -= 2
         manager.run_until_idle(timeout=10)
-    kind, state = _final(workspace, job_id)
-    assert kind == "failed"
-    failure = state["failure"]
-    assert isinstance(failure, dict)
+    assert _state(workspace, job_id) == "failed"
+    failure = _failure(workspace, job_id)
     assert failure["code"] == code
     assert failure["details"]["exit_status"] == status
-    assert state["total_attempts"] == 1
+    assert _doc(workspace, job_id).counters["attempts_total"] == 1
 
 
 @pytest.mark.parametrize("maxtime", [600, None])
@@ -148,9 +98,8 @@ publish("succeed")
     resources = {} if maxtime is None else {"maxtime": maxtime}
     workspace, job_id, _ = _run(tmp_path, body, resources=resources)
     finished = time.time()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    seen = json.loads((workspace.payload_path(marker.placement, marker.job_key) / "run" / "seen.json").read_text())
+    assert _state(workspace, job_id) == "succeeded"
+    seen = json.loads((find(workspace, job_id).path / "run" / "seen.json").read_text())
     if maxtime is None:
         assert seen == {"context": None, "env": "absent"}
     else:

@@ -24,8 +24,6 @@ from httk.workflow._manager_binding import Inventory, NodeShare, Placement
 from httk.workflow._slurm import slurm_allocation
 from httk.workflow.errors import FormatError
 from test_binding import HOST, _Campaign
-from test_manager_scheduling import _payload
-from test_maxtime import _HEADER
 
 _DEVICES = """
 seen = {
@@ -47,10 +45,7 @@ _PINNABLE = pytest.mark.skipif(
 
 
 class _Devices(_Campaign):
-    def submit(self, tag: str, **resources: int) -> None:
-        payload, job_id = _payload(self.tmp_path / "source", _HEADER + _DEVICES, tag=tag, resources=resources)
-        self.workspace.submit(payload, f"project/{tag}")
-        self.jobs[tag] = job_id
+    body = _DEVICES
 
 
 def _manager(campaign: _Campaign, *nodes: Node, workers: int = 2) -> TaskManager:

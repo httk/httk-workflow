@@ -2,11 +2,7 @@
 # One repository-relative path per line; the comment names its fate (port <packet> | delete <packet>).
 
 tests/test_adoption.py  # fate: delete D4
-tests/test_allocation_probe.py  # fate: port C2c
-tests/test_allocation_time.py  # fate: port C2c
-tests/test_attempt_env.py  # fate: port C2c
 tests/test_bash_sdk.py  # fate: port C3
-tests/test_binding.py  # fate: port C2c
 tests/test_c_api.py  # fate: port C3
 tests/test_call.py  # fate: port C3
 tests/test_call_staging.py  # fate: delete C6
@@ -24,11 +20,8 @@ tests/test_compat_pwd.py  # fate: port C3
 tests/test_concurrency.py  # fate: port C2c
 tests/test_crash_injection.py  # fate: port C2c
 tests/test_daemon_exchange_flow.py  # fate: port D4
-tests/test_deadline_drain.py  # fate: port C2c
-tests/test_device_binding.py  # fate: port C2c
 tests/test_durability.py  # fate: port C2c
 tests/test_eject_adopt.py  # fate: port D3
-tests/test_empty_placement.py  # fate: port C2c
 tests/test_examples.py  # fate: port C3
 tests/test_exchange_enable.py  # fate: port D4
 tests/test_exchange_pass.py  # fate: port D4
@@ -47,8 +40,6 @@ tests/test_manager_hardening.py  # fate: port C2c
 tests/test_manager_jobdir_hardening.py  # fate: port C2c
 tests/test_manager_logs.py  # fate: port C5b
 tests/test_manager_ownership.py  # fate: port C2c
-tests/test_manager_scheduling.py  # fate: port C2c
-tests/test_maxtime.py  # fate: port C2c
 tests/test_mount_adapter.py  # fate: port D3
 tests/test_parity.py  # fate: port C3
 tests/test_policy_and_fsck.py  # fate: port C5a
@@ -62,7 +53,7 @@ tests/test_scaffold.py  # fate: port C3
 tests/test_scale_and_handoffs.py  # fate: port C2c
 tests/test_sdk.py  # fate: port C3
 tests/test_sealing_runtime.py  # fate: port C5a
-tests/test_settings_layering.py  # fate: port C2c
+tests/test_settings_layering.py  # fate: ported in C2c-1; re-enable with C3b (SDK reads v3 job.json)
 tests/test_shared_runners.py  # fate: port C3
 tests/test_transfer_hardening.py  # fate: port D3
 tests/test_transfer_phase0_hardening.py  # fate: port D3
@@ -73,6 +64,5 @@ tests/test_v1_compatibility.py  # fate: port C3
 tests/test_workflow.py  # fate: port C3
 tests/test_workflow_calls.py  # fate: port C3
 tests/test_workflow_cli_packages.py  # fate: port C5b
-tests/test_workflow_requires.py  # fate: port C2c
 tests/test_cpp_api.py  # fate: port C3b (HTTK_WORKFLOW_DATA_DIR now mandatory)
 tests/test_perl_api.py  # fate: port C3b (HTTK_WORKFLOW_DATA_DIR now mandatory)

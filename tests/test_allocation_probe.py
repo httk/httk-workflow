@@ -27,6 +27,7 @@ from httk.workflow._allocation import (
 from httk.workflow._slurm import slurm_allocation, slurm_counts
 from httk.workflow.errors import FormatError
 from httk.workflow.workflow_cli import _manager
+from v3_helpers import workspace as initialize_workspace
 
 _SLURM_FIXTURES = [
     {"SLURM_NTASKS": "8"},
@@ -426,16 +427,16 @@ def test_run_uses_the_probed_allocation(tmp_path: Path, monkeypatch: pytest.Monk
     assert "allocation=pbs nodes=2" in capsys.readouterr().err
 
 
-def test_manager_json_records_the_allocation(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
+def test_owner_json_records_the_allocation(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
     allocation = Allocation("slurm", None, (Node("n01", 4), Node("n02", 4)), {})
     with TaskManager(workspace, allocation=allocation) as manager:
-        record = json.loads((workspace.control / "managers" / manager.manager_id / "manager.json").read_text())
+        record = json.loads((manager.manager_directory / "owner.json").read_text())
         assert manager.allocation is allocation
-        assert (record["allocation"], record["nodes"]) == ("slurm", ["n01", "n02"])
+        assert (record["allocation"]["kind"], record["allocation"]["end_time"]) == ("slurm", None)
     with TaskManager(workspace) as manager:
-        record = json.loads((workspace.control / "managers" / manager.manager_id / "manager.json").read_text())
-        assert (record["allocation"], record["nodes"]) == (None, [])
+        record = json.loads((manager.manager_directory / "owner.json").read_text())
+        assert record["allocation"] is None
 
 
 def test_slurm_dispatcher_appends_the_configured_probe() -> None:
