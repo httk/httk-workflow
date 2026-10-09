@@ -847,6 +847,52 @@ def test_planted_temporary_lookalikes_do_not_wedge(ws: FakeWorkspace) -> None:
     assert (job.path / "job.json").exists()
 
 
+def test_discard_subtree(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner))
+    assert job is not None
+    attempt = job.path / "attempts" / "a"
+    (attempt / "txn" / "1.tmp").mkdir(parents=True)
+    (attempt / "out.txt").write_text("x")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("keep")
+    os.symlink(outside, job.path / "run")
+    assert job.discard_subtree("attempts/a/out.txt")
+    assert not (attempt / "out.txt").exists()
+    assert job.discard_subtree(PurePosixPath("attempts/a"))
+    assert not attempt.exists() and (job.path / "attempts").is_dir()
+    assert job.discard_subtree("run")
+    assert not os.path.lexists(job.path / "run") and (outside / "keep").read_text() == "keep"
+    assert not job.discard_subtree("attempts/a")
+    assert not job.discard_subtree("absent/deeper")
+    # A symlinked parent is never traversed.
+    os.symlink(outside, job.path / "files")
+    with pytest.raises(_fs.UnsafePath):
+        job.discard_subtree("files/keep")
+    assert (outside / "keep").exists()
+    for refused in (
+        "",
+        ".",
+        "/abs",
+        "../x",
+        "a/../b",
+        "a//b",
+        "./a",
+        "a/",
+        "job.json",
+        "state.json",
+        "logs",
+        "logs/stdio.out",
+    ):
+        with pytest.raises(ValueError):
+            job.discard_subtree(refused)
+    assert (job.path / "job.json").exists()
+    job.release(StateDoc.empty(job.job_id), Release("ready", 500))
+    with pytest.raises(ReleasedJobError):
+        job.discard_subtree("attempts")
+
+
 def test_discard_with_unreadable_state(ws: FakeWorkspace) -> None:
     owner = new_owner(ws)
     job = claim(ws, owner, new_job(ws, owner))

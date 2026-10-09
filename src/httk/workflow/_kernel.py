@@ -104,6 +104,7 @@ _SHM_NAME = re.compile(r"httk-([0-9a-f]{32})")
 _OWNER_TEMPORARY = re.compile(r"\.(owner|heartbeat|dead)\.json\.[a-z2-7]{16}\.tmp")
 _STATE_TEMPORARY = re.compile(r"\.state\.json\.[a-z2-7]{16}\.tmp")
 _LOG_TEMPORARY = re.compile(r"\..+\.[a-z2-7]{16}\.tmp")
+_TRUSTED_NAMES = frozenset({"job.json", "state.json", "logs"})
 _EVIDENCE_KEYS = frozenset({"subject", "rule", "detail"})
 _JOB_LIMIT = 8 << 20
 _RECORD_LIMIT = 1 << 20
@@ -1000,6 +1001,46 @@ class OwnedJob:
         for name in _names(directory):
             if _request_id(name, self.job_id) is not None:
                 _fs.remove_file(_fs.loc(directory / name), durable=self.owner.workspace.durable)
+
+    def discard_subtree(self, relative: str | PurePosixPath) -> bool:
+        """Remove one entry below the job directory; a symlink is removed, never followed.
+
+        Quiescence is the caller's concern: the manager removes ``attempts/<A>`` after :meth:`end_attempt`.
+
+        :param relative: A normalized relative POSIX path below the job, outside ``job.json``, ``state.json``
+            and ``logs``.
+        :return: ``False`` when the entry is absent.
+        :raises ValueError: For a malformed path or a trusted name.
+        :raises httk.workflow._fs.UnsafePath: When a parent component is a symlink or not a directory.
+        :raises OwnerLost: When the job directory is gone.
+        """
+
+        self._live()
+        self._present()
+        path = PurePosixPath(relative)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+            or str(relative) != path.as_posix()
+            or path.parts[0] in _TRUSTED_NAMES
+        ):
+            raise ValueError(f"not a removable path below the job: {relative!r}")
+        # The parents may be job-written: each must be a real directory, so nothing outside the job is reached.
+        modes: list[int] = []
+        for depth in range(1, len(path.parts) + 1):
+            try:
+                modes.append(os.lstat(self.path.joinpath(*path.parts[:depth])).st_mode)
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+            if depth < len(path.parts) and not stat.S_ISDIR(modes[-1]):
+                raise _fs.UnsafePath(f"{self.path.joinpath(*path.parts[:depth])} is a symlink or not a directory")
+        target = self.path.joinpath(*path.parts)
+        if stat.S_ISDIR(modes[-1]) or stat.S_ISREG(modes[-1]):
+            self.owner._discard(target)
+        else:
+            _fs.remove_file(_fs.loc(target), durable=self.owner.workspace.durable)
+        return True
 
     def remove_leftover_temporaries(self) -> None:
         """Remove write temporaries a crashed writer left beside ``state.json`` and in ``logs/``."""
