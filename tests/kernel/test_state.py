@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import uuid
 from pathlib import Path
 
@@ -284,3 +285,25 @@ def test_history_tail_is_bounded_and_members_replace() -> None:
     assert decode_state(encode_state(doc)) == doc
     with pytest.raises(FormatError):
         doc.updated(origin="remote")
+
+
+def test_read_state_unowned_never_blocks_on_a_fifo(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    os.mkfifo(path)
+
+    def expire(signum: int, frame: object) -> None:
+        raise TimeoutError("read_state_unowned blocked on a FIFO")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(5)
+    try:
+        assert read_state_unowned(path) == (None, True)
+        # A FIFO with a writer attached is refused the same way, without reading from it.
+        writer = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            assert read_state_unowned(path) == (None, True)
+        finally:
+            os.close(writer)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)

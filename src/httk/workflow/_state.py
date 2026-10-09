@@ -498,7 +498,8 @@ def read_state_unowned(path: Path) -> tuple[StateDoc | None, bool]:
     """
 
     try:
-        data = _fs.read_bounded(_fs.loc(path), MAX_STATE_BYTES)
+        # Non-blocking: a FIFO a job planted at state.json must never stall a read-only consumer.
+        data = _fs.read_bounded(_fs.loc(path), MAX_STATE_BYTES, nonblock=True)
     except (FileNotFoundError, NotADirectoryError):
         # The job moved away (or its parent was replaced) between listing and reading: absent.
         return None, False
