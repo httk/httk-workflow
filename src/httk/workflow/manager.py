@@ -5,13 +5,11 @@ import dataclasses
 import logging
 import math
 import os
-import re
 import shlex
 import signal
 import socket
 import stat
 import subprocess
-import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -23,6 +21,7 @@ from typing import Any, Literal, Self, cast
 from httk.core.digests import tree_digest
 
 from . import (
+    _attempt_process,
     _confine,
     _manager_cancellation,
     _manager_commit,
@@ -40,6 +39,8 @@ from ._allocation import (
     format_cpulist,
     parse_cpulist,
 )
+from ._attempt_env import attempt_context, runner_environment
+from ._attempt_process import append_log_line, start_gated, write_marker
 from ._durations import format_duration
 from ._exchange import ExchangeService
 from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
@@ -58,7 +59,6 @@ from ._manager_launches import AttemptLaunches, LaunchContext
 from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
 from ._txn import manager_gone, owner_token
 from ._util import (
-    interpreter_first_path,
     json_bytes,
     read_json,
     timestamp_seconds,
@@ -181,38 +181,6 @@ class _Confinement:
     launch: LaunchConfinement | None
 
 
-def _write_marker(descriptor: int, line: str, job_key: str) -> None:
-    """Write one evidence marker, retaining launch progress on ordinary errors."""
-
-    try:
-        os.write(descriptor, ("\n" + line).encode("utf-8", errors="backslashreplace"))
-    except Exception as exc:
-        _LOGGER.warning("cannot append an evidence marker for %s: %s", job_key, exc)
-
-
-def _append_log_line(job_dir: JobDirectory, line: str, *, job_key: str) -> None:
-    """Append one complete evidence line to the job's stdio chronicle.
-
-    The chronicle is opened through the job directory without following a
-    symlink or blocking on a FIFO the job may have planted; such a chronicle is
-    skipped with a warning, never written through.
-    """
-
-    descriptor = -1
-    try:
-        with job_dir.directory(LOGS_DIRECTORY, create=True) as logs:
-            descriptor = logs.open_append("stdio.out")
-        _write_marker(descriptor, line, job_key)
-    except Exception as exc:
-        _LOGGER.warning("cannot append the stdio chronicle for %s: %s", job_key, exc)
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except Exception as exc:
-                _LOGGER.warning("cannot close the stdio chronicle for %s: %s", job_key, exc)
-
-
 def _attempt_outcome_action(job_dir: JobDirectory, control_name: str) -> str:
     """Return an attempt's published action, or ``none`` while it is absent or unreadable.
 
@@ -242,12 +210,6 @@ def _append_attempt_event(logs: JobDirectory, record: Mapping[str, object], job_
         logs.append("runlog.jsonl", json_bytes(record) + b"\n")
     except Exception as exc:
         _LOGGER.warning("cannot append the attempt runlog event for %s: %s", job_key, exc)
-
-
-def _setting_variable_name(key: str) -> str:
-    """Return the environment variable synthesized for one setting name."""
-
-    return "HTTK_" + key.upper().replace(".", "_")
 
 
 @dataclass(frozen=True)
@@ -1053,10 +1015,8 @@ class TaskManager:
                 action = attempt.outcome_action or _attempt_outcome_action(
                     job_dir, f"{ATTEMPTS_DIRECTORY}/{attempt.attempt_id}"
                 )
-                _append_log_line(
-                    job_dir,
-                    f"=== httk attempt {attempt.attempt_id} ended {utc_now()} exit {return_code} outcome {action}\n",
-                    job_key=attempt.marker.job_key,
+                _attempt_process.write_attempt_end(
+                    job_dir, attempt.attempt_id, return_code, action, job_key=attempt.marker.job_key
                 )
         except Exception as exc:
             _LOGGER.warning("cannot append the end marker for %s: %s", attempt.marker.job_key, exc)
@@ -2298,119 +2258,49 @@ class TaskManager:
             binding_environment["HTTK_WORKFLOW_LAUNCH_LOCKS"] = str(
                 _confine.launch_locks_path(checked.launch.shm_root, attempt_id)
             )
-        context = {
-            "format": "httk-workflow-attempt-context",
-            "format_version": 2,
-            "workspace_id": self.workspace.workspace_id,
-            "job_id": job.id,
-            "job_key": job.job_key,
-            "placement": placement_text(marker.placement),
-            "payload": str(payload.resolve()),
-            "step": claimed_state.step,
-            "activation_id": claimed_state.activation_id,
-            "activation_ordinal": claimed_state.activation_ordinal,
-            "attempt_id": attempt_id,
-            "attempt_ordinal": claimed_state.attempt_ordinal,
-            "total_attempts": claimed_state.total_attempts,
-            "is_restart": (claimed_state.attempt_ordinal or 0) > 1,
-            "is_unclean_restart": previous_state.unclean_restart,
-            "attempt_reason": claimed_state.reason or "claim",
-            "previous_attempt_id": previous_state.attempt_id,
-            "activation_reason": previous_state.reason,
-            "workdir_mode": job.workdir_mode,
-            "workdir_reused": workdir_reused,
-            "unsafe_persistent_takeover": previous_state.unsafe_persistent_takeover,
-            "data_generation": claimed_state.data_generation,
-            # The workspace durability mode, so every artifact the runner
-            # publishes is synchronized to the same standard as the marker and
-            # journal that will reference it.
-            "durable": self.workspace.durable,
-            # The workspace application settings, snapshotted at claim time, so a
-            # runner resolves a.setting("code.command") without the operator
-            # re-exporting it for every job. This is the workspace layer of the
-            # parameters → environment → workspace → default resolution.
-            "settings": settings,
-            "resources": dict(requirement),
-            "deadline": deadline,
-            **({} if binding is None else {"binding": binding}),
-            "join": claimed_state.join_summary,
-            # The enriched, labeled observations of this activation's join, or an
-            # empty array when the activation follows no join. ``join`` keeps the
-            # summary exactly as earlier profiles published it.
-            "children": self._context_children(claimed_state.join_summary),
-        }
-        context_value = json_bytes(context)
-        if len(context_value) >= 100_000:
-            raise FormatError(
-                "attempt context exceeds the 100000-byte environment limit"
-                + ("" if binding is None else f"; its binding of {len(binding['nodes'])} nodes is too large")
-            )
-        context_json = context_value.decode("utf-8")
-        environment = os.environ.copy()
-        environment.pop("HTTK_WORKFLOW_RUNNER_ARTIFACTS", None)
-        environment.pop("HTTK_WORKFLOW_RUNNER_ROOT", None)
-        environment.pop("HTTK_WORKFLOW_DEADLINE", None)
-        if deadline is not None:
-            environment["HTTK_WORKFLOW_DEADLINE"] = str(deadline)
-        for variable in (
-            "HTTK_WORKFLOW_NODELIST",
-            "HTTK_WORKFLOW_NODEFILE",
-            "HTTK_WORKFLOW_LAUNCH",
-            "HTTK_WORKFLOW_LAUNCH_LOCKS",
-        ):
-            environment.pop(variable, None)
-        environment.update(binding_environment)
-        environment.update(
-            {
-                # A runner's ``#!/usr/bin/env python3`` finds this interpreter, the
-                # one the job's ``requires`` were checked in at claim time.
-                "PATH": interpreter_first_path(os.environ.get("PATH")),
-                "HTTK_WORKFLOW_CONTEXT": context_json,
-                "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-                "HTTK_WORKFLOW_WORKSPACE_DIR": str(self.workspace.root),
-                "HTTK_WORKFLOW_JOB_DIR": str(payload),
-                "HTTK_WORKFLOW_WORKDIR": str(workdir),
-                "HTTK_WORKFLOW_IS_RESTART": "1" if context["is_restart"] else "0",
-                "HTTK_WORKFLOW_UNCLEAN_RESTART": "1" if context["is_unclean_restart"] else "0",
-                "HTTK_WORKFLOW_DURABLE": "1" if self.workspace.durable else "0",
-                "HTTK_WORKFLOW_ATTEMPT_REASON": str(context["attempt_reason"]),
-                "HTTK_WORKFLOW_STEP": str(context["step"]),
-                "HTTK_WORKFLOW_PYTHON": sys.executable,
-                "HTTK_WORKFLOW_BASH_API": str(Path(__file__).with_name("languages") / "bash" / "httk-workflow.sh"),
-                "HTTK_WORKFLOW_LANGUAGES_DIR": str(Path(__file__).with_name("languages")),
-                "HTTK_WORKFLOW_PERL_API": str(Path(__file__).with_name("languages") / "perl"),
-            }
+        context = attempt_context(
+            workspace_id=self.workspace.workspace_id,
+            job_id=job.id,
+            job_key=job.job_key,
+            placement=placement_text(marker.placement),
+            payload=str(payload.resolve()),
+            step=claimed_state.step,
+            activation_id=claimed_state.activation_id,
+            activation_ordinal=claimed_state.activation_ordinal,
+            attempt_id=attempt_id,
+            attempt_ordinal=claimed_state.attempt_ordinal,
+            total_attempts=claimed_state.total_attempts,
+            is_unclean_restart=previous_state.unclean_restart,
+            attempt_reason=claimed_state.reason,
+            previous_attempt_id=previous_state.attempt_id,
+            activation_reason=previous_state.reason,
+            workdir_mode=job.workdir_mode,
+            workdir_reused=workdir_reused,
+            unsafe_persistent_takeover=previous_state.unsafe_persistent_takeover,
+            data_generation=claimed_state.data_generation,
+            durable=self.workspace.durable,
+            settings=settings,
+            resources=requirement,
+            deadline=deadline,
+            binding=binding,
+            join=claimed_state.join_summary,
+            children=self._context_children(claimed_state.join_summary),
         )
-        environment.update(code_environment())
-        if job.data_mode == "transactional":
-            environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
-        declared_environment = job.environment.get("declared", {})
-        consumed_variables: set[str] = set()
-        if isinstance(declared_environment, Mapping):
-            consumed_variables = {
-                _setting_variable_name(setting)
-                for name, metadata in declared_environment.items()
-                if isinstance(metadata, Mapping)
-                for setting in (metadata.get("setting", name),)
-                if isinstance(setting, str)
-            }
-        for key in sorted(settings):
-            value = settings[key]
-            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-                continue
-            variable = _setting_variable_name(key)
-            if variable in consumed_variables:
-                continue
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) is None:
-                _LOGGER.warning("setting %s has an invalid environment variable name; not exported", key)
-                continue
-            if variable.startswith("HTTK_WORKFLOW_"):
-                _LOGGER.warning(
-                    "setting %s shadows the reserved HTTK_WORKFLOW_ namespace; not exported",
-                    key,
-                )
-                continue
-            environment.setdefault(variable, str(value))
+        environment = runner_environment(
+            base=os.environ.copy(),
+            context=context,
+            control=control,
+            workspace_root=self.workspace.root,
+            payload=payload,
+            workdir=workdir,
+            durable=self.workspace.durable,
+            deadline=deadline,
+            binding_environment=binding_environment,
+            code_variables=code_environment(),
+            data_dir=payload / "data" if job.data_mode == "transactional" else None,
+            declared_environment=job.environment.get("declared", {}),
+            settings=settings,
+        )
         if job.runner_source != "payload":
             verified = _manager_runners.verify_runner(self, job)
             runner = Path(f"/dev/fd/{verified.fd}") if verified.fd is not None else verified.path
@@ -2438,7 +2328,7 @@ class TaskManager:
                 f"=== httk attempt {attempt_id} step {context['step']} ordinal {context['attempt_ordinal']} "
                 f"started {utc_now()}\n"
             )
-            _write_marker(stdio_fd, start_marker, marker.job_key)
+            write_marker(stdio_fd, start_marker, marker.job_key)
             runner_command = list(
                 executor.command(
                     AttemptLaunch(
@@ -2501,29 +2391,15 @@ class TaskManager:
                 sandbox = self._prepare_sandbox(
                     confinement, job_dir, workdir, environment, block_userns, launch_locks=launch_locks
                 )
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(Path(__file__).with_name("_launcher.py")),
-                    str(gate_read),
-                    "--",
-                    # The gate stays outside the sandbox: the launcher execs
-                    # Bubblewrap, which keeps the launcher's process group.
-                    *(sandbox.argv if sandbox is not None else ()),
-                    *runner_command,
-                ],
+            process = start_gated(
+                runner_command,
+                gate_read=gate_read,
                 cwd=workdir,
-                env=environment,
-                # A confined attempt gets no terminal input to inject into.
-                stdin=subprocess.DEVNULL if confined else None,
-                stdout=stdio_fd,
-                stderr=stdio_fd,
-                start_new_session=True,
-                pass_fds=(
-                    gate_read,
-                    *([verified.fd] if verified and verified.fd is not None else []),
-                    *(sandbox.descriptors if sandbox is not None else ()),
-                ),
+                environment=environment,
+                stdio_fd=stdio_fd,
+                confined=confined,
+                sandbox=sandbox,
+                runner_fd=verified.fd if verified else None,
             )
             if sandbox is not None:
                 sandbox.close()
@@ -2566,7 +2442,7 @@ class TaskManager:
                         exc,
                         extra=self._event("attempt_pin_failed", running, attempt_id=attempt_id),
                     )
-            os.write(gate_write, b"R")
+            _attempt_process.release_gate(gate_write)
             started = time.monotonic()
             if verified is not None and verified.fd is not None:
                 os.close(verified.fd)
@@ -2588,7 +2464,7 @@ class TaskManager:
                 # exits, but an unreaped launcher must never be left behind.
                 self._reap_launcher(process)
             reason = str(exc).replace("\n", "\\n")
-            _append_log_line(
+            append_log_line(
                 job_dir,
                 f"=== httk attempt {attempt_id} ended {utc_now()} launch-failed {reason}\n",
                 job_key=marker.job_key,
@@ -4175,33 +4051,8 @@ class TaskManager:
             return
         self._terminate_process(cast(int, process["process_group"]), signal_number)
 
-    @staticmethod
-    def _process_group_alive(process_group: int) -> bool:
-        """Report whether one process group still exists on this host."""
-
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # It exists and belongs to somebody else, which is still existence.
-            return True
-        except OSError:
-            return True
-        return True
-
-    @staticmethod
-    def _terminate_process(process_group: int, signal_number: int = signal.SIGTERM) -> None:
-        # killpg is load-bearing: a confined attempt is the launcher exec'ing
-        # Bubblewrap, whose namespace init and command share this process
-        # group. Signalling the outer pid alone (Popen.terminate/kill) would
-        # leave them running, so every stop goes through the process group.
-        try:
-            os.killpg(process_group, signal_number)
-        except ProcessLookupError:
-            return
-        except PermissionError as exc:
-            _LOGGER.warning("cannot signal process group %d: %s", process_group, exc)
+    _process_group_alive = staticmethod(_attempt_process.process_group_alive)
+    _terminate_process = staticmethod(_attempt_process.terminate_process)
 
     @staticmethod
     def _failure(
