@@ -35,6 +35,7 @@ from httk.workflow._fs import (
     loc,
     move_once,
     move_owned,
+    open_append,
     open_dir,
     publish_dir,
     read_bounded,
@@ -650,6 +651,31 @@ def test_append_file_anchored(tmp_path: Path) -> None:
     finally:
         os.close(descriptor)
     assert (tmp_path / "log").read_bytes() == b"ab"
+
+
+def test_open_append_refuses_non_regular_without_blocking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _count_fsync(monkeypatch)
+    descriptor = open_append(loc(tmp_path / "log"), durable=True, mode=0o600)
+    try:
+        os.write(descriptor, b"x")
+    finally:
+        os.close(descriptor)
+    # Only the directory: this call created the entry; data fsyncs are the caller's.
+    assert len(calls) == 1 and (tmp_path / "log").read_bytes() == b"x"
+    (tmp_path / "dir").mkdir()
+    os.mkfifo(tmp_path / "fifo")
+    for name in ("dir", "fifo"):
+        with pytest.raises(UnsafePath):
+            open_append(loc(tmp_path / name), durable=False)
+        with pytest.raises(UnsafePath):
+            append_file(loc(tmp_path / name), b"x", durable=False)
+    # A FIFO with a reader opens without blocking, and is still refused.
+    reader = os.open(tmp_path / "fifo", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with pytest.raises(UnsafePath):
+            open_append(loc(tmp_path / "fifo"), durable=False)
+    finally:
+        os.close(reader)
 
 
 # read_bounded

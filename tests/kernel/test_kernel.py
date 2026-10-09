@@ -4,10 +4,13 @@ import json
 import multiprocessing
 import os
 import random
+import shutil
+import signal
 import time
 import uuid
 from collections import Counter
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -917,6 +920,121 @@ def test_close_removes_trash_before_owner_record(ws: FakeWorkspace, monkeypatch:
     monkeypatch.setattr(_fs, "remove_file", remove_file)
     owner.close()
     assert seen == [[]] and not owner.path.exists()
+
+
+@contextmanager
+def no_hang(seconds: int = 5) -> Iterator[None]:
+    """Fail instead of hanging when a call blocks (a FIFO opened without O_NONBLOCK)."""
+
+    def expire(signum: int, frame: object) -> None:
+        raise TimeoutError("the call blocked")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_symlinked_or_planted_logs_are_replaced(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner))
+    assert job is not None
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, job.path / "logs")
+    job.append_log("claimed")
+    assert os.listdir(outside) == []
+    assert (job.path / "logs").is_dir() and not (job.path / "logs").is_symlink()
+    assert json.loads((job.path / "logs" / "runlog.jsonl").read_text())["event"] == "claimed"
+    shutil.rmtree(job.path / "logs")
+    (job.path / "logs").write_text("not a directory")
+    job.append_log("again")
+    assert (job.path / "logs" / "runlog.jsonl").read_text().count("\n") == 1
+
+
+def test_planted_log_files_never_block_and_are_replaced(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner))
+    assert job is not None
+    logs = job.path / "logs"
+    logs.mkdir()
+    os.mkfifo(logs / "runlog.jsonl")
+    os.mkfifo(logs / "stdio.out")
+    (tmp_path / "precious").write_text("precious")
+    with no_hang():
+        job.append_log("claimed")
+        descriptor = job.open_log("stdio.out")
+    try:
+        os.write(descriptor, b"out\n")
+    finally:
+        os.close(descriptor)
+    assert (logs / "runlog.jsonl").is_file() and (logs / "stdio.out").read_text() == "out\n"
+    # A FIFO that has a reader opens, but is still refused as non-regular and replaced.
+    (logs / "stdio.out").unlink()
+    os.mkfifo(logs / "stdio.out")
+    reader = os.open(logs / "stdio.out", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with no_hang():
+            os.close(job.open_log("stdio.out"))
+    finally:
+        os.close(reader)
+    assert (logs / "stdio.out").is_file()
+    # A symlink and a directory at the log name are replaced, the symlink's target untouched.
+    os.unlink(logs / "stdio.out")
+    os.symlink(tmp_path / "precious", logs / "stdio.out")
+    os.close(job.open_log("stdio.out"))
+    (logs / "runlog.jsonl").unlink()
+    (logs / "runlog.jsonl" / "inner").mkdir(parents=True)
+    job.append_log("claimed")
+    assert (logs / "stdio.out").is_file() and (logs / "runlog.jsonl").is_file()
+    assert (tmp_path / "precious").read_text() == "precious"
+    for name in ("", ".hidden", "a/b", "../x", "Stdio"):
+        with pytest.raises(ValueError):
+            job.open_log(name)
+
+
+def test_header_is_read_at_claim(ws: FakeWorkspace) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner, placement="p/q"))
+    assert job is not None
+    write_payload(job.path, job_id=job.job_id, placement="elsewhere", priority=1)
+    assert job.placement() == PurePosixPath("p/q") and job.header().priority == 500
+    released = job.release(StateDoc.empty(job.job_id), Release("ready", 500))
+    assert released.path.parent == ws.jobs / "ready" / "p" / "q"
+
+
+def test_fifo_job_json_at_claim_raises_without_blocking(ws: FakeWorkspace) -> None:
+    owner = new_owner(ws)
+    ref = new_job(ws, owner)
+    (ref.path / "job.json").unlink()
+    os.mkfifo(ref.path / "job.json")
+    with no_hang(), pytest.raises(_fs.UnsafePath):
+        claim(ws, owner, ref)
+    # The won job stays owned (recovery quarantines it once this owner is proven dead).
+    (owned,) = owner.owned()
+    assert owned.job_id == ref.job_id
+    with no_hang(), pytest.raises(_fs.UnsafePath):
+        owner.adopt_owned(owned)
+
+
+def test_read_state_refuses_non_regular_state(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner))
+    assert job is not None
+    os.mkfifo(job.path / "state.json")
+    with no_hang(), pytest.raises(_fs.UnsafePath):
+        job.read_state()
+    os.unlink(job.path / "state.json")
+    (tmp_path / "state.json").write_bytes(b"{}")
+    os.symlink(tmp_path / "state.json", job.path / "state.json")
+    with pytest.raises(_fs.UnsafePath):
+        job.read_state()
+    # A delete still applies to a job whose state.json is damaged this way.
+    job.discard()
+    assert everywhere(ws) == Counter()
 
 
 # -- 10. take -------------------------------------------------------------------------------------------------------------

@@ -266,8 +266,6 @@ def _failure_code(ws: Workspace, job_id: str) -> tuple[str, str | None]:
 _DEFECTS = {
     "logs_symlink": "OwnedJob.append_log follows a symlinked logs/ directory: the manager appends runlog.jsonl "
     "outside the job directory",
-    "stdio_fifo": "_fs.append_file opens an existing file without O_NONBLOCK: a FIFO planted at logs/stdio.out "
-    "blocks the manager (every job) until a reader appears",
     "runlog_symlink": "a symlink at logs/runlog.jsonl raises UnsafePath, which reconcile does not treat as job "
     "damage: the job stays owned forever and its manager never becomes idle",
     "state_json_symlink": "a symlink at state.json raises UnsafePath, which reconcile does not treat as job "
@@ -433,11 +431,6 @@ def test_a_fifo_job_definition_of_a_ready_job_never_stalls_the_manager(
     assert h.find(ws, hostile.job_id).path == hostile.path
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the kernel reads job.json lazily (OwnedJob.header at the first release) with a blocking open: a FIFO "
-    "the running job planted at job.json blocks the manager",
-)
 def test_a_fifo_job_definition_planted_by_a_running_job_fails_it_without_stalling_the_manager(
     ws: Workspace, installed: _store.Installed, outside: Path
 ) -> None:

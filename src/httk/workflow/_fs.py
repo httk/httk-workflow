@@ -507,38 +507,59 @@ def create_exclusive(dst: Loc, data: bytes = b"", *, durable: bool, mode: int = 
     return descriptor
 
 
-def append_file(target: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
-    """Append *data* to a file, creating it when absent; one appender per file.
+def open_append(target: Loc, *, durable: bool, mode: int = 0o644) -> int:
+    """Open a regular file for appending, creating it when absent; nothing at *target* can block the call.
 
-    :param target: The file to append to.
-    :param data: The bytes to append.
-    :param durable: Fsync the file, and its directory when this call created it.
+    :param target: The file.
+    :param durable: Fsync its directory when this call created it.
     :param mode: The permission bits of a newly created file (before the umask).
-    :raises UnsafePath: When *target* is a symlink.
+    :return: An ``O_WRONLY|O_APPEND`` descriptor; the caller closes it.
+    :raises UnsafePath: When *target* is a symlink, a FIFO, a directory or any other non-regular file.
     """
 
     created = True
     try:
         # Exclusive first: success proves this call created the entry, whose directory then needs an fsync.
-        descriptor = os.open(target.path, _CREATE_FLAGS | os.O_APPEND, mode, dir_fd=target.at)
+        descriptor = os.open(target.path, _CREATE_FLAGS | os.O_APPEND | os.O_NONBLOCK, mode, dir_fd=target.at)
     except FileExistsError:
         created = False
+        flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
         try:
-            descriptor = os.open(
-                target.path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=target.at
-            )
+            descriptor = os.open(target.path, flags, dir_fd=target.at)
         except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise UnsafePath(f"{target.path} is a symlink") from exc
+            # ELOOP: a symlink. ENXIO: a FIFO without a reader (O_NONBLOCK never waits for one). EISDIR.
+            if exc.errno in (errno.ELOOP, errno.ENXIO, errno.EISDIR):
+                raise UnsafePath(f"{target.path} is not a regular file") from exc
             raise
+    try:
+        # A FIFO with a reader, or a device, opens: only a regular file is accepted.
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise UnsafePath(f"{target.path} is not a regular file")
+        if durable and created:
+            _fsync_parent(target)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def append_file(target: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
+    """Append *data* to a regular file, creating it when absent; one appender per file.
+
+    :param target: The file to append to.
+    :param data: The bytes to append.
+    :param durable: Fsync the file, and its directory when this call created it.
+    :param mode: The permission bits of a newly created file (before the umask).
+    :raises UnsafePath: When *target* is a symlink, a FIFO, a directory or any other non-regular file.
+    """
+
+    descriptor = open_append(target, durable=durable, mode=mode)
     try:
         _write_all(descriptor, data)
         if durable:
             os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    if durable and created:
-        _fsync_parent(target)
 
 
 def read_bounded(src: Loc, limit: int, *, nonblock: bool = False) -> bytes | None:

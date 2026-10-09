@@ -12,6 +12,7 @@ decision here depends on a clock; time only paces visibility retries and dates
 records.
 """
 
+import contextlib
 import dataclasses
 import itertools
 import json
@@ -93,7 +94,7 @@ _LOGGER = logging.getLogger(__name__)
 #: The state of a job directory below ``jobs/owned/<owner-id>/``.
 OWNED = "owned"
 _OWNER_KINDS = ("manager", "cli", "daemon")
-_ADVERTISED = frozenset({"pools", "capabilities", "prefixes", "resources"})
+_ADVERTISED = frozenset({"pools", "capabilities", "prefixes", "resources", "end_time", "drain_start"})
 _OWNER_ID = re.compile(r"[0-9a-f]{32}")
 _TOKEN = re.compile(r"[a-z2-7]{16}")
 _PRIORITY = re.compile(r"p([0-9]{3})")
@@ -105,6 +106,7 @@ _OWNER_TEMPORARY = re.compile(r"\.(owner|heartbeat|dead)\.json\.[a-z2-7]{16}\.tm
 _STATE_TEMPORARY = re.compile(r"\.state\.json\.[a-z2-7]{16}\.tmp")
 _LOG_TEMPORARY = re.compile(r"\..+\.[a-z2-7]{16}\.tmp")
 _TRUSTED_NAMES = frozenset({"job.json", "state.json", "logs"})
+_LOG_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _EVIDENCE_KEYS = frozenset({"subject", "rule", "detail"})
 _JOB_LIMIT = 8 << 20
 _RECORD_LIMIT = 1 << 20
@@ -360,7 +362,8 @@ def _subdirectories(directory: Path) -> list[str]:
 
 
 def _read_json(path: Path, limit: int) -> dict[str, object] | None:
-    data = _fs.read_bounded(_fs.loc(path), limit)
+    # Non-blocking: a FIFO planted in a job-written path must never stall the caller.
+    data = _fs.read_bounded(_fs.loc(path), limit, nonblock=True)
     if data is None:
         return None
     try:
@@ -401,6 +404,13 @@ def _read_header(directory: Path, expect_key: str | None = None) -> JobHeader:
     if expect_key is not None and job_key != expect_key:
         raise FormatError(f"{directory}/job.json names {job_key}, not {expect_key}")
     return JobHeader(job_id, job_key, tag, placement, priority)
+
+
+def _lstat_mode(path: Path, directory: int | None = None) -> int | None:
+    try:
+        return os.lstat(path, dir_fd=directory).st_mode
+    except FileNotFoundError:
+        return None
 
 
 def _check_owner_id(owner_id: str) -> str:
@@ -464,7 +474,8 @@ def register_owner(
     :param kind: ``"manager"``, ``"cli"`` or ``"daemon"``.
     :param label: A human-readable label, or ``None``.
     :param allocation: The recorded allocation (``RecordedAllocation.as_json()``), or ``None``.
-    :param advertised: Any of ``pools``, ``capabilities``, ``prefixes`` and ``resources``.
+    :param advertised: Any of ``pools``, ``capabilities``, ``prefixes``, ``resources``, ``end_time`` and
+        ``drain_start`` (epoch seconds, or ``None``).
     :return: The new owner.
     :raises ValueError: For an unknown kind or advertised member.
     """
@@ -716,6 +727,8 @@ class Owner:
         :return: The handle.
         :raises ValueError: If *ref* is not owned by this owner.
         :raises OwnerLost: If the job is no longer there.
+        :raises httk.workflow.errors.FormatError: If its ``job.json`` is unreadable; the job stays owned.
+        :raises httk.workflow._fs.UnsafePath: If its ``job.json`` is not a regular file; the job stays owned.
         """
 
         if ref.state != OWNED or ref.owner_id != self.owner_id:
@@ -801,6 +814,8 @@ class OwnedJob:
 
     :param owner: The owner.
     :param ref: The job's reference below ``owned/<owner-id>/``.
+    :raises httk.workflow.errors.FormatError: If ``job.json`` is missing, malformed or names another job.
+    :raises httk.workflow._fs.UnsafePath: If ``job.json`` is a symlink or not a regular file.
     """
 
     def __init__(self, owner: Owner, ref: JobRef) -> None:
@@ -813,37 +828,38 @@ class OwnedJob:
         self.job_key = ref.job_key
         self.from_state: str = ref.from_state
         self.from_priority = ref.priority
-        self._header: JobHeader | None = None
         self._attempt: str | None = None
         self._retired: set[str] = set()
         self._released = False
+        # Read while quiescent (at claim or adoption): a later attempt may rewrite or replace job.json.
+        self._header = _read_header(self.path, self.job_key)
 
     def header(self) -> JobHeader:
-        """Return the kernel's view of ``job.json`` (cached; it is immutable).
+        """Return the kernel's view of ``job.json``, read when this handle was created.
 
         :return: The header.
-        :raises httk.workflow.errors.FormatError: If ``job.json`` is missing, malformed or names another job.
         """
 
         self._live()
-        if self._header is None:
-            self._header = _read_header(self.path, self.job_key)
         return self._header
 
     def placement(self) -> PurePosixPath:
-        """Return the authoritative placement from ``job.json``."""
+        """Return the authoritative placement, from ``job.json`` as read at claim or adoption."""
 
         return self.header().placement
 
     def read_state(self) -> StateDoc | None:
         """Return ``state.json``, or ``None`` before the job's first write.
 
+        Callers treat both errors below as a damaged ``state.json``.
+
         :return: The document.
-        :raises httk.workflow.errors.FormatError: If the document is malformed or names another job.
+        :raises httk.workflow.errors.FormatError: If the document is malformed, too large or names another job.
+        :raises httk.workflow._fs.UnsafePath: If ``state.json`` is a symlink or not a regular file.
         """
 
         self._live()
-        data = _fs.read_bounded(_fs.loc(self.path / "state.json"), MAX_STATE_BYTES)
+        data = _fs.read_bounded(_fs.loc(self.path / "state.json"), MAX_STATE_BYTES, nonblock=True)
         if data is None:
             return None
         doc = decode_state(data)
@@ -884,10 +900,52 @@ class OwnedJob:
         self._present()
         if not event or {"at", "event", "owner_id"} & detail.keys():
             raise ValueError("a run-log line needs an event and may not override at/event/owner_id")
-        line = _encode({"at": _now(), "event": event, "owner_id": self.owner.owner_id, **detail}) + b"\n"
+        line = memoryview(_encode({"at": _now(), "event": event, "owner_id": self.owner.owner_id, **detail}) + b"\n")
+        descriptor = self.open_log("runlog.jsonl")
+        try:
+            while line:
+                line = line[os.write(descriptor, line) :]
+            if self.owner.workspace.durable:
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def open_log(self, name: str) -> int:
+        """Open ``logs/<name>`` for appending, after making ``logs/`` and the file trusted, plain entries.
+
+        A symlink or non-directory at ``logs`` and a non-regular entry at ``logs/<name>`` (planted by a job)
+        are removed, never followed, and recreated; nothing there can block the call.
+
+        :param name: The file name, ``[a-z0-9][a-z0-9._-]*``.
+        :return: An ``O_WRONLY|O_APPEND`` descriptor of a regular file; the caller closes it.
+        :raises ValueError: For a malformed name.
+        :raises OwnerLost: When the job directory is gone.
+        """
+
+        if not _LOG_NAME.fullmatch(name):
+            raise ValueError(f"not a log file name: {name!r}")
+        self._present()
+        durable = self.owner.workspace.durable
         logs = self.path / "logs"
-        os.makedirs(logs, exist_ok=True)
-        _fs.append_file(_fs.loc(logs / "runlog.jsonl"), line, durable=self.owner.workspace.durable)
+        # §3.3: logs/ is trusted. Anything but a real directory there was planted, and is removed unfollowed.
+        if (mode := _lstat_mode(logs)) is not None and not stat.S_ISDIR(mode):
+            _fs.remove_file(_fs.loc(logs), durable=durable)
+            mode = None
+        if mode is None:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(logs)
+        # Every later step is anchored at this descriptor, so a swapped logs/ cannot redirect it.
+        directory = _fs.open_dir(logs)
+        try:
+            target = _fs.anchored(directory, name)
+            mode = _lstat_mode(Path(name), directory)
+            if mode is not None and stat.S_ISDIR(mode):
+                self.owner._discard(logs / name)
+            elif mode is not None and not stat.S_ISREG(mode):
+                _fs.remove_file(target, durable=durable)
+            return _fs.open_append(target, durable=durable)
+        finally:
+            os.close(directory)
 
     def begin_attempt(self, attempt_id: str) -> None:
         """Record that an attempt's processes may run from now on (called right before the gate opens).
@@ -987,8 +1045,8 @@ class OwnedJob:
         self.require_quiescent()
         try:
             doc = self.read_state()
-        except FormatError:
-            # A delete must always apply: an unreadable state.json is treated as not an exchange job.
+        except (FormatError, _fs.UnsafePath):
+            # A delete must always apply: a damaged state.json is treated as not an exchange job.
             _LOGGER.warning("deleting %s with an unreadable state.json", self.path, exc_info=True)
             doc = None
         if doc is not None and doc.origin == "exchange" and doc.exchange_name is not None:
@@ -1342,6 +1400,8 @@ def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | N
     :param ref: An unowned reference.
     :return: The quiescent handle, or ``None`` when another actor moved the job first.
     :raises ValueError: For an owned reference (I3).
+    :raises httk.workflow.errors.FormatError: If the won job's ``job.json`` is unreadable; the job stays owned.
+    :raises httk.workflow._fs.UnsafePath: If the won job's ``job.json`` is not a regular file; it stays owned.
     """
 
     if ref.state not in UNOWNED_STATES:
