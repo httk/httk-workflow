@@ -535,18 +535,12 @@ int httk_workflow_log(const char *level, const char *message) {
 }
 
 /* ------------------------------------------------------------------------- */
-/* Transactional data.                                                        */
+/* Job data.                                                                  */
 /* ------------------------------------------------------------------------- */
 
 char *httk_workflow_put(const char *source, const char *destination, int *status) {
     const char *prefix[] = {"put", source, destination, NULL};
     return read_value(prefix, NULL, status);
-}
-
-char *httk_workflow_remove(const char *destination, int missing_ok, int *status) {
-    const char *prefix[] = {"remove", destination, NULL};
-    const char *tail[] = {"--missing-ok", NULL};
-    return read_value(prefix, missing_ok ? tail : NULL, status);
 }
 
 /* ------------------------------------------------------------------------- */

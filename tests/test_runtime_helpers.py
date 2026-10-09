@@ -28,7 +28,6 @@ def _context(path: Path) -> dict[str, object]:
         "attempt_id": "attempt",
         "is_restart": True,
         "is_unclean_restart": False,
-        "data_generation": None,
     }
 
 
@@ -42,6 +41,7 @@ def test_an_attempt_reads_its_context_and_publishes_one_outcome(tmp_path: Path) 
         "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
         "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
         "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
+        "HTTK_WORKFLOW_DATA_DIR": str(tmp_path / "job" / "data"),
     }
     attempt = Attempt.initialize(environment)
     assert attempt.context.step == "relax"

@@ -72,8 +72,6 @@ package body Httk_Workflow is
      with Import, Convention => C, External_Name => "httk_workflow_log";
    function C_Put (Source, Destination : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_put";
-   function C_Remove (Destination : CS.chars_ptr; Missing_Ok : C.int; Status : access C.int) return CS.chars_ptr
-     with Import, Convention => C, External_Name => "httk_workflow_remove";
    function C_Spawn (Label : CS.chars_ptr; Arguments : System.Address; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_spawn";
    function C_Call (Label, Workflow : CS.chars_ptr; Arguments : System.Address; Status : access C.int) return CS.chars_ptr
@@ -415,11 +413,6 @@ package body Httk_Workflow is
       B_Source : CS.chars_ptr := New_Input (Source); B_Destination : CS.chars_ptr := New_Input (Destination);
       C_Status : aliased C.int; Pointer : CS.chars_ptr;
    begin Pointer := C_Put (B_Source, B_Destination, C_Status'Access); Release (B_Source); Release (B_Destination); Status := Read_With_Pointer (Pointer, C_Status, Operation, Present); end Httk_Workflow_Put;
-   procedure Httk_Workflow_Remove
-     (Destination : String; Operation : out U.Unbounded_String; Present : out Boolean;
-      Status : out C.int; Missing_Ok : Boolean := False) is
-      B_Destination : CS.chars_ptr := New_Input (Destination); C_Status : aliased C.int; Pointer : CS.chars_ptr;
-   begin Pointer := C_Remove (B_Destination, (if Missing_Ok then 1 else 0), C_Status'Access); Release (B_Destination); Status := Read_With_Pointer (Pointer, C_Status, Operation, Present); end Httk_Workflow_Remove;
    procedure Httk_Workflow_Spawn
      (Label : String; Job_Key : out U.Unbounded_String; Present : out Boolean;
       Status : out C.int; Arguments : String_List := No_Arguments) is

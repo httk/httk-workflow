@@ -27,8 +27,10 @@ from pathlib import Path
 import pytest
 
 from conftest import TestProfile as _TestProfile
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import TaskManager, _kernel
+from httk.workflow._state import read_state_unowned
 from httk.workflow.scaffold import new_job
+from test_job_creation import workspace_at
 
 _ROOT = Path(__file__).parents[1]
 _CORE_SOURCE = _ROOT.parents[0] / "httk-core" / "src"
@@ -147,14 +149,23 @@ def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subpr
 def _finished(workspace_root: Path) -> tuple[str, Path, Path]:
     """Return the terminal state, payload, and postprocess SVG path of the one job."""
 
-    workspace = Workspace(workspace_root, mutable=False)
-    markers = list(workspace.scan_markers())
-    assert len(markers) == 1, f"expected exactly one job, found {[marker.job_key for marker in markers]}"
-    marker = markers[0]
-    svg = workspace.root.joinpath(
-        "postprocess", *marker.placement.parts, marker.job_key, "relaxation-plot", "relaxation_energies.svg"
+    workspace = _Root(workspace_root)
+    refs = [ref for state in _kernel.UNOWNED_STATES for ref in _kernel.list_jobs(workspace, state)]
+    assert len(refs) == 1, f"expected exactly one job, found {[ref.job_key for ref in refs]}"
+    ref = refs[0]
+    assert ref.placement is not None
+    svg = workspace_root.joinpath(
+        "postprocess", *ref.placement.parts, ref.job_key, "relaxation-plot", "relaxation_energies.svg"
     )
-    return marker.kind, workspace.payload_path(marker.placement, marker.job_key), svg
+    return ref.state, ref.path, svg
+
+
+class _Root:
+    """The read-only kernel view of a workspace a documented command created."""
+
+    def __init__(self, root: Path) -> None:
+        self.root, self.control, self.jobs = root, root / ".httk-workspace", root / "jobs"
+        self.durable, self.visibility_deadline = False, 0.0
 
 
 def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
@@ -263,7 +274,7 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
 @pytest.mark.parametrize("runner", ["defect_campaign.py", "defect_campaign.sh"])
 def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Path, test_profile: _TestProfile) -> None:
     sites = test_profile.scale(normal=2, extended=3)
-    workspace = Workspace.initialize(tmp_path / runner)
+    workspace = workspace_at(tmp_path / runner)
     parent = new_job(
         workspace,
         _EXAMPLES / runner,
@@ -271,24 +282,25 @@ def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Pat
         parameters={"sites": sites, "diverging": "1"},
         tag="campaign",
     )
-    assert parent.workflow == "examples.defects"
+    assert parent.workflow.startswith("adhoc:defect_campaign@")
 
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=300.0)
 
     # The documented campaign happened: representative normal runs retain one
     # success and one failure, while extended also covers the third child.
-    states = {marker.job_key.split("--")[0]: marker.kind for marker in workspace.scan_markers()}
+    refs = [ref for state in _kernel.UNOWNED_STATES for ref in _kernel.list_jobs(workspace, state)]
+    states = {ref.job_key.split("--")[0]: ref.state for ref in refs}
     assert states == {
         "campaign": "failed",
         **{f"site-{site}": "failed" if site == 1 else "succeeded" for site in range(sites)},
     }
-    campaign = workspace.payload_path(parent.placement, parent.job_key)
+    (campaign,) = [ref.path for ref in refs if ref.job_id == parent.job_id]
     assert (campaign / "run" / "report.tsv").read_text(encoding="utf-8") == "".join(
         f"site-{site}\t{site}\n" for site in range(sites) if site != 1
     )
     assert (campaign / "run" / "triage.txt").read_text(encoding="utf-8") == "site-1\n"
-    marker = workspace.find_marker_by_id(parent.job_id)
-    assert marker is not None
-    failure = workspace.read_state(marker)["failure"]
+    state, _damaged = read_state_unowned(campaign / "state.json")
+    assert state is not None and state.failure is not None
+    failure = state.failure
     assert failure["code"] == "defects.child_failed" and failure["message"] == "failed: site-1"

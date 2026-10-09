@@ -736,7 +736,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         runner_options = {
             key: value
             for key, value in runner.items()
-            if key not in {"format", "document", "data_mode", "workdir_mode"}
+            if key not in {"format", "document", "data_mode", "workdir_mode", "seal_succeeded"}
         }
         try:
             lang.validate_runner(runner_options, root)
@@ -755,7 +755,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
     elif recognize is None:
         _unknown(
             runner,
-            {"entry", "command", "initial_step", "steps", "data_mode", "workdir_mode"},
+            {"entry", "command", "initial_step", "steps", "data_mode", "workdir_mode", "seal_succeeded"},
             "[workflow.runner]",
             root,
         )
@@ -795,6 +795,9 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             raise _error(root, f"[workflow.runner].initial_step {initial_step!r} is not in steps")
     data_mode = runner.get("data_mode", "none")
     workdir_mode = runner.get("workdir_mode", "persistent")
+    seal_succeeded = runner.get("seal_succeeded")
+    if seal_succeeded is not None and not isinstance(seal_succeeded, bool):
+        raise _error(root, "[workflow.runner].seal_succeeded must be a boolean")
     if data_mode not in {"none", "transactional"}:
         raise _error(root, "[workflow.runner].data_mode must be 'none' or 'transactional'")
     if workdir_mode not in {"persistent", "isolated"}:
@@ -958,6 +961,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         steps=steps,
         data_mode=cast(DataMode, data_mode),
         workdir_mode=cast(WorkdirMode, workdir_mode),
+        seal_succeeded=seal_succeeded,
         summary=description,
         inputs=inputs,
         instantiate=lang is not None or instantiate_file is not None,

@@ -390,39 +390,115 @@ def _encode(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
 
 
-def _adhoc_package(runner: Path, destination: Path) -> tuple[str, str]:
-    """Write a one-runner package for a runner file; return its id and name."""
+#: The instantiate member of an ad hoc package whose runner declares an SDK instantiate hook.
+_ADHOC_INSTANTIATE = """# The instantiate hook of the ad hoc runner `run` beside this file (generated at install).
+from pathlib import Path
+
+from httk.workflow.scaffold import _runner_instantiate
+
+instantiate = _runner_instantiate(Path(__file__).with_name("run"))
+"""
+
+
+def _adhoc_package(runner: Path, destination: Path, initial_step: str | None) -> tuple[str, str]:
+    """Write a one-runner package for a runner file, carrying its described inputs and hook; return its id and name."""
 
     preserve = runner.suffix in {".sh", ".bash"} or scaffold._has_bash_shebang(runner)
     described = scaffold.describe_runner(runner, preserve_registration_order=preserve)
     steps = tuple(cast(list[str], described["steps"]))
-    initial = scaffold._initial_step(runner, steps, None)
+    initial = scaffold._initial_step(runner, steps, initial_step)
     destination.mkdir()
     shutil.copyfile(runner, destination / "run")
     os.chmod(destination / "run", 0o755)
-    # JSON strings and arrays are valid TOML basic strings and arrays.
+    # JSON strings and arrays are valid TOML basic strings, quoted keys and arrays.
     manifest = (
         f"[workflow]\nname = {json.dumps(runner.stem)}\n\n"
         f"[workflow.runner]\nsteps = {json.dumps(list(steps))}\ninitial_step = {json.dumps(initial)}\n"
     )
+    for name, target in cast(dict[str, str | None], described.get("inputs", {})).items():
+        manifest += f"\n[workflow.inputs.{json.dumps(name)}]\n"
+        manifest += "" if target is None else f"destination = {json.dumps(target)}\n"
+    if described.get("instantiate"):
+        if preserve:
+            raise ValueError(f"the instantiate hook is Python-SDK-only: {runner}")
+        (destination / "instantiate.py").write_text(_ADHOC_INSTANTIATE, encoding="utf-8")
+        manifest += '\n[workflow.instantiate]\nfile = "instantiate.py"\n'
     (destination / MANIFEST_NAME).write_text(manifest, encoding="utf-8")
-    # ponytail: described inputs are not carried into the manifest; add [workflow.inputs] when ad hoc runners need them.
     return f"adhoc:{runner.stem}@{sha256_file(runner)[:12]}", runner.stem
 
 
-def _resolve(source: str | os.PathLike[str], work: Path) -> tuple[str, str, WorkflowProvider, str]:
-    """Resolve an install source to its id, short name, provider and recorded source text."""
+def _document_package(source: Path, language: str | None, destination: Path) -> tuple[str, str] | None:
+    """Write a package for a bare format document (or document directory); ``None`` when it is not one.
+
+    The package names the document and declares its ports as inputs and record outputs, so
+    a job of it is prepared by the format's realization and run by its built-in runner.
+    """
+
+    from httk.workflow import compat
+
+    if language is None:
+        lang = compat.match_document(source) if source.is_file() else None
+        if lang is None:
+            return None
+    else:
+        lang = compat.language(language)
+        if (lang.document_policy == "forbidden") != source.is_dir():
+            kind = "a directory" if lang.document_policy == "forbidden" else "a document file"
+            raise ValueError(f"workflow format {lang.name!r} expects {kind}: {source}")
+    stem = source.name if source.is_dir() else source.stem
+    name = f"{lang.name}.{scaffold._sanitize_tag(stem) or 'document'}"
+    ports = lang.ports(source)
+    if source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+        _writable(destination)
+        document, digest = "", source_tree_digest(destination)
+    else:
+        destination.mkdir()
+        shutil.copyfile(source, destination / source.name)
+        document, digest = f"document = {json.dumps(source.name)}\n", sha256_file(source)
+    # JSON strings are valid TOML basic strings and quoted keys.
+    manifest = (
+        f"[workflow]\nname = {json.dumps(name)}\n"
+        f"description = {json.dumps(f'the {lang.name} document {source.name}')}\n\n"
+        f"[workflow.runner]\nformat = {json.dumps(lang.name)}\n{document}"
+    )
+    manifest += "".join(f"\n[workflow.inputs.{json.dumps(port)}]\n" for port in ports.inputs)
+    manifest += "".join(f'\n[workflow.outputs.{json.dumps(port)}]\nentry_type = "records"\n' for port in ports.outputs)
+    (destination / MANIFEST_NAME).write_text(manifest, encoding="utf-8")
+    return f"adhoc:{name}@{digest[:12]}", name
+
+
+def _resolve(
+    source: str | os.PathLike[str],
+    work: Path,
+    initial_step: str | None,
+    *,
+    by_name: bool = False,
+    language: str | None = None,
+) -> tuple[str, str, WorkflowProvider, str]:
+    """Resolve an install source to its id, short name, provider and recorded source text.
+
+    With *by_name* (a declared call) the source is a workflow name or git URI, never a path,
+    so a directory of that name where the install runs is not taken for it.
+    """
 
     path = Path(source).expanduser()
     text = os.fspath(source)
-    if path.is_dir() and (path / MANIFEST_NAME).is_file():
+    manifest = path.is_dir() and (path / MANIFEST_NAME).is_file()
+    if manifest and language is not None:
+        raise ValueError("a format applies only to a bare document or directory; a package names its own format")
+    if not by_name and not manifest and path.exists() and not path.is_symlink():
+        found = _document_package(path.resolve(), language, work / "adhoc")
+        if found is not None:
+            return found[0], found[1], parse_workflow_manifest(work / "adhoc"), str(path.resolve())
+    if not by_name and manifest:
         provider = parse_workflow_manifest(path)
         return f"local:{provider.workflow_id}", provider.workflow_id, provider, str(path.resolve())
     if text.startswith("git+"):
         provider = git_workflows.fetch_workflow(text)
         return provider.workflow_id, provider.name or provider.workflow_id, provider, text
-    if path.is_file() and not path.is_symlink():
-        workflow_id, name = _adhoc_package(path.resolve(), work / "adhoc")
+    if not by_name and path.is_file() and not path.is_symlink():
+        workflow_id, name = _adhoc_package(path.resolve(), work / "adhoc", initial_step)
         return workflow_id, name, parse_workflow_manifest(work / "adhoc"), str(path.resolve())
     known = scaffold.workflow_provider(text)
     if known is None:
@@ -452,12 +528,15 @@ def install(
     *,
     calls: bool = True,
     build: bool = True,
+    initial_step: str | None = None,
+    language: str | None = None,
 ) -> Installed:
     """Install (or reinstall, replacing) a workflow package in the workspace.
 
     *source* is, in this order: a directory holding ``httk_workflow.toml``
     (id ``local:<name>``); a ``git+…`` URI (id = the canonical commit-pinned
-    URI); a runner file (an ad hoc package, id ``adhoc:<stem>@<sha12>``); or a
+    URI); a bare document of a workflow format, or a runner file (an ad hoc
+    package, id ``adhoc:<name>@<sha12>``); or a
     workflow name known on this machine with a package directory. A
     reinstall moves the old installation into the scratch, moves the new one
     into place and only then removes the old tree.
@@ -467,12 +546,17 @@ def install(
     :param source: The source.
     :param calls: Install every ``[workflow.calls]`` reference first (recursively) unless already installed.
     :param build: Build for the current platform when the package declares ``[workflow.build]``.
+    :param initial_step: The default step of an ad hoc package (runner file sources only); required
+        when the runner registers several steps and none of them is ``start``.
+    :param language: Force a workflow format for a bare document or directory.
     :return: The installation.
     :raises ValueError: For an unresolvable or invalid source, a symlink or special file in the
         package, a package registered in-process only, or a call cycle.
     """
 
-    return _install(workspace, owner, source, calls=calls, build=build, stack=())
+    return _install(
+        workspace, owner, source, calls=calls, build=build, stack=(), initial_step=initial_step, language=language
+    )
 
 
 def _install(
@@ -483,9 +567,13 @@ def _install(
     calls: bool,
     build: bool,
     stack: tuple[str, ...],
+    initial_step: str | None = None,
+    language: str | None = None,
 ) -> Installed:
     with _scratch(owner) as work:
-        workflow_id, name, provider, origin = _resolve(source, work)
+        workflow_id, name, provider, origin = _resolve(
+            source, work, initial_step, by_name=bool(stack), language=language
+        )
         if workflow_id in stack:
             raise ValueError(f"workflow calls form a cycle: {' -> '.join((*stack, workflow_id))}")
         if stack and (installed := lookup(workspace, workflow_id)) is not None and installed.id == workflow_id:

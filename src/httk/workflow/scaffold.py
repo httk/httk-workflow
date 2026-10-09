@@ -1,19 +1,24 @@
-"""Scaffolding submitted jobs from a workflow, some files, and some inputs.
+"""Scaffolding submitted jobs from an installed workflow, some files, and some inputs.
 
-A job is a payload directory plus a ``job.json`` that names the runner to execute,
-and building one by hand means knowing the runner's workflow name, its initial
-step, its digest, and where its inputs live in the payload. This module is the
-short way: :func:`new_job` takes a *workflow* — a packaged runner a domain
-registered by name, or the path of a runner file of your own — stages the files
-the runner reads, writes the ``job.json``, and submits the result, all in one
-call.
+A job is a payload directory plus a ``job.json`` that names the installed
+workflow to run, and building one by hand means knowing that workflow's id, its
+initial step, and where its inputs live in the payload. This module is the
+short way: :func:`new_job` takes a *workflow* — the id or name of a workflow
+installed in the workspace, or the path of a runner file of your own — stages
+the files the runner reads, writes the ``job.json``, and submits the result, all
+in one call.
+
+A job runs only a workflow installed in its workspace (``httk workflow
+install``): the manager executes the installed package, so upgrading the
+*httk-workflow* underneath a queued campaign never changes what its jobs run.
+A workflow that is not installed is refused, unless ``install=True`` installs it
+first. A runner file is always installed, as an ``adhoc:`` workflow.
 
 Packaged workflows are not known to this module. A domain or compat engine
 registers each one it ships with :func:`~httk.workflow.scaffold.register_workflow`, supplying only the
 generic description of a starting point — its name, the runner it starts from,
-the workflow and steps that runner declares, the modes a job of it defaults to,
-and what it does — so the scaffold resolves and pins a workflow without ever
-importing the science that owns it.
+the workflow and steps that runner declares, and what it does — so the scaffold
+resolves a workflow without ever importing the science that owns it.
 
 .. code-block:: python
 
@@ -21,23 +26,13 @@ importing the science that owns it.
     from httk.workflow.scaffold import new_job
 
     workspace = Workspace.initialize("workflow-workspace")
-    job = new_job(workspace, "some-workflow", files={"input": "input"}, tag="example")
+    job = new_job(workspace, "some-workflow", files={"input": "input"}, tag="example", install=True)
     print(job.job_key, job.payload)
 
-By default the runner file is *published into the workspace runner store*, and the
-job references it there by digest. That is what makes a scaffolded job durable:
-the bytes that will run are pinned in the workspace, so upgrading the installed
-*httk-workflow* underneath a queued campaign cannot change what its jobs execute.
-Publication is content addressed — the store name carries the digest of the
-bytes — so scaffolding the same workflow twice publishes nothing the second time,
-and a later, different version of a packaged runner lands beside the old one
-instead of replacing it. ``publish="installed"`` instead references a packaged
-workflow through the reserved ``pkg:`` form, which copies nothing at all.
-
-:func:`new_jobs` is the same operation for a campaign: one workflow resolution and
-one publication amortized over every job, and a lazy iterator over the results. By
-design, generating a partitioned campaign costs one payload and one marker per
-job and never materializes a list of them.
+:func:`new_jobs` is the same operation for a campaign: one workflow resolution
+amortized over every job, and a lazy iterator over the results. By design,
+generating a partitioned campaign costs one payload per job and never
+materializes a list of them.
 """
 
 from __future__ import annotations
@@ -55,15 +50,14 @@ import shlex
 import shutil
 import subprocess
 import sys
-import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 from httk.core.building import BuildSpec
-from httk.core.digests import sha256_file, tree_digest
+from httk.core.digests import tree_digest
 from httk.core.report import context_logger
 from httk.core.requirements import check_requirements, parse_requirements
 
@@ -71,15 +65,16 @@ if TYPE_CHECKING:
     from .collecting import JobRecord
     from .compat import LanguageRequest
 
+from . import _fs, _kernel
 from ._durations import cap_maxtime
+from ._job import JobDefinition
 from ._util import interpreter_first_path, validate_inputs
 from .codes import code_environment
-from .errors import FormatError, WorkflowError
+from .errors import FormatError
 from .models import (
     ATTEMPTS_DIRECTORY,
     JOB_STATE_DIRECTORY,
     LOGS_DIRECTORY,
-    JobDefinition,
     ensure_step_known,
     expand_runner_command,
     normalize_placement,
@@ -90,7 +85,10 @@ from .models import (
     validate_step,
 )
 from .runtime_builders import JobSpec, prepare_job_payload
-from .workspace import Workspace, _stage_runner
+from .workspace import Workspace
+
+if TYPE_CHECKING:
+    from ._store import Installed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,7 +137,6 @@ _MAXIMUM_TAG_LENGTH = 48
 
 type DataMode = Literal["none", "transactional"]
 type WorkdirMode = Literal["persistent", "isolated"]
-type PublishMode = Literal["workspace", "installed"]
 
 
 @dataclass(frozen=True)
@@ -184,6 +181,8 @@ class WorkflowProvider:
     :param step_resources: Declare per-step resource requirements, time labels spelled as in *resources*.
     :param data_mode: Declare the workflow's default data mode.
     :param workdir_mode: Declare the workflow's default workdir mode.
+    :param seal_succeeded: Seal a succeeded job of it (``[workflow.runner] seal_succeeded``); ``None``
+        leaves it to the workspace setting.
     :param summary: Describe the workflow for callers.
     :param inputs: Map input names to payload destinations or hook handling.
     :param instantiate: Indicate that the workflow has an instantiate hook.
@@ -222,6 +221,7 @@ class WorkflowProvider:
     step_resources: Mapping[str, Mapping[str, int | str]] = field(default_factory=dict)
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
+    seal_succeeded: bool | None = None
     summary: str = ""
     inputs: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
@@ -661,47 +661,20 @@ class ResolvedWorkflow:
 
         return self.recognize is None
 
-    @property
-    def store_name(self) -> str:
-        """Return the content-addressed name this workflow takes in a runner store.
-
-        The digest of the bytes is part of the name, so publishing is idempotent
-        for identical bytes and never overwrites a name a submitted job pinned:
-        an upgraded packaged runner is published beside the version its queued
-        jobs still reference.
-
-        :return: The digest-pinned runner-store name.
-        """
-
-        if self.language is not None:
-            raise ValueError("a language workflow is never published to the runner store")
-        if self.directory is not None:
-            from .packages import source_tree_digest
-
-            return f"{self.directory.name}.{source_tree_digest(self.directory)[:12]}"
-        digest = sha256_file(self.source)
-        stem = self.source.name
-        suffix = ""
-        for candidate in (".py", ".sh", ".bash"):
-            if stem.endswith(candidate):
-                stem, suffix = stem[: -len(candidate)], candidate
-                break
-        return f"{stem}.{digest[:12]}{suffix}"
-
 
 @dataclass(frozen=True)
 class ScaffoldedJob:
     """Describe one job this module submitted.
 
     :param job_id: Identify the submitted job.
-    :param job_key: Identify the job payload and state markers.
+    :param job_key: Identify the job directory.
     :param tag: Preserve the optional job tag.
-    :param placement: Locate the job within the workspace.
-    :param payload: Locate the submitted payload.
-    :param marker: Locate the submitted state marker.
-    :param workflow: Name the workflow the job runs.
+    :param placement: Locate the job within each state directory.
+    :param payload: Locate the job directory as submitted, in ``jobs/ready/``.
+    :param ref: The kernel reference of the submitted job directory.
+    :param workflow: Name the installed workflow's id.
+    :param workflow_name: Name the installed workflow's short name.
     :param initial_step: Name the step the job starts at.
-    :param runner: Describe the pinned runner.
     :param warnings: Preserve the preparation warnings raised for this workflow.
     """
 
@@ -710,10 +683,10 @@ class ScaffoldedJob:
     tag: str | None
     placement: PurePosixPath
     payload: Path
-    marker: Path
+    ref: _kernel.JobRef
     workflow: str
+    workflow_name: str
     initial_step: str
-    runner: Mapping[str, object]
     warnings: tuple[str, ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
@@ -724,32 +697,24 @@ class ScaffoldedJob:
 
         return {
             "format": JOB_SCAFFOLD_FORMAT,
-            "format_version": 2,
+            "format_version": 3,
             "job_id": self.job_id,
             "job_key": self.job_key,
             "tag": self.tag,
             "placement": placement_text(self.placement),
             "payload_path": str(self.payload),
-            "marker_path": str(self.marker),
-            "workflow": self.workflow,
+            "state": self.ref.state,
+            "workflow": {"id": self.workflow, "name": self.workflow_name},
             "initial_step": self.initial_step,
-            "runner": dict(self.runner),
         }
 
 
 @dataclass(frozen=True)
 class _Prepared:
-    """A workflow whose runner is resolved once for every job that will use it."""
+    """An installed workflow resolved once for every job that will use it."""
 
+    installed: Installed
     workflow: ResolvedWorkflow
-    runner_source: Literal["payload", "workspace", "installed"]
-    runner_path: str
-    runner_sha256: str | None
-    data_mode: DataMode
-    runner_executor: str = "path"
-    runner_command: tuple[str, ...] | None = None
-    payload_runner: str | None = None
-    workdir_path: str | None = None
     required_capabilities: tuple[str, ...] = ()
     reserved_parameters: tuple[str, ...] = ()
     documents: Mapping[str, str | bytes] = field(default_factory=dict)
@@ -1022,21 +987,6 @@ def _packaged_runner_path(provider: WorkflowProvider) -> Path:
     return Path(location).with_name(provider.runner_file)
 
 
-def _packaged_runner_reference(provider: WorkflowProvider) -> dict[str, object]:
-    """Return the installed ``runner`` member a provider's ``pkg:`` form pins."""
-
-    path = _packaged_runner_path(provider)
-    if provider.runner_package is None or provider.runner_file is None:
-        raise ValueError(f"workflow {provider.workflow_id!r} is not a packaged workflow")
-    return {
-        "executor": "path",
-        "source": "installed",
-        "path": f"pkg:{provider.runner_package}/{PurePosixPath(provider.runner_file)}",
-        "sha256": sha256_file(path),
-        "arguments": [],
-    }
-
-
 def registered_workflow(name: str) -> ResolvedWorkflow | None:
     """Return the registered workflow selected by *name*, or ``None``.
 
@@ -1099,61 +1049,6 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         recognize=provider.recognize,
         _input_metadata=provider._input_metadata,
     )
-
-
-def resolve_calls(calls: Mapping[str, str]) -> dict[str, str]:
-    """Resolve the workflows a workflow declares it calls, for one new job to record.
-
-    Every declared call must resolve, transitively, so a job whose dependencies
-    are unknown is refused when it is created rather than failing when it runs. A
-    name must select a registered, plugin-bundled, or installed workflow (never a
-    path) and is recorded as it is, to be resolved again wherever the job runs; a
-    git URI, which the manifest pins to a commit, is recorded in its canonical
-    form, so the job calls exactly the definition that existed when it was
-    created.
-
-    :param calls: The declared calls, alias to workflow reference.
-    :return: The calls to record, alias to resolved reference.
-    :raises ValueError: If a declared call, or one of its own declared calls, cannot be resolved.
-    """
-
-    resolved: dict[str, str] = {}
-    seen: set[str] = set()
-    for alias, reference in calls.items():
-        recorded, provider = _call_provider(alias, reference)
-        resolved[alias] = recorded
-        _require_calls_resolve(provider, seen | {recorded})
-    return resolved
-
-
-def _call_provider(alias: str, reference: str) -> tuple[str, WorkflowProvider]:
-    """Resolve one declared call to the reference to record and its provider."""
-
-    try:
-        if reference.startswith("git+"):
-            recorded = resolve_workflow(reference).registration_id or reference
-            provider = workflow_provider(recorded)
-        else:
-            recorded, provider = reference, workflow_provider(reference)
-    except (WorkflowError, ValueError, OSError) as exc:
-        raise ValueError(f"declared call {alias} = {reference!r} does not resolve here: {exc}") from exc
-    if provider is None:
-        raise ValueError(
-            f"declared call {alias} = {reference!r} does not resolve here: no registered, plugin, or installed "
-            "workflow has that name"
-        )
-    return recorded, provider
-
-
-def _require_calls_resolve(provider: WorkflowProvider, seen: set[str]) -> None:
-    """Require every call *provider* itself declares to resolve too, transitively."""
-
-    for alias, reference in (provider.calls or {}).items():
-        if reference in seen:
-            continue
-        seen.add(reference)
-        _recorded, called = _call_provider(alias, reference)
-        _require_calls_resolve(called, seen)
 
 
 def resolve_workflow(
@@ -1427,42 +1322,35 @@ def new_job(
     tag: str | None = None,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     priority: int | None = None,
-    workdir_mode: WorkdirMode = "persistent",
-    data_mode: DataMode | None = None,
-    publish: PublishMode = "workspace",
     step: str | None = None,
     format: str | None = None,
-    workflow_id: str | None = None,
-    runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
     provenance: Mapping[str, object] | None = None,
+    install: bool = False,
 ) -> ScaffoldedJob:
-    """Scaffold, submit, and describe one job of *workflow*.
+    """Scaffold, submit, and describe one job of an installed *workflow*.
 
-    *workflow* is a registered workflow name — see :func:`~httk.workflow.scaffold.registered_workflows` —
-    or the path of a runner file. *files* maps payload names to the files to stage
-    there: a bare name lands in the payload's :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is
-    where a packaged runner reads its inputs, and a name with a directory in
-    it is used verbatim. *inputs* stages the workflow's declared objects into
-    the payload; *parameters* is the job's opaque implementation mapping.
+    *workflow* is the id or short name of a workflow installed in *workspace*
+    (``httk workflow install``), a registered or alias name, git URI or package
+    directory whose installation is looked up, or the path of a runner file of
+    your own or of a bare workflow document (a CWL or PWD file), which is
+    installed as an ``adhoc:`` workflow. *files* maps payload
+    names to the files to stage there: a bare name lands in the payload's
+    :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is where a packaged
+    runner reads its inputs, and a name with a directory in it is used
+    verbatim. *inputs* stages the workflow's declared objects into the payload;
+    *parameters* is the job's opaque implementation mapping.
 
-    *data_mode* defaults to the workflow's declared mode, or ``none`` when
-    unspecified. Workflows with a persistent workdir typically default to
-    ``none``: the workdir holds the results. Pass ``transactional`` to copy their curated
-    outputs into ``data/`` as well. *publish* ``workspace`` publishes the runner
-    file into the workspace runner store and pins its digest; ``installed``
-    references a packaged runner through the reserved ``pkg:`` form instead and
-    copies nothing. It is ignored for language workflows, whose realization
-    chooses the runner itself.
+    The payload is built in the scratch of a CLI owner registered for the call
+    and submitted to ``jobs/ready/<placement>/``.
 
     :func:`scaffold_job` is the same operation stopped one step short of
     submission: it builds the payload into a directory you name and returns its
-    :class:`~httk.workflow.protocol.JobDefinition` without registering a state
-    marker, which is how :meth:`httk.workflow.Attempt.call` builds a child job of
-    a registered workflow from inside a running step.
+    ``job.json`` definition, which is how :meth:`httk.workflow.Attempt.call`
+    builds a child job from inside a running step.
 
     :param workspace: Provide the workspace receiving the job.
-    :param workflow: Select the workflow or runner file.
+    :param workflow: Select the installed workflow, or a runner file to install.
     :param inputs: Supply declared workflow inputs.
     :param files: Map payload names to files to stage.
     :param parameters: Supply opaque job parameters.
@@ -1470,13 +1358,8 @@ def new_job(
     :param tag: Set the job tag.
     :param placement: Place the job within the workspace.
     :param priority: Set the scheduling priority.
-    :param workdir_mode: Select the job workdir mode.
-    :param data_mode: Override the workflow data mode.
-    :param publish: Select workspace publication or installed reference.
     :param step: Override the workflow's initial step.
-    :param format: Force a language for a bare workflow document or directory.
-    :param workflow_id: Override the workflow id in the job definition.
-    :param runner_name: Override the workspace runner-store name when publishing.
+    :param format: Force a workflow format for a bare document or directory, which is then installed ad hoc.
     :param name: Set the job's display name.
     :param provenance: Merge one declared-side ``provenance`` document (see
         :mod:`httk.workflow.provenance`) into the job's declarations. When the
@@ -1487,23 +1370,16 @@ def new_job(
         birth-time claim that this job is for a database entity: an ``inputs``
         edge labelled ``entity`` naming the entity by its stable ledger key, e.g.
         ``{"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}}``.
+    :param install: Install *workflow* into the workspace first when it is not installed.
     :return: The submitted job description.
-    :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
+    :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
+        inputs, placement, or job settings are invalid.
     """
 
-    prepared = _prepare(
+    [job] = new_jobs(
         workspace,
         workflow,
-        publish=publish,
-        step=step,
-        workflow_id=workflow_id,
-        data_mode=data_mode,
-        format=format,
-        runner_name=runner_name,
-    )
-    return _submit(
-        workspace,
-        prepared,
+        [{}],
         inputs=inputs,
         files=files,
         parameters=parameters,
@@ -1511,10 +1387,13 @@ def new_job(
         tag=tag,
         placement=placement,
         priority=priority,
-        workdir_mode=workdir_mode,
+        step=step,
+        format=format,
         name=name,
         provenance=provenance,
+        install=install,
     )
+    return job
 
 
 def new_jobs(
@@ -1529,16 +1408,12 @@ def new_jobs(
     tag: str | None = None,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     priority: int | None = None,
-    workdir_mode: WorkdirMode = "persistent",
-    data_mode: DataMode | None = None,
-    publish: PublishMode = "workspace",
     step: str | None = None,
     format: str | None = None,
-    workflow_id: str | None = None,
-    runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
     provenance: Mapping[str, object] | None = None,
-) -> Iterator[ScaffoldedJob]:
+    install: bool = False,
+) -> Generator[ScaffoldedJob, None, None]:
     """Scaffold and submit one job per member of *items*, lazily.
 
     Every keyword is the shared value of the whole campaign, and every member of
@@ -1546,15 +1421,16 @@ def new_jobs(
     merged over the shared mappings, and ``tag``, ``name``, ``placement``, and
     ``priority`` replace the shared value.
 
-    This is the pattern for a campaign of any size. The workflow is resolved once
-    and its runner published once, however many jobs follow, so every job costs
-    exactly one payload directory and one state marker; *items* is consumed as an
-    iterator and the results are yielded as they are submitted, so a structure
-    generator can be turned into jobs without either side of the loop ever being
-    materialized.
+    This is the pattern for a campaign of any size. The workflow is resolved (and,
+    when asked, installed) once, however many jobs follow, so every job costs
+    exactly one payload directory; *items* is consumed as an iterator and the
+    results are yielded as they are submitted, so a structure generator can be
+    turned into jobs without either side of the loop ever being materialized.
+    Nothing happens until the first job is requested, and the CLI owner the jobs
+    are built by is closed when the iterator is exhausted or closed.
 
     :param workspace: Provide the workspace receiving the jobs.
-    :param workflow: Select the workflow or runner file.
+    :param workflow: Select the installed workflow, or a runner file to install.
     :param items: Yield per-job overrides.
     :param inputs: Supply shared declared workflow inputs.
     :param files: Supply shared payload files.
@@ -1563,21 +1439,18 @@ def new_jobs(
     :param tag: Set the shared job tag.
     :param placement: Set the shared workspace placement.
     :param priority: Set the shared scheduling priority.
-    :param workdir_mode: Select the shared workdir mode.
-    :param data_mode: Override the workflow data mode.
-    :param publish: Select workspace publication or installed reference.
     :param step: Override the workflow's initial step.
-    :param format: Force a language for a bare workflow document or directory.
-    :param workflow_id: Override the workflow id in each job definition.
-    :param runner_name: Override the workspace runner-store name when publishing.
+    :param format: Force a workflow format for a bare document or directory, which is then installed ad hoc.
     :param name: Set the shared display name.
     :param provenance: Set the shared ``provenance`` document; a per-item
         ``provenance`` in :class:`~httk.workflow.scaffold.JobItem` replaces it entirely rather than
         merging with it. See :func:`new_job` for the merge rule against a
         workflow-declared ``provenance`` and the entity-claim convention.
+    :param install: Install *workflow* into the workspace first when it is not installed.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
-    :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
+    :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
+        inputs, placement, or job settings are invalid.
 
     .. code-block:: python
 
@@ -1589,78 +1462,107 @@ def new_jobs(
             print(job.job_key)
     """
 
-    prepared = _prepare(
-        workspace,
-        workflow,
-        publish=publish,
-        step=step,
-        workflow_id=workflow_id,
-        data_mode=data_mode,
-        format=format,
-        runner_name=runner_name,
-    )
-    for item in items:
-        yield _submit(
-            workspace,
-            prepared,
-            inputs={**(inputs or {}), **item.get("inputs", {})},
-            files={**(files or {}), **item.get("files", {})},
-            parameters={**(parameters or {}), **item.get("parameters", {})},
-            environment={**(environment or {}), **item.get("environment", {})},
-            tag=item.get("tag", tag),
-            placement=item.get("placement", placement),
-            priority=item.get("priority", priority),
-            workdir_mode=workdir_mode,
-            name=item.get("name", name),
-            provenance=item.get("provenance", provenance),
-        )
+    owner = _kernel.register_owner(workspace, kind="cli", label="job new", allocation=None, advertised={})
+    try:
+        installed = _installed(workspace, workflow, owner=owner, install=install, step=step, language=format)
+        prepared = _prepare(installed, step=step)
+        for item in items:
+            scratch = owner.scratch("submit")
+            staging = scratch / "job"
+            staging.mkdir()
+            job = _build_payload(
+                workspace,
+                prepared,
+                staging,
+                inputs={**(inputs or {}), **item.get("inputs", {})},
+                files={**(files or {}), **item.get("files", {})},
+                parameters={**(parameters or {}), **item.get("parameters", {})},
+                environment={**(environment or {}), **item.get("environment", {})},
+                tag=item.get("tag", tag),
+                placement=item.get("placement", placement),
+                priority=item.get("priority", priority),
+                name=item.get("name", name),
+                provenance=item.get("provenance", provenance),
+            )
+            ref = _kernel.submit(workspace, owner, staging)
+            _fs.remove_empty_dir(_fs.loc(scratch))
+            yield ScaffoldedJob(
+                job_id=job.id,
+                job_key=job.job_key,
+                tag=job.tag,
+                placement=job.placement,
+                payload=ref.path,
+                ref=ref,
+                workflow=job.workflow_id,
+                workflow_name=job.workflow_name,
+                initial_step=job.initial_step,
+                warnings=prepared.warnings,
+            )
+    finally:
+        # Discards the scratch of a job whose building failed, then the owner record.
+        owner.close()
 
 
-def _prepare(
+def _installed(
     workspace: Workspace,
     workflow: str | os.PathLike[str],
     *,
-    publish: PublishMode,
+    owner: _kernel.Owner | None,
+    install: bool,
     step: str | None,
-    workflow_id: str | None,
-    data_mode: DataMode | None,
-    format: str | None,
-    runner_name: str | PurePosixPath | None,
-    runner_stage: Path | None = None,
-) -> _Prepared:
-    """Resolve one workflow and make its runner referenceable, exactly once.
+    language: str | None = None,
+) -> Installed:
+    """Return the installation *workflow* names, installing a runner file or bare document first.
 
-    ``publish`` is ignored for language workflows because their realization
-    supplies the runner reference and payload members. With *runner_stage*,
-    ``publish="workspace"`` stages the runner there instead of publishing it
-    into the workspace store (:func:`~httk.workflow.workspace._stage_runner`):
-    :meth:`httk.workflow.Attempt.call` stages into its outcome draft, and the
-    manager publishes at commit. The reference is the same either way, and an
-    instantiate hook runs from the staged copy, so a store that does not hold
-    the runner yet is never consulted.
+    Anything else is installed only with *install*; without an *owner* nothing is installed.
     """
 
-    resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode, format=format)
+    from . import _store
+    from .packages import MANIFEST_NAME, parse_workflow_manifest
+
+    text = os.fspath(workflow)
+    path = Path(text).expanduser()
+    package = path.is_dir() and (path / MANIFEST_NAME).is_file()
+    if owner is not None and (path.is_file() or (language is not None and path.is_dir() and not package)):
+        return _store.install(workspace, owner, path, initial_step=step, language=language)
+    found = None
+    if package:
+        found = _store.lookup(workspace, f"local:{parse_workflow_manifest(path).workflow_id}")
+    elif not path.exists():
+        found = _store.lookup(workspace, text)
+        # An alias or a git URI of an already fetched workflow names an installation by its canonical id.
+        if found is None and (provider := workflow_provider(text)) is not None:
+            found = _store.lookup(workspace, provider.definition_uri or f"local:{provider.workflow_id}")
+    if found is not None:
+        return found
+    if owner is not None and install:
+        return _store.install(workspace, owner, path if path.exists() else text)
+    raise ValueError(
+        f"workflow {text!r} is not installed in the workspace {workspace.root}; "
+        f"install it first with `httk workflow install {shlex.quote(text)}` (or pass install=True)"
+    )
+
+
+def _prepare(installed: Installed, *, step: str | None) -> _Prepared:
+    """Resolve one installed workflow for job creation, exactly once per campaign.
+
+    An instantiate hook runs from the installed package, verified against the
+    installed tree digest. A language workflow is prepared by its realization,
+    whose runner is the manager's own built-in, so only its payload members,
+    parameters and hooks are taken.
+    """
+
+    resolved = _provider_resolution(installed.provider())
     if not resolved.runnable:
         raise ValueError(f"{resolved.workflow_id} recognizes calculations and cannot be run")
+    if step is not None:
+        if resolved.steps:
+            ensure_step_known(step, resolved.steps, f"the workflow {installed.id}")
+        resolved = replace(resolved, initial_step=step)
     if resolved.language is not None:
         from . import compat
 
-        lang = compat.language(resolved.language)
-        scaffolded = lang.prepare(_language_request(resolved))
-        if scaffolded.runner is not None:
-            runner = scaffolded.runner
-            runner_source = cast(Literal["payload", "workspace", "installed"], str(runner["source"]))
-            runner_path = str(runner["path"])
-            runner_sha256 = None if runner_source == "payload" else str(runner["sha256"])
-            runner_executor = str(runner.get("executor", scaffolded.runner_executor))
-        else:
-            if scaffolded.payload_runner is None:
-                raise ValueError(f"language {resolved.language!r} did not provide a runner")
-            runner_source = "payload"
-            runner_path = scaffolded.payload_runner
-            runner_sha256 = None
-            runner_executor = scaffolded.runner_executor
+        scaffolded = compat.language(resolved.language).prepare(_language_request(resolved))
         parameters = dict(scaffolded.parameters)
         parameters["workflow_realization"] = "language"
         reserved_parameters = (*scaffolded.reserved_parameters, "workflow_realization")
@@ -1668,14 +1570,8 @@ def _prepare(
             parameters["workflow_collect"] = "package"
             reserved_parameters = (*reserved_parameters, "workflow_collect")
         return _Prepared(
+            installed=installed,
             workflow=resolved,
-            runner_source=runner_source,
-            runner_path=runner_path,
-            runner_sha256=runner_sha256,
-            data_mode=resolved.data_mode,
-            runner_executor=runner_executor,
-            payload_runner=scaffolded.payload_runner,
-            workdir_path=scaffolded.workdir_path,
             required_capabilities=tuple(sorted(set(scaffolded.required_capabilities))),
             reserved_parameters=reserved_parameters,
             documents=scaffolded.documents,
@@ -1685,78 +1581,20 @@ def _prepare(
             instantiate=scaffolded.instantiate,
             finalize=scaffolded.finalize,
         )
-    if publish == "installed":
-        if runner_name is not None:
-            raise ValueError("runner_name requires publish='workspace'")
-        if resolved.directory is not None:
-            raise ValueError(
-                "publish='installed' is not supported for a directory workflow; publish it into the workspace"
-            )
-        provider = workflow_provider(resolved.registration_id or resolved.workflow_id)
-        if resolved.packaged is None or provider is None:
-            raise ValueError(
-                f"publish='installed' references a packaged workflow, but {resolved.source} is a runner "
-                "file of your own; publish it into the workspace instead (the default), or install it on "
-                "a runner search path and write its job.json yourself"
-            )
-        reference = _packaged_runner_reference(provider)
-    else:
-        try:
-            if runner_stage is None:
-                reference = workspace.publish_runner(resolved.source, name=runner_name or resolved.store_name)
-            else:
-                name = runner_name or resolved.store_name
-                reference = _stage_runner(resolved.source, runner_stage, name, store=workspace.runner_store_path(name))
-        except FileExistsError as exc:
-            if resolved.directory is None:
-                raise
-            # A staged call checks the store first, so an existing store entry is the conflict.
-            target = workspace.runner_store_path(resolved.store_name)
-            if runner_stage is not None and not target.exists():
-                target = runner_stage / resolved.store_name
-            actual = tree_digest(target)
-            from .packages import source_tree_digest
+    if resolved.instantiate_file is None:
+        return _Prepared(installed=installed, workflow=resolved)
+    from .packages import _tree_hook
 
-            expected = source_tree_digest(resolved.source)
-            raise ValueError(
-                f"published workflow tree {target} has digest {actual}, but the package resolves to {expected}"
-            ) from exc
-    runner_sha256 = str(reference["sha256"])
-    instantiate: Callable[[InstantiateContext], object] | None
-    instantiate_exec: tuple[Path, str, str] | None = None
-    if resolved.directory is not None and resolved.instantiate_file is not None:
-        from .packages import _tree_hook
-
-        # The hook runs from the tree just published or staged, pinned to its digest.
-        runner_tree = (
-            workspace.runner_store_path(str(reference["path"]))
-            if runner_stage is None
-            else runner_stage.joinpath(*PurePosixPath(str(reference["path"])).parts)
+    digest = str(installed.record.get("tree_sha256"))
+    if resolved.instantiate_exec is not None:
+        return _Prepared(
+            installed=installed,
+            workflow=resolved,
+            instantiate_exec=(installed.package, digest, resolved.instantiate_exec),
         )
-        if resolved.instantiate_exec is not None:
-            instantiate = None
-            instantiate_exec = (runner_tree, runner_sha256, resolved.instantiate_exec)
-        else:
-            instantiate = cast(
-                Callable[[InstantiateContext], object],
-                _tree_hook(
-                    runner_tree,
-                    runner_sha256,
-                    resolved.instantiate_file,
-                    "instantiate",
-                ),
-            )
-    else:
-        instantiate = _resolve_instantiate(resolved, runner_sha256) if resolved.instantiate else None
+    hook = _tree_hook(installed.package, digest, resolved.instantiate_file, "instantiate")
     return _Prepared(
-        workflow=resolved,
-        runner_source=cast(Literal["workspace", "installed"], str(reference["source"])),
-        runner_path=str(reference["path"]),
-        runner_sha256=runner_sha256,
-        runner_command=resolved.command,
-        data_mode=resolved.data_mode,
-        instantiate=instantiate,
-        instantiate_exec=instantiate_exec,
+        installed=installed, workflow=resolved, instantiate=cast(Callable[[InstantiateContext], object], hook)
     )
 
 
@@ -1788,20 +1626,19 @@ def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
     )
 
 
-def _resolve_instantiate(workflow: ResolvedWorkflow, runner_sha256: str) -> Callable[[InstantiateContext], object]:
-    """Import and resolve a workflow's instantiate hook once."""
+def _runner_instantiate(source: Path) -> Callable[[InstantiateContext], object]:
+    """Import an SDK runner file once and return the instantiate hook of its one :class:`~httk.workflow.Runner`.
 
-    if workflow.source.suffix != ".py":
-        raise ValueError(f"the instantiate hook is Python-SDK-only: {workflow.source}")
-    source = workflow.source
+    The ad hoc package of a runner file that declares a hook calls this from its
+    generated ``instantiate.py`` member.
+
+    :param source: The runner file.
+    :return: The hook.
+    :raises ValueError: If the file defines no or several runners, or its runner has no hook.
+    """
+
     source_bytes = source.read_bytes()
-    digest = hashlib.sha256(source_bytes).hexdigest()
-    if digest != runner_sha256:
-        raise ValueError(
-            f"the runner {source} changed while resolving its instantiate hook: "
-            f"import digest {digest} does not match pinned runner digest {runner_sha256}"
-        )
-    module_name = f"httk_workflow_runner_{digest}"
+    module_name = f"httk_workflow_runner_{hashlib.sha256(source_bytes).hexdigest()}"
     module = sys.modules.get(module_name)
     if module is None:
         module = ModuleType(module_name)
@@ -1944,34 +1781,28 @@ def scaffold_job(
     environment: Mapping[str, object] | None = None,
     tag: str | None = None,
     priority: int | None = None,
-    workdir_mode: WorkdirMode = "persistent",
-    data_mode: DataMode | None = None,
-    publish: PublishMode = "workspace",
     step: str | None = None,
-    format: str | None = None,
-    workflow_id: str | None = None,
-    runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
     maxtime_cap: int | None = None,
 ) -> JobDefinition:
-    """Build one job payload of *workflow* into *destination*, without submitting it.
+    """Build one job payload of an installed *workflow* into *destination*, without submitting it.
 
-    This is :func:`new_job` stopped one step short of submission: it resolves the
-    workflow, publishes or references its runner, stages *files* and *inputs*,
-    validates *parameters* and *environment*, runs any instantiate hook, and
-    writes ``job.json`` — but into *destination* rather than into the workspace,
-    and it registers no state marker. *destination* must already exist and be an
-    empty directory. The result is a prepared payload directory, which is exactly
-    what :meth:`httk.workflow.Attempt.spawn` accepts, so a running step can build
-    a child job of any registered workflow and spawn it; :meth:`httk.workflow.Attempt.call`
+    This is :func:`new_job` stopped one step short of submission: it looks the
+    workflow up in the workspace (it never installs), stages *files* and
+    *inputs*, validates *parameters* and *environment*, runs any instantiate
+    hook, and writes ``job.json`` — but into *destination* rather than into the
+    workspace. *destination* must already exist and be an empty directory. The
+    result is a prepared payload directory, which is exactly what
+    :meth:`httk.workflow.Attempt.spawn` accepts, so a running step can build a
+    child job of an installed workflow and spawn it; :meth:`httk.workflow.Attempt.call`
     does exactly that.
 
     Every argument other than *destination* means what it does for
-    :func:`new_job`, minus *placement*: a prepared payload has no placement of its
-    own until something submits or spawns it.
+    :func:`new_job`, minus *placement*: the payload's ``job.json`` carries the
+    root placement until something spawns it at its own.
 
-    :param workspace: Provide the workspace whose runner store receives a published runner.
-    :param workflow: Select the workflow or runner file.
+    :param workspace: Provide the workspace the workflow is installed in.
+    :param workflow: Select the installed workflow by id or name.
     :param destination: Locate the empty directory to build the payload into.
     :param inputs: Supply declared workflow inputs.
     :param files: Map payload names to files to stage.
@@ -1979,18 +1810,13 @@ def scaffold_job(
     :param environment: Supply overrides for declared workflow environment values.
     :param tag: Set the job tag.
     :param priority: Set the scheduling priority.
-    :param workdir_mode: Select the job workdir mode.
-    :param data_mode: Override the workflow data mode.
-    :param publish: Select workspace publication or installed reference.
     :param step: Override the workflow's initial step.
-    :param format: Force a language for a bare workflow document or directory.
-    :param workflow_id: Override the workflow id in the job definition.
-    :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the job's display name.
     :param maxtime_cap: Cap every ``maxtime`` of the job at these seconds, setting the job-level one
         when the workflow declares none; :meth:`httk.workflow.Attempt.call` passes its own ``maxtime``.
     :return: The written job definition.
-    :raises ValueError: If the destination is not an empty directory, or workflow, inputs, or job settings are invalid.
+    :raises ValueError: If the destination is not an empty directory, the workflow is not installed,
+        or workflow, inputs, or job settings are invalid.
     """
 
     target = Path(destination)
@@ -1998,16 +1824,7 @@ def scaffold_job(
         raise ValueError(f"a scaffold_job destination must be an existing directory: {target}")
     if any(target.iterdir()):
         raise ValueError(f"a scaffold_job destination must be an empty directory: {target}")
-    prepared = _prepare(
-        workspace,
-        workflow,
-        publish=publish,
-        step=step,
-        workflow_id=workflow_id,
-        data_mode=data_mode,
-        format=format,
-        runner_name=runner_name,
-    )
+    prepared = _prepare(_installed(workspace, workflow, owner=None, install=False, step=step), step=step)
     return _build_payload(
         workspace,
         prepared,
@@ -2018,7 +1835,6 @@ def scaffold_job(
         environment=environment,
         tag=tag,
         priority=priority,
-        workdir_mode=workdir_mode,
         name=name,
         maxtime_cap=maxtime_cap,
     )
@@ -2035,17 +1851,17 @@ def _build_payload(
     environment: Mapping[str, object] | None,
     tag: str | None,
     priority: int | None,
-    workdir_mode: WorkdirMode,
     name: str | None,
+    placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     provenance: Mapping[str, object] | None = None,
     maxtime_cap: int | None = None,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
 
-    This is the shared body of :func:`new_job`/:func:`new_jobs` (through
-    :func:`_submit`) and :func:`scaffold_job`: everything between a resolved
-    workflow and a written ``job.json``, with no workspace submission of its own.
-    *destination* is an existing empty directory the caller owns.
+    This is the shared body of :func:`new_jobs` and :func:`scaffold_job`:
+    everything between an installed workflow and a written ``job.json``, with
+    no submission of its own. *destination* is an existing empty directory the
+    caller owns.
     """
 
     workflow = prepared.workflow
@@ -2182,21 +1998,16 @@ def _build_payload(
         declared_member["parameters"] = {name: dict(metadata) for name, metadata in declared_parameters.items()}
     if declared_input_metadata:
         declared_member["inputs"] = declared_input_metadata
+    installed = prepared.installed
     spec = JobSpec(
-        name=name or f"{workflow.workflow_id}: {tag or 'job'}",
-        workflow=workflow.workflow_id,
-        runner_executor=prepared.runner_executor,
-        runner_path=prepared.runner_path,
-        runner_source=prepared.runner_source,
-        runner_sha256=prepared.runner_sha256,
-        runner_command=prepared.runner_command,
+        name=name or f"{installed.name}: {tag or 'job'}",
+        workflow_id=installed.id,
+        workflow_name=installed.name,
         initial_step=workflow.initial_step,
         tag=tag,
-        workdir_mode=workdir_mode,
-        workdir_path=prepared.workdir_path if prepared.workdir_path is not None else "run",
-        data_mode=prepared.data_mode,
+        placement=placement_text(normalize_placement(placement)),
         priority=500 if priority is None else priority,
-        required_capabilities=tuple(sorted(set(prepared.required_capabilities))),
+        required_capabilities=prepared.required_capabilities,
         resources=workflow.resources,
         step_resources=workflow.step_resources,
         parameters=validate_parameters(job_parameters),
@@ -2210,8 +2021,7 @@ def _build_payload(
         ),
         declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
-        requires=workflow.requires,
-        calls=None if workflow.calls is None else resolve_calls(workflow.calls),
+        seal_succeeded=installed.provider().seal_succeeded,
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)
@@ -2239,65 +2049,6 @@ def _check_parameter_types(values: Mapping[str, object], declared: Mapping[str, 
                 f"NAME=VALUE parses VALUE as JSON when it can, so quote a literal string as "
                 f'NAME=\'"text"\''
             )
-
-
-def _submit(
-    workspace: Workspace,
-    prepared: _Prepared,
-    *,
-    inputs: Mapping[str, object] | None,
-    files: Mapping[str, str | os.PathLike[str]] | None,
-    parameters: Mapping[str, object] | None,
-    environment: Mapping[str, object] | None,
-    tag: str | None,
-    placement: str | PurePosixPath,
-    priority: int | None,
-    workdir_mode: WorkdirMode,
-    name: str | None,
-    provenance: Mapping[str, object] | None = None,
-) -> ScaffoldedJob:
-    """Build one payload below the workspace and publish it as a submitted job."""
-
-    normalized = normalize_placement(placement)
-    # The payload is built inside the workspace's own scratch directory, so
-    # submitting it is a rename on one filesystem rather than a copy, whatever
-    # the size of the files it stages.
-    staging = workspace.control / "tmp" / f"scaffold.{uuid.uuid4()}"
-    try:
-        staging.mkdir(parents=True, exist_ok=False)
-        job = _build_payload(
-            workspace,
-            prepared,
-            staging,
-            inputs=inputs,
-            files=files,
-            parameters=parameters,
-            environment=environment,
-            tag=tag,
-            priority=priority,
-            workdir_mode=workdir_mode,
-            name=name,
-            provenance=provenance,
-        )
-        marker = workspace.submit(staging, normalized, move=True)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-    return ScaffoldedJob(
-        job_id=job.id,
-        job_key=job.job_key,
-        tag=job.tag,
-        placement=marker.placement,
-        payload=workspace.payload_path(marker.placement, marker.job_key),
-        marker=marker.path,
-        workflow=job.workflow,
-        initial_step=job.initial_step,
-        runner={
-            "source": prepared.runner_source,
-            "path": prepared.runner_path,
-            "sha256": prepared.runner_sha256,
-        },
-        warnings=prepared.warnings,
-    )
 
 
 def _serialize_executable_inputs(
@@ -2541,12 +2292,12 @@ def _stage_inputs(
         if name not in declared:
             names = ", ".join(declared) or "none"
             hint = ""
-            if not declared and workflow.language is not None and workflow.directory is None:
+            if not declared and workflow.language is not None:
                 from . import compat
 
                 if compat.language(workflow.language).open_ports:
                     hint = (
-                        f"; this bare {workflow.language} document declares no ports — "
+                        f"; this {workflow.language} workflow declares no ports — "
                         "declare inputs in an httk_workflow.toml package to pass them"
                     )
             raise ValueError(f"unknown workflow input {name!r}; declared inputs: {names}{hint}")

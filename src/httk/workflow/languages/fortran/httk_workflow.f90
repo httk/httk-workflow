@@ -86,7 +86,7 @@ module httk_workflow
   public :: httk_workflow_state_set, httk_workflow_state_delete, httk_workflow_state_merge
   public :: httk_workflow_declare, httk_workflow_runlog_note, httk_workflow_runlog_headline
   public :: httk_workflow_runlog_append, httk_workflow_log
-  public :: httk_workflow_put, httk_workflow_remove, httk_workflow_spawn, httk_workflow_call
+  public :: httk_workflow_put, httk_workflow_spawn, httk_workflow_call
   public :: httk_workflow_advance, httk_workflow_gather, httk_workflow_succeed
   public :: httk_workflow_fail, httk_workflow_retry, httk_workflow_pause
   public :: httk_workflow_batch, httk_workflow_job_prepare, httk_workflow_workdir_apply
@@ -261,14 +261,6 @@ module httk_workflow
     function c_put(source, destination, status) bind(c, name="httk_workflow_put") result(p)
       import :: c_ptr, c_int
       type(c_ptr), value :: source, destination
-      integer(c_int), intent(out) :: status
-      type(c_ptr) :: p
-    end function
-
-    function c_remove(destination, missing_ok, status) bind(c, name="httk_workflow_remove") result(p)
-      import :: c_ptr, c_int
-      type(c_ptr), value :: destination
-      integer(c_int), value :: missing_ok
       integer(c_int), intent(out) :: status
       type(c_ptr) :: p
     end function
@@ -882,9 +874,11 @@ contains
     rc = int(c_log(c_loc(blevel), c_loc(bmessage)))
   end function
 
-  ! --- Transactional data. ----------------------------------------------------
+  ! --- Job data. --------------------------------------------------------------
 
-  ! Stage one file or tree into the job's data; `operation` is the operation id.
+  ! Stage one file or tree for data/<destination>, committed with the outcome;
+  ! `operation` receives the staged path. Explicit transactions go through
+  ! httk_workflow_invoke (`transaction begin|put|commit`).
   subroutine httk_workflow_put(source, destination, operation, status)
     character(len=*), intent(in) :: source, destination
     character(len=:), allocatable, intent(out) :: operation
@@ -894,23 +888,6 @@ contains
     bsource = cstr(source)
     bdest = cstr(destination)
     call take(c_put(c_loc(bsource), c_loc(bdest), st), operation)
-    if (present(status)) status = int(st)
-  end subroutine
-
-  ! Stage one removal from the job's data; `operation` is the operation id.
-  subroutine httk_workflow_remove(destination, operation, missing_ok, status)
-    character(len=*), intent(in) :: destination
-    character(len=:), allocatable, intent(out) :: operation
-    logical, intent(in), optional :: missing_ok
-    integer, intent(out), optional :: status
-    character(kind=c_char), allocatable, target :: bdest(:)
-    integer(c_int) :: st, flag
-    bdest = cstr(destination)
-    flag = 0
-    if (present(missing_ok)) then
-      if (missing_ok) flag = 1
-    end if
-    call take(c_remove(c_loc(bdest), flag, st), operation)
     if (present(status)) status = int(st)
   end subroutine
 

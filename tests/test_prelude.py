@@ -4,22 +4,22 @@ A prelude is shell text an operator configures to initialize the environment
 before a job runs — ``module load VASP/6.2.1`` and the like. Layer 2 is a
 workspace-side map keyed by workflow id, applied by the executor per launch;
 Layer 1 is the ``environment.prelude`` application setting, applied by the
-launcher. These tests cover the workspace round-trip and validation, the pure
-executor wrap, and the slurm batch-script tail.
+launcher. These tests cover the workspace round-trip and validation, the
+manager's wrap of the runner command, and the slurm batch-script tail.
 """
 
 import os
 import shlex
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from httk.workflow import Workspace
-from httk.workflow.executors import AttemptLaunch, PathRunnerExecutor
+from httk.workflow import TaskManager, Workspace
+from httk.workflow._job import JobDefinition
 from httk.workflow.launch_runtime import _batch_script
-from httk.workflow.models import Marker
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow.runtime_builders import JobSpec
 
 
 def test_workflow_prelude_round_trip_and_validation(tmp_path: Path) -> None:
@@ -47,58 +47,32 @@ def test_workflow_prelude_round_trip_and_validation(tmp_path: Path) -> None:
         workspace.set_workflow_prelude("relax-vasp", "bad\0value")
 
 
-def _launch(tmp_path: Path, prelude: str) -> AttemptLaunch:
-    payload = tmp_path / "payload"
-    payload.mkdir(exist_ok=True)
-    runner = payload / "runner.sh"
-    if not runner.exists():
-        runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Prelude",
-            workflow="tests.prelude",
-            runner_path="runner.sh",
-            initial_step="only",
-            data_mode="none",
-        ),
+def _wrap(tmp_path: Path, prelude: str) -> tuple[list[str], Path]:
+    """Return what the manager launches for a job of ``tests.prelude`` with *prelude* stored, and its control dir."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    if prelude:
+        workspace.set_workflow_prelude("tests.prelude", prelude)
+    job = JobDefinition.from_mapping(
+        JobSpec(name="Prelude", workflow_id="local:tests.prelude", workflow_name="tests.prelude").as_mapping()
     )
     control = tmp_path / "control"
     control.mkdir(exist_ok=True)
-    marker = Marker(
-        kind="running",
-        placement=PurePosixPath("project/prelude"),
-        job_key=job.job_key,
-        priority=0,
-        generation=0,
-        record_ref="r",
-        path=control / "marker",
-    )
-    return AttemptLaunch(
-        job=job,
-        marker=marker,
-        payload=payload,
-        workdir=tmp_path / "workdir",
-        control=control,
-        context={},
-        workflow_prelude=prelude,
-    )
+    manager = SimpleNamespace(workspace=workspace)
+    return TaskManager._with_prelude(manager, control, job, ["runner", "--flag"]), control  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("prelude", ["", "   \n "])
-def test_executor_without_prelude_returns_plain_argv(tmp_path: Path, prelude: str) -> None:
-    launch = _launch(tmp_path, prelude)
-    base = [str(launch.runner_command), *launch.job.runner_arguments]
-    assert list(PathRunnerExecutor().command(launch)) == base
-    assert not (launch.control / "prelude.sh").exists()
+def test_a_job_without_a_prelude_runs_the_plain_argv(tmp_path: Path, prelude: str) -> None:
+    command, control = _wrap(tmp_path, prelude.strip() and prelude)
+    assert command == ["runner", "--flag"]
+    assert not (control / "prelude.sh").exists()
 
 
-def test_executor_with_prelude_wraps_in_login_shell(tmp_path: Path) -> None:
-    launch = _launch(tmp_path, "module load VASP/6.2.1")
-    base = [str(launch.runner_command), *launch.job.runner_arguments]
-    script = launch.control / "prelude.sh"
-    assert list(PathRunnerExecutor().command(launch)) == ["bash", "-l", str(script), *base]
+def test_a_workflow_prelude_wraps_the_runner_in_a_login_shell(tmp_path: Path) -> None:
+    command, control = _wrap(tmp_path, "module load VASP/6.2.1")
+    script = control / "prelude.sh"
+    assert command == ["bash", "-l", str(script), "runner", "--flag"]
     text = script.read_text(encoding="utf-8")
     assert text.startswith(f'set -e\nexport PATH={shlex.quote(os.path.dirname(sys.executable))}:"$PATH"\nmodule load')
     assert "module load VASP/6.2.1" in text

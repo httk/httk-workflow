@@ -1,8 +1,6 @@
 # Test files C4 split out of the files it ported: they exercise code other packets port.
 # One repository-relative path per line; the comment names its fate (port <packet> | delete <packet>).
 
-tests/test_declarations_sdk.py  # fate: port C3 (SDK declare/declaration, ChildSpec spawn, Bash bridge)
-tests/test_campaigns_pending.py  # fate: port C3 (campaign_submit through scaffold.new_job) and C5b (CLI campaign submit, manager launch)
 tests/test_postprocessing_pending.py  # fate: port C5b (the postprocess CLI resolves selectors to job references)
 tests/test_precheck_transfer.py  # fate: port D3 (transfer-time destination advisories through transfers.py and the transfer CLI)
 tests/test_job_paging_cli.py  # fate: port C5b (remote job list/show/log/why relays through the legacy CLI handlers)
@@ -10,4 +8,5 @@ tests/test_monitor_remote_pending.py  # fate: port C5b (the remote job list hand
 tests/test_cli_job_delete.py  # fate: port C5a (job delete resolves selectors to job references since C4; the tests fabricate legacy markers)
 tests/test_cli_sealing.py  # fate: port C5a (job seal/unseal resolve selectors to job references since C4; the tests fabricate legacy markers)
 tests/test_workspace_names.py  # fate: port C5b (CLI workspace move calls manager.alive(lease_seconds=...))
-tests/test_v1_reader.py  # fate: port C3b (compat/v1 builds JobRecord with the removed data_generation)
+tests/test_cli_job_transfer.py  # fate: port D3
+tests/test_docs_parity.py  # fate: port E1 (documentation examples use the removed APIs)

@@ -34,37 +34,35 @@ import logging
 import os
 import shutil
 import sys
-import time
 import traceback
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Literal, Self, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, cast, overload
 
+from . import _kernel
+from ._data import Transaction
 from ._durations import cap_maxtime
-from ._job_tree import is_detached
+from ._job import JobDefinition
+from ._state import _thaw, read_state_unowned
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
 from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
     Failure,
-    JobDefinition,
     _matches_environment_type,
     environment_variable_name,
-    normalize_placement,
     normalize_resources,
-    parse_job_key,
     parse_placement_text,
-    payload_relative,
     placement_text,
     validate_declaration_name,
     validate_declarations,
     validate_failure,
     validate_label,
-    validate_sha256,
+    validate_resources,
     validate_step,
 )
 from .runtime import AttemptContext, CommandResult, _read_environment, run_command
@@ -77,9 +75,12 @@ from .runtime_builders import (
     OutcomeDraft,
     ReplayableWorkdirBatch,
     RunLog,
-    TransactionBuilder,
     join_mapping,
 )
+
+if TYPE_CHECKING:
+    from ._store import Installed
+    from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,7 +94,6 @@ __all__ = [
     "InstantiateHandler",
     "ParentJob",
     "Runner",
-    "RunnerRef",
 ]
 
 RUNNER_DESCRIPTION_FORMAT = "httk-workflow-runner-description"
@@ -101,15 +101,12 @@ RUNNER_ERROR_FORMAT = "httk-workflow-runner-error"
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
 _DESCRIBE_FLAG = "--describe"
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
-_ENVIRONMENT_LOG_GRACE_SECONDS = 1.0
 
 type StepHandler = Callable[["Attempt"], object]
 type InstantiateHandler = Callable[[Any], object]
-type RunnerSource = Literal["payload", "workspace", "installed"]
 type EnvironmentSource = Literal["override", "environment-variable", "workspace-setting", "default"]
-# Mirrors scaffold's aliases; a cross-module import renders as an unresolvable autoapi target.
-type WorkdirMode = Literal["persistent", "isolated"]
-type DataMode = Literal["none", "transactional"]
+#: Inside an outcome draft: the six-digit sequence of the attempt's implicit transaction, for a resuming process.
+_IMPLICIT_TRANSACTION = ".implicit-transaction"
 
 
 class _Missing:
@@ -165,7 +162,7 @@ def _resolve_environment_value(
 ) -> tuple[object, EnvironmentSource | None]:
     """Resolve one declared environment value using the SDK's layer order."""
 
-    environment = job.environment
+    environment = cast(Mapping[str, object], _thaw(job.environment))
     declared = environment.get("declared", {})
     if not isinstance(declared, Mapping) or name not in declared:
         available = ", ".join(sorted(declared)) if isinstance(declared, Mapping) else "none"
@@ -216,7 +213,7 @@ def resolve_declared_environment(
     :raises ValueError: If an environment or workspace layer has the wrong type.
     """
 
-    declared = job.environment.get("declared", {})
+    declared = cast(Mapping[str, object], _thaw(job.environment)).get("declared", {})
     if not isinstance(declared, Mapping):  # pragma: no cover - JobDefinition validates this
         return {}, []
     values: dict[str, dict[str, object]] = {}
@@ -255,107 +252,20 @@ def _environment_log_message(values: Mapping[str, Mapping[str, object]]) -> str:
 
 
 @dataclass(frozen=True)
-class RunnerRef:
-    """Which runner executes a child job synthesized by :class:`ChildSpec`.
-
-    A synthesized child has no payload of its own, so its runner must be one that
-    lives outside a payload: an entry of the workspace runner store, or an
-    installed runner on the machine that runs it. :meth:`inherit` copies the
-    reference of the spawning job itself, which is what a campaign whose steps all
-    live in one published runner wants.
-
-    Only :meth:`inherit` carries the spawning job's ``runner.command``. A
-    :meth:`workspace` or :meth:`installed` reference records no command, so it
-    must name a tree with a ``run`` entry or a runner file; a child pointed at a
-    package that declares ``[workflow.runner] command`` fails with
-    ``runner_unavailable``.
-
-    :param source: The location from which the child runner is loaded.
-    :param path: The workspace or installed runner path when one is selected.
-    :param sha256: The digest pin for a workspace or installed runner.
-    """
-
-    source: Literal["inherit", "workspace", "installed"] = "inherit"
-    path: str | None = None
-    sha256: str | None = None
-
-    @classmethod
-    def inherit(cls) -> "RunnerRef":
-        """Reference exactly the runner of the spawning job.
-
-        :return: The inherited runner reference.
-        """
-
-        return cls("inherit")
-
-    @classmethod
-    def workspace(cls, path: str | PurePosixPath, sha256: str) -> "RunnerRef":
-        """Reference one runner published in the workspace runner store.
-
-        :param path: The path within the workspace runner store.
-        :param sha256: The runner digest.
-        :return: The workspace runner reference.
-        """
-
-        return cls("workspace", str(PurePosixPath(path)), validate_sha256(sha256, "runner sha256"))
-
-    @classmethod
-    def installed(cls, path: str | PurePosixPath, sha256: str) -> "RunnerRef":
-        """Reference one runner installed on the machine that runs the child.
-
-        :param path: The installed runner path.
-        :param sha256: The runner digest.
-        :return: The installed runner reference.
-        """
-
-        return cls("installed", str(PurePosixPath(path)), validate_sha256(sha256, "runner sha256"))
-
-    def _resolve(
-        self, parent: JobDefinition
-    ) -> tuple[str, RunnerSource, str, str | None, tuple[str, ...], tuple[str, ...] | None]:
-        """Return ``(executor, source, path, sha256, arguments, command)`` for a child."""
-
-        if self.source != "inherit":
-            if self.path is None or self.sha256 is None:
-                raise ValueError("a workspace or installed runner reference needs a path and a digest")
-            return "path", self.source, self.path, self.sha256, (), None
-        if parent.runner_source == "payload":
-            raise ValueError(
-                "RunnerRef.inherit() needs a runner that lives outside the payload, but this job runs the "
-                f"payload runner {parent.runner_path.as_posix()!r}; publish it with "
-                "Workspace.publish_runner and reference it with RunnerRef.workspace(path, sha256), "
-                "or spawn a prepared payload directory instead of a ChildSpec"
-            )
-        return (
-            parent.runner_executor,
-            # Validated against the protocol's runner sources when the job was read.
-            cast(RunnerSource, parent.runner_source),
-            parent.runner_path.as_posix(),
-            parent.runner_sha256,
-            parent.runner_arguments,
-            parent.runner_command,
-        )
-
-
-@dataclass(frozen=True)
 class ChildSpec:
     """A complete child job described by the step and parameters it starts with.
 
-    Everything not given follows the spawning job: its workflow, its claim pool,
-    its priority, its resources, and its runner. The child therefore differs from
-    its parent in exactly what the campaign varies, which is normally only *step*
-    and *parameters*.
+    A child of a :class:`ChildSpec` runs the spawning job's installed workflow
+    (another workflow is started with :meth:`Attempt.call`). Everything not given
+    follows the spawning job: its claim pool, its priority, its resources and
+    its sealing. The child therefore differs from its parent in exactly what the
+    campaign varies, which is normally only *step* and *parameters*.
 
     :param step: The first step the child runs.
     :param parameters: The opaque implementation knobs given to the child.
     :param declarations: The workflow declarations carried by the child.
-    :param runner: The runner reference used to execute the child.
     :param name: The child job name, or a generated name when omitted.
-    :param workflow: The child's workflow identifier, or the parent's when omitted.
     :param tag: The child's optional job tag, or the spawn label when omitted.
-    :param workdir_mode: Whether the child's workdir persists or is isolated.
-    :param workdir_path: The child's relative workdir path.
-    :param data_mode: Whether the child has transactional data.
     :param priority: The child's priority, or the parent's when omitted.
     :param claim_pool: The child's claim pool, or the parent's when omitted.
     :param required_capabilities: Capabilities required by the child.
@@ -375,13 +285,8 @@ class ChildSpec:
     #: belongs to, so nothing is inherited: a child that declares carries what it
     #: was given here, and a child that declares nothing carries nothing.
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-    runner: RunnerRef = field(default_factory=RunnerRef.inherit)
     name: str | None = None
-    workflow: str | None = None
     tag: str | None = None
-    workdir_mode: Literal["persistent", "isolated"] = "persistent"
-    workdir_path: str = "run"
-    data_mode: Literal["none", "transactional"] = "none"
     priority: int | None = None
     claim_pool: str | None = None
     required_capabilities: tuple[str, ...] = ()
@@ -399,14 +304,16 @@ class ChildSpec:
         is at most *maxtime_cap*, the spawning attempt's effective ``maxtime``.
         """
 
-        executor, source, path, sha256, arguments, command = self.runner._resolve(parent)
         if self.resources is None:
-            resources = {name: value for name, value in parent.resources.items() if name != "mintime"}
+            inherited = validate_resources(_thaw(parent.resources))
+            resources = {name: value for name, value in inherited.items() if name != "mintime"}
         else:
             resources = normalize_resources(self.resources, "child resources")
         if self.step_resources is None:
             step_resources = {
-                step: {name: value for name, value in requirement.items() if name != "mintime"}
+                step: {
+                    name: value for name, value in validate_resources(_thaw(requirement)).items() if name != "mintime"
+                }
                 for step, requirement in parent.step_resources.items()
             }
         else:
@@ -417,18 +324,10 @@ class ChildSpec:
         resources, step_resources = cap_maxtime(resources, step_resources, maxtime_cap)
         return JobSpec(
             name=self.name or f"{parent.name}: {self.step} ({label})",
-            workflow=self.workflow or parent.workflow,
-            runner_path=path,
+            workflow_id=parent.workflow_id,
+            workflow_name=parent.workflow_name,
             initial_step=validate_step(self.step, "child step"),
             tag=self.tag or label,
-            runner_executor=executor,
-            runner_source=source,
-            runner_sha256=sha256,
-            runner_arguments=arguments,
-            runner_command=command,
-            workdir_mode=self.workdir_mode,
-            workdir_path=self.workdir_path,
-            data_mode=self.data_mode,
             priority=parent.priority if self.priority is None else self.priority,
             claim_pool=parent.claim_pool if self.claim_pool is None else self.claim_pool,
             required_capabilities=self.required_capabilities,
@@ -440,6 +339,7 @@ class ChildSpec:
             step_resources=step_resources,
             parameters=dict(self.parameters),
             declarations=validate_declarations(self.declarations, "child declarations"),
+            seal_succeeded=parent.seal_succeeded,
         )
 
 
@@ -448,8 +348,11 @@ class ChildResult:
     """What one gathering step may know about one child it spawned.
 
     Every member is derived from authoritative state by the manager before the
-    gathering activation starts, so reading a child is a pure read of the
-    attempt context and never a scan of the workspace. Paths are absolute.
+    gathering activation starts: it located each child when it launched this
+    attempt, so reading a child is a pure read of the attempt context and never
+    a scan of the workspace. Paths are absolute, and ``None`` when the manager
+    could not find the child. A child's directory moves when it is claimed, so
+    a path read here is valid while the child stays terminal.
     """
 
     label: str | None
@@ -458,10 +361,9 @@ class ChildResult:
     kind: str
     failure: Failure | None
     placement: PurePosixPath
-    payload: Path
+    payload: Path | None
     workdir: Path | None
     data: Path | None
-    data_generation: int | None
     raw: Mapping[str, object]
 
     @property
@@ -479,11 +381,12 @@ class ChildResult:
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object], workspace: Path) -> "ChildResult":
         label = raw.get("label")
-        payload_path = PurePosixPath(require_string(raw.get("payload_path"), "child payload_path"))
-        workdir_raw = raw.get("workdir_path")
         failure_raw = raw.get("failure")
-        generation = raw.get("data_generation")
-        payload = workspace.joinpath(*payload_path.parts)
+
+        def located(name: str) -> Path | None:
+            value = raw.get(name)
+            return None if not isinstance(value, str) else workspace.joinpath(*PurePosixPath(value).parts)
+
         return cls(
             label=None if label is None else validate_label(label, "child label"),
             job_id=require_string(raw.get("job_id"), "child job_id"),
@@ -491,10 +394,9 @@ class ChildResult:
             kind=require_string(raw.get("kind"), "child kind"),
             failure=None if not isinstance(failure_raw, Mapping) else validate_failure(failure_raw, "child failure"),
             placement=parse_placement_text(raw.get("placement"), "child placement"),
-            payload=payload,
-            workdir=None if not isinstance(workdir_raw, str) else workspace.joinpath(*PurePosixPath(workdir_raw).parts),
-            data=None if generation is None else payload / "data",
-            data_generation=None if not isinstance(generation, int) or isinstance(generation, bool) else generation,
+            payload=located("payload_path"),
+            workdir=located("workdir_path"),
+            data=located("data_path"),
             raw=dict(raw),
         )
 
@@ -503,19 +405,20 @@ class ChildResult:
 class ParentJob:
     """Where the job that spawned this one lives, for reading its files in place.
 
-    The location comes from the immutable ``parent`` member every spawned child's
-    ``job.json`` carries, joined to this attempt's workspace root. Nothing is
-    copied or frozen: the parent's workdir is ordinary storage its own steps may
-    still change, so a parent that shares files this way writes them before it
-    publishes the spawning outcome and leaves them alone until every child that
-    reads them is terminal. Paths are absolute.
+    The parent is found from the immutable ``parent`` member every spawned
+    child's ``job.json`` carries: a read-only lookup at its placement in this
+    workspace. Nothing is copied or frozen: the parent's workdir is ordinary
+    storage its own steps may still change, so a parent that shares files this
+    way writes them before it publishes the spawning outcome and leaves them
+    alone until every child that reads them is terminal. The parent's
+    directory moves while a manager holds it, so the paths are those of the
+    moment of the lookup. Paths are absolute.
 
     :param job_id: The parent job UUID.
-    :param job_key: The parent job key, its payload directory name.
+    :param job_key: The parent job key.
     :param placement: The parent's workspace placement.
-    :param payload: The parent's payload directory.
-    :param workdir: The parent's persistent workdir, or ``None`` when the parent
-        uses isolated workdirs, whose per-attempt directory a child cannot name.
+    :param payload: The parent's job directory.
+    :param workdir: The parent's persistent workdir, ``run/`` of its job directory.
     :param raw: The ``parent`` member of this job's ``job.json``, verbatim.
     """
 
@@ -523,7 +426,7 @@ class ParentJob:
     job_key: str
     placement: PurePosixPath
     payload: Path
-    workdir: Path | None
+    workdir: Path
     raw: Mapping[str, object]
 
 
@@ -588,18 +491,19 @@ class Attempt:
     """Everything one attempt of one step may read, do, and publish.
 
     An attempt owns exactly one implicit outcome draft. The draft is created by
-    the first :meth:`spawn`, :meth:`put`, or :meth:`remove`, and it is published
-    by exactly one of :meth:`advance`, :meth:`gather`, :meth:`succeed`,
+    the first :meth:`spawn`, :meth:`call` or :meth:`put`, and it is published by
+    exactly one of :meth:`advance`, :meth:`gather`, :meth:`succeed`,
     :meth:`retry`, :meth:`pause`, or :meth:`fail`. Publication is the single
     atomic rename the manager observes, so nothing a step did takes effect until
-    the step says how it ended.
+    the step says how it ended; only a :meth:`transaction` committed earlier is
+    applied at the next attempt boundary whatever the outcome.
 
     :param context: The manager-written identity and restart context.
     :param control: The attempt control directory.
     :param payload: The immutable job payload directory.
     :param workdir: The directory in which the step works.
     :param workspace: The workspace root containing the job.
-    :param data: The job's transactional data directory, when enabled.
+    :param data: The job's data directory, ``data/`` of the payload when omitted.
     :param step: The step this attempt runs, or the context step when omitted.
     :param runner: The runner dispatching this attempt, when available.
     """
@@ -621,7 +525,7 @@ class Attempt:
         self.payload = payload
         self.workdir = workdir
         self.workspace = workspace
-        self.data = data
+        self.data = payload / "data" if data is None else data
         self.step = step or context.step
         # Every artifact this attempt publishes inherits the workspace's
         # durability from the manager-written context, so a durable workspace
@@ -631,11 +535,11 @@ class Attempt:
         self.log = RunLog(payload)
         self._runner = runner
         self._draft: OutcomeDraft | None = None
-        self._transaction: TransactionBuilder | None = None
-        self._operations = 0
+        self._implicit: Transaction | None = None
         self._published: Path | None = None
         self._action: str | None = None
         self._job: JobDefinition | None = None
+        self._parameters: dict[str, object] | None = None
         self._children: ChildrenView | None = None
         self._parent: ParentJob | None | _Missing = _MISSING
         self._environment_snapshot: dict[str, object] | None = None
@@ -699,7 +603,9 @@ class Attempt:
     def parameters(self) -> Mapping[str, object]:
         """The application-defined ``parameters`` object of this job."""
 
-        return self.job.parameters
+        if self._parameters is None:
+            self._parameters = cast(dict[str, object], _thaw(self.job.parameters))
+        return self._parameters
 
     @property
     def children(self) -> ChildrenView:
@@ -721,12 +627,11 @@ class Attempt:
         """The job that spawned this one, when it is reachable in this workspace.
 
         ``None`` when this job has no parent or was detached from it with
-        ``httk job detach``, or when no parent payload is found
-        at the recorded placement in this workspace: a child transferred away from
-        its parent, or a parent transferred or removed. A parent and child
-        transferred together still find each other when both keep their
-        placements. Reading it performs one small file read of the parent's
-        ``job.json``.
+        ``httk job detach``, or when the parent is not found at its recorded
+        placement in this workspace: a child transferred away from its parent, or
+        a parent transferred or removed. A parent and child transferred together
+        still find each other when both keep their placements. Reading it lists
+        the parent's placement once (read-only) and reads its ``job.json``.
 
         :raises httk.workflow.errors.FormatError: If this job's ``parent`` member or
             the parent's ``job.json`` is malformed.
@@ -737,39 +642,34 @@ class Attempt:
         return self._parent
 
     def _locate_parent(self) -> ParentJob | None:
-        """Resolve this job's ``parent`` member against the workspace root."""
+        """Look up this job's ``parent`` member in the workspace, without changing anything."""
 
         raw = self.job.parent
-        # An operator-detached child is independent: it no longer has a parent to read.
-        if raw is None or is_detached(self.payload):
+        if raw is None:
             return None
-        job_key, placement = raw.get("job_key"), raw.get("placement")
-        if not isinstance(job_key, str) or not isinstance(placement, str):
-            raise FormatError("parent must carry job_key and placement")
-        if parse_job_key(job_key)[1] != raw.get("job_id"):
-            raise FormatError(f"parent job_key {job_key!r} does not carry the parent job_id")
-        normalized = normalize_placement(placement)
-        payload = self.workspace / payload_relative(normalized, job_key)
-        definition_path = payload / "job.json"
-        if not definition_path.is_file():
+        # An operator-detached child is independent: it no longer has a parent to read.
+        state, _damaged = read_state_unowned(self.payload / "state.json")
+        if state is not None and state.detached is not None:
+            return None
+        placement = parse_placement_text(raw["placement"], "parent placement")
+        ref = _kernel.locate(self._workspace(), str(raw["job_id"]), placement_hint=placement)
+        if ref is None:
             return None
         try:
-            definition = JobDefinition.from_path(definition_path)
+            definition = JobDefinition.from_path(ref.path / "job.json")
         except FormatError:
-            # A parent removed between the check and the read is absent, not corrupt.
-            if not definition_path.exists():
-                return None
-            raise
-        if definition.id != raw.get("job_id"):
+            # A parent moved between the listing and the read is absent, not corrupt.
+            if (ref.path / "job.json").exists():
+                raise
+            return None
+        if definition.id != raw["job_id"]:
             return None
         return ParentJob(
             job_id=definition.id,
-            job_key=job_key,
-            placement=normalized,
-            payload=payload,
-            workdir=(
-                payload.joinpath(*definition.workdir_path.parts) if definition.workdir_mode == "persistent" else None
-            ),
+            job_key=definition.job_key,
+            placement=placement,
+            payload=ref.path,
+            workdir=ref.path / "run",
             raw=dict(raw),
         )
 
@@ -792,7 +692,7 @@ class Attempt:
         :raises KeyError: If the parameter is absent and no default was supplied.
         """
 
-        parameters = self.job.parameters
+        parameters = self.parameters
         if name in parameters:
             return parameters[name]
         if isinstance(default, _Missing):
@@ -846,7 +746,7 @@ class Attempt:
         :return: The first value found in the resolution layers, or the default.
         """
 
-        parameters = self.job.parameters
+        parameters = self.parameters
         if name in parameters:
             return parameters[name]
         variable = "HTTK_" + name.upper().replace(".", "_")
@@ -1025,7 +925,8 @@ class Attempt:
         path = self._declaration_path(declaration)
         if path.is_file():
             return read_json(path)
-        return self.job.declarations.get(declaration)
+        declared = _thaw(self.job.declarations.get(declaration))
+        return declared if isinstance(declared, dict) else None
 
     def _declaration_path(self, declaration: str) -> Path:
         """Return where the observed document of one declaration is stored."""
@@ -1067,47 +968,45 @@ class Attempt:
 
         return ReplayableWorkdirBatch.initialize(self.workdir, durable=self.context.durable)
 
-    def put(self, source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> str:
-        """Stage one file or directory for the job's transactional data.
+    def transaction(self) -> Transaction:
+        """Begin a transaction of this attempt, for a commit point in the middle of a step.
 
-        The operation is applied by the manager when the outcome is committed,
-        exactly once, whatever happens to this process in between. Operation
-        identifiers are generated in call order, so replaying the same step
-        produces the same manifest.
+        Stage files with :meth:`~httk.workflow._data.Transaction.put` (destinations
+        are relative to the job directory, so ``data/result`` lands in the data
+        directory), then :meth:`~httk.workflow._data.Transaction.commit`. The
+        manager applies every committed transaction at the next attempt boundary,
+        whatever the outcome, and before any later attempt starts; an
+        uncommitted one is discarded.
+
+        :return: The new transaction.
+        """
+
+        return Transaction(self.control, durable=self.context.durable)
+
+    def put(self, source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> PurePosixPath:
+        """Stage a copy of one file or directory for ``data/<destination>`` of this job.
+
+        The copy is staged now into the attempt's implicit transaction, which
+        commits together with the outcome; the manager applies it when it
+        commits the outcome, exactly once. A file replaces what is there, and a
+        directory is merged into what is there.
 
         :param source: The file or directory to stage.
-        :param destination: The destination path in transactional data.
-        :return: The generated transaction operation identifier.
-        :raises ValueError: If this job has no transactional data.
+        :param destination: The destination path below the job's data directory.
+        :return: The payload-relative destination, ``data/<destination>``.
+        :raises ValueError: If the destination is absolute, empty or escapes the data directory.
         """
 
-        transaction = self._data_transaction()
-        operation_id = self._next_operation()
-        path = Path(source)
-        if path.is_dir() and not path.is_symlink():
-            # A file put overwrites its destination; a directory put is made just
-            # as idempotent by replacing a destination tree that already exists in
-            # the committed data, so a step that advances back onto a step and
-            # re-puts the same tree succeeds instead of failing on put-tree.
-            replace = self.data is not None and (self.data / destination).exists()
-            transaction.put_tree(operation_id, path, destination, replace=replace)
-        else:
-            transaction.put_file(operation_id, path, destination)
-        return operation_id
-
-    def remove(self, destination: str | os.PathLike[str], *, missing_ok: bool = False) -> str:
-        """Remove one path from the job's transactional data.
-
-        :param destination: The path to remove from transactional data.
-        :param missing_ok: Whether an absent destination is acceptable.
-        :return: The generated transaction operation identifier.
-        :raises ValueError: If this job has no transactional data.
-        """
-
-        transaction = self._data_transaction()
-        operation_id = self._next_operation()
-        transaction.remove(operation_id, destination, missing_ok=missing_ok)
-        return operation_id
+        self._reject_published()
+        target = PurePosixPath("data") / PurePosixPath(os.fspath(destination))
+        if PurePosixPath(os.fspath(destination)).is_absolute():
+            raise ValueError(f"put destination must be relative to the data directory: {os.fspath(destination)!r}")
+        if self._implicit is None:
+            draft = self._require_draft()
+            self._implicit = self.transaction()
+            (draft.root / _IMPLICIT_TRANSACTION).write_text(self._implicit.seq, encoding="utf-8")
+        self._implicit.put(source, target)
+        return target
 
     def spawn(
         self,
@@ -1139,10 +1038,9 @@ class Attempt:
         target = self.context.placement if placement is None else placement
         if not isinstance(child, ChildSpec):
             return self._require_draft().add_child(child, target, label=entry_label)
-        if child.runner.source == "inherit":
-            # An inherited runner is this very program, so the child's initial
-            # step is a step of this runner and a typo in it is catchable here.
-            self._check_step(child.step, "spawned child step")
+        # The child runs this very workflow, so its initial step is a step of
+        # this runner and a typo in it is catchable here.
+        self._check_step(child.step, "spawned child step")
         # Everything this child needs is validated before the draft exists, so a
         # refused spawn leaves the attempt exactly as it found it.
         spec = child._job_spec(self.job, entry_label, self.context.resources.get("maxtime"))
@@ -1150,36 +1048,46 @@ class Attempt:
         _LOGGER.debug("spawned %s at step %s as %s", reference.job_key, child.step, entry_label)
         return reference
 
-    def _declared_call(self, workflow: str | os.PathLike[str]) -> str | os.PathLike[str]:
-        """Map a call target through this job's declared calls, refusing an undeclared one.
+    def _workspace(self) -> "Workspace":
+        """Return this attempt's workspace, for read-only lookups (jobs, installed workflows)."""
 
-        A job whose workflow declared ``[workflow.calls]`` may call only those
-        workflows, named by alias or by the reference the job recorded; a job
-        that declared nothing (a runner file of your own, or one created before
-        declarations existed) may call anything.
+        from .workspace import Workspace
+
+        return Workspace(self.workspace, durable=self.context.durable)
+
+    def _callee(self, workflow: str) -> "Installed":
+        """Return the installed workflow *workflow* names among this job's declared calls.
+
+        The calls are the ``[workflow.calls]`` of this job's installed workflow,
+        alias to installed id; *workflow* is one of the aliases or one of the ids.
         """
 
-        # An attempt bound without a job definition (an in-process harness)
-        # declares nothing; a real attempt always has one.
-        if not (self.payload / "job.json").is_file():
-            return workflow
-        calls = self.job.calls
-        if calls is None:
-            return workflow
-        name = os.fspath(workflow)
-        if name in calls:
-            return calls[name]
-        if name in calls.values():
-            return name
-        declared = ", ".join(f"{alias} = {reference}" for alias, reference in sorted(calls.items())) or "none"
-        raise ValueError(
-            f"workflow {name!r} is not declared in [workflow.calls] of {self.job.workflow} "
-            f"(declared: {declared}); declare it there so it is checked before this job starts"
-        )
+        from . import _store
+
+        workspace = self._workspace()
+        own = _store.lookup(workspace, self.job.workflow_id)
+        if own is None:
+            raise ValueError(f"this job's workflow {self.job.workflow_id} is not installed in the workspace")
+        recorded = own.record.get("calls")
+        calls = {str(alias): str(target) for alias, target in recorded.items()} if isinstance(recorded, dict) else {}
+        target = calls.get(workflow, workflow if workflow in calls.values() else None)
+        if target is None:
+            declared = ", ".join(f"{alias} = {callee}" for alias, callee in sorted(calls.items())) or "none"
+            raise ValueError(
+                f"workflow {workflow!r} is not declared in [workflow.calls] of {own.name} (declared: {declared}); "
+                "declare it there and reinstall the workflow"
+            )
+        installed = _store.lookup(workspace, target)
+        if installed is None or installed.id != target:
+            raise ValueError(
+                f"the called workflow {target} is not installed in the workspace; "
+                f"install it with `httk workflow install {target}`"
+            )
+        return installed
 
     def call(
         self,
-        workflow: str | os.PathLike[str],
+        workflow: str,
         *,
         label: str,
         inputs: Mapping[str, object] | None = None,
@@ -1189,44 +1097,25 @@ class Attempt:
         tag: str | None = None,
         placement: str | PurePosixPath | None = None,
         priority: int | None = None,
-        workdir_mode: WorkdirMode = "persistent",
-        data_mode: DataMode | None = None,
         step: str | None = None,
-        workflow_id: str | None = None,
         name: str | None = None,
     ) -> ChildReference:
-        """Spawn another registered workflow as a child job under *label*.
+        """Spawn a job of another installed workflow as a child under *label*.
 
         This is :func:`~httk.workflow.scaffold.new_job` from inside a running
-        step: *workflow* is resolved exactly as ``new_job`` resolves it — a
-        registered id or alias, the path of a runner file of your own, a workflow
-        package directory, or a bare language document — its runner is made
-        referenceable, and a complete child payload is scaffolded (its *files*
-        and *inputs* staged, its ``job.json`` written) and registered as a child
-        of this attempt's outcome. Wait for it with :meth:`gather`, which resumes
-        this job when the child is terminal, and read it back through
-        :attr:`children`.
+        step. *workflow* is an alias of the ``[workflow.calls]`` this job's
+        installed workflow declares, or the installed id an alias names, and the
+        called workflow must be installed in the workspace too. A complete child
+        payload is built from the installed package (its *files* and *inputs*
+        staged, its instantiate hook run, its ``job.json`` written) and
+        registered as a child of this attempt's outcome. Wait for it with
+        :meth:`gather`, which resumes this job when the child is terminal, and
+        read it back through :attr:`children`.
 
         The child takes the called workflow's resources, with every ``maxtime``
         capped at this attempt's effective ``maxtime``.
 
-        A registered packaged workflow is referenced through the reserved
-        ``pkg:`` form, so nothing is copied into the workspace runner store; a
-        runner file or workflow directory of your own is referenced as a
-        workspace store entry instead. A running step never writes that store:
-        the runner is staged into this attempt's outcome, and the manager
-        publishes it — content-addressed and idempotent, so calling the same
-        runner twice publishes nothing the second time — when it commits the
-        outcome, before the child exists. A different runner already published
-        under the same store name is refused here, as when publishing it;
-        one published by another job only after this call fails this job's
-        commit as ``protocol_error`` instead, and since every child of an
-        outcome is verified before any is published, one refused child or
-        runner publishes none of its siblings. Both need the workspace root
-        reachable from where this step runs, exactly as :attr:`children` does.
-
-        :param workflow: Select the workflow, runner file, package, or document to call; for a
-            job whose workflow declares ``[workflow.calls]``, one of those aliases or references.
+        :param workflow: The declared alias, or installed id, of the workflow to call.
         :param label: The unique label used to gather and observe the child later.
         :param inputs: Supply the called workflow's declared inputs.
         :param files: Map payload names to files to stage for the child.
@@ -1235,54 +1124,24 @@ class Attempt:
         :param tag: Set the child job tag, defaulting to *label* when omitted.
         :param placement: The workspace placement for the child, or this attempt's placement when omitted.
         :param priority: Set the child scheduling priority.
-        :param workdir_mode: Select the child workdir mode.
-        :param data_mode: Override the called workflow's data mode.
         :param step: Override the called workflow's initial step.
-        :param workflow_id: Override the workflow id in the child job definition.
         :param name: Set the child job's display name.
         :return: The reference to the registered child.
-        :raises ValueError: If the workflow is undeclared or invalid, or the label, inputs, or job
+        :raises ValueError: If the workflow is undeclared or not installed, or the label, inputs, or job
             settings are invalid.
-        :raises FileExistsError: If the workspace runner store already holds a different runner file
-            under the called runner's store name (a different workflow tree raises :class:`ValueError`).
         """
 
         self._reject_published()
         validate_label(label, "child label")
-        workflow = self._declared_call(workflow)
-        # Resolving here decides only how the runner is referenced: a packaged
-        # workflow is pinned through ``pkg:`` and copies nothing, a runner of
-        # your own is staged into this attempt's outcome draft at
-        # children/runners/<store name>, which the manager publishes into the
-        # workspace store when it commits the outcome. A running step never
-        # writes the store itself.
-        from .scaffold import _build_payload, _prepare, resolve_workflow
-        from .workspace import Workspace
+        installed = self._callee(workflow)
+        from .scaffold import _build_payload, _prepare
 
-        resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
-        publish: Literal["workspace", "installed"] = "installed" if resolved.packaged is not None else "workspace"
-        runners = self._require_draft().root / "children" / "runners"
-        staged_before = set(os.listdir(runners)) if runners.is_dir() else set()
         staging = self.control / f"call.{uuid.uuid4()}"
         staging.mkdir(parents=True, exist_ok=False)
-        succeeded = False
         try:
-            workspace = Workspace(self.workspace, durable=self.context.durable)
-            prepared = _prepare(
-                workspace,
-                # A git URI was fetched once above; its canonical, pinned URI is a cache hit.
-                (resolved.registration_id or workflow) if os.fspath(workflow).startswith("git+") else workflow,
-                publish=publish,
-                step=step,
-                workflow_id=workflow_id,
-                data_mode=data_mode,
-                format=None,
-                runner_name=None,
-                runner_stage=runners,
-            )
             _build_payload(
-                workspace,
-                prepared,
+                self._workspace(),
+                _prepare(installed, step=step),
                 staging,
                 inputs=inputs,
                 files=files,
@@ -1290,20 +1149,14 @@ class Attempt:
                 environment=environment,
                 tag=tag if tag is not None else label,
                 priority=priority,
-                workdir_mode=workdir_mode,
                 name=name,
                 maxtime_cap=self.context.resources.get("maxtime"),
             )
-            # spawn copies the payload tree into the draft at registration time
-            # (OutcomeDraft._register_child), so the staging directory is
-            # disposable the moment spawn returns.
-            reference = self.spawn(staging, label=label, placement=placement)
-            succeeded = True
+            target = self.context.placement if placement is None else placement
+            reference = self._require_draft().add_child(staging, target, label=label, move=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-            if not succeeded:
-                self._unstage_runners(runners, staged_before)
-        _LOGGER.debug("called workflow %s as %s (%s)", resolved.workflow_id, label, reference.job_key)
+        _LOGGER.debug("called workflow %s as %s (%s)", installed.id, label, reference.job_key)
         return reference
 
     def advance(
@@ -1473,26 +1326,6 @@ class Attempt:
         if self._published is not None:
             raise RuntimeError(f"this attempt already published its {self._action} outcome")
 
-    @staticmethod
-    def _unstage_runners(runners: Path, keep: set[str]) -> None:
-        """Remove what a failed call staged, so the draft holds only runners its children reference."""
-
-        if not runners.is_dir():
-            return
-        for entry in os.listdir(runners):
-            if entry in keep:
-                continue
-            path = runners / entry
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                path.unlink(missing_ok=True)
-        for directory in (runners, runners.parent):
-            try:
-                directory.rmdir()
-            except OSError:
-                break
-
     def _require_draft(self) -> OutcomeDraft:
         """Return this attempt's outcome draft, creating it on first use."""
 
@@ -1500,20 +1333,6 @@ class Attempt:
         if self._draft is None:
             self._draft = OutcomeDraft(self.context, self.control, durable=self.context.durable)
         return self._draft
-
-    def _data_transaction(self) -> TransactionBuilder:
-        if self.context.data_generation is None:
-            raise ValueError(
-                "this job has data.mode none, so it has no data transaction; "
-                "create the job with data_mode='transactional' to publish data operations"
-            )
-        if self._transaction is None:
-            self._transaction = self._require_draft().transaction()
-        return self._transaction
-
-    def _next_operation(self) -> str:
-        self._operations += 1
-        return f"op-{self._operations:04d}"
 
     def _check_step(self, step: str, name: str) -> None:
         """Reject a step this runner does not implement, at the call that names it."""
@@ -1541,6 +1360,11 @@ class Attempt:
         draft = self._require_draft()
         declared = self._undeclared_steps()
         try:
+            if self._implicit is not None:
+                # Committed first, so the outcome the manager sees never names data that is not committed.
+                self._implicit.commit()
+                self._implicit = None
+                (draft.root / _IMPLICIT_TRANSACTION).unlink()
             published = draft.publish(
                 action,
                 next_step=next_step,
@@ -1557,21 +1381,7 @@ class Attempt:
             raise
         self._published = published
         self._action = action
-        self._activate_environment_log_deadline()
         return published
-
-    def _activate_environment_log_deadline(self) -> None:
-        """Start the logging grace period when this attempt publishes."""
-
-        marker = self.control / _ENVIRONMENT_MARKER
-        if not marker.is_file():
-            return
-        recorded = read_json(marker)
-        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
-            return
-        recorded = dict(recorded)
-        recorded["log_deadline"] = time.time() + _ENVIRONMENT_LOG_GRACE_SECONDS
-        write_json_atomic(marker, recorded, durable=self.context.durable)
 
     def _undeclared_steps(self) -> list[str]:
         """Return the complete step set to carry in every published outcome."""
@@ -1583,7 +1393,7 @@ class Attempt:
 
         draft = self._draft
         self._draft = None
-        self._transaction = None
+        self._implicit = None
         if draft is None or self._published is not None:
             return
         shutil.rmtree(draft.root, ignore_errors=True)

@@ -381,12 +381,6 @@ public final class HttkWorkflow {
             return read("put", source, destination);
         }
 
-        public Optional<String> remove(String destination, boolean missingOk) {
-            return missingOk
-                    ? read("remove", destination, "--missing-ok")
-                    : read("remove", destination);
-        }
-
         public Optional<String> spawn(String label, String... args) {
             return readWithTail("spawn", label, args);
         }

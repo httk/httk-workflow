@@ -58,7 +58,6 @@ LEGACY_RAW = frozenset(
         "registry.py",
         "removal.py",
         "runtime_utils.py",
-        "scaffold.py",
         "transactions.py",
         "workflow_cli/_workspace.py",
         "workspace.py",

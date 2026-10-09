@@ -44,10 +44,6 @@ class AttemptContext:
     :param attempt_reason: Explain why this attempt was selected.
     :param previous_attempt_id: Identify the preceding attempt when present.
     :param activation_reason: Explain why the activation was selected.
-    :param workdir_mode: Describe how the work directory was selected.
-    :param workdir_reused: Mark whether the work directory was reused.
-    :param unsafe_persistent_takeover: Record whether persistent takeover was enabled.
-    :param data_generation: Record the data generation at claim time.
     :param durable: Record whether storage-crash durability was enabled.
     :param settings: Record workspace application settings at claim time.
     :param resources: Record the resources assigned to the attempt.
@@ -75,10 +71,6 @@ class AttemptContext:
     attempt_reason: str | None
     previous_attempt_id: str | None
     activation_reason: str | None
-    workdir_mode: str | None
-    workdir_reused: bool
-    unsafe_persistent_takeover: bool
-    data_generation: int | None
     #: Whether the workspace this attempt runs in claims storage-crash
     #: durability. A runner threads it into every artifact it publishes so an
     #: outcome, a transaction, or a spawned child is synchronized before it is
@@ -127,9 +119,6 @@ class AttemptContext:
         )
         if any(not isinstance(value.get(name), str) or not (value[name] or name == "placement") for name in required):
             raise ValueError("attempt context is missing a required string identity")
-        generation = value.get("data_generation")
-        if generation is not None and (not isinstance(generation, int) or isinstance(generation, bool)):
-            raise ValueError("attempt data_generation must be an integer or null")
         try:
             resources = validate_resources(value.get("resources", {}), "attempt resources")
         except FormatError as exc:
@@ -186,10 +175,6 @@ class AttemptContext:
             attempt_reason=optional_string("attempt_reason"),
             previous_attempt_id=optional_string("previous_attempt_id"),
             activation_reason=optional_string("activation_reason"),
-            workdir_mode=optional_string("workdir_mode"),
-            workdir_reused=bool(value.get("workdir_reused", False)),
-            unsafe_persistent_takeover=bool(value.get("unsafe_persistent_takeover", False)),
-            data_generation=generation,
             durable=value["durable"],
             settings=dict(settings_raw),
             resources=resources,
@@ -209,7 +194,7 @@ class _AttemptEnvironment:
     payload: Path
     workdir: Path
     workspace: Path
-    data: Path | None
+    data: Path
     step: str
 
 
@@ -239,14 +224,13 @@ def _read_environment(environment: Mapping[str, str] | None = None) -> _AttemptE
         raise ValueError(
             f"HTTK_WORKFLOW_STEP is {step!r} but the attempt context names step {context.step!r}",
         )
-    data_value = values.get("HTTK_WORKFLOW_DATA_DIR")
     return _AttemptEnvironment(
         context=context,
         control=Path(required("HTTK_WORKFLOW_CONTROL_DIR")).resolve(),
         payload=Path(required("HTTK_WORKFLOW_JOB_DIR")).resolve(),
         workdir=Path(required("HTTK_WORKFLOW_WORKDIR")).resolve(),
         workspace=Path(required("HTTK_WORKFLOW_WORKSPACE_DIR")).resolve(),
-        data=None if not data_value else Path(data_value).resolve(),
+        data=Path(required("HTTK_WORKFLOW_DATA_DIR")).resolve(),
         step=step,
     )
 

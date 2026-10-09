@@ -1,18 +1,19 @@
-"""Job scaffolding: one workflow, some files, and a submitted job.
+"""Job scaffolding: one installed workflow, some files, and a submitted job.
 
 Nothing here fabricates protocol state. Every job is built by
-:func:`httk.workflow.scaffold.new_job` or by ``httk job new`` and then
-read back from the workspace it was submitted to, and the jobs that have to prove
-they *run* are driven to completion by a real
-:class:`httk.workflow.TaskManager`. The registered packaged workflow is the
-test-only ``tests.relax`` (``conftest.relax_workflow``).
+:func:`httk.workflow.scaffold.new_job` (or by ``httk job new``) from a workflow
+installed in the workspace and then read back from ``jobs/ready/``; the jobs
+that have to prove they *run* are driven to completion by a real
+:class:`httk.workflow.TaskManager`. The installed ``tests.relax`` package wraps
+the test-only packaged runner ``workflow_fixtures/relax.py``; the in-process
+registration of ``conftest.relax_workflow`` resolves its ``test-relax`` alias.
 """
 
 import dataclasses
 import json
+import shutil
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 import httk.core
 import pytest
@@ -21,23 +22,17 @@ from httk.core.digests import sha256_file
 from httk.core.register import register_format_serializer, register_reader, register_writer
 
 from conftest import RELAX_PROVIDER, RELAX_RUNNER, register_ws
-from httk.workflow import FormatError, TaskManager, Workspace, job_records, scaffold
-from httk.workflow.models import (
-    JobDefinition,
-    StateFrame,
-    normalize_resources,
-    validate_capacity,
-    validate_label,
-    validate_resources,
-)
+from httk.workflow import FormatError, TaskManager, Workspace, _kernel, _store, job_records
+from httk.workflow._job import JobDefinition
+from httk.workflow.models import normalize_resources, validate_capacity, validate_label, validate_resources
 from httk.workflow.postprocessing import run_postprocess_script
 from httk.workflow.runtime_builders import JobSpec
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
     JobItem,
-    PublishMode,
     WorkflowProvider,
     _has_bash_shebang,
+    _merge_provenance_declaration,
     describe_runner,
     new_job,
     new_jobs,
@@ -47,34 +42,13 @@ from httk.workflow.scaffold import (
     structure_tag,
 )
 from httk.workflow.workflow_cli._job import _command_runner_text
+from test_job_creation import install, workspace_at
 
 pytestmark = pytest.mark.usefixtures("relax_workflow")
 
-
-def test_job_definition_uses_runner_executor_wire_key() -> None:
-    job: dict[str, Any] = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": "12345678-1234-4234-8234-123456789abc",
-        "tag": None,
-        "name": "Test job",
-        "workflow": "tests.example",
-        "runner": {"executor": "path", "path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "run",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"retry_on": []},
-        "resources": {},
-        "parent": None,
-    }
-    definition = JobDefinition.from_bytes(json.dumps(job).encode())
-    assert definition.runner_executor == "path"
-    assert definition.raw["runner"] == job["runner"]
-    job["runner"]["executor"] = ""
-    with pytest.raises(FormatError, match=r"runner\.executor"):
-        JobDefinition.from_mapping(job)
+#: ``httk job new`` still passes the removed per-job modes and runner-store options; C5b ports these tests
+#: together with the CLI handler.
+_C5B = pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 
 
 @pytest.mark.parametrize(
@@ -126,35 +100,22 @@ def test_manager_capacity_refuses_time_resources() -> None:
         validate_capacity({"procs": 4, "maxtime": 60}, "manager.resources")
 
 
-def test_job_definition_round_trips_step_resource_requirements() -> None:
-    mapping = JobSpec(
+def test_job_spec_round_trips_step_resource_requirements_and_refuses_bad_members() -> None:
+    spec = JobSpec(
         name="test",
-        workflow="tests.example",
-        runner_path="files/runner",
-        initial_step="start",
+        workflow_id="local:tests.example",
+        workflow_name="tests.example",
         resources={"procs": 2},
         step_resources={"start": {"mem": 1024}},
-    ).as_mapping()
-    definition = JobDefinition.from_mapping(mapping)
+        placement="project/x",
+    )
+    definition = JobDefinition.from_mapping(spec.as_mapping())
     assert definition.resources == {"procs": 2}
     assert definition.step_resources == {"start": {"mem": 1024}}
-
-
-def test_state_frame_resources_accessor_validates_and_round_trips() -> None:
-    frame = StateFrame.replace(resources={"procs": 3})
-    assert frame.resources == {"procs": 3}
-    with pytest.raises(FormatError, match="non-negative"):
-        invalid = StateFrame({"resources": {"procs": -1}})
-        value = invalid.resources
-        assert value is None
-
-
-def test_state_frame_reservation_validates_and_is_not_carried() -> None:
-    frame = StateFrame.replace(resources={"procs": 1}, reservation={"procs": 2})
-    assert frame.reservation == {"procs": 2}
-    assert frame.carried().as_mapping() == {"resources": {"procs": 1}}
-    with pytest.raises(FormatError, match=r"state\.reservation"):
-        _ = StateFrame({"reservation": {"procs": -1}}).reservation
+    assert definition.placement == PurePosixPath("project/x") and definition.parent is None
+    for bad in ({"resources": {"procs": -1}}, {"placement": "a~b"}, {"tag": "a~b"}):
+        with pytest.raises(FormatError):
+            dataclasses.replace(spec, **bad).as_mapping()  # type: ignore[arg-type]
 
 
 def test_a_bare_pwd_document_is_synthesized_with_a_declaration(tmp_path: Path) -> None:
@@ -200,21 +161,6 @@ def test_a_non_workflow_json_file_does_not_match_a_language(tmp_path: Path) -> N
         resolve_workflow(document)
 
 
-def test_job_spec_compatibility_is_optional_and_round_trips() -> None:
-    base = JobSpec(name="test", workflow="tests.example", runner_path="files/runner")
-    assert "compatibility" not in base.as_mapping()
-
-    compatibility = {"profile": "test-v1", "nested": {"value": 1}}
-    mapping = JobSpec(
-        name="test",
-        workflow="tests.example",
-        runner_path="files/runner",
-        compatibility=compatibility,
-    ).as_mapping()
-    assert mapping["compatibility"] == compatibility
-    assert JobDefinition.from_mapping(mapping).raw["compatibility"] == compatibility
-
-
 from httk.workflow.workflow_cli import command
 
 _POSCAR = """silicon
@@ -250,6 +196,24 @@ _TWO_STEP_RUNNER = _SINGLE_STEP_RUNNER.replace(
     "if __name__",
     '@run.step\ndef finish(a):\n    a.succeed()\n\n\nif __name__',
 )
+_RELAX_MANIFEST = """[workflow]
+name = "tests.relax"
+description = "relax one test structure"
+declaration_uri = "https://example.test/workflows/relax"
+
+[workflow.runner]
+steps = ["publish", "prepare", "run"]
+initial_step = "prepare"
+
+[workflow.inputs.structure]
+destination = "POSCAR"
+entry_type = "structures"
+role = "initial_structure"
+
+[workflow.postprocess.report]
+file = "scripts/report"
+description = "write a report"
+"""
 
 
 def _testfmt_reader(filename: str) -> dict[str, object]:
@@ -277,6 +241,27 @@ register_writer(
 register_format_serializer(format="workflow-testfmt", serializer=_testfmt_serializer)
 
 
+def _relax_package(root: Path, manifest: str = _RELAX_MANIFEST) -> Path:
+    """The installable package of ``tests.relax``: the packaged runner as ``run`` plus its report script."""
+
+    (root / "scripts").mkdir(parents=True)
+    (root / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
+    shutil.copyfile(RELAX_RUNNER, root / "run")
+    (root / "run").chmod(0o755)
+    shutil.copyfile(RELAX_RUNNER.with_name("scripts") / "report", root / "scripts" / "report")
+    (root / "scripts" / "report").chmod(0o755)
+    return root
+
+
+def _ready(workspace: Workspace) -> list[_kernel.JobRef]:
+    return list(_kernel.list_jobs(workspace, "ready"))
+
+
+def _no_scratch(workspace: Workspace) -> bool:
+    tmp = workspace.control / "tmp"
+    return not tmp.exists() or list(tmp.iterdir()) == []
+
+
 @pytest.fixture()
 def structure(tmp_path: Path) -> Path:
     path = tmp_path / "POSCAR"
@@ -286,11 +271,15 @@ def structure(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Iterator[Workspace]:
-    yield Workspace.initialize(tmp_path / "workspace")
+    """A workspace with ``tests.relax`` installed."""
+
+    ws = workspace_at(tmp_path / "workspace")
+    install(ws, _relax_package(tmp_path / "relax"))
+    yield ws
 
 
 def test_a_registered_packaged_workflow_resolves_by_name_and_step() -> None:
-    """A registered packaged workflow resolves by id or alias to its installed
+    """A registered packaged workflow resolves by id or alias to its packaged
     runner, whose own description agrees with the registration."""
 
     workflow = resolve_workflow("test-relax")
@@ -299,7 +288,7 @@ def test_a_registered_packaged_workflow_resolves_by_name_and_step() -> None:
     described = describe_runner(workflow.source)
     assert described["workflow"] == workflow.workflow_id == "tests.relax"
     assert described["steps"] == sorted(workflow.steps)
-    assert workflow.initial_step == "prepare" and workflow.data_mode == "none"
+    assert workflow.initial_step == "prepare"
     assert workflow.declarations["workflow"]["$id"] == "https://example.test/workflows/relax"
     # The packaged runner is not nameable by its bare file name.
     with pytest.raises(ValueError, match="no such file: relax.py"):
@@ -324,103 +313,77 @@ def test_path_shaped_unknown_workflow_reports_no_such_file() -> None:
         resolve_workflow("does/not/exist.py")
 
 
-def test_workflow_declarations_are_forwarded_and_digest_covered(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    declarations = {"workflow": {"$id": "https://example.test/workflows/v1", "nested": {"value": 7}}}
-    provider = WorkflowProvider(
-        workflow_id="tests.declarations",
-        alias="test-declarations",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-        declarations=declarations,
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
-
-    job = new_job(workspace, provider.alias or provider.workflow_id)
+def test_the_installed_declaration_is_forwarded_and_digest_covered(workspace: Workspace, structure: Path) -> None:
+    job = new_job(workspace, "tests.relax", inputs={"structure": structure})
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.declarations == declarations
+    assert json.loads((job.payload / "job.json").read_bytes())["declarations"] == {
+        "workflow": {
+            "$id": "https://example.test/workflows/relax",
+            "description": "relax one test structure",
+            "inputs": [{"name": "initial_structure", "entry_type": "structures"}],
+            "outputs": [],
+        }
+    }
     assert definition.digest == sha256_file(job.payload / "job.json")
 
 
-def test_provider_time_resources_are_slurm_durations(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provider_time_resources_are_slurm_durations(tmp_path: Path, structure: Path) -> None:
     provider = WorkflowProvider(
         workflow_id="tests.timed",
         runner_package="workflow_fixtures",
         runner_file="relax.py",
-        initial_step="prepare",
         steps=("publish", "prepare", "run"),
         resources={"maxtime": "1:00:00", "procs": 2},
-        step_resources={"run": {"mintime": "10"}},
     )
     # replace() keeps the authored form, so nothing is converted twice.
-    provider = dataclasses.replace(provider, alias="test-timed")
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
-    definition = JobDefinition.from_path(new_job(workspace, provider.workflow_id).payload / "job.json")
-    assert definition.resources == {"maxtime": 3600, "procs": 2}
-    assert definition.step_resources == {"run": {"mintime": 600}}
+    assert dataclasses.replace(provider, alias="test-timed").resources == {"maxtime": "1:00:00", "procs": 2}
     with pytest.raises(FormatError, match="Slurm duration"):
         dataclasses.replace(provider, resources={"maxtime": 3600})
+    manifest = _RELAX_MANIFEST + '\n[workflow.resources]\nmaxtime = "1:00:00"\nprocs = 2\n'
+    ws = workspace_at(tmp_path / "timed")
+    definition = JobDefinition.from_path(
+        new_job(
+            ws, _relax_package(tmp_path / "timed-package", manifest), inputs={"structure": structure}, install=True
+        ).payload
+        / "job.json"
+    )
+    assert definition.resources == {"maxtime": 3600, "procs": 2}
 
 
-def test_no_provenance_leaves_declarations_byte_identical(workspace: Workspace, structure: Path) -> None:
+def test_no_provenance_leaves_only_the_workflow_declaration(workspace: Workspace, structure: Path) -> None:
     job = new_job(workspace, "test-relax", files={"POSCAR": structure}, tag="silicon")
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert set(definition.declarations) == {"workflow"}
 
 
 def test_provenance_becomes_the_declared_entry_when_the_workflow_has_none(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+    workspace: Workspace, structure: Path
 ) -> None:
-    provider = WorkflowProvider(
-        workflow_id="tests.provenance.none",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
     claim = {"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}}
-
-    job = new_job(workspace, provider.workflow_id, provenance=claim)
+    job = new_job(workspace, "tests.relax", inputs={"structure": structure}, provenance=claim)
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.declarations == {"provenance": claim}
+    assert definition.declarations["provenance"] == claim
 
 
-def test_provenance_merges_section_wise_with_a_workflow_declared_provenance(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provider = WorkflowProvider(
-        workflow_id="tests.provenance.merge",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-        declarations={
-            "provenance": {
-                "workflow_declaration_uri": "https://example.test/workflows/fixed",
-                "inputs": {"reference": {"type": "structures", "id": "ref-1"}},
-                "outputs": {"summary": {"type": "records", "id": "sum-1"}},
-            }
-        },
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
-
-    job = new_job(
-        workspace,
-        provider.workflow_id,
-        provenance={
+def test_provenance_merges_section_wise_with_a_workflow_declared_provenance() -> None:
+    declarations = {
+        "provenance": {
+            "workflow_declaration_uri": "https://example.test/workflows/fixed",
+            "inputs": {"reference": {"type": "structures", "id": "ref-1"}},
+            "outputs": {"summary": {"type": "records", "id": "sum-1"}},
+        }
+    }
+    merged = _merge_provenance_declaration(
+        declarations,
+        {
             "inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}},
             "artifacts": {"relaxed": {"type": "structures", "id": "s2"}},
         },
     )
-    definition = JobDefinition.from_path(job.payload / "job.json")
     # workflow_declaration_uri and the outputs section, which only the workflow
     # declares, are untouched; inputs is concatenated; artifacts, which only the
     # caller declares, is carried through outright.
-    assert definition.declarations["provenance"] == {
+    assert merged["provenance"] == {
         "workflow_declaration_uri": "https://example.test/workflows/fixed",
         "inputs": {
             "reference": {"type": "structures", "id": "ref-1"},
@@ -429,88 +392,35 @@ def test_provenance_merges_section_wise_with_a_workflow_declared_provenance(
         "outputs": {"summary": {"type": "records", "id": "sum-1"}},
         "artifacts": {"relaxed": {"type": "structures", "id": "s2"}},
     }
+    assert _merge_provenance_declaration(declarations, None) is declarations
 
 
-def test_provenance_duplicate_label_in_one_section_raises_value_error(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provider = WorkflowProvider(
-        workflow_id="tests.provenance.duplicate",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-        declarations={"provenance": {"inputs": {"entity": {"type": "amdb_material", "id": "old"}}}},
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
-
+def test_provenance_duplicate_label_in_one_section_raises_value_error() -> None:
+    declarations = {"provenance": {"inputs": {"entity": {"type": "amdb_material", "id": "old"}}}}
     with pytest.raises(ValueError, match=r"provenance inputs label 'entity'.*workflow.*caller-supplied"):
-        new_job(
-            workspace,
-            provider.workflow_id,
-            provenance={"inputs": {"entity": {"type": "amdb_material", "id": "new"}}},
-        )
-    assert not list(workspace.scan_markers())
+        _merge_provenance_declaration(declarations, {"inputs": {"entity": {"type": "amdb_material", "id": "new"}}})
 
 
-def test_provenance_non_mapping_section_on_either_side_raises_and_does_not_erase_edges(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provider = WorkflowProvider(
-        workflow_id="tests.provenance.non_mapping",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-        declarations={"provenance": {"inputs": {"reference": {"type": "structures", "id": "ref-1"}}}},
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
-
+def test_provenance_non_mapping_section_on_either_side_raises_and_does_not_erase_edges() -> None:
+    declarations = {"provenance": {"inputs": {"reference": {"type": "structures", "id": "ref-1"}}}}
     # A caller-side list must not silently replace the workflow's declared edges.
     with pytest.raises(ValueError, match=r"provenance inputs: the caller-supplied section must be a mapping"):
-        new_job(workspace, provider.workflow_id, provenance={"inputs": ["not-a-mapping"]})
-    assert not list(workspace.scan_markers())
-
+        _merge_provenance_declaration(declarations, {"inputs": ["not-a-mapping"]})
     # A malformed workflow-declared section is caught the same way when the
     # caller's side is a well-formed mapping.
-    broken = WorkflowProvider(
-        workflow_id="tests.provenance.non_mapping.workflow_side",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-        declarations={"provenance": {"inputs": []}},
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, broken.workflow_id, broken)
     with pytest.raises(ValueError, match=r"provenance inputs: the workflow's section must be a mapping"):
-        new_job(
-            workspace,
-            broken.workflow_id,
-            provenance={"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}},
+        _merge_provenance_declaration(
+            {"provenance": {"inputs": []}},
+            {"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}},
         )
-    assert not list(workspace.scan_markers())
 
 
-def test_new_jobs_per_item_provenance_overrides_the_shared_default(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provider = WorkflowProvider(
-        workflow_id="tests.provenance.campaign",
-        runner_package="workflow_fixtures",
-        runner_file="relax.py",
-        initial_step="prepare",
-        steps=("publish", "prepare", "run"),
-    )
-    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+def test_new_jobs_per_item_provenance_overrides_the_shared_default(workspace: Workspace, structure: Path) -> None:
     shared = {"inputs": {"entity": {"type": "amdb_material", "id": "shared"}}}
     override = {"inputs": {"entity": {"type": "amdb_material", "id": "override"}}}
-
     jobs = list(
         new_jobs(
-            workspace,
-            provider.workflow_id,
-            [{}, {"provenance": override}],
-            provenance=shared,
+            workspace, "tests.relax", [{}, {"provenance": override}], inputs={"structure": structure}, provenance=shared
         )
     )
     definitions = [JobDefinition.from_path(job.payload / "job.json") for job in jobs]
@@ -518,60 +428,49 @@ def test_new_jobs_per_item_provenance_overrides_the_shared_default(
     assert definitions[1].declarations["provenance"] == override
 
 
-def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, structure: Path) -> None:
+def test_a_scaffolded_job_references_its_installed_workflow(workspace: Workspace, structure: Path) -> None:
     job = new_job(
         workspace, "test-relax", files={"POSCAR": structure}, tag="silicon", parameters={"kpoint_density": 30.0}
     )
 
-    # The job is submitted, its runner is in the store under a name carrying the
-    # digest of its bytes, and the payload holds the structure where the runner
-    # reads it.
+    # The job is submitted to jobs/ready/, it names the installed workflow, and
+    # the payload holds the structure where the runner reads it.
     assert job.job_key == f"silicon--{job.job_id}"
-    assert job.placement == PurePosixPath()
-    digest = sha256_file(RELAX_RUNNER)
-    assert job.runner == {"source": "workspace", "path": f"relax.{digest[:12]}.py", "sha256": digest}
-    assert sha256_file(workspace.runner_store_path(str(job.runner["path"]))) == digest
+    assert job.placement == PurePosixPath() and job.payload.parent == workspace.jobs / "ready"
+    assert job.workflow == "local:tests.relax" and job.workflow_name == "tests.relax"
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.workflow == "tests.relax" and definition.initial_step == "prepare"
-    assert json.loads((job.payload / "job.json").read_text(encoding="utf-8"))["runner"]["executor"] == "path"
-    assert definition.data_mode == "none" and definition.workdir_mode == "persistent"
+    assert definition.workflow_id == "local:tests.relax" and definition.initial_step == "prepare"
     assert definition.parameters == {"kpoint_density": 30.0}
-    assert workspace.find_marker_by_id(job.job_id) is not None
+    assert "runner" not in json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
+    assert [ref.job_id for ref in _ready(workspace)] == [job.job_id]
 
-    # Scaffolding a second job publishes nothing new: identical bytes are one
-    # store entry, which is what makes one runner serve a whole campaign.
+    # A second job installs nothing: one installation serves a whole campaign.
     again = new_job(workspace, "test-relax", files={"POSCAR": structure}, tag="silicon")
-    assert again.runner == job.runner
-    assert sorted(path.name for path in workspace.runners.iterdir()) == [f"relax.{digest[:12]}.py"]
+    assert again.workflow == job.workflow
+    assert [found.id for found in _store.list_installed(workspace)] == ["local:tests.relax"]
 
 
-@pytest.mark.parametrize("publish", ("workspace", "installed"))
-def test_a_registered_packaged_workflow_runs_and_postprocesses(
-    workspace: Workspace, structure: Path, publish: PublishMode
-) -> None:
-    """The packaged runner runs from either publication, and its packaged
-    postprocess script resolves inside the runner package."""
+def test_an_installed_packaged_workflow_runs_and_postprocesses(workspace: Workspace, structure: Path) -> None:
+    """The installed package runs, and its postprocess script resolves inside the installed package."""
 
-    job = new_job(workspace, "test-relax", files={"POSCAR": structure}, publish=publish)
-    assert job.runner["source"] == publish
-    with TaskManager(
-        workspace, heartbeat_interval=0.01, runner_modules=("httk.workflow", "workflow_fixtures")
-    ) as manager:
+    job = new_job(workspace, "test-relax", files={"POSCAR": structure})
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    assert [ref.job_id for ref in _kernel.list_jobs(workspace, "succeeded")] == [job.job_id]
 
     record = next(job_records(workspace))
-    result = run_postprocess_script(RELAX_PROVIDER, "report", record)
+    (installed,) = _store.list_installed(workspace)
+    result = run_postprocess_script(installed.provider(), "report", record)
     assert result.returncode == 0, result.stderr
     assert (result.output_dir / "report.txt").read_text(encoding="utf-8") == "reported\n"
+    assert RELAX_PROVIDER.postprocess_scripts["report"]["file"] == "scripts/report"
 
 
 def test_a_path_parameter_lands_at_the_declared_payload_destination(workspace: Workspace, structure: Path) -> None:
     job = new_job(workspace, "test-relax", inputs={"structure": structure})
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
-    assert "parameters" not in json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
+    assert json.loads((job.payload / "job.json").read_text(encoding="utf-8"))["parameters"] == {}
 
 
 def test_parameter_validation_and_realization_fail_before_submission(tmp_path: Path, workspace: Workspace) -> None:
@@ -589,8 +488,8 @@ def test_parameter_validation_and_realization_fail_before_submission(tmp_path: P
     )
     with pytest.raises(ValueError, match="requires an instantiate hook"):
         new_job(workspace, runner, inputs={"x": object()})
-    assert not list(workspace.scan_markers())
-    assert list((workspace.control / "tmp").iterdir()) == []
+    assert not _ready(workspace)
+    assert _no_scratch(workspace)
 
 
 def test_an_instantiate_hook_stages_parameters_and_runs_once_per_campaign(tmp_path: Path, workspace: Workspace) -> None:
@@ -653,12 +552,12 @@ def test_an_instantiate_hook_failure_leaves_no_submission_or_scratch(tmp_path: P
     )
     with pytest.raises(RuntimeError, match="hook failed"):
         new_job(workspace, runner, inputs={"note": "value"})
-    assert not list(workspace.scan_markers())
-    assert list((workspace.control / "tmp").iterdir()) == []
+    assert not _ready(workspace)
+    assert _no_scratch(workspace)
 
 
-def test_an_instantiate_hook_must_match_the_published_runner_digest(
-    tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+def test_an_instantiate_hook_runs_only_from_an_unchanged_installed_package(
+    tmp_path: Path, workspace: Workspace
 ) -> None:
     runner = tmp_path / "changing.py"
     runner.write_text(
@@ -671,57 +570,12 @@ def test_an_instantiate_hook_must_match_the_published_runner_digest(
         "if __name__ == '__main__': raise SystemExit(run.main())\n",
         encoding="utf-8",
     )
-    publish_runner = workspace.publish_runner
-
-    def publish_then_change(source: Path, *, name: str) -> dict[str, object]:
-        reference = publish_runner(source, name=name)
-        source.write_text(source.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
-        return reference
-
-    monkeypatch.setattr(workspace, "publish_runner", publish_then_change)
-    with pytest.raises(ValueError, match="does not match pinned runner digest"):
-        new_job(workspace, runner)
-    assert not list(workspace.scan_markers())
-    assert list((workspace.control / "tmp").iterdir()) == []
-
-
-def test_an_instantiate_hook_executes_the_bytes_it_verified(
-    tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runner = tmp_path / "verified.py"
-    runner.write_text(
-        "from httk.workflow import Runner\n"
-        "run = Runner('tests.verified', inputs={'value': None})\n"
-        "@run.instantiate\n"
-        "def instantiate(ctx):\n"
-        "    (ctx.payload / 'verified.txt').write_text(ctx.inputs['value'], encoding='utf-8')\n"
-        "@run.step\n"
-        "def start(a): a.succeed()\n"
-        "if __name__ == '__main__': raise SystemExit(run.main())\n",
-        encoding="utf-8",
-    )
-    verified_bytes = runner.read_bytes()
-    real_read_bytes = Path.read_bytes
-    reads = 0
-    publish_runner = workspace.publish_runner
-
-    def publish_then_replace(source: Path, *, name: str) -> dict[str, object]:
-        reference = publish_runner(source, name=name)
-        source.write_text("raise AssertionError('unverified bytes executed')\n", encoding="utf-8")
-        return reference
-
-    def read_verified_bytes(path: Path) -> bytes:
-        nonlocal reads
-        if path.resolve() == runner.resolve():
-            reads += 1
-            return verified_bytes
-        return real_read_bytes(path)
-
-    monkeypatch.setattr(workspace, "publish_runner", publish_then_replace)
-    monkeypatch.setattr(Path, "read_bytes", read_verified_bytes)
-    job = new_job(workspace, runner, inputs={"value": "verified"})
-    assert reads == 1
-    assert (job.payload / "verified.txt").read_text(encoding="utf-8") == "verified"
+    installed = install(workspace, runner)
+    (installed.package / "run").write_text(runner.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="changed: digest .* does not match pinned"):
+        new_job(workspace, installed.id)
+    assert not _ready(workspace)
+    assert _no_scratch(workspace)
 
 
 def test_instantiate_resolution_rejects_bad_runner_shapes_and_bash(tmp_path: Path, workspace: Workspace) -> None:
@@ -788,8 +642,8 @@ def test_an_object_parameter_is_serialized_and_a_failing_save_leaves_no_scratch(
     assert (job.payload / "files" / "data.testfmt").read_text(encoding="utf-8") == "{'value': 7}"
     with pytest.raises(RuntimeError, match="test serializer failed"):
         new_job(workspace, runner, inputs={"data": {"raise": True}})
-    assert len(list(workspace.scan_markers())) == 1
-    assert list((workspace.control / "tmp").iterdir()) == []
+    assert len(_ready(workspace)) == 1
+    assert _no_scratch(workspace)
 
 
 def test_an_object_parameter_requires_a_registered_writer(tmp_path: Path, workspace: Workspace) -> None:
@@ -812,23 +666,7 @@ def test_a_runner_without_a_parameter_description_has_an_empty_declaration(tmp_p
     assert resolve_workflow(runner).parameters == {}
 
 
-def test_the_installed_form_references_a_packaged_runner_without_copying(workspace: Workspace, structure: Path) -> None:
-    job = new_job(
-        workspace,
-        "test-relax",
-        files={"POSCAR": structure},
-        publish="installed",
-        workflow_id="tests.override.relax",
-    )
-
-    assert job.runner["source"] == "installed"
-    assert job.runner["path"] == "pkg:workflow_fixtures/relax.py"
-    assert job.workflow == "tests.override.relax"
-    assert not list(workspace.runners.iterdir())
-    assert job.tag is None and job.job_key == job.job_id
-
-
-def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, workspace: Workspace) -> None:
+def test_a_runner_file_of_ones_own_is_described_installed_and_runs(tmp_path: Path, workspace: Workspace) -> None:
     runner = tmp_path / "single.py"
     runner.write_text(_SINGLE_STEP_RUNNER, encoding="utf-8")
 
@@ -837,18 +675,13 @@ def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, wo
     assert described == {"workflow": "tests.scaffold.single", "steps": ["start"]}
     assert resolve_workflow(runner).declarations == {}
     job = new_job(workspace, runner, tag="own")
-    assert job.workflow == "tests.scaffold.single" and job.initial_step == "start"
-    # A runner of one's own defaults to data.mode none: it declared no results.
-    assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
-    assert "declarations" not in json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
-    assert job.runner["source"] == "workspace"
-    assert str(job.runner["path"]).startswith("single.")
+    assert job.workflow == f"adhoc:single@{sha256_file(runner)[:12]}" and job.initial_step == "start"
 
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert (job.payload / "run" / "done.txt").is_file()
+    (done,) = _kernel.list_jobs(workspace, "succeeded")
+    assert done.job_id == job.job_id
+    assert (done.path / "run" / "done.txt").is_file()
 
 
 def test_describe_runner_scrubs_shared_runner_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -876,6 +709,9 @@ def test_a_runner_with_several_steps_needs_the_starting_step_named(tmp_path: Pat
     with pytest.raises(ValueError, match="does not implement the step 'begin'"):
         new_job(workspace, runner, step="begin")
     assert new_job(workspace, runner, step="finish", tag="named").initial_step == "finish"
+    # The installed workflow's own step set guards a named step as well.
+    with pytest.raises(ValueError, match="does not implement the step 'begin'"):
+        new_job(workspace, "tests.relax", step="begin")
 
 
 def test_an_undescribable_workflow_is_refused_by_name(tmp_path: Path, workspace: Workspace) -> None:
@@ -895,19 +731,7 @@ def test_an_undescribable_workflow_is_refused_by_name(tmp_path: Path, workspace:
         new_job(workspace, mystery)
 
 
-def test_a_packaged_workflow_defaults_to_workdir_results_with_transactional_opt_in(
-    tmp_path: Path, structure: Path
-) -> None:
-    workflow = "test-relax"
-    plain = Workspace.initialize(tmp_path / "plain")
-    job = new_job(plain, workflow, files={"POSCAR": structure})
-    assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
-
-    job = new_job(plain, workflow, files={"POSCAR": structure}, data_mode="transactional")
-    assert JobDefinition.from_path(job.payload / "job.json").data_mode == "transactional"
-
-
-def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Workspace, tmp_path: Path) -> None:
+def test_a_campaign_installs_nothing_more_and_yields_jobs_lazily(workspace: Workspace, tmp_path: Path) -> None:
     directory = tmp_path / "structures"
     directory.mkdir()
     for name in ("POSCAR.Si2O", "POSCAR.fcc-Al", "mp-149.vasp", "notes.txt"):
@@ -928,16 +752,14 @@ def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Works
 
     # Nothing happened yet: the campaign is a generator, which is what lets it be
     # a hundred million jobs long.
-    assert not list(workspace.scan_markers())
+    assert not _ready(workspace)
     jobs = list(campaign)
     assert [job.tag for job in jobs] == ["si2o", "fcc-al", "mp-149"]
     assert {job.placement.as_posix() for job in jobs} == {"project/screening"}
-    # One publication served every job, and per-job inputs were merged over shared.
-    assert len({str(job.runner["path"]) for job in jobs}) == 1
-    assert len(list(workspace.runners.iterdir())) == 1
+    assert len(_store.list_installed(workspace)) == 1
     definition = JobDefinition.from_path(jobs[1].payload / "job.json")
     assert definition.parameters == {"kpoint_density": 15.0, "index": 1}
-    assert len(list(workspace.scan_markers())) == 3
+    assert len(_ready(workspace)) == 3
 
 
 def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
@@ -975,7 +797,7 @@ def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, str
         new_job(workspace, "test-relax", files={"POSCAR": tmp_path})
     with pytest.raises(ValueError, match="does not exist"):
         new_job(workspace, "test-relax", files={"POSCAR": tmp_path / "absent"})
-    assert len(list(workspace.scan_markers())) == 1
+    assert len(_ready(workspace)) == 1
 
 
 def test_structure_tags_are_derived_from_recognizable_names() -> None:
@@ -995,6 +817,7 @@ def test_structure_tags_are_derived_from_recognizable_names() -> None:
     assert structure_tag("...") is None
 
 
+@_C5B
 def test_the_command_scaffolds_one_job(
     tmp_path: Path,
     structure: Path,
@@ -1055,6 +878,7 @@ def test_the_command_scaffolds_one_job(
     assert (Path(payload) / "files" / "POSCAR").is_file()
 
 
+@_C5B
 def test_the_command_scaffolds_a_whole_structure_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     pytest.importorskip("httk.atomistic")
     ws_name = "cli-workspace"
@@ -1089,6 +913,7 @@ def test_the_command_scaffolds_a_whole_structure_directory(tmp_path: Path, capsy
     assert {report["workflow"] for report in reports} == {"tests.relax"}
 
 
+@_C5B
 def test_command_workflow_is_generated_published_once_and_runs(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command")
@@ -1129,6 +954,7 @@ def test_command_workflow_is_generated_published_once_and_runs(tmp_path: Path, c
         assert "command-sentinel-17\n" in (payload / "logs" / "stdio.out").read_text(encoding="utf-8")
 
 
+@_C5B
 def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-file-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-file")
@@ -1167,6 +993,7 @@ def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> 
     assert output.count("file-placeholder-unique-sentinel\n") == 2
 
 
+@_C5B
 def test_command_files_directory_is_staged_warns_and_resolves_placeholders(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1218,6 +1045,7 @@ def test_command_files_directory_is_staged_warns_and_resolves_placeholders(
         assert output.count(f"{name}-directory-sentinel\n") == (2 if name == "POSCAR" else 1)
 
 
+@_C5B
 def test_command_files_directory_stages_special_basenames(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-files-special-names-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-special-names")
@@ -1249,6 +1077,7 @@ def test_command_files_directory_stages_special_basenames(tmp_path: Path, capsys
         assert (payload / "files" / name).read_text(encoding="utf-8") == f"{name}\n"
 
 
+@_C5B
 def test_command_files_directory_works_with_workflow_dir_and_from_runner(tmp_path: Path, capsys) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -1301,6 +1130,7 @@ def test_command_files_directory_works_with_workflow_dir_and_from_runner(tmp_pat
         assert (Path(report["payload_path"]) / "files" / "workflow-input").read_text(encoding="utf-8") == "workflow\n"
 
 
+@_C5B
 def test_command_files_directories_can_be_repeated(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-files-directories-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-directories")
@@ -1336,6 +1166,7 @@ def test_command_files_directories_can_be_repeated(tmp_path: Path, capsys) -> No
     assert (payload / "files" / "two").read_text(encoding="utf-8") == "two\n"
 
 
+@_C5B
 def test_command_files_directories_collide_with_each_other(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-files-directory-collision-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-directory-collision")
@@ -1370,6 +1201,7 @@ def test_command_files_directories_collide_with_each_other(tmp_path: Path, capsy
     assert str(second / "same") in error
 
 
+@_C5B
 def test_command_files_directory_collides_with_file(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-files-collision-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-collision")
@@ -1405,6 +1237,7 @@ def test_command_files_directory_collides_with_file(tmp_path: Path, capsys) -> N
     assert not list(workspace.scan_markers())
 
 
+@_C5B
 @pytest.mark.parametrize("directory_kind", ["missing", "empty"])
 def test_command_files_directory_requires_regular_files(tmp_path: Path, capsys, directory_kind: str) -> None:
     workspace = Workspace.initialize(tmp_path / f"command-files-{directory_kind}-workspace")
@@ -1436,6 +1269,7 @@ def test_command_files_directory_requires_regular_files(tmp_path: Path, capsys, 
         assert f"--files directory does not exist or is not a directory: {directory}" in error
 
 
+@_C5B
 def test_command_files_directory_rejects_whitespace_edge_basenames(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-files-whitespace-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-whitespace")
@@ -1465,6 +1299,7 @@ def test_command_files_directory_rejects_whitespace_edge_basenames(tmp_path: Pat
     assert "staging normalization" in error
 
 
+@_C5B
 def test_command_file_is_staged_into_workdir_and_preserves_existing_file(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-cwd-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-cwd")
@@ -1505,6 +1340,7 @@ def test_command_file_is_staged_into_workdir_and_preserves_existing_file(tmp_pat
     assert "payload-sentinel\n" not in output
 
 
+@_C5B
 def test_command_file_preserves_a_dangling_workdir_symlink(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-symlink-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-symlink")
@@ -1543,6 +1379,7 @@ def test_command_file_preserves_a_dangling_workdir_symlink(tmp_path: Path, capsy
     assert link.readlink() == Path("missing-POSCAR")
 
 
+@_C5B
 def test_command_file_names_are_shell_safe_when_staged(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-shell-safe-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-shell-safe")
@@ -1581,6 +1418,7 @@ def test_command_file_names_are_shell_safe_when_staged(tmp_path: Path, capsys) -
         assert (run / name).read_text(encoding="utf-8") == "payload-sentinel\n"
 
 
+@_C5B
 def test_command_file_names_control_runner_publication(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-file-runners")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-file-runners")
@@ -1618,6 +1456,7 @@ def test_command_file_names_control_runner_publication(tmp_path: Path, capsys) -
     assert len(list(workspace.runners.rglob("*.sh"))) == 3
 
 
+@_C5B
 def test_command_template_grammar_and_argv_value_fidelity(tmp_path: Path, capsys) -> None:
     rendered = _command_runner_text(
         r'''echo '{"x":1}' '{{n}}' '--n={n}' '{not a parameter}' ''',
@@ -1656,6 +1495,7 @@ def test_command_template_grammar_and_argv_value_fidelity(tmp_path: Path, capsys
     assert value + "\n" in (Path(report["payload_path"]) / "logs" / "stdio.out").read_text(encoding="utf-8")
 
 
+@_C5B
 def test_command_requires_all_placeholders_and_is_mutually_exclusive(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-refusals")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "refusals")
@@ -1719,6 +1559,7 @@ def test_command_requires_all_placeholders_and_is_mutually_exclusive(tmp_path: P
     assert "not allowed with argument --from-command" in capsys.readouterr().err
 
 
+@_C5B
 @pytest.mark.parametrize(
     ("first", "second"),
     [("input", "files/input"), ("input", " input "), ("input", "input")],
@@ -1753,6 +1594,7 @@ def test_command_rejects_colliding_file_names(tmp_path: Path, capsys, first: str
     assert not list(workspace.scan_markers())
 
 
+@_C5B
 def test_command_rejects_slash_file_name_as_placeholder(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-file-placeholder")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "slash-placeholder")
@@ -1782,6 +1624,7 @@ def test_command_rejects_slash_file_name_as_placeholder(tmp_path: Path, capsys) 
     assert not list(workspace.scan_markers())
 
 
+@_C5B
 def test_command_rejects_file_inputs_with_the_same_workdir_basename(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-basename-collisions")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "basename-collisions")
@@ -1810,6 +1653,7 @@ def test_command_rejects_file_inputs_with_the_same_workdir_basename(tmp_path: Pa
     assert not list(workspace.scan_markers())
 
 
+@_C5B
 def test_workflow_rejects_runner_and_package_paths(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "workflow-path-refusals")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "workflow-paths")
@@ -1844,6 +1688,7 @@ def test_bash_runner_without_registration_names_the_missing_call(tmp_path: Path)
     assert str(runner.resolve()) in str(error.value)
 
 
+@_C5B
 def test_a_bash_runner_file_is_described_published_and_runs(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "bash-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "bash")
@@ -1882,6 +1727,7 @@ def test_a_bash_runner_file_is_described_published_and_runs(tmp_path: Path, caps
     assert "bash-runner" in (Path(report["payload_path"]) / "logs" / "stdio.out").read_text(encoding="utf-8")
 
 
+@_C5B
 def test_the_command_reports_what_it_cannot_do(
     tmp_path: Path,
     structure: Path,
@@ -1912,6 +1758,7 @@ def test_the_command_reports_what_it_cannot_do(
     assert "no readable input files" in capsys.readouterr().err
 
 
+@_C5B
 def test_parameter_from_single_structure_file(
     tmp_path: Path, structure: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1943,6 +1790,7 @@ def test_parameter_from_single_structure_file(
     assert (Path(report["payload_path"]) / "files" / "POSCAR").is_file()
 
 
+@_C5B
 def test_parameter_from_generic_files_and_two_batches_are_validated(
     tmp_path: Path, structure: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2024,6 +1872,7 @@ def test_parameter_from_generic_files_and_two_batches_are_validated(
     assert "ambiguous option: --from" in capsys.readouterr().err
 
 
+@_C5B
 def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_available(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

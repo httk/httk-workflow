@@ -84,7 +84,6 @@ from httk.workflow.compat import (
     _load_outputs,
     _output_roles,
     _parameter,
-    runner_reference,
 )
 from httk.workflow.scaffold import FILES_DIRECTORY, payload_relative
 
@@ -822,7 +821,6 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
             "workflow_language": "cwl",
             "cwl_output_roles": output_roles,
         },
-        runner=runner_reference(PACKAGE, RUNNER),
         required_capabilities=tuple(sorted(notes.capabilities)),
         reserved_parameters=("cwl_inputs",),
         warnings=tuple(notes.warnings),
@@ -832,6 +830,10 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
 
 def _file_record(record: "JobRecord", value: Mapping[str, object], prefix: str, port: str, index: int) -> FileRecord:
     recorded = value.get("path")
+    anchor, relative = value.get("httk_job"), value.get("httk_path")
+    if isinstance(anchor, Mapping) and anchor.get("job_id") == record.job_id and isinstance(relative, str):
+        # The runner's absolute path is where the job was then; the anchored one is where it is now.
+        recorded = str(record.payload.joinpath(*PurePosixPath(relative).parts))
     if not isinstance(recorded, str):
         raise ValueError(f"{record.workspace_id}:{record.job_id}: CWL File output {port!r} has no string path")
     try:

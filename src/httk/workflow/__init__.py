@@ -52,7 +52,6 @@ from .sdk import (
     InstantiateHandler,
     ParentJob,
     Runner,
-    RunnerRef,
 )
 from .storing import store_collected
 from .workspace import Workspace
@@ -75,7 +74,6 @@ __all__ = [
     "ParentJob",
     # Execution / authoring surface.
     "Runner",
-    "RunnerRef",
     "RunnerResolutionError",
     "ScaffoldedJob",
     "TaskManager",

@@ -182,7 +182,7 @@ def _freeze(program: Path, *, cwd: Path, environment: Mapping[str, str], log: Pa
 
 
 def _compatibility(a: Attempt) -> Mapping[str, object]:
-    compatibility = a.job.raw.get("compatibility")
+    compatibility = a.parameters.get("v1_compatibility")
     if not isinstance(compatibility, Mapping) or compatibility.get("profile") != "httk-v1-task-v1":
         raise _V1ConfigError("v1 compatibility metadata is missing")
     return compatibility
@@ -222,7 +222,7 @@ def _environment(
             "HTTK_DIR": str(root.resolve()),
             "HT_TASK_TOP_DIR": str(a.payload),
             "HT_TASK_CURRENT_DIR": str(current),
-            "HT_TASK_RUN_NAME": "ht.run.current" if program == "ht_steps" else ".",
+            "HT_TASK_RUN_NAME": os.path.relpath(a.workdir, a.payload) if program == "ht_steps" else ".",
             "HT_TASK_REL_TOP_DIR": os.path.relpath(a.payload, current),
             "HT_TASK_STEP": str(a.state.get("v1_step", "start")),
             "HT_TASKMGR_TIMEOUT": str(int(timeout)),
@@ -296,7 +296,7 @@ def _spawn(a: Attempt, sources: Sequence[Path], attempts: int, legacy_root: Path
             child_id = str(uuid.uuid5(uuid.UUID(a.job.id), f"{relative}|{fields['taskset']}|{fields['task_id']}"))
             prepared = staging / child_id
             shutil.copytree(source, prepared)
-            mapping = dict(a.job.raw)
+            mapping = a.job.as_mapping()
             mapping.update(
                 {
                     "id": child_id,
@@ -313,7 +313,7 @@ def _spawn(a: Attempt, sources: Sequence[Path], attempts: int, legacy_root: Path
             compatibility = dict(_compatibility(a))
             compatibility["legacy_step"] = fields["step"]
             compatibility["root_placement"] = str(compatibility.get("root_placement", a.context.placement))
-            mapping["compatibility"] = compatibility
+            mapping["parameters"] = {**a.parameters, "v1_compatibility": compatibility}
             write_json_atomic(prepared / "job.json", mapping)
             a.spawn(prepared, label=_label(fields["task_id"], labels), placement=_placement(a, child_id))
             spawned.append(relative)

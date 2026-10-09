@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 from httk.core import DataRecord
 
-from httk.workflow import TaskManager, Workspace, collect
+from attempt_fixtures import failure_of as _failure
+from attempt_fixtures import find, job_json, new_job, new_jobs
+from httk.workflow import TaskManager, Workspace, _store, collect
 from httk.workflow import scaffold as scaffold_module
-from httk.workflow.compat import runner_path, runner_reference
+from httk.workflow.compat import runner_path
 from httk.workflow.compat.pwd import (
     DEFAULT_MAXIMUM_EMBEDDED_BYTES,
     DOCUMENT_FILE,
@@ -19,9 +21,8 @@ from httk.workflow.compat.pwd import (
     load_pwd_document,
     validate_pwd_document,
 )
-from httk.workflow.models import JobDefinition
 from httk.workflow.packages import load_workflow_package
-from httk.workflow.scaffold import describe_runner, new_job, new_jobs, resolve_workflow
+from httk.workflow.scaffold import describe_runner, resolve_workflow
 
 _MODULE = '''"""Functions for the packaged test workflows."""
 
@@ -209,15 +210,17 @@ def test_pwd_language_job_runs_to_success_and_carries_embedded_document(tmp_path
     assert resolve_workflow(package).language == "pwd"
     job = new_job(workspace, package)
 
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.parameters["workflow_language"] == "pwd"
-    assert definition.parameters["workflow_realization"] == "language"
-    assert definition.parameters["pwd_document"] == _ARITHMETIC
+    definition = job_json(find(workspace, job.job_id).path)
+    assert definition["parameters"]["workflow_language"] == "pwd"
+    assert definition["parameters"]["workflow_realization"] == "language"
+    assert definition["parameters"]["pwd_document"] == _ARITHMETIC
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert json.loads((job.payload / "run" / "pwd-outputs.json").read_text(encoding="utf-8")) == {"result": 6.25}
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    assert json.loads((find(workspace, job.job_id).path / "run" / "pwd-outputs.json").read_text(encoding="utf-8")) == {
+        "result": 6.25
+    }
 
 
 def test_bare_pwd_document_runs_with_a_module_root_parameter(tmp_path: Path, workspace: Workspace) -> None:
@@ -225,8 +228,8 @@ def test_bare_pwd_document_runs_with_a_module_root_parameter(tmp_path: Path, wor
     job = new_job(workspace, package / "workflow.json", parameters={"pwd_module_path": [str(package)]})
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
     item = next(collect(workspace))
     assert isinstance(item.outputs["result"], DataRecord)
     assert item.outputs["result"].value == 6.25
@@ -236,8 +239,8 @@ def test_pwd_language_preserves_unknown_document_members(tmp_path: Path, workspa
     package = _package(tmp_path / "annotated", {**_ARITHMETIC, "engineAnnotations": {"who": "other"}})
     job = new_job(workspace, package)
 
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    embedded = definition.parameters["pwd_document"]
+    definition = job_json(find(workspace, job.job_id).path)
+    embedded = definition["parameters"]["pwd_document"]
     assert isinstance(embedded, dict)
     assert embedded["engineAnnotations"] == {"who": "other"}
 
@@ -254,8 +257,10 @@ def test_pwd_language_collects_scalar_records_and_degrades_when_unregistered(
     assert item.outputs["result"].value == 6.25
     assert item.unfulfilled == ()
 
-    scaffold_module._WORKFLOW_PROVIDERS.pop(resolve_workflow(package).workflow_id, None)
-    (job.payload / "run" / "pwd-outputs.json").unlink()
+    # The collector reads the outputs from the data copy, then from the workdir; with neither, it degrades.
+    done = find(workspace, job.job_id).path
+    (done / "run" / "pwd-outputs.json").unlink()
+    (done / "data" / "pwd" / "pwd-outputs.json").unlink()
     degraded = next(collect(workspace))
     assert degraded.outputs == {}
     assert degraded.missing_collector is not None
@@ -277,7 +282,7 @@ def test_registered_pwd_package_degrades_on_truncated_outputs_and_continues(
     new_job(workspace, package, inputs={"x": 1})
     bad = new_job(workspace, package, inputs={"x": 2})
     _drive(workspace)
-    (bad.payload / "run" / "pwd-outputs.json").write_text('{"result":', encoding="utf-8")
+    (find(workspace, bad.job_id).path / "run" / "pwd-outputs.json").write_text('{"result":', encoding="utf-8")
 
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "pwd-degrade")
@@ -327,9 +332,11 @@ def test_pwd_language_input_override_matches_import_behavior(tmp_path: Path, wor
     job = new_job(workspace, _package(tmp_path / "override", _ARITHMETIC), inputs={"x": 3})
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert json.loads((job.payload / "run" / "pwd-outputs.json").read_text(encoding="utf-8")) == {"result": 56.25}
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    assert json.loads((find(workspace, job.job_id).path / "run" / "pwd-outputs.json").read_text(encoding="utf-8")) == {
+        "result": 56.25
+    }
 
 
 def test_pwd_language_resumes_from_a_checkpoint(tmp_path: Path, workspace: Workspace) -> None:
@@ -338,9 +345,11 @@ def test_pwd_language_resumes_from_a_checkpoint(tmp_path: Path, workspace: Works
     job = new_job(workspace, package)
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert json.loads((job.payload / "run" / "pwd-outputs.json").read_text(encoding="utf-8")) == {"result": 104}
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    assert json.loads((find(workspace, job.job_id).path / "run" / "pwd-outputs.json").read_text(encoding="utf-8")) == {
+        "result": 104
+    }
     assert json.loads(log.read_text(encoding="utf-8")) == ["step_one", "poison", "poison", "step_three"]
 
 
@@ -349,9 +358,9 @@ def test_pwd_language_allowlist_failure_names_refused_module(tmp_path: Path, wor
     job = new_job(workspace, package, parameters={"pwd_retry_failed_nodes": False})
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker)["failure"]
+    marker = find(workspace, job.job_id)
+    assert marker.state == "failed"
+    failure = _failure(marker)
     assert failure["code"] == "pwd.node_failed"
     assert "workflow" in failure["message"]
 
@@ -361,24 +370,25 @@ def test_pwd_language_stages_an_oversized_document(tmp_path: Path, workspace: Wo
     package = _package(tmp_path / "staged", document)
     job = new_job(workspace, package)
 
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    assert "pwd_document" not in definition.parameters
-    assert definition.parameters["pwd_document_path"] == DOCUMENT_FILE
+    definition = job_json(find(workspace, job.job_id).path)
+    assert "pwd_document" not in definition["parameters"]
+    assert definition["parameters"]["pwd_document_path"] == DOCUMENT_FILE
     assert (
-        json.loads((job.payload / "files" / "pwd.json").read_text(encoding="utf-8"))["padding"] == document["padding"]
+        json.loads((find(workspace, job.job_id).path / "files" / "pwd.json").read_text(encoding="utf-8"))["padding"]
+        == document["padding"]
     )
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
 
 
 def test_pwd_language_payload_stages_module_and_job_definition(tmp_path: Path, workspace: Workspace) -> None:
     job = new_job(workspace, _package(tmp_path / "shape", _ARITHMETIC))
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.runner_source == "installed"
-    assert definition.runner_path.as_posix() == f"pkg:{PACKAGE}/pwd_runner.py"
-    assert definition.runner_sha256 == runner_reference(PACKAGE, "pwd_runner.py")["sha256"]
+    # The installed package names the format; the manager runs the realization's own runner.
+    (installed,) = _store.list_installed(workspace)
+    assert installed.record["runner"] == {"command": None, "entry": None, "builtin": "pwd"}
+    assert job_json(job.payload)["workflow"] == {"id": installed.id, "name": installed.name}
     staged = sorted(path.relative_to(job.payload).as_posix() for path in job.payload.rglob("*") if path.is_file())
     assert staged == ["files/workflow.py", "job.json"]
 
@@ -401,11 +411,11 @@ def test_pwd_language_snapshots_non_utf8_module_bytes(tmp_path: Path, workspace:
     (package / "workflow.py").write_bytes(source)
 
     job = new_job(workspace, package)
-    assert (job.payload / "files" / "workflow.py").read_bytes() == source
+    assert (find(workspace, job.job_id).path / "files" / "workflow.py").read_bytes() == source
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
 
 
 def test_pwd_language_campaign_prepares_once_and_snapshots_modules(
@@ -447,9 +457,13 @@ def test_pwd_language_campaign_prepares_once_and_snapshots_modules(
 
     results = []
     for job in jobs:
-        marker = workspace.find_marker_by_id(job.job_id)
-        assert marker is not None and marker.kind == "succeeded"
-        results.append(json.loads((job.payload / "run" / "pwd-outputs.json").read_text(encoding="utf-8"))["result"])
+        marker = find(workspace, job.job_id)
+        assert marker.state == "succeeded"
+        results.append(
+            json.loads((find(workspace, job.job_id).path / "run" / "pwd-outputs.json").read_text(encoding="utf-8"))[
+                "result"
+            ]
+        )
     assert results == [6.25, 25.0, 56.25]
 
 

@@ -274,10 +274,6 @@ sub log {
 }
 
 sub put { my ($self, $source, $destination) = @_; return $self->_read('put', $source, $destination); }
-sub remove {
-    my ($self, $destination, $missing_ok) = @_;
-    return $missing_ok ? $self->_read('remove', $destination, '--missing-ok') : $self->_read('remove', $destination);
-}
 sub spawn {
     my ($self, $label, $args) = @_;
     return $self->_read('spawn', $label, _args($args));

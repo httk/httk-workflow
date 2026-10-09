@@ -9,9 +9,10 @@ publish the same bytes, because they publish through exactly one implementation.
 A Bash runner is many short-lived processes, so the bridge holds no state of its
 own between calls. The one implicit outcome draft of an attempt lives in the
 attempt control directory as ``outcome.tmp.<uuid>``, and every bridge process
-rediscovers and resumes it there: the spawned children, the staged data
-transaction, and therefore the operation counter are all read back from the
-draft itself.
+rediscovers and resumes it there: the spawned children and the implicit data
+transaction ``put`` stages into are read back from the draft itself. An
+explicit transaction (``transaction begin``) is named by its six-digit
+sequence, which every later ``transaction put``/``commit`` passes back.
 
 Exit codes are uniform across every subcommand:
 
@@ -43,9 +44,11 @@ from collections.abc import Mapping, Sequence
 from functools import cache
 from pathlib import Path
 from types import ModuleType
-from typing import Literal, cast
+from typing import cast
 
+from ._data import Transaction
 from ._durations import TIME_RESOURCES
+from ._state import _thaw
 from ._util import read_json, write_json_atomic
 from .codes import BRIDGE_ABSENT, installed_codes
 from .errors import FormatError
@@ -56,7 +59,6 @@ from .runtime_builders import (
     JoinCondition,
     OutcomeDraft,
     ReplayableWorkdirBatch,
-    TransactionBuilder,
     prepare_job_payload,
 )
 from .runtime_utils import (
@@ -65,7 +67,7 @@ from .runtime_utils import (
     evaluate_expression,
     render_template,
 )
-from .sdk import RUNNER_ERROR_FORMAT, Attempt, ChildSpec, Runner, RunnerRef
+from .sdk import _IMPLICIT_TRANSACTION, RUNNER_ERROR_FORMAT, Attempt, ChildSpec, Runner
 from .supervision import CheckerSpec, ProcessSupervisor
 
 ABSENT = BRIDGE_ABSENT
@@ -84,7 +86,6 @@ _CHILD_FIELDS = (
     "payload",
     "workdir",
     "data",
-    "data_generation",
 )
 _JOIN_CONDITIONS = ("all_succeeded", "all_terminal", "any_succeeded", "any_terminal", "at_least")
 
@@ -165,24 +166,24 @@ def _parser() -> argparse.ArgumentParser:
     put = commands.add_parser("put")
     put.add_argument("source")
     put.add_argument("destination")
-    remove = commands.add_parser("remove")
-    remove.add_argument("destination")
-    remove.add_argument("--missing-ok", action="store_true")
+    transaction = commands.add_parser("transaction")
+    transaction_verbs = transaction.add_subparsers(dest="verb", required=True)
+    transaction_verbs.add_parser("begin")
+    transaction_put = transaction_verbs.add_parser("put")
+    transaction_put.add_argument("handle")
+    transaction_put.add_argument("source")
+    transaction_put.add_argument("destination")
+    transaction_verbs.add_parser("commit").add_argument("handle")
 
     spawn = commands.add_parser("spawn")
     spawn.add_argument("label")
     spawn.add_argument("--step")
     spawn.add_argument("--payload")
     spawn.add_argument("--parameter", action="append", default=[], dest="parameters")
-    spawn.add_argument("--runner", default="inherit")
     spawn.add_argument("--placement")
     spawn.add_argument("--priority", type=int)
     spawn.add_argument("--tag")
     spawn.add_argument("--name")
-    spawn.add_argument("--workflow")
-    spawn.add_argument("--workdir-mode", choices=("persistent", "isolated"), default="persistent")
-    spawn.add_argument("--workdir-path", default="run")
-    spawn.add_argument("--data-mode", choices=("none", "transactional"), default="none")
     spawn.add_argument("--claim-pool")
     spawn.add_argument("--capability", action="append", default=[], dest="capabilities")
     spawn.add_argument("--retry-on", action="append", default=[], dest="retry_on")
@@ -203,10 +204,7 @@ def _parser() -> argparse.ArgumentParser:
     call.add_argument("--name")
     call.add_argument("--placement")
     call.add_argument("--priority", type=int)
-    call.add_argument("--workdir-mode", choices=("persistent", "isolated"), default="persistent")
-    call.add_argument("--data-mode", choices=("none", "transactional"))
     call.add_argument("--step")
-    call.add_argument("--workflow-id", dest="workflow_id")
 
     children = commands.add_parser("children")
     selection = children.add_mutually_exclusive_group()
@@ -334,20 +332,10 @@ def _bind() -> Attempt:
         return attempt
     draft = OutcomeDraft._resume(bound.context, bound.control, root, durable=bound.context.durable)
     attempt._draft = draft
-    if (draft.root / "transaction" / "manifest.json").is_file():
-        generation = attempt.context.data_generation
-        if generation is None:
-            raise _Refused("this draft stages a transaction but the job has data.mode none")
-        # The sealed manifest is the operation counter of a Bash runner, so the
-        # next identifier is the same whichever process of this attempt asks.
-        try:
-            transaction = TransactionBuilder.resume(
-                draft.root / "transaction", expected_generation=generation, durable=False
-            )
-        except ValueError as exception:
-            raise _Refused(f"the staged transaction manifest of this draft is unusable: {exception}") from exception
-        attempt._transaction = transaction
-        attempt._operations = len(transaction)
+    implicit = draft.root / _IMPLICIT_TRANSACTION
+    if implicit.is_file():
+        seq = implicit.read_text(encoding="utf-8").strip()
+        attempt._implicit = Transaction.resume(bound.control, seq, durable=bound.context.durable)
     attempt._prepare_environment()
     return attempt
 
@@ -474,24 +462,6 @@ def _resources(values: Sequence[str]) -> dict[str, int | str] | None:
     return result
 
 
-def _runner_reference(value: str) -> RunnerRef:
-    """Parse the ``inherit``/``ws:PATH@SHA``/``installed:PATH@SHA`` spelling."""
-
-    if value == "inherit":
-        return RunnerRef.inherit()
-    source, separator, rest = value.partition(":")
-    path, marker, digest = rest.rpartition("@")
-    if not separator or not marker or not path:
-        raise _Refused(
-            f"runner reference {value!r} must be inherit, ws:PATH@SHA256, or installed:PATH@SHA256",
-        )
-    if source in {"ws", "workspace"}:
-        return RunnerRef.workspace(path, digest)
-    if source == "installed":
-        return RunnerRef.installed(path, digest)
-    raise _Refused(f"runner source {source!r} must be ws or installed")
-
-
 def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
     """Build the synthesized child one ``spawn`` call describes."""
 
@@ -504,13 +474,8 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
     return ChildSpec(
         step=arguments.step,
         parameters=_assignments(arguments.parameters, "a child parameter"),
-        runner=_runner_reference(arguments.runner),
         name=arguments.name,
-        workflow=arguments.workflow,
         tag=arguments.tag,
-        workdir_mode=cast(Literal["persistent", "isolated"], arguments.workdir_mode),
-        workdir_path=arguments.workdir_path,
-        data_mode=cast(Literal["none", "transactional"], arguments.data_mode),
         priority=arguments.priority,
         claim_pool=arguments.claim_pool,
         required_capabilities=tuple(arguments.capabilities),
@@ -551,10 +516,7 @@ def _call(arguments: argparse.Namespace) -> None:
         tag=arguments.tag,
         placement=arguments.placement,
         priority=arguments.priority,
-        workdir_mode=cast(Literal["persistent", "isolated"], arguments.workdir_mode),
-        data_mode=cast("Literal['none', 'transactional'] | None", arguments.data_mode),
         step=arguments.step,
-        workflow_id=arguments.workflow_id,
         name=arguments.name,
     )
     print(reference.job_key)
@@ -563,16 +525,10 @@ def _call(arguments: argparse.Namespace) -> None:
 def _spawn(arguments: argparse.Namespace) -> None:
     attempt = _publishing()
     if arguments.payload:
-        if (
-            arguments.step
-            or arguments.parameters
-            or arguments.runner != "inherit"
-            or arguments.resources
-            or arguments.step_resources
-        ):
+        if arguments.step or arguments.parameters or arguments.resources or arguments.step_resources:
             raise _Refused(
                 "a prepared payload directory carries its own job definition, "
-                "so --step, --parameter, and --runner apply only to a synthesized child"
+                "so --step, --parameter, and the resources apply only to a synthesized child"
             )
         reference = attempt.spawn(arguments.payload, label=arguments.label, placement=arguments.placement)
     else:
@@ -613,10 +569,9 @@ def _child(arguments: argparse.Namespace) -> None:
         "job_key": child.job_key,
         "failure_code": None if child.failure is None else child.failure.code,
         "failure_message": None if child.failure is None else child.failure.message,
-        "payload": str(child.payload),
+        "payload": None if child.payload is None else str(child.payload),
         "workdir": None if child.workdir is None else str(child.workdir),
         "data": None if child.data is None else str(child.data),
-        "data_generation": child.data_generation,
     }
     value = fields[arguments.field]
     if value is None:
@@ -624,11 +579,19 @@ def _child(arguments: argparse.Namespace) -> None:
     _print(value)
 
 
-def _seal(attempt: Attempt) -> None:
-    """Persist the staged transaction so the next bridge process resumes it."""
+def _transaction(arguments: argparse.Namespace) -> None:
+    """Begin, stage into or commit one explicit transaction, named by its six-digit sequence."""
 
-    if attempt._transaction is not None:
-        attempt._transaction.seal()
+    attempt = _attempt()
+    attempt._reject_published()
+    if arguments.verb == "begin":
+        print(attempt.transaction().seq)
+        return
+    transaction = Transaction.resume(attempt.control, arguments.handle, durable=attempt.context.durable)
+    if arguments.verb == "put":
+        transaction.put(arguments.source, arguments.destination)
+    else:
+        transaction.commit()
 
 
 def _abort(arguments: argparse.Namespace) -> None:
@@ -659,9 +622,8 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
     """Create ``job.json`` in a prepared payload from a specification file.
 
     The specification is exactly the member set of :class:`JobSpec`, including
-    ``runner_executor``, ``runner_source``, ``runner_sha256``, and ``parameters``, so
-    a Bash runner can prepare a payload for a shared runner without a Python
-    program in between.
+    ``workflow_id``, ``workflow_name`` and ``parameters``, so a Bash runner can
+    prepare a payload of an installed workflow without a Python program in between.
     """
 
     raw = read_json(Path(arguments.spec))
@@ -670,7 +632,7 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
     if unknown:
         raise _Refused(f"unknown job specification members: {', '.join(unknown)}")
     values = dict(raw)
-    for name in ("runner_arguments", "required_capabilities", "retry_on"):
+    for name in ("required_capabilities", "retry_on"):
         if name in values:
             values[name] = tuple(values[name])
     job = prepare_job_payload(arguments.destination, JobSpec(**values))
@@ -678,10 +640,8 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
         {
             "id": job.id,
             "job_key": job.job_key,
-            "runner_executor": job.runner_executor,
-            "runner_source": job.runner_source,
-            "runner_sha256": job.runner_sha256,
-            "parameters": dict(job.parameters),
+            "workflow": {"id": job.workflow_id, "name": job.workflow_name},
+            "parameters": _thaw(job.parameters),
         }
     )
 
@@ -850,13 +810,9 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
     elif command == "environment-log":
         _attempt()._finish_environment_log()
     elif command == "put":
-        attempt = _publishing()
-        print(attempt.put(arguments.source, arguments.destination))
-        _seal(attempt)
-    elif command == "remove":
-        attempt = _publishing()
-        print(attempt.remove(arguments.destination, missing_ok=arguments.missing_ok))
-        _seal(attempt)
+        print(_attempt().put(arguments.source, arguments.destination))
+    elif command == "transaction":
+        _transaction(arguments)
     elif command == "spawn":
         _spawn(arguments)
     elif command == "call":

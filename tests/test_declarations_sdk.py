@@ -1,4 +1,4 @@
-"""Workflow declarations in the runner SDK and the Bash bridge (legacy until the SDK port, C3).
+"""Workflow declarations in the runner SDK and the Bash bridge.
 
 Split out of ``test_declarations.py``; the description below is the original module's.
 
@@ -24,13 +24,8 @@ from typing import Any, cast
 
 import pytest
 
-from httk.workflow import (
-    Attempt,
-    ChildSpec,
-    FormatError,
-    RunnerRef,
-)
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow import Attempt, ChildSpec, FormatError
+from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 
 _SRC = str(Path(__file__).parents[1] / "src")
 _SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "languages" / "bash" / "httk-workflow.sh"
@@ -54,21 +49,17 @@ _OBSERVED: dict[str, Any] = {**_DECLARED, "outputs": {"structures": 3, "labels":
 def _payload(root: Path, **spec: Any) -> Path:
     """Prepare one payload whose runner never has to run."""
 
-    payload = root
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     prepare_job_payload(
-        payload,
+        root,
         JobSpec(
             name="Declaring job",
-            workflow="tests.declarations",
-            runner_path="files/runner",
+            workflow_id="local:tests.declarations",
+            workflow_name="tests.declarations",
             initial_step="only",
             **spec,
         ),
     )
-    return payload
+    return root
 
 
 def test_a_spawned_child_declares_for_itself_and_inherits_nothing(tmp_path: Path) -> None:
@@ -80,22 +71,18 @@ def test_a_spawned_child_declares_for_itself_and_inherits_nothing(tmp_path: Path
             step="relax",
             parameters={"site": 0},
             declarations={"workflow": child},
-            runner=RunnerRef.workspace("campaign/run.py", "a" * 64),
         ),
         label="declaring-child",
     )
-    attempt.spawn(
-        ChildSpec(step="relax", runner=RunnerRef.workspace("campaign/run.py", "a" * 64)),
-        label="silent-child",
-    )
+    attempt.spawn(ChildSpec(step="relax"), label="silent-child")
 
     jobs = {
         path.parent.name.split("--")[0]: json.loads(path.read_text(encoding="utf-8")) for path in _child_jobs(attempt)
     }
     assert jobs["declaring-child"]["declarations"] == {"workflow": child}
     # The parent's own declaration describes the parent, so nothing of it leaks
-    # into a child: a child that declares nothing carries no declarations member.
-    assert "declarations" not in jobs["silent-child"]
+    # into a child: a child that declares nothing carries empty declarations.
+    assert jobs["silent-child"]["declarations"] == {}
 
 
 def _child_jobs(attempt: Attempt) -> list[Path]:
@@ -130,7 +117,6 @@ def _fabricate(tmp_path: Path, *, step: str, declarations: dict[str, Any] | None
             "step": step,
             "activation_id": str(uuid.uuid4()),
             "attempt_id": str(uuid.uuid4()),
-            "data_generation": None,
             "children": [],
         }
     )
@@ -140,6 +126,7 @@ def _fabricate(tmp_path: Path, *, step: str, declarations: dict[str, Any] | None
         "HTTK_WORKFLOW_JOB_DIR": str(payload),
         "HTTK_WORKFLOW_WORKDIR": str(workdir),
         "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
+        "HTTK_WORKFLOW_DATA_DIR": str(payload / "data"),
         "HTTK_WORKFLOW_STEP": step,
     }
 

@@ -1,26 +1,24 @@
 """The Python authoring SDK: dynamic step graphs, job state, and outcomes."""
 
 import json
-import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
+from attempt_fixtures import every_job, fabricate, find, run_manager, state, submit_runner
 from httk.workflow import (
     Attempt,
     ChildSpec,
     FormatError,
     Runner,
-    RunnerRef,
-    TaskManager,
     Workspace,
 )
-from httk.workflow._job_tree import mark_detached
-from httk.workflow.models import Marker
-from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
+from httk.workflow._job import JobDefinition
+from httk.workflow._state import StateDoc, encode_state
+from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 
 _SRC = str(Path(__file__).parents[1] / "src")
 
@@ -122,15 +120,6 @@ raise SystemExit(run.main())
 _CAMPAIGN_STEPS = ["aggregate", "characterize", "relax", "triage"]
 
 
-def _publish_campaign(workspace: Workspace, root: Path) -> dict[str, object]:
-    """Publish the campaign runner and return its job runner reference."""
-
-    source = root / "campaign.py"
-    root.mkdir(parents=True, exist_ok=True)
-    source.write_text(_CAMPAIGN_RUNNER, encoding="utf-8")
-    return workspace.publish_runner(source, name="campaign/run.py")
-
-
 def _submit_campaign(
     workspace: Workspace,
     root: Path,
@@ -138,43 +127,34 @@ def _submit_campaign(
     *,
     initial_step: str = "characterize",
 ) -> str:
-    """Submit one campaign parent job built entirely through the SDK."""
+    """Install the campaign runner and submit one campaign parent job of it."""
 
-    reference = _publish_campaign(workspace, root / "runners")
-    payload = root / "parent"
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Defect campaign",
-            workflow="tests.campaign",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="campaign",
-            initial_step=initial_step,
-            maximum_attempts_per_activation=1,
-            parameters=parameters,
-        ),
-    )
-    workspace.submit(payload, "project/campaign")
-    return job.id
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "campaign.py"
+    source.write_text(_CAMPAIGN_RUNNER, encoding="utf-8")
+    return submit_runner(
+        workspace,
+        source,
+        placement="project/campaign",
+        install_step="characterize",
+        name="Defect campaign",
+        tag="campaign",
+        initial_step=initial_step,
+        maximum_attempts_per_activation=1,
+        parameters=parameters,
+    ).job_id
 
 
 def _run(workspace: Workspace) -> None:
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
+    run_manager(workspace)
 
 
-def _state(workspace: Workspace, job_id: str) -> dict[str, Any]:
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    return dict(workspace.read_state(marker))
+def _state(workspace: Workspace, job_id: str) -> StateDoc:
+    return state(find(workspace, job_id))
 
 
 def _workdir(workspace: Workspace, job_id: str) -> Path:
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    return workspace.payload_path(marker.placement, marker.job_key) / "run"
+    return find(workspace, job_id).path / "run"
 
 
 def test_a_dynamic_campaign_spawns_gathers_and_aggregates(tmp_path: Path) -> None:
@@ -182,8 +162,8 @@ def test_a_dynamic_campaign_spawns_gathers_and_aggregates(tmp_path: Path) -> Non
     job_id = _submit_campaign(workspace, tmp_path / "source", {"sites": 3})
     _run(workspace)
 
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    parent = find(workspace, job_id)
+    assert parent.state == "succeeded"
     report = json.loads((_workdir(workspace, job_id) / "report.json").read_text(encoding="utf-8"))
     assert report["labels"] == ["site-0", "site-1", "site-2"]
     assert report["relaxed"] == ["0", "1", "2"]
@@ -192,29 +172,23 @@ def test_a_dynamic_campaign_spawns_gathers_and_aggregates(tmp_path: Path) -> Non
     assert [key.split("--")[0] for key in report["keys"]] == ["site-0", "site-1", "site-2"]
     assert report["sites"] == 3
 
-    children = [found for found in workspace.scan_markers() if found.job_key != marker.job_key]
-    assert len(children) == 3 and all(child.kind == "succeeded" for child in children)
-    parent_payload = workspace.payload_path(marker.placement, marker.job_key)
+    children = [found for found in every_job(workspace) if found.job_id != job_id]
+    assert len(children) == 3 and all(child.state == "succeeded" for child in children)
+    parent_job = JobDefinition.from_path(parent.path / "job.json")
     for child in children:
-        # A child at another placement locates its parent through the recorded
-        # parent placement and reads the parent's workdir in place.
-        seen = json.loads(
-            (workspace.payload_path(child.placement, child.job_key) / "run" / "parent.json").read_text(encoding="utf-8")
-        )
-        assert seen == {
-            "job_id": job_id,
-            "placement": "project/campaign",
-            "payload": str(parent_payload),
-            "shared": "from the parent",
-        }
-        child_job = workspace.load_job(child)
-        assert child_job.runner_source == "workspace" and child_job.runner_path.as_posix() == "campaign/run.py"
-        assert child_job.workflow == "tests.campaign"
-        assert not (workspace.payload_path(child.placement, child.job_key) / "campaign").exists()
+        # A child at another placement locates its waiting parent through the
+        # recorded parent placement and reads the parent's workdir in place.
+        seen = json.loads((child.path / "run" / "parent.json").read_text(encoding="utf-8"))
+        assert seen["job_id"] == job_id and seen["placement"] == "project/campaign"
+        assert seen["shared"] == "from the parent"
+        assert Path(seen["payload"]).parent == workspace.jobs / "waiting" / "project" / "campaign"
+        child_job = JobDefinition.from_path(child.path / "job.json")
+        assert (child_job.workflow_id, child_job.workflow_name) == (parent_job.workflow_id, parent_job.workflow_name)
+        assert child.path.parent == workspace.jobs / "succeeded" / "project" / "children"
 
     # The step set of the runner is recorded once, from the first outcome the job
     # published, and carried forward by later ones.
-    assert _state(workspace, job_id)["runner_steps"] == _CAMPAIGN_STEPS
+    assert list(_state(workspace, job_id).runner_steps or ()) == _CAMPAIGN_STEPS
 
 
 def test_a_failing_child_is_observed_and_triaged_by_a_later_step(tmp_path: Path) -> None:
@@ -222,9 +196,9 @@ def test_a_failing_child_is_observed_and_triaged_by_a_later_step(tmp_path: Path)
     job_id = _submit_campaign(workspace, tmp_path / "source", {"sites": 3, "failing": [1]})
     _run(workspace)
 
-    state = _state(workspace, job_id)
-    assert state["reason"] == "declared_failure"
-    assert state["failure"] == {
+    failure = _state(workspace, job_id).failure
+    assert failure is not None
+    assert {key: failure[key] for key in ("code", "message", "details")} == {
         "code": "campaign_incomplete",
         "message": "not every site relaxed",
         "details": {"failed": 1},
@@ -249,9 +223,8 @@ def test_an_impossible_join_advances_to_the_step_it_names(tmp_path: Path) -> Non
     )
     _run(workspace)
 
-    state = _state(workspace, job_id)
-    assert state["reason"] == "declared_failure"
-    assert state["failure"]["code"] == "campaign_incomplete"
+    failure = _state(workspace, job_id).failure
+    assert failure is not None and failure["code"] == "campaign_incomplete"
     workdir = _workdir(workspace, job_id)
     # The join became impossible the moment one child failed, so triage ran
     # without an aggregate step and observed the children as they then were.
@@ -265,10 +238,10 @@ def test_an_unregistered_step_fails_the_job_with_unknown_step(tmp_path: Path) ->
     job_id = _submit_campaign(workspace, tmp_path / "source", {"sites": 1}, initial_step="charaterize")
     _run(workspace)
 
-    state = _state(workspace, job_id)
-    assert state["failure"]["code"] == "unknown_step"
-    assert "registered steps: aggregate, characterize, relax, triage" in state["failure"]["message"]
-    assert state["failure"].get("retryable", False) is False
+    failure = _state(workspace, job_id).failure
+    assert failure is not None and failure["code"] == "unknown_step"
+    assert "registered steps: aggregate, characterize, relax, triage" in str(failure["message"])
+    assert failure.get("retryable", False) is False
 
 
 def _attempt(
@@ -278,7 +251,6 @@ def _attempt(
     parameters: dict[str, object] | None = None,
     environment: dict[str, object] | None = None,
     settings: dict[str, object] | None = None,
-    data_generation: int | None = None,
     children: list[dict[str, object]] | None = None,
     runner: Runner | None = None,
     name: str = "payload",
@@ -290,17 +262,14 @@ def _attempt(
     """Bind one attempt of a fabricated job, without a manager."""
 
     payload = tmp_path / name
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (payload / "files").mkdir(parents=True)
     prepare_job_payload(
         payload,
         JobSpec(
             name="Fabricated",
-            workflow="tests.sdk",
-            runner_path="files/runner",
+            workflow_id="local:tests.sdk",
+            workflow_name="tests.sdk",
             initial_step=step,
-            data_mode="none" if data_generation is None else "transactional",
             parameters=parameters or {},
             environment=environment or {},
             resources=resources or {},
@@ -324,7 +293,6 @@ def _attempt(
             "step": step,
             "activation_id": str(uuid.uuid4()),
             "attempt_id": str(uuid.uuid4()),
-            "data_generation": data_generation,
             "children": children or [],
             "settings": settings or {},
             "resources": context_resources or {},
@@ -337,10 +305,9 @@ def _attempt(
         "HTTK_WORKFLOW_JOB_DIR": str(payload),
         "HTTK_WORKFLOW_WORKDIR": str(workdir),
         "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
+        "HTTK_WORKFLOW_DATA_DIR": str(payload / "data"),
         "HTTK_WORKFLOW_STEP": step,
     }
-    if data_generation is not None:
-        attempt_environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
     return Attempt.initialize(attempt_environment, runner=runner)
 
 
@@ -356,7 +323,7 @@ def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:
         resources={"procs": 2},
         step_resources={"start": {"mem": 1024}},
     )
-    child = ChildSpec(step="start", runner=RunnerRef.workspace("runner", "a" * 64))
+    child = ChildSpec(step="start")
     spec = child._job_spec(attempt.job, "child")
     assert spec.resources == {"procs": 2}
     assert spec.step_resources == {"start": {"mem": 1024}}
@@ -370,11 +337,10 @@ def test_child_spec_never_inherits_mintime_and_caps_maxtime(tmp_path: Path) -> N
         step_resources={"start": {"maxtime": 7200, "mintime": 60}},
         context_resources={"maxtime": 3600, "procs": 2},
     )
-    runner = RunnerRef.workspace("runner", "a" * 64)
     cap = attempt.context.resources.get("maxtime")
 
     def spec(**members: Any) -> JobSpec:
-        return ChildSpec(step="start", runner=runner, **members)._job_spec(attempt.job, "child", cap)
+        return ChildSpec(step="start", **members)._job_spec(attempt.job, "child", cap)
 
     inherited = spec()
     assert inherited.resources == {"maxtime": 3600, "procs": 2}
@@ -386,11 +352,11 @@ def test_child_spec_never_inherits_mintime_and_caps_maxtime(tmp_path: Path) -> N
     assert clamped.step_resources == {"start": {"maxtime": 3600, "mintime": 3600}, "other": {"procs": 1}}
     with pytest.raises(ValueError, match="Slurm duration"):
         spec(resources={"maxtime": 60})
-    uncapped = ChildSpec(step="start", runner=runner)._job_spec(attempt.job, "child", None)
+    uncapped = ChildSpec(step="start")._job_spec(attempt.job, "child", None)
     assert uncapped.resources == {"maxtime": 3600, "procs": 2}
 
     # Attempt.spawn passes the attempt's own effective maxtime as the cap.
-    attempt.spawn(ChildSpec(step="start", runner=runner, resources={"maxtime": "3:00:00"}), label="capped")
+    attempt.spawn(ChildSpec(step="start", resources={"maxtime": "3:00:00"}), label="capped")
     draft = next(iter(attempt.control.glob("outcome.tmp.*")))
     (job,) = (json.loads(path.read_text(encoding="utf-8")) for path in draft.glob("children/jobs/*/job.json"))
     assert job["resources"] == {"maxtime": 3600}
@@ -479,7 +445,7 @@ def test_runner_gates_all_declared_environment_and_records_sources(
             "variable": {"value": "env", "source": "environment-variable"},
         },
     }
-    log = (attempt.payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
+    log = (attempt.payload / ".httk-job" / "runlog.jsonl").read_text(encoding="utf-8")
     assert log.count("parameters are in job.json; environment resolved as") == 1
 
 
@@ -554,7 +520,7 @@ def test_environment_resolution_snapshot_and_unchanged_activation_are_stable(
     second.declare("environment", document)
     assert _main(run, second) == 0
     assert second.declaration("environment") == first.declaration("environment")
-    assert not (second.payload / "logs" / "runlog.jsonl").exists()
+    assert not (second.payload / ".httk-job" / "runlog.jsonl").exists()
 
 
 def test_environment_resolution_distinguishes_json_number_and_boolean(
@@ -592,7 +558,7 @@ def test_environment_resolution_distinguishes_json_number_and_boolean(
     value = values["value"]
     assert isinstance(value, Mapping)
     assert value["value"] is True
-    assert (second.payload / "logs" / "runlog.jsonl").is_file()
+    assert (second.payload / ".httk-job" / "runlog.jsonl").is_file()
 
 
 @pytest.mark.timing
@@ -620,102 +586,17 @@ raise SystemExit(run.main())
         encoding="utf-8",
     )
     runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Environment race",
-            workflow="tests.environment.race",
-            runner_path="runner.py",
-            environment={
-                "declared": {"value": {"type": "string", "default": "manifest"}},
-                "overrides": {},
-            },
-        ),
+    job = submit_runner(
+        workspace,
+        runner,
+        environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
     )
-    workspace.submit(payload, "project/environment-race")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=30)
+    run_manager(workspace, timeout=30)
 
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
-    runlog = (workdir.parent / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
+    done = find(workspace, job.job_id)
+    assert done.state == "succeeded"
+    runlog = (done.path / ".httk-job" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "parameters are in job.json; environment resolved as" in runlog
-
-
-@pytest.mark.timing
-def test_peer_manager_defers_a_live_environment_log_writer(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload = tmp_path / "payload"
-    runner = payload / "runner.py"
-    runner.parent.mkdir(parents=True)
-    runner.write_text(
-        f'''#!/usr/bin/env python3
-import sys
-import time
-sys.path.insert(0, {_SRC!r})
-from httk.workflow import Runner
-
-run = Runner("tests.environment.peer")
-
-@run.step
-def start(a):
-    a.succeed()
-    time.sleep(0.4)
-
-raise SystemExit(run.main())
-''',
-        encoding="utf-8",
-    )
-    runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Environment peer race",
-            workflow="tests.environment.peer",
-            runner_path="runner.py",
-            environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
-        ),
-    )
-    workspace.submit(payload, "project/environment-peer")
-    with (
-        TaskManager(workspace, heartbeat_interval=0.01) as owner,
-        TaskManager(workspace, heartbeat_interval=0.01) as peer,
-    ):
-        deadline = time.monotonic() + 30.0
-        while not owner._running and time.monotonic() < deadline:
-            owner.tick()
-        assert owner._running
-        running = workspace.find_marker_by_id(job.id)
-        assert running is not None and running.kind == "running"
-        state = workspace.read_state(running)
-        control = workspace.payload_path(running.placement, running.job_key) / str(state["attempt_control"])
-        while not (control / "outcome.ready").is_dir() and time.monotonic() < deadline:
-            owner.heartbeat()
-            time.sleep(0.01)
-        assert (control / "outcome.ready").is_dir()
-
-        peer.tick()
-        recorded = json.loads((control / ".httk-environment-resolution.json").read_text(encoding="utf-8"))
-        assert recorded["log_pending"] is True
-        assert isinstance(recorded["log_deadline"], (int, float))
-        assert "log_absent" not in recorded
-        still_running = workspace.find_marker_by_id(job.id)
-        assert still_running is not None and still_running.kind == "running"
-
-        final: Marker | None = None
-        while time.monotonic() < deadline:
-            owner.tick()
-            final = workspace.find_marker_by_id(job.id)
-            if final is not None and final.kind == "succeeded":
-                break
-            time.sleep(0.01)
-        assert final is not None and final.kind == "succeeded"
-
-    workdir = workspace.payload_path(final.placement, final.job_key) / "run"
-    assert "parameters are in job.json; environment resolved as" in (
-        workdir.parent / "logs" / "runlog.jsonl"
-    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.timing
@@ -744,24 +625,17 @@ raise SystemExit(run.main())
         encoding="utf-8",
     )
     runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Late environment publish",
-            workflow="tests.environment.late-publish",
-            runner_path="runner.py",
-            environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
-        ),
+    job = submit_runner(
+        workspace,
+        runner,
+        environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
     )
-    workspace.submit(payload, "project/environment-late-publish")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=30)
+    run_manager(workspace, timeout=30)
 
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
+    done = find(workspace, job.job_id)
+    assert done.state == "succeeded"
     assert "parameters are in job.json; environment resolved as" in (
-        workdir.parent / "logs" / "runlog.jsonl"
+        done.path / ".httk-job" / "runlog.jsonl"
     ).read_text(encoding="utf-8")
 
 
@@ -820,24 +694,11 @@ attempt.succeed()
     metadata: dict[str, object] = {"type": environment_type, "setting": setting}
     if environment_default is not None:
         metadata["default"] = environment_default
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Environment manager job",
-            workflow="tests.environment",
-            runner_path="runner.py",
-            environment={
-                "declared": {name: metadata},
-                "overrides": {},
-            },
-        ),
-    )
-    workspace.submit(payload, "project/environment")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=30)
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    run = workspace.payload_path(marker.placement, marker.job_key) / "run"
+    job = submit_runner(workspace, runner, steps=["start"], environment={"declared": {name: metadata}, "overrides": {}})
+    run_manager(workspace, timeout=30)
+    done = find(workspace, job.job_id)
+    assert done.state == "succeeded"
+    run = done.path / "run"
     if (run / "error").is_file():
         return (run / "error").read_text()
     return (run / "value").read_text()
@@ -908,11 +769,7 @@ def test_fail_can_set_terminal_priority(tmp_path: Path) -> None:
 def test_gather_can_set_join_priority(tmp_path: Path) -> None:
     attempt = _attempt(tmp_path, step="start")
     child = tmp_path / "child"
-    (child / "files").mkdir(parents=True)
-    (child / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    prepare_job_payload(
-        child, JobSpec(name="Child", workflow="tests.sdk", runner_path="files/runner", initial_step="start")
-    )
+    prepare_job_payload(child, JobSpec(name="Child", workflow_id="local:tests.sdk", workflow_name="tests.sdk"))
     attempt.spawn(child, label="child")
     attempt.gather("start", priority=900)
     assert _published(attempt)["priority"] == 900
@@ -1087,7 +944,7 @@ def test_an_uncaught_exception_leaves_a_breadcrumb_and_no_draft(tmp_path: Path) 
         a.put(a.workdir / "energy.json", "results/energy.json")
         raise KeyError("missing parameter")
 
-    attempt = _attempt(tmp_path, step="explode", data_generation=0, runner=run)
+    attempt = _attempt(tmp_path, step="explode", runner=run)
     (attempt.workdir / "energy.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(KeyError):
@@ -1100,34 +957,46 @@ def test_an_uncaught_exception_leaves_a_breadcrumb_and_no_draft(tmp_path: Path) 
     assert "raise KeyError" in breadcrumb["traceback"]
 
 
-def test_data_operation_identifiers_are_generated_in_call_order(tmp_path: Path) -> None:
-    def publish(attempt: Attempt) -> list[dict[str, object]]:
-        (attempt.workdir / "energy.json").write_text("{}", encoding="utf-8")
-        (attempt.workdir / "bundle").mkdir()
-        (attempt.workdir / "bundle" / "log.txt").write_text("done\n", encoding="utf-8")
-        assert attempt.put(attempt.workdir / "energy.json", "results/energy.json") == "op-0001"
-        assert attempt.put(attempt.workdir / "bundle", "results/bundle") == "op-0002"
-        assert attempt.remove("scratch", missing_ok=True) == "op-0003"
-        attempt.succeed()
-        manifest = json.loads(
-            (attempt.control / "outcome.ready" / "transaction" / "manifest.json").read_text(encoding="utf-8")
-        )
-        return list(manifest["operations"])
-
-    first = publish(_attempt(tmp_path, step="collect", data_generation=0, name="first"))
-    second = publish(_attempt(tmp_path, step="collect", data_generation=0, name="second"))
-    assert [item["id"] for item in first] == ["op-0001", "op-0002", "op-0003"]
-    assert [item["op"] for item in first] == ["put-file", "put-tree", "remove"]
-    # Replaying the same step produces exactly the same manifest, which is what
-    # makes an interrupted attempt safe to repeat.
-    assert first == second
-
-
-def test_data_operations_refuse_a_job_without_transactional_data(tmp_path: Path) -> None:
+def test_put_stages_into_the_implicit_transaction_committed_with_the_outcome(tmp_path: Path) -> None:
     attempt = _attempt(tmp_path, step="collect")
-    with pytest.raises(ValueError, match="data.mode none"):
-        attempt.remove("results")
-    assert not list(attempt.control.glob("outcome.tmp.*"))
+    (attempt.workdir / "energy.json").write_text("{}", encoding="utf-8")
+    (attempt.workdir / "bundle").mkdir()
+    (attempt.workdir / "bundle" / "log.txt").write_text("done\n", encoding="utf-8")
+    assert attempt.put(attempt.workdir / "energy.json", "results/energy.json").as_posix() == "data/results/energy.json"
+    assert attempt.put(attempt.workdir / "bundle", "results/bundle").as_posix() == "data/results/bundle"
+    # Staged now, as a copy: a later change of the source does not reach the data.
+    (attempt.workdir / "energy.json").write_text("changed", encoding="utf-8")
+    txn = attempt.control / "txn"
+    assert [path.name for path in txn.iterdir()] == ["000001.tmp"]
+    attempt.succeed()
+    # Committed together with the outcome; the manager applies it at the commit.
+    assert [path.name for path in txn.iterdir()] == ["000001"]
+    assert (txn / "000001" / "data" / "results" / "energy.json").read_text(encoding="utf-8") == "{}"
+    assert (txn / "000001" / "data" / "results" / "bundle" / "log.txt").is_file()
+    assert sorted(path.name for path in (attempt.control / "outcome.ready").iterdir()) == ["outcome.json"]
+
+
+def test_put_refuses_a_destination_outside_the_data_directory(tmp_path: Path) -> None:
+    attempt = _attempt(tmp_path, step="collect")
+    source = attempt.workdir / "file"
+    source.write_text("x", encoding="utf-8")
+    for destination in ("/abs", "../escape", "a/../../b"):
+        with pytest.raises(ValueError):
+            attempt.put(source, destination)
+
+
+def test_an_explicit_transaction_commits_in_the_middle_of_a_step(tmp_path: Path) -> None:
+    attempt = _attempt(tmp_path, step="collect")
+    source = attempt.workdir / "checkpoint"
+    source.write_text("one", encoding="utf-8")
+    transaction = attempt.transaction()
+    transaction.put(source, "data/checkpoint")
+    transaction.commit()
+    committed = attempt.control / "txn" / transaction.seq
+    assert (committed / "data" / "checkpoint").read_text(encoding="utf-8") == "one"
+    # A failed attempt keeps what it committed: the manager applies it whatever the outcome.
+    attempt.fail("tests.failed", "after the checkpoint")
+    assert committed.is_dir()
 
 
 def test_stage_input_copies_the_payload_file_a_parameter_names(tmp_path: Path) -> None:
@@ -1153,75 +1022,19 @@ def test_stage_input_copies_the_payload_file_a_parameter_names(tmp_path: Path) -
         attempt.stage_input("encut", "ENCUT")
 
 
-def _child_of(
-    tmp_path: Path,
-    *,
-    parent_mode: Literal["persistent", "isolated"] = "persistent",
-    parent_placement: str = "project/parent",
-    parent_workspace: str | None = None,
-    create_parent: bool = True,
-) -> tuple[Attempt, Path]:
-    """Bind one attempt of a child whose parent lives in the same fabricated workspace."""
+def _child_of(tmp_path: Path, **parent_changes: object) -> tuple[Attempt, Path]:
+    """Bind one attempt of a child whose parent waits in the same workspace; return it and the parent directory.
 
-    workspace, workspace_id = tmp_path / "workspace", str(uuid.uuid4())
-    parent_id = str(uuid.uuid4())
-    parent_key = f"parent--{parent_id}"
-    parent_payload = workspace / "jobs" / parent_placement / parent_key
+    *parent_changes* replace members of the child's ``parent`` block.
+    """
 
-    def spec(**workdir: Any) -> JobSpec:
-        return JobSpec(
-            name="Fabricated", workflow="tests.sdk", runner_path="files/runner", initial_step="start", **workdir
-        )
-
-    if create_parent:
-        (parent_payload / "files").mkdir(parents=True)
-        (parent_payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        prepare_job_payload(parent_payload, spec(workdir_mode=parent_mode, workdir_path="calc"))
-        # prepare_job_payload chooses the id, so rename the payload to the key it implies.
-        parent_id = JobDefinition.from_path(parent_payload / "job.json").id
-        parent_key = f"parent--{parent_id}"
-        parent_payload = parent_payload.rename(parent_payload.with_name(parent_key))
-    child_payload = workspace / "jobs/project/children" / f"child--{uuid.uuid4()}"
-    (child_payload / "files").mkdir(parents=True)
-    (child_payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    parent = {
-        "workspace_id": parent_workspace or workspace_id,
-        "job_id": parent_id,
-        "job_key": parent_key,
-        "placement": parent_placement,
-        "activation_id": str(uuid.uuid4()),
-        "spawn_id": str(uuid.uuid4()),
-    }
-    prepare_job_payload(child_payload, spec(), parent=parent)
-    control = child_payload / f"attempts/{uuid.uuid4()}"
-    control.mkdir(parents=True)
-    (child_payload / "run").mkdir()
-    context = {
-        "format": "httk-workflow-attempt-context",
-        "durable": False,
-        "deadline": None,
-        "settings": {},
-        "format_version": 2,
-        "workspace_id": workspace_id,
-        "job_id": str(uuid.uuid4()),
-        "job_key": child_payload.name,
-        "placement": "project/children",
-        "payload": str(child_payload),
-        "step": "start",
-        "activation_id": str(uuid.uuid4()),
-        "attempt_id": str(uuid.uuid4()),
-    }
-    attempt = Attempt.initialize(
-        {
-            "HTTK_WORKFLOW_CONTEXT": json.dumps(context),
-            "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-            "HTTK_WORKFLOW_JOB_DIR": str(child_payload),
-            "HTTK_WORKFLOW_WORKDIR": str(child_payload / "run"),
-            "HTTK_WORKFLOW_WORKSPACE_DIR": str(workspace),
-            "HTTK_WORKFLOW_STEP": "start",
-        }
-    )
-    return attempt, parent_payload
+    fabricated = fabricate(tmp_path, step="start", parent=True)
+    document = json.loads((fabricated.payload / "job.json").read_text(encoding="utf-8"))
+    (parent,) = every_job(fabricated.workspace)
+    if parent_changes:
+        document["parent"] = {**document["parent"], **parent_changes}
+        (fabricated.payload / "job.json").write_text(json.dumps(document), encoding="utf-8")
+    return Attempt.initialize(fabricated.environment), parent.path
 
 
 def test_parent_locates_the_spawning_job_and_its_persistent_workdir(tmp_path: Path) -> None:
@@ -1229,38 +1042,33 @@ def test_parent_locates_the_spawning_job_and_its_persistent_workdir(tmp_path: Pa
     parent = attempt.parent
     assert parent is not None
     assert parent.payload == parent_payload
-    assert parent.workdir == parent_payload / "calc"
+    assert parent.workdir == parent_payload / "run"
     assert parent.placement.as_posix() == "project/parent"
-    assert parent.job_key == parent_payload.name
+    assert parent.job_key == JobDefinition.from_path(parent_payload / "job.json").job_key
     assert parent.raw["spawn_id"]
 
 
 def test_parent_is_found_after_parent_and_child_moved_to_another_workspace(tmp_path: Path) -> None:
     # The recorded parent workspace is the one the child was spawned in; a tree
-    # transferred together is located by placement and key alone.
-    attempt, parent_payload = _child_of(tmp_path, parent_workspace=str(uuid.uuid4()))
+    # transferred together is located by placement and job id alone.
+    attempt, parent_payload = _child_of(tmp_path, workspace_id=str(uuid.uuid4()))
     parent = attempt.parent
     assert parent is not None and parent.payload == parent_payload
 
 
 def test_parent_is_none_once_the_child_is_detached(tmp_path: Path) -> None:
     attempt, _parent_payload = _child_of(tmp_path)
-    mark_detached(attempt.payload, operator=None, durable=False)
+    detached = StateDoc.empty(attempt.job.id).updated(detached={"at": "2026-10-09T00:00:00+00:00", "operator": None})
+    (attempt.payload / "state.json").write_bytes(encode_state(detached))
     assert attempt.parent is None
-
-
-def test_parent_has_no_workdir_when_the_parent_uses_isolated_workdirs(tmp_path: Path) -> None:
-    attempt, parent_payload = _child_of(tmp_path, parent_mode="isolated")
-    parent = attempt.parent
-    assert parent is not None and parent.payload == parent_payload and parent.workdir is None
 
 
 def test_parent_is_none_without_a_reachable_parent(tmp_path: Path) -> None:
     assert _attempt(tmp_path, step="start").parent is None
-    moved, _ = _child_of(tmp_path / "moved", create_parent=False)
+    moved, _ = _child_of(tmp_path / "moved", placement="project/elsewhere")
     assert moved.parent is None
     with pytest.raises(FormatError):
-        _ = _child_of(tmp_path / "unsafe", parent_placement="../outside")[0].parent
+        _ = _child_of(tmp_path / "unsafe", placement="../outside")[0].parent
 
 
 def test_parent_refuses_a_corrupt_parent_definition(tmp_path: Path) -> None:
@@ -1282,19 +1090,16 @@ def test_job_inputs_round_trip_and_are_bounded(tmp_path: Path) -> None:
 
     # The inputs of a job are part of job.json and therefore of its digest.
     stored = JobDefinition.from_path(attempt.payload / "job.json")
-    assert stored.parameters == attempt.parameters
+    assert stored.as_mapping()["parameters"] == attempt.parameters
     assert stored.digest == JobDefinition.from_path(attempt.payload / "job.json").digest
 
     oversized = JobSpec(
-        name="Too much",
-        workflow="tests.sdk",
-        runner_path="files/runner",
-        parameters={"blob": "x" * 300000},
+        name="Too much", workflow_id="local:tests.sdk", workflow_name="tests.sdk", parameters={"blob": "x" * 300000}
     )
     with pytest.raises(FormatError, match="exceeds the 262144-byte limit"):
         oversized.as_mapping()
     with pytest.raises(FormatError, match="keys must be nonempty strings"):
-        JobDefinition.from_mapping({**stored.raw, "parameters": {"": 1}})
+        JobDefinition.from_mapping({**stored.as_mapping(), "parameters": {"": 1}})
 
 
 def test_a_prepared_payload_child_can_be_spawned_by_path(tmp_path: Path) -> None:
@@ -1303,10 +1108,12 @@ def test_a_prepared_payload_child_can_be_spawned_by_path(tmp_path: Path) -> None
     attempt = _attempt(tmp_path, step="branch", runner=run)
     child = attempt.workdir / "child"
     (child / "files").mkdir(parents=True)
-    (child / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (child / "files" / "input").write_text("staged\n", encoding="utf-8")
     prepare_job_payload(
         child,
-        JobSpec(name="Child", workflow="tests.sdk", runner_path="files/runner", tag="child", initial_step="branch"),
+        JobSpec(
+            name="Child", workflow_id="local:tests.sdk", workflow_name="tests.sdk", tag="child", initial_step="branch"
+        ),
     )
 
     reference = attempt.spawn(child, label="prepared")
@@ -1314,21 +1121,22 @@ def test_a_prepared_payload_child_can_be_spawned_by_path(tmp_path: Path) -> None
     draft = next(iter(attempt.control.glob("outcome.tmp.*")))
     spawn = json.loads((draft / "children" / "spawn.json").read_text(encoding="utf-8"))
     assert [entry["label"] for entry in spawn["children"]] == ["prepared"]
-    assert (draft / "children" / "jobs" / reference.job_key / "files" / "runner").is_file()
+    staged = draft / "children" / "jobs" / reference.job_key
+    assert (staged / "files" / "input").is_file()
+    registered = json.loads((staged / "job.json").read_text(encoding="utf-8"))
+    assert registered["placement"] == attempt.context.placement
+    assert registered["parent"]["job_id"] == attempt.context.job_id and registered["parent"]["spawn_id"]
 
 
 def test_a_prepared_payload_spawn_is_not_capped(tmp_path: Path) -> None:
     attempt = _attempt(tmp_path, step="start", context_resources={"maxtime": 60})
     child = tmp_path / "child"
-    (child / "files").mkdir(parents=True)
-    (child / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     prepare_job_payload(
         child,
         JobSpec(
             name="Child",
-            workflow="tests.sdk",
-            runner_path="files/runner",
-            initial_step="start",
+            workflow_id="local:tests.sdk",
+            workflow_name="tests.sdk",
             resources={"maxtime": 3600, "mintime": 600},
         ),
     )
@@ -1338,23 +1146,19 @@ def test_a_prepared_payload_spawn_is_not_capped(tmp_path: Path) -> None:
     assert registered["resources"] == {"maxtime": 3600, "mintime": 600}
 
 
-def test_inheriting_a_payload_runner_is_refused_with_a_usable_message(tmp_path: Path) -> None:
+def test_a_child_spec_child_runs_the_spawning_jobs_workflow(tmp_path: Path) -> None:
     run = Runner("tests.sdk")
     run.step(name="branch")(lambda a: a.succeed())
     attempt = _attempt(tmp_path, step="branch", runner=run)
-    with pytest.raises(ValueError, match="publish_runner"):
-        attempt.spawn(ChildSpec(step="branch"), label="child")
-    # A child that names a shared runner explicitly needs no payload at all.
-    reference = attempt.spawn(
-        ChildSpec(step="branch", runner=RunnerRef.workspace("campaign/run.py", "a" * 64)),
-        label="shared",
-    )
+    reference = attempt.spawn(ChildSpec(step="branch", parameters={"site": 1}), label="child")
     draft = next(iter(attempt.control.glob("outcome.tmp.*")))
-    child = JobDefinition.from_path(draft / "children" / "jobs" / reference.job_key / "job.json")
-    assert child.runner_source == "workspace" and child.runner_sha256 == "a" * 64
-    assert list((draft / "children" / "jobs" / reference.job_key).iterdir()) == [
-        draft / "children" / "jobs" / reference.job_key / "job.json"
-    ]
+    staged = draft / "children" / "jobs" / reference.job_key
+    child = JobDefinition.from_path(staged / "job.json")
+    assert (child.workflow_id, child.workflow_name) == (attempt.job.workflow_id, attempt.job.workflow_name)
+    assert child.initial_step == "branch" and child.tag == "child" and child.parameters == {"site": 1}
+    assert child.parent is not None and child.parent["activation_id"] == attempt.context.activation_id
+    # The child needs no payload of its own.
+    assert list(staged.iterdir()) == [staged / "job.json"]
 
 
 _STATE_RUNNER = f"""#!/usr/bin/env python3
@@ -1392,43 +1196,27 @@ raise SystemExit(run.main())
 """
 
 
-def test_job_state_survives_retries_advances_and_isolated_workdirs(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload = tmp_path / "source" / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
+def test_job_state_survives_retries_and_advances(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    runner = tmp_path / "stateful.py"
     runner.write_text(_STATE_RUNNER, encoding="utf-8")
-    runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Stateful",
-            workflow="tests.state",
-            runner_path="files/runner",
-            tag="stateful",
-            initial_step="count",
-            workdir_mode="isolated",
-            maximum_attempts_per_activation=3,
-        ),
+    job = submit_runner(
+        workspace,
+        runner,
+        install_step="count",
+        tag="stateful",
+        initial_step="count",
+        maximum_attempts_per_activation=3,
     )
-    workspace.submit(payload, "project/stateful")
     _run(workspace)
 
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-    # Each attempt ran in its own workdir, so the count can only have survived in
-    # the job state stored beside them.
-    workdirs = sorted(item for item in root.glob("run.*") if item.is_dir())
-    assert len(workdirs) == 4
-    visits = [(item / "visit.txt").read_text(encoding="utf-8") for item in workdirs if (item / "visit.txt").is_file()]
-    assert sorted(visits) == ["1", "2", "3"]
-    finals = [item / "final.json" for item in workdirs if (item / "final.json").is_file()]
-    assert len(finals) == 1
-    final = json.loads(finals[0].read_text(encoding="utf-8"))
+    done = find(workspace, job.job_id)
+    assert done.state == "succeeded"
+    # The count survived every attempt in the job state stored beside the workdir.
+    assert (done.path / "run" / "visit.txt").read_text(encoding="utf-8") == "3"
+    final = json.loads((done.path / "run" / "final.json").read_text(encoding="utf-8"))
     assert final == {"visits": 3, "counted": True, "keys": "counted,visits"}
-    assert json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8")) == {
+    assert json.loads((done.path / ".httk-job" / "state.json").read_text(encoding="utf-8")) == {
         "visits": 3,
         "counted": True,
     }

@@ -12,8 +12,8 @@ invoked**. The workflow runs on *httk₂*'s own machinery:
   step per activation, so every step boundary is a journalled state frame that a
   restart resumes from;
 * a scattered step spawns one labeled child job per shard — ``s0000``, ``s0001``,
-  … — through :class:`~httk.workflow.ChildSpec` with
-  :meth:`~httk.workflow.RunnerRef.inherit`, and the parent joins them with
+  … — through :class:`~httk.workflow.ChildSpec`, so they run this same installed
+  workflow, and the parent joins them with
   :meth:`~httk.workflow.Attempt.gather`, so shards are claimed, leased, retried
   and scheduled independently like any other children;
 * a subworkflow spawns exactly one child carrying the path to itself inside the
@@ -46,7 +46,11 @@ Restarts
 
 Every value a step produces is written to the job state before the outcome that
 follows it is published, so a repeated attempt re-reads the same values and runs
-only what is left. A tool that was interrupted mid-run is re-run from a cleaned
+only what is left. A job directory moves between attempts (and a waiting parent
+moves while its children run), so a File or Directory value is never stored by
+its absolute path alone: it also carries the job it lies in (``httk_job``, the
+job id and placement) and its path inside that job (``httk_path``), and every
+reader locates that job again before using the value. A tool that was interrupted mid-run is re-run from a cleaned
 execution directory: staging is idempotent, and a half-written output of a dead
 process is never collected.
 
@@ -55,14 +59,14 @@ Job parameters
 
 * ``cwl_document`` — where the normalized plan is, inside the payload.
 * ``cwl_inputs`` — where the staged input object is (root job only).
-* ``cwl_payload`` — the workspace-relative payload holding both, for a child job
-  whose own payload holds only its ``job.json``.
+* ``cwl_root`` — the job (id and placement) whose payload holds both, for a child
+  job whose own payload holds only its ``job.json``.
 * ``cwl_target`` — the path of step names to the process a child runs.
 * ``cwl_bindings`` — the resolved inputs of that process.
 * ``cwl_timeout`` — seconds one tool execution may take, overriding
   ``ToolTimeLimit``.
-* ``cwl_data_prefix`` (default ``cwl``) — where the outputs are published when
-  the job has transactional data.
+* ``cwl_data_prefix`` (default ``cwl``) — where the outputs are published in the
+  job's data directory.
 """
 
 import hashlib
@@ -73,7 +77,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from httk.workflow import Attempt, ChildSpec, Runner, RunnerRef
+from httk.workflow import Attempt, ChildSpec, Runner, Workspace, _kernel
 
 WORKFLOW = "cwl.workflow"
 OUTPUTS_FILE = "cwl-outputs.json"
@@ -126,6 +130,39 @@ def _read_json_document(path: Path) -> object:
 # ---------------------------------------------------------------------------
 
 
+def _anchor(a: Attempt) -> dict[str, str]:
+    """Return the identity that locates this attempt's job: its id and placement."""
+
+    return {"job_id": a.context.job_id, "placement": a.context.placement}
+
+
+def job_path(a: Attempt, anchor: object) -> Path:
+    """Return where the job an anchor names is now, without changing anything.
+
+    :param a: Look the job up in this attempt's workspace.
+    :param anchor: The ``{"job_id", "placement"}`` of the job.
+    :return: The job directory.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the anchor is malformed or the job is not found.
+    """
+
+    if not isinstance(anchor, Mapping) or not isinstance(anchor.get("job_id"), str):
+        raise ToolError("cwl.child_invalid", f"a job reference is malformed: {anchor!r}")
+    job_id = str(anchor["job_id"])
+    if job_id == a.context.job_id:
+        return a.payload
+    for child in a.children:
+        if child.job_id == job_id and child.payload is not None:
+            return child.payload
+    ref = _kernel.locate(
+        Workspace(a.workspace, durable=a.context.durable),
+        job_id,
+        placement_hint=PurePosixPath(str(anchor.get("placement", ""))),
+    )
+    if ref is None:
+        raise ToolError("cwl.input_missing", f"the job {job_id} holding a CWL value is not in this workspace")
+    return ref.path
+
+
 def plan_root(a: Attempt) -> Path:
     """Return the payload holding the plan: this job's, or the root job's.
 
@@ -133,10 +170,60 @@ def plan_root(a: Attempt) -> Path:
     :return: The payload containing the normalized plan.
     """
 
-    pointer = a.parameter("cwl_payload", None)
-    if isinstance(pointer, str) and pointer:
-        return a.workspace.joinpath(*PurePosixPath(pointer).parts)
-    return a.payload
+    root = a.parameter("cwl_root", None)
+    return a.payload if root is None else job_path(a, root)
+
+
+def portable(a: Attempt, value: object) -> object:
+    """Anchor every File and Directory of *value* lying in this job or one of its observed children.
+
+    :param a: Anchor paths below this attempt's job and its observed children.
+    :param value: The value to anchor recursively.
+    :return: The value whose files also carry ``httk_job`` and ``httk_path``.
+    """
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping):
+        return [portable(a, item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    if not is_file(value):
+        return {key: portable(a, item) for key, item in value.items()}
+    path = value.get("path")
+    if "httk_job" in value or not isinstance(path, str):
+        return dict(value)
+    roots = [(a.payload, _anchor(a))] + [
+        (child.payload, {"job_id": child.job_id, "placement": child.placement.as_posix()})
+        for child in a.children
+        if child.payload is not None
+    ]
+    for root, anchor in roots:
+        try:
+            relative = Path(path).relative_to(root)
+        except ValueError:
+            continue
+        return {**value, "httk_job": anchor, "httk_path": relative.as_posix()}
+    return dict(value)
+
+
+def located(a: Attempt, value: object) -> object:
+    """Point every anchored File and Directory of *value* at where its job is now.
+
+    :param a: Locate anchored jobs from this attempt.
+    :param value: The value to locate recursively.
+    :return: The value whose anchored files carry their current ``path``.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If an anchored job is not found.
+    """
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping):
+        return [located(a, item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    if not is_file(value):
+        return {key: located(a, item) for key, item in value.items()}
+    if "httk_job" not in value:
+        return dict(value)
+    root = job_path(a, value.get("httk_job"))
+    return {**value, "path": str(root.joinpath(*PurePosixPath(str(value.get("httk_path"))).parts))}
 
 
 def plan_of(a: Attempt) -> dict[str, object]:
@@ -177,20 +264,6 @@ def process_at(plan: Mapping[str, object], target: Sequence[str]) -> Mapping[str
     if not isinstance(process, Mapping):
         raise ToolError("cwl.target_missing", f"the CWL plan has no process at {'/'.join(target)}")
     return process
-
-
-def payload_relative(a: Attempt) -> str:
-    """Return the workspace-relative payload holding the plan, for a child.
-
-    :param a: Resolve the plan payload for this attempt.
-    :return: The workspace-relative payload path.
-    """
-
-    root = plan_root(a)
-    try:
-        return PurePosixPath(root.relative_to(a.workspace)).as_posix()
-    except ValueError:  # pragma: no cover - a payload outside its own workspace
-        return root.as_posix()
 
 
 # ---------------------------------------------------------------------------
@@ -721,11 +794,12 @@ def child_inputs(a: Attempt, target: Sequence[str], bindings: Mapping[str, objec
     :return: Parameters for the child job.
     """
 
+    root = a.parameter("cwl_root", None)
     return {
-        "cwl_payload": payload_relative(a),
+        "cwl_root": _anchor(a) if root is None else root,
         "cwl_document": str(a.parameter("cwl_document")),
         "cwl_target": list(target),
-        "cwl_bindings": dict(bindings),
+        "cwl_bindings": portable(a, bindings),
     }
 
 
@@ -737,18 +811,17 @@ def finish(a: Attempt, outputs: Mapping[str, object]) -> None:
     """
 
     path = a.workdir / OUTPUTS_FILE
-    path.write_text(json.dumps(outputs, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if a.context.data_generation is not None:
-        prefix = str(a.parameter("cwl_data_prefix", DEFAULT_DATA_PREFIX))
-        for name, value in outputs.items():
-            produced = [value] if is_file(value) else list(value) if isinstance(value, list) else []
-            for index, item in enumerate(produced):
-                if not is_file(item) or not isinstance(item, Mapping):
-                    continue
-                source = Path(str(item.get("path")))
-                if source.exists():
-                    a.put(source, f"{prefix}/{name}/{index:04d}-{source.name}")
-        a.put(path, f"{prefix}/{OUTPUTS_FILE}")
+    path.write_text(json.dumps(portable(a, outputs), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    prefix = str(a.parameter("cwl_data_prefix", DEFAULT_DATA_PREFIX))
+    for name, value in outputs.items():
+        produced = [value] if is_file(value) else list(value) if isinstance(value, list) else []
+        for index, item in enumerate(produced):
+            if not is_file(item) or not isinstance(item, Mapping):
+                continue
+            source = Path(str(item.get("path")))
+            if source.exists():
+                a.put(source, f"{prefix}/{name}/{index:04d}-{source.name}")
+    a.put(path, f"{prefix}/{OUTPUTS_FILE}")
     a.log.append("note", f"cwl outputs: {', '.join(outputs) or 'none'}")
     a.succeed()
 
@@ -828,12 +901,12 @@ def start(a: Attempt) -> None:
         _failed(a, exception)
         return
     assert isinstance(values, Mapping)
-    bindings = _defaulted(plan, values)
+    bindings = portable(a, _defaulted(plan, values))
     a.state.merge(
         {
             STATE_TARGET: [],
             STATE_BINDINGS: bindings,
-            STATE_VALUES: dict(bindings),
+            STATE_VALUES: bindings,
             STATE_DONE: [],
         }
     )
@@ -868,12 +941,12 @@ def enter(a: Attempt) -> None:
     except ToolError as exception:
         _failed(a, exception)
         return
-    resolved = _defaulted(process, bindings)
+    resolved = portable(a, _defaulted(process, bindings))
     a.state.merge(
         {
             STATE_TARGET: target,
             STATE_BINDINGS: resolved,
-            STATE_VALUES: dict(resolved),
+            STATE_VALUES: resolved,
             STATE_DONE: [],
         }
     )
@@ -898,10 +971,13 @@ def _advance(a: Attempt) -> None:
     target = _state_list(a, STATE_TARGET)
     process = process_at(plan, target)
     if process.get("class") == "CommandLineTool":
-        outputs = run_tool(a, process, _state_mapping(a, STATE_BINDINGS), name=str(process.get("id") or "tool"))
+        bindings = located(a, _state_mapping(a, STATE_BINDINGS))
+        assert isinstance(bindings, Mapping)
+        outputs = run_tool(a, process, bindings, name=str(process.get("id") or "tool"))
         finish(a, outputs)
         return
-    values = _state_mapping(a, STATE_VALUES)
+    values = located(a, _state_mapping(a, STATE_VALUES))
+    assert isinstance(values, dict)
     done = _state_list(a, STATE_DONE)
     steps = process.get("steps")
     entries = steps if isinstance(steps, Mapping) else {}
@@ -934,7 +1010,6 @@ def _advance(a: Attempt) -> None:
                 ChildSpec(
                     step="enter",
                     parameters=child_inputs(a, [*target, name], shard),
-                    runner=RunnerRef.inherit(),
                     name=f"{name} shard {index}",
                 ),
                 label=f"s{index:04d}",
@@ -948,7 +1023,6 @@ def _advance(a: Attempt) -> None:
             ChildSpec(
                 step="enter",
                 parameters=child_inputs(a, [*target, name], bindings),
-                runner=RunnerRef.inherit(),
                 name=f"{name} subworkflow",
             ),
             label="sub",
@@ -975,7 +1049,7 @@ def _record(
         values[f"{name}/{port}"] = value
     if name not in done:
         done.append(name)
-    a.state.merge({STATE_VALUES: values, STATE_DONE: done, STATE_PENDING: None})
+    a.state.merge({STATE_VALUES: portable(a, values), STATE_DONE: done, STATE_PENDING: None})
 
 
 @run.step
@@ -1001,10 +1075,10 @@ def collect(a: Attempt) -> None:
             # Shard order is the label order, not the order the children happened
             # to finish in: a scattered output is an array in scatter order.
             shards = int(str(pending.get("shards") or 0))
-            collected = [_child_outputs(a.children[f"s{index:04d}"]) for index in range(shards)]
+            collected = [_child_outputs(a, a.children[f"s{index:04d}"]) for index in range(shards)]
             outputs: dict[str, object] = {port: [item.get(port) for item in collected] for port in ports}
         else:
-            collected = [_child_outputs(child) for child in a.children.all]
+            collected = [_child_outputs(a, child) for child in a.children.all]
             outputs = {port: (collected[0].get(port) if collected else None) for port in ports}
     except (ToolError, KeyError) as exception:
         _failed(a, exception if isinstance(exception, ToolError) else ToolError("cwl.child_invalid", str(exception)))
@@ -1013,8 +1087,8 @@ def collect(a: Attempt) -> None:
     a.advance("advance")
 
 
-def _child_outputs(child: object) -> dict[str, object]:
-    """Return what one finished child job published as its outputs."""
+def _child_outputs(a: Attempt, child: object) -> dict[str, object]:
+    """Return what one finished child job published as its outputs, located where its files are now."""
 
     workdir = getattr(child, "workdir", None)
     label = getattr(child, "label", None)
@@ -1026,7 +1100,9 @@ def _child_outputs(child: object) -> dict[str, object]:
     loaded = _read_json_document(path)
     if not isinstance(loaded, Mapping):
         raise ToolError("cwl.child_invalid", f"the child {label} published a malformed {OUTPUTS_FILE}")
-    return dict(loaded)
+    outputs = located(a, loaded)
+    assert isinstance(outputs, dict)
+    return outputs
 
 
 if __name__ == "__main__":

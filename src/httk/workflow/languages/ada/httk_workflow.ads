@@ -79,9 +79,6 @@ package Httk_Workflow is
    procedure Httk_Workflow_Put
      (Source : String; Destination : String; Operation : out U.Unbounded_String;
       Present : out Boolean; Status : out C.int);
-   procedure Httk_Workflow_Remove
-     (Destination : String; Operation : out U.Unbounded_String; Present : out Boolean;
-      Status : out C.int; Missing_Ok : Boolean := False);
    procedure Httk_Workflow_Spawn
      (Label : String; Job_Key : out U.Unbounded_String; Present : out Boolean;
       Status : out C.int; Arguments : String_List := No_Arguments);

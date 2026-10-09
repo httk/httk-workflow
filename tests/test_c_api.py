@@ -5,7 +5,7 @@ The C SDK is a bridge client, exactly like the Bash one: every verb execs
 is native. What is tested here is what only the C half can get wrong — compiling
 warning-clean, describing itself byte-for-byte the way the Bash SDK does,
 dispatching into a step handler, and turning a handler's ending into exactly one
-outcome — plus `job new --from-runner` resolving and running a compiled runner.
+outcome — plus a compiled runner file installed ad hoc and run.
 
 Every test gates on a C compiler and skips cleanly without one.
 """
@@ -14,21 +14,14 @@ import json
 import os
 import shutil
 import subprocess
-import sys
-import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
-from httk.core.cli import CLIContext
 
 import httk.workflow
-from conftest import register_ws
-from httk.workflow import TaskManager, Workspace
-from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.scaffold import describe_runner
-from httk.workflow.workflow_cli import command as workflow_command
+from attempt_fixtures import FabricatedAttempt, assert_called, every_job, fabricate, run_manager, sub_package
+from httk.workflow import Workspace
+from httk.workflow.scaffold import describe_runner, new_job
 
 _CC = shutil.which("cc")
 pytestmark = pytest.mark.skipif(_CC is None, reason="no C compiler (cc) is available")
@@ -85,118 +78,59 @@ def _write_runner(tmp_path: Path, workflow: str, steps: dict[str, str], name: st
     return tmp_path / name
 
 
-@dataclass(frozen=True)
-class _Attempt:
-    """One fabricated attempt a compiled C runner can be dispatched into."""
-
-    payload: Path
-    control: Path
-    workdir: Path
-    environment: dict[str, str]
-
-    def run(self, binary: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(binary), *arguments],
-            cwd=self.workdir,
-            env=self.environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def outcome(self) -> dict[str, Any]:
-        return json.loads((self.control / "outcome.ready" / "outcome.json").read_text(encoding="utf-8"))
-
-    def breadcrumb(self) -> dict[str, Any]:
-        return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
+_Attempt = FabricatedAttempt
 
 
-def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None, parent: bool = False) -> _Attempt:
-    """Fabricate one attempt of one job, without a manager (mirrors test_bash_sdk)."""
+def _attempt(
+    tmp_path: Path,
+    *,
+    step: str,
+    parameters: dict[str, object] | None = None,
+    parent: bool = False,
+    calls: bool = False,
+) -> FabricatedAttempt:
+    """Fabricate one attempt of one job of ``tests.c``, without a manager."""
 
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    workspace_id = str(uuid.uuid4())
-    parent_block = _fabricate_parent(tmp_path / "workspace", workspace_id) if parent else None
-    prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Fabricated",
-            workflow="tests.c",
-            runner_path="files/runner",
-            initial_step=step,
-            data_mode="none" if data_generation is None else "transactional",
-        ),
-        parent=parent_block,
+    return fabricate(
+        tmp_path,
+        step=step,
+        workflow="tests.c",
+        parameters=parameters,
+        parent=parent,
+        calls={"sub": sub_package(tmp_path / "sub")} if calls else None,
     )
-    control = payload / f"attempts/{uuid.uuid4()}"
-    control.mkdir(parents=True)
-    workdir = payload / "run"
-    workdir.mkdir()
-    context_json = json.dumps(
-        {
-            "format": "httk-workflow-attempt-context",
-            "format_version": 2,
-            "workspace_id": workspace_id,
-            "job_id": (_jid := str(uuid.uuid4())),
-            "job_key": f"fabricated--{_jid}",
-            "placement": "project/fabricated",
-            "payload": str(payload),
-            "step": step,
-            "activation_id": str(uuid.uuid4()),
-            "attempt_id": str(uuid.uuid4()),
-            "data_generation": data_generation,
-            "children": [],
-            "settings": {},
-            "durable": False,
-            "deadline": None,
-        }
-    )
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HTTK_WORKFLOW_CONTEXT": context_json,
-            "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-            "HTTK_WORKFLOW_JOB_DIR": str(payload),
-            "HTTK_WORKFLOW_WORKDIR": str(workdir),
-            "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
-            "HTTK_WORKFLOW_STEP": step,
-            "HTTK_WORKFLOW_PYTHON": sys.executable,
-        }
-    )
-    if data_generation is not None:
-        environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
-    for name_to_drop in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
-        environment.pop(name_to_drop, None)
-    return _Attempt(payload, control, workdir, environment)
 
 
-def _fabricate_parent(workspace: Path, workspace_id: str) -> dict[str, object]:
-    """Fabricate a parent payload with a persistent ``calc`` workdir; return the child's ``parent`` block."""
+def _parent_of(attempt: FabricatedAttempt) -> tuple[Path, str, str]:
+    """Return the waiting parent's job directory, id and the child's spawn id."""
 
-    staging = workspace / "jobs/project/parent/staging"
-    (staging / "files").mkdir(parents=True)
-    (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    spec = JobSpec(
-        name="Parent",
-        workflow="tests.parent",
-        runner_path="files/runner",
-        initial_step="start",
-        workdir_mode="persistent",
-        workdir_path="calc",
-    )
-    job_id = prepare_job_payload(staging, spec).id
-    job_key = staging.rename(staging.with_name(f"parent--{job_id}")).name
-    return {
-        "workspace_id": workspace_id,
-        "job_id": job_id,
-        "job_key": job_key,
-        "placement": "project/parent",
-        "activation_id": str(uuid.uuid4()),
-        "spawn_id": str(uuid.uuid4()),
-    }
+    (parent,) = every_job(attempt.workspace)
+    recorded = json.loads((attempt.payload / "job.json").read_text(encoding="utf-8"))["parent"]
+    return parent.path, parent.job_id, str(recorded["spawn_id"])
+
+
+def _call_input(tmp_path: Path) -> Path:
+    """Write the file a call stages into the child."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "input.txt"
+    path.write_text("staged-by-call\n", encoding="utf-8")
+    return path
+
+
+def _assert_called(attempt: FabricatedAttempt, job_key: str | None = None) -> None:
+    """The outcome registered one ``sub`` child of the installed ``tests.sub``, with the staged file."""
+
+    key = assert_called(attempt, job_key)
+    staged = attempt.control / "outcome.ready" / "children" / "jobs" / key / "files" / "input.txt"
+    assert staged.read_text(encoding="utf-8") == "staged-by-call\n"
+    assert attempt.outcome()["join"]["condition"] == "all_succeeded"
+
+
+def _stage_call_target(attempt: FabricatedAttempt) -> None:
+    """Write the file the call stages, ``input.txt`` in the attempt's workdir."""
+
+    (attempt.workdir / "input.txt").write_text("staged-by-call\n", encoding="utf-8")
 
 
 def test_the_sdk_and_a_runner_compile_warning_clean(tmp_path: Path) -> None:
@@ -306,50 +240,39 @@ def test_a_handler_that_returns_nonzero_leaves_a_breadcrumb_and_no_outcome(tmp_p
     assert breadcrumb["message"] == "explode exited with status 3"
 
 
-def _cli_context(tmp_path: Path) -> tuple[Workspace, CLIContext, str]:
-    """Compile a one-step ``relax`` runner and register a workspace for it."""
+def _workspace(tmp_path: Path) -> Workspace:
+    """Compile a one-step ``relax`` runner and initialize a workspace for it."""
 
     _write_runner(tmp_path, "tests.c.cli", {"start": "httk_workflow_succeed(); return 0;"}, name="relax")
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    return workspace, context, register_ws(context, workspace.root)
-
-
-def _job_new(ws: str, runner: str, context: CLIContext) -> int:
-    return workflow_command(["job", "new", "--workspace", ws, "--from-runner", runner, "--step", "start"], context)
+    return Workspace.initialize(tmp_path / "workspace", durable=False)
 
 
 def _assert_succeeded(workspace: Workspace) -> None:
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    assert len(list(workspace.walk_markers(("succeeded",)))) == 1
+    run_manager(workspace)
+    assert [ref.state for ref in every_job(workspace)] == ["succeeded"]
 
 
-def test_the_cli_scaffolds_and_runs_a_c_binary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """An absolute `--from-runner` path scaffolds, describes by running, and submits."""
+def test_a_c_binary_is_installed_ad_hoc_and_runs(tmp_path: Path) -> None:
+    """An absolute runner path is described by running it, installed and submitted."""
 
-    workspace, context, ws = _cli_context(tmp_path)
-    assert _job_new(ws, str(tmp_path / "relax"), context) == 0, capsys.readouterr().err
+    workspace = _workspace(tmp_path)
+    new_job(workspace, tmp_path / "relax", step="start")
     _assert_succeeded(workspace)
 
 
-def test_the_cli_scaffolds_from_a_relative_runner_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The documented `--from-runner ./relax` flow: a relative path must not PATH-exec."""
+def test_a_relative_runner_path_is_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented `./relax` runner path: a relative path must not PATH-exec."""
 
-    workspace, context, ws = _cli_context(tmp_path)
+    workspace = _workspace(tmp_path)
     # From the runner's own directory, `./relax` normalizes to bare `relax`; only
     # the resolve() in describe_runner keeps exec from doing a PATH lookup.
     monkeypatch.chdir(tmp_path)
-    assert _job_new(ws, "./relax", context) == 0, capsys.readouterr().err
+    new_job(workspace, "./relax", step="start")
     _assert_succeeded(workspace)
 
 
-def test_a_bare_runner_name_resolves_to_the_cwd_file_not_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """`--from-runner relax` runs the cwd file, never a PATH exec.
+def test_a_bare_runner_name_resolves_to_the_cwd_file_not_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner named `relax` is the cwd file, never a PATH exec.
 
     The compiled `relax` exists only in the cwd, never on PATH, so a successful
     describe-and-run proves the resolve() in describe_runner turned the bare name
@@ -358,9 +281,9 @@ def test_a_bare_runner_name_resolves_to_the_cwd_file_not_path(
     hijack.
     """
 
-    workspace, context, ws = _cli_context(tmp_path)
+    workspace = _workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert _job_new(ws, "relax", context) == 0, capsys.readouterr().err
+    new_job(workspace, "relax", step="start")
     _assert_succeeded(workspace)
 
 
@@ -569,13 +492,12 @@ def test_parent_reads_the_spawning_job_or_answers_absent(tmp_path: Path) -> None
 
     binary = _compile_source(tmp_path, _PARENT_RUNNER, "parent")
     child = _attempt(tmp_path / "child", step="probe", parent=True)
-    parent_payload = next((tmp_path / "child/workspace/jobs/project/parent").iterdir())
+    parent_payload, job_id, _spawn_id = _parent_of(child)
     completed = child.run(binary)
     assert completed.returncode == 0, completed.stderr
-    job_id = parent_payload.name.removeprefix("parent--")
     for expected in (
         f"PAYLOAD 0 {parent_payload}",
-        f"WORKDIR 0 {parent_payload / 'calc'}",
+        f"WORKDIR 0 {parent_payload / 'run'}",
         f"JOB 0 {job_id}",
         '"spawn_id"',
     ):
@@ -589,52 +511,12 @@ def test_parent_reads_the_spawning_job_or_answers_absent(tmp_path: Path) -> None
         assert expected in completed.stderr, completed.stderr
 
 
-_CALL_SUB_RUNNER = """#!{python}
-from httk.workflow import Runner
-
-run = Runner("tests.sub")
-
-
-@run.step
-def run_sub(a):
-    a.succeed()
-
-
-raise SystemExit(run.main())
-"""
-
-
-def _stage_call_target(attempt: _Attempt) -> None:
-    """Write a runner file of another workflow and a file to stage into the attempt's workdir."""
-
-    Workspace.initialize(attempt.payload.parent / "workspace")
-    sub = attempt.workdir / "sub_runner.py"
-    sub.write_text(_CALL_SUB_RUNNER.format(python=sys.executable), encoding="utf-8")
-    sub.chmod(0o755)
-    (attempt.workdir / "input.txt").write_text("staged-by-call\n", encoding="utf-8")
-
-
-def _assert_called(attempt: _Attempt, stderr: str) -> None:
-    """The call registered one child running the other workflow, with the staged file."""
-
-    ready = attempt.control / "outcome.ready"
-    spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
-    assert [entry["label"] for entry in spawn["children"]] == ["sub"]
-    job_key = spawn["children"][0]["job_key"]
-    assert f"KEY 0 {job_key}" in stderr, stderr
-    child_dir = ready / "children" / "jobs" / job_key
-    child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
-    assert child["workflow"] == "tests.sub"
-    assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
-    assert attempt.outcome()["join"]["condition"] == "all_succeeded"
-
-
-def test_call_spawns_another_workflow_as_a_child(tmp_path: Path) -> None:
-    """httk_workflow_call registers a runner file of another workflow as a labelled child."""
+def test_call_spawns_an_installed_workflow_as_a_child(tmp_path: Path) -> None:
+    """httk_workflow_call registers a job of another installed workflow as a labelled child."""
 
     body = r"""int status = -1;
     const char *args[] = {"--file", "input.txt=input.txt", NULL};
-    char *key = httk_workflow_call("sub", "./sub_runner.py", args, &status);
+    char *key = httk_workflow_call("sub", "sub", args, &status);
     char line[512];
     snprintf(line, sizeof line, "KEY %d %s", status, key != NULL ? key : "");
     httk_workflow_log("probe", line);
@@ -648,8 +530,8 @@ def test_call_spawns_another_workflow_as_a_child(tmp_path: Path) -> None:
     )
     result = _compile(tmp_path, source, name="call")
     assert result.returncode == 0, result.stderr
-    attempt = _attempt(tmp_path / "attempt", step="start")
+    attempt = _attempt(tmp_path / "attempt", step="start", calls=True)
     _stage_call_target(attempt)
     completed = attempt.run(tmp_path / "call")
     assert completed.returncode == 0, completed.stderr
-    _assert_called(attempt, completed.stderr)
+    _assert_called(attempt)

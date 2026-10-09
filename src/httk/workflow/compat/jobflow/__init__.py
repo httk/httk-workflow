@@ -25,7 +25,6 @@ from httk.workflow.compat import (
     _load_outputs,
     _output_roles,
     _parameter,
-    runner_reference,
 )
 from httk.workflow.scaffold import FILES_DIRECTORY, payload_relative
 
@@ -229,14 +228,13 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
         return None
 
     def finalize(spec: "JobSpec") -> "JobSpec":
-        """Pin jobflow jobs to a persistent workdir with unlimited activations."""
-        return replace(spec, workdir_mode="persistent", maximum_activations=None)
+        """Give jobflow jobs unlimited activations."""
+        return replace(spec, maximum_activations=None)
 
     return LanguageScaffold(
         documents=documents,
         files={},
         parameters=parameters,
-        runner=runner_reference(PACKAGE, RUNNER),
         reserved_parameters=("jobflow_inputs",),
         required_capabilities=(),
         instantiate=instantiate,

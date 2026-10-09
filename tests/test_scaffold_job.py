@@ -2,7 +2,7 @@
 
 :func:`~httk.workflow.scaffold.scaffold_job` is :func:`~httk.workflow.scaffold.new_job`
 stopped one step short of submission — the shared body extracted so that
-:meth:`httk.workflow.Attempt.call` can build a child of any registered workflow.
+:meth:`httk.workflow.Attempt.call` can build a child of an installed workflow.
 These tests hold the two to one implementation: the payload ``scaffold_job``
 writes is byte-for-byte the payload ``new_job`` submits, save the random job id.
 """
@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import Workspace, new_job, scaffold_job
-from httk.workflow.models import JobDefinition
-
-pytestmark = pytest.mark.usefixtures("relax_workflow")
+from httk.workflow import Workspace, _kernel, new_job, scaffold_job
+from httk.workflow._job import JobDefinition
+from test_job_creation import install
+from test_scaffold import _relax_package
 
 _POSCAR = """silicon
 1.0
@@ -33,7 +33,11 @@ Direct
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Iterator[Workspace]:
-    yield Workspace.initialize(tmp_path / "workspace")
+    """A workspace with ``tests.relax`` installed."""
+
+    ws = Workspace.initialize(tmp_path / "workspace")
+    install(ws, _relax_package(tmp_path / "relax"))
+    yield ws
 
 
 @pytest.fixture()
@@ -49,20 +53,16 @@ def test_scaffold_job_builds_a_payload_and_submits_nothing(
     destination = tmp_path / "payload"
     destination.mkdir()
 
-    job = scaffold_job(workspace, "test-relax", destination, files={"POSCAR": structure}, tag="silicon")
+    job = scaffold_job(workspace, "tests.relax", destination, files={"POSCAR": structure}, tag="silicon")
 
     assert isinstance(job, JobDefinition)
     # The payload is complete: job.json plus the staged file where the runner reads it.
     assert (destination / "job.json").is_file()
     assert (destination / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     definition = JobDefinition.from_path(destination / "job.json")
-    assert definition.workflow == "tests.relax" and definition.initial_step == "prepare"
-    # The runner is published into the store (default publish="workspace")...
-    assert definition.runner_source == "workspace"
-    assert workspace.runners.is_dir() and list(workspace.runners.iterdir())
-    # ...but no job was submitted: no marker exists for it anywhere in the workspace.
-    assert workspace.find_marker_by_id(job.id) is None
-    assert not list(workspace.scan_markers())
+    assert definition.workflow_id == "local:tests.relax" and definition.initial_step == "prepare"
+    # No job was submitted: no job directory exists anywhere in the workspace.
+    assert _kernel.locate(workspace, job.id, placement_hint=None, exhaustive=True) is None
 
 
 def test_scaffold_job_refuses_a_non_empty_destination(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
@@ -70,12 +70,12 @@ def test_scaffold_job_refuses_a_non_empty_destination(workspace: Workspace, stru
     occupied.mkdir()
     (occupied / "stray.txt").write_text("x", encoding="utf-8")
     with pytest.raises(ValueError, match="empty directory"):
-        scaffold_job(workspace, "test-relax", occupied, files={"POSCAR": structure})
+        scaffold_job(workspace, "tests.relax", occupied, files={"POSCAR": structure})
 
 
 def test_scaffold_job_refuses_a_missing_destination(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="existing directory"):
-        scaffold_job(workspace, "test-relax", tmp_path / "nope", files={"POSCAR": structure})
+        scaffold_job(workspace, "tests.relax", tmp_path / "nope", files={"POSCAR": structure})
 
 
 def test_scaffold_job_writes_what_new_job_submits(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
@@ -84,7 +84,7 @@ def test_scaffold_job_writes_what_new_job_submits(workspace: Workspace, structur
 
     scaffolded = scaffold_job(
         workspace,
-        "test-relax",
+        "tests.relax",
         destination,
         files={"POSCAR": structure},
         tag="silicon",
@@ -92,7 +92,7 @@ def test_scaffold_job_writes_what_new_job_submits(workspace: Workspace, structur
     )
     submitted = new_job(
         workspace,
-        "test-relax",
+        "tests.relax",
         files={"POSCAR": structure},
         tag="silicon",
         parameters={"kpoint_density": 30.0},

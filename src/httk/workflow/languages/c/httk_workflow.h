@@ -209,19 +209,21 @@ int httk_workflow_runlog_append(const char *message, const char *const *files);
  */
 int httk_workflow_log(const char *level, const char *message);
 
-/* --- Transactional data ----------------------------------------------------- */
+/* --- Job data ---------------------------------------------------------------- */
 
-/* Stage one file or tree into the job's data; returns the operation id. */
+/*
+ * Stage a copy of one file or tree for data/<destination>, committed with the
+ * outcome; returns the staged path data/<destination>. Explicit transactions
+ * (`transaction begin|put|commit`) are reached through httk_workflow_invoke.
+ */
 char *httk_workflow_put(const char *source, const char *destination, int *status);
-/* Stage one removal from the job's data; returns the operation id. */
-char *httk_workflow_remove(const char *destination, int missing_ok, int *status);
 
 /* --- Children --------------------------------------------------------------- */
 
 /*
  * Register one child under a mandatory unique `label`, created when the outcome
  * is published; returns the child's job key. `args` carries the child options
- * (--step, --parameter NAME=VALUE, --payload, --runner, ...) untouched.
+ * (--step, --parameter NAME=VALUE, --payload, ...) untouched.
  */
 char *httk_workflow_spawn(const char *label, const char *const *args, int *status);
 /*

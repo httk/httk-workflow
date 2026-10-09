@@ -13,7 +13,7 @@ from contextlib import chdir
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from httk.workflow import Attempt, ChildSpec, Runner, RunnerRef
+from httk.workflow import Attempt, ChildSpec, Runner
 from httk.workflow.compat.jobflow import OUTPUTS_FILE
 
 WORKFLOW = "jobflow.workflow"
@@ -367,10 +367,11 @@ def advance(a: Attempt) -> None:
             ChildSpec(
                 step="enter",
                 parameters={
-                    "jobflow_child_job": str(spool_path),
-                    "jobflow_child_snapshot": str(snapshot_path),
+                    # Relative to this workdir: the parent's directory moves while it waits, and the
+                    # child reads them through its parent accessor.
+                    "jobflow_child_job": spool_path.relative_to(a.workdir).as_posix(),
+                    "jobflow_child_snapshot": snapshot_path.relative_to(a.workdir).as_posix(),
                 },
-                runner=RunnerRef.inherit(),
             ),
             label=label,
         )
@@ -395,9 +396,7 @@ def advance(a: Attempt) -> None:
                     outputs["stored_data"] = state.stored_data
                 output_path = a.workdir / OUTPUTS_FILE
                 _write_json(output_path, outputs)
-                if a.context.data_generation is not None:
-                    prefix = a.parameter("jobflow_data_prefix", "jobflow")
-                    a.put(output_path, f"{prefix}/{OUTPUTS_FILE}")
+                a.put(output_path, f"{a.parameter('jobflow_data_prefix', 'jobflow')}/{OUTPUTS_FILE}")
                 a.log.append("headline", "jobflow completed successfully")
                 a.succeed()
             except Exception as exc:
@@ -420,8 +419,12 @@ def enter(a: Attempt) -> None:
     try:
         from httk.workflow.compat.jobflow._driver import load_spooled_job, merge_documents
 
-        job_path = Path(str(a.parameter("jobflow_child_job")))
-        snapshot_path = Path(str(a.parameter("jobflow_child_snapshot")))
+        parent = a.parent
+        if parent is None:
+            a.fail("jobflow.job_unloadable", "the parent job holding the spooled job is not in this workspace")
+            return
+        job_path = parent.workdir / str(a.parameter("jobflow_child_job"))
+        snapshot_path = parent.workdir / str(a.parameter("jobflow_child_snapshot"))
         try:
             job = load_spooled_job(json.loads(job_path.read_text(encoding="utf-8")))
         except (OSError, RuntimeError, TypeError, ValueError) as exc:

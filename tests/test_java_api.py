@@ -4,18 +4,12 @@ import json
 import os
 import shutil
 import subprocess
-import sys
-import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import httk.workflow
-from httk.workflow import Workspace
-from httk.workflow.protocol import JobSpec, prepare_job_payload
-from test_bash_sdk import _CALL_SUB_RUNNER
+from attempt_fixtures import FabricatedAttempt, assert_called, every_job, fabricate, sub_package
 
 _JAVAC = shutil.which("javac")
 _JAVA = shutil.which("java")
@@ -63,50 +57,7 @@ def _write_runner(tmp_path: Path, workflow: str, steps: dict[str, str], name: st
     return classes
 
 
-@dataclass(frozen=True)
-class _Attempt:
-    payload: Path
-    control: Path
-    workdir: Path
-    environment: dict[str, str]
-
-    def run(self, classes: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-        assert _JAVA is not None
-        return subprocess.run(
-            [_JAVA, "-cp", str(classes), "RunnerMain", *arguments],
-            cwd=self.workdir,
-            env=self.environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def outcome(self) -> dict[str, Any]:
-        return json.loads((self.control / "outcome.ready" / "outcome.json").read_text(encoding="utf-8"))
-
-    def breadcrumb(self) -> dict[str, Any]:
-        return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
-
-
-def _parent_job(tmp_path: Path) -> dict[str, str]:
-    """Fabricate a persistent-workdir parent payload in the workspace; return a child's ``parent`` block."""
-
-    staging = tmp_path / "workspace" / "jobs" / "project" / "parent" / "staging"
-    (staging / "files").mkdir(parents=True)
-    (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    spec = JobSpec(
-        name="Parent", workflow="tests.parent", runner_path="files/runner", initial_step="start", workdir_path="calc"
-    )
-    job_id = prepare_job_payload(staging, spec).id
-    staging.rename(staging.with_name(f"parent--{job_id}"))
-    return {
-        "workspace_id": str(uuid.uuid4()),
-        "job_id": job_id,
-        "job_key": f"parent--{job_id}",
-        "placement": "project/parent",
-        "activation_id": str(uuid.uuid4()),
-        "spawn_id": str(uuid.uuid4()),
-    }
+_Attempt = FabricatedAttempt
 
 
 def _attempt(
@@ -114,90 +65,44 @@ def _attempt(
     *,
     step: str,
     parameters: dict[str, object] | None = None,
-    data_generation: int | None = None,
-    parent: dict[str, str] | None = None,
-) -> _Attempt:
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Fabricated",
-            workflow="tests.java",
-            runner_path="files/runner",
-            initial_step=step,
-            data_mode="none" if data_generation is None else "transactional",
-            parameters=parameters or {},
-        ),
+    parent: bool = False,
+    calls: bool = False,
+) -> FabricatedAttempt:
+    """Fabricate one attempt of one job of ``tests.java``, without a manager."""
+
+    return fabricate(
+        tmp_path,
+        step=step,
+        workflow="tests.java",
+        parameters=parameters,
         parent=parent,
+        calls={"sub": sub_package(tmp_path / "sub")} if calls else None,
     )
-    control = payload / f"attempts/{uuid.uuid4()}"
-    control.mkdir(parents=True)
-    workdir = payload / "run"
-    workdir.mkdir()
-    context_json = json.dumps(
-        {
-            "format": "httk-workflow-attempt-context",
-            "durable": False,
-            "deadline": None,
-            "format_version": 2,
-            "workspace_id": parent["workspace_id"] if parent else str(uuid.uuid4()),
-            "job_id": (_jid := str(uuid.uuid4())),
-            "job_key": f"fabricated--{_jid}",
-            "placement": "project/fabricated",
-            "payload": str(payload),
-            "step": step,
-            "activation_id": str(uuid.uuid4()),
-            "attempt_id": str(uuid.uuid4()),
-            "data_generation": data_generation,
-            "children": [],
-            "settings": {},
-        }
-    )
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HTTK_WORKFLOW_CONTEXT": context_json,
-            "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-            "HTTK_WORKFLOW_JOB_DIR": str(payload),
-            "HTTK_WORKFLOW_WORKDIR": str(workdir),
-            "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
-            "HTTK_WORKFLOW_STEP": step,
-            "HTTK_WORKFLOW_PYTHON": sys.executable,
-        }
-    )
-    if data_generation is not None:
-        environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
-    for name in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
-        environment.pop(name, None)
-    return _Attempt(payload, control, workdir, environment)
 
 
-def _call_target(tmp_path: Path) -> tuple[Path, Path]:
-    """Initialize the attempt's workspace; write a callable Python runner file and a file to stage."""
+def _parent_of(attempt: FabricatedAttempt) -> tuple[Path, str, str]:
+    """Return the waiting parent's job directory, id and the child's spawn id."""
 
-    Workspace.initialize(tmp_path / "workspace")
-    sub = tmp_path / "sub_runner.py"
-    sub.write_text(_CALL_SUB_RUNNER.format(src=Path(__file__).parents[1] / "src"), encoding="utf-8")
-    sub.chmod(0o755)
-    input_file = tmp_path / "input.txt"
-    input_file.write_text("staged-by-call\n", encoding="utf-8")
-    return sub, input_file
+    (parent,) = every_job(attempt.workspace)
+    recorded = json.loads((attempt.payload / "job.json").read_text(encoding="utf-8"))["parent"]
+    return parent.path, parent.job_id, str(recorded["spawn_id"])
 
 
-def _assert_called(attempt: _Attempt, job_key: str) -> None:
-    """The outcome registered one ``sub`` child running the called workflow, with the staged file."""
+def _call_input(tmp_path: Path) -> Path:
+    """Write the file a call stages into the child."""
 
-    ready = attempt.control / "outcome.ready"
-    spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
-    assert [(entry["label"], entry["job_key"]) for entry in spawn["children"]] == [("sub", job_key)]
-    child_dir = ready / "children" / "jobs" / job_key
-    child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
-    assert child["workflow"] == "tests.sub"
-    assert child["runner"]["source"] == "workspace"
-    assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "input.txt"
+    path.write_text("staged-by-call\n", encoding="utf-8")
+    return path
+
+
+def _assert_called(attempt: FabricatedAttempt, job_key: str | None = None) -> None:
+    """The outcome registered one ``sub`` child of the installed ``tests.sub``, with the staged file."""
+
+    key = assert_called(attempt, job_key)
+    staged = attempt.control / "outcome.ready" / "children" / "jobs" / key / "files" / "input.txt"
+    assert staged.read_text(encoding="utf-8") == "staged-by-call\n"
     assert attempt.outcome()["join"]["condition"] == "all_succeeded"
 
 
@@ -376,13 +281,13 @@ def test_parent_reads_the_parent_location_or_answers_empty(tmp_path: Path) -> No
         "attempt.succeed(); return 0;"
     )
     classes = _write_runner(tmp_path, "tests.java", {"start": body})
-    parent = _parent_job(tmp_path)
-    completed = _attempt(tmp_path, step="start", parent=parent).run(classes)
+    child = _attempt(tmp_path, step="start", parent=True)
+    completed = child.run(classes)
     assert completed.returncode == 0, completed.stderr
-    payload = tmp_path / "workspace" / "jobs" / "project" / "parent" / parent["job_key"]
+    payload, job_id, spawn_id = _parent_of(child)
     lines = completed.stdout.splitlines()
-    assert lines[:3] == [str(payload), str(payload / "calc"), parent["job_id"]]
-    assert json.loads(lines[3])["spawn_id"] == parent["spawn_id"]
+    assert lines[:3] == [str(payload), str(payload / "run"), job_id]
+    assert json.loads(lines[3])["spawn_id"] == spawn_id
 
     orphan = _write_runner(
         tmp_path, "tests.java", {"start": "System.out.println(attempt.parent().isPresent()); return 0;"}, "orphan"
@@ -392,16 +297,16 @@ def test_parent_reads_the_parent_location_or_answers_empty(tmp_path: Path) -> No
     assert completed.stdout == "false\n"
 
 
-def test_call_spawns_another_workflow_as_a_child(tmp_path: Path) -> None:
-    sub, input_file = _call_target(tmp_path)
+def test_call_spawns_an_installed_workflow_as_a_child(tmp_path: Path) -> None:
+    input_file = _call_input(tmp_path)
     body = (
-        f"String key = attempt.call(\"sub\", {json.dumps(str(sub))}, "
+        f"String key = attempt.call(\"sub\", \"sub\", "
         f"\"--file\", {json.dumps(f'input.txt={input_file}')}).orElseThrow(); "
         "System.out.println(key); "
         'attempt.gather("finish", new HttkWorkflow.Gather()); return 0;'
     )
     classes = _write_runner(tmp_path, "tests.java", {"start": body, "finish": "return 0;"})
-    attempt = _attempt(tmp_path, step="start")
+    attempt = _attempt(tmp_path, step="start", calls=True)
     completed = attempt.run(classes)
     assert completed.returncode == 0, completed.stderr
     _assert_called(attempt, completed.stdout.strip())

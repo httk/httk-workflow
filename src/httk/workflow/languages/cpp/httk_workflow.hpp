@@ -182,11 +182,6 @@ public:
         char* output = httk_workflow_put(source.c_str(), destination.c_str(), &status);
         return read_result(output, status);
     }
-    static std::optional<std::string> remove(const std::string& destination, bool missing_ok = false) {
-        int status = HTTK_WORKFLOW_OK;
-        char* output = httk_workflow_remove(destination.c_str(), missing_ok ? 1 : 0, &status);
-        return read_result(output, status);
-    }
     static std::string spawn(const std::string& label, const Arguments& arguments = {}) {
         int status = HTTK_WORKFLOW_OK;
         auto args = c_arguments(arguments);

@@ -38,10 +38,8 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
-
-from httk.core.digests import sha256_file
 
 if TYPE_CHECKING:
     import httk.core
@@ -61,7 +59,6 @@ __all__ = [
     "language",
     "match_document",
     "runner_path",
-    "runner_reference",
 ]
 
 type DocumentPolicy = Literal["required", "optional", "forbidden"]
@@ -198,15 +195,14 @@ class LanguageRequest:
 
 @dataclass(frozen=True)
 class LanguageScaffold:
-    """The files, runner, and hooks prepared for one format workflow.
+    """The files and hooks prepared for one format workflow.
+
+    The runner is the realization's own ``<format>_runner.py``, which the
+    manager runs for an installed package whose ``runner.builtin`` names the format.
 
     :param documents: Text or byte documents to write into the payload.
     :param files: Files to stage into the payload.
     :param parameters: Job parameters produced by preparation.
-    :param runner: Runner description for the job, when one is supplied.
-    :param runner_executor: Select the runner executor.
-    :param payload_runner: Name a runner staged in the payload.
-    :param workdir_path: Name the workdir below the job payload.
     :param required_capabilities: Require these manager capabilities.
     :param reserved_parameters: Names reserved for per-job realization output.
     :param warnings: Preserve preparation warnings.
@@ -217,10 +213,6 @@ class LanguageScaffold:
     documents: Mapping[str, str | bytes]
     files: Mapping[str, Path]
     parameters: Mapping[str, object]
-    runner: Mapping[str, object] | None
-    runner_executor: str = "path"
-    payload_runner: str | None = None
-    workdir_path: str | None = None
     required_capabilities: tuple[str, ...] = ()
     reserved_parameters: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -322,27 +314,12 @@ def runner_path(package: str, name: str) -> Path:
     """Return the installed file of one packaged compat runner.
 
     *package* is the importable package the runner file lives beside — its own
-    consumer package, e.g. ``httk.workflow.compat.cwl`` — so a compat engine
-    resolves and digest-pins the exact bytes it ships rather than a runner owned
-    by some shared module.
+    consumer package, e.g. ``httk.workflow.compat.cwl`` — which is where the
+    manager finds the runner of an installed package of that format.
+
+    :param package: The consumer package.
+    :param name: The runner file name.
+    :return: The runner file.
     """
 
     return Path(str(files(package).joinpath(name)))
-
-
-def runner_reference(package: str, name: str) -> dict[str, object]:
-    """Return the ``runner`` member of a ``job.json`` running one packaged runner.
-
-    The reserved ``pkg:`` form names the runner inside its own consumer package,
-    and the digest is taken from the installed bytes, which is exactly what the
-    manager verifies before it stages and executes them.
-    """
-
-    path = runner_path(package, name)
-    return {
-        "executor": "path",
-        "source": "installed",
-        "path": f"pkg:{package}/{PurePosixPath(name)}",
-        "sha256": sha256_file(path),
-        "arguments": [],
-    }

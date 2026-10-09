@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 from pathlib import Path, PurePosixPath
+from typing import Self
 
 from httk.workflow import _fs
 from httk.workflow._kernel import OwnedJob
@@ -108,6 +109,35 @@ class Transaction:
             break
         self._durable = durable
         self._committed = False
+
+    @classmethod
+    def resume(cls, control_dir: Path, seq: str, *, durable: bool) -> Self:
+        """Reattach to the uncommitted transaction *seq* an earlier process of this attempt began.
+
+        A Bash runner is many short-lived processes; the staging directory is what carries a
+        transaction from one bridge call to the next.
+
+        :param control_dir: The attempt directory ``attempts/<A>``.
+        :param seq: The six-digit sequence, as :attr:`seq` reports it.
+        :param durable: Fsync the staged content and the commit rename.
+        :return: The transaction.
+        :raises WorkflowError: When no such uncommitted transaction exists.
+        """
+
+        if not _COMMITTED.fullmatch(seq) or not (control_dir / "txn" / f"{seq}.tmp").is_dir():
+            raise WorkflowError(f"{control_dir}: no uncommitted transaction {seq!r}")
+        transaction = cls.__new__(cls)
+        transaction._final = control_dir / "txn" / seq
+        transaction.path = control_dir / "txn" / f"{seq}.tmp"
+        transaction._durable = durable
+        transaction._committed = False
+        return transaction
+
+    @property
+    def seq(self) -> str:
+        """The six-digit sequence of this transaction within its attempt."""
+
+        return self._final.name
 
     def put(self, source: str | os.PathLike[str], destination: str | PurePosixPath) -> None:
         """Stage a copy of a file or a directory tree (symlinks inside it stay links).

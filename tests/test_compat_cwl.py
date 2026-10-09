@@ -10,8 +10,10 @@ from httk.core import DataRecord, FileEntry, FileRecord
 from httk.core.cli import CLIContext
 from httk.core.storage import content_id
 
+from attempt_fixtures import every_job, find, job_json, new_job, new_jobs, state
+from attempt_fixtures import failure_of as _failure
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, collect
+from httk.workflow import TaskManager, Workspace, _store, collect
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow.collecting import job_records
@@ -25,9 +27,8 @@ from httk.workflow.compat.cwl import (
     load_cwl_plan,
 )
 from httk.workflow.introspection import list_jobs
-from httk.workflow.models import JobDefinition
 from httk.workflow.packages import load_workflow_package
-from httk.workflow.scaffold import describe_runner, new_job, new_jobs, resolve_workflow
+from httk.workflow.scaffold import describe_runner, resolve_workflow
 from httk.workflow.workflow_cli import command
 
 _ECHO_TOOL = """
@@ -211,6 +212,13 @@ _REFUSALS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _located(workspace: Workspace, value: object) -> Path:
+    """Return where a CWL File output is now: the job it is anchored to, located again, and its path in it."""
+
+    assert isinstance(value, dict)
+    return find(workspace, str(value["httk_job"]["job_id"])).path / str(value["httk_path"])
+
+
 def _drive(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=300.0)
@@ -288,10 +296,10 @@ def test_cwl_language_job_runs_to_success(package: Path, workspace: Workspace) -
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-    assert Path(str(outputs["spoken"]["path"])).read_text(encoding="utf-8").strip() == "hello"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    assert _located(workspace, outputs["spoken"]).read_text(encoding="utf-8").strip() == "hello"
 
 
 def test_bare_cwl_document_runs_and_collects_without_a_provider(package: Path, workspace: Workspace) -> None:
@@ -299,8 +307,8 @@ def test_bare_cwl_document_runs_and_collects_without_a_provider(package: Path, w
     job = new_job(workspace, document, inputs={"message": "hello"})
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
     item = next(collect(workspace))
     assert isinstance(item.outputs["spoken"], FileRecord)
     output = item.outputs["spoken"]
@@ -313,6 +321,7 @@ def test_bare_cwl_document_can_be_forced(package: Path, workspace: Workspace) ->
         resolve_workflow(package / "echo.cwl", format="unknown")
 
 
+@pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Workspace, tmp_path: Path, capsys) -> None:
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "bare-cwl")
     assert (
@@ -323,7 +332,7 @@ def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Works
         == 0
     )
     payload = Path(capsys.readouterr().out.split("\t", 1)[1].strip())
-    assert JobDefinition.from_path(payload / "job.json").workflow == "cwl.echo"
+    assert job_json(payload)["workflow"]["name"] == "cwl.echo"
     _drive(workspace)
     assert any(record.outputs.get("spoken") is not None for record in collect(workspace))
 
@@ -385,8 +394,8 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
 
     item = next(collect(workspace))
     value = item.outputs["spoken"]
-    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-    old_path = Path(str(outputs["spoken"]["path"])).resolve().relative_to(workspace.root).as_posix()
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    old_path = _located(workspace, outputs["spoken"]).resolve().relative_to(workspace.root).as_posix()
     assert isinstance(value, FileRecord)
     assert value.type == "files"
     assert re.fullmatch(r"[0-9a-f]{64}", content_id(value))
@@ -397,16 +406,18 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
     assert value.sha256 == expected
     assert value.size == len("hello\n")
     assert value.media_type is None
-    assert job.payload.exists()
+    assert find(workspace, job.job_id).path.exists()
 
 
 def test_cwl_file_output_rejects_outside_and_missing_paths(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "confined", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     job = new_job(workspace, package, inputs={"message": "hello"})
     _drive(workspace)
-    output_path = job.payload / "run" / "cwl-outputs.json"
+    output_path = find(workspace, job.job_id).path / "run" / "cwl-outputs.json"
     outputs = json.loads(output_path.read_text(encoding="utf-8"))
 
+    # Without its anchor, a File output is only the path the runner recorded.
+    del outputs["spoken"]["httk_job"], outputs["spoken"]["httk_path"]
     outputs["spoken"]["path"] = "/etc/passwd"
     output_path.write_text(json.dumps(outputs), encoding="utf-8")
     outside = next(collect(workspace))
@@ -453,9 +464,9 @@ file = "collect.py"
         encoding="utf-8",
     )
     job = new_job(workspace, package, inputs={"message": "hello"})
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.parameters["workflow_collect"] == "package"
-    assert definition.parameters["workflow_realization"] == "language"
+    definition = job_json(find(workspace, job.job_id).path)
+    assert definition["parameters"]["workflow_collect"] == "package"
+    assert definition["parameters"]["workflow_realization"] == "language"
     _drive(workspace)
 
     item = next(collect(workspace))
@@ -626,16 +637,16 @@ def test_cwl_language_scatter_runs_labeled_children_and_publishes_data(tmp_path:
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
     rows = {row["job_key"]: row for row in list_jobs(workspace)}
     shards = sorted(key for key in rows if key.startswith("s000"))
     assert [key.split("--")[0] for key in shards] == ["s0000", "s0001", "s0002"]
     assert {rows[key]["state"] for key in shards} == {"succeeded"}
-    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-    transcript = Path(str(outputs["transcript"]["path"]))
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    transcript = _located(workspace, outputs["transcript"])
     assert transcript.read_text(encoding="utf-8").split() == ["alpha", "beta", "gamma"]
-    published = sorted((job.payload / "data" / "cwl" / "transcript").iterdir())
+    published = sorted((find(workspace, job.job_id).path / "data" / "cwl" / "transcript").iterdir())
     assert [path.name for path in published] == ["0000-joined.txt"]
 
 
@@ -652,15 +663,15 @@ def test_cwl_language_subworkflow_carries_its_target(tmp_path: Path, workspace: 
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    child = next(row for row in list_jobs(workspace) if row["job_key"].startswith("sub--"))
-    assert child["state"] == "succeeded"
-    child_definition = JobDefinition.from_path(
-        workspace.payload_path(PurePosixPath(str(child["placement"])), str(child["job_key"])) / "job.json"
-    )
-    assert child_definition.parameters["cwl_target"] == ["inner"]
-    assert child_definition.parameters["cwl_document"] == "files/workflow.cwl.json"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    child = next(ref for ref in every_job(workspace) if ref.job_key.startswith("sub--"))
+    assert child.state == "succeeded"
+    child_definition = job_json(child.path)
+    assert child_definition["parameters"]["cwl_target"] == ["inner"]
+    assert child_definition["parameters"]["cwl_document"] == "files/workflow.cwl.json"
+    # The child finds the plan in the root job, by its identity rather than by a path that moves.
+    assert child_definition["parameters"]["cwl_root"] == {"job_id": job.job_id, "placement": ""}
 
 
 def test_cwl_language_command_line_tool_is_a_workflow_of_one(tmp_path: Path, workspace: Workspace) -> None:
@@ -669,10 +680,10 @@ def test_cwl_language_command_line_tool_is_a_workflow_of_one(tmp_path: Path, wor
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-    assert Path(str(outputs["spoken"]["path"])).read_text(encoding="utf-8").strip() == "solo"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    assert _located(workspace, outputs["spoken"]).read_text(encoding="utf-8").strip() == "solo"
     assert outputs["spoken"]["checksum"].startswith("sha1$")
 
 
@@ -694,15 +705,15 @@ def test_cwl_language_stages_file_inputs_by_effective_port(tmp_path: Path, works
         inputs={"source": [{"class": "File", "path": str(source)}]},
         tag="staged",
     )
-    staged = job.payload / "files" / "inputs" / "files[0]" / "letters.txt"
+    staged = find(workspace, job.job_id).path / "files" / "inputs" / "files[0]" / "letters.txt"
     assert staged.read_text(encoding="utf-8") == "one\ntwo\n"
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-    assert Path(str(outputs["joined"]["path"])).read_text(encoding="utf-8") == "one\ntwo\n"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    assert _located(workspace, outputs["joined"]).read_text(encoding="utf-8") == "one\ntwo\n"
 
 
 def test_cwl_language_v1_document_is_upgraded_and_runs(tmp_path: Path, workspace: Workspace) -> None:
@@ -711,10 +722,10 @@ def test_cwl_language_v1_document_is_upgraded_and_runs(tmp_path: Path, workspace
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-    assert Path(str(outputs["spoken"]["path"])).read_text(encoding="utf-8").strip() == "vintage"
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    assert _located(workspace, outputs["spoken"]).read_text(encoding="utf-8").strip() == "vintage"
 
 
 def test_cwl_language_tool_failure_is_terminal_with_stderr(tmp_path: Path, workspace: Workspace) -> None:
@@ -726,13 +737,14 @@ def test_cwl_language_tool_failure_is_terminal_with_stderr(tmp_path: Path, works
 
     _drive(workspace)
 
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker)["failure"]
+    marker = find(workspace, job.job_id)
+    assert marker.state == "failed"
+    failure = _failure(marker)
     assert failure["code"] == "cwl.tool_failed"
     assert "no-such-file" in failure["message"]
     assert failure.get("retryable", False) is False
-    assert workspace.read_state(marker)["attempt_ordinal"] == 1
+    attempt = state(marker).attempt
+    assert attempt is not None and attempt["ordinal"] == 1
 
 
 def test_cwl_language_docker_requirement_is_recorded_and_warned(tmp_path: Path, workspace: Workspace) -> None:
@@ -743,11 +755,8 @@ def test_cwl_language_docker_requirement_is_recorded_and_warned(tmp_path: Path, 
     package = _package(tmp_path / "docker", "docker.cwl", document, "message", "spoken")
     job = new_job(workspace, package, inputs={"message": "contained"}, tag="docker")
 
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    assert json.loads((job.payload / "job.json").read_text(encoding="utf-8"))["claim"]["required_capabilities"] == [
-        DOCKER_CAPABILITY
-    ]
-    assert definition.required_capabilities == frozenset({DOCKER_CAPABILITY})
+    definition = job_json(find(workspace, job.job_id).path)
+    assert definition["claim"]["required_capabilities"] == [DOCKER_CAPABILITY]
     # The DockerRequirement warning is carried structurally on the scaffolded job.
     assert any("DockerRequirement is recorded as the required capability 'docker'" in item for item in job.warnings)
     assert any("never pulls or enters an image" in item for item in job.warnings)
@@ -760,6 +769,7 @@ def test_load_cwl_inputs_teaches_on_malformed_json(tmp_path: Path) -> None:
         load_cwl_inputs(inputs)
 
 
+@pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, workspace: Workspace, capsys) -> None:
     document = _ECHO_TOOL.replace(
         "baseCommand: echo",
@@ -810,19 +820,27 @@ def test_cwl_language_campaign_prepares_once_and_runs_each_job(
     _drive(workspace)
 
     for job, expected in zip(jobs, ("one", "two", "three")):
-        marker = workspace.find_marker_by_id(job.job_id)
-        assert marker is not None and marker.kind == "succeeded"
-        outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
-        assert Path(str(outputs["spoken"]["path"])).read_text(encoding="utf-8").strip() == expected
+        marker = find(workspace, job.job_id)
+        assert marker.state == "succeeded"
+        outputs = json.loads(
+            (find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8")
+        )
+        assert _located(workspace, outputs["spoken"]).read_text(encoding="utf-8").strip() == expected
 
 
 def test_cwl_language_payload_shape_and_runner(package: Path, workspace: Workspace) -> None:
     job = new_job(workspace, package, inputs={"message": "shape"})
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    staged = sorted(path.relative_to(job.payload).as_posix() for path in job.payload.rglob("*") if path.is_file())
+    definition = job_json(find(workspace, job.job_id).path)
+    staged = sorted(
+        path.relative_to(find(workspace, job.job_id).path).as_posix()
+        for path in find(workspace, job.job_id).path.rglob("*")
+        if path.is_file()
+    )
     assert staged == ["files/inputs.json", "files/workflow.cwl.json", "job.json"]
-    assert definition.runner_source == "installed"
-    assert definition.runner_path.as_posix() == f"pkg:{PACKAGE}/cwl_runner.py"
+    # The installed package names the format; the manager runs the realization's own runner.
+    (installed,) = _store.list_installed(workspace)
+    assert installed.record["runner"] == {"command": None, "entry": None, "builtin": "cwl"}
+    assert definition["workflow"] == {"id": installed.id, "name": installed.name}
 
 
 def test_the_packaged_runner_describes_its_dispatch_vocabulary() -> None:

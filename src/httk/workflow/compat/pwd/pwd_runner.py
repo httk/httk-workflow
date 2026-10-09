@@ -50,8 +50,8 @@ Job parameters
   match. Absent, no allowlist applies.
 * ``pwd_retry_failed_nodes`` (default true) — whether a node that raised makes
   the failure retryable.
-* ``pwd_data_prefix`` (default ``pwd``) — where the outputs are published when
-  the job has transactional data.
+* ``pwd_data_prefix`` (default ``pwd``) — where the outputs are published in the
+  job's data directory.
 
 Security
 --------
@@ -321,9 +321,8 @@ def publish_outputs(a: Attempt, document: PwdDocument, results: Mapping[int, obj
         outputs[str(definition["name"])] = value if jsonable(value) else repr(value)
     path = a.workdir / OUTPUTS_FILE
     path.write_text(json.dumps(outputs, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if a.context.data_generation is not None:
-        prefix = a.parameter("pwd_data_prefix", DEFAULT_DATA_PREFIX)
-        a.put(path, f"{prefix}/{OUTPUTS_FILE}")
+    prefix = a.parameter("pwd_data_prefix", DEFAULT_DATA_PREFIX)
+    a.put(path, f"{prefix}/{OUTPUTS_FILE}")
     a.log.append("note", f"pwd outputs: {', '.join(outputs) or 'none'}")
 
 

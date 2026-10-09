@@ -1,435 +1,211 @@
+"""End-to-end jobs of installed workflows with SDK-free runners, and the runner-side builders they publish with."""
+
 import json
 import os
-import time
 import uuid
 from pathlib import Path
 
 import pytest
 
-from conftest import bury_manager
-from httk.workflow import TaskManager, Workspace
-from httk.workflow.errors import TransitionLostError
-from httk.workflow.journal import JournalWriter, read_record
-from httk.workflow.models import StateFrame
+from httk.workflow import TaskManager, Workspace, _kernel
+from httk.workflow.errors import TransactionError
+from httk.workflow.runtime_builders import JobSpec, ReplayableWorkdirBatch, prepare_job_payload, replay_transaction
+from httk.workflow.scaffold import new_job
+from test_job_creation import install, workspace_at
 
+_OUTCOME = """
+def publish(context, control, **members):
+    draft = control / "outcome.tmp.test"
+    draft.mkdir()
+    outcome = {key: context[key] for key in ("job_id", "activation_id", "attempt_id")}
+    outcome.update(format="httk-workflow-outcome", format_version=2, **members)
+    (draft / "outcome.json").write_text(json.dumps(outcome))
+    os.rename(draft, control / "outcome.ready")
+"""
 
-def _payload(
-    root: Path,
-    runner_source: str,
-    *,
-    data_mode: str = "none",
-    retry_on: list[str] | None = None,
-) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
-    runner.write_text(runner_source, encoding="utf-8")
-    runner.chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": "test-job",
-        "name": "Test job",
-        "workflow": "tests.example",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": data_mode},
-        "initial_step": "prepare",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {
-            "maximum_attempts_per_activation": 3,
-            "maximum_total_attempts": 10,
-            "maximum_activations": 5,
-            "retry_on": retry_on or [],
-        },
-        "resources": {},
-        "parent": None,
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    return payload, job_id
+_PREAMBLE = (
+    "#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\n"
+    + _OUTCOME
+    + 'context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])\n'
+    + 'control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])\n'
+    + 'run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])\n'
+)
 
-
-_TWO_STEP_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
-(run / "steps.txt").open("a").write(context["step"] + "\\n")
+_TWO_STEP_RUNNER = (
+    _PREAMBLE
+    + """(run / "steps.txt").open("a").write(context["step"] + "\\n")
 if context["step"] == "prepare":
-    body = {"action": "advance", "next_step": "collect"}
+    publish(context, control, action="advance", next_step="collect")
 else:
-    body = {"action": "succeed"}
-outcome = {
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    **body,
-}
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps(outcome))
-os.rename(temporary, control / "outcome.ready")
+    publish(context, control, action="succeed")
 """
+)
 
 
-def test_journal_round_trip(tmp_path: Path) -> None:
-    control = tmp_path / ".httk-workspace"
-    (control / "journal").mkdir(parents=True)
-    with JournalWriter(control) as writer:
-        reference = writer.append({"answer": 42})
-    assert read_record(control, reference) == {"answer": 42}
-    assert len(reference) <= 106
-
-
-def test_transition_verifies_destination_after_ambiguous_rename(tmp_path: Path, monkeypatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, _ = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    marker = workspace.submit(payload, "project/rename")
-    real_rename = os.rename
-    injected = False
-
-    def ambiguous_rename(source, destination) -> None:
-        nonlocal injected
-        real_rename(source, destination)
-        if not injected and Path(source) == marker.path:
-            injected = True
-            raise OSError("simulated lost NFS reply")
-
-    monkeypatch.setattr(os, "rename", ambiguous_rename)
-    with JournalWriter(workspace.control) as writer:
-        moved = workspace.transition(
-            writer,
-            marker,
-            "ready",
-            {
-                "step": "prepare",
-                "activation_id": str(uuid.uuid4()),
-                "activation_ordinal": 1,
-                "attempt_ordinal": 0,
-                "total_attempts": 0,
-                "data_generation": None,
-            },
-        )
-    assert moved.kind == "ready"
-    assert not marker.path.exists()
-    assert moved.path.exists()
-
-
-def test_submit_and_run_multistep_persistent_job(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    workspace.submit(payload, "project/a")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    assert marker.kind == "succeeded"
-    run = workspace.payload_path(marker.placement, marker.job_key) / "run"
-    assert (run / "steps.txt").read_text(encoding="utf-8").splitlines() == ["prepare", "collect"]
-
-
-@pytest.mark.timing
-def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _TWO_STEP_RUNNER.replace('"action": "advance", "next_step": "collect"', '"action": "succeed"'),
+def _package(root: Path, runner: str, steps: tuple[str, ...] = ("prepare", "collect")) -> Path:
+    root.mkdir(parents=True)
+    (root / "httk_workflow.toml").write_text(
+        f'[workflow]\nname = "tests.example"\n\n[workflow.runner]\nsteps = {json.dumps(list(steps))}\n'
+        f'initial_step = "{steps[0]}"\n',
+        encoding="utf-8",
     )
-    workspace.submit(payload, "project/recovery")
-    first = TaskManager(workspace, heartbeat_interval=0.01)
-    try:
-        first.tick()
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            running = workspace.find_marker_by_id(job_id)
-            assert running is not None
-            state = workspace.read_state(running)
-            if running.kind == "running" and first._outcome_path(running, StateFrame.from_mapping(state)).exists():
-                first.tick()
-                break
-            time.sleep(0.01)
-        committing = workspace.find_marker_by_id(job_id)
-        assert committing is not None and committing.kind == "committing"
-    finally:
-        first.close()
-    # The first manager is abandoned with the commit it owns, as a crash leaves it.
-    bury_manager(workspace.control / "managers" / first.manager_id)
-    with TaskManager(workspace) as replacement:
-        replacement.run_until_idle()
-    finished = workspace.find_marker_by_id(job_id)
-    assert finished is not None and finished.kind == "succeeded"
+    (root / "run").write_text(runner, encoding="utf-8")
+    (root / "run").chmod(0o755)
+    return root
 
 
-@pytest.mark.timing
-def test_lost_running_transition_does_not_execute_runner(tmp_path: Path, monkeypatch) -> None:
-    runner = """#!/usr/bin/env python3
-from pathlib import Path
-Path("runner-executed").write_text("unsafe")
-"""
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", runner)
-    workspace.submit(payload, "project/gated")
-    real_transition = workspace.transition
-
-    def lose_running_transition(writer, marker, kind, updates, *, priority=None):
-        if kind == "running":
-            raise TransitionLostError("simulated competing transition")
-        return real_transition(writer, marker, kind, updates, priority=priority)
-
-    monkeypatch.setattr(workspace, "transition", lose_running_transition)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.tick()
-        time.sleep(0.05)
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "claimed"
-    workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
-    assert not (workdir / "runner-executed").exists()
+def _run(ws: Workspace) -> None:
+    with TaskManager(ws) as manager:
+        manager.run_until_idle(timeout=60)
 
 
-def test_unclean_process_failure_sets_restart_context(tmp_path: Path) -> None:
-    runner = """#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
+def _only(ws: Workspace, state: str) -> _kernel.JobRef:
+    (ref,) = _kernel.list_jobs(ws, state)
+    return ref
 
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
-count_path = run / "count"
+
+@pytest.fixture()
+def ws(tmp_path: Path) -> Workspace:
+    return workspace_at(tmp_path / "workspace")
+
+
+def test_submit_and_run_multistep_persistent_job(ws: Workspace, tmp_path: Path) -> None:
+    job = new_job(ws, _package(tmp_path / "package", _TWO_STEP_RUNNER), placement="project/a", install=True)
+    _run(ws)
+    done = _only(ws, "succeeded")
+    assert done.job_id == job.job_id and done.path.parent == ws.jobs / "succeeded" / "project" / "a"
+    assert (done.path / "run" / "steps.txt").read_text(encoding="utf-8").splitlines() == ["prepare", "collect"]
+
+
+def test_a_job_spec_job_with_retry_restarts_after_a_failed_exit(ws: Workspace, tmp_path: Path) -> None:
+    runner = (
+        _PREAMBLE
+        + """count_path = run / "count"
 count = int(count_path.read_text()) + 1 if count_path.exists() else 1
 count_path.write_text(str(count))
 if count == 1:
     sys.exit(9)
-assert context["is_restart"] is True
-assert context["is_unclean_restart"] is True
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
+assert context["is_restart"] is True and context["attempt_reason"] == "process_failure"
+publish(context, control, action="succeed")
 """
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", runner, retry_on=["process_failure"])
-    workspace.submit(payload, "project/restart")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    assert marker.kind == "succeeded"
-    assert (workspace.payload_path(marker.placement, marker.job_key) / "run" / "count").read_text() == "2"
+    )
+    installed = install(ws, _package(tmp_path / "package", runner, ("start",)))
+    spec = JobSpec(
+        name="restart",
+        workflow_id=installed.id,
+        workflow_name=installed.name,
+        placement="project/restart",
+        maximum_attempts_per_activation=3,
+        retry_on=("process_failure",),
+    )
+    owner = _kernel.register_owner(ws, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        staging = owner.scratch("submit") / "job"
+        definition = prepare_job_payload(staging, spec)
+        assert definition.retry_policy.retry_on == frozenset({"process_failure"})
+        _kernel.submit(ws, owner, staging)
+    finally:
+        owner.close()
+    _run(ws)
+    done = _only(ws, "succeeded")
+    assert done.job_id == definition.id
+    assert (done.path / "run" / "count").read_text() == "2"
 
 
-def test_transactional_output(tmp_path: Path) -> None:
-    runner = """#!/usr/bin/env python3
-import hashlib
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-payload = temporary / "transaction" / "payload"
-payload.mkdir(parents=True)
-content = b"complete\\n"
-(payload / "result.txt").write_bytes(content)
-(temporary / "transaction" / "manifest.json").write_text(json.dumps({
-    "format": "httk-workflow-transaction",
-    "format_version": 2,
-    "id": "transaction",
-    "expected_data_generation": context["data_generation"],
-    "operations": [{
-        "id": "result",
-        "op": "put-file",
-        "source": "payload/result.txt",
-        "path": "result.txt",
-        "sha256": hashlib.sha256(content).hexdigest(),
-    }],
-}))
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "expected_data_generation": context["data_generation"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
+def test_committed_transactions_land_in_data(ws: Workspace, tmp_path: Path) -> None:
+    runner = (
+        _PREAMBLE
+        + """staged = control / "txn" / "000000.tmp" / "data"
+staged.mkdir(parents=True)
+(staged / "result.txt").write_text("complete\\n")
+os.rename(control / "txn" / "000000.tmp", control / "txn" / "000000")
+publish(context, control, action="succeed")
 """
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", runner, data_mode="transactional")
-    workspace.submit(payload, "project/transaction")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    assert marker.kind == "succeeded"
-    data = workspace.payload_path(marker.placement, marker.job_key) / "data"
-    assert (data / "result.txt").read_text(encoding="utf-8") == "complete\n"
+    )
+    new_job(ws, _package(tmp_path / "package", runner, ("start",)), install=True)
+    _run(ws)
+    assert (_only(ws, "succeeded").path / "data" / "result.txt").read_text(encoding="utf-8") == "complete\n"
 
 
-def test_dynamic_child_join(tmp_path: Path) -> None:
-    runner = """#!/usr/bin/env python3
-import json
-import os
-import uuid
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-base = {
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-}
-if context["step"] == "aggregate":
-    outcome = {**base, "action": "succeed"}
+def test_a_child_spawned_with_the_runtime_builders_is_validated_published_and_joined(
+    ws: Workspace, tmp_path: Path
+) -> None:
+    # The parent publishes through OutcomeDraft and JobSpec exactly as the SDK does, so the child job.json
+    # and spawn.json it writes must be what the manager's child validation accepts.
+    runner = (
+        _PREAMBLE
+        + """from httk.workflow.runtime import AttemptContext
+from httk.workflow.runtime_builders import JobSpec, OutcomeDraft
+job = json.loads((Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "job.json").read_text())
+if context["step"] == "start":
+    draft = OutcomeDraft(AttemptContext.from_mapping(context), control)
+    spec = JobSpec(name="child", workflow_id=job["workflow"]["id"], workflow_name=job["workflow"]["name"],
+                   initial_step="child", tag="kid")
+    draft.add_child_job(spec.as_mapping(), "project/children", label="kid")
+    draft.publish("wait", next_step="aggregate")
+elif context["step"] == "aggregate":
+    (run / "children.json").write_text(json.dumps(context["children"]))
+    publish(context, control, action="succeed")
 else:
-    child_id = str(uuid.uuid5(uuid.UUID(context["activation_id"]), "child"))
-    child_key = "child--" + child_id
-    child_dir = temporary / "children" / "jobs" / child_key
-    (child_dir / "files").mkdir(parents=True)
-    child_runner = child_dir / "files" / "runner"
-    child_runner.write_text('''#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.child"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
-''')
-    child_runner.chmod(0o755)
-    (child_dir / "job.json").write_text(json.dumps({
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": child_id,
-        "tag": "child",
-        "name": "Child",
-        "workflow": "tests.child",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "run",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"retry_on": []},
-        "resources": {},
-        "parent": {
-            "workspace_id": context["workspace_id"],
-            "job_id": context["job_id"],
-            "job_key": context["job_key"],
-            "placement": context["placement"],
-            "activation_id": context["activation_id"],
-        },
-    }))
-    (temporary / "children" / "spawn.json").write_text(json.dumps({
-        "children": [{
-            "workspace_id": context["workspace_id"],
-            "job_id": child_id,
-            "job_key": child_key,
-            "label": "child",
-            "placement": "project/children",
-        }]
-    }))
-    outcome = {
-        **base,
-        "action": "wait",
-        "next_step": "aggregate",
-        "join": {
-            "children": [{
-                "workspace_id": context["workspace_id"],
-                "job_id": child_id,
-                "job_key": child_key,
-                "placement_hint": "project/children",
-            }],
-            "condition": "all_succeeded",
-        },
-    }
-(temporary / "outcome.json").write_text(json.dumps(outcome))
-os.rename(temporary, control / "outcome.ready")
+    publish(context, control, action="succeed")
 """
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", runner)
-    workspace.submit(payload, "project/parent")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    parent = workspace.find_marker_by_id(job_id)
-    assert parent is not None and parent.kind == "succeeded"
-    markers = list(workspace.scan_markers(("succeeded",)))
-    assert len(markers) == 2
+    )
+    parent = new_job(
+        ws, _package(tmp_path / "package", runner, ("start", "child", "aggregate")), placement="project", install=True
+    )
+    _run(ws)
+    done = {ref.job_id: ref for ref in _kernel.list_jobs(ws, "succeeded")}
+    assert len(done) == 2 and parent.job_id in done
+    (child,) = [ref for job_id, ref in done.items() if job_id != parent.job_id]
+    assert child.path.parent == ws.jobs / "succeeded" / "project" / "children"
+    document = json.loads((child.path / "job.json").read_bytes())
+    assert document["placement"] == "project/children" and document["initial_step"] == "child"
+    assert document["parent"]["job_id"] == parent.job_id and document["parent"]["placement"] == "project"
+    (observed,) = json.loads((done[parent.job_id].path / "run" / "children.json").read_text(encoding="utf-8"))
+    assert observed["label"] == "kid" and observed["kind"] == "succeeded"
+    assert observed["payload_path"] == child.path.relative_to(ws.root).as_posix()
 
 
-def test_invalid_submission_moves_to_failed(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    (payload / "files" / "runner").unlink()
-    workspace.submit(payload, "project/invalid")
-    with TaskManager(workspace) as manager:
-        manager.tick()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    assert marker.kind == "failed"
+def test_a_workdir_batch_replays_idempotently(tmp_path: Path) -> None:
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    (workdir / "old").mkdir()
+    (workdir / "old" / "stale").write_text("stale", encoding="utf-8")
+    (workdir / "doomed").write_text("x", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file").write_text("new", encoding="utf-8")
+    batch = ReplayableWorkdirBatch.initialize(workdir)
+    batch.transaction.make_dir("dir", "made/deep")
+    batch.transaction.put_file("file", source / "file", "made/file")
+    batch.transaction.put_tree("tree", source, "copied")
+    batch.transaction.put_tree("replace", source, "old", replace=True)
+    batch.transaction.remove("remove", "doomed")
+    batch.transaction.remove("absent", "never", missing_ok=True)
+    ready = batch.seal()
+    # A crash after the replay applied everything but before the batch was retired: replaying again is a no-op.
+    assert replay_transaction(ready, workdir, expected_generation=0)
+    (applied,) = ReplayableWorkdirBatch.recover(workdir)
+    assert applied.parent.name == "workdir-applied"
+    assert (workdir / "made" / "deep").is_dir()
+    assert (workdir / "made" / "file").read_text(encoding="utf-8") == "new"
+    assert (workdir / "copied" / "file").read_text(encoding="utf-8") == "new"
+    assert sorted(os.listdir(workdir / "old")) == ["file"]
+    assert not (workdir / "doomed").exists()
+    with pytest.raises(TransactionError, match="stale"):
+        replay_transaction(applied, workdir, expected_generation=1)
 
 
-def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    submitted = workspace.submit(payload, "project/request")
-    with TaskManager(workspace, pools=("other",)) as manager:
-        manager.tick()
-        ready = workspace.find_marker_by_id(job_id)
-        assert ready is not None and ready.kind == "ready"
-        assert ready.path.name.startswith(f"{ready.job_key}.p500.")
-        workspace.publish_request(
-            {
-                "format": "httk-workflow-request",
-                "format_version": 2,
-                "job_id": job_id,
-                "job_key": ready.job_key,
-                "placement": ready.placement.as_posix(),
-                "expected_generation": ready.generation,
-                "expected_record_ref": ready.record_ref,
-                "action": "set_priority",
-                "priority": 25,
-                "operator": "pytest",
-                "reason": "test",
-            }
-        )
-        manager.tick()
-    changed = workspace.find_marker_by_id(job_id)
-    assert changed is not None
-    assert changed.priority == 25
-    assert changed.kind == "ready"
-    assert changed.path.name.startswith(f"{changed.job_key}.p025.")
-    assert changed.generation > submitted.generation
+def test_a_replay_refuses_a_corrupt_source(tmp_path: Path) -> None:
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    source = tmp_path / "file"
+    source.write_text("good", encoding="utf-8")
+    batch = ReplayableWorkdirBatch.initialize(workdir)
+    batch.transaction.put_file(str(uuid.uuid4().hex[:8]), source, "file")
+    ready = batch.seal()
+    (staged,) = (ready / "payload").iterdir()
+    staged.write_text("tampered", encoding="utf-8")
+    with pytest.raises(TransactionError, match="digest mismatch"):
+        replay_transaction(ready, workdir, expected_generation=0)
+    assert not (workdir / "file").exists()

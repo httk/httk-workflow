@@ -129,7 +129,7 @@ class JobDefinition:
     :param declared: Declared parameter and input metadata, keyed by section.
     :param environment: The declared and overridden workflow environment.
     :param parent: ``{workspace_id, job_id, job_key, placement, activation_id, spawn_id}`` of the spawning job.
-    :param seal_succeeded: Whether a succeeded job is sealed; ``None`` leaves it to the installed workflow.
+    :param seal_succeeded: Whether a succeeded job is sealed; ``None`` uses the workspace setting ``seal.succeeded``.
     :param stored_digest: The SHA-256 of the stored bytes this definition was read from, if any.
     """
 

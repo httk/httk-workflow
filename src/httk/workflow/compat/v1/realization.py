@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from string import Template
 from typing import TYPE_CHECKING, cast
 
-from httk.workflow.compat import LanguagePorts, LanguageRequest, LanguageScaffold, WorkflowLanguage, runner_reference
+from httk.workflow.compat import LanguagePorts, LanguageRequest, LanguageScaffold, WorkflowLanguage
 from httk.workflow.protocol import validate_label
 
 if TYPE_CHECKING:
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 # The runner file is data of the v1 package this module belongs to.
 PACKAGE = "httk.workflow.compat.v1"
 RUNNER = "v1_runner.py"
+#: The reserved job parameter carrying the v1 task metadata (program, attempts, legacy step and root placement).
+COMPATIBILITY_PARAMETER = "v1_compatibility"
 PROGRAMS = ("ht_steps", "ht_run")
 V1_PRIORITY_MAP = {1: 100, 2: 300, 3: 500, 4: 700, 5: 900}
 V2_TO_V1_PRIORITY = {value: key for key, value in V1_PRIORITY_MAP.items()}
@@ -222,28 +224,25 @@ def prepare(request: LanguageRequest) -> LanguageScaffold:
             raise ValueError(f"legacy runner is missing or not executable: {runner}")
 
     def finalize(spec: JobSpec) -> JobSpec:
+        compatibility = {
+            "profile": "httk-v1-task-v1",
+            "program": program,
+            "legacy_priority": V2_TO_V1_PRIORITY.get(spec.priority, 3),
+            "attempts": attempts,
+        }
         return replace(
             spec,
-            compatibility={
-                "profile": "httk-v1-task-v1",
-                "program": program,
-                "legacy_priority": V2_TO_V1_PRIORITY.get(spec.priority, 3),
-                "attempts": attempts,
-            },
+            parameters={**spec.parameters, COMPATIBILITY_PARAMETER: compatibility},
             claim_pool=taskset,
-            retry_on=("lease_lost", "process_failure"),
+            retry_on=("owner_lost", "process_failure"),
             maximum_attempts_per_activation=attempts + 1,
-            workdir_mode="persistent",
-            workdir_path="ht.run.current",
-            data_mode="none",
         )
 
     return LanguageScaffold(
         documents={},
         files={},
         parameters={"workflow_language": "httk-v1"},
-        runner=runner_reference(PACKAGE, RUNNER),
-        workdir_path="ht.run.current",
+        reserved_parameters=(COMPATIBILITY_PARAMETER,),
         required_capabilities=(),
         instantiate=instantiate,
         finalize=finalize,

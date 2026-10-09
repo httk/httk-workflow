@@ -9,7 +9,6 @@ classes here are the protocol-level building blocks that both the Python
 authoring SDK and the Bash bridge publish with.
 """
 
-import copy
 import json
 import os
 import shutil
@@ -21,35 +20,27 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from httk.core.digests import sha256_file, tree_digest
 
+from ._job import JOB_FORMAT, JOB_FORMAT_VERSION, JobDefinition
 from ._util import (
     fsync_directory,
+    fsync_file,
     fsync_tree,
     json_bytes,
     read_json,
     utc_now,
     write_json_atomic,
 )
-from .errors import FormatError
+from .errors import FormatError, TransactionError
 from .models import (
     _UNSAFE_PATH_COMPONENTS,
     JOB_STATE_DIRECTORY,
-    JobDefinition,
     normalize_placement,
     normalize_resources,
     placement_text,
-    validate_calls,
-    validate_declarations,
-    validate_declared,
-    validate_environment,
     validate_failure,
     validate_label,
-    validate_parameters,
-    validate_resources,
-    validate_runner_command,
-    validate_sha256,
     validate_step,
 )
-from .transactions import replay_transaction
 
 if TYPE_CHECKING:
     from .runtime import AttemptContext
@@ -145,27 +136,19 @@ def join_mapping(
 
 @dataclass(frozen=True)
 class JobSpec:
-    """Values needed to create an immutable native job definition.
+    """Values needed to create an immutable ``job.json`` (version 3).
 
-    A ``payload`` runner is a file inside the job payload. A ``workspace`` or
-    ``installed`` runner lives outside the payload and must therefore pin its own
-    ``runner_sha256``, which is how one published runner serves a whole campaign
-    of jobs without being copied per job.
+    The installed workflow supplies the runner, its steps and its calls, so a
+    job names that workflow only by its id and short name.
 
     :param name: Set the job display name.
-    :param workflow: Name the workflow.
-    :param runner_path: Locate the runner.
+    :param workflow_id: Name the installed workflow by id.
+    :param workflow_name: Give the installed workflow's short name.
     :param initial_step: Name the starting step.
     :param tag: Set the optional job tag.
     :param job_id: Preserve a job id when resuming or spawning.
-    :param runner_executor: Select the runner executor.
-    :param runner_source: Select where the runner lives.
-    :param runner_sha256: Pin a runner outside the payload by digest.
-    :param runner_arguments: Supply runner arguments.
-    :param runner_command: Supply the unexpanded package command of a shared runner tree.
-    :param workdir_mode: Select the workdir mode.
-    :param workdir_path: Name the workdir below the job payload.
-    :param data_mode: Select the job data mode.
+    :param placement: Place the job below each state directory; a spawned child takes the
+        placement it is spawned at instead.
     :param priority: Set the scheduling priority.
     :param claim_pool: Select the claim pool.
     :param required_capabilities: Require these manager capabilities.
@@ -177,27 +160,18 @@ class JobSpec:
     :param step_resources: Supply per-step resource requirements, time labels in seconds.
     :param parameters: Supply opaque job parameters.
     :param environment: Supply declared environment metadata and overrides.
-    :param declarations: Supply workflow declarations.
+    :param declarations: Supply workflow declarations, keyed by name.
     :param declared: Supply the declared parameter and input metadata sections.
-    :param compatibility: Supply an optional compatibility profile.
-    :param requires: Require these ``NAME>=VERSION`` distributions in the claiming manager's environment.
-    :param calls: Declare the workflows the job may call, alias to resolved reference.
+    :param seal_succeeded: Seal the job when it succeeds; ``None`` leaves it to the workspace setting.
     """
 
     name: str
-    workflow: str
-    runner_path: str
+    workflow_id: str
+    workflow_name: str
     initial_step: str = "start"
     tag: str | None = None
     job_id: str | None = None
-    runner_executor: str = "path"
-    runner_source: Literal["payload", "workspace", "installed"] = "payload"
-    runner_sha256: str | None = None
-    runner_arguments: tuple[str, ...] = ()
-    runner_command: tuple[str, ...] | None = None
-    workdir_mode: Literal["persistent", "isolated"] = "persistent"
-    workdir_path: str = "run"
-    data_mode: Literal["none", "transactional"] = "none"
+    placement: str = ""
     priority: int = 500
     claim_pool: str = "default"
     required_capabilities: tuple[str, ...] = ()
@@ -209,87 +183,48 @@ class JobSpec:
     step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     parameters: Mapping[str, object] = field(default_factory=dict)
     environment: Mapping[str, object] = field(default_factory=dict)
-    #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-    #: The declared parameter and input metadata, keyed by section, mirroring
-    #: the shape of the environment member.
     declared: Mapping[str, object] = field(default_factory=dict)
-    compatibility: Mapping[str, object] | None = None
-    requires: tuple[str, ...] = ()
-    calls: Mapping[str, str] | None = None
+    seal_succeeded: bool | None = None
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
-        """Return the validated job-definition mapping.
+        """Return the validated ``job.json`` mapping.
 
         :param parent: Identify the parent job when this is a spawned child.
         :return: The mapping written to ``job.json``.
-        :raises ValueError: If runner placement or digest settings are invalid.
+        :raises httk.workflow.errors.FormatError: If a member is invalid.
         """
+
         limits = {
             "maximum_attempts_per_activation": self.maximum_attempts_per_activation,
             "maximum_total_attempts": self.maximum_total_attempts,
             "maximum_activations": self.maximum_activations,
         }
-        retry_policy: dict[str, object] = {name: value for name, value in limits.items() if value is not None}
-        retry_policy["retry_on"] = list(self.retry_on)
-        runner: dict[str, object] = {
-            "executor": self.runner_executor,
-            "source": self.runner_source,
-            "path": self.runner_path,
-            "arguments": list(self.runner_arguments),
-        }
-        if self.runner_source == "payload":
-            if self.runner_sha256 is not None:
-                raise ValueError("a payload runner is pinned by the job digest and cannot carry runner_sha256")
-        else:
-            if self.runner_sha256 is None:
-                raise ValueError(f"a {self.runner_source} runner must pin runner_sha256")
-            runner["sha256"] = validate_sha256(self.runner_sha256, "runner_sha256")
-        if self.runner_command is not None:
-            if self.runner_source == "payload":
-                raise ValueError("a payload runner cannot carry runner_command")
-            runner["command"] = list(validate_runner_command(self.runner_command, "runner_command"))
-        resources = validate_resources(self.resources)
-        step_resources: dict[str, dict[str, int]] = {}
-        for raw_step, raw_resources in self.step_resources.items():
-            step = validate_step(raw_step, "step_resources step")
-            step_resources[step] = validate_resources(raw_resources, f"step_resources.{step}")
-        result: dict[str, object] = {
-            "format": "httk-workflow-job",
-            "format_version": 2,
+        mapping = {
+            "format": JOB_FORMAT,
+            "format_version": JOB_FORMAT_VERSION,
             "id": self.job_id or str(uuid.uuid4()),
             "tag": self.tag,
             "name": self.name,
-            "workflow": self.workflow,
-            "runner": runner,
-            "workdir": {"mode": self.workdir_mode, "path": self.workdir_path},
-            "data": {"mode": self.data_mode},
+            "placement": placement_text(normalize_placement(self.placement)),
+            "workflow": {"id": self.workflow_id, "name": self.workflow_name},
             "initial_step": self.initial_step,
             "priority": self.priority,
-            "claim": {
-                "pool": self.claim_pool,
-                "required_capabilities": list(self.required_capabilities),
+            "claim": {"pool": self.claim_pool, "required_capabilities": list(self.required_capabilities)},
+            "retry_policy": {
+                **{name: limit for name, limit in limits.items() if limit is not None},
+                "retry_on": list(self.retry_on),
             },
-            "retry_policy": retry_policy,
-            "resources": resources,
-            "step_resources": step_resources,
+            "resources": dict(self.resources),
+            "step_resources": {step: dict(value) for step, value in self.step_resources.items()},
+            "parameters": dict(self.parameters),
+            "declarations": {name: dict(value) for name, value in self.declarations.items()},
+            "declared": dict(self.declared),
+            "environment": dict(self.environment),
             "parent": None if parent is None else dict(parent),
+            "seal_succeeded": self.seal_succeeded,
         }
-        if self.parameters:
-            result["parameters"] = validate_parameters(self.parameters)
-        if self.environment:
-            result["environment"] = validate_environment(self.environment)
-        if self.declarations:
-            result["declarations"] = validate_declarations(self.declarations)
-        if self.declared:
-            result["declared"] = validate_declared(self.declared)
-        if self.requires:
-            result["requires"] = list(self.requires)
-        if self.calls is not None:
-            result["calls"] = validate_calls(self.calls, "calls")
-        if self.compatibility is not None:
-            result["compatibility"] = copy.deepcopy(dict(self.compatibility))
-        return result
+        return JobDefinition.from_mapping(mapping).as_mapping()
 
 
 def prepare_job_payload(
@@ -299,7 +234,7 @@ def prepare_job_payload(
     parent: Mapping[str, object] | None = None,
     durable: bool = False,
 ) -> JobDefinition:
-    """Create and validate ``job.json`` in an existing prepared payload.
+    """Create ``job.json`` in an existing prepared payload.
 
     *durable* synchronizes the written ``job.json`` for a caller preparing a
     payload directly on durable storage; it defaults to ``False`` because a
@@ -310,24 +245,19 @@ def prepare_job_payload(
     :param spec: Supply the immutable job definition values.
     :param parent: Identify the parent job when preparing a child.
     :param durable: Synchronize ``job.json`` before returning.
-    :return: The validated job definition.
+    :return: The job definition, its digest pinned to the written bytes.
     :raises FileExistsError: If ``job.json`` already exists.
-    :raises ValueError: If the job definition or payload runner is invalid.
+    :raises httk.workflow.errors.FormatError: If the job definition is invalid.
     """
 
     root = Path(destination)
     root.mkdir(parents=True, exist_ok=True)
-    job_path = root / "job.json"
-    if job_path.exists():
-        raise FileExistsError(f"job definition already exists: {job_path}")
-    mapping = spec.as_mapping(parent=parent)
-    job = JobDefinition.from_mapping(mapping)
-    if job.runner_source == "payload":
-        runner = root.joinpath(*job.runner_path.parts)
-        if not runner.is_file() or runner.is_symlink():
-            raise ValueError(f"runner must be a regular file inside the payload: {job.runner_path}")
-    write_json_atomic(job_path, mapping, durable=durable)
-    return job
+    data = JobDefinition.from_mapping(spec.as_mapping(parent=parent)).encode()
+    with open(root / "job.json", "xb") as stream:
+        stream.write(data)
+        if durable:
+            os.fsync(stream.fileno())
+    return JobDefinition.from_bytes(data)
 
 
 class TransactionBuilder:
@@ -502,12 +432,12 @@ class OutcomeDraft:
     """One unpublished outcome bundle below an attempt control directory.
 
     The draft is the single place that writes the protocol shapes of an outcome:
-    its transaction, its spawn set, and the atomic rename that publishes it. It
+    its spawn set and the atomic rename that publishes it. It
     is bound to nothing but the attempt identity and the control directory, so
     the authoring SDK and the Bash bridge publish through exactly one
     implementation.
 
-    :param context: Provide the attempt identity and generation.
+    :param context: Provide the attempt identity.
     :param control: Locate the attempt control directory.
     :param root: Locate an existing unpublished draft, when resuming one.
     :param durable: Synchronize the draft before publishing it.
@@ -526,12 +456,10 @@ class OutcomeDraft:
         #: Whether :meth:`publish` synchronizes the draft before the atomic
         #: rename that publishes it. The whole draft is unreferenced until that
         #: rename, so nothing inside it is synchronized per write: one batched
-        #: tree sync at publication makes the outcome, its transaction manifest
-        #: and staged payload, and its child bundles durable together.
+        #: tree sync at publication makes the outcome and its child bundles durable together.
         self.durable = durable
         self.root = root or control / f"outcome.tmp.{uuid.uuid4()}"
         self.root.mkdir(exist_ok=False)
-        self._transaction: TransactionBuilder | None = None
         self._children: list[tuple[ChildReference, dict[str, object]]] = []
 
     @classmethod
@@ -554,7 +482,6 @@ class OutcomeDraft:
             raise ValueError("outcome draft is not below this attempt control directory")
         if not result.root.is_dir():
             raise FileNotFoundError(result.root)
-        result._transaction = None
         result._children = []
         spawn_path = result.root / "children" / "spawn.json"
         if spawn_path.exists():
@@ -569,27 +496,6 @@ class OutcomeDraft:
                     )
                     result._children.append((reference, dict(raw)))
         return result
-
-    def transaction(self) -> TransactionBuilder:
-        """Create the transaction builder for this outcome.
-
-        :return: The outcome's transaction builder.
-        :raises ValueError: If the attempt has no transactional data.
-        :raises RuntimeError: If the outcome already has a transaction.
-        """
-        if self.context.data_generation is None:
-            raise ValueError("this job does not use transactional data")
-        if self._transaction is not None or (self.root / "transaction").exists():
-            raise RuntimeError("an outcome can contain only one transaction")
-        self._transaction = TransactionBuilder(
-            self.root / "transaction",
-            expected_generation=self.context.data_generation,
-            # The draft's own publish-time tree sync makes the manifest and the
-            # staged payload durable in one batch, so the builder does not sync
-            # the manifest a second time on its own.
-            durable=False,
-        )
-        return self._transaction
 
     def _child_label(self, requested: str | None, child: JobDefinition) -> str:
         """Return one child's spawn label, which must be unique in this set."""
@@ -614,17 +520,23 @@ class OutcomeDraft:
         placement: str | PurePosixPath,
         *,
         label: str | None = None,
+        move: bool = False,
     ) -> ChildReference:
         """Register one prepared payload directory as a child of this outcome.
+
+        The payload's ``job.json`` (version 3) is rewritten with the child's
+        placement and its ``parent`` member.
 
         :param payload: Locate the prepared child payload.
         :param placement: Place the child within the workspace.
         :param label: Set the child's unique spawn label.
+        :param move: Rename the payload into the draft instead of copying it (same filesystem only).
         :return: The registered child reference.
         """
 
         source = Path(payload)
-        return self._register_child(read_json(source / "job.json"), placement, label=label, source=source)
+        child = read_json(source / "job.json")
+        return self._register_child(child, placement, label=label, source=source, move=move)
 
     def add_child_job(
         self,
@@ -635,9 +547,9 @@ class OutcomeDraft:
     ) -> ChildReference:
         """Register one synthesized child that needs no prepared payload.
 
-        A child whose runner lives outside the payload — a workspace or installed
-        runner — is completely described by its ``job.json``, so a partitioned
-        campaign can spawn children without copying a payload tree per child.
+        The installed workflow supplies the runner, so a child is completely
+        described by its ``job.json``, and a partitioned campaign can spawn
+        children without copying a payload tree per child.
 
         :param job: Supply the synthesized child job definition.
         :param placement: Place the child within the workspace.
@@ -654,8 +566,11 @@ class OutcomeDraft:
         *,
         label: str | None,
         source: Path | None,
+        move: bool = False,
     ) -> ChildReference:
         spawn_id = str(uuid.uuid4())
+        normalized = normalize_placement(placement)
+        child_mapping["placement"] = placement_text(normalized)
         child_mapping["parent"] = {
             "workspace_id": self.context.workspace_id,
             "job_id": self.context.job_id,
@@ -668,17 +583,18 @@ class OutcomeDraft:
         }
         child = JobDefinition.from_mapping(child_mapping)
         entry_label = self._child_label(label, child)
-        normalized = normalize_placement(placement)
         jobs = self.root / "children" / "jobs"
         jobs.mkdir(parents=True, exist_ok=True)
         destination = jobs / child.job_key
         if source is None:
             destination.mkdir(exist_ok=False)
+        elif move:
+            os.rename(source, destination)
         else:
             _copy_tree(source, destination)
         # Draft-internal: the publish-time tree sync of this draft synchronizes
         # every staged child bundle in one batch just before the outcome rename.
-        write_json_atomic(destination / "job.json", child_mapping, durable=False)
+        (destination / "job.json").write_bytes(child.encode())
         reference = ChildReference(
             self.context.workspace_id,
             child.id,
@@ -730,7 +646,6 @@ class OutcomeDraft:
         join: Mapping[str, object] | None = None,
         pause: Mapping[str, object] | None = None,
         message: str | None = None,
-        expected_data_generation: int | None = None,
         runner_steps: Sequence[str] | None = None,
         resources: Mapping[str, int | str] | None = None,
     ) -> Path:
@@ -744,7 +659,6 @@ class OutcomeDraft:
         :param join: Supply join details for ``wait``.
         :param pause: Supply pause details for ``pause``.
         :param message: Attach an optional human-readable message.
-        :param expected_data_generation: Confirm the transaction generation.
         :param runner_steps: Record the runner steps available to the manager.
         :param resources: Set the requirement of the next activation for ``advance`` or ``wait``;
             ``maxtime`` and ``mintime`` are Slurm duration strings.
@@ -783,20 +697,6 @@ class OutcomeDraft:
             raise ValueError("retry requires a reason")
         if action == "pause" and pause is None:
             raise ValueError("pause requires a reason")
-        transaction_path = self.root / "transaction"
-        if self._transaction is not None:
-            self._transaction.seal()
-        if transaction_path.is_dir():
-            context_generation = self.context.data_generation
-            manifest = read_json(transaction_path / "manifest.json")
-            if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 2:
-                raise ValueError("transaction must use httk-workflow-transaction version 2")
-            if manifest.get("expected_data_generation") != context_generation:
-                raise ValueError("transaction expected_data_generation does not match the attempt context")
-            if expected_data_generation is None:
-                expected_data_generation = context_generation
-            elif expected_data_generation != context_generation:
-                raise ValueError("expected_data_generation does not match the attempt context")
         body: dict[str, object] = {
             "format": "httk-workflow-outcome",
             "format_version": 2,
@@ -813,7 +713,6 @@ class OutcomeDraft:
             "join": join,
             "pause": None if pause is None else dict(pause),
             "message": message,
-            "expected_data_generation": expected_data_generation,
             # The step set of the runner that published this outcome, recorded by
             # the manager as evidence of what this job can still be advanced to.
             "runner_steps": None if runner_steps is None else [validate_step(item) for item in runner_steps],
@@ -824,8 +723,7 @@ class OutcomeDraft:
         # sync below, so this final write is not synchronized on its own.
         write_json_atomic(self.root / "outcome.json", body, durable=False)
         if self.durable:
-            # Everything the draft staged — the outcome, its sealed transaction
-            # manifest and copied payload, its child bundles — is synchronized
+            # Everything the draft staged — the outcome and its child bundles — is synchronized
             # here, before the rename that makes the outcome authoritative, so a
             # node crash can never leave a published outcome that names data its
             # storage never received.
@@ -836,6 +734,124 @@ class OutcomeDraft:
             # control directory; synchronize that directory entry too.
             fsync_directory(self.control)
         return ready
+
+
+def _operation_path(value: object, name: str) -> PurePosixPath:
+    if not isinstance(value, str):
+        raise FormatError(f"{name} must be a nonempty relative path")
+    try:
+        return _relative(value, name)
+    except ValueError as exc:
+        raise FormatError(str(exc)) from exc
+
+
+def _operations(transaction: Path, expected_generation: int) -> list[Mapping[str, object]]:
+    """Return the validated operations of one sealed transaction manifest."""
+
+    manifest = read_json(transaction / "manifest.json")
+    if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 2:
+        raise FormatError("transaction must use httk-workflow-transaction version 2")
+    if manifest.get("expected_data_generation") != expected_generation:
+        raise TransactionError("transaction expected_data_generation is stale")
+    operations = manifest.get("operations")
+    if not isinstance(operations, list) or not all(isinstance(item, Mapping) for item in operations):
+        raise FormatError("transaction operations must be an array of objects")
+    identifiers = [validate_label(item.get("id"), "transaction operation id") for item in operations]
+    if len(set(identifiers)) != len(identifiers):
+        raise FormatError("transaction operation ids are not unique")
+    targets = [
+        _operation_path(item.get("path"), "transaction operation path")
+        for item in operations
+        if item.get("op") != "make-dir"
+    ]
+    for index, left in enumerate(targets):
+        for right in targets[index + 1 :]:
+            if left == right or left in right.parents or right in left.parents:
+                raise FormatError(f"transaction paths overlap: {left} and {right}")
+    return operations
+
+
+def _digest(path: Path) -> str | None:
+    """Return the digest of the file or tree at *path*, or ``None`` when nothing is there."""
+
+    if not path.exists():
+        return None
+    return tree_digest(path) if path.is_dir() else sha256_file(path)
+
+
+def replay_transaction(
+    transaction_dir: Path,
+    data_dir: Path,
+    *,
+    expected_generation: int,
+    durable: bool = False,
+) -> bool:
+    """Idempotently apply one sealed transaction to a directory the runner owns.
+
+    Every operation is a rename out of the transaction (or into its
+    ``trash/<id>/``), so a replay interrupted at any point is finished by
+    running it again: a source that is gone was moved by an earlier replay,
+    which the destination's digest confirms. Paths follow symlinks, so a
+    workdir entry such as ``scratch -> /scratch/...`` works.
+
+    :param transaction_dir: The sealed transaction directory.
+    :param data_dir: The directory to update, created when missing.
+    :param expected_generation: Require this ``expected_data_generation`` in the manifest.
+    :param durable: Synchronize what was installed and every changed directory before returning.
+    :return: Whether the manifest contains operations.
+    :raises httk.workflow.errors.FormatError: If the manifest or an operation is invalid.
+    :raises httk.workflow.errors.TransactionError: If the generation, a source or a destination does not fit.
+    """
+
+    operations = _operations(transaction_dir, expected_generation)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    touched: set[Path] = set()
+    for raw in operations:
+        operation = raw.get("op")
+        relative = _operation_path(raw.get("path"), "transaction operation path")
+        target = data_dir.joinpath(*relative.parts)
+        trash = transaction_dir / "trash" / str(raw["id"])
+        if operation == "make-dir":
+            if target.exists() and not target.is_dir():
+                raise TransactionError(f"make-dir destination is not a directory: {relative}")
+            target.mkdir(parents=True, exist_ok=True)
+        elif operation == "remove":
+            if not target.exists() and not target.is_symlink():
+                if (trash / "removed").exists() or raw.get("missing_ok") is True:
+                    continue
+                raise TransactionError(f"remove target is missing: {relative}")
+            trash.mkdir(parents=True, exist_ok=True)
+            os.rename(target, trash / "removed")
+            touched.add(trash)
+        elif operation in {"put-file", "put-tree", "replace-tree"}:
+            source = transaction_dir.joinpath(*_operation_path(raw.get("source"), f"{operation} source").parts)
+            expected = str(raw.get("sha256", ""))
+            if not source.exists():
+                if _digest(target) == expected:
+                    continue
+                raise TransactionError(f"{operation} source is missing: {relative}")
+            if _digest(source) != expected:
+                raise TransactionError(f"{operation} source digest mismatch: {relative}")
+            if target.exists() and operation == "put-tree":
+                raise TransactionError(f"put-tree destination already exists: {relative}")
+            if target.exists() and operation == "replace-tree":
+                trash.mkdir(parents=True, exist_ok=True)
+                os.rename(target, trash / "old")
+                touched.add(trash)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, target)
+            if durable and target.is_dir():
+                fsync_tree(target)
+            elif durable:
+                fsync_file(target)
+        else:
+            raise FormatError(f"unsupported transaction operation: {operation!r}")
+        touched.add(target.parent)
+    if durable:
+        for directory in sorted(touched):
+            if directory.is_dir():
+                fsync_directory(directory)
+    return bool(operations)
 
 
 class ReplayableWorkdirBatch:
@@ -1036,13 +1052,15 @@ def _check_state_item(name: str, value: object) -> None:
 
 
 class RunLog:
-    """Append structured application evidence in a job payload.
+    """Append structured application evidence to the runner-private ``.httk-job/runlog.jsonl``.
+
+    The owner-written ``logs/runlog.jsonl`` is the job's timeline; these records annotate it.
 
     :param payload: Locate the payload receiving the run log.
     """
 
     def __init__(self, payload: str | os.PathLike[str]) -> None:
-        self.path = Path(payload).resolve() / "logs" / "runlog.jsonl"
+        self.path = Path(payload).resolve() / JOB_STATE_DIRECTORY / "runlog.jsonl"
 
     def append(self, kind: str, message: str, *, files: Sequence[str | os.PathLike[str]] = ()) -> None:
         """Append one structured run-log event.

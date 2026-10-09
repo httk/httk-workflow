@@ -1,305 +1,201 @@
 """Labeled children, typed join observations, and runner-declared retries."""
 
 import json
-import uuid
 from pathlib import Path
 
-from httk.workflow import TaskManager, Workspace
+import pytest
 
-_CHILD_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
+from attempt_fixtures import every_job, find, package, run_manager, state
+from httk.workflow import Workspace, _kernel, _store
+from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-mode = "@MODE@"
-if mode == "succeed":
-    body = {"action": "succeed"}
-else:
-    body = {
-        "action": "fail",
-        "failure": {"code": "child.broken", "message": "the child declared a failure"},
-    }
-temporary = control / "outcome.tmp.child"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    **body,
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
-
-_PARENT_RUNNER = """#!/usr/bin/env python3
+#: One SDK-free runner for parent and children: ``branch`` spawns the children ``parameters.labels`` lists
+#: (label, mode) with a join that names no labels, ``gather`` records its context children, ``run`` is a
+#: child that succeeds or declares a failure, and ``only`` declares a retryable failure.
+_RUNNER = """#!/usr/bin/env python3
 import json
 import os
 import uuid
 from pathlib import Path
 
-CHILD = {child!r}
-LABELS = {labels!r}
 context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
+job = json.loads((Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "job.json").read_text())
+step = context["step"]
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
-base = {{
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-}}
-if context["step"] == "gather":
+outcome = {key: context[key] for key in ("job_id", "activation_id", "attempt_id")}
+outcome.update(format="httk-workflow-outcome", format_version=2)
+if step == "gather":
     (workdir / "children.json").write_text(json.dumps(context["children"], sort_keys=True))
-    outcome = {{**base, "action": "succeed"}}
+    outcome.update(action="succeed")
+elif step == "run":
+    if job["parameters"]["mode"] == "succeed":
+        outcome.update(action="succeed")
+    else:
+        outcome.update(action="fail", failure={"code": "child.broken", "message": "the child declared a failure"})
+elif step == "only":
+    count_path = workdir / "attempts"
+    count = int(count_path.read_text()) + 1 if count_path.exists() else 1
+    count_path.write_text(str(count))
+    outcome.update(
+        action="fail",
+        failure={
+            "code": "vasp.nonconvergent",
+            "message": "electronic minimization did not converge",
+            "retryable": True,
+        },
+    )
 else:
     entries = []
-    for label, mode in LABELS:
+    for label, mode in job["parameters"]["labels"]:
         child_id = str(uuid.uuid5(uuid.UUID(context["activation_id"]), label + mode))
         child_key = "child--" + child_id
         child_dir = temporary / "children" / "jobs" / child_key
-        (child_dir / "files").mkdir(parents=True)
-        runner = child_dir / "files" / "runner"
-        runner.write_text(CHILD.replace("@MODE@", mode))
-        runner.chmod(0o755)
-        (child_dir / "job.json").write_text(json.dumps({{
-            "format": "httk-workflow-job",
-            "format_version": 2,
-            "id": child_id,
-            "tag": "child",
-            "name": "Child " + label,
-            "workflow": "tests.child",
-            "runner": {{"path": "files/runner", "arguments": []}},
-            "workdir": {{"mode": "persistent", "path": "run"}},
-            "data": {{"mode": "none"}},
-            "initial_step": "run",
-            "priority": 500,
-            "claim": {{"pool": "default", "required_capabilities": []}},
-            "retry_policy": {{"retry_on": []}},
-            "resources": {{}},
-            "parent": {{
-                "workspace_id": context["workspace_id"],
-                "job_id": context["job_id"],
-                "job_key": context["job_key"],
-                "placement": context["placement"],
-                "activation_id": context["activation_id"],
-            }},
-        }}))
-        entry = {{
+        child_dir.mkdir(parents=True)
+        child = dict(job, id=child_id, tag="child", name="Child " + label, placement="project/children")
+        child.update(initial_step="run", parameters={"mode": mode})
+        child["parent"] = {
             "workspace_id": context["workspace_id"],
-            "job_id": child_id,
-            "job_key": child_key,
-            "placement": "project/children",
-        }}
+            "job_id": context["job_id"],
+            "job_key": context["job_key"],
+            "placement": context["placement"],
+            "activation_id": context["activation_id"],
+            "spawn_id": str(uuid.uuid4()),
+        }
+        (child_dir / "job.json").write_text(json.dumps(child))
+        entry = {"job_key": child_key, "placement": "project/children", "spawn_id": child["parent"]["spawn_id"]}
         if label:
             entry["label"] = label
         entries.append(entry)
-    (temporary / "children" / "spawn.json").write_text(json.dumps({{"children": entries}}))
-    outcome = {{
-        **base,
-        "action": "wait",
-        "next_step": "gather",
-        "join": {{
-            # The join names no labels: the manager must carry them over from the
-            # spawn set that registered these children.
-            "children": [
-                {{
-                    "workspace_id": entry["workspace_id"],
-                    "job_id": entry["job_id"],
-                    "job_key": entry["job_key"],
-                    "placement_hint": entry["placement"],
-                }}
-                for entry in entries
-            ],
-            "condition": "all_terminal",
-        }},
-    }}
+    spawn = {"format": "httk-workflow-spawn", "format_version": 2, "children": entries}
+    (temporary / "children" / "spawn.json").write_text(json.dumps(spawn))
+    # The join names no labels: the manager must carry them over from the spawn set that registered them.
+    references = [
+        {
+            "workspace_id": context["workspace_id"],
+            "job_id": entry["job_key"].split("--")[1],
+            "job_key": entry["job_key"],
+            "placement_hint": entry["placement"],
+        }
+        for entry in entries
+    ]
+    outcome.update(action="wait", next_step="gather", join={"children": references, "condition": "all_terminal"})
 (temporary / "outcome.json").write_text(json.dumps(outcome))
 os.rename(temporary, control / "outcome.ready")
 """
 
-_RETRYABLE_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
 
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
-count_path = run / "attempts"
-count = int(count_path.read_text()) + 1 if count_path.exists() else 1
-count_path.write_text(str(count))
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "fail",
-    "failure": {
-        "code": "vasp.nonconvergent",
-        "message": "electronic minimization did not converge",
-        "retryable": True,
-    },
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
+@pytest.fixture()
+def workspace(tmp_path: Path) -> Workspace:
+    ws = Workspace.initialize(tmp_path / "workspace", durable=False)
+    owner = _kernel.register_owner(ws, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        source = package(tmp_path / "labels", "tests.labels", ["branch", "gather", "run", "only"], runner=_RUNNER)
+        _store.install(ws, owner, source)
+    finally:
+        owner.close()
+    return ws
 
 
-def _parent_runner(labels: list[tuple[str, str]]) -> str:
-    return _PARENT_RUNNER.format(child=_CHILD_RUNNER, labels=labels)
-
-
-def _payload(
-    root: Path,
-    runner_source: str,
+def _submit(
+    workspace: Workspace,
     *,
+    labels: tuple[tuple[str, str], ...] = (),
     initial_step: str = "branch",
     attempts_per_activation: int = 1,
-) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
-    runner.write_text(runner_source, encoding="utf-8")
-    runner.chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": "parent",
-        "name": "Labeled children parent",
-        "workflow": "tests.labels",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": initial_step,
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {
-            "maximum_attempts_per_activation": attempts_per_activation,
-            "maximum_total_attempts": 10,
-            "retry_on": [],
-        },
-        "resources": {},
-        "parent": None,
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    return payload, job_id
+) -> str:
+    owner = _kernel.register_owner(workspace, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        staging = owner.scratch("submit") / "job"
+        spec = JobSpec(
+            name="Labeled children parent",
+            workflow_id="local:tests.labels",
+            workflow_name="tests.labels",
+            tag="parent",
+            placement="project/parent",
+            initial_step=initial_step,
+            maximum_attempts_per_activation=attempts_per_activation,
+            maximum_total_attempts=10,
+            parameters={"labels": [list(item) for item in labels]},
+        )
+        job = prepare_job_payload(staging, spec)
+        _kernel.submit(workspace, owner, staging)
+    finally:
+        owner.close()
+    return job.id
 
 
-def _run(workspace: Workspace) -> None:
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=60.0)
-
-
-def test_a_spawn_child_without_a_label_is_a_protocol_error(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _parent_runner([("", "succeed")]))
-    workspace.submit(payload, "project/unlabeled")
-    _run(workspace)
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker)["failure"]
-    assert failure["code"] == "protocol_error"
-    assert "spawn child label" in failure["message"]
+def test_a_spawn_child_without_a_label_is_a_protocol_error(workspace: Workspace) -> None:
+    job_id = _submit(workspace, labels=(("", "succeed"),))
+    run_manager(workspace, timeout=60.0)
+    failed = find(workspace, job_id)
+    assert failed.state == "failed"
+    failure = state(failed).failure
+    assert failure is not None and failure["code"] == "protocol_error"
+    assert "spawn child" in str(failure["message"])
     # Nothing was registered: an unusable spawn set never becomes work.
-    assert [found.job_key for found in workspace.scan_markers()] == [marker.job_key]
+    assert [found.job_id for found in every_job(workspace)] == [job_id]
 
 
-def test_duplicate_spawn_labels_are_a_protocol_error(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _parent_runner([("alpha", "succeed"), ("alpha", "fail")]))
-    workspace.submit(payload, "project/duplicated")
-    _run(workspace)
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker)["failure"]
-    assert failure["code"] == "protocol_error"
-    assert "not unique" in failure["message"]
+def test_duplicate_spawn_labels_are_a_protocol_error(workspace: Workspace) -> None:
+    job_id = _submit(workspace, labels=(("alpha", "succeed"), ("alpha", "fail")))
+    run_manager(workspace, timeout=60.0)
+    failed = find(workspace, job_id)
+    assert failed.state == "failed"
+    failure = state(failed).failure
+    assert failure is not None and failure["code"] == "protocol_error"
+    assert "not unique" in str(failure["message"])
 
 
-def test_gather_step_reads_labeled_child_observations_from_its_context(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _parent_runner([("alpha", "succeed"), ("beta", "fail")]))
-    workspace.submit(payload, "project/gathering")
-    _run(workspace)
+def test_gather_step_reads_labeled_child_observations_from_its_context(workspace: Workspace) -> None:
+    job_id = _submit(workspace, labels=(("alpha", "succeed"), ("beta", "fail")))
+    run_manager(workspace, timeout=60.0)
 
-    parent = workspace.find_marker_by_id(job_id)
-    assert parent is not None and parent.kind == "succeeded"
-    parent_payload = workspace.payload_path(parent.placement, parent.job_key)
-    observations = json.loads((parent_payload / "run" / "children.json").read_text(encoding="utf-8"))
+    parent = find(workspace, job_id)
+    assert parent.state == "succeeded"
+    observations = json.loads((parent.path / "run" / "children.json").read_text(encoding="utf-8"))
     assert [item["label"] for item in observations] == ["alpha", "beta"]
     by_label = {str(item["label"]): item for item in observations}
 
     succeeded = by_label["alpha"]
+    child = find(workspace, str(succeeded["job_id"]))
     assert succeeded["kind"] == "succeeded"
     assert succeeded["failure"] is None
-    assert succeeded["data_generation"] is None
-    assert succeeded["payload_path"] == f"jobs/project/children/{succeeded['job_key']}"
-    assert succeeded["workdir_path"] == f"jobs/project/children/{succeeded['job_key']}/run"
+    # The manager located the child when it launched the gathering attempt.
+    assert succeeded["payload_path"] == child.path.relative_to(workspace.root).as_posix()
+    assert succeeded["workdir_path"] == f"{succeeded['payload_path']}/run"
+    assert succeeded["data_path"] == f"{succeeded['payload_path']}/data"
     assert (workspace.root / str(succeeded["workdir_path"])).is_dir()
 
     failed = by_label["beta"]
     assert failed["kind"] == "failed"
-    assert failed["failure"] == {"code": "child.broken", "message": "the child declared a failure"}
-
-    # The enriched observations are exactly the join summary earlier profiles
-    # published, so a runner reading either member sees one consistent record.
-    assert workspace.read_state(parent)["join_summary"] == observations
-    assert all(item["record_ref"] for item in observations)
+    assert failed["failure"]["code"] == "child.broken"
+    assert failed["failure"]["message"] == "the child declared a failure"
 
 
-def test_a_retryable_declared_failure_retries_until_the_budget_is_exhausted(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _RETRYABLE_RUNNER,
-        initial_step="only",
-        attempts_per_activation=3,
-    )
-    workspace.submit(payload, "project/retryable")
-    _run(workspace)
+def test_a_retryable_declared_failure_retries_until_the_budget_is_exhausted(workspace: Workspace) -> None:
+    job_id = _submit(workspace, initial_step="only", attempts_per_activation=3)
+    run_manager(workspace, timeout=60.0)
 
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "failed"
-    state = workspace.read_state(marker)
+    failed = find(workspace, job_id)
+    assert failed.state == "failed"
+    doc = state(failed)
     # The runner-declared failure is what an operator finally sees, and the
     # activation was repeated exactly as often as the budget permitted.
-    assert state["reason"] == "declared_failure"
-    assert state["failure"] == {
-        "code": "vasp.nonconvergent",
-        "message": "electronic minimization did not converge",
-        "retryable": True,
-    }
-    assert state["attempt_ordinal"] == 3
-    attempts = workspace.payload_path(marker.placement, marker.job_key) / "run" / "attempts"
-    assert attempts.read_text(encoding="utf-8") == "3"
+    assert doc.failure is not None and doc.failure["code"] == "vasp.nonconvergent"
+    assert doc.failure["message"] == "electronic minimization did not converge"
+    assert doc.attempt is not None and doc.attempt["ordinal"] == 3
+    assert (failed.path / "run" / "attempts").read_text(encoding="utf-8") == "3"
 
 
-def test_a_retryable_failure_is_not_retried_without_a_remaining_attempt(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _RETRYABLE_RUNNER,
-        initial_step="only",
-        attempts_per_activation=1,
-    )
-    workspace.submit(payload, "project/single-attempt")
-    _run(workspace)
+def test_a_retryable_failure_is_not_retried_without_a_remaining_attempt(workspace: Workspace) -> None:
+    job_id = _submit(workspace, initial_step="only", attempts_per_activation=1)
+    run_manager(workspace, timeout=60.0)
 
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "failed"
-    state = workspace.read_state(marker)
-    assert state["reason"] == "declared_failure"
-    assert state["failure"]["code"] == "vasp.nonconvergent"
-    attempts = workspace.payload_path(marker.placement, marker.job_key) / "run" / "attempts"
-    assert attempts.read_text(encoding="utf-8") == "1"
+    failed = find(workspace, job_id)
+    assert failed.state == "failed"
+    doc = state(failed)
+    assert doc.failure is not None and doc.failure["code"] == "vasp.nonconvergent"
+    assert (failed.path / "run" / "attempts").read_text(encoding="utf-8") == "1"

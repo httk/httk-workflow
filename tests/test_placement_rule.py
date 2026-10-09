@@ -55,7 +55,7 @@ def test_submit_refuses_a_nesting_placement_before_copying_anything(tmp_path: Pa
 
 
 def test_submit_and_job_new_still_accept_ordinary_placements(tmp_path: Path) -> None:
-    from httk.workflow.scaffold import new_job
+    from attempt_fixtures import new_job
     from test_runner_builds import _compiled_package
 
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -63,17 +63,17 @@ def test_submit_and_job_new_still_accept_ordinary_placements(tmp_path: Path) -> 
     assert marker.placement == PurePosixPath("project/children")
     package = _compiled_package(tmp_path)
     job = new_job(workspace, package, placement="project/children")
-    assert workspace.find_marker_by_id(job.job_id) is not None
+    assert job.payload.parent == workspace.jobs / "ready" / "project" / "children"
 
 
 def test_job_new_refuses_a_nesting_placement(tmp_path: Path, nesting: str) -> None:
-    from httk.workflow.scaffold import new_job
+    from attempt_fixtures import every_job, new_job
     from test_runner_builds import _compiled_package
 
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(FormatError, match="must not name a job directory"):
         new_job(workspace, _compiled_package(tmp_path), placement=nesting)
-    assert not list(workspace.scan_markers())
+    assert every_job(workspace) == []
 
 
 def test_import_refuses_a_bundle_whose_destination_placement_nests(tmp_path: Path, nesting: str) -> None:

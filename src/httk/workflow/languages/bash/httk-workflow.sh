@@ -340,8 +340,9 @@ httk_workflow_put() {
     _httk_workflow_bridge put "$1" "$2"
 }
 
-httk_workflow_remove() {
-    _httk_workflow_bridge remove "$@"
+# transaction begin (prints a handle) | transaction put HANDLE SOURCE DEST | transaction commit HANDLE
+httk_workflow_transaction() {
+    _httk_workflow_bridge transaction "$@"
 }
 
 httk_workflow_spawn() {

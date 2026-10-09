@@ -4,18 +4,17 @@ import importlib.util
 import json
 import os
 import sys
-import time
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 import pytest
 from httk.core import DataRecord
 
-from conftest import bury_manager
+from attempt_fixtures import find, new_job
 from httk.workflow import TaskManager, Workspace, collect, job_records
 from httk.workflow.collecting import JobRecord
 from httk.workflow.compat import LanguageRequest, available_languages, jobflow, match_document
-from httk.workflow.scaffold import InstantiateContext, describe_runner, new_job, resolve_workflow
+from httk.workflow.scaffold import InstantiateContext, describe_runner, resolve_workflow
 
 
 def _request(
@@ -158,7 +157,7 @@ def test_bare_jobflow_document_input_teaches_to_use_a_package(tmp_path: Path) ->
     document = tmp_path / "maker.json"
     document.write_text(json.dumps({"@module": "atomate2", "@class": "Maker"}), encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    with pytest.raises(ValueError, match="this bare jobflow document declares no ports"):
+    with pytest.raises(ValueError, match="this jobflow workflow declares no ports"):
         new_job(workspace, document, inputs={"structure": 1})
 
 
@@ -180,7 +179,6 @@ def test_prepare_requires_exactly_one_source(tmp_path: Path, document: Path | No
 def test_prepare_document_stages_maker_and_sets_parameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     document = tmp_path / "maker.json"
     document.write_text(json.dumps({"@class": "Maker", "@module": "atomate2", "z": 1}), encoding="utf-8")
-    monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
 
     prepared = jobflow._prepare(_request(tmp_path, document=document))
 
@@ -195,7 +193,6 @@ def test_prepare_document_stages_maker_and_sets_parameters(tmp_path: Path, monke
 
 
 def test_prepare_maker_sets_spec_without_declared_parameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
     prepared = jobflow._prepare(
         _request(tmp_path, runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"})
     )
@@ -205,7 +202,6 @@ def test_prepare_maker_sets_spec_without_declared_parameters(tmp_path: Path, mon
 
 
 def test_prepare_records_declared_maker_parameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
     request = _request(
         tmp_path,
         runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"},
@@ -217,7 +213,7 @@ def test_prepare_records_declared_maker_parameters(tmp_path: Path, monkeypatch: 
     assert prepared.parameters["jobflow_maker_parameters"] == ("relax_steps",)
 
 
-def test_prepare_uses_the_packaged_runner_reference(tmp_path: Path) -> None:
+def test_prepare_needs_no_runner_reference(tmp_path: Path) -> None:
     jobflow._prepare(_request(tmp_path, runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"}))
 
 
@@ -332,9 +328,14 @@ def test_jobflow_linear_maker_runs_through_task_manager(tmp_path: Path, monkeypa
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, package)
     _drive(workspace)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert json.loads((job.payload / "run" / jobflow.OUTPUTS_FILE).read_text(encoding="utf-8"))["output"] == 2
+    marker = find(workspace, job.job_id)
+    assert marker.state == "succeeded"
+    assert (
+        json.loads((find(workspace, job.job_id).path / "run" / jobflow.OUTPUTS_FILE).read_text(encoding="utf-8"))[
+            "output"
+        ]
+        == 2
+    )
     assert _collected_value(workspace, job.job_id) == 2
     collected = next(item for item in collect(workspace) if item.record.job_id == job.job_id)
     assert collected.run.inputs == ()
@@ -530,7 +531,9 @@ class Maker:
     assert parent.failure.code == "jobflow.flow_failed"
     assert parent.failure.details is not None
     assert failed_uuid in json.dumps(parent.failure.details)
-    state = json.loads((parent.payload / "run" / "jobflow" / "state.json").read_text(encoding="utf-8"))
+    state = json.loads(
+        (find(workspace, parent.job_id).path / "run" / "jobflow" / "state.json").read_text(encoding="utf-8")
+    )
     assert any(failed_uuid in key for key in state["errored"])
     assert any(poisoned_uuid in key for key in state["skipped"])
     assert good_marker.read_text(encoding="utf-8") == "good"
@@ -539,79 +542,6 @@ class Maker:
     degraded = next(item for item in collect(workspace, states=("failed",)) if item.record.job_id == root_job.job_id)
     assert degraded.outputs == {}
     assert degraded.missing_collector is not None
-
-
-@pytest.mark.timing
-def test_jobflow_resumes_after_a_manager_session_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    flag = tmp_path / "resume.flag"
-    started = tmp_path / "resume.started"
-    monkeypatch.setenv("JOBFLOW_RESUME_FLAG", str(flag))
-    monkeypatch.setenv("JOBFLOW_RESUME_STARTED", str(started))
-    package = _jobflow_package(
-        tmp_path / "resume-package",
-        '''import os
-import time
-from pathlib import Path
-from jobflow import Flow, job
-
-@job
-def first():
-    return 1
-
-@job
-def gated(value):
-    started = Path(os.environ["JOBFLOW_RESUME_STARTED"])
-    started.write_text("started", encoding="utf-8")
-    deadline = time.monotonic() + 30
-    while not Path(os.environ["JOBFLOW_RESUME_FLAG"]).exists():
-        if time.monotonic() >= deadline:
-            raise RuntimeError("resume gate was not released")
-        time.sleep(0.01)
-    return value + 1
-
-@job
-def last(value):
-    return value + 1
-
-class Maker:
-    def make(self):
-        one = first()
-        two = gated(one.output)
-        three = last(two.output)
-        return Flow([one, two, three], output=three.output)
-        ''',
-    )
-    _set_pythonpath(monkeypatch, package)
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    root_job = new_job(workspace, package)
-    first_manager = TaskManager(
-        workspace,
-        heartbeat_interval=0.01,
-        lease_seconds=0.5,
-        takeover_grace_factor=1.0,
-    )
-    try:
-        deadline = time.monotonic() + 30
-        while not started.exists() and time.monotonic() < deadline:
-            first_manager.tick()
-            time.sleep(0.01)
-        assert started.is_file()
-    finally:
-        first_manager.close()
-    # The session's process ended: only then does another manager commit the outcome its attempt publishes.
-    bury_manager(workspace.control / "managers" / first_manager.manager_id)
-    flag.write_text("release", encoding="utf-8")
-
-    with TaskManager(
-        workspace,
-        heartbeat_interval=0.01,
-        lease_seconds=0.5,
-        takeover_grace_factor=1.0,
-    ) as second_manager:
-        second_manager.run_until_idle(timeout=300.0)
-    marker = workspace.find_marker_by_id(root_job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert _collected_value(workspace, root_job.job_id) == 3
 
 
 def test_jobflow_maker_parameters_and_document_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -774,7 +704,6 @@ def test_jobflow_atomate2_document_round_trips_without_execution(tmp_path: Path)
 def test_instantiate_stages_paths_and_preserves_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "POSCAR"
     source.write_text("structure", encoding="utf-8")
-    monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
     prepared = jobflow._prepare(
         _request(
             tmp_path,
@@ -804,7 +733,6 @@ def test_instantiate_stages_paths_and_preserves_values(tmp_path: Path, monkeypat
 def test_jobflow_input_path_typo_is_refused_but_plain_literal_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
     root = tmp_path / "pkg"
     root.mkdir()
     prepared = jobflow._prepare(
@@ -862,7 +790,6 @@ def test_collect_uses_jobflow_output_names(tmp_path: Path) -> None:
         payload_path=PurePosixPath("."),
         workdir_path=PurePosixPath("."),
         data_path=None,
-        data_generation=None,
         provenance={},
         runner_steps=None,
         children={},

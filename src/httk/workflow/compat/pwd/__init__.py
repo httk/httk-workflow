@@ -54,7 +54,6 @@ from httk.workflow.compat import (
     _load_outputs,
     _output_roles,
     _parameter,
-    runner_reference,
 )
 from httk.workflow.models import MAXIMUM_PARAMETERS_BYTES
 from httk.workflow.scaffold import FILES_DIRECTORY
@@ -321,7 +320,6 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
         documents=documents,
         files={},
         parameters=parameters,
-        runner=runner_reference(PACKAGE, RUNNER),
         reserved_parameters=("pwd_inputs",),
         instantiate=instantiate,
     )

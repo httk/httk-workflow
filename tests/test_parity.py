@@ -1,11 +1,10 @@
 """One campaign, two languages: the Bash and Python SDKs publish the same bytes.
 
 The same defect campaign is authored twice — once as a Python ``Runner`` file,
-once as a Bash ``httk_workflow_runner`` script — published to the workspace
-runner store, and run through the real manager. Everything the two runs leave behind is
-then compared: the published outcomes, the staged data transactions, the
-synthesized child jobs, the final states, the job state, and the files in every
-workdir and data directory. Only the identifiers and paths that must differ
+once as a Bash ``httk_workflow_runner`` script — installed in its workspace, and
+run through the real manager. Everything the two runs leave behind is then
+compared: the published outcomes, the synthesized child jobs, the final states,
+the job state, and the files in every workdir and data directory. Only the identifiers and paths that must differ
 between two independent workspaces are normalized away.
 """
 
@@ -19,9 +18,10 @@ from typing import Any
 
 import pytest
 
+from attempt_fixtures import every_job, run_manager, state, submit_runner
 from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow._job import JobDefinition
 
 _PYTHON_RUNNER = '''#!/usr/bin/env python3
 """Defect campaign: characterize, relax every site, aggregate, triage."""
@@ -42,7 +42,6 @@ def characterize(a):
             ChildSpec(
                 step="relax",
                 parameters={"site": site, "diverge": str(site) in failing},
-                data_mode="transactional",
                 maximum_attempts_per_activation=1,
             ),
             label="site-%d" % site,
@@ -111,7 +110,6 @@ step_characterize() {
             --step relax \\
             --parameter site="$site" \\
             --parameter diverge="$diverge" \\
-            --data-mode transactional \\
             --max-attempts-per-activation 1 \\
             --placement project/children >/dev/null
         site=$((site + 1))
@@ -179,26 +177,19 @@ def _campaign(root: Path, source: str, name: str, *, sites: int) -> Workspace:
     runner = root / name
     runner.write_text(source, encoding="utf-8")
     runner.chmod(0o755)
-    workspace = Workspace.initialize(root / "workspace")
-    reference = workspace.publish_runner(runner, name=f"parity/{name}")
-    payload = root / "parent"
-    prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Defect campaign",
-            workflow="tests.parity",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="campaign",
-            initial_step="characterize",
-            maximum_attempts_per_activation=1,
-            parameters={**_CAMPAIGN_INPUTS, "sites": sites},
-        ),
+    workspace = Workspace.initialize(root / "workspace", durable=False)
+    submit_runner(
+        workspace,
+        runner,
+        placement="project/campaign",
+        install_step="characterize",
+        name="Defect campaign",
+        tag="campaign",
+        initial_step="characterize",
+        maximum_attempts_per_activation=1,
+        parameters={**_CAMPAIGN_INPUTS, "sites": sites},
     )
-    workspace.submit(payload, "project/campaign")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=180.0)
+    run_manager(workspace, timeout=180.0)
     return workspace
 
 
@@ -221,10 +212,10 @@ def _normalized_outcome(body: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _outcomes(workspace: Workspace) -> dict[str, list[dict[str, Any]]]:
-    """Every committed outcome of every job (its draft renamed to ``commit.<g>``), in publication order per job."""
+    """Every committed outcome of every job (its attempt kept), in publication order per job."""
 
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-    for path in workspace.root.glob("**/attempts/*/commit.*/outcome.json"):
+    for path in workspace.jobs.glob("*/**/attempts/*/outcome.ready/outcome.json"):
         body = json.loads(path.read_text(encoding="utf-8"))
         collected.setdefault(_tag(path.parents[3].name), []).append(
             (path.stat().st_mtime_ns, _normalized_outcome(body))
@@ -232,68 +223,58 @@ def _outcomes(workspace: Workspace) -> dict[str, list[dict[str, Any]]]:
     return {tag: [body for _, body in sorted(items)] for tag, items in collected.items()}
 
 
-def _transactions(workspace: Workspace) -> dict[str, list[Any]]:
-    """The operations of every published data transaction, keyed by job tag."""
-
-    collected: dict[str, list[Any]] = {}
-    for path in workspace.root.glob("**/attempts/*/commit.*/transaction/manifest.json"):
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        collected[_tag(path.parents[4].name)] = list(manifest["operations"])
-    return collected
-
-
 def _jobs(workspace: Workspace) -> dict[str, dict[str, Any]]:
-    """Every job definition, minus the members that identify one workspace."""
+    """Every job definition, minus the members that identify one workspace or one installed runner."""
 
     result: dict[str, dict[str, Any]] = {}
-    for marker in workspace.scan_markers():
-        raw = dict(workspace.load_job(marker).raw)
-        for key in ("id", "parent", "runner"):
+    for ref in every_job(workspace):
+        raw = JobDefinition.from_path(ref.path / "job.json").as_mapping()
+        for key in ("id", "parent", "workflow"):
             raw.pop(key, None)
-        result[_tag(marker.job_key)] = raw
+        result[_tag(ref.job_key)] = raw
     return result
 
 
 def _states(workspace: Workspace) -> dict[str, dict[str, Any]]:
-    """The terminal state frame of every job, keyed by job tag."""
+    """The terminal state of every job, keyed by job tag."""
 
     result: dict[str, dict[str, Any]] = {}
-    for marker in workspace.scan_markers():
-        state = workspace.read_state(marker)
-        result[_tag(marker.job_key)] = {
-            "kind": marker.kind,
-            "reason": state.get("reason"),
-            "failure": state.get("failure"),
-            "runner_steps": state.get("runner_steps"),
-            "data_generation": state.get("data_generation"),
+    for ref in every_job(workspace):
+        doc = state(ref)
+        failure = doc.failure
+        result[_tag(ref.job_key)] = {
+            "kind": ref.state,
+            "failure": None if failure is None else {key: failure[key] for key in ("code", "message")},
+            "runner_steps": None if doc.runner_steps is None else list(doc.runner_steps),
         }
     return result
 
 
 def _artifacts(workspace: Workspace) -> dict[str, str]:
-    """The workdir files, data files, and job state of every job."""
+    """The workdir files, data files, and runner-private job files of every job."""
 
     result: dict[str, str] = {}
-    for marker in workspace.scan_markers():
-        payload = workspace.payload_path(marker.placement, marker.job_key)
-        tag = _tag(marker.job_key)
+    for ref in every_job(workspace):
+        tag = _tag(ref.job_key)
         for directory in ("run", "data", ".httk-job"):
-            base = payload / directory
+            base = ref.path / directory
             for path in sorted(base.rglob("*")) if base.is_dir() else ():
-                # The manager, not the SDK, writes the tree records, named by attempt id.
-                manager_owned = path.relative_to(payload).parts[:2] == (".httk-job", "tree")
-                if path.is_file() and ".httk-runner" not in path.parts and not manager_owned:
-                    result[f"{tag}/{path.relative_to(payload).as_posix()}"] = path.read_text(encoding="utf-8")
+                # The run log and the seal record times and digests of this run.
+                if (
+                    path.is_file()
+                    and ".httk-runner" not in path.parts
+                    and path.name not in {"runlog.jsonl", "seal.json"}
+                ):
+                    result[f"{tag}/{path.relative_to(ref.path).as_posix()}"] = path.read_text(encoding="utf-8")
     return result
 
 
 def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(
     tmp_path: Path, test_profile: _TestProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Keep the full outcome and transaction bundles available for this parity
-    # comparison. This reaches the private implementation seam deliberately;
-    # the production cleanup behavior has no diagnostic/runtime switch.
-    monkeypatch.setattr("httk.workflow._manager_commit._remove_committed_attempt_control", lambda *args: None)
+    # Keep every attempt, with its published outcome, for this parity comparison. This reaches the private
+    # implementation seam deliberately; the production cleanup behavior has no diagnostic switch.
+    monkeypatch.setattr(TaskManager, "_remove_attempt", lambda *args: None)
     sites = test_profile.scale(normal=2, extended=3)
     python = _campaign(tmp_path / "python", _PYTHON_RUNNER, "run.py", sites=sites)
     shell = _campaign(tmp_path / "bash", _BASH_RUNNER, "run.sh", sites=sites)
@@ -316,13 +297,11 @@ def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(
     assert _artifacts(python)["site-0/data/results/site.txt"] == "0\n"
     # Every child read the parent's workdir in place through its parent accessor.
     assert _artifacts(python)["site-0/run/parent.txt"] == "from the parent\n"
-    assert [item["id"] for item in _transactions(python)["site-0"]] == ["op-0001"]
 
     # And the Bash runner published exactly the same thing.
     assert _states(shell) == states
     assert _jobs(shell) == _jobs(python)
     assert _outcomes(shell) == _outcomes(python)
-    assert _transactions(shell) == _transactions(python)
     assert _artifacts(shell) == _artifacts(python)
 
 

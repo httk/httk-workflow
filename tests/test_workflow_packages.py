@@ -1,7 +1,6 @@
 """Directory workflow package manifests and scaffold integration."""
 
 import json
-import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -9,8 +8,10 @@ from typing import Any, cast
 import pytest
 from httk.core.digests import tree_digest
 
-from httk.workflow import Workspace, compat, scaffold
-from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, JobDefinition
+from attempt_fixtures import new_job
+from httk.workflow import Workspace, _kernel, _store, compat, scaffold
+from httk.workflow._job import JobDefinition
+from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES
 from httk.workflow.packages import (
     load_workflow_package,
     parse_workflow_manifest,
@@ -18,7 +19,7 @@ from httk.workflow.packages import (
     source_tree_digest,
     workflow_declaration_from_manifest,
 )
-from httk.workflow.scaffold import BuildSpec, new_job, resolve_workflow, workflow_provider
+from httk.workflow.scaffold import BuildSpec, resolve_workflow, workflow_provider
 
 _MANIFEST = '''
 [workflow]
@@ -250,34 +251,34 @@ def test_build_is_directory_only(tmp_path: Path) -> None:
         )
 
 
-def test_source_digest_and_publication_ignore_build_artifacts(tmp_path: Path) -> None:
+def _install(workspace: Workspace, source: Path) -> _store.Installed:
+    owner = _kernel.register_owner(workspace, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        return _store.install(workspace, owner, source, build=False)
+    finally:
+        owner.close()
+
+
+def test_source_digest_and_installation_ignore_build_artifacts(tmp_path: Path) -> None:
     package = _package(
         tmp_path / "package",
         _MANIFEST + '\n[workflow.build]\ncommand = "python build.py"\nartifacts = ["build"]\n',
     )
-    resolved = resolve_workflow(package)
     digest = source_tree_digest(package)
-    store_name = resolved.store_name
     build = package / "build"
     build.mkdir()
     (build / "runner.o").write_bytes(b"artifact")
     assert source_tree_digest(package) == digest
-    assert resolved.store_name == store_name
 
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    reference = workspace.publish_runner(package, name=store_name)
-    store = workspace.runner_store_path(store_name)
-    assert not (store / "build").exists()
-    assert tree_digest(store) == digest == reference["sha256"]
-    shutil.rmtree(build)
-    assert workspace.publish_runner(package, name=store_name) == reference
+    installed = _install(Workspace.initialize(tmp_path / "workspace"), package)
+    assert not (installed.package / "build").exists()
+    assert tree_digest(installed.package) == digest == installed.record["tree_sha256"]
 
 
-def test_buildless_publication_keeps_the_plain_tree_digest(tmp_path: Path) -> None:
+def test_buildless_installation_keeps_the_plain_tree_digest(tmp_path: Path) -> None:
     package = _package(tmp_path / "package")
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.publish_runner(package, name="buildless")
-    assert tree_digest(workspace.runner_store_path("buildless")) == tree_digest(package)
+    installed = _install(Workspace.initialize(tmp_path / "workspace"), package)
+    assert tree_digest(installed.package) == tree_digest(package) == installed.record["tree_sha256"]
 
 
 def test_cwl_language_manifest_uses_registry_defaults(tmp_path: Path) -> None:
@@ -513,8 +514,9 @@ def test_declared_parameters_apply_defaults_enforce_types_and_warn_on_undeclared
     job = new_job(workspace, package, inputs={"structure": structure})
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.parameters["label"] == "test"
-    assert definition.declared["parameters"]["label"] == {"type": "string", "default": "test"}
-    assert definition.declared["inputs"]["structure"]["required"] is True
+    declared = cast(Any, definition.declared)
+    assert declared["parameters"]["label"] == {"type": "string", "default": "test"}
+    assert declared["inputs"]["structure"]["required"] is True
 
     # A declared type mismatch is an error that names the remedy.
     with pytest.raises(ValueError, match="parameter 'label' does not match type 'string'"):
@@ -545,7 +547,8 @@ def test_required_input_is_enforced_and_entry_type_defaults_required(tmp_path: P
         _MANIFEST.replace('destination = "POSCAR"', 'destination = "POSCAR"\nrequired = false'),
     )
     job = new_job(workspace, optional)
-    assert JobDefinition.from_path(job.payload / "job.json").declared["inputs"]["structure"]["required"] is False
+    declared = cast(Any, JobDefinition.from_path(job.payload / "job.json").declared)
+    assert declared["inputs"]["structure"]["required"] is False
 
 
 def test_format_rejects_manifest_package_directory(tmp_path: Path) -> None:
@@ -798,18 +801,18 @@ def test_port_is_rejected_in_entry_manifests(tmp_path: Path) -> None:
         parse_workflow_manifest(_package(tmp_path / "entry", manifest))
 
 
-def test_language_resolution_scaffolds_without_publishing(tmp_path: Path) -> None:
+def test_language_resolution_scaffolds_from_the_installed_package(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "package")
     provider = load_workflow_package(package, register=False)
     resolved = resolve_workflow(package)
     assert resolved.language == provider.language
     assert resolved.document_path == package.resolve() / "echo.cwl"
-    with pytest.raises(ValueError, match="never published"):
-        _ = resolved.store_name
-    job = new_job(Workspace.initialize(tmp_path / "workspace"), package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.runner_path.as_posix() == "pkg:httk.workflow.compat.cwl/cwl_runner.py"
-    assert definition.runner_source == "installed"
+    (installed,) = _store.list_installed(workspace)
+    assert installed.record["runner"] == {"command": None, "entry": None, "builtin": "cwl"}
+    assert definition.workflow_id == installed.id
     assert definition.parameters["workflow_language"] == "cwl"
     assert definition.parameters["cwl_document"] == "files/workflow.cwl.json"
     assert definition.parameters["cwl_output_roles"] == {"spoken": "spoken"}
@@ -1004,32 +1007,29 @@ def test_workflow_package_precedes_document_matching(tmp_path: Path, monkeypatch
     assert resolve_workflow(package).workflow_id == "tests.package"
 
 
-def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarations(tmp_path: Path) -> None:
+def test_directory_workflow_scaffolds_from_the_installed_tree_and_pins_declarations(tmp_path: Path) -> None:
     package = _package(tmp_path / "package")
     structure = tmp_path / "POSCAR"
     structure.write_text("structure", encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, package, inputs={"structure": structure}, parameters={"label": "job"})
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.workflow == "tests.package"
-    assert definition.runner_source == "workspace"
-    assert definition.runner_sha256 == tree_digest(package)
-    assert definition.declarations["workflow"]["$id"] == "https://example.test/workflows/package"
+    (installed,) = _store.list_installed(workspace)
+    assert (definition.workflow_id, definition.workflow_name) == ("local:tests.package", "tests.package")
+    assert installed.record["tree_sha256"] == tree_digest(package)
+    assert cast(Any, definition.declarations)["workflow"]["$id"] == "https://example.test/workflows/package"
     # The hook module cache is content-addressed: byte-identical package trees
-    # share one loaded module, so __file__ may name any identical published
-    # tree. Assert the hook ran from a published runner store, not which one.
+    # share one loaded module, so __file__ may name any identical installed
+    # tree. Assert the hook ran from an installed package, not which one.
     instantiated = (job.payload / "instantiated.txt").read_text(encoding="utf-8")
     assert instantiated.endswith("instantiate.py")
-    assert "/.httk-workspace/runners/" in instantiated
-    digest = str(job.runner["path"]).rsplit(".", 1)[-1]
-    assert Path(instantiated).parent.name.endswith(digest)
-    assert workspace.runner_store_path(job.runner["path"]).is_dir()  # type: ignore[arg-type]
+    assert "/workflows/" in instantiated and Path(instantiated).parent.name == "package"
 
-    stored = workspace.runner_store_path(str(job.runner["path"]))
-    stored.chmod(0o755)
-    (stored / "collect.py").chmod(0o644)
-    (stored / "collect.py").write_text("def collect(record):\n    return {'changed': True}\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="published workflow tree"):
+    # A changed installed tree is refused when a hook would run from it.
+    (installed.package / "collect.py").write_text(
+        "def collect(record):\n    return {'changed': True}\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="changed: digest"):
         new_job(workspace, package, inputs={"structure": structure})
 
 

@@ -2,19 +2,18 @@
 
 import json
 import shutil
+import uuid
 from pathlib import Path
 
 import pytest
-from httk.core.cli import CLIContext
 
-from conftest import register_ws
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import TaskManager, Workspace, _kernel, _store
+from httk.workflow._job import JobDefinition
 from httk.workflow.errors import FormatError
-from httk.workflow.models import JobDefinition
 from httk.workflow.packages import parse_workflow_manifest
-from httk.workflow.precheck import precheck_jobs
 from httk.workflow.scaffold import describe_package_runner, new_job
-from httk.workflow.workflow_cli import command
+from test_job_creation import install, workspace_at
+from test_runner_builds import _build
 
 _CC = shutil.which("cc")
 
@@ -134,85 +133,45 @@ def test_a_command_package_may_not_also_carry_a_run_member(tmp_path: Path) -> No
         parse_workflow_manifest(package)
 
 
-def test_the_command_is_recorded_in_job_json_and_parsed_strictly(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, _python_package(tmp_path / "package"))
+def test_the_command_lives_in_the_installation_not_in_job_json(tmp_path: Path) -> None:
+    workspace = workspace_at(tmp_path / "workspace")
+    job = new_job(workspace, _python_package(tmp_path / "package"), install=True)
     document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
-    assert document["runner"]["command"] == ["python3", "{package}/runner.py"]
-    assert JobDefinition.from_path(job.payload / "job.json").runner_command == ("python3", "{package}/runner.py")
-    for bad in (
-        [],
-        ["{nope}"],
-        ["/bin/sh"],
-        "python3",
-        ["{package}/../../usr/bin/env"],
-        ["{artifacts}/../../evil"],
-        ["{package}//runner.py"],
-        ["{package}/./runner.py"],
-        ["{package}/"],
-        ["python3", "a{package}/runner.py"],
-        ["python3", "{package}/runner.py{artifacts}"],
-        ["-Dx={package}/runner.py"],
-        ["{package}"],
-        ["{artifacts}"],
-        ["."],
-        [".."],
-    ):
-        document["runner"]["command"] = bad
-        with pytest.raises(FormatError):
-            JobDefinition.from_mapping(document)
-    document["runner"]["command"] = ["python3", "-Dhome={package}", "{package}/runner.py"]
-    assert JobDefinition.from_mapping(document).runner_command == ("python3", "-Dhome={package}", "{package}/runner.py")
-    payload = dict(document, runner={"source": "payload", "path": "runner.py", "command": ["python3"]})
-    with pytest.raises(FormatError, match="payload runner"):
-        JobDefinition.from_mapping(payload)
+    assert "runner" not in document and document["workflow"]["id"] == "local:tests.command"
+    (installed,) = _store.list_installed(workspace)
+    assert installed.record["runner"] == {"command": ["python3", "{package}/runner.py"], "entry": None, "builtin": None}
 
 
-def test_the_manager_runs_an_interpreter_command_without_a_run_entry(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
+def _run(workspace: Workspace) -> _kernel.JobRef:
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=120.0)
+    (done,) = _kernel.list_jobs(workspace, "succeeded")
+    return done
+
+
+@pytest.mark.slow
+def test_the_manager_runs_an_interpreter_command_without_a_run_entry(tmp_path: Path) -> None:
+    workspace = workspace_at(tmp_path / "workspace")
     package = _python_package(tmp_path / "package")
     assert describe_package_runner(package) == {"workflow": "tests.command.python", "steps": ["start"]}
-    job = new_job(workspace, package)
-    (finding,) = precheck_jobs(workspace)
-    assert finding["runner"] == {"status": "ok", "ok": True}, finding
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None
-    assert marker.kind == "succeeded", workspace.read_state(marker).get("failure")
-    assert (job.payload / "run" / "done.txt").is_file()
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "command-listing")
-    capsys.readouterr()
-    assert command(["runner", "describe", "--workspace", name, "--json"], context) == 0
-    (listed,) = json.loads(capsys.readouterr().out)
-    assert listed["kind"] == "tree" and listed["path"] == job.runner["path"]
+    job = new_job(workspace, package, install=True)
+    done = _run(workspace)
+    assert done.job_id == job.job_id
+    assert (done.path / "run" / "done.txt").is_file()
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(_CC is None, reason="no C compiler (cc) is available")
 def test_the_manager_runs_a_compiled_command_after_the_build_is_registered(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "command-c")
+    workspace = workspace_at(tmp_path / "workspace")
     package = _c_package(tmp_path / "package")
     assert not (package / "run").exists()
-
-    first = new_job(workspace, package)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(first.job_id)
-    assert marker is not None and marker.kind == "failed"
-    assert workspace.read_state(marker)["failure"]["code"] == "runner_not_built"
-
-    assert command(["build", "--workspace", name, str(package)], context) == 0
-    second = new_job(workspace, package)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(second.job_id)
-    assert marker is not None
-    assert marker.kind == "succeeded", workspace.read_state(marker).get("failure")
+    installed = install(workspace, package, build=False)
+    job = new_job(workspace, installed.id)
+    with TaskManager(workspace) as manager:
+        assert manager.run_until_idle(timeout=120.0).ready_claimable == 0
+    _build(workspace, installed.id)
+    assert _run(workspace).job_id == job.job_id
 
 
 @pytest.mark.skipif(_CC is None, reason="no C compiler (cc) is available")
@@ -232,84 +191,9 @@ def test_describe_runs_the_command_only_with_artifacts(tmp_path: Path) -> None:
     assert describe_package_runner(package, artifacts=package) == {"workflow": "tests.command.c", "steps": ["start"]}
 
 
-def _rewrite_job(job, change) -> None:
-    path = job.payload / "job.json"
-    document = json.loads(path.read_text(encoding="utf-8"))
-    change(document["runner"])
-    path.write_text(json.dumps(document), encoding="utf-8")
-
-
-def _run(workspace: Workspace, job):
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None
-    return marker
-
-
-def test_an_escaping_command_in_job_json_never_runs(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, _python_package(tmp_path / "package"))
-    _rewrite_job(job, lambda runner: runner.update(command=["{package}/../../../../usr/bin/env", "touch", "x"]))
-    marker = _run(workspace, job)
-    assert marker.kind == "failed"
-    failure = workspace.read_state(marker)["failure"]
-    assert failure["code"] == "protocol_error" and "must continue its placeholder" in failure["message"], failure
-    assert not (job.payload / "run" / "x").exists()
-
-
-def test_a_placeholder_program_resolving_outside_its_root_is_refused(tmp_path: Path) -> None:
-    from httk.workflow._manager_runners import runner_command_problem
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, _python_package(tmp_path / "package"))
-    tree = tmp_path / "tree"
-    tree.mkdir()
-    (tree / "link").symlink_to(shutil.which("env") or "/usr/bin/env")
-    _rewrite_job(job, lambda runner: runner.update(command=["{package}/link"]))
-    definition = JobDefinition.from_path(job.payload / "job.json")
-    assert "escapes its root" in str(runner_command_problem(definition, tree, None))
-
-
-def test_a_command_reference_missing_from_the_tree_is_runner_unavailable(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, _python_package(tmp_path / "package"))
-    _rewrite_job(job, lambda runner: runner.update(command=["python3", "{package}/missing.py"]))
-    (finding,) = precheck_jobs(workspace)
-    assert finding["runner"] == {
-        "status": "problem",
-        "problem": f"runner {job.runner['path']} command reference {{package}}/missing.py does not exist",
-    }
-    marker = _run(workspace, job)
-    assert marker.kind == "failed"
-    assert workspace.read_state(marker)["failure"]["code"] == "runner_unavailable"
-
-
-def test_runner_arguments_follow_the_command_and_the_runlog_records_it(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    package = _python_package(tmp_path / "package")
-    (package / "runner.py").write_text(
-        _PYTHON_RUNNER.replace(
-            '(a.workdir / "done.txt").write_text("done\\n", encoding="utf-8")',
-            'import sys; (a.workdir / "done.txt").write_text(" ".join(sys.argv[1:]), encoding="utf-8")',
-        ),
-        encoding="utf-8",
-    )
-    job = new_job(workspace, package)
-    _rewrite_job(job, lambda runner: runner.update(arguments=["--extra", "value"]))
-    marker = _run(workspace, job)
-    assert marker.kind == "succeeded", workspace.read_state(marker).get("failure")
-    assert (job.payload / "run" / "done.txt").read_text(encoding="utf-8") == "--extra value"
-    events = [
-        json.loads(line) for line in (job.payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    tree = workspace.runner_store_path(str(job.runner["path"]))
-    (attempt,) = [event for event in events if event["kind"] == "attempt"]
-    assert attempt["runner_command"] == ["python3", f"{tree}/runner.py"]
-
-
+@pytest.mark.slow
 def test_an_inherited_child_runs_the_parents_command(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace = workspace_at(tmp_path / "workspace")
     package = _manifest(tmp_path / "package", "command = ['python3', '{package}/runner.py']\ninitial_step = 'parent'")
     (package / "httk_workflow.toml").write_text(
         (package / "httk_workflow.toml")
@@ -345,14 +229,14 @@ if __name__ == "__main__":
 """,
         encoding="utf-8",
     )
-    job = new_job(workspace, package)
-    marker = _run(workspace, job)
-    assert marker.kind == "succeeded", workspace.read_state(marker).get("failure")
-    children = [found for found in workspace.walk_markers(("succeeded",)) if found.job_key != marker.job_key]
-    (child,) = children
-    child_job = JobDefinition.from_path(workspace.payload_path(child.placement, child.job_key) / "job.json")
-    assert child_job.runner_command == ("python3", "{package}/runner.py")
-    assert (workspace.payload_path(child.placement, child.job_key) / "run" / "child.txt").is_file()
+    job = new_job(workspace, package, install=True)
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=120.0)
+    done = {ref.job_id: ref for ref in _kernel.list_jobs(workspace, "succeeded")}
+    assert job.job_id in done and len(done) == 2
+    (child,) = [ref for job_id, ref in done.items() if job_id != job.job_id]
+    assert JobDefinition.from_path(child.path / "job.json").workflow_id == job.workflow
+    assert (child.path / "run" / "child.txt").is_file()
 
 
 _BASH_ENTRY = """#!/usr/bin/env bash
@@ -376,6 +260,7 @@ def _entry_package(root: Path, entry: str, source: str) -> Path:
     return root
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("entry", "source", "workflow"),
     [
@@ -384,18 +269,15 @@ def _entry_package(root: Path, entry: str, source: str) -> Path:
     ],
 )
 def test_a_named_entry_runs_end_to_end_as_its_command(tmp_path: Path, entry: str, source: str, workflow: str) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace = workspace_at(tmp_path / "workspace")
     package = _entry_package(tmp_path / "package", entry, source)
     assert parse_workflow_manifest(package).command == (f"{{package}}/{entry}",)
     assert describe_package_runner(package) == {"workflow": workflow, "steps": ["start"]}
-    job = new_job(workspace, package)
-    document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
-    assert document["runner"]["command"] == [f"{{package}}/{entry}"]
-    (finding,) = precheck_jobs(workspace)
-    assert finding["runner"] == {"status": "ok", "ok": True}, finding
-    marker = _run(workspace, job)
-    assert marker.kind == "succeeded", workspace.read_state(marker).get("failure")
-    assert (job.payload / "run" / "done.txt").is_file()
+    job = new_job(workspace, package, install=True)
+    (installed,) = _store.list_installed(workspace)
+    assert installed.record["runner"]["command"] == [f"{{package}}/{entry}"]  # type: ignore[index]
+    done = _run(workspace)
+    assert done.job_id == job.job_id and (done.path / "run" / "done.txt").is_file()
 
 
 def test_a_named_entry_follows_the_command_rules(tmp_path: Path) -> None:
@@ -420,19 +302,26 @@ def test_a_named_entry_that_is_a_build_artifact_points_at_command(tmp_path: Path
 
 
 def test_a_parent_member_must_locate_its_parent(tmp_path: Path) -> None:
-    import uuid
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, _python_package(tmp_path / "package"))
+    workspace = workspace_at(tmp_path / "workspace")
+    job = new_job(workspace, _python_package(tmp_path / "package"), install=True)
     document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
     parent_id = str(uuid.uuid4())
-    good = {"job_id": parent_id, "job_key": f"p--{parent_id}", "placement": "jobs"}
+    good = {
+        "workspace_id": str(uuid.uuid4()),
+        "job_id": parent_id,
+        "job_key": f"p--{parent_id}",
+        "placement": "jobs",
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
     assert JobDefinition.from_mapping(dict(document, parent=good)).parent == good
     for bad in (
         {"job_id": parent_id},
         {**good, "placement": 3},
+        {**good, "placement": "a~b"},
         {**good, "job_key": f"p--{uuid.uuid4()}"},
         {**good, "job_id": "nope"},
+        {**good, "spawn_id": "nope"},
         "parent",
     ):
         with pytest.raises(FormatError):

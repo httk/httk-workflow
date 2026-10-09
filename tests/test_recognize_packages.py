@@ -4,10 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from attempt_fixtures import new_job
 from httk.workflow import Workspace
 from httk.workflow.hookapi import Claim, Unclaimed
 from httk.workflow.packages import load_workflow_package, parse_workflow_manifest
-from httk.workflow.scaffold import RecognizeSpec, new_job
+from httk.workflow.scaffold import RecognizeSpec
 
 _MANIFEST = """
 [workflow]

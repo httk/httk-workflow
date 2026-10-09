@@ -17,10 +17,12 @@ import pytest
 from httk.core.register import codes as core_codes
 from httk.core.register import register_code
 
-from httk.workflow import TaskManager, Workspace, _shell_bridge
+from httk.workflow import TaskManager, _kernel, _shell_bridge
+from httk.workflow._state import read_state_unowned
 from httk.workflow.codes import code_environment, installed_codes
 from httk.workflow.errors import RunnerResolutionError
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow.scaffold import new_job
+from test_job_creation import workspace_at
 
 SRC = Path(__file__).parents[1] / "src"
 
@@ -100,31 +102,28 @@ def fake_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _run_job(tmp_path: Path, *, failure: str | None = None) -> Path:
-    """Run one Bash job and return its payload directory.
+    """Run one Bash job of an installed package and return its job directory.
 
     The job must succeed, or fail with the protocol failure code *failure*.
     """
 
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload = tmp_path / "payload"
-    (payload / "files").mkdir(parents=True)
-    runner = payload / "files" / "runner"
-    runner.write_text(_RUNNER, encoding="utf-8")
-    runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(name="Fake code", workflow="tests.codes.fake", runner_path="files/runner", initial_step="start"),
+    workspace = workspace_at(tmp_path / "workspace")
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nname = "tests.codes.fake"\n\n[workflow.runner]\nsteps = ["start"]\n', encoding="utf-8"
     )
-    workspace.submit(payload, "codes/jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+    (package / "run").write_text(_RUNNER, encoding="utf-8")
+    (package / "run").chmod(0o755)
+    job = new_job(workspace, package, placement="codes/jobs", install=True)
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=120.0)
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None
-    if failure is None:
-        assert marker.kind == "succeeded"
-    else:
-        assert marker.kind == "failed" and workspace.read_state(marker)["failure"]["code"] == failure
-    return workspace.payload_path(marker.placement, marker.job_key)
+    (done,) = _kernel.list_jobs(workspace, "succeeded" if failure is None else "failed")
+    assert done.job_id == job.job_id
+    if failure is not None:
+        state, _damaged = read_state_unowned(done.path / "state.json")
+        assert state is not None and state.failure is not None and state.failure["code"] == failure
+    return done.path
 
 
 def _bridge(*arguments: str, stdin: str = "") -> int:

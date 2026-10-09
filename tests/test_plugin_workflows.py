@@ -1,18 +1,17 @@
 import logging
 from collections.abc import Iterator
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 from httk.core.plugins.install import install_plugin
 
-from httk.workflow import Workspace, scaffold
-from httk.workflow._runner_builds import register_build
-from httk.workflow.models import JobDefinition
+from attempt_fixtures import new_job
+from httk.workflow import Workspace, _kernel, _store, scaffold
+from httk.workflow._job import JobDefinition
 from httk.workflow.packages import _reset_plugin_workflow_cache, parse_workflow_manifest
-from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import (
     WorkflowProvider,
-    new_job,
     register_workflow,
     registered_workflow_labels,
     registered_workflows,
@@ -156,12 +155,10 @@ def test_manifest_time_resources_are_slurm_durations_stored_as_seconds(tmp_path:
     for spelling in ("60", "1:00:00", "0-1"):
         resolved = resolve_workflow(_time_package(tmp_path / spelling, spelling))
         payload = tmp_path / f"payload-{spelling}"
-        (payload / "files").mkdir(parents=True)
-        (payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         spec = JobSpec(
             name="timed",
-            workflow="test.resources",
-            runner_path="files/runner",
+            workflow_id="local:test.resources",
+            workflow_name="test.resources",
             initial_step="start",
             job_id="00000000-0000-4000-8000-000000000000",
             resources=resolved.resources,
@@ -236,23 +233,21 @@ def test_plugin_workflows_appear_in_listings_and_hints(tmp_path: Path) -> None:
     assert "test.plugin.flow" in str(excinfo.value)
 
 
-def test_plugin_workflow_build_publishes_and_registers_artifacts(tmp_path: Path) -> None:
+def test_a_plugin_workflow_installs_by_name_and_builds(tmp_path: Path) -> None:
     install_plugin(_plugin(tmp_path / "plugin", "plugin-builder", [("test.plugin.build", None, True)]))
     _reset_plugin_workflow_cache()
     provider = workflow_provider("test.plugin.build")
     assert provider is not None and provider.directory is not None and provider.build is not None
 
-    resolved = resolve_workflow("test.plugin.build")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    reference = workspace.publish_runner(resolved.source, name="plugin-build")
-    artifacts = register_build(
-        workspace,
-        workspace.runner_store_path("plugin-build"),
-        PurePosixPath("plugin-build"),
-        provider.build,
-        source_sha256=str(reference["sha256"]),
-    )
-    assert (artifacts / "build" / "run").is_file()
+    owner = _kernel.register_owner(workspace, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        installed = _store.install(workspace, owner, "test.plugin.build")
+    finally:
+        owner.close()
+    assert installed.id == "local:test.plugin.build"
+    (built,) = (installed.directory / "builds").iterdir()
+    assert (built / "artifacts" / "build" / "run").is_file()
 
 
 def test_plugin_requires_apply_to_its_workflows_and_reach_job_json(tmp_path: Path) -> None:
@@ -272,8 +267,11 @@ def test_plugin_requires_apply_to_its_workflows_and_reach_job_json(tmp_path: Pat
     _reset_plugin_workflow_cache()
     provider = workflow_provider("test.plugin.flow")
     assert provider is not None and provider.requires == ("httk-core>=0.1", "httk-workflow>=0.2")
-    job = new_job(Workspace.initialize(tmp_path / "workspace"), "test.plugin.flow")
-    assert JobDefinition.from_path(job.payload / "job.json").requires == ("httk-core>=0.1", "httk-workflow>=0.2")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    new_job(workspace, "test.plugin.flow")
+    # The requirements travel with the installed workflow, where the manager checks them before claiming.
+    (flow,) = _store.list_installed(workspace)
+    assert flow.record["requires"] == ["httk-core>=0.1", "httk-workflow>=0.2"]
 
     # The environment changed after installation: the plugin's requirement now fails every member.
     installed_manifest = installed.root / "httk_plugin.toml"

@@ -15,18 +15,26 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from httk.workflow import (
-    TaskManager,
-    Workspace,
+from attempt_fixtures import (
+    CALL_SUB_RUNNER,
+    FabricatedAttempt,
+    assert_called,
+    child_observation,
+    fabricate,
+    find,
+    run_manager,
+    state,
+    sub_package,
+    submit_runner,
 )
-from httk.workflow.protocol import JobSpec, ReplayableWorkdirBatch, prepare_job_payload
+from httk.workflow import Workspace
+from httk.workflow.protocol import ReplayableWorkdirBatch
 from httk.workflow.supervision import ProcessSupervisor
 
 _SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "languages" / "bash" / "httk-workflow.sh"
@@ -67,18 +75,7 @@ class _Fixture:
 def _child(label: str, kind: str, *, failure: dict[str, object] | None = None) -> dict[str, object]:
     """One join observation exactly as the manager writes it into the context."""
 
-    job_key = f"{label}--{uuid.uuid4()}"
-    return {
-        "label": label,
-        "job_id": str(uuid.uuid4()),
-        "job_key": job_key,
-        "kind": kind,
-        "failure": failure,
-        "placement": "project/children",
-        "payload_path": f"project/children/{job_key}",
-        "workdir_path": f"project/children/{job_key}/run",
-        "data_generation": None,
-    }
+    return child_observation(label, kind, failure=failure)
 
 
 def _fixture(
@@ -89,69 +86,22 @@ def _fixture(
     environment: dict[str, object] | None = None,
     settings: dict[str, object] | None = None,
     children: list[dict[str, object]] | None = None,
-    data_generation: int | None = None,
+    calls: dict[str, Path] | None = None,
     name: str = "attempt",
 ) -> _Fixture:
     """Fabricate one attempt of one job, without a manager."""
 
-    root = tmp_path / name
-    payload = root / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Fabricated",
-            workflow="tests.bash",
-            runner_path="files/runner",
-            initial_step=step,
-            data_mode="none" if data_generation is None else "transactional",
-            parameters=parameters or {},
-            environment=environment or {},
-        ),
+    fabricated: FabricatedAttempt = fabricate(
+        tmp_path / name,
+        step=step,
+        workflow="tests.bash",
+        parameters=parameters,
+        environment=environment,
+        settings=settings,
+        children=children or (),
+        calls=calls,
     )
-    control = payload / f"attempts/{uuid.uuid4()}"
-    control.mkdir(parents=True)
-    workdir = payload / "run"
-    workdir.mkdir()
-    context_json = json.dumps(
-        {
-            "format": "httk-workflow-attempt-context",
-            "format_version": 2,
-            "workspace_id": str(uuid.uuid4()),
-            "job_id": (_jid := str(uuid.uuid4())),
-            "job_key": f"fabricated--{_jid}",
-            "placement": "project/fabricated",
-            "payload": str(payload),
-            "step": step,
-            "activation_id": str(uuid.uuid4()),
-            "attempt_id": str(uuid.uuid4()),
-            "data_generation": data_generation,
-            "children": children or [],
-            "settings": settings or {},
-            "durable": False,
-            "deadline": None,
-        }
-    )
-    process_environment = os.environ.copy()
-    process_environment.update(
-        {
-            "HTTK_WORKFLOW_CONTEXT": context_json,
-            "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-            "HTTK_WORKFLOW_JOB_DIR": str(payload),
-            "HTTK_WORKFLOW_WORKDIR": str(workdir),
-            "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
-            "HTTK_WORKFLOW_STEP": step,
-            "HTTK_WORKFLOW_PYTHON": sys.executable,
-            "HTTK_WORKFLOW_BASH_API": str(_SHELL),
-        }
-    )
-    if data_generation is not None:
-        process_environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
-    for name_to_drop in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
-        process_environment.pop(name_to_drop, None)
-    return _Fixture(root, payload, control, workdir, process_environment)
+    return _Fixture(fabricated.root, fabricated.payload, fabricated.control, fabricated.workdir, fabricated.environment)
 
 
 def test_declared_environment_is_gated_and_recorded_before_a_bash_step(tmp_path: Path) -> None:
@@ -187,7 +137,7 @@ def test_declared_environment_is_gated_and_recorded_before_a_bash_step(tmp_path:
         "setting": {"value": 7, "source": "workspace-setting"},
         "variable": {"value": "env", "source": "environment-variable"},
     }
-    log = (fixture.payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
+    log = (fixture.payload / ".httk-job" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "parameters are in job.json; environment resolved as" in log
 
 
@@ -404,7 +354,7 @@ def test_registration_must_match_the_step_functions(tmp_path: Path) -> None:
 
 
 def test_an_aborted_handler_leaves_a_breadcrumb_and_no_draft(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path, step="explode", data_generation=0)
+    fixture = _fixture(tmp_path, step="explode")
     (fixture.workdir / "energy.json").write_text("{}\n", encoding="utf-8")
     source = _runner(
         "explode",
@@ -643,18 +593,17 @@ def test_spawn_reads_json_input_values_from_files(tmp_path: Path) -> None:
     source = _runner(
         "branch",
         "relax",
-        body=f"""step_branch() {{
+        body="""step_branch() {
     httk_workflow_spawn site-0 \\
         --step relax \\
         --parameter structure=@defect-0.json \\
         --parameter supercell=2 \\
         --parameter label=alpha \\
-        --runner ws:parity/run.sh@{"a" * 64} \\
         --tag defect \\
         --priority 700
     httk_workflow_gather relax --when any_succeeded --priority 900
-}}
-step_relax() {{ httk_workflow_succeed; }}""",
+}
+step_relax() { httk_workflow_succeed; }""",
     )
 
     completed = fixture.run(source)
@@ -672,13 +621,8 @@ step_relax() {{ httk_workflow_succeed; }}""",
         "supercell": 2,
         "label": "alpha",
     }
-    assert child["runner"] == {
-        "executor": "path",
-        "source": "workspace",
-        "path": "parity/run.sh",
-        "arguments": [],
-        "sha256": "a" * 64,
-    }
+    assert child["workflow"] == {"id": "local:tests.bash", "name": "tests.bash"}
+    assert child["placement"] == "project/fabricated" and child["initial_step"] == "relax"
     assert child["tag"] == "defect" and child["priority"] == 700
     assert fixture.outcome()["join"]["condition"] == "any_succeeded"
     assert fixture.outcome()["priority"] == 900
@@ -690,11 +634,8 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
         json.dumps(
             {
                 "name": "Prepared child",
-                "workflow": "tests.bash",
-                "runner_executor": "path",
-                "runner_source": "workspace",
-                "runner_path": "parity/run.sh",
-                "runner_sha256": "b" * 64,
+                "workflow_id": "local:tests.bash",
+                "workflow_name": "tests.bash",
                 "initial_step": "branch",
                 "tag": "prepared",
                 "parameters": {"encut": 520},
@@ -715,9 +656,7 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
     completed = fixture.run(source)
     assert completed.returncode == 0, completed.stderr
     prepared = json.loads(completed.stdout)
-    assert prepared["runner_source"] == "workspace"
-    assert prepared["runner_sha256"] == "b" * 64
-    assert prepared["runner_executor"] == "path"
+    assert prepared["workflow"] == {"id": "local:tests.bash", "name": "tests.bash"}
     assert prepared["parameters"] == {"encut": 520}
     ready = fixture.control / "outcome.ready"
     spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
@@ -726,39 +665,18 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
     assert child["id"] == prepared["id"] and child["parameters"] == {"encut": 520}
 
 
-_CALL_SUB_RUNNER = """#!/usr/bin/env python3
-import sys
-
-sys.path.insert(0, "{src}")
-
-from httk.workflow import Runner
-
-run = Runner("tests.sub")
+_CALL_SUB_RUNNER = CALL_SUB_RUNNER
 
 
-@run.step
-def run_sub(a):
-    a.succeed()
-
-
-raise SystemExit(run.main())
-"""
-
-
-def test_call_scaffolds_another_workflow_and_registers_it_as_a_child(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    src = str(Path(__file__).parents[1] / "src")
-    sub = tmp_path / "sub_runner.py"
-    sub.write_text(_CALL_SUB_RUNNER.format(src=src), encoding="utf-8")
-    sub.chmod(0o755)
+def test_call_scaffolds_an_installed_workflow_and_registers_it_as_a_child(tmp_path: Path) -> None:
     input_file = tmp_path / "input.txt"
     input_file.write_text("staged-by-call\n", encoding="utf-8")
-    fixture = _fixture(tmp_path, step="start")
+    fixture = _fixture(tmp_path, step="start", calls={"sub": sub_package(tmp_path / "sub")})
     source = _runner(
         "start",
         "finish",
         body=f"""step_start() {{
-    httk_workflow_call sub "{sub}" --file "input.txt={input_file}"
+    httk_workflow_call sub sub --file "input.txt={input_file}"
     httk_workflow_gather finish
 }}
 step_finish() {{ httk_workflow_succeed; }}""",
@@ -766,23 +684,28 @@ step_finish() {{ httk_workflow_succeed; }}""",
 
     completed = fixture.run(source)
     assert completed.returncode == 0, completed.stderr
-    ready = fixture.control / "outcome.ready"
-    spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
-    assert [entry["label"] for entry in spawn["children"]] == ["sub"]
-    job_key = spawn["children"][0]["job_key"]
-    assert completed.stdout.split("\n")[0] == job_key
-    child_dir = ready / "children" / "jobs" / job_key
-    child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
-    # The child runs the *other* workflow's own runner, a workspace store entry
-    # the call staged into the draft for the manager to publish at commit, with
-    # the staged file in its payload; the step itself never wrote the store.
-    assert child["workflow"] == "tests.sub"
-    assert child["runner"]["source"] == "workspace"
-    staged = ready / "children" / "runners" / child["runner"]["path"]
-    assert staged.read_bytes() == sub.read_bytes()
-    assert not workspace.runner_store_path(child["runner"]["path"]).exists()
+    job_key = completed.stdout.split("\n")[0]
+    # The child runs the other installed workflow, with the staged file in its payload.
+    called = FabricatedAttempt(
+        fixture.root,
+        fixture.payload,
+        fixture.control,
+        fixture.workdir,
+        Workspace(fixture.root / "workspace"),
+        fixture.environment,
+    )
+    assert assert_called(called, job_key) == job_key
+    child_dir = fixture.control / "outcome.ready" / "children" / "jobs" / job_key
     assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
     assert fixture.outcome()["join"]["condition"] == "all_succeeded"
+
+
+def test_call_refuses_an_undeclared_alias(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="start", calls={})
+    completed = fixture.run(_runner("start", body="step_start() { httk_workflow_call sub sub; }"))
+    assert completed.returncode == 2
+    assert "is not declared in [workflow.calls]" in completed.stderr
+    assert not (fixture.control / "outcome.ready").exists()
 
 
 def test_a_step_name_that_is_not_registered_is_refused_at_the_call(tmp_path: Path) -> None:
@@ -815,8 +738,7 @@ step_collect() { :; }
 record advance httk_workflow_advance colect
 record gather httk_workflow_gather colect2
 record on_impossible httk_workflow_gather collect --on-impossible colect3
-record child_step httk_workflow_spawn one --step relx
-record payload_runner httk_workflow_spawn two --step relax""",
+record child_step httk_workflow_spawn one --step relx""",
             main="",
         ),
         name="refusals.sh",
@@ -827,14 +749,10 @@ record payload_runner httk_workflow_spawn two --step relax""",
         "gather": "2",
         "on_impossible": "2",
         "child_step": "2",
-        "payload_runner": "2",
     }
     refused = (fixture.workdir / "refused.txt").read_text(encoding="utf-8")
     for name in ("advance target 'colect'", "gather target 'colect2'", "spawned child step 'relx'"):
         assert name in refused
-    # A synthesized child cannot inherit a runner that lives inside the payload,
-    # and the refusal says exactly what to do instead.
-    assert "publish it with Workspace.publish_runner" in refused
     assert not (fixture.control / "outcome.ready").exists()
 
 
@@ -893,7 +811,7 @@ def test_children_are_reported_as_one_tab_separated_row_each(tmp_path: Path) -> 
                 str(child["kind"]),
                 str(child["job_key"]),
                 str(workspace / str(child["workdir_path"])),
-                "",
+                str(workspace / str(child["data_path"])),
             )
         )
         for child in children
@@ -910,8 +828,8 @@ def test_children_are_reported_as_one_tab_separated_row_each(tmp_path: Path) -> 
     ]
 
 
-def test_data_operation_identifiers_continue_across_bridge_processes(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path, step="collect", data_generation=0)
+def test_put_stages_one_implicit_transaction_across_bridge_processes(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="collect")
     (fixture.workdir / "energy.json").write_text("{}\n", encoding="utf-8")
     (fixture.workdir / "bundle").mkdir()
     (fixture.workdir / "bundle" / "log.txt").write_text("done\n", encoding="utf-8")
@@ -920,34 +838,47 @@ def test_data_operation_identifiers_continue_across_bridge_processes(tmp_path: P
         body="""step_collect() {
     httk_workflow_put energy.json results/energy.json
     httk_workflow_put bundle results/bundle
-    httk_workflow_remove scratch --missing-ok
     httk_workflow_succeed
 }""",
     )
 
     completed = fixture.run(source)
     assert completed.returncode == 0, completed.stderr
-    # Each call was its own interpreter, and the draft on disk was the counter.
-    assert completed.stdout.splitlines() == ["op-0001", "op-0002", "op-0003"]
-    manifest = json.loads(
-        (fixture.control / "outcome.ready" / "transaction" / "manifest.json").read_text(encoding="utf-8")
-    )
-    assert [item["id"] for item in manifest["operations"]] == ["op-0001", "op-0002", "op-0003"]
-    assert [item["op"] for item in manifest["operations"]] == ["put-file", "put-tree", "remove"]
-    assert manifest["expected_data_generation"] == 0
-    assert fixture.outcome()["expected_data_generation"] == 0
+    assert completed.stdout.splitlines() == ["data/results/energy.json", "data/results/bundle"]
+    # Each call was its own interpreter; the draft named the one implicit transaction they shared,
+    # which committed with the outcome.
+    txn = fixture.control / "txn"
+    assert [path.name for path in txn.iterdir()] == ["000001"]
+    assert (txn / "000001" / "data" / "results" / "energy.json").read_text(encoding="utf-8") == "{}\n"
+    assert (txn / "000001" / "data" / "results" / "bundle" / "log.txt").is_file()
 
 
-def test_data_operations_refuse_a_job_without_transactional_data(tmp_path: Path) -> None:
+def test_an_explicit_transaction_is_named_by_its_sequence_across_processes(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="collect")
-    completed = fixture.run(_runner("collect", body="step_collect() { httk_workflow_remove results; }"))
-    assert completed.returncode == 2
-    assert "data.mode none" in completed.stderr
-    assert fixture.drafts() == []
+    (fixture.workdir / "checkpoint").write_text("one\n", encoding="utf-8")
+    source = _runner(
+        "collect",
+        body="""step_collect() {
+    local handle
+    handle=$(httk_workflow_transaction begin)
+    httk_workflow_transaction put "$handle" checkpoint data/checkpoint
+    httk_workflow_transaction commit "$handle"
+    printf 'handle=%s\\n' "$handle"
+    local code=0
+    httk_workflow_transaction commit "$handle" 2>/dev/null || code=$?
+    printf 'again=%s\\n' "$code"
+    httk_workflow_succeed
+}""",
+    )
+
+    completed = fixture.run(source)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["handle=000001", "again=2"]
+    assert (fixture.control / "txn" / "000001" / "data" / "checkpoint").read_text(encoding="utf-8") == "one\n"
 
 
 def test_the_batch_subcommand_runs_many_commands_in_one_interpreter(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path, step="collect", data_generation=0)
+    fixture = _fixture(tmp_path, step="collect")
     (fixture.workdir / "energy.json").write_text("{}\n", encoding="utf-8")
     source = _runner(
         "collect",
@@ -957,7 +888,6 @@ def test_the_batch_subcommand_runs_many_commands_in_one_interpreter(tmp_path: Pa
 state-set converged true
 state-set energy -12.5
 put energy.json results/energy.json
-remove scratch --missing-ok
 EOF
     httk_workflow_state_get energy
     httk_workflow_succeed
@@ -966,13 +896,10 @@ EOF
 
     completed = fixture.run(source)
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.splitlines() == ["op-0001", "op-0002", "-12.5"]
-    state = json.loads((fixture.payload / ".httk-job" / "state.json").read_text(encoding="utf-8"))
-    assert state == {"converged": True, "energy": -12.5}
-    manifest = json.loads(
-        (fixture.control / "outcome.ready" / "transaction" / "manifest.json").read_text(encoding="utf-8")
-    )
-    assert [item["id"] for item in manifest["operations"]] == ["op-0001", "op-0002"]
+    assert completed.stdout.splitlines() == ["data/results/energy.json", "-12.5"]
+    job_state = json.loads((fixture.payload / ".httk-job" / "state.json").read_text(encoding="utf-8"))
+    assert job_state == {"converged": True, "energy": -12.5}
+    assert (fixture.control / "txn" / "000001" / "data" / "results" / "energy.json").is_file()
 
 
 def test_a_failing_batch_line_stops_the_batch_and_names_it(tmp_path: Path) -> None:
@@ -1024,44 +951,27 @@ httk_workflow_main
 """
 
 
-def test_a_payload_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
+def test_an_installed_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    runner = tmp_path / "managed.sh"
     runner.write_text(_MANAGED_RUNNER, encoding="utf-8")
     runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Managed bash runner",
-            workflow="tests.bash.managed",
-            runner_path="files/runner",
-            tag="bash",
-            initial_step="start",
-            data_mode="transactional",
-        ),
-    )
-    workspace.submit(payload, "bash/jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
+    job = submit_runner(workspace, runner, placement="bash/jobs", tag="bash", initial_step="start")
+    run_manager(workspace)
 
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
+    done = find(workspace, job.job_id)
+    assert done.state == "succeeded"
     # The value passed through a Bash quoting hazard and a real transaction
     # without ever being evaluated by a shell.
-    assert (root / "data" / "results" / "result.txt").read_text(encoding="utf-8") == "literal; $(touch unsafe)\n"
-    assert not (root / "run" / "unsafe").exists()
-    assert json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8")) == {
+    assert (done.path / "data" / "results" / "result.txt").read_text(encoding="utf-8") == "literal; $(touch unsafe)\n"
+    assert not (done.path / "run" / "unsafe").exists()
+    assert json.loads((done.path / ".httk-job" / "state.json").read_text(encoding="utf-8")) == {
         "answer": 42,
         "stage": "committed",
     }
-    state = workspace.read_state(marker)
-    assert state["runner_steps"] == ["collect", "start"]
-    assert marker.priority == 700
-    runlog = (root / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
+    assert list(state(done).runner_steps or ()) == ["collect", "start"]
+    assert done.priority == 700
+    runlog = (done.path / ".httk-job" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "the data of the previous step is committed" in runlog
 
 

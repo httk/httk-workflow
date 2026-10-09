@@ -592,20 +592,12 @@ impl Attempt {
         eprintln!("{} [{level}] {message}", utc_timestamp());
     }
 
-    // --- Transactional data -------------------------------------------------
+    // --- Job data -----------------------------------------------------------
 
-    /// Stage one file or tree into the job's data; returns the operation id.
+    /// Stage one file or tree for `data/<destination>`, committed with the outcome; returns the
+    /// staged path. Explicit transactions go through [`Attempt::invoke`] (`transaction begin|put|commit`).
     pub fn put(&self, source: &str, destination: &str) -> Result<Option<String>, BridgeError> {
         self.read(&["put", source, destination])
-    }
-
-    /// Stage one removal from the job's data; returns the operation id.
-    pub fn remove(&self, destination: &str, missing_ok: bool) -> Result<Option<String>, BridgeError> {
-        if missing_ok {
-            self.read(&["remove", destination, "--missing-ok"])
-        } else {
-            self.read(&["remove", destination])
-        }
     }
 
     // --- Children -----------------------------------------------------------
@@ -613,7 +605,7 @@ impl Attempt {
     /// Register one child under a mandatory unique `label`, created when the
     /// outcome is published; returns the child's job key. `args` carries the
     /// child options (`--step`, `--parameter NAME=VALUE`, `--payload`,
-    /// `--runner`, …).
+    /// …).
     pub fn spawn(&self, label: &str, args: &[&str]) -> Result<Option<String>, BridgeError> {
         let mut argv = vec!["spawn", label];
         argv.extend_from_slice(args);

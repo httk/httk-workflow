@@ -20,7 +20,7 @@ from httk.workflow.protocol import (
 from httk.workflow.supervision import ProcessSupervisor
 
 
-def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraft:
+def _draft(tmp_path: Path) -> OutcomeDraft:
     """Return one unpublished outcome draft of a fabricated attempt."""
 
     control = tmp_path / "control"
@@ -45,62 +45,46 @@ def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraf
         "is_restart": True,
         "is_unclean_restart": False,
         "attempt_reason": "requested_retry",
-        "workdir_mode": "persistent",
-        "workdir_reused": True,
-        "data_generation": data_generation,
         "join": None,
     }
     (tmp_path / "run").mkdir()
     return OutcomeDraft(AttemptContext.from_mapping(context), control)
 
 
-def test_composed_outcome_contains_transaction_and_children(tmp_path: Path) -> None:
-    outcome = _draft(tmp_path, data_generation=2)
-    source = tmp_path / "result.txt"
-    source.write_text("result\n", encoding="utf-8")
+def test_composed_outcome_contains_children_with_v3_job_definitions(tmp_path: Path) -> None:
+    outcome = _draft(tmp_path)
     child = tmp_path / "child"
-    files = child / "files"
-    files.mkdir(parents=True)
-    runner = files / "run"
-    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    runner.chmod(0o755)
+    (child / "files").mkdir(parents=True)
+    (child / "files" / "input").write_text("input\n", encoding="utf-8")
     prepare_job_payload(
         child,
-        JobSpec(
-            name="child",
-            workflow="tests.child",
-            runner_path="files/run",
-            tag="child",
-            job_id=str(uuid.uuid4()),
-        ),
+        JobSpec(name="child", workflow_id="local:tests.child", workflow_name="tests.child", tag="child"),
     )
 
-    transaction = outcome.transaction()
-    transaction.make_dir("results-dir", "results")
-    transaction.put_file("result", source, "results/value.txt")
     reference = outcome.add_child(child, "children/a", label="first")
     ready = outcome.publish("wait", next_step="collect")
 
     body = json.loads((ready / "outcome.json").read_text(encoding="utf-8"))
-    manifest = json.loads((ready / "transaction" / "manifest.json").read_text(encoding="utf-8"))
     spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
-    assert body["action"] == "wait"
-    assert body["expected_data_generation"] == 2
+    assert body["action"] == "wait" and "expected_data_generation" not in body
     assert body["join"]["children"][0]["job_id"] == reference.job_id
-    assert [item["op"] for item in manifest["operations"]] == ["make-dir", "put-file"]
+    assert spawn["format_version"] == 2
     assert spawn["children"][0]["placement"] == "children/a"
     assert spawn["children"][0]["label"] == "first"
+    staged = ready / "children" / "jobs" / reference.job_key
+    assert (staged / "files" / "input").is_file() and (child / "files" / "input").is_file()
+    job = json.loads((staged / "job.json").read_text(encoding="utf-8"))
+    assert job["format_version"] == 3 and job["placement"] == "children/a"
+    assert job["parent"]["job_id"] == body["job_id"] and job["parent"]["spawn_id"] == spawn["children"][0]["spawn_id"]
 
 
-def test_outcome_rejects_stale_explicit_generation(tmp_path: Path) -> None:
-    outcome = _draft(tmp_path, data_generation=2)
-    outcome.transaction().make_dir("results", "results")
-    try:
-        outcome.publish("advance", next_step="collect", expected_data_generation=1)
-    except ValueError as exc:
-        assert "does not match" in str(exc)
-    else:
-        raise AssertionError("stale explicit generation was accepted")
+def test_a_moved_child_payload_leaves_its_source(tmp_path: Path) -> None:
+    outcome = _draft(tmp_path)
+    child = tmp_path / "control" / "prepared"
+    prepare_job_payload(child, JobSpec(name="child", workflow_id="local:tests.child", workflow_name="tests.child"))
+    reference = outcome.add_child(child, "children/a", label="moved", move=True)
+    assert not child.exists()
+    assert (outcome.root / "children" / "jobs" / reference.job_key / "job.json").is_file()
 
 
 def test_workdir_batch_replays_after_seal(tmp_path: Path) -> None:

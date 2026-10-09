@@ -270,7 +270,6 @@ def _record(root: Path, task: V1FinishedTask, workflow_id: str, declaration: Map
         payload_path=payload,
         workdir_path=workdir,
         data_path=None,
-        data_generation=None,
         provenance={"activations": [], "gaps": False},
         runner_steps=None,
         children={},

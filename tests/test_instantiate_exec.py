@@ -1,7 +1,5 @@
 """Executable instantiate hooks and their v1 boundary contract."""
 
-from __future__ import annotations
-
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,8 +8,8 @@ from typing import cast
 import pytest
 from httk.core.register import register_format_serializer, register_writer
 
-from httk.workflow import TaskManager, Workspace
-from httk.workflow.models import JobDefinition
+from httk.workflow import TaskManager, Workspace, _kernel
+from httk.workflow._job import JobDefinition
 from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli._describe import _workflow_description
@@ -177,7 +175,7 @@ def test_executable_instantiate_stages_inputs_and_runs(tmp_path: Path) -> None:
     source.write_text("source", encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
 
-    job = new_job(workspace, package, inputs={"file": source, "value": "literal"}, parameters={"base": 1})
+    job = new_job(workspace, package, install=True, inputs={"file": source, "value": "literal"}, parameters={"base": 1})
 
     assert JobDefinition.from_path(job.payload / "job.json").parameters == {
         "base": 1,
@@ -187,10 +185,9 @@ def test_executable_instantiate_stages_inputs_and_runs(tmp_path: Path) -> None:
     assert (job.payload / "files/inputs/file/input.txt").read_text(encoding="utf-8") == "source"
     assert (job.payload / "derived.txt").read_text(encoding="utf-8") == "source-derived"
     assert job.tag == "suggested"
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=60.0)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    assert [ref.job_id for ref in _kernel.list_jobs(workspace, "succeeded")] == [job.job_id]
 
 
 def test_executable_input_serialization_uses_value_and_registered_writer(tmp_path: Path) -> None:
@@ -210,6 +207,7 @@ instantiate_main(instantiate)
     job = new_job(
         workspace,
         package,
+        install=True,
         inputs={"value": {"nested": [{"ok": True}], "list": [1, 2]}, "object": _TinyValue("written")},
     )
     assert (job.payload / "files/inputs/object/object.aainst").is_file()
@@ -227,16 +225,19 @@ instantiate_main(instantiate)
     tuple_job = new_job(
         Workspace.initialize(tmp_path / "tuple-workspace"),
         _package(tmp_path / "tuple-package", hook),
+        install=True,
         inputs={"object": _TupleInput((1, 2))},
     )
     dict_job = new_job(
         Workspace.initialize(tmp_path / "dict-workspace"),
         _package(tmp_path / "dict-package", hook),
+        install=True,
         inputs={"object": {1: "one"}},
     )
     basename_job = new_job(
         Workspace.initialize(tmp_path / "basename-workspace"),
         _package(tmp_path / "basename-package", hook),
+        install=True,
         inputs={"object": _BasenameValue()},
     )
     assert (tuple_job.payload / "files/inputs/object/object.tupleinst").is_file()
@@ -250,9 +251,9 @@ def test_executable_input_without_writer_cleans_staging(tmp_path: Path) -> None:
     source.write_text("source", encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(ValueError, match=r"input 'object'.*serializ.*(\.py hook|register)"):
-        new_job(workspace, package, inputs={"file": source, "value": "literal", "object": _NoWriter()})
+        new_job(workspace, package, install=True, inputs={"file": source, "value": "literal", "object": _NoWriter()})
     assert list((workspace.control / "tmp").iterdir()) == []
-    assert not list(workspace.scan_markers())
+    assert not list(_kernel.list_jobs(workspace, "ready"))
 
 
 def test_executable_input_path_typo_is_refused(tmp_path: Path) -> None:
@@ -261,7 +262,7 @@ def test_executable_input_path_typo_is_refused(tmp_path: Path) -> None:
     # A separator-bearing value that resolves to no file is a mistyped path, so
     # the submission is refused before the hook ever runs.
     with pytest.raises(ValueError, match="input 'file' looks like a file path but nothing exists at no/such/path.txt"):
-        new_job(workspace, package, inputs={"file": "no/such/path.txt", "value": "literal"})
+        new_job(workspace, package, install=True, inputs={"file": "no/such/path.txt", "value": "literal"})
     assert list((workspace.control / "tmp").iterdir()) == []
 
 
@@ -277,9 +278,9 @@ import sys
     package = _package(tmp_path / "package", hook)
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(ValueError, match="executable instantiate hook"):
-        new_job(workspace, package, inputs={"value": "value"})
+        new_job(workspace, package, install=True, inputs={"value": "value"})
     assert list((workspace.control / "tmp").iterdir()) == []
-    assert not list(workspace.scan_markers())
+    assert not list(_kernel.list_jobs(workspace, "ready"))
 
 
 def test_executable_and_python_hooks_have_equivalent_payloads(tmp_path: Path) -> None:
@@ -313,17 +314,19 @@ instantiate_main(instantiate)
     py_job = new_job(
         first,
         _package(tmp_path / "python", python_hook, workflow="tests.conformance", member="hook.py"),
+        install=True,
         inputs={"file": source},
     )
     exec_job = new_job(
         second,
         _package(tmp_path / "exec", executable_hook, workflow="tests.conformance"),
+        install=True,
         inputs={"file": source},
     )
     py_definition = JobDefinition.from_path(py_job.payload / "job.json")
     exec_definition = JobDefinition.from_path(exec_job.payload / "job.json")
     assert py_definition.parameters == exec_definition.parameters
-    assert py_definition.workflow == exec_definition.workflow == "tests.conformance"
+    assert py_definition.workflow_name == exec_definition.workflow_name == "tests.conformance"
     assert py_definition.tag == exec_definition.tag == "same-tag"
     assert py_job.tag == exec_job.tag
     assert _payload_file_hashes(py_job.payload) == _payload_file_hashes(exec_job.payload)
@@ -332,9 +335,9 @@ instantiate_main(instantiate)
 def _payload_file_hashes(payload: Path) -> dict[str, str]:
     """Hash staged payload files, excluding only root ``job.json``.
 
-    The exclusion list is exactly ``job.json``: its job UUID and runner-store
-    path/digest legitimately differ between the two independently published
-    package trees. Every other payload member must have identical bytes.
+    The exclusion list is exactly ``job.json``: its job UUID and installed
+    workflow id legitimately differ between the two independently installed
+    packages. Every other payload member must have identical bytes.
     """
 
     result: dict[str, str] = {}
@@ -415,7 +418,7 @@ def test_a_hook_sees_only_supplied_parameters_and_defaults_apply_after_it(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     package = _package(tmp_path / "package", _hook_source(body), member=member, extra=_DEFAULTS)
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, package, parameters={"a": 10})
+    job = new_job(workspace, package, install=True, parameters={"a": 10})
     # Caller-supplied a, hook-returned b, and the declared default for c only.
     assert JobDefinition.from_path(job.payload / "job.json").parameters == {"a": 10, "b": 20, "c": 3}
     if member == "hook":
@@ -440,7 +443,7 @@ def test_a_missing_required_hook_input_is_refused_before_the_hook_runs(tmp_path:
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(ValueError, match="workflow input 'needed' is required and was not supplied"):
-        new_job(workspace, package)
+        new_job(workspace, package, install=True)
     assert not sentinel.exists()
 
 
@@ -497,4 +500,4 @@ def test_a_hook_parameter_must_match_its_declared_type(tmp_path: Path, member: s
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(ValueError, match="workflow parameter 'a' does not match type 'integer'; got str"):
-        new_job(workspace, package)
+        new_job(workspace, package, install=True)

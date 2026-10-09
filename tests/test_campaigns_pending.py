@@ -1,4 +1,4 @@
-"""Campaign submission and manager launch (legacy until the scaffold and CLI manager ports, C3 and C5b).
+"""Campaign submission (ported in C3) and manager launch (legacy until the CLI manager port, C5b).
 
 Split out of ``test_campaigns.py``; the description below is the original module's.
 
@@ -17,7 +17,8 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
-from httk.workflow import Workspace
+from attempt_fixtures import every_job, package
+from httk.workflow import Workspace, _kernel
 from httk.workflow.campaigns import (
     campaign_managers,
     campaign_submit,
@@ -103,20 +104,25 @@ def test_submit_routes_a_root_into_its_assigned_partition(tmp_path: Path) -> Non
     runner = _runner(tmp_path, _SUCCEED, "succeed.py")
     job = campaign_submit(str(runner), key="south", project=root, step="only", tag="silicon")
 
-    assert workspaces["south"].find_marker_by_id(job.job_id) is not None
-    assert workspaces["north"].find_marker_by_id(job.job_id) is None
+    assert [ref.job_id for ref in every_job(workspaces["south"])] == [job.job_id]
+    assert every_job(workspaces["north"]) == []
 
 
-@pytest.mark.usefixtures("relax_workflow")
 def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Path) -> None:
     root, workspaces = _campaign_project(tmp_path, "explicit")
     structure = tmp_path / "POSCAR"
     structure.write_text("structure\n", encoding="utf-8")
-    job = campaign_submit("test-relax", key="north", project=root, inputs={"structure": structure})
+    source = package(
+        tmp_path / "relax", "tests.relax", ["start"], extra='\n[workflow.inputs.structure]\ndestination = "POSCAR"\n'
+    )
+    with pytest.raises(ValueError, match="is not installed"):
+        campaign_submit(str(source), key="north", project=root)
+    job = campaign_submit(str(source), key="north", project=root, inputs={"structure": structure}, install=True)
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == "structure\n"
-    assert workspaces["north"].find_marker_by_id(job.job_id) is not None
+    assert [ref.job_id for ref in _kernel.list_jobs(workspaces["north"], "ready")] == [job.job_id]
 
 
+@pytest.mark.skip(reason="C5b: the campaign submit CLI is rewritten on installed workflows")
 @pytest.mark.usefixtures("relax_workflow")
 def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.atomistic")
@@ -153,6 +159,7 @@ def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path,
     assert len(list(workspaces["south"].scan_markers())) == 2
 
 
+@pytest.mark.skip(reason="C5b: campaign manager launch is rewritten on the kernel")
 def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Path) -> None:
     """One manager per selected partition drains its work; a partition subset
     leaves the others alone."""

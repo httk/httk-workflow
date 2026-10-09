@@ -16,9 +16,8 @@ Four steps, and nothing declares the shape of the workflow in advance:
     records which children failed and fails the campaign with a named failure.
 
 Every child job runs *this same file* at a different step: ``ChildSpec`` needs no
-payload, and ``RunnerRef.inherit()`` — the default — points at the runner of the
-job that spawned it. That is why the runner must live outside the payload, which
-is exactly what scaffolding a job does with it.
+payload, and a child runs the installed workflow of the job that spawned it, which
+is exactly what scaffolding a job installs this file as.
 
 Run it with the mock relaxation this file performs (no VASP, no site
 characterization — the point is the campaign, not the physics):
@@ -63,7 +62,6 @@ def characterize(a: Attempt) -> None:
             ChildSpec(
                 step="relax",
                 parameters={"site": site, "diverge": str(site) in diverging},
-                data_mode="transactional",
                 maximum_attempts_per_activation=1,
             ),
             label=f"site-{site}",

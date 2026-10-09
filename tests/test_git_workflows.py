@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import subprocess
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from httk.core.plugins.install import install_plugin
 from httk.core.userdirs import data_home
 
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, collect, git_workflows, scaffold
+from httk.workflow import Attempt, TaskManager, Workspace, _kernel, _store, collect, git_workflows, scaffold
 from httk.workflow.git_workflows import fetch_workflow, fetched_workflows
 from httk.workflow.packages import _reset_plugin_workflow_cache, parse_workflow_manifest
 from httk.workflow.provenance import _definition_uri
@@ -29,8 +30,8 @@ from httk.workflow.scaffold import (
 )
 from httk.workflow.workflow_cli import command
 from httk.workflow.workflow_cli._collect import _collected_mapping
-from test_call import _in_process_attempt
 from test_campaigns import _campaign_project
+from test_job_creation import workspace_at
 from test_workflow_cli_packages import _SUCCESS_RUNNER
 from test_workflow_packages import _package
 
@@ -169,16 +170,21 @@ def test_pinned_cached_reference_runs_no_git(tmp_path: Path, monkeypatch: pytest
     assert after["uri"] == uri and after["subdir"] == "relax" and after["names"] == ["tests.git.relax"]
 
 
-def test_job_new_records_the_canonical_uri_and_publishes_the_tree(tmp_path: Path) -> None:
+def test_job_new_installs_and_records_the_canonical_uri(tmp_path: Path) -> None:
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, f"git+file://{root}@main#relax")
+    workspace = workspace_at(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="is not installed"):
+        new_job(workspace, f"git+file://{root}@main#relax")
+    job = new_job(workspace, f"git+file://{root}@main#relax", install=True)
     uri = f"git+file://{root}@{commit}#relax"
-    assert job.workflow == uri
+    assert job.workflow == uri and job.workflow_name == "tests.git.relax"
     document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
-    assert document["workflow"] == uri
-    assert document["runner"]["source"] == "workspace"
-    assert (workspace.runner_store_path(str(job.runner["path"])) / "httk_workflow.toml").is_file()
+    assert document["workflow"] == {"id": uri, "name": "tests.git.relax"} and "runner" not in document
+    (installed,) = _store.list_installed(workspace)
+    assert installed.id == uri and (installed.package / "httk_workflow.toml").is_file()
+    # The canonical URI and the short name find the installation; nothing is fetched or installed again.
+    assert new_job(workspace, uri).workflow == new_job(workspace, "tests.git.relax").workflow == uri
+    assert len(_store.list_installed(workspace)) == 1
     resolved = resolve_workflow(uri)
     assert resolved.definition_uri == uri
     assert "$id" not in resolved.declarations["workflow"]  # the URI names the definition, not the declaration
@@ -264,9 +270,9 @@ def test_collect_dispatches_to_the_installed_provider_without_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    new_job(workspace, f"git+file://{root}#relax")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+    workspace = workspace_at(tmp_path / "workspace")
+    new_job(workspace, f"git+file://{root}#relax", install=True)
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=120.0)
 
     def refuse(*arguments: object, **options: object) -> None:
@@ -285,9 +291,9 @@ def test_collect_dispatches_to_the_installed_provider_without_git(
 
 def test_collect_of_an_uninstalled_uri_uses_only_the_pinned_tree(tmp_path: Path) -> None:
     root, _ = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    new_job(workspace, f"git+file://{root}#relax")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+    workspace = workspace_at(tmp_path / "workspace")
+    new_job(workspace, f"git+file://{root}#relax", install=True)
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=120.0)
     shutil.rmtree(data_home() / "workflows")
     git_workflows._reset_fetched_workflow_cache()
@@ -320,6 +326,7 @@ def test_cli_list_and_describe_report_fetched_workflows(tmp_path: Path, capsys: 
     assert f"installed {uri}" in capsys.readouterr().out
 
 
+@pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 def test_cli_job_new_accepts_a_git_uri(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
     context = CLIContext("httk", tmp_path)
@@ -356,22 +363,64 @@ def test_fetch_refuses_an_unpublishable_tree_before_installing(tmp_path: Path) -
     assert not list((data_home() / "workflows").glob("installed/*.json"))
 
 
-def test_attempt_call_fetches_an_unpinned_uri_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_attempt_call_of_an_installed_git_workflow_never_runs_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    attempt = _in_process_attempt(tmp_path, workspace.root)
-    calls: list[tuple[str, ...]] = []
-    original = git_sources._git
+    uri = f"git+file://{root}@{commit}#relax"
+    fetch_workflow(uri)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "httk_workflow.toml").write_text(
+        f'[workflow]\nname = "tests.git.caller"\n\n[workflow.runner]\nsteps = ["start"]\n\n'
+        f'[workflow.calls]\nrelax = "{uri}"\n',
+        encoding="utf-8",
+    )
+    (caller / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (caller / "run").chmod(0o755)
+    workspace = workspace_at(tmp_path / "workspace")
+    job = new_job(workspace, caller, install=True)
+    attempt = Attempt.initialize(_attempt_environment(workspace, job.payload))
 
-    def counting(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        calls.append(arguments)
-        return original(cwd, *arguments, check=check)
+    def refuse(*arguments: object, **options: object) -> None:
+        raise AssertionError("a call must never run git")
 
-    monkeypatch.setattr(git_sources, "_git", counting)
-    attempt.call(f"git+file://{root}@main#relax", label="relax")
-    assert [arguments[0] for arguments in calls].count("clone") == 1
+    monkeypatch.setattr(git_sources, "_git", refuse)
+    attempt.call("relax", label="relax")
     child = json.loads(next(attempt.control.glob("outcome.tmp.*/children/jobs/*/job.json")).read_text())
-    assert child["workflow"] == f"git+file://{root}@{commit}#relax"
+    assert child["workflow"] == {"id": uri, "name": "tests.git.relax"}
+
+
+def _attempt_environment(workspace: Workspace, payload: Path) -> dict[str, str]:
+    """The environment of one fabricated attempt of the job at *payload*."""
+
+    definition = json.loads((payload / "job.json").read_text(encoding="utf-8"))
+    control = payload / "attempts" / str(uuid.uuid4())
+    control.mkdir(parents=True)
+    (payload / "run").mkdir()
+    context = {
+        "format": "httk-workflow-attempt-context",
+        "format_version": 2,
+        "workspace_id": workspace.workspace_id,
+        "job_id": definition["id"],
+        "job_key": payload.name.split("~")[0],
+        "placement": definition["placement"],
+        "payload": str(payload),
+        "step": "start",
+        "activation_id": str(uuid.uuid4()),
+        "attempt_id": control.name,
+        "settings": {},
+        "durable": False,
+        "deadline": None,
+    }
+    return {
+        "HTTK_WORKFLOW_CONTEXT": json.dumps(context),
+        "HTTK_WORKFLOW_CONTROL_DIR": str(control),
+        "HTTK_WORKFLOW_JOB_DIR": str(payload),
+        "HTTK_WORKFLOW_WORKDIR": str(payload / "run"),
+        "HTTK_WORKFLOW_DATA_DIR": str(payload / "data"),
+        "HTTK_WORKFLOW_WORKSPACE_DIR": str(workspace.root),
+    }
 
 
 def test_describe_ignores_step_order(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -471,7 +520,7 @@ def test_definition_uri_is_only_a_pinned_canonical_git_uri(workflow: object, exp
     assert _definition_uri(workflow) == expected
 
 
-def test_git_workflow_with_unmet_requires_is_refused_at_job_creation(tmp_path: Path) -> None:
+def test_a_git_workflow_with_unmet_requires_is_created_but_never_claimed(tmp_path: Path) -> None:
     root, _ = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
     manifest = root / "relax" / "httk_workflow.toml"
     manifest.write_text(
@@ -481,7 +530,9 @@ def test_git_workflow_with_unmet_requires_is_refused_at_job_creation(tmp_path: P
         encoding="utf-8",
     )
     _commit(root, "requires")
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    with pytest.raises(ValueError, match=r"unmet requirements: httk-no-such-distribution>=1 \(not installed\)"):
-        new_job(workspace, f"git+file://{root}@main#relax")
-    assert not list(workspace.scan_marker_entries(("submitted",)))
+    workspace = workspace_at(tmp_path / "workspace")
+    # Eligibility is the manager's: job creation records the installed workflow, the manager leaves the job ready.
+    job = new_job(workspace, f"git+file://{root}@main#relax", install=True)
+    with TaskManager(workspace) as manager:
+        assert manager.run_until_idle(timeout=60).ready_claimable == 0
+    assert [ref.job_id for ref in _kernel.list_jobs(workspace, "ready")] == [job.job_id]

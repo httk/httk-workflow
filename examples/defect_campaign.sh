@@ -41,7 +41,6 @@ step_characterize() {
             --step relax \
             --parameter site="$site" \
             --parameter diverge="$diverge" \
-            --data-mode transactional \
             --max-attempts-per-activation 1 \
             --placement project/children >/dev/null
         site=$((site + 1))
