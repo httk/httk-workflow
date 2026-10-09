@@ -1,16 +1,18 @@
-"""Killing a manager at every step of the required outcome-processing order.
+"""Killing a manager at every step of the commit and replaying it from ``state.json``.
 
-The specification fixes nine steps for committing one outcome and pairs every
-interruption point with exactly one recovery rule. Each case below stops a
-manager dead at one of those points, throws that manager away, attaches a fresh
-incarnation, and demands that the commit completes *exactly* once: one applied
-transaction, one registered child, one activation, and a job history that still
-walks backwards from the authoritative marker to the submission.
+The commit of one outcome is decided once, in the ``commit`` intent of
+``state.json``, and then executed by idempotent steps: the committed
+transactions are applied, the children published, the job sealed, and the job
+released by the release rule. Each case below stops a manager dead at one of
+those points (the owner fail-stops, as it does when it is declared dead), has an
+operator attest it dead and recover its jobs, and lets a fresh owner finish the
+work. The commit must complete *exactly* once: every transaction entry applied
+once, one child published, no step rerun, and one terminal job.
 
-The second half injects the two storage failures the verified-transition
-algorithm exists for — a rename that happened but reported failure, and a
-destination that is not visible yet — because a manager that cannot tell those
-apart from a lost race either duplicates work or loses a job.
+The second half injects the storage failures the contested and owned moves of
+the kernel exist for — a rename that happened but reported failure, a rename
+that another actor won, and a destination that is not visible yet — because a
+manager that cannot tell those apart either duplicates work or loses a job.
 """
 
 import errno
@@ -20,757 +22,369 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from conftest import bury_manager, register_ws
-from httk.workflow import TaskManager, Workspace, _txn
-from httk.workflow import transactions as transactions_module
-from httk.workflow._logging import reset_logging
-from httk.workflow.errors import TransitionLostError, WorkspaceUnavailableError
-from httk.workflow.journal import read_record
-from httk.workflow.models import Marker
+import v3_helpers as h
+from httk.workflow import TaskManager, Workspace, _death, _fs, _kernel, _store
 
-pytestmark = pytest.mark.xdist_group("crash-recovery")
+pytestmark = pytest.mark.slow
 
-# ---------------------------------------------------------------------------
-# Runners
-# ---------------------------------------------------------------------------
+SOURCE = Path(__file__).resolve().parents[1] / "src"
 
-#: One job whose single commit exercises every step of the outcome-processing
-#: order: a multi-operation transaction, a spawned child, a join to wait on it,
-#: and a second activation that finishes. Its child runs the same runner file.
-_COMMIT_HEAVY_RUNNER = """#!/usr/bin/env python3
-import hashlib
-import json
-import os
-import shutil
-import uuid
-from pathlib import Path
+#: The payload a heavy job starts with: committed transactions merge into ``data/`` rather than replace it.
+_MEMBERS = {"data/README": "inputs\n"}
+#: What the first step stages through one committed transaction.
+_PUTS = {f"data/result-{index}.txt": f"result {index}\n" for index in range(3)}
 
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-job_dir = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
-run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
-with (run / "steps.log").open("a") as stream:
-    stream.write(context["step"] + " " + context["attempt_id"] + "\\n")
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-base = {
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-}
-if context["step"] == "prepare":
-    payload = temporary / "transaction" / "payload"
-    payload.mkdir(parents=True)
-    operations = []
-    for index in range(3):
-        name = "result-" + str(index) + ".txt"
-        content = ("result " + str(index) + "\\n").encode()
-        (payload / name).write_bytes(content)
-        operations.append({
-            "id": "put-" + str(index),
-            "op": "put-file",
-            "source": "payload/" + name,
-            "path": name,
-            "sha256": hashlib.sha256(content).hexdigest(),
-        })
-    (temporary / "transaction" / "manifest.json").write_text(json.dumps({
-        "format": "httk-workflow-transaction",
-        "format_version": 2,
-        "id": "transaction",
-        "expected_data_generation": context["data_generation"],
-        "operations": operations,
-    }))
-    child_id = str(uuid.uuid5(uuid.UUID(context["activation_id"]), "child"))
-    child_key = "child--" + child_id
-    child_dir = temporary / "children" / "jobs" / child_key
-    (child_dir / "files").mkdir(parents=True)
-    shutil.copyfile(job_dir / "files" / "runner", child_dir / "files" / "runner")
-    (child_dir / "files" / "runner").chmod(0o755)
-    (child_dir / "job.json").write_text(json.dumps({
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": child_id,
-        "tag": "child",
-        "name": "Interrupted child",
-        "workflow": "tests.crash",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "only",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"retry_on": []},
-        "resources": {},
-        "parent": {
-            "workspace_id": context["workspace_id"],
-            "job_id": context["job_id"],
-            "job_key": context["job_key"],
-            "placement": context["placement"],
-            "activation_id": context["activation_id"],
+
+@pytest.fixture()
+def ws(tmp_path: Path) -> Workspace:
+    return h.workspace(tmp_path / "ws")
+
+
+@pytest.fixture()
+def installed(ws: Workspace, tmp_path: Path) -> _store.Installed:
+    return h.install(ws, tmp_path / "demo")
+
+
+def _submit_heavy(ws: Workspace, installed: _store.Installed) -> _kernel.JobRef:
+    """Submit one job whose first commit exercises every commit step: transactions, a child and a join."""
+
+    return h.submit(
+        ws,
+        installed,
+        {"start": "spawn", "gather": "succeed"},
+        members=_MEMBERS,
+        parameters={
+            "spawn": {"children": [{"label": "only", "script": {"start": "succeed"}}]},
+            "put": {"start": _PUTS},
         },
-    }))
-    reference = {
-        "workspace_id": context["workspace_id"],
-        "job_id": child_id,
-        "job_key": child_key,
-        "placement": "project/children",
-        "label": "only",
-    }
-    (temporary / "children" / "spawn.json").write_text(json.dumps({"children": [reference]}))
-    outcome = {
-        **base,
-        "action": "wait",
-        "next_step": "gather",
-        "expected_data_generation": context["data_generation"],
-        "join": {
-            "children": [{
-                "workspace_id": reference["workspace_id"],
-                "job_id": reference["job_id"],
-                "job_key": reference["job_key"],
-                "placement_hint": reference["placement"],
-            }],
-            "condition": "all_succeeded",
-        },
-    }
-else:
-    outcome = {**base, "action": "succeed"}
-(temporary / "outcome.json").write_text(json.dumps(outcome))
-os.rename(temporary, control / "outcome.ready")
-"""
-
-_SUCCEED_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
-
-_SLEEPING_RUNNER = """#!/usr/bin/env python3
-import time
-
-time.sleep(600)
-"""
-
-#: Records that it started, waits long enough for its manager to be killed
-#: under it, and then publishes its outcome into the workspace anyway.
-_ORPHANABLE_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-import time
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
-with (run / "steps.log").open("a") as stream:
-    stream.write(context["step"] + "\\n")
-time.sleep(3.0)
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
+    )
 
 
-@pytest.fixture(autouse=True)
-def _isolated_logging() -> Iterator[None]:
-    """Keep records propagating to the capture handlers pytest installs."""
+def _all_jobs(ws: Workspace) -> list[_kernel.JobRef]:
+    """Every job directory of the workspace, unowned or owned."""
 
-    reset_logging()
-    yield
-    reset_logging()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+    refs = [ref for state in _kernel.UNOWNED_STATES for ref in _kernel.list_jobs(ws, state)]
+    owned = ws.jobs / "owned"
+    for owner in sorted(owned.iterdir()) if owned.is_dir() else ():
+        refs += [_kernel.JobRef.from_path(path, state=_kernel.OWNED, owner_id=owner.name) for path in owner.iterdir()]
+    return refs
 
 
-#: What every rename this file intercepts is actually called with.
-_RenamePath = str | os.PathLike[str]
+def _children(ws: Workspace, parent_id: str) -> list[_kernel.JobRef]:
+    return [ref for ref in _all_jobs(ws) if ref.job_id != parent_id]
 
 
-class _KilledManager(Exception):
-    """Stands in for a manager process disappearing at one exact point.
+def _parent(ws: Workspace, parent_id: str) -> _kernel.JobRef:
+    (ref,) = [ref for ref in _all_jobs(ws) if ref.job_id == parent_id]
+    return ref
 
-    It deliberately derives from nothing the manager catches, so injecting it
-    is indistinguishable from the process ceasing to exist mid-commit.
+
+def _log(ref: _kernel.JobRef) -> list[dict[str, object]]:
+    lines = (ref.path / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines]
+
+
+@contextmanager
+def _fault(hook: Callable[[str, str, _fs.Loc | None, _fs.Loc | None], None]) -> Iterator[None]:
+    """Install a fault injector at the crash points of :mod:`httk.workflow._fs` for the duration."""
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_fs, "_fault", hook)
+        yield
+
+
+def _crash() -> None:
+    raise _kernel.OwnerLost("simulated crash")
+
+
+def _crash_and_recover(ws: Workspace, arm: Callable[[pytest.MonkeyPatch], None]) -> str:
+    """Run a manager until it fail-stops at the armed point, attest it dead and recover its jobs.
+
+    :return: The dead manager's owner id.
     """
 
-
-def _payload(
-    root: Path,
-    runner_source: str,
-    *,
-    tag: str,
-    data_mode: str = "none",
-    initial_step: str = "only",
-    pool: str = "default",
-) -> tuple[Path, str]:
-    """Write one complete payload directory and return it with its job id."""
-
-    job_id = str(uuid.uuid4())
-    payload = root / tag
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
-    runner.write_text(runner_source, encoding="utf-8")
-    runner.chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": tag,
-        "name": f"Crash-injection job {tag}",
-        "workflow": "tests.crash",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": data_mode},
-        "initial_step": initial_step,
-        "priority": 500,
-        "claim": {"pool": pool, "required_capabilities": []},
-        "retry_policy": {
-            "maximum_attempts_per_activation": 3,
-            "maximum_total_attempts": 6,
-            "maximum_activations": 4,
-            "retry_on": [],
-        },
-        "resources": {},
-        "parent": None,
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    return payload, job_id
+    with pytest.MonkeyPatch.context() as patch:
+        arm(patch)
+        manager = TaskManager(ws, heartbeat_interval=0.01)
+        with pytest.raises(_kernel.OwnerLost):
+            manager.run_until_idle(timeout=60)
+        manager.close()
+    # The dead manager left its jobs exactly as they were: nothing ran after the crash.
+    assert not manager.running_attempts
+    _kernel.attest_dead(ws, manager.manager_id, by="operator", evidence=[], reason="test crash")
+    with h.cli_owner(ws) as owner:
+        _kernel.recover(ws, owner, manager.manager_id)
+    return manager.manager_id
 
 
-def _destination_kind(workspace: Workspace, destination: Path) -> str:
-    """Return the state kind one marker destination path belongs to."""
+def _crash_on_entry(
+    target: object, name: str, *, when: Callable[..., bool] = lambda *_a, **_k: True
+) -> Callable[[pytest.MonkeyPatch], None]:
+    """Arm a crash at the entry of *target.name*, the first time *when* holds for its arguments."""
 
-    return destination.relative_to(workspace.control / "state").parts[0]
+    def arm(patch: pytest.MonkeyPatch) -> None:
+        real = getattr(target, name)
+        fired: list[bool] = []
 
+        def crash(*arguments: object, **options: object) -> object:
+            if not fired and when(*arguments, **options):
+                fired.append(True)
+                _crash()
+            return real(*arguments, **options)
 
-def _kill_at_marker_rename(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    job_key: str,
-    kind: str,
-    after: bool,
-) -> None:
-    """Kill the manager at the one rename that moves *job_key* into *kind*.
+        patch.setattr(target, name, crash)
 
-    With ``after`` the rename is performed first, which is the interruption the
-    protocol calls "after marker rename": the new state is already
-    authoritative and only cleanup was lost.
-    """
-
-    real = Workspace._verified_marker_rename
-    armed = [True]
-
-    def hooked(self: Workspace, marker: Marker, destination: Path) -> Marker:
-        if armed[0] and marker.job_key == job_key and _destination_kind(self, destination) == kind:
-            armed[0] = False
-            if after:
-                real(self, marker, destination)
-            raise _KilledManager()
-        return real(self, marker, destination)
-
-    monkeypatch.setattr(Workspace, "_verified_marker_rename", hooked)
+    return arm
 
 
-def _kill_on_entry(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    """Kill the manager as soon as it enters one of its own methods."""
+def _crash_at_rename(
+    phase: str, matches: Callable[[_fs.Loc, _fs.Loc], bool], *, ordinal: int = 1
+) -> Callable[[pytest.MonkeyPatch], None]:
+    """Arm a crash at the *ordinal*-th ``_fs`` rename (``before`` or ``after`` it) that *matches*."""
 
-    def hooked(self: TaskManager, *arguments: object, **keywords: object) -> None:
-        raise _KilledManager()
+    def arm(patch: pytest.MonkeyPatch) -> None:
+        seen = [0]
 
-    monkeypatch.setattr(TaskManager, name, hooked)
+        def hook(op: str, at: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+            if op != "rename" or at != phase or src is None or dst is None or not matches(src, dst):
+                return
+            seen[0] += 1
+            if seen[0] == ordinal:
+                _crash()
 
+        patch.setattr(_fs, "_fault", hook)
 
-def _kill_after(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    """Kill the manager the instant one of its own methods has finished."""
-
-    real = getattr(TaskManager, name)
-
-    def hooked(self: TaskManager, *arguments: object, **keywords: object) -> None:
-        real(self, *arguments, **keywords)
-        raise _KilledManager()
-
-    monkeypatch.setattr(TaskManager, name, hooked)
-
-
-def _kill_at_step(monkeypatch: pytest.MonkeyPatch, step: str) -> None:
-    """Kill the manager the first time it reaches one named protocol step (:func:`httk.workflow._txn._hook`)."""
-
-    armed = [True]
-
-    def hook(reached: str) -> None:
-        if armed[0] and reached == step:
-            armed[0] = False
-            raise _KilledManager()
-
-    monkeypatch.setattr(_txn, "_HOOK", hook)
-
-
-def _kill_at_transaction_operation(monkeypatch: pytest.MonkeyPatch, ordinal: int) -> None:
-    """Kill the manager part way through replaying a multi-operation transaction."""
-
-    real = transactions_module._rename_verified
-    calls = [0]
-
-    def hooked(
-        source: transactions_module._Location,
-        destination: transactions_module._Location,
-        *,
-        replace: bool = False,
-        attempts: int = 7,
-    ) -> None:
-        calls[0] += 1
-        if calls[0] >= ordinal:
-            raise _KilledManager()
-        real(source, destination, replace=replace, attempts=attempts)
-
-    monkeypatch.setattr(transactions_module, "_rename_verified", hooked)
-
-
-def _tick_until_killed(manager: TaskManager, *, timeout: float = 60.0) -> None:
-    """Tick until the injected interruption fires, or fail saying it never did."""
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        manager.tick()
-        time.sleep(0.01)
-    raise AssertionError("the injected interruption never fired")
-
-
-def _stop_attempts(manager: TaskManager) -> None:
-    """Kill and reap every attempt one abandoned manager still owns locally."""
-
-    for attempt in list(manager._running.values()):
-        try:
-            os.killpg(attempt.process.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        try:
-            attempt.process.wait(timeout=30)
-        except subprocess.TimeoutExpired:  # pragma: no cover - depends on the host
-            pass
-
-
-def _walk_chain(workspace: Workspace, marker: Marker) -> list[dict[str, object]]:
-    """Return one job's history, newest first, walked back from its marker."""
-
-    frames: list[dict[str, object]] = []
-    record_ref: str | None = marker.record_ref
-    while record_ref is not None and record_ref != "init":
-        frame = read_record(workspace.control, record_ref, deadline_seconds=workspace.visibility_deadline)
-        frames.append(frame)
-        previous = frame.get("previous_record_ref")
-        record_ref = None if previous is None else str(previous)
-    generations = [int(str(frame["state_generation"])) for frame in frames]
-    assert generations == sorted(generations, reverse=True), generations
-    assert generations[-1] == 1
-    return frames
-
-
-def _drive_until(workspace: Workspace, manager: TaskManager, job_id: str, kinds: set[str]) -> Marker:
-    """Tick until one job reaches any of *kinds*, returning its marker."""
-
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        manager.tick()
-        marker = workspace.find_marker_by_id(job_id)
-        if marker is not None and marker.kind in kinds:
-            return marker
-        time.sleep(0.01)
-    raise AssertionError(f"job {job_id} never reached {sorted(kinds)}")
+    return arm
 
 
 # ---------------------------------------------------------------------------
-# 1. Every interruption point of the outcome-processing order
+# 1. Every interruption point of the commit
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class _Interruption:
-    """One point of the outcome-processing order, and where it leaves the job."""
+    """One point of the commit, where it leaves the parent, and whether the next owner recovers it."""
 
     name: str
-    arm: Callable[[pytest.MonkeyPatch, str], None]
-    kind_after_kill: str
+    arm: Callable[[str], Callable[[pytest.MonkeyPatch], None]]
+    state_after_kill: str
+    recovered: bool = True
+
+
+def _is_parent(parent_id: str) -> Callable[..., bool]:
+    def when(_self: object, owned: object, *_rest: object, **_options: object) -> bool:
+        return getattr(owned, "job_id", None) == parent_id
+
+    return when
+
+
+def _second_call(parent_id: str) -> Callable[..., bool]:
+    calls = [0]
+
+    def when(_self: object, owned: object, *_rest: object, **_options: object) -> bool:
+        if getattr(owned, "job_id", None) == parent_id:
+            calls[0] += 1
+        return calls[0] == 2
+
+    return when
 
 
 _INTERRUPTIONS = (
+    # The attempt ended and its outcome is published, but no intent is written: the outcome is committed, not rerun.
     _Interruption(
-        "after-committing-frame-append",
-        lambda monkeypatch, job_key: _kill_at_marker_rename(
-            monkeypatch, job_key=job_key, kind="committing", after=False
-        ),
-        "running",
+        "before-the-commit-intent",
+        lambda parent: _crash_on_entry(TaskManager, "_commit_outcome", when=_is_parent(parent)),
+        "ready",
     ),
+    # Between two entries of one committed transaction.
     _Interruption(
-        "after-running-to-committing-rename",
-        lambda monkeypatch, job_key: _kill_on_entry(monkeypatch, "_process_committing"),
-        "committing",
+        "mid-transaction",
+        lambda parent: _crash_at_rename("before", lambda src, dst: "/txn/" in str(src.path), ordinal=2),
+        "ready",
     ),
+    # The child is published; the parent still carries its intent.
     _Interruption(
-        "after-draft-rename",
-        lambda monkeypatch, job_key: _kill_at_step(monkeypatch, "commit.draft_renamed"),
-        "committing",
+        "after-the-child-is-published",
+        lambda parent: _crash_at_rename("after", lambda src, dst: "/children/jobs/" in str(src.path)),
+        "ready",
     ),
+    # The final state is computed but neither written nor released.
     _Interruption(
-        "mid-transaction-replay",
-        lambda monkeypatch, job_key: _kill_at_transaction_operation(monkeypatch, ordinal=2),
-        "committing",
+        "before-the-release",
+        lambda parent: _crash_on_entry(TaskManager, "_release", when=_is_parent(parent)),
+        "ready",
     ),
+    # The release rename happened: the parent waits, and nothing is left to recover.
     _Interruption(
-        "after-children-registered",
-        lambda monkeypatch, job_key: _kill_after(monkeypatch, "_register_children"),
-        "committing",
-    ),
-    _Interruption(
-        "after-destination-frame-append",
-        lambda monkeypatch, job_key: _kill_at_marker_rename(monkeypatch, job_key=job_key, kind="waiting", after=False),
-        "committing",
-    ),
-    _Interruption(
-        "after-destination-marker-rename",
-        lambda monkeypatch, job_key: _kill_at_marker_rename(monkeypatch, job_key=job_key, kind="waiting", after=True),
+        "after-the-release-rename",
+        lambda parent: _crash_at_rename("after", lambda src, dst: "/jobs/waiting/" in str(dst.path)),
         "waiting",
+        recovered=False,
+    ),
+    # The second commit sealed the parent, then died before its attempt directory went.
+    _Interruption(
+        "after-the-seal",
+        lambda parent: _crash_on_entry(TaskManager, "_remove_attempt", when=_second_call(parent)),
+        "ready",
     ),
 )
 
-#: The complete history of the interrupted job once it has finished, newest
-#: first. It is the same list whatever was interrupted: a commit that ran twice,
-#: an activation that repeated, or a step that was rerun would all show here.
-_EXPECTED_CHAIN = [
-    "succeeded",
-    "committing",
-    "running",
-    "claimed",
-    "ready",
-    "waiting",
-    "committing",
-    "running",
-    "claimed",
-    "ready",
-]
+
+def _assert_completed_exactly_once(ws: Workspace, parent_id: str) -> _kernel.JobRef:
+    """The heavy job finished once: one child, each entry applied once, each step run once."""
+
+    parent = _parent(ws, parent_id)
+    assert parent.state == "succeeded"
+    (child,) = _children(ws, parent_id)
+    assert child.state == "succeeded"
+    assert len([line for line in _log(child) if line["event"] == "launched"]) == 1
+    data = parent.path / "data"
+    assert sorted(path.name for path in data.iterdir()) == ["README", *(Path(name).name for name in sorted(_PUTS))]
+    for name, text in _PUTS.items():
+        assert (parent.path / name).read_text(encoding="utf-8") == text
+    log = _log(parent)
+    started = [line for line in log if line["event"] == "attempt_started"]
+    # No step was rerun: one attempt of the spawning step, one of the gathering step.
+    assert [line["step"] for line in started] == ["start", "gather"]
+    doc = h.state_of(parent)
+    assert doc.counters == {"activations": 2, "attempts_total": 2}
+    assert [str(entry["label"]) for entry in doc.children] == ["only"]
+    assert [item["state"] for item in doc.observations] == ["succeeded"]
+    assert doc.commit is None and doc.failure is None and doc.failure_history == ()
+    seal = parent.path / ".httk-job" / "seal.json"
+    assert doc.seal is not None and seal.is_file()
+    # Nothing is left owned, staged or half-removed.
+    assert not list((ws.jobs / "owned").glob("*/*"))
+    assert not (parent.path / "attempts").exists()
+    return parent
 
 
-#: Where the newest commit-takeover frame sits in a chain from :func:`_expected_chain`.
-_TAKEOVER = _EXPECTED_CHAIN.index("waiting") + 1
-
-
-def _expected_chain(takeovers: int) -> list[str]:
-    """Return :data:`_EXPECTED_CHAIN` with *takeovers* commit-takeover frames on the first commit."""
-
-    return _EXPECTED_CHAIN[:_TAKEOVER] + ["committing"] * takeovers + _EXPECTED_CHAIN[_TAKEOVER:]
-
-
-def _assert_taken_over(frame: dict[str, object], previous: TaskManager, successor: TaskManager) -> None:
-    """Assert one commit-takeover frame names both managers and the dead-process evidence."""
-
-    assert frame["kind"] == "committing" and frame["reason"] == "commit_takeover"
-    assert frame["previous_manager_id"] == previous.manager_id
-    assert frame["manager_id"] == successor.manager_id
-    evidence = frame["takeover_evidence"]
-    assert isinstance(evidence, dict) and evidence["evidence"] == "manager_process_dead"
-
-
-@pytest.mark.parametrize(
-    "interruption",
-    _INTERRUPTIONS,
-    ids=lambda item: item.name,
-)
-@pytest.mark.timing
+@pytest.mark.parametrize("interruption", _INTERRUPTIONS, ids=lambda item: item.name)
 def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    interruption: _Interruption,
+    ws: Workspace, installed: _store.Installed, interruption: _Interruption
 ) -> None:
-    root = tmp_path / "workspace"
-    Workspace.initialize(root)
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _COMMIT_HEAVY_RUNNER,
-        tag="interrupted",
-        data_mode="transactional",
-        initial_step="prepare",
-    )
-    submitted = Workspace(root).submit(payload, "project/interrupted")
+    submitted = _submit_heavy(ws, installed)
+    dead = _crash_and_recover(ws, interruption.arm(submitted.job_id))
 
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
-        interruption.arm(monkeypatch, submitted.job_key)
-        with pytest.raises(_KilledManager):
-            _tick_until_killed(dying)
-        _stop_attempts(dying)
-    monkeypatch.undo()
-    bury_manager(Workspace(root).control / "managers" / dying.manager_id)
+    interrupted = _parent(ws, submitted.job_id)
+    assert interrupted.state == interruption.state_after_kill
+    doc = h.state_of(interrupted)
+    if interruption.name == "before-the-commit-intent":
+        # The dead owner left a running attempt whose outcome is published.
+        assert doc.phase["kind"] == "running" and doc.commit is None
+    elif interruption.name == "after-the-release-rename":
+        assert doc.commit is None and doc.join is not None
+    else:
+        assert doc.commit is not None
+    if interruption.name == "mid-transaction":
+        # The manager really did die between two entries of one transaction.
+        assert sorted(path.name for path in (interrupted.path / "data").iterdir()) == ["README", "result-0.txt"]
+    if interruption.name in ("after-the-child-is-published", "before-the-release"):
+        (child,) = _children(ws, submitted.job_id)
+        assert child.state == "ready"
 
-    workspace = Workspace(root)
-    interrupted = workspace.find_marker_by_id(job_id)
-    assert interrupted is not None and interrupted.kind == interruption.kind_after_kill
-    interrupted_payload = workspace.payload_path(interrupted.placement, interrupted.job_key)
-    if interruption.name == "mid-transaction-replay":
-        # The manager really did die between two operations of one transaction.
-        assert sorted(path.name for path in (interrupted_payload / "data").iterdir()) == ["result-0.txt"]
-    if interruption.name == "after-children-registered":
-        # And here it really did die with the child already registered.
-        assert len([m for m in workspace.scan_markers() if m.job_key.startswith("child--")]) == 1
+    h.run(ws)
 
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as fresh:
-        fresh.run_until_idle(timeout=90.0)
-
-    parent = workspace.find_marker_by_id(job_id)
-    assert parent is not None and parent.kind == "succeeded"
-
-    # The child was registered exactly once: one bundle, one marker, one run.
-    children = [marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--")]
-    assert len(children) == 1 and children[0].kind == "succeeded"
-    assert [path.name for path in sorted((root / "jobs" / "project" / "children").iterdir())] == [children[0].job_key]
-
-    # The transaction is all or nothing at the attempt boundary, and it advanced
-    # the data generation exactly once however far into it the manager died.
-    parent_payload = workspace.payload_path(parent.placement, parent.job_key)
-    data = parent_payload / "data"
-    assert sorted(path.name for path in data.iterdir()) == ["result-0.txt", "result-1.txt", "result-2.txt"]
-    for index in range(3):
-        assert (data / f"result-{index}.txt").read_text(encoding="utf-8") == f"result {index}\n"
-    assert workspace.read_state(parent)["data_generation"] == 1
-
-    # No activation was duplicated and no step was rerun: the runner recorded
-    # one line per step, and both were run by the attempt that committed.
-    steps = (parent_payload / "run" / "steps.log").read_text(encoding="utf-8").splitlines()
-    assert [line.split()[0] for line in steps] == ["prepare", "gather"]
-    assert len({line.split()[1] for line in steps}) == 2
-
-    chain = _walk_chain(workspace, parent)
-    # A commit left behind by a dead manager is taken over by one transition
-    # before the fresh manager touches it; any other interruption is not.
-    takeovers = 1 if interruption.kind_after_kill == "committing" else 0
-    assert [frame["kind"] for frame in chain] == _expected_chain(takeovers)
-    if takeovers:
-        _assert_taken_over(chain[_TAKEOVER], dying, fresh)
-    assert workspace.check().ok
+    parent = _assert_completed_exactly_once(ws, submitted.job_id)
+    log = _log(parent)
+    recovered = [line for line in log if line["event"] == "recovered"]
+    if interruption.recovered:
+        # The next claimant recognised the dead owner's unfinished work.
+        assert recovered and recovered[0]["detail"] == dead
+    else:
+        assert not recovered
+    # The dead manager keeps only its tombstone.
+    (tombstone,) = [item for item in _kernel.list_owners(ws) if item.tombstone is not None]
+    assert tombstone.owner_id == dead and sorted(path.name for path in tombstone.path.iterdir()) == ["dead.json"]
 
 
-@pytest.mark.timing
-def test_a_commit_taken_over_by_a_manager_that_then_dies_completes_exactly_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_commit_replayed_by_an_owner_that_then_dies_completes_exactly_once(
+    ws: Workspace, installed: _store.Installed
 ) -> None:
-    """A successor killed right after its takeover transition is itself taken over."""
+    """A successor killed in the middle of its own replay is itself replayed."""
 
-    root = tmp_path / "workspace"
-    Workspace.initialize(root)
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _COMMIT_HEAVY_RUNNER,
-        tag="taken-over",
-        data_mode="transactional",
-        initial_step="prepare",
-    )
-    Workspace(root).submit(payload, "project/taken-over")
-    control = Workspace(root).control
+    submitted = _submit_heavy(ws, installed)
+    first = _crash_and_recover(ws, _crash_at_rename("before", lambda src, dst: "/txn/" in str(src.path), ordinal=2))
+    # The second owner resumes the transactions and dies right before it publishes the child.
+    second = _crash_and_recover(ws, _crash_at_rename("before", lambda src, dst: "/children/jobs/" in str(src.path)))
+    interrupted = _parent(ws, submitted.job_id)
+    assert interrupted.state == "ready" and h.state_of(interrupted).commit is not None
+    assert not _children(ws, submitted.job_id)
+    assert sorted(path.name for path in (interrupted.path / "data").iterdir()) == [
+        "README",
+        *(Path(name).name for name in sorted(_PUTS)),
+    ]
 
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
-        _kill_on_entry(monkeypatch, "_process_committing")
-        with pytest.raises(_KilledManager):
-            _tick_until_killed(dying)
-        _stop_attempts(dying)
-    monkeypatch.undo()
-    bury_manager(control / "managers" / dying.manager_id)
+    h.run(ws)
 
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as successor:
-        _kill_at_step(monkeypatch, "commit.taken_over")
-        with pytest.raises(_KilledManager):
-            _tick_until_killed(successor)
-    monkeypatch.undo()
-    bury_manager(control / "managers" / successor.manager_id)
-
-    workspace = Workspace(root)
-    interrupted = workspace.find_marker_by_id(job_id)
-    assert interrupted is not None and interrupted.kind == "committing"
-    # The successor died after its takeover and before touching the draft.
-    installed = workspace.payload_path(interrupted.placement, interrupted.job_key)
-    assert not (installed / "data").exists() or not list((installed / "data").iterdir())
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as fresh:
-        fresh.run_until_idle(timeout=90.0)
-
-    parent = workspace.find_marker_by_id(job_id)
-    assert parent is not None and parent.kind == "succeeded"
-    children = [marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--")]
-    assert len(children) == 1 and children[0].kind == "succeeded"
-    data = workspace.payload_path(parent.placement, parent.job_key) / "data"
-    assert sorted(path.name for path in data.iterdir()) == ["result-0.txt", "result-1.txt", "result-2.txt"]
-    assert workspace.read_state(parent)["data_generation"] == 1
-    chain = _walk_chain(workspace, parent)
-    assert [frame["kind"] for frame in chain] == _expected_chain(2)
-    _assert_taken_over(chain[_TAKEOVER], successor, fresh)
-    _assert_taken_over(chain[_TAKEOVER + 1], dying, successor)
-    assert workspace.check().ok
+    parent = _assert_completed_exactly_once(ws, submitted.job_id)
+    recovered = [line for line in _log(parent) if line["event"] == "recovered"]
+    # Each claimant names the owner whose state.json it found unfinished: the second owner died before it wrote
+    # any, so the third also finds the first owner's intent.
+    assert [line["detail"] for line in recovered] == [first, first]
+    assert recovered[0]["owner_id"] == second and recovered[1]["owner_id"] not in (first, second)
 
 
-@pytest.mark.timing
-def test_a_commit_resumes_after_its_registered_child_has_already_started(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A child registered by an interrupted commit is a job in its own right.
+def test_a_commit_resumes_after_its_published_child_has_already_run(ws: Workspace, installed: _store.Installed) -> None:
+    """A child published by an interrupted commit is a job in its own right.
 
-    Registration is the point of no return for a spawn set, so once the child
-    carries its own marker another manager may claim it at once. When the
-    interrupted parent commit is resumed, the child's payload has therefore
-    already grown a workdir and an attempt of its own, and the resumption must
-    verify that the child is *registered* rather than that its payload still
-    hashes to what the outcome published.
+    Publication is the point of no return for a child, so another manager may
+    run it at once. When the interrupted parent commit is resumed, the staged
+    child is gone (it was published), and the replay must not publish or
+    validate it again.
     """
 
-    root = tmp_path / "workspace"
-    Workspace.initialize(root)
-    payload, job_id = _payload(
-        tmp_path / "source",
-        _COMMIT_HEAVY_RUNNER,
-        tag="overtaken",
-        data_mode="transactional",
-        initial_step="prepare",
-    )
-    submitted = Workspace(root).submit(payload, "project/overtaken")
+    submitted = _submit_heavy(ws, installed)
+    _crash_and_recover(ws, _crash_at_rename("after", lambda src, dst: "/children/jobs/" in str(src.path)))
+    (child,) = _children(ws, submitted.job_id)
+    assert child.state == "ready"
 
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
-        _kill_after(monkeypatch, "_register_children")
-        with pytest.raises(_KilledManager):
-            _tick_until_killed(dying)
-        _stop_attempts(dying)
-    monkeypatch.undo()
-    bury_manager(Workspace(root).control / "managers" / dying.manager_id)
+    # Another manager serves only the child's subtree and runs it to completion, leaving the parent alone.
+    placement = child.placement
+    assert placement is not None
+    h.run(ws, placement_prefixes=(placement.as_posix(),))
+    (child,) = _children(ws, submitted.job_id)
+    assert child.state == "succeeded"
+    assert h.state_of(_parent(ws, submitted.job_id)).commit is not None
 
-    workspace = Workspace(root)
-    interrupted = workspace.find_marker_by_id(job_id)
-    assert interrupted is not None and interrupted.kind == "committing"
+    h.run(ws)
 
-    # Another manager runs the registered child to completion, and deliberately
-    # leaves the interrupted parent commit alone while it does so.
-    child_key = next(marker.job_key for marker in workspace.scan_markers() if marker.job_key.startswith("child--"))
-    real_process_committing = TaskManager._process_committing
-
-    def only_the_child(self: TaskManager, marker: Marker) -> None:
-        if marker.job_key != submitted.job_key:
-            real_process_committing(self, marker)
-
-    monkeypatch.setattr(TaskManager, "_process_committing", only_the_child)
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as child_runner:
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            child_runner.tick()
-            found = workspace.find_markers(child_key)
-            if found and found[0].kind == "succeeded":
-                break
-            time.sleep(0.01)
-    monkeypatch.undo()
-    # That manager took the abandoned parent commit over before leaving it alone.
-    bury_manager(workspace.control / "managers" / child_runner.manager_id)
-    assert workspace.find_markers(child_key)[0].kind == "succeeded"
-
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as fresh:
-        fresh.run_until_idle(timeout=90.0)
-
-    parent = workspace.find_marker_by_id(job_id)
-    assert parent is not None and parent.kind == "succeeded"
-    assert len(workspace.find_markers(child_key)) == 1
-    assert [frame["kind"] for frame in _walk_chain(workspace, parent)] == _expected_chain(2)
-    assert workspace.check().ok
+    _assert_completed_exactly_once(ws, submitted.job_id)
 
 
 # ---------------------------------------------------------------------------
 # 2. A real process, killed with SIGKILL
 # ---------------------------------------------------------------------------
 
+#: Records that it started, waits long enough for its manager to be killed under it, and then publishes its
+#: outcome anyway: the attempt runs in its own process group, so it outlives its manager.
+_ORPHANABLE_RUNNER = """#!/usr/bin/env python3
+import json, os, pathlib, time
 
-@pytest.mark.slow
-@pytest.mark.timing
-def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    Workspace.initialize(root)
-    ws = register_ws(None, root)
-    payload, job_id = _payload(tmp_path / "source", _ORPHANABLE_RUNNER, tag="sigkilled")
-    Workspace(root).submit(payload, "project/sigkilled")
-
-    source_root = Path(__file__).resolve().parents[1] / "src"
-    environment = dict(os.environ)
-    existing = environment.get("PYTHONPATH", "")
-    environment["PYTHONPATH"] = f"{source_root}{os.pathsep}{existing}" if existing else str(source_root)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "httk.workflow.workflow_cli", "run", "--workspace", ws, "--poll-interval", "0.05"],
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    state_running = root / ".httk-workspace" / "state" / "running"
-    try:
-        running = _wait_for(lambda: any(path.is_file() for path in state_running.rglob("*")))
-        if running:
-            os.kill(process.pid, signal.SIGKILL)
-        else:  # pragma: no cover - only on a host too slow to launch an attempt
-            process.terminate()
-    finally:
-        process.wait(timeout=60)
-    if not running:  # pragma: no cover - only on a host too slow to launch an attempt
-        pytest.skip("the manager subprocess never reached a running attempt on this host")
-    assert process.returncode == -signal.SIGKILL
-
-    # The runner was started in its own session, so it outlives its manager and
-    # publishes the outcome the killed manager never got to see.
-    published = _wait_for(
-        lambda: bool(list((root / "jobs" / "project" / "sigkilled").rglob("outcome.ready"))), timeout=60.0
-    )
-    if not published:  # pragma: no cover - only on a host where the orphan was reaped
-        pytest.skip("the orphaned runner never published its outcome on this host")
-
-    workspace = Workspace(root)
-    with TaskManager(workspace, heartbeat_interval=0.01) as fresh:
-        fresh.run_until_idle(timeout=90.0)
-
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    steps = (workspace.payload_path(marker.placement, marker.job_key) / "run" / "steps.log").read_text(encoding="utf-8")
-    # Recovery committed the published outcome instead of rerunning the step.
-    assert steps.splitlines() == ["only"]
-    assert workspace.check().ok
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
+control = pathlib.Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+with open("steps.log", "a") as stream:
+    stream.write(context["step"] + "\\n")
+pathlib.Path("started").touch()
+time.sleep(3.0)
+draft = control / "outcome.tmp.x"
+draft.mkdir()
+outcome = {key: context[key] for key in ("job_id", "activation_id", "attempt_id")}
+outcome.update(format="httk-workflow-outcome", format_version=2, action="succeed")
+(draft / "outcome.json").write_text(json.dumps(outcome))
+draft.rename(control / "outcome.ready")
+"""
 
 
 def _wait_for(condition: Callable[[], bool], *, timeout: float = 60.0) -> bool:
-    """Poll *condition* generously, reporting whether it ever became true."""
-
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if condition():
@@ -779,18 +393,61 @@ def _wait_for(condition: Callable[[], bool], *, timeout: float = 60.0) -> bool:
     return False
 
 
+@pytest.mark.timing
+def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(ws: Workspace, tmp_path: Path) -> None:
+    installed = h.install(ws, tmp_path / "orphan", executables={"run": _ORPHANABLE_RUNNER})
+    submitted = h.submit(ws, installed, {"start": "succeed"}, retry_policy={"retry_on": ["owner_lost"]})
+    code = (
+        "from httk.workflow import TaskManager, Workspace\n"
+        f"TaskManager(Workspace({str(ws.root)!r}, durable=False)).run_until_idle(timeout=120)\n"
+    )
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(SOURCE), os.environ.get("PYTHONPATH")])),
+    }
+    process = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        assert _wait_for(lambda: any((ws.jobs / "owned").glob("*/*/run/started")))
+    finally:
+        process.send_signal(signal.SIGKILL)
+        process.wait(timeout=60)
+    assert process.returncode == -signal.SIGKILL
+    (dead,) = [item.owner_id for item in _kernel.list_owners(ws) if item.record is not None]
+
+    with TaskManager(ws, heartbeat_interval=0.01) as fresh:
+        # The manager is gone, but its attempt still runs: the owner is not proven dead, so nothing is recovered.
+        fresh.tick()
+        assert _parent(ws, submitted.job_id).state == _kernel.OWNED
+        assert _kernel.probe_owner(ws, dead, scheduler=fresh._scheduler) is not _death.Liveness.DEAD
+
+        # Once the orphaned attempt published its outcome and exited, the death proof holds.
+        def finished() -> bool:
+            fresh.tick()
+            return _parent(ws, submitted.job_id).state == "succeeded"
+
+        assert _wait_for(finished, timeout=90.0)
+
+    done = _parent(ws, submitted.job_id)
+    # Recovery committed the published outcome instead of rerunning the step.
+    assert (done.path / "run" / "steps.log").read_text(encoding="utf-8").splitlines() == ["start"]
+    doc = h.state_of(done)
+    assert doc.counters["attempts_total"] == 1 and doc.failure_history == ()
+    log = _log(done)
+    assert [line["event"] for line in log].count("launched") == 1
+    assert any(line["event"] == "recovered" and line["detail"] == dead for line in log)
+    (tombstone,) = [item for item in _kernel.list_owners(ws) if item.tombstone is not None]
+    assert tombstone.owner_id == dead and tombstone.tombstone is not None and tombstone.tombstone["by"] == "probe"
+
+
 # ---------------------------------------------------------------------------
 # 3. Renames that lie, the way a network filesystem lies
 # ---------------------------------------------------------------------------
 
+_RenamePath = str | os.PathLike[str]
 
-def _lying_rename(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    source_kind: str,
-    perform: bool,
-) -> list[int]:
-    """Make the one rename leaving ``state/<source_kind>/`` report a failure.
+
+def _lying_rename(patch: pytest.MonkeyPatch, *, source: str, destination: str = "", perform: bool) -> list[int]:
+    """Make the first rename from a path containing *source* (to one containing *destination*) report a failure.
 
     With ``perform`` the rename is carried out first, which is exactly what a
     retransmitted NFS rename whose first reply was lost does: the operation
@@ -800,206 +457,97 @@ def _lying_rename(
     real = os.rename
     fired = [0]
 
-    def rename(source: _RenamePath, destination: _RenamePath, **keywords: int | None) -> None:
-        if not fired[0] and f"{os.sep}state{os.sep}{source_kind}{os.sep}" in str(source):
+    def rename(src: _RenamePath, dst: _RenamePath, **keywords: int | None) -> None:
+        if not fired[0] and source in os.fspath(src) and destination in os.fspath(dst):
             fired[0] += 1
             if perform:
-                real(source, destination, **keywords)
+                real(src, dst, **keywords)
             raise OSError(errno.EIO, "simulated retransmitted rename whose reply was lost")
-        real(source, destination, **keywords)
+        real(src, dst, **keywords)
 
-    monkeypatch.setattr(os, "rename", rename)
+    patch.setattr(os, "rename", rename)
     return fired
 
 
-def test_a_claim_whose_rename_happened_but_reported_failure_is_won(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="claimed")
-    workspace.submit(payload, "project/claimed")
+def _single_success(ws: Workspace, job_id: str) -> _kernel.JobRef:
+    """The job succeeded with one claim and one attempt, and it is the workspace's only job."""
 
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        fired = _lying_rename(monkeypatch, source_kind="ready", perform=True)
-        manager.run_until_idle(timeout=60.0)
-    monkeypatch.undo()
+    (done,) = _all_jobs(ws)
+    assert done.job_id == job_id and done.state == "succeeded"
+    events = [line["event"] for line in _log(done)]
+    assert events.count("claimed") == 1 and events.count("launched") == 1
+    return done
 
+
+def test_a_claim_whose_rename_happened_but_reported_failure_is_won(ws: Workspace, installed: _store.Installed) -> None:
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    with pytest.MonkeyPatch.context() as patch:
+        fired = _lying_rename(patch, source="/jobs/ready/", perform=True)
+        h.run(ws)
     assert fired == [1]
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    # One marker, one claim, one intact history: the actor that renamed the
-    # marker verified the destination and correctly concluded that it had won.
-    assert len(list(workspace.scan_markers())) == 1
-    assert [frame["kind"] for frame in _walk_chain(workspace, marker)] == [
-        "succeeded",
-        "committing",
-        "running",
-        "claimed",
-        "ready",
-    ]
-    assert workspace.check().ok
+    # The claimant observed its own destination and correctly concluded that it had won.
+    _single_success(ws, submitted.job_id)
 
 
-def test_an_outcome_commit_whose_rename_happened_but_reported_failure_is_won(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_an_outcome_release_whose_rename_happened_but_reported_failure_is_done(
+    ws: Workspace, installed: _store.Installed
 ) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="committed")
-    workspace.submit(payload, "project/committed")
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        fired = _lying_rename(monkeypatch, source_kind="running", perform=True)
-        manager.run_until_idle(timeout=60.0)
-    monkeypatch.undo()
-
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    with pytest.MonkeyPatch.context() as patch:
+        fired = _lying_rename(patch, source="/jobs/owned/", destination="/jobs/succeeded/", perform=True)
+        h.run(ws)
     assert fired == [1]
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert len(list(workspace.scan_markers())) == 1
-    assert [frame["kind"] for frame in _walk_chain(workspace, marker)] == [
-        "succeeded",
-        "committing",
-        "running",
-        "claimed",
-        "ready",
-    ]
-    assert workspace.check().ok
+    # An owned move is decided by its source alone: gone means done, so it is neither retried nor lost.
+    done = _single_success(ws, submitted.job_id)
+    assert [line["event"] for line in _log(done)].count("released") == 1
 
 
-@pytest.mark.timing
-def test_a_cancellation_fence_whose_rename_happened_but_reported_failure_is_won(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="cancelled")
-    workspace.submit(payload, "project/cancelled")
-
-    with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=0.5) as manager:
-        running = _drive_until(workspace, manager, job_id, {"running"})
-        workspace.publish_request(
-            {
-                "format": "httk-workflow-request",
-                "format_version": 2,
-                "request_id": str(uuid.uuid4()),
-                "job_id": running.job_id,
-                "job_key": running.job_key,
-                "placement": running.placement.as_posix(),
-                "expected_generation": running.generation,
-                "expected_record_ref": running.record_ref,
-                "action": "cancel",
-                "operator": "tester",
-                "reason": "rename injection",
-                "created_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
-            }
-        )
-        fired = _lying_rename(monkeypatch, source_kind="running", perform=True)
-        manager._handle_requests()
-        monkeypatch.undo()
-        # The fence was verified, not retried: the attempt is fenced exactly once.
-        assert fired == [1]
-        fenced = workspace.find_marker_by_id(job_id)
-        assert fenced is not None and fenced.kind == "cancelling"
-        _drive_until(workspace, manager, job_id, {"cancelled"})
-
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "cancelled"
-    assert len(list(workspace.scan_markers())) == 1
-    assert workspace.read_state(marker)["cancellation"]["verified"] in {
-        "process_exited",
-        "process_group_absent",
-    }
-    assert workspace.check().ok
-
-
-def test_a_rename_that_really_failed_is_simply_retried(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="retried")
-    workspace.submit(payload, "project/retried")
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        # The rename genuinely did not happen, so the source is still there and
-        # the same rename is simply attempted again.
-        fired = _lying_rename(monkeypatch, source_kind="ready", perform=False)
-        manager.run_until_idle(timeout=60.0)
-    monkeypatch.undo()
-
+def test_a_rename_that_really_failed_is_simply_retried(ws: Workspace, installed: _store.Installed) -> None:
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    with pytest.MonkeyPatch.context() as patch:
+        # The rename genuinely did not happen, so the source is still there and the same rename is simply
+        # attempted again.
+        fired = _lying_rename(patch, source="/jobs/ready/", perform=False)
+        h.run(ws)
     assert fired == [1]
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert len(list(workspace.scan_markers())) == 1
-    assert workspace.check().ok
+    _single_success(ws, submitted.job_id)
 
 
 def test_a_rename_that_failed_because_another_actor_won_is_reported_as_lost(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    ws: Workspace, installed: _store.Installed
 ) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="lost")
-    workspace.submit(payload, "project/lost")
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    rival = h.cli_owner(ws)
+    real = os.rename
+    fired: list[Path] = []
 
-    rival = Workspace(root)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        ready = workspace.find_marker_by_id(job_id)
-        assert ready is not None and ready.kind == "ready"
+    def rename(src: _RenamePath, dst: _RenamePath, **keywords: int | None) -> None:
+        if not fired and os.fspath(src) == str(submitted.path):
+            # Another owner wins the very rename this one is about to attempt, and this one's reply is a
+            # pruned destination parent.
+            name = _kernel.format_job_name(submitted.job_key, submitted.priority, _fs.fresh_token(), "ready")
+            won = ws.jobs / "owned" / rival.owner_id / name
+            won.parent.mkdir(parents=True, exist_ok=True)
+            real(src, won)
+            fired.append(won)
+            raise OSError(errno.ENOENT, "simulated rename onto a pruned destination parent")
+        real(src, dst, **keywords)
 
-        # Another manager appends its own claim frame and wins the very rename
-        # this one is about to attempt.
-        writer = rival.open_journal_writer()
-        rival_ref = writer.append(
-            {
-                "format": "httk-workflow-state",
-                "format_version": 3,
-                "workspace_id": rival.workspace_id,
-                "job_id": ready.job_id,
-                "job_key": ready.job_key,
-                "placement": ready.placement.as_posix(),
-                "state_generation": ready.generation + 1,
-                "kind": "claimed",
-                "previous_record_ref": ready.record_ref,
-                "created_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
-                "priority": ready.priority,
-            }
-        )
-        rival_path = rival.marker_path(
-            "claimed", ready.placement, ready.job_key, ready.priority, ready.generation + 1, rival_ref
-        )
-        real = os.rename
-        fired = [0]
-
-        def rename(source: _RenamePath, destination: _RenamePath) -> None:
-            if not fired[0] and str(source) == str(ready.path):
-                fired[0] += 1
-                rival_path.parent.mkdir(parents=True, exist_ok=True)
-                real(source, rival_path)
-                raise OSError(errno.ENOENT, "simulated rename onto a pruned destination parent")
-            real(source, destination)
-
-        monkeypatch.setattr(os, "rename", rename)
-        with pytest.raises(TransitionLostError):
-            manager._claim_and_launch(ready)
-        monkeypatch.undo()
-        writer.close()
-
-    assert fired == [1]
-    # Nothing was lost and nothing was duplicated: the job carries exactly the
-    # one marker the winning transition left it at.
-    assert [marker.path for marker in workspace.scan_markers()] == [rival_path]
-    assert workspace.check().ok
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "rename", rename)
+            assert manager._claim_and_launch(submitted) is False
+        # The loser holds nothing: no attempt, no owned job, no state written.
+        assert manager.running_attempts == 0 and not manager.owner.owned()
+        (won,) = fired
+        assert [ref.path for ref in rival.owned()] == [won]
+        assert not (won / "state.json").exists() and not (won / "logs").exists()
+        # And it keeps working: its very next tick is an ordinary one.
+        manager.tick()
+    # The rival closes; its unheld job goes back unchanged, and runs once.
+    rival.close()
+    h.run(ws)
+    _single_success(ws, submitted.job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,90 +555,39 @@ def test_a_rename_that_failed_because_another_actor_won_is_reported_as_lost(
 # ---------------------------------------------------------------------------
 
 
-def _blind_to_destination(monkeypatch: pytest.MonkeyPatch, *, kind: str, job_key: str, times: int) -> list[int]:
-    """Hide every ``state/<kind>/`` marker of *job_key* from the next probes.
+def _hide(patch: pytest.MonkeyPatch, *, matches: Callable[[Path], bool], times: int) -> list[int]:
+    """Make the next *times* existence probes of matching paths report absence (a stale attribute cache)."""
 
-    This is the stale-attribute-cache case: the rename succeeded, and the
-    client simply cannot see the destination yet however often it looks.
-    """
+    real = _fs.exists
+    hidden = [0]
 
-    real = Path.is_file
-    probes = [0]
-    remaining = [times]
-
-    def is_file(self: Path) -> bool:
-        text = str(self)
-        if remaining[0] and job_key in self.name and f"{os.sep}state{os.sep}{kind}{os.sep}" in text:
-            remaining[0] -= 1
-            probes[0] += 1
+    def exists(target: _fs.Loc) -> bool:
+        if hidden[0] < times and target.at is None and matches(target.path):
+            hidden[0] += 1
             return False
-        return real(self)
+        return real(target)
 
-    monkeypatch.setattr(Path, "is_file", is_file)
-    return probes
+    patch.setattr(_fs, "exists", exists)
+    return hidden
 
 
-@pytest.mark.timing
-def test_a_transition_concludes_correctly_once_a_late_destination_becomes_visible(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_claim_whose_destination_is_not_visible_yet_is_adopted_by_self_healing(
+    ws: Workspace, installed: _store.Installed
 ) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="invisible")
-    submitted = workspace.submit(payload, "project/invisible")
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        probes = _blind_to_destination(monkeypatch, kind="ready", job_key=submitted.job_key, times=4)
-        manager._register_submissions()
-        monkeypatch.undo()
-        # The destination probe, the placement probe, and the rescan behind it
-        # all came back empty before the marker finally became visible.
-        assert probes[0] >= 3
-        ready = workspace.find_marker_by_id(job_id)
-        assert ready is not None and ready.kind == "ready"
-        manager.run_until_idle(timeout=60.0)
-
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    assert len(list(workspace.scan_markers())) == 1
-    assert workspace.check().ok
-
-
-@pytest.mark.timing
-def test_a_destination_invisible_past_the_deadline_is_contained_by_the_tick(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    root = tmp_path / "workspace"
-    workspace = Workspace.initialize(root, policy={"visibility_deadline_seconds": 0.05})
-    refused, refused_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="refused")
-    contained, contained_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="contained")
-    workspace.submit(refused, "project/refused")
-    workspace.submit(contained, "project/contained")
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        ready = workspace.find_marker_by_id(refused_id)
-        assert ready is not None and ready.kind == "ready"
-        # Nothing this job's marker moves to will ever become visible.
-        _blind_to_destination(monkeypatch, kind="claimed", job_key="", times=10_000)
-
-        # The workspace layer refuses to guess: an unresolvable rename is
-        # reported as an unavailable workspace, never as a lost race.
-        with pytest.raises(WorkspaceUnavailableError):
-            manager._claim_and_launch(ready)
-
-        # A whole tick contains exactly that condition for the next job, and the
-        # manager keeps serving the workspace afterwards.
-        with caplog.at_level("ERROR", logger="httk.workflow"):
-            manager.tick()
-        monkeypatch.undo()
-        assert any("cannot claim or launch" in record.getMessage() for record in caplog.records)
-        assert manager.tick() is not None
-
-    # Both jobs are intact: one marker each, resolving to their own frames.
-    kinds = {marker.job_id: marker.kind for marker in workspace.scan_markers()}
-    assert kinds == {refused_id: "claimed", contained_id: "claimed"}
-    assert workspace.check().ok
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
+        with pytest.MonkeyPatch.context() as patch:
+            owned = ws.jobs / "owned" / manager.manager_id
+            hidden = _hide(patch, matches=lambda path: path.parent == owned, times=1)
+            # Source gone, destination not visible yet: a claim decides without waiting, so it concludes LOST.
+            assert manager._claim_and_launch(submitted) is False
+        assert hidden == [1] and manager.running_attempts == 0
+        # The won claim was not stranded: it is in owned/<self>/, where the next tick's self-healing adopts it.
+        (stranded,) = manager.owner.owned()
+        assert stranded.job_id == submitted.job_id
+        manager.run_until_idle(timeout=60)
+    (done,) = _all_jobs(ws)
+    assert done.state == "succeeded"
+    events = _log(done)
+    assert [line["event"] for line in events].count("launched") == 1
+    assert any(line["event"] == "recovered" and line["detail"] == "self-healed" for line in events)

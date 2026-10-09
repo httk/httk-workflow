@@ -1,290 +1,147 @@
+"""Which jobs and requests a manager accepts: provenance, real directories, and decisions from the owned copy."""
+
 import json
 import os
-import shutil
 import uuid
-from dataclasses import replace
-from pathlib import Path
-from typing import cast
-
-from httk.workflow import TaskManager, Workspace, _manager_requests
-from httk.workflow.models import STATE_KINDS, marker_basename
-from httk.workflow.workspace import MarkerStream
-
-_RUNNER = """#!/usr/bin/env python3
-import json
-import os
 from pathlib import Path
 
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
+import pytest
+
+import v3_helpers as h
+from httk.workflow import TaskManager, Workspace, _kernel, _manager_scheduling, _requests, _store
+from test_crash_injection import _log
+
+pytestmark = pytest.mark.slow
 
 
-def _payload(root: Path, *, tag: str) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / tag
-    (payload / "files").mkdir(parents=True)
-    runner = payload / "files" / "runner"
-    runner.write_text(_RUNNER, encoding="utf-8")
-    runner.chmod(0o755)
-    (payload / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": job_id,
-                "tag": tag,
-                "name": tag,
-                "workflow": "tests.ownership",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "run",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-                "parent": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return payload, job_id
+@pytest.fixture()
+def ws(tmp_path: Path) -> Workspace:
+    return h.workspace(tmp_path / "ws")
 
 
-def test_window_and_walk_filter_foreign_markers_in_every_state(tmp_path, monkeypatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="central-filter")
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None
-
-        class Stream:
-            def __init__(self, markers):
-                self.markers = markers
-
-            def advance(self, **_kwargs):
-                return self.markers
-
-        for index, kind in enumerate(STATE_KINDS):
-            owned = replace(marker, kind=kind)
-            foreign = replace(marker, kind=kind)
-            manager._streams[f"central-{index}"] = cast(MarkerStream, Stream([foreign, owned]))
-            monkeypatch.setattr(manager, "_owns", lambda candidate, owned=owned: candidate is owned)
-            assert manager._window(f"central-{index}", kind) == [owned]
-
-        owned = replace(marker, kind="waiting")
-        foreign = replace(marker, kind="waiting")
-        monkeypatch.setattr(manager.workspace, "walk_markers", lambda *_args, **_kwargs: iter([foreign, owned]))
-        monkeypatch.setattr(manager, "_owns", lambda candidate: candidate is owned)
-        assert list(manager._walk(STATE_KINDS)) == [owned]
+@pytest.fixture()
+def installed(ws: Workspace, tmp_path: Path) -> _store.Installed:
+    return h.install(ws, tmp_path / "demo")
 
 
-def test_ready_hardlink_forgery_requires_payload_provenance(tmp_path, monkeypatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="legitimate")
-    workspace.submit(source, "jobs")
+def test_a_job_without_this_users_provenance_is_never_claimed_or_served(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legitimate = h.submit(ws, installed, {"start": "succeed"}, placement="project/legitimate")
+    forged = h.submit(ws, installed, {"start": "succeed"}, placement="project/forged")
+    _requests.post(ws, action="pause", job_id=forged.job_id, placement="project/forged", operator="o", reason="r")
+    real = os.lstat
 
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        legitimate = workspace.find_marker_by_id(job_id)
-        assert legitimate is not None and legitimate.kind == "ready"
+    def lstat(path: str | os.PathLike[str], *arguments: object, **keywords: object) -> os.stat_result:
+        result = real(path, *arguments, **keywords)  # type: ignore[arg-type]
+        if Path(path) in (forged.path, forged.path / "job.json"):
+            # Planted by another user: the provenance check (not an authentication) refuses it.
+            fields = list(result[:10])
+            fields[4] = result.st_uid + 1
+            return os.stat_result(fields)
+        return result
 
-        forged_id = str(uuid.uuid4())
-        forged_key = f"forged--{forged_id}"
-        forged_payload = workspace.payload_path(legitimate.placement, forged_key)
-        shutil.copytree(workspace.payload_path(legitimate.placement, legitimate.job_key), forged_payload)
-        document = json.loads((forged_payload / "job.json").read_text(encoding="utf-8"))
-        document["id"] = forged_id
-        document["tag"] = "forged"
-        (forged_payload / "job.json").write_text(json.dumps(document), encoding="utf-8")
-        forged_marker = legitimate.path.with_name(
-            marker_basename(forged_key, legitimate.priority, legitimate.generation, legitimate.record_ref)
-        )
-        os.link(legitimate.path, forged_marker)
+    monkeypatch.setattr(os, "lstat", lstat)
+    h.run(ws)
+    monkeypatch.undo()
 
-        from types import SimpleNamespace
+    assert h.find(ws, legitimate.job_id).state == "succeeded"
+    untouched = h.find(ws, forged.job_id)
+    assert untouched.path == forged.path and sorted(os.listdir(untouched.path)) == ["job.json"]
+    # Its request was not served either.
+    assert len(list((ws.control / "requests").iterdir())) == 1
 
-        real_lstat = Path.lstat
 
-        def fake_lstat(path: Path):
-            original = real_lstat(path)
-            if path == forged_payload:
-                return SimpleNamespace(st_uid=manager.uid + 1, st_mode=original.st_mode)
-            return original
+def test_a_symlinked_job_directory_is_never_claimed(ws: Workspace, installed: _store.Installed, tmp_path: Path) -> None:
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    saved = tmp_path / "saved"
+    submitted.path.rename(saved)
+    submitted.path.symlink_to(saved, target_is_directory=True)
+    h.run(ws)
+    # Neither the link nor its target was claimed, written or moved.
+    assert submitted.path.is_symlink() and os.readlink(submitted.path) == str(saved)
+    assert sorted(os.listdir(saved)) == ["job.json"]
+    assert not list((ws.jobs / "owned").glob("*/*"))
+    assert not [ref for state in _kernel.UNOWNED_STATES if state != "ready" for ref in _kernel.list_jobs(ws, state)]
 
-        monkeypatch.setattr(Path, "lstat", fake_lstat)
-        eligible = manager._eligible_ready()
-        assert all(item.job_key != forged_key for item in eligible)
-        assert any(item.job_key == legitimate.job_key for item in eligible)
-        assert manager._claim_and_launch(legitimate)
 
+def test_a_job_definition_changed_after_the_eligibility_read_decides_from_the_owned_copy(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read before a claim is only a hint: eligibility is decided again from the claimed directory."""
+
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    real = _manager_scheduling.read_ready
+    swapped: list[str] = []
+
+    def read_then_swap(manager: TaskManager, ref: _kernel.JobRef) -> object:
+        result = real(manager, ref)
+        if not swapped:
+            # Between the eligibility read and the claim, the definition starts asking for another pool.
+            document = json.loads((ref.path / "job.json").read_text(encoding="utf-8"))
+            document["claim"]["pool"] = "elsewhere"
+            (ref.path / "job.json").write_text(json.dumps(document), encoding="utf-8")
+            swapped.append(ref.job_key)
+        return result
+
+    monkeypatch.setattr(_manager_scheduling, "read_ready", read_then_swap)
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
         manager.tick()
-        current = workspace.find_marker_by_id(job_id)
-        assert current is not None and current.kind in {"running", "committing", "succeeded"}
+        assert swapped and manager.running_attempts == 0
+    returned = h.find(ws, submitted.job_id)
+    assert returned.state == "ready"
+    # Claimed, found ineligible from its own job.json, and returned without an attempt.
+    assert h.events(returned) == ["claimed", "released"]
+    assert not (returned.path / "attempts").exists() and not (returned.path / "run").exists()
+    assert h.state_of(returned).attempt is None
 
 
-def test_symlinked_payload_directory_is_refused(tmp_path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="symlinked")
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None
-        payload = workspace.payload_path(marker.placement, marker.job_key)
-        saved = payload.with_name(payload.name + ".saved")
-        payload.rename(saved)
-        payload.symlink_to(saved, target_is_directory=True)
-        assert not manager._owns(marker)
-        assert manager._eligible_ready() == []
+def test_a_request_whose_job_id_disagrees_with_its_name_is_never_applied(
+    ws: Workspace, installed: _store.Installed, caplog: pytest.LogCaptureFixture
+) -> None:
+    submitted = h.submit(ws, installed, {"start": "succeed"}, pool="nobody")
+    request_id = str(uuid.uuid4())
+    document = {
+        "format": _requests.REQUEST_FORMAT,
+        "format_version": _requests.REQUEST_FORMAT_VERSION,
+        "request_id": request_id,
+        "job_id": str(uuid.uuid4()),
+        "placement": "project/0",
+        "action": "pause",
+        "operator": "tester",
+        "reason": "test",
+        "created_at": "2026-10-09T00:00:00+00:00",
+    }
+    # Filed under the job's id, but naming another job: a misnamed request is malformed, whatever it says.
+    misnamed = ws.control / "requests" / f"{submitted.job_id}.{request_id}.json"
+    misnamed.parent.mkdir(parents=True, exist_ok=True)
+    misnamed.write_text(json.dumps(document), encoding="utf-8")
+    with caplog.at_level("ERROR", logger="httk.workflow"):
+        h.run(ws)
+    current = h.find(ws, submitted.job_id)
+    assert current.path == submitted.path and current.state == "ready"
+    assert not (current.path / "logs").exists()
+    # It stays for collection to quarantine; nothing applied it.
+    assert misnamed.exists()
+    assert any("ignoring malformed request" in record.getMessage() for record in caplog.records)
 
 
-def test_marker_symlink_is_not_owned_accepted(tmp_path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="marker-link")
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None
-        target = marker.path.with_name(marker.path.name + ".target")
-        marker.path.rename(target)
-        marker.path.symlink_to(target)
-        assert not manager._owns(marker)
-        assert manager._eligible_ready() == []
-
-
-def test_payload_swap_after_ownership_check_is_refused(tmp_path, monkeypatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="swap")
-    workspace.submit(source, "jobs")
-    alternate_source, _ = _payload(tmp_path / "alternate", tag="alternate")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None and marker.kind == "ready"
-        payload = workspace.payload_path(marker.placement, marker.job_key)
-        alternate = payload.with_name(payload.name + ".alternate")
-        shutil.copytree(alternate_source, alternate)
-        saved = payload.with_name(payload.name + ".saved")
-        real_owns = manager._owns
-        swapped = False
-
-        def owns(candidate):
-            nonlocal swapped
-            result = real_owns(candidate)
-            if not swapped and candidate.path == marker.path:
-                swapped = True
-                payload.rename(saved)
-                alternate.rename(payload)
-            return result
-
-        monkeypatch.setattr(manager, "_owns", owns)
-        assert not manager._claim_and_launch(marker)
-        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
-
-
-def test_job_digest_is_rechecked_before_launch(tmp_path, monkeypatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="digest")
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None and marker.kind == "ready"
-        payload = workspace.payload_path(marker.placement, marker.job_key)
-        real_launch = manager._launch_claimed
-
-        def tamper_then_launch(claimed, job, state):
-            document = json.loads((payload / "job.json").read_text(encoding="utf-8"))
-            document["name"] = "tampered"
-            (payload / "job.json").write_text(json.dumps(document), encoding="utf-8")
-            real_launch(claimed, job, state)
-
-        monkeypatch.setattr(manager, "_launch_claimed", tamper_then_launch)
-        assert manager._claim_and_launch(marker)
-        failed = workspace.find_marker_by_id(job_id)
-        assert failed is not None and failed.kind == "failed"
-        assert workspace.read_state(failed)["failure"]["code"] == "payload.tampered"
-        assert not list(payload.glob("attempts/*"))
-
-
-def test_request_replaced_during_claim_is_not_applied(tmp_path, monkeypatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="request")
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None and marker.kind == "ready"
-        request = {
-            "format": "httk-workflow-request",
-            "format_version": 2,
-            "request_id": str(uuid.uuid4()),
-            "job_id": marker.job_id,
-            "job_key": marker.job_key,
-            "placement": marker.placement.as_posix(),
-            "expected_generation": marker.generation,
-            "expected_record_ref": marker.record_ref,
-            "action": "cancel",
-            "operator": "tester",
-            "reason": "test",
-        }
-        request_path = workspace.publish_request(request)
-        claimed_path = workspace.control / "requests" / "claimed" / manager.manager_id / request_path.name
-        real_rename = _manager_requests.os.rename
-
-        def rename(source_path, destination):
-            real_rename(source_path, destination)
-            if Path(destination) == claimed_path:
-                swapped = tmp_path / "swapped.json"
-                swapped.write_text(json.dumps({**request, "action": "pause"}), encoding="utf-8")
-                os.replace(swapped, destination)
-
-        monkeypatch.setattr(_manager_requests.os, "rename", rename)
-        manager._handle_requests()
-
-    current = workspace.find_marker_by_id(job_id)
-    assert current is not None and current.kind == "ready"
-
-
-def test_request_job_id_must_match_job_key(tmp_path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source, job_id = _payload(tmp_path / "source", tag="request-id")
-    workspace.submit(source, "jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None
-        workspace.publish_request(
-            {
-                "format": "httk-workflow-request",
-                "format_version": 2,
-                "request_id": str(uuid.uuid4()),
-                "job_id": str(uuid.uuid4()),
-                "job_key": marker.job_key,
-                "placement": marker.placement.as_posix(),
-                "expected_generation": marker.generation,
-                "expected_record_ref": marker.record_ref,
-                "action": "cancel",
-                "operator": "tester",
-                "reason": "test",
-            }
-        )
-        manager._handle_requests()
-    assert list((workspace.control / "quarantine").iterdir())
-    current = workspace.find_marker_by_id(job_id)
-    assert current is not None and current.kind == "ready"
+def test_a_request_for_a_job_is_applied_from_the_owned_copy_and_recorded(
+    ws: Workspace, installed: _store.Installed
+) -> None:
+    submitted = h.submit(ws, installed, {"start": "succeed"}, pool="nobody")
+    request = _requests.post(
+        ws,
+        action="set_priority",
+        job_id=submitted.job_id,
+        placement="project/0",
+        operator="o",
+        reason="r",
+        priority=25,
+    )
+    h.run(ws)
+    current = h.find(ws, submitted.job_id)
+    assert current.state == "ready" and current.priority == 25
+    assert not request.exists()
+    (applied,) = [line for line in _log(current) if line["event"] == "request_applied"]
+    assert applied["detail"] == {"request_id": request.name.split(".")[1], "action": "set_priority"}

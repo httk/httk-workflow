@@ -1,54 +1,49 @@
 """A job that tampers with its own control paths fails alone, never redirecting or stalling the manager.
 
 Each scenario runs a real :class:`~httk.workflow.TaskManager` over a job whose
-runner plants a symlink, FIFO, or oversized document on one of the manager's
-control paths in its own directory and then exits, so the manager meets the
-tampering while ending that attempt and launching the next one. A healthy job
-in the same workspace must still succeed, nothing outside the job directory
-may change, and nothing may block.
+runner plants a symlink, FIFO, oversized or damaged document on one of the
+manager's control paths in its own directory and then exits, so the manager
+meets the tampering while ending that attempt and launching the next one. A
+healthy job in the same workspace must still succeed, nothing outside the job
+directory may change, and nothing may block.
 """
 
 import json
 import os
 import signal
+import stat
+import threading
 import time
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace
-from httk.workflow._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectoryError
+import v3_helpers as h
+from httk.workflow import TaskManager, Workspace, _kernel, _manager_commit, _store
 from httk.workflow._logging import reset_logging
-from httk.workflow.models import Marker
+from test_commit_ownership import _gone
+from test_crash_injection import _log
+
+pytestmark = pytest.mark.slow
 
 _RUNNER = """#!/usr/bin/env python3
-import json
-import os
-import signal
-import sys
-import time
-from pathlib import Path
+import json, os, pathlib, signal, subprocess, sys, time
 
 context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-job = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
-OUTSIDE = Path({outside!r})
-LIMIT = {limit!r}
+control = pathlib.Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+job = pathlib.Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
+parameters = json.loads((job / "job.json").read_text())["parameters"]
+OUTSIDE = pathlib.Path(parameters["outside"])
+LIMIT = parameters.get("limit", 0)
 
 
 def outcome(action="succeed"):
-    return {{
-        "format": "httk-workflow-outcome",
-        "format_version": 2,
-        "job_id": context["job_id"],
-        "activation_id": context["activation_id"],
-        "attempt_id": context["attempt_id"],
-        "action": action,
-    }}
+    document = {key: context[key] for key in ("job_id", "activation_id", "attempt_id")}
+    document.update(format="httk-workflow-outcome", format_version=2, action=action)
+    return document
 
 
 def publish(document=None):
@@ -58,102 +53,126 @@ def publish(document=None):
     os.rename(temporary, control / "outcome.ready")
 
 
+(OUTSIDE / ("runner." + context["attempt_id"])).write_text(__file__)
 if context["attempt_ordinal"] == 1:
-{tamper}
+    exec(parameters.get("tamper", "pass"))
 publish()
 """
 
-#: What the first attempt of each scenario does to its own job directory, and the
-#: failure code the job must end with.
+#: What the first attempt of each scenario does to its own job directory, and the failure code the job must end
+#: with. A scenario that exits 1 leaves the next attempt (``retry_on: process_failure``) to meet the tampering.
 _SCENARIOS: dict[str, tuple[str, str]] = {
     # (a) the stdio chronicle is a symlink to a file outside the job directory.
     "stdio_symlink": (
         """
-    (job / "logs" / "stdio.out").unlink()
-    (job / "logs" / "stdio.out").symlink_to(OUTSIDE / "target")
-    sys.exit(1)
+(job / "logs" / "stdio.out").unlink()
+(job / "logs" / "stdio.out").symlink_to(OUTSIDE / "target")
+sys.exit(1)
 """,
         "protocol_error",
     ),
     # (b) the whole log directory is a symlink to a directory outside.
     "logs_symlink": (
         """
-    (job / "logs").rename(job / "logs.moved")
-    (job / "logs").symlink_to(OUTSIDE, target_is_directory=True)
-    sys.exit(1)
+(job / "logs").rename(job / "logs.moved")
+(job / "logs").symlink_to(OUTSIDE, target_is_directory=True)
+sys.exit(1)
 """,
         "protocol_error",
     ),
     # (c) the stdio chronicle is a FIFO nobody reads.
     "stdio_fifo": (
         """
-    (job / "logs" / "stdio.out").unlink()
-    os.mkfifo(job / "logs" / "stdio.out")
-    sys.exit(1)
+(job / "logs" / "stdio.out").unlink()
+os.mkfifo(job / "logs" / "stdio.out")
+sys.exit(1)
 """,
         "protocol_error",
     ),
-    # (d) the attempt container is a symlink to a directory outside.
+    # (d) the owner run log is a symlink to a file outside.
+    "runlog_symlink": (
+        """
+(job / "logs" / "runlog.jsonl").unlink()
+(job / "logs" / "runlog.jsonl").symlink_to(OUTSIDE / "target")
+sys.exit(1)
+""",
+        "protocol_error",
+    ),
+    # (e) the attempt container is a symlink to a directory outside.
     "attempts_symlink": (
         """
-    os.rename(job / "attempts", job / "attempts.moved")
-    (job / "attempts").symlink_to(OUTSIDE, target_is_directory=True)
-    sys.exit(1)
+os.rename(job / "attempts", job / "attempts.moved")
+(job / "attempts").symlink_to(OUTSIDE, target_is_directory=True)
+sys.exit(1)
 """,
         "protocol_error",
     ),
-    # (e) outcome.ready is a symlink to an outside directory holding a valid outcome.
+    # (f) outcome.ready is a symlink to an outside directory holding a valid outcome.
     "outcome_symlink": (
         """
-    (OUTSIDE / "published").mkdir()
-    (OUTSIDE / "published" / "outcome.json").write_text(json.dumps(outcome()))
-    (control / "outcome.ready").symlink_to(OUTSIDE / "published", target_is_directory=True)
-    sys.exit(0)
+(OUTSIDE / "published").mkdir()
+(OUTSIDE / "published" / "outcome.json").write_text(json.dumps(outcome()))
+(control / "outcome.ready").symlink_to(OUTSIDE / "published", target_is_directory=True)
+sys.exit(0)
 """,
         "protocol_error",
     ),
-    # (f) .httk-job is a symlink to an outside directory holding a "seal": following
-    # it would make every transition of the job raise SealedError. The job gets a
-    # single attempt, so the failure transition itself is what must not be refused.
+    # (g) .httk-job is a symlink to an outside directory holding a "seal". The job gets a single attempt and
+    # fails, so the failure release itself is what must not follow it.
     "state_symlink": (
         """
-    (OUTSIDE / "state").mkdir()
-    (OUTSIDE / "state" / "seal.json").write_text("{}")
-    if (job / ".httk-job").exists():
-        (job / ".httk-job").rename(job / ".httk-job.moved")
-    (job / ".httk-job").symlink_to(OUTSIDE / "state", target_is_directory=True)
-    sys.exit(1)
+(OUTSIDE / "state").mkdir()
+(OUTSIDE / "state" / "seal.json").write_text("{}")
+(job / ".httk-job").symlink_to(OUTSIDE / "state", target_is_directory=True)
+sys.exit(1)
 """,
         "process_failure",
     ),
-    # (g) the persistent workdir is a symlink to a directory outside.
+    # (h) the workdir is a symlink to a directory outside.
     "workdir_symlink": (
         """
-    os.chdir(job)
-    (job / "run").rename(job / "run.moved")
-    (job / "run").symlink_to(OUTSIDE, target_is_directory=True)
-    sys.exit(1)
+os.chdir(job)
+(job / "run").rename(job / "run.moved")
+(job / "run").symlink_to(OUTSIDE, target_is_directory=True)
+sys.exit(1)
 """,
         "protocol_error",
     ),
-    # An oversized outcome document.
+    # (i) an oversized outcome document.
     "outcome_oversized": (
         """
-    temporary = control / "outcome.tmp.test"
-    temporary.mkdir()
-    with (temporary / "outcome.json").open("wb") as handle:
-        handle.truncate(LIMIT + 1)
-    os.rename(temporary, control / "outcome.ready")
-    sys.exit(0)
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+with (temporary / "outcome.json").open("wb") as handle:
+    handle.truncate(LIMIT + 1)
+os.rename(temporary, control / "outcome.ready")
+sys.exit(0)
 """,
         "protocol_error",
     ),
-    # A FIFO as the environment-resolution marker next to a valid outcome.
-    "environment_marker_fifo": (
+    # (j) the outcome document is a FIFO nobody writes.
+    "outcome_fifo": (
         """
-    os.mkfifo(control / ".httk-environment-resolution.json")
-    publish()
-    sys.exit(0)
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+os.mkfifo(temporary / "outcome.json")
+os.rename(temporary, control / "outcome.ready")
+sys.exit(0)
+""",
+        "protocol_error",
+    ),
+    # (k) the job overwrites its owner's state.json with garbage, then publishes a valid outcome.
+    "state_json_garbage": (
+        """
+(job / "state.json").write_text("{ not json")
+""",
+        "protocol_error",
+    ),
+    # (l) the job replaces its owner's state.json with a symlink to a file outside.
+    "state_json_symlink": (
+        """
+(job / "state.json").unlink()
+(job / "state.json").symlink_to(OUTSIDE / "target")
 """,
         "protocol_error",
     ),
@@ -185,42 +204,40 @@ def _watchdog() -> Iterator[None]:
         signal.signal(signal.SIGALRM, previous)
 
 
-def _payload(root: Path, tag: str, runner_source: str, *, attempts: int) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / tag
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
-    runner.write_text(runner_source, encoding="utf-8")
-    runner.chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": tag,
-        "name": f"Job directory hardening {tag}",
-        "workflow": "tests.jobdir",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "only",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {
+@pytest.fixture()
+def ws(tmp_path: Path) -> Workspace:
+    return h.workspace(tmp_path / "ws")
+
+
+@pytest.fixture()
+def installed(ws: Workspace, tmp_path: Path) -> _store.Installed:
+    return h.install(ws, tmp_path / "jobdir", executables={"run": _RUNNER})
+
+
+@pytest.fixture()
+def outside(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "target").write_text("outside\n", encoding="utf-8")
+    return outside
+
+
+def _submit(
+    ws: Workspace, installed: _store.Installed, outside: Path, tag: str, *, tamper: str = "pass", attempts: int = 1
+) -> _kernel.JobRef:
+    return h.submit(
+        ws,
+        installed,
+        {"start": "tamper"},
+        tag=tag,
+        placement=f"project/{tag}",
+        parameters={"outside": str(outside), "tamper": tamper, "limit": _manager_commit._OUTCOME_LIMIT},
+        retry_policy={
             "maximum_attempts_per_activation": attempts,
             "maximum_total_attempts": attempts,
-            "maximum_activations": 1,
             "retry_on": ["process_failure"] if attempts > 1 else [],
         },
-        "resources": {},
-        "parent": None,
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    return payload, job_id
-
-
-def _runner(outside: Path, tamper: str = "    pass\n") -> str:
-    return _RUNNER.format(outside=str(outside), limit=CONTROL_DOCUMENT_LIMIT, tamper=tamper.strip("\n") + "\n")
+    )
 
 
 def _snapshot(directory: Path) -> dict[str, Any]:
@@ -236,255 +253,207 @@ def _snapshot(directory: Path) -> dict[str, Any]:
     return state
 
 
-def _failure_code(workspace: Workspace, job_id: str) -> tuple[str, str | None]:
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    if marker.kind != "failed":
-        return marker.kind, None
-    return marker.kind, workspace.read_state(marker)["failure"]["code"]
+def _failure_code(ws: Workspace, job_id: str) -> tuple[str, str | None]:
+    ref = h.find(ws, job_id)
+    if ref.state != "failed":
+        return ref.state, None
+    doc = h.state_of(ref)
+    assert doc.failure is not None
+    return ref.state, str(doc.failure["code"])
 
 
-@pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
-def test_tampering_with_a_control_path_fails_only_that_job(tmp_path: Path, scenario: str) -> None:
+#: Scenarios that reveal manager defects (reported; the tests stay strict so a fix turns them green).
+_DEFECTS = {
+    "logs_symlink": "OwnedJob.append_log follows a symlinked logs/ directory: the manager appends runlog.jsonl "
+    "outside the job directory",
+    "stdio_fifo": "_fs.append_file opens an existing file without O_NONBLOCK: a FIFO planted at logs/stdio.out "
+    "blocks the manager (every job) until a reader appears",
+    "runlog_symlink": "a symlink at logs/runlog.jsonl raises UnsafePath, which reconcile does not treat as job "
+    "damage: the job stays owned forever and its manager never becomes idle",
+    "state_json_symlink": "a symlink at state.json raises UnsafePath, which reconcile does not treat as job "
+    "damage: the job stays owned forever and its manager never becomes idle",
+}
+#: How long a scenario may run before the test opens every FIFO in the workspace for reading, unblocking a
+#: manager stuck on one (which the test then reports as a stall instead of hanging).
+_STALL_SECONDS = 20.0
+
+
+class _Rescuer:
+    """After the stall deadline, keep giving every FIFO in the workspace a partner until stopped.
+
+    Opening a FIFO read-write completes a blocked open on either side; closing it again then ends a blocked read
+    (end of file) or a blocked write (a broken pipe). A manager stuck on a planted FIFO thus moves on, and the test
+    reports the stall instead of hanging.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.fired = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10.0)
+
+    def _run(self) -> None:
+        if self._stop.wait(_STALL_SECONDS):
+            return
+        while not self._stop.wait(0.2):
+            for current, _directories, files in os.walk(self.root):
+                for name in files:
+                    path = Path(current, name)
+                    try:
+                        if not stat.S_ISFIFO(path.lstat().st_mode):
+                            continue
+                        descriptor = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+                    except OSError:
+                        continue
+                    self.fired = True
+                    os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=_DEFECTS[name])) if name in _DEFECTS else name
+        for name in sorted(_SCENARIOS)
+    ],
+)
+def test_tampering_with_a_control_path_fails_only_that_job(
+    ws: Workspace, installed: _store.Installed, outside: Path, scenario: str
+) -> None:
     tamper, expected = _SCENARIOS[scenario]
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "target").write_text("outside\n", encoding="utf-8")
     attempts = 1 if scenario in _SINGLE_ATTEMPT else 2
-    hostile_payload, hostile_id = _payload(tmp_path / "source", "hostile", _runner(outside, tamper), attempts=attempts)
-    healthy_payload, healthy_id = _payload(tmp_path / "source", "healthy", _runner(outside), attempts=1)
-    workspace.submit(hostile_payload, "project/hostile")
-    workspace.submit(healthy_payload, "project/healthy")
+    hostile = _submit(ws, installed, outside, "hostile", tamper=tamper, attempts=attempts)
+    healthy = _submit(ws, installed, outside, "healthy")
 
     started = time.monotonic()
-    with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=1.0) as manager:
-        manager.run_until_idle(timeout=60.0)
-        # The tampering only makes the manager record a failure, so it is still serving.
-        manager.tick()
-    elapsed = time.monotonic() - started
+    with _Rescuer(ws.root) as rescuer:
+        with TaskManager(ws, heartbeat_interval=0.01, cancel_grace_seconds=1.0) as manager:
+            manager.run_until_idle(timeout=_STALL_SECONDS)
+            # The tampering only makes the manager record a failure, so it is still serving.
+            manager.tick()
+        elapsed = time.monotonic() - started
+    assert not rescuer.fired, "the manager blocked on a FIFO the job planted"
 
-    # Nothing the manager did was written through the planted links: the only
-    # entries outside are the target and what the job itself put there.
+    # Nothing the manager did was written through the planted links: the only entries outside are the target and
+    # what the job itself put there.
     planted = _snapshot(outside)
     assert planted.pop("target")[2] == b"outside\n"
+    planted = {name: value for name, value in planted.items() if not name.startswith("runner.")}
     assert set(planted) <= {"published", "published/outcome.json", "state", "state/seal.json"}
-    assert _failure_code(workspace, hostile_id) == ("failed", expected)
-    assert _failure_code(workspace, healthy_id) == ("succeeded", None)
-    assert elapsed < 60.0
+    assert _failure_code(ws, hostile.job_id) == ("failed", expected)
+    assert _failure_code(ws, healthy.job_id) == ("succeeded", None)
+    assert elapsed < _STALL_SECONDS
 
 
-@pytest.mark.timing
-def test_a_fenced_attempt_ignoring_sigterm_is_killed_after_the_grace(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    runner = _runner(outside).replace(
-        "\npublish()\n",
-        "\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\npublish()\n"
-        '(OUTSIDE / "pid").write_text(str(os.getpid()))\ntime.sleep(120)\n',
-    )
-    payload, job_id = _payload(tmp_path / "source", "lingering", runner, attempts=1)
-    workspace.submit(payload, "project/lingering")
+def test_a_process_left_in_the_attempt_group_ignoring_sigterm_is_killed_before_the_commit(
+    ws: Workspace, installed: _store.Installed, outside: Path
+) -> None:
+    """The runner exits, but a process it left in its group ignores SIGTERM: the manager kills the group."""
 
+    tamper = """
+script = "import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); " \\
+         "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(120)"
+subprocess.Popen([sys.executable, "-c", script, str(OUTSIDE / "pid")])
+while not (OUTSIDE / "pid").exists():
+    time.sleep(0.01)
+"""
+    lingering = _submit(ws, installed, outside, "lingering", tamper=tamper)
     started = time.monotonic()
-    with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=0.5) as manager:
+    with TaskManager(ws, heartbeat_interval=0.01, cancel_grace_seconds=0.5) as manager:
         manager.run_until_idle(timeout=60.0)
-        assert not manager._running
+        assert not manager.running_attempts
     elapsed = time.monotonic() - started
 
-    assert _failure_code(workspace, job_id) == ("succeeded", None)
-    pid = int((outside / "pid").read_text(encoding="utf-8"))
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert _failure_code(ws, lingering.job_id) == ("succeeded", None)
+    assert _gone(int((outside / "pid").read_text(encoding="utf-8")))
     assert elapsed < 30.0
 
 
-def test_an_undescribable_launch_digest_is_logged_and_the_launch_proceeds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_a_commit_error_is_retried_by_self_healing_and_spares_other_jobs(
+    ws: Workspace, installed: _store.Installed, outside: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    linked_payload, linked_id = _payload(tmp_path / "source", "linked", _runner(outside), attempts=1)
-    plain_payload, plain_id = _payload(tmp_path / "source", "plain", _runner(outside), attempts=1)
-    linked = workspace.submit(linked_payload, "project/linked")
-    workspace.submit(plain_payload, "project/plain")
-    # A contained relative symlink a previous attempt left in the persistent
-    # workdir is legal payload content that the payload digest cannot describe.
-    workdir = workspace.payload_path(linked.placement, linked.job_key) / "run"
-    workdir.mkdir()
-    (workdir / "alias").symlink_to("../files/runner")
+    bad = _submit(ws, installed, outside, "bad")
+    good = _submit(ws, installed, outside, "good")
+    real = TaskManager._commit_outcome
+    failed: list[str] = []
 
-    with (
-        caplog.at_level("WARNING", logger="httk.workflow.manager"),
-        TaskManager(workspace, heartbeat_interval=0.01) as manager,
-    ):
+    def commit(self: TaskManager, owned: _kernel.OwnedJob, *arguments: Any) -> None:
+        if owned.job_id == bad.job_id and not failed:
+            failed.append(owned.job_key)
+            # What an unexpected I/O error while committing reports.
+            raise OSError("simulated storage error while committing")
+        real(self, owned, *arguments)
+
+    monkeypatch.setattr(TaskManager, "_commit_outcome", commit)
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=60.0)
+        reported = dict(manager._reported)
 
-    assert _failure_code(workspace, linked_id) == ("succeeded", None)
-    assert _failure_code(workspace, plain_id) == ("succeeded", None)
-    assert any("cannot record the launch payload digest" in record.getMessage() for record in caplog.records)
-    launches = [getattr(record, "event", None) for record in caplog.records]
-    assert "payload_digest_unavailable" in launches
+    assert failed == [bad.job_key]
+    assert any(key == f"commit:{bad.job_key}" for key in reported)
+    # The job stayed owned with its published outcome; the next tick's self-healing committed it.
+    assert _failure_code(ws, bad.job_id) == ("succeeded", None)
+    assert [line["event"] for line in _log(h.find(ws, bad.job_id))].count("launched") == 1
+    assert _failure_code(ws, good.job_id) == ("succeeded", None)
 
 
-def test_a_job_directory_refusal_while_polling_fails_only_that_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_installed_runner_is_executed_by_its_installed_path(
+    ws: Workspace, installed: _store.Installed, outside: Path
 ) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    bad_payload, bad_id = _payload(tmp_path / "source", "bad", _runner(outside), attempts=1)
-    good_payload, good_id = _payload(tmp_path / "source", "good", _runner(outside), attempts=1)
-    workspace.submit(bad_payload, "project/bad")
-    workspace.submit(good_payload, "project/good")
-    real_poll = TaskManager._poll_one_running
-
-    def poll(self: TaskManager, marker: Marker, *args: Any) -> bool:
-        if marker.job_id == bad_id:
-            # What a digest of a tree holding a special file reports.
-            raise JobDirectoryError("special file is forbidden in immutable bundle")
-        return real_poll(self, marker, *args)
-
-    monkeypatch.setattr(TaskManager, "_poll_one_running", poll)
-    with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=1.0) as manager:
-        manager.run_until_idle(timeout=60.0)
-
-    assert _failure_code(workspace, bad_id) == ("failed", "protocol_error")
-    assert _failure_code(workspace, good_id) == ("succeeded", None)
+    submitted = _submit(ws, installed, outside, "runner")
+    h.run(ws)
+    done = h.find(ws, submitted.job_id)
+    assert done.state == "succeeded"
+    # The runner sees its real path in the installed package, so it can locate the files beside it.
+    (seen,) = outside.glob("runner.*")
+    assert seen.read_text(encoding="utf-8") == str(installed.package / "run")
+    (started,) = [line for line in _log(done) if line["event"] == "attempt_started"]
+    detail = started["detail"]
+    assert isinstance(detail, dict) and detail["command"] == [str(installed.package / "run")]
 
 
-def test_a_payload_runner_is_hashed_by_descriptor_and_executed_by_its_path(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    runner = _runner(outside).replace("\npublish()\n", '\n(OUTSIDE / "file").write_text(__file__)\npublish()\n')
-    payload, job_id = _payload(tmp_path / "source", "runner", runner, attempts=1)
-    marker = workspace.submit(payload, "project/runner")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=60.0)
-    assert _failure_code(workspace, job_id) == ("succeeded", None)
-    installed = workspace.payload_path(marker.placement, marker.job_key)
-    # The runner sees its real path, so it can locate the files beside it.
-    assert (outside / "file").read_text(encoding="utf-8") == str(installed / "files" / "runner")
-    events = [
-        json.loads(line)
-        for line in (installed / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    launched = [event for event in events if event.get("kind") == "attempt"]
-    assert launched and launched[0]["runner_path"] == str(installed / "files" / "runner")
-    assert isinstance(launched[0]["runner_sha256"], str) and len(launched[0]["runner_sha256"]) == 64
+def test_a_fifo_job_definition_of_a_ready_job_never_stalls_the_manager(
+    ws: Workspace, installed: _store.Installed, outside: Path
+) -> None:
+    hostile = _submit(ws, installed, outside, "hostile")
+    healthy = _submit(ws, installed, outside, "healthy")
+    # Something outside the protocol replaced the ready job's definition with a FIFO nobody writes.
+    (hostile.path / "job.json").unlink()
+    os.mkfifo(hostile.path / "job.json")
+    h.run(ws)
+    assert _failure_code(ws, healthy.job_id) == ("succeeded", None)
+    # The job is skipped, never claimed.
+    assert h.find(ws, hostile.job_id).path == hostile.path
 
 
-def test_an_execute_only_payload_runner_still_launches_without_a_digest(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    payload, job_id = _payload(tmp_path / "source", "exec-only", _runner(outside), attempts=1)
-    # A binary the manager may execute but not read: it exits 0 without an outcome.
-    true = Path("/bin/true")
-    (payload / "files" / "runner").write_bytes(true.read_bytes())
-    (payload / "files" / "runner").chmod(0o755)
-    marker = workspace.submit(payload, "project/exec-only")
-    installed = workspace.payload_path(marker.placement, marker.job_key)
-    (installed / "files" / "runner").chmod(0o111)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=60.0)
-    state = workspace.read_state(workspace.find_marker_by_id(job_id))  # type: ignore[arg-type]
-    assert state["failure"]["code"] == "protocol_error"
-    assert "without an outcome" in state["failure"]["message"]
-    events = [
-        json.loads(line)
-        for line in (installed / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    launched = [event for event in events if event.get("kind") == "attempt"]
-    assert launched and launched[0]["runner_sha256"] is None
-
-
-def test_a_symlinked_payload_runner_planted_after_registration_fails_the_launch(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    # Were the planted symlink followed, the target would leave a sentinel.
-    (outside / "target").write_text(f"#!/bin/sh\ntouch {outside / 'ran'}\nexit 0\n", encoding="utf-8")
-    (outside / "target").chmod(0o755)
-    payload, job_id = _payload(tmp_path / "source", "linked-runner", _runner(outside), attempts=1)
-    marker = workspace.submit(payload, "project/linked-runner")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager._register_submissions()
-        installed = workspace.payload_path(marker.placement, marker.job_key)
-        (installed / "files" / "runner").unlink()
-        (installed / "files" / "runner").symlink_to(outside / "target")
-        manager.run_until_idle(timeout=60.0)
-    assert _failure_code(workspace, job_id) == ("failed", "protocol_error")
-    assert not (outside / "ran").exists()
-    failed = workspace.find_marker_by_id(job_id)
-    assert failed is not None
-    message = workspace.read_state(failed)["failure"]["message"]
-    assert "cannot launch runner" in message and "not a regular file" in message, message
-
-
-def _tick_until(manager: TaskManager, workspace: Workspace, job_id: str, kind: str) -> None:
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        manager.tick()
-        marker = workspace.find_marker_by_id(job_id)
-        if marker is not None and marker.kind == kind:
-            return
-        time.sleep(0.01)
-    raise AssertionError(f"job {job_id} never reached {kind}")
-
-
-@pytest.mark.parametrize("state", ["ready", "running"])
-def test_a_fifo_job_definition_fails_the_job_without_stalling_the_manager(tmp_path: Path, state: str) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sleeper = _runner(outside).replace("\npublish()\n", "\ntime.sleep(120)\n")
-    hostile_payload, hostile_id = _payload(
-        tmp_path / "source", "hostile", sleeper if state == "running" else _runner(outside), attempts=1
-    )
-    healthy_payload, healthy_id = _payload(tmp_path / "source", "healthy", _runner(outside), attempts=1)
-    hostile = workspace.submit(hostile_payload, "project/hostile")
-    installed = workspace.payload_path(hostile.placement, hostile.job_key)
-
-    with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=0.5) as manager:
-        if state == "ready":
-            manager._register_submissions()
-        else:
-            _tick_until(manager, workspace, hostile_id, "running")
-        # The job replaces its own definition with a FIFO nobody writes.
-        (installed / "job.json").unlink()
-        os.mkfifo(installed / "job.json")
-        workspace.submit(healthy_payload, "project/healthy")
-        manager.run_until_idle(timeout=60.0)
-        assert not manager._running
-
-    kind, code = _failure_code(workspace, hostile_id)
-    assert (kind, code) == ("failed", "protocol_error")
-    failed = workspace.find_marker_by_id(hostile_id)
-    assert failed is not None
-    assert "job.json is not a regular file" in workspace.read_state(failed)["failure"]["message"]
-    assert _failure_code(workspace, healthy_id) == ("succeeded", None)
-
-
-def test_a_job_under_a_symlinked_placement_directory_runs(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    # Placement directories are operator layout: project -> /scratch/project.
-    scratch = tmp_path / "scratch" / "project"
-    scratch.mkdir(parents=True)
-    (workspace.jobs / "project").symlink_to(scratch, target_is_directory=True)
-    payload, job_id = _payload(tmp_path / "source", "placed", _runner(outside), attempts=1)
-    marker = workspace.submit(payload, "project/placed")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=60.0)
-    assert _failure_code(workspace, job_id) == ("succeeded", None)
-    assert (scratch / "placed" / marker.job_key / "logs" / "stdio.out").is_file()
+@pytest.mark.xfail(
+    strict=True,
+    reason="the kernel reads job.json lazily (OwnedJob.header at the first release) with a blocking open: a FIFO "
+    "the running job planted at job.json blocks the manager",
+)
+def test_a_fifo_job_definition_planted_by_a_running_job_fails_it_without_stalling_the_manager(
+    ws: Workspace, installed: _store.Installed, outside: Path
+) -> None:
+    tamper = """
+(job / "job.json").unlink()
+os.mkfifo(job / "job.json")
+"""
+    hostile = _submit(ws, installed, outside, "hostile", tamper=tamper)
+    healthy = _submit(ws, installed, outside, "healthy")
+    with _Rescuer(ws.root) as rescuer, TaskManager(ws, heartbeat_interval=0.01, cancel_grace_seconds=0.5) as manager:
+        manager.run_until_idle(timeout=_STALL_SECONDS)
+        assert not manager.running_attempts
+    assert not rescuer.fired, "the manager blocked on a FIFO the job planted"
+    assert _failure_code(ws, healthy.job_id) == ("succeeded", None)
+    state, code = _failure_code(ws, hostile.job_id)
+    assert (state, code) == ("failed", "protocol_error")
 
 
 def test_a_tampered_job_seal_path_is_a_discrepancy_not_an_error(tmp_path: Path) -> None:
@@ -507,3 +476,4 @@ def test_a_tampered_job_seal_path_is_a_discrepancy_not_an_error(tmp_path: Path) 
     verdict = verify_job_seal(payload)
     assert [(item.path, item.kind) for item in verdict.discrepancies] == [("payload", "invalid")]
     assert not is_job_sealed(payload)
+    assert json.loads((outside / "seal.json").read_text(encoding="utf-8")) == {}

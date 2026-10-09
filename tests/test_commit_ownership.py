@@ -1,626 +1,184 @@
-"""One owner per commit: a takeover fences the previous owner without a false corruption.
+"""One owner per job: an owner declared dead stops without touching the jobs recovered from it.
 
-Two real managers share one workspace. The first is stopped inside its replay
-of a transaction at one of the interleavings an adversarial review found, the
-second takes the commit over (the first manager's heartbeat is backdated, so
-the second has evidence that it is gone) and completes it, and then the first
-continues. It must stop at its next access to the renamed draft, record
-nothing, and leave the data exactly as one sequential replay would.
+A job leaves ``owned/<owner>/`` only by its owner's release, or by recovery
+after the owner is proven (or attested) dead. Nothing is taken over on a
+timeout, so the only way two writers could meet in one job is a false death
+verdict: an operator's attestation, or a broken probe, of an owner that is in
+fact still running. That owner must fail-stop at its next step — kill every
+attempt it started and touch no job — so the work its successor finished is
+exactly what one owner would have left.
 """
 
-import json
 import os
 import time
-import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
-from typing import Any
+from pathlib import Path
 
 import pytest
-from httk.core.digests import tree_digest
 
-from conftest import bury_manager
-from httk.workflow import TaskManager, Workspace, _manager_commit, _txn
-from httk.workflow import transactions as transactions_module
-from httk.workflow._jobdir import JobDirectory
-from httk.workflow._manager_commit import CommitFencedError, open_draft
-from httk.workflow._manager_requests import _STATE_ENVELOPE_MEMBERS
-from httk.workflow.journal import read_record
-from httk.workflow.models import Marker, StateFrame
-from httk.workflow.transactions import _DisplacedDataError, _replay_pinned
-
-pytestmark = pytest.mark.xdist_group("commit-ownership")
-
-#: Seeds the data in one commit, then changes it in a second one with a
-#: put-file, a replace-tree and a remove: every rename kind the replay has.
-_RUNNER = """#!/usr/bin/env python3
-import hashlib
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-payload = temporary / "transaction" / "payload"
-payload.mkdir(parents=True)
-operations = []
-
-def put_file(name, text):
-    (payload / name).write_text(text)
-    operations.append({
-        "id": "put-" + name.replace(".", "-"),
-        "op": "put-file",
-        "source": "payload/" + name,
-        "path": name,
-        "sha256": hashlib.sha256(text.encode()).hexdigest(),
-    })
-
-def tree(op, text, digest):
-    (payload / "tree").mkdir()
-    (payload / "tree" / "inner").write_text(text)
-    operations.append({"id": op, "op": op, "source": "payload/tree", "path": "tree", "sha256": digest})
-
-base = {
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "expected_data_generation": context["data_generation"],
-}
-if context["step"] == "seed":
-    put_file("keep.txt", "keep\\n")
-    put_file("old.txt", "old\\n")
-    tree("put-tree", "old\\n", "OLD_TREE")
-    outcome = {**base, "action": "advance", "next_step": "change"}
-else:
-    put_file("new.txt", "new\\n")
-    tree("replace-tree", "new\\n", "NEW_TREE")
-    operations.append({"id": "remove", "op": "remove", "path": "old.txt"})
-    outcome = {**base, "action": "succeed"}
-(temporary / "transaction" / "manifest.json").write_text(json.dumps({
-    "format": "httk-workflow-transaction",
-    "format_version": 2,
-    "expected_data_generation": context["data_generation"],
-    "operations": operations,
-}))
-(temporary / "outcome.json").write_text(json.dumps(outcome))
-os.rename(temporary, control / "outcome.ready")
-"""
+import v3_helpers as h
+from httk.workflow import TaskManager, Workspace, _data, _kernel, _store
+from httk.workflow.errors import WorkflowError
+from test_crash_injection import _all_jobs, _log
 
 
-def _tree_digest(tmp_path: Path, text: str) -> str:
-    """Return the digest of a ``tree`` holding one ``inner`` file with *text*."""
-
-    tree = tmp_path / "digests" / str(uuid.uuid4())
-    tree.mkdir(parents=True)
-    (tree / "inner").write_text(text, encoding="utf-8")
-    return tree_digest(tree)
+@pytest.fixture()
+def ws(tmp_path: Path) -> Workspace:
+    return h.workspace(tmp_path / "ws")
 
 
-def _payload(
-    tmp_path: Path, runner_text: str, *, tag: str = "owned", data_mode: str = "transactional", step: str = "seed"
-) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = tmp_path / "source" / tag
-    (payload / "files").mkdir(parents=True)
-    runner = payload / "files" / "runner"
-    runner.write_text(runner_text, encoding="utf-8")
-    runner.chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": tag,
-        "name": "Commit ownership job",
-        "workflow": "tests.ownership",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": data_mode},
-        "initial_step": step,
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"retry_on": []},
-        "resources": {},
-        "parent": None,
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    return payload, job_id
+@pytest.fixture()
+def installed(ws: Workspace, tmp_path: Path) -> _store.Installed:
+    return h.install(ws, tmp_path / "demo")
 
 
-def _backdate_heartbeat(workspace: Workspace, manager_id: str) -> None:
-    """Make a live manager look long silent, which is evidence that it is gone."""
-
-    updated = datetime.now(UTC) - timedelta(days=30)
-    (workspace.control / "managers" / manager_id / "heartbeat.json").write_text(
-        json.dumps(
-            {"manager_id": manager_id, "updated_at": updated.isoformat(timespec="microseconds").replace("+00:00", "Z")}
-        ),
-        encoding="utf-8",
-    )
+pytestmark = pytest.mark.slow
 
 
-#: Each interleaving names where the first owner is stopped, by the replay
-#: primitive it is calling and its arguments, and whether it stops before the
-#: call (the successor then runs while its draft root is open) or after it.
-_Trigger = Callable[[str, tuple[Any, ...]], bool]
+def _declare_dead_and_recover(ws: Workspace, owner_id: str) -> None:
+    """What an operator's (false) attestation and any recoverer do to a live owner."""
+
+    _kernel.attest_dead(ws, owner_id, by="operator", evidence=[], reason="mistaken attestation")
+    with h.cli_owner(ws) as recoverer:
+        _kernel.recover(ws, recoverer, owner_id)
 
 
-def _data_entry(name: str, *, present: bool | None = None) -> _Trigger:
-    def matches(primitive: str, call: tuple[Any, ...]) -> bool:
-        if primitive != "entry":
-            return False
-        root, relative, result = call
-        return (
-            root.path.name == "data"
-            and relative == PurePosixPath(name)
-            and (present is None or (result is not None) == present)
-        )
+def _lines_after_recovery(ref: _kernel.JobRef, owner_id: str) -> list[dict[str, object]]:
+    """The run-log lines the frozen owner wrote after its job was recovered and claimed by another owner."""
 
-    return matches
+    log = _log(ref)
+    first_foreign = next(index for index, line in enumerate(log) if line["owner_id"] != owner_id)
+    return [line for line in log[first_foreign:] if line["owner_id"] == owner_id]
 
 
-def _source_entry(primitive: str, call: tuple[Any, ...]) -> bool:
-    if primitive != "entry":
-        return False
-    root, relative, _result = call
-    return root.path.name == "transaction" and relative == PurePosixPath("payload/new.txt")
+def _gone(pid: int) -> bool:
+    """Whether the process is gone (a killed process may linger briefly as a zombie of its reaper)."""
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
 
 
-def _trash_rename(primitive: str, call: tuple[Any, ...]) -> bool:
-    if primitive != "rename":
-        return False
-    _source, destination = call
-    return destination.name == "old"
+def _wait_until(manager: TaskManager, condition: Callable[[], bool]) -> None:
+    for _ in range(2000):
+        manager.tick()
+        if condition():
+            return
+    raise AssertionError("condition not reached")
 
 
-_INTERLEAVINGS: dict[str, _Trigger] = {
-    # The reviewer's interleaving: the destination is observed absent, and the
-    # successor moves the source in before the source is observed.
-    "put-file-after-destination-observed": _data_entry("new.txt"),
-    # The same, with the draft root already open: the source is observed
-    # absent, and the destination is re-observed instead of concluding corruption.
-    "put-file-source-in-flight": _source_entry,
-    "replace-tree-between-its-two-renames": _trash_rename,
-    "remove-before-its-trash-rename": _data_entry("old.txt", present=True),
-}
-
-
-@pytest.mark.timing
-@pytest.mark.parametrize("interleaving", sorted(_INTERLEAVINGS))
-def test_a_commit_taken_over_mid_replay_fences_its_old_owner_without_corruption(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interleaving: str
+def test_a_manager_declared_dead_mid_attempt_fail_stops_without_touching_the_recovered_job(
+    ws: Workspace, installed: _store.Installed
 ) -> None:
-    root = tmp_path / "workspace"
-    Workspace.initialize(root)
-    payload, job_id = _payload(
-        tmp_path,
-        _RUNNER.replace("OLD_TREE", _tree_digest(tmp_path, "old\n")).replace(
-            "NEW_TREE", _tree_digest(tmp_path, "new\n")
-        ),
-    )
-    workspace = Workspace(root)
-    workspace.submit(payload, "project/owned")
-    trigger = _INTERLEAVINGS[interleaving]
-    before_call = interleaving == "put-file-source-in-flight"
+    submitted = h.submit(ws, installed, {"start": "crash_once"}, retry_policy={"retry_on": ["owner_lost"]})
+    frozen = TaskManager(ws, heartbeat_interval=0.01, cancel_grace_seconds=1.0)
+    _wait_until(frozen, lambda: any((ws.jobs / "owned").glob("*/*/run/sleeping")))
+    (sleeping,) = (ws.jobs / "owned").glob("*/*/run/sleeping")
+    pid = int(sleeping.read_text(encoding="utf-8"))
 
-    with (
-        TaskManager(Workspace(root), heartbeat_interval=0.01) as owner,
-        TaskManager(Workspace(root), heartbeat_interval=0.01) as successor,
-    ):
-        armed = [False]
-        fired: list[int] = []
-        recorded: list[tuple[str, str]] = []
-        fenced: list[tuple[str, type[BaseException]]] = []
+    # The owner is declared dead while its attempt runs. Recovery cannot know the attempt still runs (it trusts
+    # the tombstone), so the job goes back to ready with its attempt recorded as running.
+    _declare_dead_and_recover(ws, frozen.manager_id)
+    returned = h.find(ws, submitted.job_id)
+    assert returned.state == "ready" and h.state_of(returned).phase["kind"] == "running"
 
-        def run_successor() -> None:
-            armed[0] = False
-            fired.append(len(recorded))
-            _backdate_heartbeat(workspace, owner.manager_id)
-            deadline = time.monotonic() + 60.0
-            while time.monotonic() < deadline:
-                successor.tick()
-                marker = workspace.find_marker_by_id(job_id)
-                if marker is not None and marker.kind == "succeeded":
-                    return
-                time.sleep(0.01)
-            raise AssertionError("the successor never committed")
+    # The owner sees its tombstone at its next tick: it kills its attempt and stops, writing nothing.
+    with pytest.raises(_kernel.OwnerDeclaredDead):
+        frozen.tick()
+    frozen.close()
+    assert _gone(pid)
+    with pytest.raises(WorkflowError, match="closed"):
+        frozen.tick()
+    unchanged = h.find(ws, submitted.job_id)
+    assert unchanged.path == returned.path and h.state_of(unchanged) == h.state_of(returned)
 
-        real_entry = transactions_module._entry
-        real_rename = transactions_module._rename_verified
-
-        def entry(root_dir: JobDirectory, relative: PurePosixPath, *, follow: bool) -> os.stat_result | None:
-            if before_call and armed[0] and trigger("entry", (root_dir, relative, None)):
-                run_successor()
-            result = real_entry(root_dir, relative, follow=follow)
-            if not before_call and armed[0] and trigger("entry", (root_dir, relative, result)):
-                run_successor()
-            return result
-
-        def rename(
-            source: transactions_module._Location,
-            destination: transactions_module._Location,
-            *,
-            replace: bool = False,
-            attempts: int = 7,
-        ) -> None:
-            real_rename(source, destination, replace=replace, attempts=attempts)
-            if armed[0] and trigger("rename", (source, destination)):
-                run_successor()
-
-        real_transition = TaskManager._transition
-        real_anomaly = TaskManager._report_anomaly
-        real_process = TaskManager._process_committing
-
-        def transition(self: TaskManager, marker: Marker, kind: str, *arguments: Any, **keywords: Any) -> Marker:
-            recorded.append((self.manager_id, f"transition:{kind}"))
-            return real_transition(self, marker, kind, *arguments, **keywords)
-
-        def anomaly(self: TaskManager, key: str, *arguments: Any, **keywords: Any) -> None:
-            recorded.append((self.manager_id, f"anomaly:{key}"))
-            real_anomaly(self, key, *arguments, **keywords)
-
-        def process(self: TaskManager, marker: Marker) -> None:
-            try:
-                real_process(self, marker)
-            except Exception as exc:
-                fenced.append((self.manager_id, type(exc)))
-                raise
-
-        monkeypatch.setattr(transactions_module, "_entry", entry)
-        monkeypatch.setattr(transactions_module, "_rename_verified", rename)
-        monkeypatch.setattr(TaskManager, "_transition", transition)
-        monkeypatch.setattr(TaskManager, "_report_anomaly", anomaly)
-        monkeypatch.setattr(TaskManager, "_process_committing", process)
-
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            marker = workspace.find_marker_by_id(job_id)
-            assert marker is not None
-            if marker.kind == "succeeded":
-                break
-            # Only the second commit is interrupted, and only once.
-            if marker.kind == "committing" and not fired:
-                armed[0] = workspace.read_state(marker).get("step") == "change"
-            owner.tick()
-            time.sleep(0.01)
-        monkeypatch.undo()
-
-    assert len(fired) == 1, "the interleaving never happened"
-    # The old owner was fenced at its next access to the draft, with an
-    # error, and recorded nothing at all after the takeover.
-    assert fenced == [(owner.manager_id, CommitFencedError)]
-    assert [event for manager_id, event in recorded[fired[0] :] if manager_id == owner.manager_id] == []
-
-    final = workspace.find_marker_by_id(job_id)
-    assert final is not None and final.kind == "succeeded"
-    chain: list[dict[str, Any]] = []
-    record_ref: str | None = final.record_ref
-    while record_ref is not None and record_ref != "init":
-        frame = read_record(workspace.control, record_ref, deadline_seconds=workspace.visibility_deadline)
-        chain.append(frame)
-        previous = frame.get("previous_record_ref")
-        record_ref = None if previous is None else str(previous)
-    assert [frame["kind"] for frame in chain] == [
-        "succeeded",
-        "committing",
-        "committing",
-        "running",
-        "claimed",
-        "ready",
-        "committing",
-        "running",
-        "claimed",
-        "ready",
-    ]
-    takeover = chain[1]
-    assert takeover["reason"] == "commit_takeover"
-    assert takeover["previous_manager_id"] == owner.manager_id
-    assert takeover["manager_id"] == successor.manager_id
-    assert takeover["takeover_evidence"]["evidence"] == "lease_grace_expired"
-
-    # The data is exactly what one sequential replay of both commits leaves.
-    data = workspace.payload_path(final.placement, final.job_key) / "data"
-    assert sorted(path.relative_to(data).as_posix() for path in data.rglob("*")) == [
-        "keep.txt",
-        "new.txt",
-        "tree",
-        "tree/inner",
-    ]
-    assert (data / "new.txt").read_text(encoding="utf-8") == "new\n"
-    assert (data / "tree" / "inner").read_text(encoding="utf-8") == "new\n"
-    assert workspace.read_state(final)["data_generation"] == 2
-
-    # Nothing was created under the old owner's draft name; the draft carries
-    # the successor's. The successor retired the old owner's trash before it
-    # replayed and deleted what it moved aside: only its own, empty trash
-    # directories remain, the evidence that makes its replay idempotent.
-    control = workspace.payload_path(final.placement, final.job_key) / str(takeover["attempt_control"])
-    owned_generation = int(takeover["state_generation"]) - 1
-    assert not (control / f"commit.{owned_generation}").exists()
-    trash = control / f"commit.{owned_generation + 1}" / "transaction" / "trash"
-    left = sorted(trash.iterdir())
-    assert {path.name for path in left} <= {
-        f"{operation}.{owned_generation + 1}" for operation in ("put-new-txt", "replace-tree", "remove")
-    }
-    assert f"remove.{owned_generation + 1}" in {path.name for path in left}
-    assert all(not list(path.iterdir()) for path in left)
-    assert workspace.check().ok
+    # The next owner treats the recorded attempt as lost and reruns it (as an unclean restart) under the retry
+    # policy; the frozen owner wrote nothing after the recovery.
+    h.run(ws)
+    final = h.find(ws, submitted.job_id)
+    assert final.state == "succeeded"
+    events = _log(final)
+    assert [line["event"] for line in events].count("launched") == 2
+    recovered = [line for line in events if line["event"] == "recovered"]
+    assert recovered and recovered[0]["detail"] == frozen.manager_id
+    assert [item["code"] for item in h.state_of(final).failure_history] == ["owner_lost"]
+    assert not _lines_after_recovery(final, frozen.manager_id)
 
 
-#: Spawns two children, then gathers them.
-_SPAWNER = """#!/usr/bin/env python3
-import json
-import os
-import uuid
-from pathlib import Path
-
-CHILD = '''#!/usr/bin/env python3
-import json, os
-from pathlib import Path
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-(control / "outcome.tmp.child").mkdir()
-(control / "outcome.tmp.child" / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome", "format_version": 2, "job_id": context["job_id"],
-    "activation_id": context["activation_id"], "attempt_id": context["attempt_id"], "action": "succeed"}))
-os.rename(control / "outcome.tmp.child", control / "outcome.ready")
-'''
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-base = {
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-}
-if context["step"] == "gather":
-    outcome = {**base, "action": "succeed"}
-else:
-    entries = []
-    for label in ("first", "second"):
-        child_id = str(uuid.uuid5(uuid.UUID(context["activation_id"]), label))
-        child_key = "child--" + child_id
-        bundle = temporary / "children" / "jobs" / child_key
-        (bundle / "files").mkdir(parents=True)
-        (bundle / "files" / "runner").write_text(CHILD)
-        (bundle / "files" / "runner").chmod(0o755)
-        (bundle / "job.json").write_text(json.dumps({
-            "format": "httk-workflow-job",
-            "format_version": 2,
-            "id": child_id,
-            "tag": "child",
-            "name": "Spawned " + label,
-            "workflow": "tests.ownership",
-            "runner": {"path": "files/runner", "arguments": []},
-            "workdir": {"mode": "persistent", "path": "run"},
-            "data": {"mode": "none"},
-            "initial_step": "run",
-            "priority": 500,
-            "claim": {"pool": "default", "required_capabilities": []},
-            "retry_policy": {"retry_on": []},
-            "resources": {},
-            "parent": None,
-        }))
-        entries.append({
-            "workspace_id": context["workspace_id"],
-            "job_id": child_id,
-            "job_key": child_key,
-            "placement": "project/children",
-            "label": label,
-        })
-    (temporary / "children" / "spawn.json").write_text(json.dumps({"children": entries}))
-    outcome = {
-        **base,
-        "action": "wait",
-        "next_step": "gather",
-        "join": {
-            "children": [
-                {"workspace_id": entry["workspace_id"], "job_id": entry["job_id"], "job_key": entry["job_key"],
-                 "placement_hint": entry["placement"]}
-                for entry in entries
-            ],
-            "condition": "all_terminal",
-        },
-    }
-(temporary / "outcome.json").write_text(json.dumps(outcome))
-os.rename(temporary, control / "outcome.ready")
-"""
-
-
-class _Killed(BaseException):
-    """A manager stopped dead, as a crash would stop it."""
-
-
-def test_a_fenced_owner_never_removes_its_successors_staged_children(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_manager_declared_dead_mid_commit_never_writes_the_recovered_job(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "workspace"
-    Workspace.initialize(root)
-    payload, job_id = _payload(tmp_path, _SPAWNER, tag="spawner", data_mode="none", step="spawn")
-    workspace = Workspace(root)
-    workspace.submit(payload, "project/spawner")
+    """A frozen owner wakes in the middle of a commit its successor already finished.
 
-    # The first owner renames the draft to its name and stops right there.
-    def stop_after_the_draft_rename(step: str) -> None:
-        if step == "commit.draft_renamed":
-            raise _Killed()
+    The owner wrote its commit intent and is about to apply the committed
+    transaction when it is declared dead. A successor recovers the job,
+    replays the intent and releases it. When the frozen owner resumes, its job
+    directory is gone: it must not recreate, write or move anything, and it
+    fail-stops at its next tick.
+    """
 
-    monkeypatch.setattr(_txn, "_HOOK", stop_after_the_draft_rename)
-    with TaskManager(Workspace(root), heartbeat_interval=0.01) as first:
-        with pytest.raises(_Killed):
-            first.run_until_idle(timeout=60.0)
-        for attempt in list(first._running.values()):
-            attempt.process.kill()
-            attempt.process.wait(timeout=30)
-        first._running.clear()
+    puts = {"data/result.txt": "result\n"}
+    submitted = h.submit(ws, installed, {"start": "succeed"}, parameters={"put": {"start": puts}})
+    frozen = TaskManager(ws, heartbeat_interval=0.01)
+    real = _data.apply_transactions
+    fired: list[Path] = []
+
+    def freeze_then_apply(job: _kernel.OwnedJob) -> int:
+        if job.owner.owner_id == frozen.manager_id and not fired:
+            fired.append(job.path)
+            # While the owner is frozen here, it is declared dead and a successor finishes the commit.
+            _declare_dead_and_recover(ws, frozen.manager_id)
+            h.run(ws)
+        return real(job)
+
+    monkeypatch.setattr(_data, "apply_transactions", freeze_then_apply)
+    with pytest.raises(_kernel.OwnerLost):
+        frozen.run_until_idle(timeout=60)
+    frozen.close()
     monkeypatch.undo()
-    bury_manager(workspace.control / "managers" / first.manager_id)
-    committing = workspace.find_marker_by_id(job_id)
-    assert committing is not None and committing.kind == "committing"
-    old_name = f"commit.{committing.generation}"
-    control_path = workspace.payload_path(committing.placement, committing.job_key) / str(
-        workspace.read_state(committing)["attempt_control"]
-    )
 
-    # While the successor verifies each staged child, the fenced first owner
-    # takes its next steps for that child: copy it (whose first act used to be
-    # removing the shared staging name), and the fence before publication.
-    real_verify = _manager_commit._verify_staged
-    interleaved: list[str] = []
-
-    def fenced_owner_steps_in(staging: JobDirectory, staged: str, job_key: str, *rest: Any) -> Any:
-        with JobDirectory.at(control_path) as control:
-            with pytest.raises(CommitFencedError):
-                _manager_commit._copy_child(control, old_name, staging, job_key, staged)
-            with pytest.raises(CommitFencedError):
-                open_draft(control, old_name).close()
-        assert staging.stat(staged) is not None
-        interleaved.append(job_key)
-        return real_verify(staging, staged, job_key, *rest)
-
-    monkeypatch.setattr(_manager_commit, "_verify_staged", fenced_owner_steps_in)
-    with TaskManager(workspace, heartbeat_interval=0.01) as successor:
-        successor.run_until_idle(timeout=90.0)
-        reported = dict(successor._reported)
-
-    assert len(interleaved) == 2
-    parent = workspace.find_marker_by_id(job_id)
-    assert parent is not None and parent.kind == "succeeded"
-    children = [marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--")]
-    assert sorted(marker.kind for marker in children) == ["succeeded", "succeeded"]
-    assert not [key for key in reported if committing.job_key in key]
-    record_ref: str | None = parent.record_ref
-    while record_ref is not None and record_ref != "init":
-        frame = read_record(workspace.control, record_ref, deadline_seconds=workspace.visibility_deadline)
-        assert frame["kind"] != "failed"
-        previous = frame.get("previous_record_ref")
-        record_ref = None if previous is None else str(previous)
+    (stale,) = fired
+    assert not os.path.lexists(stale) and not (ws.jobs / "owned" / frozen.manager_id).exists()
+    (done,) = _all_jobs(ws)
+    assert done.job_id == submitted.job_id and done.state == "succeeded"
+    assert (done.path / "data" / "result.txt").read_text(encoding="utf-8") == "result\n"
+    doc = h.state_of(done)
+    assert doc.owner_id != frozen.manager_id and doc.seal is not None and doc.failure is None
+    events = [line["event"] for line in _log(done)]
+    assert events.count("launched") == 1 and events[-1] == "released"
+    assert not _lines_after_recovery(done, frozen.manager_id)
 
 
-def test_a_replace_tree_rename_onto_an_empty_set_aside_directory_is_detected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_manager_declared_dead_between_its_claim_and_its_launch_launches_nothing(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The syscall gap the stdlib cannot close: detected after the rename, with both paths named."""
+    submitted = h.submit(ws, installed, {"start": "succeed"})
+    frozen = TaskManager(ws, heartbeat_interval=0.01)
+    real = TaskManager._launch
 
-    transaction = tmp_path / "control" / "commit.3" / "transaction"
-    (transaction / "payload" / "tree").mkdir(parents=True)
-    (transaction / "payload" / "tree" / "inner").write_text("new\n", encoding="utf-8")
-    (transaction / "manifest.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-transaction",
-                "format_version": 2,
-                "expected_data_generation": 0,
-                "operations": [
-                    {
-                        "id": "replace",
-                        "op": "replace-tree",
-                        "path": "tree",
-                        "source": "payload/tree",
-                        "sha256": tree_digest(transaction / "payload" / "tree"),
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    data = tmp_path / "data"
-    (data / "tree").mkdir(parents=True)  # the old tree is empty
-    real_rename = transactions_module._rename_verified
+    def declared_dead_first(self: TaskManager, *arguments: object) -> None:
+        if self is frozen:
+            _declare_dead_and_recover(ws, frozen.manager_id)
+        real(self, *arguments)  # type: ignore[arg-type]
 
-    def successor_in_the_gap(
-        source: transactions_module._Location,
-        destination: transactions_module._Location,
-        *,
-        replace: bool = False,
-        attempts: int = 7,
-    ) -> None:
-        if destination.name == "old" and not (transaction / "trash" / "replace.3" / "old").exists():
-            # Between this owner's check that the trash name is free and its
-            # rename, something sets the empty old tree aside into that name
-            # and installs the new one. A successor never can (each owner's
-            # trash is its own and is retired first); the check stays as a
-            # second line of defence.
-            os.rename(data / "tree", transaction / "trash" / "replace.3" / "old")
-            os.rename(transaction / "payload" / "tree", data / "tree")
-        real_rename(source, destination, replace=replace, attempts=attempts)
+    monkeypatch.setattr(TaskManager, "_launch", declared_dead_first)
+    with pytest.raises(_kernel.OwnerDeclaredDead):
+        frozen.tick()
+    frozen.close()
+    monkeypatch.undo()
 
-    monkeypatch.setattr(transactions_module, "_rename_verified", successor_in_the_gap)
-    with (
-        JobDirectory.at(tmp_path / "control") as control,
-        JobDirectory.at(data) as pinned_data,
-        pytest.raises(_DisplacedDataError) as raised,
-    ):
-        _replay_pinned(control, "commit.3", pinned_data, expected_generation=0, generation=3, base_generation=3)
-    assert str(data / "tree") in str(raised.value)
-    assert str(transaction / "trash" / "replace.3" / "old") in str(raised.value)
-    # The displaced tree is where the message says it is.
-    assert (transaction / "trash" / "replace.3" / "old" / "inner").read_text(encoding="utf-8") == "new\n"
-
-
-_SUCCEED = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-(control / "outcome.tmp.test").mkdir()
-(control / "outcome.tmp.test" / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(control / "outcome.tmp.test", control / "outcome.ready")
-"""
-
-
-@pytest.mark.parametrize("displaced", [True, False])
-def test_a_fenced_commit_reports_only_displaced_data(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, displaced: bool
-) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path, _SUCCEED, tag="fenced", data_mode="none", step="run")
-    workspace.submit(payload, "project/fenced")
-    fired: list[Marker] = []
-
-    def fenced_mid_commit(self: TaskManager, marker: Marker) -> None:
-        # What a takeover does to this commit's marker, and the error the
-        # fenced replay then raises.
-        state = self._read_frame(marker)
-        frame = StateFrame(
-            {name: value for name, value in state.members.items() if name not in _STATE_ENVELOPE_MEMBERS}
-        )
-        fired.append(self._transition(marker, "committing", frame))
-        if displaced:
-            raise _DisplacedDataError("replace-tree moved data/tree onto commit.3/transaction/trash/replace.3/old")
-        raise CommitFencedError("commit draft commit.3 is gone")
-
-    monkeypatch.setattr(TaskManager, "_process_committing", fenced_mid_commit)
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        deadline = time.monotonic() + 60.0
-        while not fired and time.monotonic() < deadline:
-            manager.tick()
-            time.sleep(0.01)
-        assert fired
-        reported = dict(manager._reported)
-        monkeypatch.undo()
-        manager.run_until_idle(timeout=60.0)
-
-    key = f"displaced:{fired[0].job_key}"
-    if displaced:
-        assert "displaced data" in reported[key] and "trash/replace.3/old" in reported[key]
-    else:
-        assert key not in reported
-    assert not [name for name in reported if name != key]
-    final = workspace.find_marker_by_id(job_id)
-    assert final is not None and final.kind == "succeeded"
+    # The claim was returned unchanged: no attempt, no state written, no runner started.
+    returned = h.find(ws, submitted.job_id)
+    assert returned.state == "ready"
+    assert not (returned.path / "state.json").exists() and not (returned.path / "attempts").exists()
+    assert [line["event"] for line in _log(returned)] == ["claimed"]
+    h.run(ws)
+    done = h.find(ws, submitted.job_id)
+    assert done.state == "succeeded"
+    doc = h.state_of(done)
+    assert doc.counters["attempts_total"] == 1 and doc.attempt is not None and doc.attempt["ordinal"] == 1
