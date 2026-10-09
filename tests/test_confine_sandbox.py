@@ -17,12 +17,9 @@ from httk.workflow._confine import (
     ConfinementUnavailableError,
     ConfineSettings,
     confine_settings,
-    create_launch_locks,
     filtered_attempt_environment,
-    launch_locks_path,
     prepare_attempt_sandbox,
     probe_bwrap,
-    remove_launch_locks,
 )
 from httk.workflow._sandbox import PreparedSandbox, device_parent_dirs, open_directory_nofollow
 
@@ -169,82 +166,13 @@ def test_argv_order_binds_and_descriptors(layout: _Layout) -> None:
     os.fstat(layout.job_fd)
 
 
-def test_launch_locks_are_bound_at_their_host_path_after_dev(layout: _Layout, tmp_path: Path) -> None:
-    shm = tmp_path / "shm"
-    shm.mkdir(mode=0o700)
-    attempt_id = "5e0f2dce-e297-4a38-bd5e-9e9e36bb5962"
-    settings = _settings(readonly_paths=(layout.readonly,), devices=(Path("/dev/null"),), shm_root=shm)
-    locks_fd, locks_path = create_launch_locks(shm, attempt_id)
-    try:
-        assert locks_path == shm / f"httk-launch-{attempt_id}" == launch_locks_path(shm, attempt_id)
-        prepared = _prepare(layout, settings, launch_locks=(locks_fd, locks_path))
-        try:
-            argv = prepared.argv
-            # One more descriptor than the sandbox without locks: readonly, workspace, job, device, locks.
-            assert len(prepared.descriptors) == 5
-            locks = prepared.descriptors[-1]
-            assert locks not in (locks_fd, layout.workspace_fd, layout.job_fd)
-            assert os.get_inheritable(locks)
-            assert os.fstat(locks).st_ino == locks_path.stat().st_ino
-            bind = _option_index(argv, "--bind-fd", str(locks), str(locks_path))
-            assert bind > _option_index(argv, "--proc", "/proc", "--dev", "/dev")
-            assert bind > _option_index(argv, "--bind-fd", str(prepared.descriptors[3]), "/dev/null")
-            assert argv[-3:] == ["--chdir", str(layout.workdir), "--"]
-            assert bind == len(argv) - 3 - 3
-        finally:
-            prepared.close()
-        os.fstat(locks_fd)  # duplicated, never consumed
-        with pytest.raises(ValueError, match="absolute"):
-            _prepare(layout, settings, launch_locks=(locks_fd, Path("relative")))
-        plain = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
-        try:
-            with pytest.raises(ValueError, match="not a directory"):
-                _prepare(layout, settings, launch_locks=(plain, locks_path))
-        finally:
-            os.close(plain)
-    finally:
-        os.close(locks_fd)
-        remove_launch_locks(shm, attempt_id)
-    assert list(shm.iterdir()) == []
-
-
-def test_a_sandbox_without_launch_locks_binds_nothing_after_the_devices(layout: _Layout) -> None:
+def test_the_device_binds_come_last(layout: _Layout) -> None:
     prepared = _prepare(layout, _settings(devices=(Path("/dev/null"),)))
     try:
         assert len(prepared.descriptors) == 3  # workspace, job, device
         assert prepared.argv[-4:-3] == [str(Path("/dev/null"))]
     finally:
         prepared.close()
-
-
-def test_create_launch_locks_checks_the_root_and_refuses_an_existing_directory(tmp_path: Path) -> None:
-    shm = tmp_path / "shm"
-    shm.mkdir(mode=0o700)
-    attempt_id = "5e0f2dce-e297-4a38-bd5e-9e9e36bb5962"
-    descriptor, path = create_launch_locks(shm, attempt_id)
-    try:
-        assert stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o700
-        assert os.fstat(descriptor).st_uid == os.geteuid()
-        with pytest.raises(ConfinementUnavailableError, match="exists already"):
-            create_launch_locks(shm, attempt_id)
-        assert path.is_dir()  # the refused attempt did not remove the entry it did not make
-    finally:
-        os.close(descriptor)
-    (path / "x.lock").write_text("", encoding="utf-8")
-    remove_launch_locks(shm, attempt_id)
-    remove_launch_locks(shm, attempt_id)  # a missing directory is not an error
-    assert list(shm.iterdir()) == []
-    with pytest.raises(ConfinementUnavailableError, match="cannot open confine.shm_root"):
-        create_launch_locks(tmp_path / "absent", attempt_id)
-    open_root = tmp_path / "open"
-    open_root.mkdir(mode=0o777)
-    open_root.chmod(0o777)
-    with pytest.raises(ConfinementUnavailableError, match="world-writable"):
-        create_launch_locks(open_root, attempt_id)
-    link = tmp_path / "link"
-    link.symlink_to(shm)
-    with pytest.raises(ConfinementUnavailableError, match="cannot open confine.shm_root"):
-        create_launch_locks(link, attempt_id)
 
 
 def test_no_environment_value_enters_the_world_readable_argv(layout: _Layout) -> None:
@@ -587,57 +515,3 @@ def test_real_attempt_sandbox_confines_writes_and_follows_killpg(layout: _Layout
         process.wait()
         if process.stderr is not None:
             process.stderr.close()
-
-
-def test_real_attempt_sandbox_binds_a_writable_launch_lock_directory(layout: _Layout) -> None:
-    if shutil.which("bwrap") is None:
-        if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
-            pytest.fail("required Bubblewrap executable is unavailable")
-        pytest.skip("Bubblewrap executable is unavailable")
-    settings = confine_settings({"manager.confine": "bwrap"})
-    try:
-        block_userns = probe_bwrap(settings)
-    except ConfinementUnavailableError as exc:
-        _unsupported_namespace_failure(str(exc))
-        raise
-    environment = filtered_attempt_environment({"PATH": "/usr/bin:/bin"})
-    attempt_id = "0b6d6f8e-3b57-4f0c-9d1d-5f3a1d0d9a11"
-    locks_fd, locks_path = create_launch_locks(settings.shm_root, attempt_id)
-    try:
-        prepared = _prepare(
-            layout,
-            settings,
-            block_userns=block_userns,
-            workdir=layout.job,
-            environment=environment,
-            launch_locks=(locks_fd, locks_path),
-        )
-        try:
-            result = subprocess.run(
-                [
-                    *prepared.argv,
-                    "/bin/sh",
-                    "-c",
-                    'echo held > "$1/probe.lock" && ls "$1"; ls /dev/shm',
-                    "sh",
-                    str(locks_path),
-                ],
-                pass_fds=prepared.descriptors,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=environment,
-                check=False,
-            )
-        finally:
-            prepared.close()
-        if result.returncode != 0:
-            _unsupported_namespace_failure(result.stderr or result.stdout)
-        # The lock directory shows through ``--dev /dev``'s private /dev/shm, as its only entry.
-        assert result.stdout.split() == ["probe.lock", locks_path.name]
-        assert (locks_path / "probe.lock").read_text(encoding="utf-8") == "held\n"
-    finally:
-        os.close(locks_fd)
-        remove_launch_locks(settings.shm_root, attempt_id)
-    assert not locks_path.exists()

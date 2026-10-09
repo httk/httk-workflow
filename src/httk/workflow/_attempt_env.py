@@ -173,7 +173,6 @@ def runner_environment(
         "HTTK_WORKFLOW_NODELIST",
         "HTTK_WORKFLOW_NODEFILE",
         "HTTK_WORKFLOW_LAUNCH",
-        "HTTK_WORKFLOW_LAUNCH_LOCKS",
     ):
         environment.pop(variable, None)
     environment.update(binding_environment)

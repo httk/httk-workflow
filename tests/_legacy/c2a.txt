@@ -52,11 +52,9 @@ tests/test_jobstate_digest.py  # fate: delete C6
 tests/test_labeled_children.py  # fate: port C3
 tests/test_launch_end_evidence.py  # fate: delete C6
 tests/test_management.py  # fate: port C5a
-tests/test_manager_confinement.py  # fate: port C2b
 tests/test_manager_deployment.py  # fate: port C5b
 tests/test_manager_hardening.py  # fate: port C2c
 tests/test_manager_jobdir_hardening.py  # fate: port C2c
-tests/test_manager_launches.py  # fate: port C2b
 tests/test_manager_logs.py  # fate: port C5b
 tests/test_manager_ownership.py  # fate: port C2c
 tests/test_manager_scheduling.py  # fate: port C2c
@@ -90,3 +88,5 @@ tests/test_workflow.py  # fate: port C3
 tests/test_workflow_calls.py  # fate: port C3
 tests/test_workflow_cli_packages.py  # fate: port C5b
 tests/test_workflow_requires.py  # fate: port C2c
+tests/test_cpp_api.py  # fate: port C3b (HTTK_WORKFLOW_DATA_DIR now mandatory)
+tests/test_perl_api.py  # fate: port C3b (HTTK_WORKFLOW_DATA_DIR now mandatory)

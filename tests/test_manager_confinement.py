@@ -22,24 +22,22 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
-from httk.core.cli import CLIContext
 
-from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _manager_launches
+from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _kernel, _manager_launches, _requests, _store
 from httk.workflow import manager as manager_module
 from httk.workflow._allocation import Allocation, Node
 from httk.workflow._exchange import enable_exchange
+from httk.workflow._job import JobDefinition
 from httk.workflow._logging import reset_logging
 from httk.workflow._sandbox import PreparedSandbox
-from httk.workflow.errors import ConfinementUnavailableError, FormatError
-from httk.workflow.models import Marker
-from httk.workflow.workflow_cli import command
+from httk.workflow._state import read_state_unowned
+from httk.workflow.errors import ConfinementUnavailableError
+from test_manager_v3 import cli_owner
 
 _BWRAP = "/usr/bin/bwrap"
 _PINNED = {"manager.confine": "bwrap", "confine.bwrap": _BWRAP}
@@ -158,9 +156,6 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Sandbox:
         state.prepares.append({"settings": settings, **arguments, "environment": dict(arguments["environment"])})
         assert os.path.samestat(os.fstat(arguments["workspace_fd"]), os.stat(arguments["workspace_root"]))
         assert os.path.samestat(os.fstat(arguments["job_fd"]), os.stat(arguments["job_path"]))
-        if arguments.get("launch_locks") is not None:
-            locks_fd, locks_path = arguments["launch_locks"]
-            assert os.path.samestat(os.fstat(locks_fd), os.stat(locks_path))
         descriptor = os.open(marker_file, os.O_RDONLY)
         os.set_inheritable(descriptor, True)
         prepared = _Recorded([str(state.wrapper)], (descriptor,))
@@ -172,60 +167,80 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Sandbox:
     return state
 
 
-def _payload(
+def submit_runner(
+    workspace: Workspace,
     root: Path,
     tag: str,
+    runner: str,
     *,
-    body: str = "",
-    runner: Mapping[str, object] | None = None,
     resources: Mapping[str, int] | None = None,
     extra: Mapping[str, object] | None = None,
-) -> tuple[Path, str]:
+) -> tuple[_kernel.JobRef, str]:
+    """Install a one-step workflow ``tests-<tag>`` whose runner is *runner* and submit one job of it."""
+
+    package = root / tag
+    package.mkdir(parents=True)
+    manifest = f'[workflow]\nname = "tests-{tag}"\n\n[workflow.runner]\nsteps = ["start"]\ninitial_step = "start"\n'
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "run").write_text(runner, encoding="utf-8")
+    (package / "run").chmod(0o755)
     job_id = str(uuid.uuid4())
-    payload = root / tag
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "runner").write_text(_RUNNER.format(body=body), encoding="utf-8")
-    (files / "runner").chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": tag,
-        "name": f"Confinement {tag}",
-        "workflow": "tests.confinement",
-        "runner": dict(runner) if runner is not None else {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "only",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"maximum_attempts_per_activation": 1, "maximum_total_attempts": 1, "retry_on": []},
-        "resources": dict(resources or {}),
-        "parent": None,
-        **dict(extra or {}),
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    return payload, job_id
+    with cli_owner(workspace) as owner:
+        installed = _store.install(workspace, owner, package)
+        document = {
+            "format": "httk-workflow-job",
+            "format_version": 3,
+            "id": job_id,
+            "tag": tag,
+            "name": f"Job {tag}",
+            "placement": f"project/{tag}",
+            "workflow": {"id": installed.id, "name": installed.name},
+            "initial_step": "start",
+            "priority": 500,
+            "claim": {"pool": "default", "required_capabilities": []},
+            "retry_policy": {"maximum_attempts_per_activation": 1, "maximum_total_attempts": 1, "retry_on": []},
+            "resources": dict(resources or {}),
+            "step_resources": {},
+            "parameters": {},
+            "declarations": {},
+            "declared": {},
+            "environment": {},
+            "parent": None,
+            "seal_succeeded": False,
+            **dict(extra or {}),
+        }
+        staging = owner.scratch("submit") / "job"
+        staging.mkdir()
+        (staging / "job.json").write_bytes(JobDefinition.from_mapping(document).encode())
+        return _kernel.submit(workspace, owner, staging), job_id
 
 
-def _submit(workspace: Workspace, root: Path, tag: str, **options: Any) -> tuple[Marker, str]:
-    payload, job_id = _payload(root, tag, **options)
-    return workspace.submit(payload, f"project/{tag}"), job_id
+def find(workspace: Workspace, job_id: str) -> _kernel.JobRef:
+    """Return where a job is now: an unowned state, or ``owned`` while a manager holds it."""
+
+    for ref in _kernel.list_jobs(workspace, "ready"):
+        if ref.job_id == job_id:
+            return ref
+    ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
+    assert ref is not None, job_id
+    return ref
+
+
+def _submit(workspace: Workspace, root: Path, tag: str, *, body: str = "", **options: Any) -> tuple[str, str]:
+    return tag, submit_runner(workspace, root, tag, _RUNNER.format(body=body), **options)[1]
 
 
 def _outcome(workspace: Workspace, job_id: str) -> tuple[str, str | None, str]:
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    if marker.kind != "failed":
-        return marker.kind, None, ""
-    failure = workspace.read_state(marker)["failure"]
-    return marker.kind, failure["code"], failure["message"]
+    ref = find(workspace, job_id)
+    if ref.state != "failed":
+        return ref.state, None, ""
+    doc, _ = read_state_unowned(ref.path / "state.json")
+    assert doc is not None and doc.failure is not None
+    return ref.state, str(doc.failure["code"]), str(doc.failure["message"])
 
 
-def _seen(workspace: Workspace, marker: Marker) -> dict[str, Any]:
-    path = workspace.payload_path(marker.placement, marker.job_key) / "run" / "seen.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+def _seen(workspace: Workspace, job_id: str) -> dict[str, Any]:
+    return json.loads((find(workspace, job_id).path / "run" / "seen.json").read_text(encoding="utf-8"))
 
 
 # -- settings precedence and probing ---------------------------------------------
@@ -235,7 +250,7 @@ def test_pinned_settings_win_and_unpinned_workspace_settings_stay_live(tmp_path:
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("manager.confine", "none")
     workspace.set_setting("confine.isolate_network", "true")
-    first, first_id = _submit(workspace, tmp_path / "source", "first")
+    _first, first_id = _submit(workspace, tmp_path / "source", "first")
     with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
         assert len(sandbox.probes) == 1 and sandbox.probes[0].bwrap == Path(_BWRAP)
         manager.run_until_idle(timeout=60.0)
@@ -243,7 +258,7 @@ def test_pinned_settings_win_and_unpinned_workspace_settings_stay_live(tmp_path:
         # key keeps the manager's value whatever the workspace says now.
         workspace.set_setting("confine.isolate_network", "false")
         workspace.set_setting("manager.confine", "none")
-        second, second_id = _submit(workspace, tmp_path / "source", "second")
+        _second, second_id = _submit(workspace, tmp_path / "source", "second")
         manager.run_until_idle(timeout=60.0)
 
     assert _outcome(workspace, first_id)[:2] == ("succeeded", None)
@@ -255,17 +270,17 @@ def test_pinned_settings_win_and_unpinned_workspace_settings_stay_live(tmp_path:
     # sandbox shape the changed network isolation gives.
     assert [probe.isolate_network for probe in sandbox.probes] == [True, False]
     # The runner sees the effective settings the manager used.
-    seen = _seen(workspace, second)
+    seen = _seen(workspace, second_id)
     assert seen["settings"]["manager.confine"] == "bwrap"
     assert seen["settings"]["confine.isolate_network"] == "false"
     assert seen["env"]["HTTK_MANAGER_CONFINE"] == "bwrap"
-    assert _seen(workspace, first)["env"]["HTTK_CONFINE_ISOLATE_NETWORK"] == "true"
+    assert _seen(workspace, first_id)["env"]["HTTK_CONFINE_ISOLATE_NETWORK"] == "true"
 
 
 def test_a_pinned_launch_template_wins_over_the_workspace_one(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("manager.launch_template", "workspace-launcher -n {procs}")
-    marker, job_id = _submit(workspace, tmp_path / "source", "launch", resources={"procs": 1})
+    _tag, job_id = _submit(workspace, tmp_path / "source", "launch", resources={"procs": 1})
     allocation = Allocation("host", None, (Node(socket.gethostname(), 2, 1000),), {})
     with TaskManager(
         workspace,
@@ -276,7 +291,7 @@ def test_a_pinned_launch_template_wins_over_the_workspace_one(tmp_path: Path, sa
     ) as manager:
         manager.run_until_idle(timeout=60.0)
     assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
-    assert _seen(workspace, marker)["env"]["HTTK_WORKFLOW_LAUNCH"] == "pinned-launcher -n 1"
+    assert _seen(workspace, job_id)["env"]["HTTK_WORKFLOW_LAUNCH"] == "pinned-launcher -n 1"
     assert not sandbox.prepares
 
 
@@ -308,38 +323,16 @@ def test_pinned_overrides_are_limited_to_confinement_keys(tmp_path: Path) -> Non
         TaskManager(workspace, setting_overrides={"manager.workers": "2"})
     with pytest.raises(ValueError, match="manager.confine must be none or bwrap"):
         TaskManager(workspace, setting_overrides={"manager.confine": "chroot"})
-    assert not (workspace.control / "managers").exists() or not list((workspace.control / "managers").iterdir())
+    assert not list((workspace.control / "owners").iterdir())
 
 
-def test_an_unusable_bubblewrap_refuses_the_manager_start_through_the_cli(
-    tmp_path: Path, sandbox: _Sandbox, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_an_unusable_bubblewrap_refuses_the_manager_start(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    ws = register_ws(None, workspace.root)
     sandbox.probe_result = _confine.ConfinementUnavailableError("bwrap cannot create a PID namespace here")
-    code = command(
-        [
-            "manager",
-            "run",
-            "--workspace",
-            ws,
-            "--allocation",
-            "none",
-            "--idle-timeout",
-            "5",
-            "--setting",
-            "manager.confine=bwrap",
-            "--setting",
-            f"confine.bwrap={_BWRAP}",
-        ],
-        CLIContext("httk", tmp_path),
-    )
-    assert code != 0
-    assert "bwrap cannot create a PID namespace here" in capsys.readouterr().err
-    # Refused before it attached: no manager record is left behind.
-    assert not list((workspace.control / "managers").iterdir())
-    with pytest.raises(_confine.ConfinementUnavailableError):
+    with pytest.raises(_confine.ConfinementUnavailableError, match="PID namespace"):
         TaskManager(workspace, setting_overrides=_PINNED)
+    # Refused before it registered: no owner record is left behind.
+    assert not list((workspace.control / "owners").iterdir())
 
 
 def test_a_workspace_switched_to_bwrap_is_probed_once_lazily(tmp_path: Path, sandbox: _Sandbox) -> None:
@@ -392,8 +385,8 @@ def test_a_lazy_probe_failure_holds_back_claims_until_bubblewrap_works(
     assert len(sandbox.records()) == 2
     # No attempt was consumed by the held-back claims.
     for job_id in identifiers:
-        marker = workspace.find_marker_by_id(job_id)
-        assert marker is not None and workspace.read_state(marker)["total_attempts"] == 1
+        doc, _ = read_state_unowned(find(workspace, job_id).path / "state.json")
+        assert doc is not None and doc.counters["attempts_total"] == 1
 
 
 def test_an_invalid_confinement_setting_holds_back_claims_naming_it(
@@ -432,19 +425,18 @@ def test_a_claim_racing_a_confinement_condition_is_released_without_an_attempt(
     tmp_path: Path, sandbox: _Sandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    marker, job_id = _submit(workspace, tmp_path / "source", "raced")
+    _tag, job_id = _submit(workspace, tmp_path / "source", "raced")
     with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
         # The claim pass saw confinement available; the condition appears before the launch.
         monkeypatch.setattr(manager, "_confinement_blocked", lambda: None)
         workspace.set_setting("confine.isolate_network", "maybe")
         for _ in range(5):
             manager.tick()
-        current = workspace.find_marker_by_id(job_id)
-        assert current is not None and current.kind == "ready"
-        state = workspace.read_state(current)
-        assert state["reason"] == "confinement_unavailable"
-        assert state.get("total_attempts", 0) == 0
-    assert not (workspace.payload_path(marker.placement, marker.job_key) / "attempts").exists()
+        current = find(workspace, job_id)
+        assert current.state == "ready"
+        doc, _ = read_state_unowned(current.path / "state.json")
+        assert doc is None or doc.counters["attempts_total"] == 0
+    assert not (find(workspace, job_id).path / "attempts").exists()
     assert not sandbox.prepares
 
 
@@ -507,25 +499,7 @@ def test_an_unconfined_manager_on_an_enrolled_workspace_is_refused(tmp_path: Pat
     workspace.set_setting("confine.bwrap", _BWRAP)
     with pytest.raises(ConfinementUnavailableError, match="manager.confine=bwrap"):
         TaskManager(workspace, setting_overrides={"manager.confine": "none"})
-    assert not list((workspace.control / "managers").iterdir())
-
-
-@pytest.mark.parametrize("addressing", ["registered", "by-path"])
-def test_inline_cli_managers_on_an_enrolled_workspace_are_refused(
-    tmp_path: Path, sandbox: _Sandbox, capsys: pytest.CaptureFixture[str], addressing: str
-) -> None:
-    workspace = _enrolled(tmp_path)
-    target = ["--by-path", "--workspace", str(workspace.root)]
-    if addressing == "registered":
-        target = ["--workspace", register_ws(None, workspace.root)]
-    code = command(
-        ["manager", "run", *target, "--inline", "--allocation", "none", "--idle-timeout", "5"],
-        CLIContext("httk", tmp_path),
-    )
-    assert code != 0
-    assert "exchange extension" in capsys.readouterr().err
-    assert not list((workspace.control / "managers").iterdir())
-    assert not sandbox.probes
+    assert not list((workspace.control / "owners").iterdir())
 
 
 def test_a_confined_manager_on_an_enrolled_workspace_starts_and_serves(tmp_path: Path, sandbox: _Sandbox) -> None:
@@ -535,27 +509,11 @@ def test_a_confined_manager_on_an_enrolled_workspace_starts_and_serves(tmp_path:
         manager.run_until_idle(timeout=60.0)
     assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
     assert len(sandbox.records()) == 1
-    # Through the workspace setting instead of a pin, and through the CLI.
+    # Through the workspace setting instead of a pin.
     workspace.set_setting("manager.confine", "bwrap")
     workspace.set_setting("confine.bwrap", _BWRAP)
     with TaskManager(workspace, heartbeat_interval=0.01):
         pass
-    code = command(
-        [
-            "manager",
-            "run",
-            "--by-path",
-            "--workspace",
-            str(workspace.root),
-            "--inline",
-            "--allocation",
-            "none",
-            "--idle-timeout",
-            "30",
-        ],
-        CLIContext("httk", tmp_path),
-    )
-    assert code == 0
 
 
 def test_an_enrolled_workspace_switched_to_unconfined_holds_back_claims(
@@ -576,19 +534,6 @@ def test_an_enrolled_workspace_switched_to_unconfined_holds_back_claims(
     assert not sandbox.records()
 
 
-# -- confinement-start checks -------------------------------------------------------
-
-
-def test_a_legacy_placement_naming_a_job_directory_is_not_confined(tmp_path: Path, sandbox: _Sandbox) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    marker, _job_id = _submit(workspace, tmp_path / "source", "legacy")
-    with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
-        legacy = replace(marker, placement=PurePosixPath(f"project/other--{uuid.uuid4()}"))
-        with pytest.raises(FormatError, match="parses as a job key"):
-            manager._check_confinement_start(legacy)
-        manager._check_confinement_start(marker)
-
-
 # -- the confined attempt -------------------------------------------------------------
 
 
@@ -599,7 +544,7 @@ def test_a_confined_attempt_gets_the_sandbox_environment_stdin_and_descriptors(
     monkeypatch.setenv("PMIX_RANK", "0")
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("manager.launch_template", "launcher -n {procs}")
-    marker, job_id = _submit(workspace, tmp_path / "source", "confined", resources={"procs": 1})
+    _tag, job_id = _submit(workspace, tmp_path / "source", "confined", resources={"procs": 1})
     allocation = Allocation("host", None, (Node(socket.gethostname(), 2, 1000),), {})
     with (
         caplog.at_level("INFO", logger="httk.workflow.manager"),
@@ -615,30 +560,28 @@ def test_a_confined_attempt_gets_the_sandbox_environment_stdin_and_descriptors(
 
     assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
     (call,) = sandbox.prepares
-    job_path = workspace.payload_path(marker.placement, marker.job_key)
+    job_path = call["job_path"]
+    # The sandbox binds the job directory where the attempt ran: this owner's entry below jobs/owned/.
+    assert job_path.parent.parent == workspace.jobs / "owned"
     assert call["workspace_root"] == workspace.root
-    assert call["job_path"] == job_path
     assert call["workdir"] == job_path / "run"
     assert call["block_userns"] is True
-    # Only an attempt with the launch client gets a lock directory, bound at its own host path.
-    _locks_fd, locks_path = call["launch_locks"]
-    attempt_id = json.loads(_seen(workspace, marker)["env"]["HTTK_WORKFLOW_CONTEXT"])["attempt_id"]
-    assert locks_path == Path("/dev/shm") / f"httk-launch-{attempt_id}"
-    assert not locks_path.exists(), "the manager removes the lock directory when it drops the attempt"
+    assert "launch_locks" not in call
     (record,) = sandbox.records()
-    # The sandbox's command is the attempt command; the gate stayed outside.
-    assert record["argv"][0] == str(job_path / "files" / "runner")
+    # The sandbox's command is the attempt command: the installed runner; the gate stayed outside.
+    installed = _store.lookup(workspace, "tests-confined")
+    assert installed is not None and record["argv"][0] == str(installed.package / "run")
     assert record["stdin_devnull"] is True
     # The sandbox descriptor was inherited, then closed in the manager.
     (descriptors,) = [closed for closed in sandbox.closed if closed]
     assert set(descriptors) <= set(record["fds"])
-    for name, environment in (("sandbox", record["env"]), ("runner", _seen(workspace, marker)["env"])):
+    for name, environment in (("sandbox", record["env"]), ("runner", _seen(workspace, job_id)["env"])):
         assert environment["HTTK_WORKFLOW_CONFINED"] == "1", name
         assert environment["HOME"] == "/tmp/home" and environment["TMPDIR"] == "/tmp", name
         assert "SLURM_JOB_ID" not in environment and "PMIX_RANK" not in environment, name
         # The launch prefix is the launch client; the binding stays informational.
         assert environment["HTTK_WORKFLOW_LAUNCH"] == _manager_launches.client_prefix(), name
-        assert environment["HTTK_WORKFLOW_LAUNCH_LOCKS"] == str(locks_path), name
+        assert "HTTK_WORKFLOW_LAUNCH_LOCKS" not in environment, name
         assert environment["HTTK_WORKFLOW_NODELIST"] == socket.gethostname(), name
         assert "HTTK_WORKFLOW_NODEFILE" in environment, name
     assert call["environment"] == {key: value for key, value in record["env"].items() if key in call["environment"]}
@@ -658,116 +601,58 @@ def _launch_manager(workspace: Workspace, shm: Path) -> TaskManager:
     )
 
 
-def test_an_attempt_without_the_launch_client_gets_no_lock_directory(tmp_path: Path, sandbox: _Sandbox) -> None:
-    shm = tmp_path / "shm"
-    shm.mkdir(mode=0o700)
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    marker, job_id = _submit(workspace, tmp_path / "source", "nolaunch")
-    # Without an allocation the attempt has no binding, hence no launch client.
-    with TaskManager(
-        workspace, heartbeat_interval=0.01, setting_overrides=_PINNED | {"confine.shm_root": str(shm)}
-    ) as manager:
-        manager.run_until_idle(timeout=60.0)
-    assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
-    (call,) = sandbox.prepares
-    assert call["launch_locks"] is None
-    assert "HTTK_WORKFLOW_LAUNCH_LOCKS" not in _seen(workspace, marker)["env"]
-    assert list(shm.iterdir()) == []
-
-
-def test_an_inherited_launch_locks_variable_never_reaches_an_attempt(
-    tmp_path: Path, sandbox: _Sandbox, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shm = tmp_path / "shm"
-    shm.mkdir(mode=0o700)
-    monkeypatch.setenv("HTTK_WORKFLOW_LAUNCH_LOCKS", "/inherited")
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    marker, job_id = _submit(workspace, tmp_path / "source", "inherit")
-    with TaskManager(
-        workspace, heartbeat_interval=0.01, setting_overrides=_PINNED | {"confine.shm_root": str(shm)}
-    ) as manager:
-        manager.run_until_idle(timeout=60.0)
-    assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
-    assert "HTTK_WORKFLOW_LAUNCH_LOCKS" not in _seen(workspace, marker)["env"]
-
-
-def test_a_pre_existing_lock_directory_refuses_the_attempt(
-    tmp_path: Path, sandbox: _Sandbox, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shm = tmp_path / "shm"
-    shm.mkdir(mode=0o700)
-    planted: list[Path] = []
-    original = _confine.create_launch_locks
-
-    def plant(shm_root: Path, attempt_id: str) -> tuple[int, Path]:
-        path = _confine.launch_locks_path(shm_root, attempt_id)
-        path.mkdir(mode=0o700)
-        planted.append(path)
-        return original(shm_root, attempt_id)
-
-    monkeypatch.setattr(_confine, "create_launch_locks", plant)
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_setting("manager.launch_template", "launcher -n {procs}")
-    _marker, job_id = _submit(workspace, tmp_path / "source", "planted", resources={"procs": 1})
-    with _launch_manager(workspace, shm) as manager:
-        manager.run_until_idle(timeout=60.0)
-    kind, code, message = _outcome(workspace, job_id)
-    assert kind == "failed" and "exists already" in message, (kind, code, message)
-    assert not sandbox.prepares and not sandbox.records()
-    assert [path.exists() for path in planted] == [True], "the entry the manager did not make is left alone"
-
-
-def test_a_failed_sandbox_removes_the_lock_directory(
-    tmp_path: Path, sandbox: _Sandbox, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_failed_sandbox_fails_the_attempt(tmp_path: Path, sandbox: _Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
     shm = tmp_path / "shm"
     shm.mkdir(mode=0o700)
 
     def refuse(settings: _confine.ConfineSettings, **arguments: Any) -> PreparedSandbox:
-        assert len(list(shm.iterdir())) == 1
         raise ValueError("no sandbox today")
 
     monkeypatch.setattr(_confine, "prepare_attempt_sandbox", refuse)
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("manager.launch_template", "launcher -n {procs}")
-    _marker, job_id = _submit(workspace, tmp_path / "source", "refused", resources={"procs": 1})
+    _tag, job_id = _submit(workspace, tmp_path / "source", "refused", resources={"procs": 1})
     with _launch_manager(workspace, shm) as manager:
         manager.run_until_idle(timeout=60.0)
-    assert _outcome(workspace, job_id)[0] == "failed"
+    kind, code, message = _outcome(workspace, job_id)
+    assert (kind, code) == ("failed", "protocol_error") and "no sandbox today" in message
     assert list(shm.iterdir()) == []
 
 
-def test_a_clean_exit_with_a_surviving_attempt_removes_its_lock_directory(tmp_path: Path, sandbox: _Sandbox) -> None:
+def test_closing_a_manager_stops_its_confined_attempt(tmp_path: Path, sandbox: _Sandbox) -> None:
     shm = tmp_path / "shm"
     shm.mkdir(mode=0o700)
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("manager.launch_template", "launcher -n {procs}")
-    _marker, _job_id = _submit(
-        workspace, tmp_path / "source", "survivor", body="time.sleep(120)\n", resources={"procs": 1}
+    _tag, job_id = _submit(workspace, tmp_path / "source", "survivor", body=_IGNORING, resources={"procs": 1})
+    manager = TaskManager(
+        workspace,
+        heartbeat_interval=0.01,
+        cancel_grace_seconds=0.5,
+        resources={"procs": 2},
+        allocation=Allocation("host", None, (Node(socket.gethostname(), 2, 1000),), {}),
+        setting_overrides=_PINNED | {"confine.shm_root": str(shm)},
     )
-    manager = _launch_manager(workspace, shm)
     try:
         deadline = time.monotonic() + 30.0
         while not sandbox.records() and time.monotonic() < deadline:
             manager.tick()
             time.sleep(0.02)
-        assert len(sandbox.records()) == 1
-        assert manager.running_attempts == 1 and len(list(shm.iterdir())) == 1
+        assert manager.running_attempts == 1
     finally:
         manager.close()
-        for line in sandbox.records():
-            try:
-                os.killpg(line["pgid"], signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    assert list(shm.iterdir()) == []
+    (record,) = sandbox.records()
+    assert _group_gone(record["pgid"])
+    # The stopped attempt is committed as lost to its owner, and the owner record is gone.
+    assert _outcome(workspace, job_id)[:2] == ("failed", "owner_lost")
+    assert not [item for item in _kernel.list_owners(workspace) if item.record is not None]
 
 
 def test_an_unconfined_attempt_is_unchanged(
     tmp_path: Path, sandbox: _Sandbox, caplog: pytest.LogCaptureFixture
 ) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    marker, job_id = _submit(workspace, tmp_path / "source", "plain")
+    _tag, job_id = _submit(workspace, tmp_path / "source", "plain")
     with (
         caplog.at_level("INFO", logger="httk.workflow.manager"),
         TaskManager(workspace, heartbeat_interval=0.01) as manager,
@@ -775,39 +660,22 @@ def test_an_unconfined_attempt_is_unchanged(
         manager.run_until_idle(timeout=60.0)
     assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
     assert not sandbox.probes and not sandbox.prepares and not sandbox.records()
-    environment = _seen(workspace, marker)["env"]
+    environment = _seen(workspace, job_id)["env"]
     assert "HTTK_WORKFLOW_CONFINED" not in environment
     launches = [record for record in caplog.records if getattr(record, "event", None) == "launch"]
     assert launches and not hasattr(launches[0], "confined")
 
 
-def test_a_shared_file_runner_runs_through_the_sandbox_by_descriptor(tmp_path: Path, sandbox: _Sandbox) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    source = tmp_path / "shared" / "succeed.py"
-    source.parent.mkdir()
-    source.write_text(_RUNNER.format(body=""), encoding="utf-8")
-    source.chmod(0o755)
-    reference = workspace.publish_runner(source)
-    marker, job_id = _submit(workspace, tmp_path / "source", "shared", runner=dict(reference))
-    with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
-        manager.run_until_idle(timeout=60.0)
-    assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
-    (record,) = sandbox.records()
-    assert record["argv"][0].startswith("/dev/fd/")
-    assert int(record["argv"][0].removeprefix("/dev/fd/")) in record["fds"]
-    assert _seen(workspace, marker)["env"]["HTTK_WORKFLOW_CONFINED"] == "1"
-
-
 def test_a_workflow_prelude_runs_inside_the_sandbox(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_workflow_prelude("tests.confinement", "export PRELUDE_RAN=yes")
-    marker, job_id = _submit(workspace, tmp_path / "source", "prelude")
+    workspace.set_workflow_prelude("tests-prelude", "export PRELUDE_RAN=yes")
+    _tag, job_id = _submit(workspace, tmp_path / "source", "prelude")
     with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
         manager.run_until_idle(timeout=60.0)
     assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
     (record,) = sandbox.records()
     assert record["argv"][:2] == ["bash", "-l"]
-    assert _seen(workspace, marker)["env"]["PRELUDE_RAN"] == "yes"
+    assert _seen(workspace, job_id)["env"]["PRELUDE_RAN"] == "yes"
 
 
 # -- supervision of a confined attempt --------------------------------------------------
@@ -863,47 +731,27 @@ def test_a_draining_manager_stops_a_confined_attempt(tmp_path: Path, sandbox: _S
     stopper.join(timeout=5.0)
     (record,) = sandbox.records()
     assert _group_gone(record["pgid"])
-    assert _outcome(workspace, job_id)[:2] == ("failed", "lease_lost")
+    assert _outcome(workspace, job_id)[:2] == ("failed", "owner_lost")
 
 
 @pytest.mark.timing
 def test_cancelling_a_confined_attempt_kills_its_process_group(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    _marker, job_id = _submit(workspace, tmp_path / "source", "cancelled", body=_IGNORING)
+    _tag, job_id = _submit(workspace, tmp_path / "source", "cancelled", body=_IGNORING)
     with TaskManager(
         workspace, heartbeat_interval=0.01, cancel_grace_seconds=0.5, setting_overrides=_PINNED
     ) as manager:
         deadline = time.monotonic() + 30.0
-        running = None
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not (manager.running_attempts and sandbox.records()):
             manager.tick()
-            running = workspace.find_marker_by_id(job_id)
-            if running is not None and running.kind == "running" and sandbox.records():
-                break
             time.sleep(0.02)
-        assert running is not None and running.kind == "running"
-        workspace.publish_request(
-            {
-                "format": "httk-workflow-request",
-                "format_version": 2,
-                "request_id": str(uuid.uuid4()),
-                "job_id": running.job_id,
-                "job_key": running.job_key,
-                "placement": running.placement.as_posix(),
-                "expected_generation": running.generation,
-                "expected_record_ref": running.record_ref,
-                "action": "cancel",
-                "operator": "tester",
-                "reason": "confinement test",
-                "created_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
-            }
+        assert manager.running_attempts == 1
+        _requests.post(
+            workspace, action="cancel", job_id=job_id, placement="project/cancelled", operator="tester", reason="test"
         )
         deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and find(workspace, job_id).state != "cancelled":
             manager.tick()
-            marker = workspace.find_marker_by_id(job_id)
-            if marker is not None and marker.kind == "cancelled":
-                break
             time.sleep(0.02)
     assert _outcome(workspace, job_id)[0] == "cancelled"
     (record,) = sandbox.records()
@@ -913,22 +761,21 @@ def test_cancelling_a_confined_attempt_kills_its_process_group(tmp_path: Path, s
 # -- requirement 3: job content cannot change confinement ---------------------------------
 
 _SPAWNING_BODY = """
-if context["step"] == "only":
+if context["step"] == "start":
     import uuid as _uuid
     child_id = str(_uuid.uuid5(_uuid.UUID(context["activation_id"]), "child"))
+    spawn_id = str(_uuid.uuid5(_uuid.UUID(context["activation_id"]), "spawn"))
     child_key = "child--" + child_id
     draft = control / "outcome.tmp.test"
     child_dir = draft / "children" / "jobs" / child_key
-    (child_dir / "files").mkdir(parents=True)
-    (child_dir / "files" / "runner").write_text(Path(sys.argv[0]).read_text())
-    (child_dir / "files" / "runner").chmod(0o755)
+    child_dir.mkdir(parents=True)
     document = json.loads((Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "job.json").read_text())
-    document.update(id=child_id, tag="child", initial_step="child", parent=None)
+    parent = {"workspace_id": context["workspace_id"], "job_id": document["id"], "job_key": context["job_key"],
+              "placement": document["placement"], "activation_id": context["activation_id"], "spawn_id": spawn_id}
+    document.update(id=child_id, tag="child", initial_step="child", placement="project/children", parent=parent)
     (child_dir / "job.json").write_text(json.dumps(document))
-    (draft / "children" / "spawn.json").write_text(json.dumps({"children": [{
-        "workspace_id": context["workspace_id"], "job_id": child_id, "job_key": child_key,
-        "placement": "project/children", "label": "child",
-    }]}))
+    (draft / "children" / "spawn.json").write_text(json.dumps({"format": "httk-workflow-spawn", "format_version": 2,
+        "children": [{"job_key": child_key, "placement": "project/children", "label": "child", "spawn_id": spawn_id}]}))
     (draft / "outcome.json").write_text(json.dumps({
         "format": "httk-workflow-outcome", "format_version": 2, "job_id": context["job_id"],
         "activation_id": context["activation_id"], "attempt_id": context["attempt_id"],
@@ -961,7 +808,7 @@ def test_job_content_cannot_change_the_confinement_the_manager_uses(
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("manager.confine", workspace_mode)
     workspace.set_setting("confine.bwrap", _BWRAP)
-    marker, job_id = _submit(
+    _tag, job_id = _submit(
         workspace,
         tmp_path / "source",
         "parent",
@@ -975,8 +822,8 @@ def test_job_content_cannot_change_the_confinement_the_manager_uses(
         manager.run_until_idle(timeout=90.0)
 
     assert _outcome(workspace, job_id)[:2] == ("succeeded", None)
-    children = [item for item in workspace.scan_markers() if item.job_key.startswith("child--")]
-    assert len(children) == 1 and children[0].kind == "succeeded"
+    children = [ref for ref in _kernel.list_jobs(workspace, "succeeded") if ref.job_key.startswith("child--")]
+    assert len(children) == 1
     # Parent (two steps) and child: every attempt is confined exactly as the
     # workspace says, whatever the jobs declare.
     expected = 3 if workspace_mode == "bwrap" else 0
@@ -986,7 +833,7 @@ def test_job_content_cannot_change_the_confinement_the_manager_uses(
         assert call["settings"].isolate_network is True
         assert call["settings"].bwrap == Path(_BWRAP)
     # The manager's own view of its settings ignores the job content.
-    assert _seen(workspace, marker)["settings"]["manager.confine"] == workspace_mode
+    assert _seen(workspace, job_id)["settings"]["manager.confine"] == workspace_mode
 
 
 # -- real Bubblewrap ----------------------------------------------------------------------
@@ -1037,34 +884,27 @@ def test_a_real_bubblewrap_attempt_writes_only_its_job_directory(tmp_path: Path)
         _unsupported_namespace_failure(str(exc))
         raise
     workspace = Workspace.initialize(tmp_path / "workspace")
-    sibling, _sibling_id = _submit(workspace, tmp_path / "source", "sibling")
-    sibling_path = workspace.payload_path(sibling.placement, sibling.job_key)
-    workspace.set_setting("sibling", str(sibling_path))
-    workspace.set_workflow_prelude("tests.confinement", "export PRELUDE_RAN=yes")
-    confined, confined_id = _submit(workspace, tmp_path / "source", "confined", body=_CONFINED_PROBE)
-    source = tmp_path / "shared" / "succeed.py"
-    source.parent.mkdir()
-    source.write_text(_RUNNER.format(body=""), encoding="utf-8")
-    source.chmod(0o755)
-    shared, shared_id = _submit(workspace, tmp_path / "source", "shared", runner=dict(workspace.publish_runner(source)))
+    # The sibling is in a pool no manager serves, so its directory does not move while the confined job runs.
+    other_pool = {"claim": {"pool": "elsewhere", "required_capabilities": []}}
+    sibling = submit_runner(workspace, tmp_path / "source", "sibling", _RUNNER.format(body=""), extra=other_pool)[0]
+    workspace.set_setting("sibling", str(sibling.path))
+    workspace.set_workflow_prelude("tests-confined", "export PRELUDE_RAN=yes")
+    _tag, confined_id = _submit(workspace, tmp_path / "source", "confined", body=_CONFINED_PROBE)
     before = {path for path in workspace.root.iterdir()}
 
     with TaskManager(workspace, heartbeat_interval=0.01, setting_overrides=pinned) as manager:
         manager.run_until_idle(timeout=120.0)
-
-    for job_id in (confined_id, shared_id):
-        kind, _code, message = _outcome(workspace, job_id)
-        if kind != "succeeded":
-            stdio = workspace.payload_path(confined.placement, confined.job_key) / "logs" / "stdio.out"
-            _unsupported_namespace_failure(message + (stdio.read_text(errors="replace") if stdio.exists() else ""))
-    confined_path = workspace.payload_path(confined.placement, confined.job_key)
+    kind, _code, message = _outcome(workspace, confined_id)
+    if kind != "succeeded":
+        stdio = find(workspace, confined_id).path / "logs" / "stdio.out"
+        _unsupported_namespace_failure(message + (stdio.read_text(errors="replace") if stdio.exists() else ""))
+    confined_path = find(workspace, confined_id).path
     results = json.loads((confined_path / "results.json").read_text(encoding="utf-8"))
     assert results == {"own": "written", "sibling": "refused", "control": "refused", "root": "refused"}
-    assert not (sibling_path / "planted.txt").exists()
+    assert not (sibling.path / "planted.txt").exists()
     assert not (workspace.control / "planted.txt").exists()
     assert {path for path in workspace.root.iterdir()} == before
-    for marker in (confined, shared):
-        environment = _seen(workspace, marker)["env"]
-        assert environment["HTTK_WORKFLOW_CONFINED"] == "1"
-        assert environment["PRELUDE_RAN"] == "yes"
+    environment = _seen(workspace, confined_id)["env"]
+    assert environment["HTTK_WORKFLOW_CONFINED"] == "1"
+    assert environment["PRELUDE_RAN"] == "yes"
     assert stat.S_ISREG((confined_path / "own.txt").stat().st_mode)

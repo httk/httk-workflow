@@ -313,100 +313,6 @@ def _namespace_options(settings: ConfineSettings, *, block_userns: bool) -> list
     return [*argv, "--cap-drop", "ALL"]
 
 
-#: The prefix of a launch-lock directory's name below ``confine.shm_root``.
-LAUNCH_LOCKS_PREFIX = "httk-launch-"
-
-
-def launch_locks_path(shm_root: Path, attempt_id: str) -> Path:
-    """Return the host path of one attempt's launch-lock directory.
-
-    :param shm_root: ``confine.shm_root``.
-    :param attempt_id: The attempt identifier.
-    :return: ``<shm_root>/httk-launch-<attempt_id>``.
-    """
-
-    return shm_root / f"{LAUNCH_LOCKS_PREFIX}{attempt_id}"
-
-
-def create_launch_locks(shm_root: Path, attempt_id: str) -> tuple[int, Path]:
-    """Create one attempt's launch-lock directory exclusively below the node-local shared-memory root.
-
-    The root is checked like the rank helper's shared-memory root (a directory owned by root or this user,
-    world-writable only as a sticky root-owned one), the directory is made with ``mkdir`` so that an existing
-    entry refuses the attempt, and it must be owned by this user with mode exactly 0700.
-
-    :param shm_root: ``confine.shm_root``.
-    :param attempt_id: The attempt identifier.
-    :return: A close-on-exec directory descriptor and the directory's host path; the caller closes the
-        descriptor and removes the directory with :func:`remove_launch_locks`.
-    :raises ConfinementUnavailableError: If the root is unsafe, the directory exists already, or it cannot be
-        created or does not have the required owner and mode.
-    """
-
-    # Imported here: the rank helper runs as ``python -m httk.workflow._confine_rank``, and importing it while
-    # the package loads would make runpy warn about the module already being in ``sys.modules``.
-    from ._confine_rank import _check_shm_root
-
-    path = launch_locks_path(shm_root, attempt_id)
-    try:
-        root_fd = open_directory_nofollow(shm_root)
-    except OSError as exc:
-        raise ConfinementUnavailableError(f"cannot open confine.shm_root {shm_root}: {exc}") from exc
-    created = False
-    descriptor = -1
-    try:
-        try:
-            _check_shm_root(root_fd, shm_root)
-        except ValueError as exc:
-            raise ConfinementUnavailableError(str(exc)) from exc
-        try:
-            os.mkdir(path.name, 0o700, dir_fd=root_fd)
-            created = True
-            descriptor = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
-            os.fchmod(descriptor, 0o700)
-            information = os.fstat(descriptor)
-            if information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700:
-                raise ConfinementUnavailableError(
-                    f"launch-lock directory {path} must be owned by this user with mode 0700"
-                )
-        except FileExistsError as exc:
-            raise ConfinementUnavailableError(f"launch-lock directory {path} exists already") from exc
-        except OSError as exc:
-            raise ConfinementUnavailableError(f"cannot create the launch-lock directory {path}: {exc}") from exc
-    except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if created:
-            remove_launch_locks(shm_root, attempt_id)
-        raise
-    finally:
-        os.close(root_fd)
-    return descriptor, path
-
-
-def remove_launch_locks(shm_root: Path, attempt_id: str) -> None:
-    """Remove one attempt's launch-lock directory with its files; a missing directory is not an error.
-
-    :param shm_root: ``confine.shm_root``.
-    :param attempt_id: The attempt identifier.
-    """
-
-    name = launch_locks_path(shm_root, attempt_id).name
-    try:
-        root_fd = open_directory_nofollow(shm_root)
-    except OSError as exc:
-        _LOGGER.warning("cannot remove the launch-lock directory %s: %s", shm_root / name, exc)
-        return
-    try:
-        shutil.rmtree(name, dir_fd=root_fd)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        _LOGGER.warning("cannot remove the launch-lock directory %s: %s", shm_root / name, exc)
-    finally:
-        os.close(root_fd)
-
-
 def prepare_attempt_sandbox(
     settings: ConfineSettings,
     *,
@@ -417,7 +323,6 @@ def prepare_attempt_sandbox(
     workdir: Path,
     environment: Mapping[str, str],
     block_userns: bool,
-    launch_locks: tuple[int, Path] | None = None,
 ) -> PreparedSandbox:
     """Build the Bubblewrap argument vector and descriptor set of one confined attempt.
 
@@ -425,8 +330,7 @@ def prepare_attempt_sandbox(
     ``settings.readonly_paths`` read-only, the workspace read-only at its real path and the job directory
     writable at its real path, in that order: a read-only path may be an ancestor of the workspace (``/home``
     for a workspace below it), because the later workspace and job binds overlay it. A read-only path at or
-    inside the workspace is refused. ``/proc``, a private ``/dev``, the device binds and the launch-lock
-    directory bind follow, the last after ``--dev /dev`` because that would hide anything below ``/dev/shm``. There is no
+    inside the workspace is refused. ``/proc``, a private ``/dev`` and the device binds follow. There is no
     ``--new-session`` and no ``--die-with-parent``: the sandbox stays in its launcher's process group, so
     ``killpg`` reaches the sandboxed command, and an attempt survives a manager exit as unconfined ones do.
 
@@ -442,9 +346,6 @@ def prepare_attempt_sandbox(
     :param workdir: The attempt's working directory, inside the job directory.
     :param environment: The launcher's environment, already filtered with :func:`filtered_attempt_environment`.
     :param block_userns: Whether to block nested user namespaces (the result of :func:`probe_bwrap`).
-    :param launch_locks: For an attempt with the launch client, a descriptor of its launch-lock directory (see
-        :func:`create_launch_locks`) and that directory's host path, bound writable at the identical path;
-        duplicated, not consumed.
     :return: The argument vector ending in ``--``, to which the caller appends the command, and the
         inheritable descriptors to pass with ``pass_fds``; the caller closes them after the spawn.
     :raises ValueError: If a path is not absolute, misplaced, unavailable or overlaps the workspace, or the
@@ -489,11 +390,6 @@ def prepare_attempt_sandbox(
             argv += device_parent_dirs(device, created)
             descriptors.append(open_device_nofollow(device))
             argv += ["--bind-fd", str(descriptors[-1]), str(device)]
-        if launch_locks is not None:
-            if not launch_locks[1].is_absolute() or ".." in launch_locks[1].parts:
-                raise ValueError(f"sandbox paths must be absolute without '..': {launch_locks[1]}")
-            descriptors.append(_directory_descriptor(*launch_locks))
-            argv += ["--bind-fd", str(descriptors[-1]), str(launch_locks[1])]
         argv += ["--chdir", str(workdir), "--"]
         make_inheritable(descriptors)
         return PreparedSandbox(argv, tuple(descriptors))
@@ -553,7 +449,8 @@ def probe_bwrap(settings: ConfineSettings) -> bool:
 
     if settings.bwrap is None:
         raise ConfinementUnavailableError("manager.confine=bwrap needs Bubblewrap: none on PATH; set confine.bwrap")
-    # Imported here for the same reason as in create_launch_locks.
+    # Imported here: the rank helper runs as ``python -m httk.workflow._confine_rank``, and importing it while
+    # the package loads would make runpy warn about the module already being in ``sys.modules``.
     from ._confine_rank import _check_shm_root
 
     try:

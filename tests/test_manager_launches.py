@@ -18,28 +18,26 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _manager_launches, _manager_requests
+from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _kernel, _manager_launches
 from httk.workflow._allocation import Allocation, Node
-from httk.workflow._launch_protocol import LaunchConfinement, TrustedLaunch, encode_trusted, trusted_name
+from httk.workflow._launch_protocol import trusted_name
 from httk.workflow._logging import reset_logging
 from httk.workflow._sandbox import PreparedSandbox
+from httk.workflow._state import read_state_unowned
 from httk.workflow.errors import ConfinementUnavailableError
-from httk.workflow.models import Marker, StateFrame
+from test_manager_confinement import find, submit_runner
 
 _FAKE_BWRAP = Path(__file__).with_name("fake_bwrap.py")
 _TIMEOUT = 60.0
 
 _RUNNER = """#!/usr/bin/env python3
-import fcntl
 import glob
 import json
 import os
@@ -56,9 +54,9 @@ context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 results = Path(os.environ["HTTK_TEST_RESULTS"])
+results.mkdir(parents=True, exist_ok=True)
 launch = shlex.split(os.environ.get("HTTK_WORKFLOW_LAUNCH", ""))
 launch_dir = control / "launch"
-locks_dir = Path(os.environ["HTTK_WORKFLOW_LAUNCH_LOCKS"]) if "HTTK_WORKFLOW_LAUNCH_LOCKS" in os.environ else None
 result = {"launch": os.environ.get("HTTK_WORKFLOW_LAUNCH")}
 published = False
 
@@ -117,33 +115,13 @@ def alive(pid):
     return True
 
 
-def request(request_id, *, lock="held", stdout=False):
+def request(request_id, *, stdout=False):
     launch_dir.mkdir(exist_ok=True)
-    descriptor = None
-    if lock in ("symlink", "launch_directory"):
-        # A lock the manager must not accept: a symlink in the lock directory, or the old location.
-        target = locks_dir / protocol.lock_name(request_id) if lock == "symlink" else launch_dir / protocol.lock_name(request_id)
-        real = control / "forged.lock"
-        descriptor = os.open(real, os.O_WRONLY | os.O_CREAT, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        if lock == "symlink":
-            os.symlink(real, target)
-        else:
-            os.rename(real, target)
-    elif lock != "missing":
-        descriptor = os.open(locks_dir / protocol.lock_name(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        if lock == "held":
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        else:
-            os.close(descriptor)
-            descriptor = None
     if stdout:
         (launch_dir / protocol.stdout_name(request_id)).write_text("forged")
     document = protocol.LaunchRequest(request_id, context["attempt_id"], ("true",), ".", ())
     (launch_dir / protocol.request_name(request_id)).write_bytes(protocol.encode_request(document))
     wait_for(launch_dir / protocol.status_name(request_id))
-    if descriptor is not None:
-        os.close(descriptor)
     return statuses().get(request_id)
 
 
@@ -192,7 +170,7 @@ class _Bench:
 
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.root = root
-        self.workspace = Workspace.initialize(root / "workspace")
+        self.workspace = Workspace.initialize(root / "workspace", policy={"visibility_deadline_seconds": 0.05})
         self.results = root / "results"
         self.results.mkdir()
         self.pids = root / "pids"
@@ -232,42 +210,22 @@ class _Bench:
             **options,
         )
 
-    def submit(self, tag: str, body: str, *, resources: Mapping[str, int] | None = None) -> tuple[Marker, str]:
-        job_id = str(uuid.uuid4())
-        payload = self.root / "source" / tag
-        files = payload / "files"
-        files.mkdir(parents=True)
-        (files / "runner").write_text(_RUNNER.replace("__BODY__", body), encoding="utf-8")
-        (files / "runner").chmod(0o755)
-        job = {
-            "format": "httk-workflow-job",
-            "format_version": 2,
-            "id": job_id,
-            "tag": tag,
-            "name": f"Launch {tag}",
-            "workflow": "tests.launches",
-            "runner": {"path": "files/runner", "arguments": []},
-            "workdir": {"mode": "persistent", "path": "run"},
-            "data": {"mode": "none"},
-            "initial_step": "only",
-            "priority": 500,
-            "claim": {"pool": "default", "required_capabilities": []},
-            "retry_policy": {"maximum_attempts_per_activation": 1, "maximum_total_attempts": 1, "retry_on": []},
-            "resources": {"procs": 1, **dict(resources or {})},
-            "parent": None,
-        }
-        (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-        return self.workspace.submit(payload, f"project/{tag}"), job_id
+    def submit(self, tag: str, body: str, *, resources: Mapping[str, int] | None = None) -> str:
+        runner = _RUNNER.replace("__BODY__", body)
+        return submit_runner(
+            self.workspace, self.root / "source", tag, runner, resources={"procs": 1, **(resources or {})}
+        )[1]
 
     def result(self, job_id: str) -> dict[str, Any]:
         return json.loads((self.results / f"{job_id}.json").read_text(encoding="utf-8"))
 
     def outcome(self, job_id: str) -> tuple[str, str | None]:
-        marker = self.workspace.find_marker_by_id(job_id)
-        assert marker is not None
-        if marker.kind != "failed":
-            return marker.kind, None
-        return marker.kind, self.workspace.read_state(marker)["failure"]["code"]
+        ref = find(self.workspace, job_id)
+        if ref.state != "failed":
+            return ref.state, None
+        doc, _ = read_state_unowned(ref.path / "state.json")
+        assert doc is not None and doc.failure is not None
+        return ref.state, str(doc.failure["code"])
 
     def pid_file(self, name: str) -> Path:
         return self.pids / name
@@ -344,21 +302,22 @@ result["first"] = run([*launch, "sh", "-c", 'pwd; echo "out $FOO"; echo err >&2;
 def test_a_confined_launch_runs_through_the_manager_and_reports_its_exit(
     bench: _Bench, caplog: pytest.LogCaptureFixture
 ) -> None:
-    marker, job_id = bench.submit("basic", _BASIC)
+    job_id = bench.submit("basic", _BASIC)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
-        launches = manager.manager_directory / _manager_launches.LAUNCHES_DIRECTORY
-        # The trusted launch directory was removed with the attempt.
-        assert not launches.exists() or not list(launches.iterdir())
-        trusted_root = launches
+        trusted_root = manager.owner.path / "launches"
+        owned = bench.workspace.jobs / "owned" / manager.manager_id
+    # The launch directories went with the launch and the attempt, and the owner with them.
+    assert not trusted_root.exists()
     assert bench.outcome(job_id) == ("succeeded", None)
     result = bench.result(job_id)
     assert result["launch"] == _manager_launches.client_prefix()
     first = result["first"]
-    job = bench.workspace.payload_path(marker.placement, marker.job_key)
     assert first["code"] == 3, first
-    # The client's working directory relative to the job directory and its environment reach the rank.
-    assert first["stdout"] == f"{job / 'run' / 'sub'}\nout bar\n"
+    # The client's working directory relative to the job directory and its environment reach the rank, which
+    # runs in the job's directory below this owner's jobs/owned/ while the attempt runs.
+    workdir, out = first["stdout"].splitlines()
+    assert Path(workdir).parent.parent.parent == owned and workdir.endswith("/run/sub") and out == "out bar"
     assert first["stderr"] == "err\n"
     (status,) = result["statuses"].values()
     assert status == {"state": "exited", "exit_code": 3, "error": None}
@@ -373,27 +332,40 @@ def test_a_confined_launch_runs_through_the_manager_and_reports_its_exit(
     assert fields["args"].endswith(f"-m httk.workflow._confine_rank --launch-dir {trusted}")
     (finished,) = _events(caplog, "launch_finished")
     for record in (started, finished):
-        assert record.request_id == request_id and record.job_key == marker.job_key
+        assert record.request_id == request_id and record.job_key == find(bench.workspace, job_id).job_key
         assert not hasattr(record, "argv")
     assert finished.exit_code == 3
 
 
-def test_a_launch_whose_process_record_cannot_be_written_never_starts_its_prefix(
-    bench: _Bench, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _record_launches(monkeypatch: pytest.MonkeyPatch, on_record: Any) -> list[subprocess.Popen[Any]]:
+    """Record the launch gates started, and run *on_record* in place of a launch's process.json write."""
+
     started: list[subprocess.Popen[Any]] = []
     real_popen = subprocess.Popen
+    real_write = _manager_launches.write_process_record
 
     def recording_popen(*arguments: Any, **options: Any) -> subprocess.Popen[Any]:
         process = real_popen(*arguments, **options)
         started.append(process)
         return process
 
-    def refuse(_directory: Path, _name: str, _data: bytes) -> None:
-        raise OSError("disk full")
+    def write(manager: Any, directory: Path, attempt_id: str, n: str, pid: int, *, ranks_local_only: bool) -> None:
+        if n != "0":
+            on_record(manager)
+        real_write(manager, directory, attempt_id, n, pid, ranks_local_only=ranks_local_only)
 
     monkeypatch.setattr(_manager_launches.subprocess, "Popen", recording_popen)
-    monkeypatch.setattr(_manager_launches, "_write_durable", refuse)
+    monkeypatch.setattr(_manager_launches, "write_process_record", write)
+    return started
+
+
+def test_a_launch_whose_process_record_cannot_be_written_never_starts_its_prefix(
+    bench: _Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(_manager: Any) -> None:
+        raise OSError("disk full")
+
+    started = _record_launches(monkeypatch, refuse)
     bench.submit("gated", _BASIC)
     with bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
@@ -403,59 +375,23 @@ def test_a_launch_whose_process_record_cannot_be_written_never_starts_its_prefix
     assert gates and all(process.wait(timeout=_TIMEOUT) in (125, -signal.SIGTERM) for process in gates)
 
 
-def _move_running_marker_at_the_gate(
-    bench: _Bench, monkeypatch: pytest.MonkeyPatch, job_id: str, kind: str
-) -> list[subprocess.Popen[Any]]:
-    """Move the job's running marker to *kind* right after the process record is durable; return the gates."""
-
-    started: list[subprocess.Popen[Any]] = []
-    real_popen = subprocess.Popen
-    real_write = _manager_launches._write_durable
-
-    def recording_popen(*arguments: Any, **options: Any) -> subprocess.Popen[Any]:
-        process = real_popen(*arguments, **options)
-        started.append(process)
-        return process
-
-    def write_then_move(directory: Path, name: str, data: bytes) -> None:
-        real_write(directory, name, data)
-        running = bench.workspace.find_marker_by_id(job_id)
-        assert running is not None and running.kind == "running"
-        state = bench.workspace.read_state(running)
-        members = {key: value for key, value in state.items() if key not in _manager_requests._STATE_ENVELOPE_MEMBERS}
-        with bench.workspace.open_journal_writer() as writer:
-            bench.workspace.transition(writer, running, kind, {**members, "reason": "test_move"})
-
-    monkeypatch.setattr(_manager_launches.subprocess, "Popen", recording_popen)
-    monkeypatch.setattr(_manager_launches, "_write_durable", write_then_move)
-    return started
-
-
-def test_a_launch_whose_attempt_was_fenced_at_the_gate_never_starts_its_prefix(
+def test_a_launch_of_an_owner_declared_dead_at_the_gate_never_starts_its_prefix(
     bench: _Bench, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A manager frozen since admission wakes after its attempt was fenced: the gate stays closed.
-    _marker, job_id = bench.submit("fenced", _BASIC)
-    started = _move_running_marker_at_the_gate(bench, monkeypatch, job_id, "cancelling")
-    with bench.manager() as manager:
+    # A manager frozen since admission wakes after an operator declared its owner dead: the gate stays closed,
+    # and the next tick fail-stops.
+    def declare_dead(manager: Any) -> None:
+        _kernel.attest_dead(bench.workspace, manager.manager_id, by="operator", evidence=[], reason="test")
+
+    started = _record_launches(monkeypatch, declare_dead)
+    bench.submit("dead", _BASIC)
+    manager = bench.manager()
+    with pytest.raises(_kernel.OwnerLost):
         manager.run_until_idle(timeout=_TIMEOUT)
+    manager.close()
     assert not bench.record.exists()
     gates = [process for process in started if process.args[1:2] == ["-c"]]  # type: ignore[index]
     assert gates and all(process.wait(timeout=_TIMEOUT) in (125, -signal.SIGTERM) for process in gates)
-    assert bench.outcome(job_id) == ("cancelled", None)
-
-
-def test_a_launch_whose_running_marker_moved_within_running_still_starts(
-    bench: _Bench, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A same-kind transition (such as a deferred pause request) renames the marker but keeps the attempt.
-    _marker, job_id = bench.submit("moved", _BASIC)
-    _move_running_marker_at_the_gate(bench, monkeypatch, job_id, "running")
-    with bench.manager() as manager:
-        manager.run_until_idle(timeout=_TIMEOUT)
-    assert bench.record.exists()
-    assert bench.outcome(job_id) == ("succeeded", None)
-    assert bench.result(job_id)["first"]["code"] == 3
 
 
 def test_the_launch_gate_runs_nothing_without_its_newline(tmp_path: Path) -> None:
@@ -475,14 +411,13 @@ def test_the_launch_gate_runs_nothing_without_its_newline(tmp_path: Path) -> Non
 
 
 def test_an_unconfined_attempt_keeps_the_rendered_launch_prefix(bench: _Bench) -> None:
-    marker, job_id = bench.submit("plain", "")
+    job_id = bench.submit("plain", "")
     with bench.manager(confined=False) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
-    control = bench.workspace.payload_path(marker.placement, marker.job_key) / "attempts"
     launch = shlex.split(bench.result(job_id)["launch"])
     assert launch[0] == str(bench.recorder)
-    assert Path(launch[1]).name == "nodefile" and Path(launch[1]).parent.parent == control
+    assert Path(launch[1]).name == "nodefile" and Path(launch[1]).parent.parent.name == "attempts"
 
 
 # -- refusals ------------------------------------------------------------------------------------------
@@ -490,54 +425,18 @@ def test_an_unconfined_attempt_keeps_the_rendered_launch_prefix(bench: _Bench) -
 
 _FORGED = """
 import secrets
-result["missing_lock"] = request(secrets.token_hex(16), lock="missing")
-result["dead_client"] = request(secrets.token_hex(16), lock="released")
-result["symlinked_lock"] = request(secrets.token_hex(16), lock="symlink")
-result["lock_in_launch_directory"] = request(secrets.token_hex(16), lock="launch_directory")
 result["forged_stdout"] = request(secrets.token_hex(16), stdout=True)
 """
 
 
-def test_requests_without_a_live_client_lock_or_with_forged_output_are_refused(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("forged", _FORGED)
+def test_a_request_with_forged_output_is_refused(bench: _Bench) -> None:
+    job_id = bench.submit("forged", _FORGED)
     with bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
-    result = bench.result(job_id)
-    for key, text in (
-        ("missing_lock", "no client lock file"),
-        ("dead_client", "client is gone"),
-        ("symlinked_lock", "no client lock file"),
-        ("lock_in_launch_directory", "no client lock file"),
-        ("forged_stdout", "output files already exist"),
-    ):
-        assert result[key]["state"] == "refused", key
-        assert text in result[key]["error"], key
+    forged = bench.result(job_id)["forged_stdout"]
+    assert forged["state"] == "refused" and "output files already exist" in forged["error"]
     assert not bench.record.exists()
-
-
-_LOCKS = """
-result["locks_dir"] = str(locks_dir)
-result["locks_mode"] = oct(locks_dir.stat().st_mode & 0o777)
-result["ran"] = run([*launch, "true"])
-result["locks_during"] = sorted(path.name for path in locks_dir.iterdir())
-result["locks_under_launch_directory"] = any(launch_dir.glob("*.lock"))
-"""
-
-
-def test_the_lock_directory_is_per_attempt_on_shm_and_removed_with_the_attempt(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("locks", _LOCKS)
-    with bench.manager() as manager:
-        manager.run_until_idle(timeout=_TIMEOUT)
-    assert bench.outcome(job_id) == ("succeeded", None)
-    result = bench.result(job_id)
-    assert Path(result["locks_dir"]).parent == bench.shm
-    assert Path(result["locks_dir"]).name.startswith("httk-launch-")
-    assert result["locks_mode"] == "0o700"
-    assert result["ran"]["code"] == 0
-    assert result["locks_during"] and all(name.endswith(".lock") for name in result["locks_during"])
-    assert not result["locks_under_launch_directory"]
-    assert list(bench.shm.iterdir()) == []
 
 
 _AFTER_PUBLISH = """
@@ -549,7 +448,7 @@ result["late"] = run([*launch, "true"])
 
 
 def test_a_request_after_the_outcome_is_published_is_refused(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("published", _AFTER_PUBLISH)
+    job_id = bench.submit("published", _AFTER_PUBLISH)
     with bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -577,7 +476,7 @@ result["late"] = run([*launch, "true"])
 
 @pytest.mark.timing
 def test_a_request_after_the_attempt_timed_out_is_refused(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("timeout", _AFTER_TIMEOUT, resources={"maxtime": 1})
+    job_id = bench.submit("timeout", _AFTER_TIMEOUT, resources={"maxtime": 1})
     with bench.manager(cancel_grace_seconds=20.0) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None) or bench.outcome(job_id)[1] == "timeout"
@@ -598,7 +497,7 @@ result["late"] = run([*launch, "true"])
 
 @pytest.mark.timing
 def test_a_request_during_a_drain_is_refused(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("drain", _DURING_DRAIN)
+    job_id = bench.submit("drain", _DURING_DRAIN)
 
     def drain() -> None:
         deadline = time.monotonic() + 30.0
@@ -617,15 +516,7 @@ def test_a_request_during_a_drain_is_refused(bench: _Bench) -> None:
 
 def _attempt(**overrides: Any) -> SimpleNamespace:
     process = SimpleNamespace(poll=lambda: None)
-    values: dict[str, Any] = {
-        "cancelling": False,
-        "fenced": False,
-        "timed_out": False,
-        "interrupted": False,
-        "sweep_kill_at": None,
-        "reaped": False,
-        "process": process,
-    }
+    values: dict[str, Any] = {"cancel": None, "timed_out": False, "interrupted": False, "process": process}
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -634,13 +525,10 @@ def _attempt(**overrides: Any) -> SimpleNamespace:
     ("attempt", "draining", "closed", "published", "expected"),
     [
         (_attempt(), False, None, False, None),
-        (_attempt(cancelling=True, fenced=True), False, None, False, "being cancelled"),
-        (_attempt(fenced=True), False, None, False, "outcome is committed"),
+        (_attempt(cancel=object()), False, None, False, "being cancelled"),
         (_attempt(timed_out=True), False, None, False, "maxtime"),
         (_attempt(interrupted=True), False, None, False, "draining"),
         (_attempt(), True, None, False, "draining"),
-        (_attempt(sweep_kill_at=1.0), False, None, False, "no longer owns"),
-        (_attempt(reaped=True), False, None, False, "process exited"),
         (_attempt(process=SimpleNamespace(poll=lambda: 0)), False, None, False, "process exited"),
         (_attempt(), False, "an earlier launch was uncertain", False, "uncertain"),
         (_attempt(), False, None, True, "published its outcome"),
@@ -669,18 +557,17 @@ rank = 'echo $$ > "$1"; exec sleep 60'
 result["term"] = signalled(signal.SIGTERM, rank, term_pid)
 result["term_rank_alive"] = alive(int(term_pid.read_text()))
 result["kill"] = signalled(signal.SIGKILL, rank, kill_pid)
-deadline = time.monotonic() + 30
-while len(statuses()) < 2 and time.monotonic() < deadline:
-    time.sleep(0.05)
+time.sleep(1.0)
+# Nothing tells the manager that a SIGKILLed client is gone: its launch runs until the attempt ends.
 result["kill_rank_alive"] = alive(int(kill_pid.read_text()))
 """
 
 
 @pytest.mark.timing
-def test_a_signalled_client_stops_its_launch_and_returns_after_it_is_reaped(
+def test_a_signalled_client_stops_its_launch_and_a_killed_one_leaves_it_to_the_attempt_end(
     bench: _Bench, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _marker, job_id = bench.submit("signals", _CLIENT_SIGNALS)
+    job_id = bench.submit("signals", _CLIENT_SIGNALS)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager(cancel_grace_seconds=5.0) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -689,11 +576,14 @@ def test_a_signalled_client_stops_its_launch_and_returns_after_it_is_reaped(
     assert result["term"]["code"] == 128 + signal.SIGTERM, result["term"]
     assert "stopped: the client asked to stop the launch" in result["term"]["stderr"]
     assert result["term_rank_alive"] is False
-    # SIGKILL: the released lock stopped the launch.
+    # SIGKILL: the launch outlived its client, and the attempt's end stopped it.
     assert result["kill"]["code"] == -signal.SIGKILL, result["kill"]
-    assert result["kill_rank_alive"] is False
-    states = sorted((status["state"], status["error"]) for status in result["statuses"].values())
-    assert states == [("stopped", "the client asked to stop the launch"), ("stopped", "the client is gone")]
+    assert result["kill_rank_alive"] is True
+    assert not _alive(int(bench.pid_file("kill").read_text()))
+    reasons = sorted(record.getMessage() for record in _events(caplog, "launch_stopping"))
+    assert any("the client asked to stop the launch" in reason for reason in reasons)
+    ending = ("the attempt published its outcome", "the attempt process exited")
+    assert any(any(text in reason for text in ending) for reason in reasons)
     assert len(_events(caplog, "launch_stopped")) == 2
 
 
@@ -721,7 +611,7 @@ result["order"] = (workdir / "order").read_text().split()
 
 @pytest.mark.timing
 def test_a_second_request_waits_for_the_first_launch_to_finish(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("queued", _QUEUED)
+    job_id = bench.submit("queued", _QUEUED)
     with bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -740,7 +630,7 @@ result["stop"] = signalled(signal.SIGTERM, rank, results.parent / "pids" / "igno
 def test_a_launch_ignoring_sigterm_is_killed_after_the_cancel_grace(
     bench: _Bench, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _marker, job_id = bench.submit("ignoring", _IGNORING_TERM)
+    job_id = bench.submit("ignoring", _IGNORING_TERM)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager(cancel_grace_seconds=1.0) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -762,16 +652,16 @@ def test_a_launch_that_cannot_be_reaped_is_uncertain_and_closes_admission(
     bench: _Bench, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     stuck = {"on": True}
-    real = _manager_launches._group_alive
-    monkeypatch.setattr(_manager_launches, "_group_alive", lambda group: stuck["on"] or real(group))
-    _marker, job_id = bench.submit("uncertain", _UNCERTAIN)
+    real = _manager_launches.process_group_alive
+    monkeypatch.setattr(_manager_launches, "process_group_alive", lambda group: stuck["on"] or real(group))
+    job_id = bench.submit("uncertain", _UNCERTAIN)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager(cancel_grace_seconds=0.5) as manager:
         _until(manager, lambda: (bench.results / f"{job_id}.json").exists())
         result = bench.result(job_id)
         # The attempt stays tracked while its launch is not confirmed gone.
         _until(manager, lambda: all(local.process.poll() is not None for local in manager._running.values()))
         assert manager.running_attempts == 1
-        assert bench.outcome(job_id)[0] in ("running", "committing")
+        assert bench.outcome(job_id)[0] == "owned"
         stuck["on"] = False
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -796,7 +686,7 @@ wait_for(rank_pid)
 
 @pytest.mark.timing
 def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_is_reaped(bench: _Bench) -> None:
-    marker, job_id = bench.submit("outliving", _OUTLIVING)
+    job_id = bench.submit("outliving", _OUTLIVING)
     with bench.manager(cancel_grace_seconds=2.0) as manager:
         _until(manager, lambda: (bench.results / f"{job_id}.json").exists())
         _until(
@@ -807,11 +697,14 @@ def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_i
         )
         (local,) = manager._running.values()
         assert _manager_launches.unreaped(local)
-        # The process record names the allocation, so that another manager can ask whether it ended.
-        (record,) = (manager.manager_directory / _manager_launches.LAUNCHES_DIRECTORY).iterdir()
+        # The process record names the allocation, so that another manager can ask whether it ended, and says
+        # the ranks run in its process group on this host (a local launch template).
+        launches = manager.owner.path / "launches"
+        (record,) = [path for path in launches.iterdir() if not path.name.endswith(".0")]
         process = json.loads((record / _manager_launches.PROCESS_FILE).read_text())
         assert process["hostname"] == socket.gethostname() and process["attempt_id"] == local.attempt_id
         assert process["allocation"] == {"probe": "host", "kind": "host", "identity": None, "end_time": None}
+        assert process["ranks_local_only"] is True and process["pgid"] == process["pid"]
         held = 0
         deadline = time.monotonic() + _TIMEOUT
         while time.monotonic() < deadline:
@@ -821,8 +714,8 @@ def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_i
                 break
             if _manager_launches.unreaped(local):
                 # The launch still runs after the attempt process exited: the placement is held and
-                # neither the marker nor the commit advances.
-                assert kind in ("running", "committing")
+                # the job stays owned and uncommitted.
+                assert kind == "owned"
                 assert manager.running_attempts == 1
                 assert manager._available_resources()["procs"] == 1
                 held += 1
@@ -832,62 +725,12 @@ def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_i
         manager.run_until_idle(timeout=_TIMEOUT)
         assert manager._available_resources()["procs"] == 2
     assert bench.outcome(job_id) == ("succeeded", None)
-    job = bench.workspace.payload_path(marker.placement, marker.job_key)
-    assert not (job / "attempts").exists()
+    assert not (find(bench.workspace, job_id).path / "attempts").exists()
     client = int(bench.pid_file("client").read_text())
     deadline = time.monotonic() + 5
     while _alive(client):  # the commit removed launch/; the client must not poll it forever
         assert time.monotonic() < deadline, "the launch client outlived its launch directory"
         time.sleep(0.05)
-
-
-# -- takeover evidence ---------------------------------------------------------------------------------
-
-
-def _writer_dead(manager: TaskManager, state: StateFrame) -> bool:
-    """Ask afresh: the launch records are otherwise read once per manager tick."""
-
-    manager._launch_records = None
-    return manager._attempt_writer_dead(state)
-
-
-def test_a_recorded_live_launch_prevents_writer_death_evidence(bench: _Bench) -> None:
-    attempt_id = str(uuid.uuid4())
-    dead = subprocess.Popen(["true"])
-    dead.wait()
-    state = StateFrame(
-        {
-            "attempt_id": attempt_id,
-            "process": {
-                "pid": dead.pid,
-                "process_group": dead.pid,
-                "hostname": socket.gethostname(),
-                "launched_at": "2026-10-05T00:00:00Z",
-            },
-        }
-    )
-    with bench.manager() as manager:
-        assert _writer_dead(manager, state)
-        live = subprocess.Popen(["sleep", "60"], start_new_session=True)
-        try:
-            trusted = bench.workspace.control / "managers" / str(uuid.uuid4()) / "launches" / ("a" * 32)
-            trusted.mkdir(parents=True)
-            record = {"pid": live.pid, "hostname": socket.gethostname(), "attempt_id": attempt_id}
-            (trusted / "process.json").write_text(json.dumps(record))
-            assert not _writer_dead(manager, state)
-            # A launch recorded on another host is never provably dead here.
-            (trusted / "process.json").write_text(json.dumps(record | {"hostname": "elsewhere.example"}))
-            assert not _writer_dead(manager, state)
-            (trusted / "process.json").write_text(json.dumps(record))
-        finally:
-            live.kill()
-            live.wait()
-        assert _writer_dead(manager, state)
-        # Records of other attempts do not matter.
-        other = trusted.parent / ("b" * 32)
-        other.mkdir()
-        (other / "process.json").write_text(json.dumps(record | {"attempt_id": str(uuid.uuid4()), "pid": os.getpid()}))
-        assert _writer_dead(manager, state)
 
 
 _SAME_REQUEST = """
@@ -902,7 +745,7 @@ result["same"] = request(os.environ["HTTK_TEST_REQUEST_ID"])
 def test_two_attempts_may_use_the_same_request_id(bench: _Bench, monkeypatch: pytest.MonkeyPatch) -> None:
     # Request ids are chosen by jobs and visible to other jobs; one job cannot block another's launch.
     monkeypatch.setenv("HTTK_TEST_REQUEST_ID", "0123456789abcdef0123456789abcdef")
-    identifiers = [bench.submit(tag, _SAME_REQUEST)[1] for tag in ("one", "two")]
+    identifiers = [bench.submit(tag, _SAME_REQUEST) for tag in ("one", "two")]
     with bench.manager(maximum_workers=2) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     for job_id in identifiers:
@@ -910,128 +753,6 @@ def test_two_attempts_may_use_the_same_request_id(bench: _Bench, monkeypatch: py
         assert bench.result(job_id)["same"] == {"state": "exited", "exit_code": 0, "error": None}
     directories = {line.rsplit("--launch-dir ", 1)[1] for line in bench.record.read_text().splitlines()}
     assert len(directories) == 2
-
-
-# -- records of crashed managers ------------------------------------------------------------------------
-
-
-def _crashed_manager(workspace: Workspace, *, heartbeat_age: float) -> Path:
-    manager_dir = workspace.control / "managers" / str(uuid.uuid4())
-    (manager_dir / "launches").mkdir(parents=True)
-    stamp = datetime.fromtimestamp(time.time() - heartbeat_age, UTC).isoformat()
-    (manager_dir / "heartbeat.json").write_text(json.dumps({"updated_at": stamp}), encoding="utf-8")
-    return manager_dir
-
-
-def _launch_record(manager_dir: Path, workspace: Workspace, attempt_id: str, process: dict[str, object] | None) -> Path:
-    request_id = uuid.uuid4().hex
-    record = manager_dir / "launches" / trusted_name(attempt_id, request_id)
-    record.mkdir()
-    trusted = TrustedLaunch(
-        request_id=request_id,
-        attempt_id=attempt_id,
-        workspace_id=workspace.workspace_id,
-        workspace_root=workspace.root,
-        placement="project",
-        job_key=f"job--{uuid.uuid4()}",
-        request=f"attempts/{attempt_id}/launch/{request_id}.request.json",
-        confine=LaunchConfinement(Path("/usr/bin/bwrap"), False, (Path("/usr"),), (), (), Path("/dev/shm"), ()),
-        python=Path(sys.executable),
-        token=uuid.uuid4().hex,
-    )
-    (record / "launch.json").write_bytes(encode_trusted(trusted))
-    if process is not None:
-        (record / "process.json").write_text(json.dumps({**process, "attempt_id": attempt_id}), encoding="utf-8")
-    return record
-
-
-def _dead_writer_state(attempt_id: str) -> StateFrame:
-    dead = subprocess.Popen(["true"])
-    dead.wait()
-    return StateFrame(
-        {
-            "attempt_id": attempt_id,
-            "process": {
-                "pid": dead.pid,
-                "process_group": dead.pid,
-                "hostname": socket.gethostname(),
-                "launched_at": "2026-10-05T00:00:00Z",
-            },
-        }
-    )
-
-
-#: A lease far longer than any test, so a fresh manager never expires while a test runs.
-_LONG_LEASE = 600.0
-#: A heartbeat age far beyond the long lease times the grace factor.
-_EXPIRED_AGE = 100_000.0
-
-
-def test_online_pruning_removes_only_process_records_proven_gone_here(bench: _Bench) -> None:
-    attempt_id = str(uuid.uuid4())
-    state = _dead_writer_state(attempt_id)
-    host = socket.gethostname()
-    gone = subprocess.Popen(["true"])
-    gone.wait()
-    live = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    try:
-        with bench.manager(lease_seconds=_LONG_LEASE, takeover_grace_factor=2.0) as manager:
-            fresh = _crashed_manager(bench.workspace, heartbeat_age=0.0)
-            expired = _crashed_manager(bench.workspace, heartbeat_age=_EXPIRED_AGE)
-            fresh_gone = _launch_record(fresh, bench.workspace, attempt_id, {"pid": gone.pid, "hostname": host})
-            expired_only = _launch_record(expired, bench.workspace, attempt_id, None)
-            expired_gone = _launch_record(expired, bench.workspace, attempt_id, {"pid": gone.pid, "hostname": host})
-            expired_live = _launch_record(expired, bench.workspace, attempt_id, {"pid": live.pid, "hostname": host})
-            expired_foreign = _launch_record(
-                expired, bench.workspace, attempt_id, {"pid": gone.pid, "hostname": "elsewhere.example"}
-            )
-            # A live group here and a record of another host block; online pruning leaves them, and a
-            # launch.json-only record, to garbage collection.
-            assert not _writer_dead(manager, state)
-            assert not expired_gone.exists()
-            assert fresh_gone.is_dir()
-            for kept in (expired_only, expired_live, expired_foreign):
-                assert kept.is_dir()
-            live.kill()
-            live.wait()
-            assert not _writer_dead(manager, state)
-            assert not expired_live.exists() and expired_foreign.is_dir()
-            shutil.rmtree(expired_foreign)
-            # The fresh manager's record is never pruned, but its group is gone, and a launch.json-only
-            # record never let a rank start: the evidence holds.
-            assert _writer_dead(manager, state)
-            assert fresh_gone.is_dir() and expired_only.is_dir()
-    finally:
-        live.kill()
-        live.wait()
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files of mode 000")
-def test_an_unreadable_record_is_never_pruned_or_reported_dead(bench: _Bench) -> None:
-    attempt_id = str(uuid.uuid4())
-    state = _dead_writer_state(attempt_id)
-    live = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    expired = _crashed_manager(bench.workspace, heartbeat_age=_EXPIRED_AGE)
-    record = _launch_record(expired, bench.workspace, attempt_id, {"pid": live.pid, "hostname": socket.gethostname()})
-    (record / "process.json").chmod(0)
-    try:
-        with bench.manager(lease_seconds=_LONG_LEASE, takeover_grace_factor=2.0) as manager:
-            assert _manager_launches.recorded_launches(manager, attempt_id) is None
-            assert not _writer_dead(manager, state)
-            live.kill()
-            live.wait()
-            # Even with the group gone, an unreadable record proves nothing.
-            assert not _writer_dead(manager, state)
-            grace = _LONG_LEASE * 2.0
-            names = _manager_launches.dead_records(
-                expired, hostname=socket.gethostname(), grace_seconds=grace, now=time.time()
-            )
-            assert names == []
-            assert (record / "process.json").exists()
-    finally:
-        live.kill()
-        live.wait()
-        (record / "process.json").chmod(0o600)
 
 
 _SEQUENTIAL = """
@@ -1044,15 +765,15 @@ wait_for(results / (context["job_id"] + ".release"), 60)
 
 @pytest.mark.timing
 def test_a_reaped_launch_leaves_no_trusted_record(bench: _Bench) -> None:
-    _marker, job_id = bench.submit("sequential", _SEQUENTIAL)
+    job_id = bench.submit("sequential", _SEQUENTIAL)
     with bench.manager() as manager:
         _until(manager, lambda: (bench.results / f"{job_id}.launched").exists())
         for _ in range(3):
             manager.tick()
-        # Three launches ran; the attempt is still running, and no record of a reaped launch remains.
+        # Three launches ran; the attempt is still running, and only its runner's record remains.
         assert manager.running_attempts == 1
-        launches = manager.manager_directory / _manager_launches.LAUNCHES_DIRECTORY
-        assert not list(launches.iterdir())
+        launches = manager.owner.path / "launches"
+        assert [path.name.rsplit(".", 1)[1] for path in launches.iterdir()] == ["0"]
         (bench.results / f"{job_id}.release").touch()
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -1064,7 +785,7 @@ def test_a_reaped_launch_leaves_no_trusted_record(bench: _Bench) -> None:
 _SHARED_MEMORY = """
 os.environ["SHM_ROOT"] = os.environ["HTTK_TEST_SHM_ROOT"]
 os.environ["WORKSPACE"] = os.environ["HTTK_WORKFLOW_WORKSPACE_DIR"]
-listing = 'ls "$SHM_ROOT" | grep -v ^httk-launch-; cat "$WORKSPACE"/.httk-workspace/managers/*/launches/*/launch.json'
+listing = 'ls "$SHM_ROOT"; cat "$WORKSPACE"/.httk-workspace/owners/*/launches/*/launch.json'
 result["shm"] = run([*launch, "sh", "-c", listing])
 """
 
@@ -1073,7 +794,7 @@ def test_the_shared_memory_directory_is_named_by_the_launch_token(
     bench: _Bench, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HTTK_TEST_SHM_ROOT", str(bench.shm))
-    _marker, job_id = bench.submit("shm", _SHARED_MEMORY)
+    job_id = bench.submit("shm", _SHARED_MEMORY)
     with bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
     assert bench.outcome(job_id) == ("succeeded", None)
@@ -1081,7 +802,7 @@ def test_the_shared_memory_directory_is_named_by_the_launch_token(
     trusted = json.loads(description)
     assert listing == f"httk-{trusted['token']}"
     assert trusted["token"] != trusted["request_id"]
-    # The last rank removed it.
+    # The manager removed it on its node when it reaped the launch.
     assert not list(bench.shm.iterdir())
 
 
@@ -1114,34 +835,11 @@ def test_a_real_bubblewrap_launch_runs_its_ranks_confined(tmp_path: Path, monkey
         raise
     workspace = Workspace.initialize(tmp_path / "workspace")
     allocation = Allocation("host", None, (Node(socket.gethostname(), 1, 1000),), {})
-    job_id = str(uuid.uuid4())
-    payload = tmp_path / "source" / "real"
-    (payload / "files").mkdir(parents=True)
-    (payload / "files" / "runner").write_text(_RUNNER.replace("__BODY__", _REAL), encoding="utf-8")
-    (payload / "files" / "runner").chmod(0o755)
-    job = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": job_id,
-        "tag": "real",
-        "name": "Real launch",
-        "workflow": "tests.launches",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "only",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"maximum_attempts_per_activation": 1, "maximum_total_attempts": 1, "retry_on": []},
-        "resources": {"procs": 1},
-        "parent": None,
-    }
-    (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
-    marker = workspace.submit(payload, "project/real")
-    job_path = workspace.payload_path(marker.placement, marker.job_key)
-    # The runner writes its results inside its own job directory, the only writable path it has.
-    (job_path / "results").mkdir()
-    monkeypatch.setenv("HTTK_TEST_RESULTS", str(job_path / "results"))
+    job_id = submit_runner(
+        workspace, tmp_path / "source", "real", _RUNNER.replace("__BODY__", _REAL), resources={"procs": 1}
+    )[1]
+    # The runner writes its results inside its own working directory, the only writable path it has.
+    monkeypatch.setenv("HTTK_TEST_RESULTS", "results")
     with TaskManager(
         workspace,
         heartbeat_interval=0.01,
@@ -1150,12 +848,11 @@ def test_a_real_bubblewrap_launch_runs_its_ranks_confined(tmp_path: Path, monkey
         setting_overrides=pinned,
     ) as manager:
         manager.run_until_idle(timeout=120.0)
-    finished = workspace.find_marker_by_id(job_id)
-    assert finished is not None
-    if finished.kind != "succeeded":
-        stdio = job_path / "logs" / "stdio.out"
-        _unsupported_namespace_failure(stdio.read_text(errors="replace") if stdio.exists() else finished.kind)
-    result = json.loads((job_path / "results" / f"{job_id}.json").read_text(encoding="utf-8"))
+    finished = find(workspace, job_id)
+    if finished.state != "succeeded":
+        stdio = finished.path / "logs" / "stdio.out"
+        _unsupported_namespace_failure(stdio.read_text(errors="replace") if stdio.exists() else finished.state)
+    result = json.loads((finished.path / "run" / "results" / f"{job_id}.json").read_text(encoding="utf-8"))
     assert result["launch"] == _manager_launches.client_prefix()
     assert result["real"]["code"] == 0, result["real"]
     assert result["real"]["stdout"] == "hi\nrefused\n"

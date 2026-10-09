@@ -70,6 +70,25 @@ if behavior.startswith("spawn:"):
     outcome.update(action="wait", next_step="gather", join=join)
 elif behavior.startswith("advance:"):
     outcome.update(action="advance", next_step=behavior.split(":", 1)[1])
+elif behavior.startswith("wait_then:"):
+    # Advance once the test drops run/go.
+    pathlib.Path("waiting").touch()
+    while not pathlib.Path("go").exists():
+        time.sleep(0.02)
+    outcome.update(action="advance", next_step=behavior.split(":", 1)[1])
+elif behavior in ("fifo", "symlinked_state"):
+    # Content a seal cannot cover, planted by the job before it succeeds.
+    if behavior == "fifo":
+        os.mkfifo("pipe")
+    else:
+        (pathlib.Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / ".httk-job").symlink_to(control)
+    outcome.update(action="succeed")
+elif behavior in ("txn_conflict", "txn_reserved"):
+    # A committed transaction staging a file over the run/ directory, or into the trusted logs/.
+    staged = control / "txn" / "000001" / ("run" if behavior == "txn_conflict" else "logs/planted")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("staged")
+    outcome.update(action="succeed")
 elif behavior == "retry_once" and context["attempt_ordinal"] == 1:
     outcome.update(action="retry", retry={"reason": "try_again"})
 elif behavior == "fail":
@@ -420,4 +439,149 @@ def test_delete_a_terminal_job(ws: Workspace, installed: _store.Installed) -> No
     run(ws)
     assert not [found for state in _kernel.UNOWNED_STATES for found in _kernel.list_jobs(ws, state)]
     assert not list((ws.control / "requests").iterdir())
-    assert ref.job_id
+    assert not (ref.path.exists() or only_or_none(ws, ref.job_id))
+
+
+def only_or_none(ws: Workspace, job_id: str) -> _kernel.JobRef | None:
+    return _kernel.locate(ws, job_id, placement_hint=None, exhaustive=True)
+
+
+@pytest.mark.parametrize("planted", ["fifo", "symlinked_state"])
+def test_content_a_seal_cannot_cover_fails_the_job_and_the_manager_keeps_serving(
+    ws: Workspace, installed: _store.Installed, planted: str
+) -> None:
+    bad = submit(ws, installed.id, {"start": planted})
+    run(ws)
+    failed = only(ws, "failed")
+    assert failed.job_id == bad.job_id
+    doc = state_of(failed)
+    assert doc.failure is not None and doc.failure["code"] == "protocol_error"
+    assert "cannot seal" in str(doc.failure["message"]) and doc.seal is None
+    good = submit(ws, installed.id, {"start": "succeed"})
+    run(ws)
+    assert only(ws, "succeeded").job_id == good.job_id
+
+
+@pytest.mark.parametrize(("behavior", "code"), [("txn_conflict", "data_conflict"), ("txn_reserved", "protocol_error")])
+def test_a_committed_transaction_that_cannot_apply_fails_the_job(
+    ws: Workspace, installed: _store.Installed, behavior: str, code: str
+) -> None:
+    submit(ws, installed.id, {"start": behavior})
+    run(ws)
+    doc = state_of(only(ws, "failed"))
+    assert doc.failure is not None and doc.failure["code"] == code
+    assert doc.seal is None
+
+
+def test_the_workspace_seal_setting_turns_sealing_off(ws: Workspace, installed: _store.Installed) -> None:
+    ws.set_setting("seal.succeeded", "off")
+    submit(ws, installed.id, {"start": "succeed"})
+    run(ws)
+    assert state_of(only(ws, "succeeded")).seal == {"disabled": True}
+
+
+def test_a_pause_posted_during_an_attempt_takes_effect_at_its_commit(
+    ws: Workspace, installed: _store.Installed
+) -> None:
+    ref = submit(ws, installed.id, {"start": "wait_then:finish", "finish": "succeed"})
+    with TaskManager(ws) as manager:
+        _wait_for(lambda: (manager.tick() or True) and any((ws.jobs / "owned").glob("*/*/run/waiting")))
+        _post(ws, ref, "pause")
+        (go,) = (ws.jobs / "owned").glob("*/*/run")
+        (go / "go").touch()
+        _wait_for(lambda: (manager.tick() or True) and not manager.running_attempts)
+        manager.run_until_idle(timeout=30)
+    paused = only(ws, "paused")
+    assert [item["step"] for item in attempts(paused)] == ["start"]
+    doc = state_of(paused)
+    assert doc.activation is not None and doc.activation["step"] == "finish"
+    assert events(paused)[-2:] == ["request_applied", "released"]
+
+
+def _fail_stop_at(monkeypatch: pytest.MonkeyPatch, target: object, name: str) -> list[str]:
+    """Make *target.name* raise OwnerLost once, as if the owner died right there; return the dead owner ids."""
+
+    real = getattr(target, name)
+    dead: list[str] = []
+
+    def crash(*arguments: object, **options: object) -> object:
+        if not dead:
+            dead.append("crashed")
+            raise _kernel.OwnerLost("simulated crash")
+        return real(*arguments, **options)
+
+    monkeypatch.setattr(target, name, crash)
+    return dead
+
+
+def _crash_then_recover(ws: Workspace, monkeypatch: pytest.MonkeyPatch, target: object, name: str) -> None:
+    """Run a manager until it fail-stops at *target.name*, then attest it dead and recover its jobs."""
+
+    _fail_stop_at(monkeypatch, target, name)
+    manager = TaskManager(ws)
+    with pytest.raises(_kernel.OwnerLost):
+        manager.run_until_idle(timeout=30)
+    manager.close()
+    monkeypatch.undo()
+    _kernel.attest_dead(ws, manager.manager_id, by="operator", evidence=[], reason="test crash")
+    with cli_owner(ws) as owner:
+        _kernel.recover(ws, owner, manager.manager_id)
+
+
+def test_a_commit_intent_is_finished_by_a_second_owner(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submit(ws, installed.id, {"start": "succeed"})
+    # The first owner dies after writing the commit intent, before the release.
+    _crash_then_recover(ws, monkeypatch, TaskManager, "_release")
+    ready = only(ws, "ready")
+    assert state_of(ready).commit is not None
+    run(ws)
+    done = only(ws, "succeeded")
+    assert len(attempts(done)) == 1, "a decided outcome is never relaunched"
+    log = events(done)
+    assert log.count("launched") == 1 and "recovered" in log and log[-1] == "released"
+
+
+def test_a_pending_release_is_finished_by_a_second_owner(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submit(ws, installed.id, {"start": "succeed"})
+    # The first owner dies after recording release_to, before the move.
+    _crash_then_recover(ws, monkeypatch, _kernel.OwnedJob, "_move_out")
+    ready = only(ws, "ready")
+    doc = state_of(ready)
+    assert doc.release_to is not None and doc.release_to.state == "succeeded" and doc.commit is None
+    run(ws)
+    done = only(ws, "succeeded")
+    assert len(attempts(done)) == 1
+    assert events(done)[-2:] == ["claimed", "released"]
+
+
+def test_an_attempt_left_launching_is_rerun_without_counting(
+    ws: Workspace, installed: _store.Installed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import manager as manager_module
+
+    submit(ws, installed.id, {"start": "succeed"})
+    _crash_then_recover(ws, monkeypatch, manager_module, "start_gated")
+    left = state_of(only(ws, "ready"))
+    assert left.phase["kind"] == "launching" and left.attempt is not None
+    run(ws)
+    done = only(ws, "succeeded")
+    (record,) = attempts(done)
+    assert record["attempt_ordinal"] == 1 and record["is_restart"] is False
+    doc = state_of(done)
+    assert doc.counters["attempts_total"] == 1 and doc.attempt is not None and doc.attempt["id"] == left.attempt["id"]
+
+
+def test_the_drain_point_stops_the_attempt_and_releases_the_job(ws: Workspace, installed: _store.Installed) -> None:
+    submit(ws, installed.id, {"start": "sleep"}, retry_on=("owner_lost",))
+    with TaskManager(ws, end_time=time.time() + 3.0, deadline_margin=1.0, cancel_grace_seconds=1.0) as manager:
+        manager.run_until_idle(timeout=30, drain_timeout=10.0, drain_grace_seconds=1.0)
+        assert manager.drained == "deadline"
+    # The stopped attempt is lost to its owner, retried by policy, and released to wait for another manager.
+    ready = only(ws, "ready")
+    doc = state_of(ready)
+    assert doc.failure is not None and doc.failure["code"] == "owner_lost"
+    assert doc.attempt is not None and doc.attempt["unclean"] is True and doc.attempt["started_at"] is None

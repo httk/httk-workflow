@@ -22,7 +22,7 @@ from typing import Literal
 
 import pytest
 
-from httk.workflow import _confine_exec, _confine_rank
+from httk.workflow import Workspace, _confine_exec, _confine_rank, _fs, _kernel
 from httk.workflow._confine import ConfinementUnavailableError, confine_settings, default_readonly_paths, probe_bwrap
 from httk.workflow._launch_protocol import (
     LaunchConfinement,
@@ -46,6 +46,7 @@ _WORKSPACE_ID = "0f6b6c2a-1d55-4c69-8d43-7c0a1b2c3d4e"
 class _Launch:
     root: Path
     workspace: Path
+    owner_id: str
     job: Path
     shm_root: Path
     pmix_root: Path
@@ -105,7 +106,10 @@ def _host_shm_directory() -> Path:
 def launch(tmp_path: Path) -> Iterator[_Launch]:
     root = tmp_path.resolve()
     workspace = root / "ws"
-    job = workspace / "jobs" / "project" / f"relax--{uuid.uuid4()}"
+    Workspace.initialize(workspace, durable=False, policy={"visibility_deadline_seconds": 0.05})
+    owner_id = uuid.uuid4().hex
+    job_key = f"relax--{uuid.uuid4()}"
+    job = workspace / "jobs" / "owned" / owner_id / _kernel.format_job_name(job_key, 500, _fs.fresh_token(), "ready")
     job.mkdir(parents=True)
     shm_root = _host_shm_directory()
     pmix_root = root / "pmix"
@@ -120,7 +124,7 @@ def launch(tmp_path: Path) -> Iterator[_Launch]:
         workspace_id=_WORKSPACE_ID,
         workspace_root=workspace,
         placement="project",
-        job_key=job.name,
+        job_key=job_key,
         request=request_relative_path(attempt_id, request_id),
         confine=LaunchConfinement(
             bwrap=_fake_bwrap(bin_directory),
@@ -134,8 +138,9 @@ def launch(tmp_path: Path) -> Iterator[_Launch]:
         python=Path(sys.executable),
         token=secrets.token_hex(16),
     )
-    launch_dir = workspace / ".httk-workspace" / "managers" / "m1" / "launches" / trusted_name(attempt_id, request_id)
-    created = _Launch(root, workspace, job, shm_root, pmix_root, launch_dir, trusted)
+    launches = workspace / ".httk-workspace" / "owners" / owner_id / "launches"
+    launch_dir = launches / trusted_name(attempt_id, request_id)
+    created = _Launch(root, workspace, owner_id, job, shm_root, pmix_root, launch_dir, trusted)
     created.write()
     try:
         yield created
@@ -162,7 +167,7 @@ class _Opened:
 @pytest.fixture
 def opened(launch: _Launch) -> Iterator[_Opened]:
     trusted, workspace, workspace_fd = _confine_rank.read_launch(launch.launch_dir)
-    job, job_fd = _confine_rank.open_job(trusted, workspace)
+    job, job_fd = _confine_rank.open_job(trusted, workspace, launch.owner_id)
     shm_fd = os.open(launch.shm_root, os.O_RDONLY | os.O_DIRECTORY)
     try:
         yield _Opened(workspace, workspace_fd, job, job_fd, shm_fd)
@@ -363,7 +368,9 @@ def test_read_launch_refusals(launch: _Launch) -> None:
     with pytest.raises(ValueError, match="--launch-dir"):
         _confine_rank.read_launch(launch.launch_dir.parent)
     with pytest.raises(ValueError, match="--launch-dir"):
-        _confine_rank.read_launch(Path("relative") / ".httk-workspace/managers/m/launches/x")
+        _confine_rank.read_launch(Path("relative") / ".httk-workspace/owners/m/launches/x")
+    with pytest.raises(ValueError, match="--launch-dir"):
+        _confine_rank.read_launch(launch.workspace / ".httk-workspace/managers/m/launches" / launch.launch_dir.name)
     # A trusted directory is named by attempt and request: neither alone is enough.
     for other_name in (
         trusted_name(launch.trusted.attempt_id, new_request_id()),
@@ -383,13 +390,13 @@ def test_read_launch_refusals(launch: _Launch) -> None:
     os.close(descriptor)
     assert trusted == launch.trusted and workspace == launch.workspace
 
-    managers = launch.workspace / ".httk-workspace" / "managers"
-    shutil.move(managers / "m1", launch.root / "m1")
-    (managers / "m1").symlink_to(launch.root / "m1")
+    owners, owner = launch.workspace / ".httk-workspace" / "owners", launch.owner_id
+    shutil.move(owners / owner, launch.root / owner)
+    (owners / owner).symlink_to(launch.root / owner)
     with pytest.raises(OSError):
         _confine_rank.read_launch(launch.launch_dir)
-    (managers / "m1").unlink()
-    shutil.move(launch.root / "m1", managers / "m1")
+    (owners / owner).unlink()
+    shutil.move(launch.root / owner, owners / owner)
 
     document = launch.launch_dir / "launch.json"
     document.rename(launch.root / "launch.json")
@@ -407,39 +414,33 @@ def test_read_launch_refusals(launch: _Launch) -> None:
 
 
 def test_open_job_refusals(launch: _Launch) -> None:
-    workspace = launch.workspace
+    workspace, owner = launch.workspace, launch.owner_id
     with pytest.raises(ValueError, match="job key"):
-        _confine_rank.open_job(replace(launch.trusted, job_key="plain"), workspace)
+        _confine_rank.open_job(replace(launch.trusted, job_key="plain"), workspace, owner)
     nested = f"relax--{uuid.uuid4()}"
     with pytest.raises(ValueError, match="job directories never nest"):
-        _confine_rank.open_job(replace(launch.trusted, placement=f"project/{nested}"), workspace)
-    with pytest.raises(ValueError, match="placement"):
-        _confine_rank.open_job(replace(launch.trusted, placement=".httk-workspace"), workspace)
-    linked = workspace / "jobs" / "project" / f"linked--{uuid.uuid4()}"
+        _confine_rank.open_job(replace(launch.trusted, placement=f"project/{nested}"), workspace, owner)
+    # The job is found by its key among the owner's own jobs only.
+    with pytest.raises(OSError):
+        _confine_rank.open_job(launch.trusted, workspace, uuid.uuid4().hex)
+    other = f"other--{uuid.uuid4()}"
+    with pytest.raises(ValueError, match="holds 0 entries"):
+        _confine_rank.open_job(replace(launch.trusted, job_key=other), workspace, owner)
+    second = launch.job.with_name(_kernel.format_job_name(launch.trusted.job_key, 400, _fs.fresh_token(), "ready"))
+    second.mkdir()
+    with pytest.raises(ValueError, match="holds 2 entries"):
+        _confine_rank.open_job(launch.trusted, workspace, owner)
+    second.rmdir()
+    linked = launch.job.with_name(_kernel.format_job_name(other, 500, _fs.fresh_token(), "ready"))
     linked.symlink_to(launch.job)
     with pytest.raises(ValueError, match="symlink"):
-        _confine_rank.open_job(replace(launch.trusted, job_key=linked.name), workspace)
-
-    # Placement directories are operator layout and followed; the job's real path is used.
-    scratch = launch.root / "scratch"
-    scratch.mkdir()
-    (workspace / "jobs" / "elsewhere").symlink_to(scratch)
-    moved = scratch / launch.job.name
-    moved.mkdir()
-    job, descriptor = _confine_rank.open_job(replace(launch.trusted, placement="elsewhere"), workspace)
+        _confine_rank.open_job(replace(launch.trusted, job_key=other), workspace, owner)
+    job, descriptor = _confine_rank.open_job(launch.trusted, workspace, owner)
     os.close(descriptor)
-    assert job == moved
-
-    # Placement symlinks may point anywhere except the workspace's own control trees.
-    for name in ("logs", "exchange", "postprocess", ".httk-workspace"):
-        (workspace / name).mkdir(exist_ok=True)
-        (workspace / name / launch.job.name).mkdir()
-        (workspace / "jobs" / f"to-{name}").symlink_to(workspace / name)
-        with pytest.raises(ValueError, match="control directory"):
-            _confine_rank.open_job(replace(launch.trusted, placement=f"to-{name}"), workspace)
+    assert job == launch.job
 
 
-def test_shared_memory_is_shared_and_removed_by_the_last_rank(launch: _Launch) -> None:
+def test_shared_memory_is_shared_and_kept_for_the_manager(launch: _Launch) -> None:
     token = launch.trusted.token
     first = _confine_rank.join_shared_memory(launch.shm_root, token)
     second = _confine_rank.join_shared_memory(launch.shm_root, token)
@@ -447,12 +448,22 @@ def test_shared_memory_is_shared_and_removed_by_the_last_rank(launch: _Launch) -
     information = os.stat(launch.shm)
     assert stat.S_IMODE(information.st_mode) == 0o700 and information.st_uid == os.geteuid()
     _confine_rank.leave_shared_memory(first)
-    assert launch.shm.is_dir()
     _confine_rank.leave_shared_memory(second)
-    assert not launch.shm.exists()
-    third = _confine_rank.join_shared_memory(launch.shm_root, token)
+    # No rank removes it: the manager does at the reap, a later rank helper's sweep once the record is gone.
     assert launch.shm.is_dir()
-    _confine_rank.leave_shared_memory(third)
+
+
+def test_the_sweep_removes_only_unrecorded_shared_memory(launch: _Launch) -> None:
+    stale = launch.shm_root / f"httk-{secrets.token_hex(16)}"
+    stale.mkdir(mode=0o700)
+    (stale / "segment").write_bytes(b"x")
+    launch.shm.mkdir(mode=0o700)
+    unrelated = launch.shm_root / "not-httk"
+    unrelated.mkdir()
+    _confine_rank.sweep_shared_memory(launch.workspace, launch.shm_root)
+    assert not stale.exists() and launch.shm.is_dir() and unrelated.is_dir()
+    shutil.rmtree(launch.launch_dir)
+    _confine_rank.sweep_shared_memory(launch.workspace, launch.shm_root)
     assert not launch.shm.exists()
 
 
@@ -474,10 +485,6 @@ def test_shared_memory_refuses_unsafe_existing_entries(launch: _Launch, monkeypa
         _confine_rank.join_shared_memory(launch.shm_root, token)
     launch.shm.unlink()
     launch.shm.mkdir(mode=0o700)
-    (launch.shm / ".lock").symlink_to(launch.root / "elsewhere")
-    with pytest.raises(OSError):
-        _confine_rank.join_shared_memory(launch.shm_root, token)
-    (launch.shm / ".lock").unlink()
     real_uid = os.geteuid()
     monkeypatch.setattr(_confine_rank, "_check_shm_root", lambda _descriptor, _path: None)
     monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
@@ -522,7 +529,7 @@ def test_end_to_end_with_fake_bwrap(launch: _Launch) -> None:
     stdout, stderr = process.communicate()
     assert process.returncode == 7, stderr
     assert stdout.decode().splitlines() == [str(launch.job / "sub"), "bar|3|none|/tmp/home||"]
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def test_helper_refuses_pmix_outside_the_roots(launch: _Launch) -> None:
@@ -533,7 +540,7 @@ def test_helper_refuses_pmix_outside_the_roots(launch: _Launch) -> None:
     _stdout, stderr = process.communicate()
     assert process.returncode == 2
     assert b"confine.pmix_roots" in stderr
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def test_helper_reports_signal_exit_and_forwards_signals(launch: _Launch) -> None:
@@ -547,7 +554,7 @@ def test_helper_reports_signal_exit_and_forwards_signals(launch: _Launch) -> Non
         if process.poll() is None:
             process.kill()
         process.communicate()
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def _alive(pid: int) -> bool:
@@ -573,10 +580,10 @@ def test_helper_signal_reaches_the_whole_rank_group(launch: _Launch) -> None:
         if process.poll() is None:
             process.kill()
         process.communicate()
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
-def test_helper_keeps_shared_memory_until_the_rank_group_is_gone(launch: _Launch) -> None:
+def test_helper_waits_until_the_rank_group_is_gone(launch: _Launch) -> None:
     # The survivor reports "started" only once its TERM trap is in place, so
     # the signal below cannot arrive before the trap is set.
     survivor = '(trap "" TERM; touch started; while [ ! -e release ]; do sleep 0.05; done; touch survived) &'
@@ -587,7 +594,6 @@ def test_helper_keeps_shared_memory_until_the_rank_group_is_gone(launch: _Launch
         process.send_signal(signal.SIGTERM)
         time.sleep(0.5)
         assert process.poll() is None, "the helper exited while a rank process was alive"
-        assert launch.shm.is_dir()
         (launch.job / "release").touch()
         assert process.wait(timeout=_TIMEOUT) == 128 + signal.SIGTERM
         assert (launch.job / "survived").exists()
@@ -595,7 +601,7 @@ def test_helper_keeps_shared_memory_until_the_rank_group_is_gone(launch: _Launch
         if process.poll() is None:
             process.kill()
         process.communicate()
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def _wait_for(path: Path, *processes: subprocess.Popen[bytes]) -> None:
@@ -609,7 +615,7 @@ def _wait_for(path: Path, *processes: subprocess.Popen[bytes]) -> None:
         time.sleep(0.02)
 
 
-def test_concurrent_helpers_share_shm_and_the_last_removes_it(launch: _Launch) -> None:
+def test_concurrent_helpers_share_shm(launch: _Launch) -> None:
     script = 'touch "started.$PMI_RANK"; while [ ! -e "release.$PMI_RANK" ]; do sleep 0.02; done'
     launch.request(("sh", "-c", script))
     first = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
@@ -623,7 +629,7 @@ def test_concurrent_helpers_share_shm_and_the_last_removes_it(launch: _Launch) -
         assert launch.shm.is_dir(), "the first rank removed shared memory still in use"
         (launch.job / "release.1").touch()
         assert second.wait(timeout=_TIMEOUT) == 0
-        assert not launch.shm.exists()
+        assert launch.shm.is_dir(), "a rank removed shared memory its launch record still names"
     finally:
         for process in (first, second):
             if process.poll() is None:
@@ -857,7 +863,7 @@ def _assert_pmi_session(process: subprocess.Popen[bytes], received: list[bytes],
 
 def test_helper_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
     _assert_pmi_session(*_pmi_session(launch, sys.executable))
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def _answer_spawn(slurm: socket.socket, line: bytes) -> None:
@@ -907,7 +913,7 @@ def test_helper_refuses_a_pmi_fd_that_is_not_a_socket(launch: _Launch) -> None:
     assert process.returncode == 2
     assert b"refused: PMI_FD" in stderr
     assert not (launch.job / "ran").exists()
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def _use_real_bwrap(launch: _Launch) -> None:
@@ -944,8 +950,8 @@ def _use_real_bwrap(launch: _Launch) -> None:
 
 def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
     _use_real_bwrap(launch)
-    sibling = launch.workspace / "jobs" / "project" / f"other--{uuid.uuid4()}"
-    sibling.mkdir()
+    sibling = launch.workspace / "jobs" / "ready" / "project" / f"other--{uuid.uuid4()}~p500~{_fs.fresh_token()}"
+    sibling.mkdir(parents=True)
     script = (
         'for target in "$1/own" "$2/x" "$3/x" "/dev/shm/x"; do\n'
         '  if (echo data > "$target") 2>/dev/null; then echo "writable $target"; else echo "refused $target"; fi\n'
@@ -962,7 +968,7 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         "writable /dev/shm/x",
     ]
     assert not (sibling / "x").exists() and not (launch.workspace / "x").exists()
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 def test_real_bwrap_rank_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
@@ -971,7 +977,7 @@ def test_real_bwrap_rank_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
     if python is None:
         pytest.skip("no system python3 to run the PMI client in the sandbox")
     _assert_pmi_session(*_pmi_session(launch, python))
-    assert not launch.shm.exists()
+    assert launch.shm.is_dir()
 
 
 _FDINFO = "pos:\t0\nflags:\t02500000\nmnt_id:\t771\nino:\t1\n"

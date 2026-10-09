@@ -9,6 +9,7 @@ claim returned; every cross-actor move goes through the kernel.
 """
 
 import dataclasses
+import json
 import logging
 import math
 import os
@@ -20,7 +21,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
@@ -77,9 +78,9 @@ from ._manager_commit import (
     read_outcome,
     settle,
 )
-from ._manager_launches import AttemptLaunches
+from ._manager_launches import AttemptLaunches, LaunchContext
 from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
-from ._state import TERMINAL_STATES, StateDoc, read_state_unowned
+from ._state import MAX_STATE_BYTES, TERMINAL_STATES, StateDoc, read_state_unowned
 from ._util import json_bytes, utc_now
 from .codes import code_environment
 from .compat import runner_path
@@ -93,6 +94,7 @@ from .errors import (
 )
 from .models import (
     EXCHANGE_EXTENSION,
+    canonical_uuid,
     check_job_placement,
     expand_runner_command,
     normalize_placement,
@@ -108,7 +110,7 @@ _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 DEFAULT_DISCOVERY_BUDGET = 4096
 #: How long a stopped attempt has to exit after ``SIGTERM`` before its process group is killed.
 DEFAULT_CANCEL_GRACE_SECONDS = 10.0
-#: Read by the legacy CLI until C5b rewrites it; this manager has no takeover.
+#: TODO(C5b): read only by the legacy CLI, which C5b rewrites; this manager has no takeover.
 DEFAULT_TAKEOVER_GRACE_FACTOR = 2.0
 #: How long a failed Bubblewrap probe stands before the manager probes again.
 CONFINE_REPROBE_SECONDS = 60.0
@@ -166,9 +168,6 @@ class WorkCensus:
     :param waiting: Jobs waiting on their join children.
     :param paused: Jobs paused for an operator.
     :param actionable_count: Jobs this manager can still make progress on.
-    :param unreadable: Jobs whose definition cannot be read.
-    :param exchange: Exchange work this manager still has to do.
-    :param outcomes_waiting: Outcomes that wait for another owner.
     """
 
     succeeded: int
@@ -178,9 +177,6 @@ class WorkCensus:
     waiting: int
     paused: int
     actionable_count: int
-    unreadable: int = 0
-    exchange: int = 0
-    outcomes_waiting: int = 0
 
     @property
     def actionable(self) -> bool:
@@ -223,10 +219,6 @@ class WorkCensus:
             f"{self.succeeded} succeeded, {self.failed} failed, {blocked}, "
             f"{self.waiting} waiting on children, {self.paused} paused"
         )
-        if self.unreadable:
-            line += f", {self.unreadable} with an unreadable definition"
-        if self.outcomes_waiting:
-            line += f", {self.outcomes_waiting} outcome(s) waiting for another manager"
         return line
 
     def time_advice(self) -> str | None:
@@ -349,7 +341,6 @@ class RunningAttempt:
     :param timed_out: Whether this manager stopped the attempt for exceeding its ``maxtime``.
     :param interrupted: Whether this manager signalled the attempt while draining or closing.
     :param placement: The nodes and slots the attempt was given, or ``None`` without a node inventory.
-    :param confined: Whether the attempt runs in the attempt sandbox.
     :param launches: The confined launches of the attempt (C2b), or ``None``.
     :param cancel: The ``cancel`` request stopping the attempt, which then commits as cancelled.
     """
@@ -366,7 +357,6 @@ class RunningAttempt:
     timed_out: bool = False
     interrupted: bool = False
     placement: Placement | None = None
-    confined: bool = False
     launches: AttemptLaunches | None = None
     cancel: _requests.Request | None = None
 
@@ -392,6 +382,27 @@ def _make_dir(path: Path) -> Path:
     if not _real_dir(path):
         os.mkdir(path)
     return path
+
+
+def _listdir(directory: Path) -> list[str]:
+    try:
+        return os.listdir(directory)
+    except FileNotFoundError:
+        return []
+
+
+def _salvaged_requests(path: Path) -> tuple[str, ...] | None:
+    """Return the ``applied_requests`` of a damaged ``state.json`` when that member still reads, else ``None``."""
+
+    try:
+        data = _fs.read_bounded(_fs.loc(path), MAX_STATE_BYTES, nonblock=True)
+        value = None if data is None else json.loads(data)
+        applied = value.get("applied_requests") if isinstance(value, dict) else None
+        if isinstance(applied, list):
+            return tuple(canonical_uuid(item, "applied request id") for item in applied)
+    except (OSError, ValueError, WorkflowError):
+        pass
+    return None
 
 
 def _text(mapping: Mapping[str, object] | None, key: str) -> str | None:
@@ -527,12 +538,17 @@ class TaskManager:
         # Installed workflows and their closure problems, by workflow id, for one tick.
         self._workflows: dict[str, tuple[_store.Installed | None, str | None]] = {}
         self._scheduler = _death.SchedulerQueries()
+        # When the launch directories of the confined attempts were last scanned for requests (monotonic).
+        self._last_launch_scan = -math.inf
         # The joins pass: its cursor, and when each join child was first not found (by job id).
         self._join_cursor: str | None = None
         self._unresolved: dict[str, float] = {}
         # Request ids that wait for a boundary (seal, unseal, eject until phase D), so their jobs are not
         # claimed on every tick; and the listings of one tick, shared by the requests and joins passes.
         self._deferred: set[str] = set()
+        # The requests pass: its cursor over requests/ names, and the parsed requests by name with their mtime.
+        self._request_cursor: str | None = None
+        self._parsed: dict[str, tuple[int, _requests.Request]] = {}
         self._cache = _kernel.ListingCache()
         self._recorded_allocation = None if allocation is None else RecordedAllocation.from_allocation(allocation)
         self._lost = False
@@ -725,8 +741,11 @@ class TaskManager:
         for ref in self.owner.owned():
             if ref.path in running:
                 continue
+            # A handle this process still holds is a commit it retries, not a claim it lost track of.
+            held = ref.path in self.owner._held
             owned = self.owner.adopt_owned(ref)
-            owned.append_log("recovered", detail="self-healed")
+            if not held:
+                owned.append_log("recovered", detail="self-healed")
             reconciled = self._reconcile_guarded(owned)
             if reconciled is not None:
                 self._release(owned, reconciled[1], Release(owned.from_state, owned.from_priority))
@@ -778,7 +797,7 @@ class TaskManager:
             return self._reconcile(owned)
         except _kernel.OwnerLost:
             raise
-        except (WorkflowError, OSError) as exc:
+        except Exception as exc:
             self._report_anomaly(
                 f"reconcile:{owned.job_key}",
                 f"cannot reconcile {owned.job_key}; it stays owned for the next pass: {exc}",
@@ -840,10 +859,12 @@ class TaskManager:
             if outcome is not None:
                 self._commit_outcome(owned, job, doc, outcome, outcome_dir)
                 return None
-            lost = "the attempt's owner died before it published an outcome"
-            intent = failure_intent(
-                job, doc, attempt_id, "owner_lost", lost, priority=owned.from_priority, unclean=True
-            )
+            if doc.owner_id == self.manager_id:
+                # This process ran the attempt and saw it end, but failed before recording the commit.
+                code, message, unclean = "process_failure", "the attempt ended without a committed outcome", False
+            else:
+                code, message, unclean = "owner_lost", "the attempt's owner died before it published an outcome", True
+            intent = failure_intent(job, doc, attempt_id, code, message, priority=owned.from_priority, unclean=unclean)
             self._commit(owned, job, doc, intent)
             return None
         try:
@@ -862,6 +883,15 @@ class TaskManager:
 
         _LOGGER.error("failing %s: %s", owned.job_key, message, extra=self._event("job_damaged", owned))
         doc = StateDoc.empty(owned.job_id).with_failure(failure("protocol_error", message))
+        applied = _salvaged_requests(owned.path / "state.json")
+        if applied is not None:
+            # Applied requests must stay skipped: their files may still exist (plan §3.3).
+            doc = doc.updated(applied_requests=applied)
+        else:
+            directory = self.workspace.control / "requests"
+            for name in _listdir(directory):
+                if name.startswith(f"{owned.job_id}."):
+                    _fs.remove_file(_fs.loc(directory / name), durable=self.workspace.durable)
         try:
             self._release(owned, doc, Release("failed", owned.from_priority))
         except FormatError as exc:
@@ -932,26 +962,41 @@ class TaskManager:
                     seal=False,
                 )
                 doc = self._write(owned, doc.with_commit(intent))
-        target = str(intent["target_state"])
-        final = settle(doc, intent)
         # Step 4: children are published from the intent alone; a staged child that is gone was published.
         plans = [_children.ChildPlan.from_mapping(entry) for entry in intent.get("children") or ()]
-        if plans:
-            _children.publish_children(owned, plans)
-            members = ("job_id", "job_key", "label", "placement", "spawn_id")
-            entries = [{**{name: getattr(plan, name) for name in members}, "attempt_id": attempt_id} for plan in plans]
-            final = final.with_children([*final.children, *entries])
-        # Step 5: the seal; an error leaves the intent, and the commit is retried at the next claim.
+        _children.publish_children(owned, plans)
+        members = ("job_id", "job_key", "label", "placement", "spawn_id")
+        entries = [{**{name: getattr(plan, name) for name in members}, "attempt_id": attempt_id} for plan in plans]
+        # Step 5: the seal. What the job planted (a FIFO, a symlinked .httk-job) fails it for good, recorded in
+        # the intent so a replay decides the same; an I/O error leaves the intent, and the commit is retried.
+        seal: dict[str, object] | None = None
         if intent.get("seal"):
-            sha256, signed = seals.seal_payload(
-                owned.path,
-                job_id=owned.job_id,
-                job_key=owned.job_key,
-                keys=self._seal_keys(),
-                durable=self.workspace.durable,
-            )
-            owned.append_log("sealed", attempt_id=attempt_id, detail={"sha256": sha256, "signed": signed})
-            final = final.updated(seal={"sha256": sha256, "signed": signed})
+            try:
+                sha256, signed = seals.seal_payload(
+                    owned.path,
+                    job_id=owned.job_id,
+                    job_key=owned.job_key,
+                    keys=self._seal_keys(),
+                    durable=self.workspace.durable,
+                )
+            except (ValueError, FormatError, _fs.UnsafePath) as exc:
+                intent.update(
+                    target_state="failed",
+                    failure=failure("protocol_error", f"cannot seal the job: {exc}"),
+                    reason="protocol_error",
+                    seal=False,
+                    seal_failed=True,
+                )
+                doc = self._write(owned, doc.with_commit(intent))
+            else:
+                owned.append_log("sealed", attempt_id=attempt_id, detail={"sha256": sha256, "signed": signed})
+                seal = {"sha256": sha256, "signed": signed}
+        target = str(intent["target_state"])
+        final = settle(doc, intent)
+        if entries:
+            final = final.with_children([*final.children, *entries])
+        if seal is not None:
+            final = final.updated(seal=seal)
         elif target == "succeeded":
             final = final.updated(seal={"disabled": True})
         if target not in ("failed", "cancelled"):
@@ -965,17 +1010,21 @@ class TaskManager:
             )
         applied = (request_id,) if isinstance(request_id, str) else ()
         released = Release(target, priority if isinstance(priority, int) else owned.from_priority, applied)
-        self._release(owned, final, released)
+        # The owner's own boundary: requests posted while the attempt ran take effect here, from the commit's
+        # target state, instead of racing other managers' claims of the released job.
+        boundary = self._apply_requests(
+            owned, job, final, from_state=target, from_priority=released.priority, exclude=applied
+        )
+        if boundary is not None:
+            self._release(owned, boundary, released)
 
     def _remove_attempt(self, owned: OwnedJob, attempt_id: str) -> None:
-        attempts = owned.path / "attempts"
         try:
-            if _real_dir(attempts) and os.path.lexists(attempts / attempt_id):
-                owned.owner._discard(attempts / attempt_id)
-        except (FormatError, OSError) as exc:
+            owned.discard_subtree(f"attempts/{attempt_id}")
+        except (_fs.UnsafePath, OSError) as exc:
             _LOGGER.warning("cannot remove attempt %s of %s: %s", attempt_id, owned.job_key, exc)
             return
-        _fs.remove_empty_dir(_fs.loc(attempts))
+        _fs.remove_empty_dir(_fs.loc(owned.path / "attempts"))
 
     def _release(self, owned: OwnedJob, doc: StateDoc, target: Release) -> _kernel.JobRef:
         """The release rule with this manager's history entry and run-log events."""
@@ -1058,12 +1107,15 @@ class TaskManager:
         """
 
         directory = self.workspace.control / "requests"
-        try:
-            names = sorted(name for name in os.listdir(directory) if not name.startswith("."))
-        except FileNotFoundError:
-            return False
+        names = sorted(name for name in _listdir(directory) if not name.startswith("."))
+        # A window resumed after a cursor, like the claim pass, so deferred or unclaimable requests never starve
+        # later ones.
+        start = self._request_cursor
+        window = [name for name in names if start is None or name > start][: self.discovery_budget]
+        self._request_cursor = window[-1] if len(window) == self.discovery_budget else None
+        self._parsed = {name: entry for name, entry in self._parsed.items() if name in set(names)}
         by_job: dict[str, list[Path]] = {}
-        for name in names[: self.discovery_budget]:
+        for name in window:
             by_job.setdefault(name.split(".", 1)[0], []).append(directory / name)
         running = {local.owned.job_id: local for local in self._running.values()}
         changed = False
@@ -1086,14 +1138,24 @@ class TaskManager:
         return changed
 
     def _parse_request(self, path: Path) -> _requests.Request | None:
+        # Parsed requests are reused while their file is unchanged: verifying a signature every tick is costly.
         try:
-            return _requests.parse(path)
+            stamp = os.lstat(path).st_mtime_ns
+        except FileNotFoundError:
+            return None
+        cached = self._parsed.get(path.name)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            request = _requests.parse(path)
         except FileNotFoundError:
             return None
         except FormatError as exc:
             # ponytail: a malformed request stays where it is; gc quarantines it (C5a).
             self._report_anomaly(f"request:{path.name}", f"ignoring malformed request {path}: {exc}", {})
             return None
+        self._parsed[path.name] = (stamp, request)
+        return request
 
     def _cancel_attempt(self, local: RunningAttempt, request: _requests.Request) -> None:
         """Stop a running attempt for a ``cancel`` request: ``SIGTERM``, then ``SIGKILL`` after the grace."""
@@ -1127,18 +1189,34 @@ class TaskManager:
             self._report_anomaly(f"claim:{ref.job_key}", f"cannot serve {ref.job_key}: {exc}", {"event": "claim_error"})
         return True
 
-    def _apply_requests(self, owned: OwnedJob, job: JobDefinition, doc: StateDoc) -> StateDoc | None:
-        """Apply the job's pending requests (the last reconcile step); ``None`` once one released the job."""
+    def _apply_requests(
+        self,
+        owned: OwnedJob,
+        job: JobDefinition,
+        doc: StateDoc,
+        *,
+        from_state: str | None = None,
+        from_priority: int | None = None,
+        exclude: Collection[str] = (),
+    ) -> StateDoc | None:
+        """Apply the job's pending requests; ``None`` once one released the job.
 
+        It is the last reconcile step, and the last step of a commit, where the
+        job is at the commit's target state (*from_state*, *from_priority*)
+        rather than the state it was claimed from; *exclude* names requests the commit itself applies.
+        """
+
+        from_state = owned.from_state if from_state is None else from_state
+        from_priority = owned.from_priority if from_priority is None else from_priority
         for path in owned.request_files():
             request = self._parse_request(path)
-            if request is None or request.job_id != owned.job_id:
+            if request is None or request.job_id != owned.job_id or request.request_id in exclude:
                 continue
             new, effect = _requests.apply(
                 job,
                 doc,
-                owned.from_state,
-                owned.from_priority,
+                from_state,
+                from_priority,
                 request,
                 refusal=lambda candidate: self._refusal(job, candidate),
             )
@@ -1161,8 +1239,7 @@ class TaskManager:
                 owned.discard()
                 _LOGGER.info("deleted %s (request %s)", owned.job_key, request.request_id)
             elif isinstance(effect, _requests.Drop):
-                applied = Release(owned.from_state, owned.from_priority, (request.request_id,))
-                self._release(owned, new, applied)
+                self._release(owned, new, Release(from_state, from_priority, (request.request_id,)))
             else:
                 self._release(owned, new, effect)
             return None
@@ -1237,9 +1314,21 @@ class TaskManager:
             if reconciled is None:
                 return True
             job, doc = reconciled
-            if doc.join is None:
+            # The claim's view, from fresh listings: a decision made from the pass's cached listings is a hint.
+            current = None
+            if doc.join is not None:
+                current = _joins.evaluate(
+                    self.workspace,
+                    owned.ref,
+                    cache=_kernel.ListingCache(),
+                    unresolved_since=self._unresolved,
+                    grace=self.join_grace_seconds,
+                    now=time.time(),
+                )
+            if current is None:
                 self._release(owned, doc, Release(owned.from_state, owned.from_priority))
                 return True
+            decision = current
             decided, target = decide_join(job, doc, decision)
             decided = decided.with_history("join_decided", detail=decision.kind)
             self._release(owned, decided, Release(target, owned.from_priority))
@@ -1412,10 +1501,25 @@ class TaskManager:
                 if placement is None
                 else self._attempt_binding(placement, control, settings, requirement.get("mem"))
             )
-            if confinement is not None:
-                # ponytail: confined launches (the launch client) return with C2b; until then a confined attempt
-                # gets no launch prefix, since a rendered one would start ranks outside the sandbox.
-                binding_environment.pop("HTTK_WORKFLOW_LAUNCH", None)
+            launch_context: LaunchContext | None = None
+            if confinement is not None and "HTTK_WORKFLOW_LAUNCH" in binding_environment:
+                # A rendered prefix would start ranks outside the sandbox: a confined attempt gets the launch
+                # client instead, and the manager renders each launch from this in-memory context, never from
+                # the job-writable nodefile or binding.json.
+                assert placement is not None and self.allocation is not None and checked.launch is not None
+                template = settings.get("manager.launch_template")
+                launch_context = LaunchContext(
+                    placement=placement,
+                    template=template if isinstance(template, str) else None,
+                    kind=self.allocation.kind,
+                    gpus_present=self.resources.get("gpus", 0) > 0,
+                    cpus_per_proc=self.allocation.cpus_per_proc,
+                    mem=requirement.get("mem"),
+                    # Already validated by the binding above, which rendered the prefix.
+                    mpi=_confine.launch_mpi_setting(settings),
+                    confinement=checked.launch,
+                )
+                binding_environment["HTTK_WORKFLOW_LAUNCH"] = _manager_launches.client_prefix()
             children = self._context_children(doc)
             context = attempt_context(
                 workspace_id=self.workspace.workspace_id,
@@ -1489,7 +1593,9 @@ class TaskManager:
             )
             # The launch record is durable before the gate opens (plan §3.6): a probe of a dead owner then finds it.
             launch_dir = self.owner.launch_dir(attempt_id, "0")
-            self._write_process_record(launch_dir, attempt_id, process.pid)
+            _manager_launches.write_process_record(
+                self, launch_dir, attempt_id, "0", process.pid, ranks_local_only=True
+            )
             doc = self._write(owned, doc.with_phase("running", attempt_id))
         except Exception as exc:
             if process is not None:
@@ -1551,7 +1657,7 @@ class TaskManager:
             time.monotonic(),
             requirement.get("maxtime"),
             placement=placement,
-            confined=confinement is not None,
+            launches=None if confinement is None else AttemptLaunches(f"attempts/{attempt_id}", launch_context),
         )
         owned.append_log("launched", attempt_id=attempt_id, activation_id=context["activation_id"], step=step)
         _LOGGER.info(
@@ -1559,7 +1665,14 @@ class TaskManager:
             attempt_id,
             owned.job_key,
             process.pid,
-            extra=self._event("launch", owned, attempt_id=attempt_id, pid=process.pid, step=step),
+            extra=self._event(
+                "launch",
+                owned,
+                attempt_id=attempt_id,
+                pid=process.pid,
+                step=step,
+                **({"confined": True} if confinement is not None else {}),
+            ),
         )
         return True
 
@@ -1607,30 +1720,14 @@ class TaskManager:
         finally:
             os.close(descriptor)
 
-    def _write_process_record(self, launch_dir: Path, attempt_id: str, pid: int) -> None:
-        """Write ``process.json`` of the attempt runner (``n = 0``) for the death proof (plan §3.6)."""
-
-        identity = _death.process_identity(pid)
-        record = {
-            "attempt_id": attempt_id,
-            "n": "0",
-            "pid": identity.pid,
-            "pgid": pid,
-            "hostname": identity.hostname,
-            "boot_id": identity.boot_id,
-            "process_start_ticks": identity.start_ticks,
-            "started_at": utc_now(),
-            "allocation": None if self._recorded_allocation is None else self._recorded_allocation.as_json(),
-            "ranks_local_only": True,
-        }
-        _fs.write_file(_fs.loc(launch_dir / "process.json"), json_bytes(record), durable=self.workspace.durable)
-
     # -- supervision ------------------------------------------------------------------------------------------------
 
     def _supervise(self) -> bool:
         """Enforce deadlines, reap ended attempts and commit them (plan §7.7 step 7)."""
 
         changed = self._enforce_deadlines()
+        # Right before the attempts: a launch is stopped in the pass that observes its attempt stop.
+        changed |= _manager_launches.supervise(self)
         for local in list(self._running.values()):
             return_code = local.process.poll()
             if return_code is None:
@@ -1648,7 +1745,7 @@ class TaskManager:
                 self._finish_attempt(local, return_code)
             except _kernel.OwnerLost:
                 raise
-            except (WorkflowError, OSError) as exc:
+            except Exception as exc:
                 # The job stays owned with its intent; self-healing resumes the commit on a later tick.
                 self._report_anomaly(
                     f"commit:{local.owned.job_key}",
@@ -1664,6 +1761,7 @@ class TaskManager:
         owned, attempt_id, job = local.owned, local.attempt_id, local.job
         self._running.pop(attempt_id, None)
         self._release_placement(local.placement)
+        _manager_launches.forget(self, local)
         owned.end_attempt(attempt_id)
         try:
             self.owner.remove_launch(attempt_id, "0")

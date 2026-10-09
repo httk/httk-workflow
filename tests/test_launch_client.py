@@ -1,6 +1,5 @@
 """The launch client against a fake manager that watches the attempt's ``launch/`` directory."""
 
-import fcntl
 import json
 import os
 import shutil
@@ -21,7 +20,6 @@ from httk.workflow._launch_protocol import (
     LaunchStatus,
     decode_request,
     encode_status,
-    lock_name,
     status_name,
     stderr_name,
     stdout_name,
@@ -37,7 +35,6 @@ class _Attempt:
     job: Path
     control: Path
     attempt_id: str
-    locks: Path
 
     @property
     def launch(self) -> Path:
@@ -47,7 +44,6 @@ class _Attempt:
         return {
             "HTTK_WORKFLOW_CONTROL_DIR": str(self.control),
             "HTTK_WORKFLOW_JOB_DIR": str(self.job),
-            "HTTK_WORKFLOW_LAUNCH_LOCKS": str(self.locks),
             "HTTK_WORKFLOW_CONTEXT": json.dumps({"attempt_id": self.attempt_id, "step": "main"}),
         }
 
@@ -59,10 +55,7 @@ def attempt(tmp_path: Path) -> _Attempt:
     control = job / "attempts" / attempt_id
     control.mkdir(parents=True)
     (job / "sub").mkdir()
-    # Stands in for the manager's ``<shm_root>/httk-launch-<attempt_id>`` directory on host tmpfs.
-    locks = tmp_path / "shm" / f"httk-launch-{attempt_id}"
-    locks.mkdir(parents=True, mode=0o700)
-    return _Attempt(job, control, attempt_id, locks)
+    return _Attempt(job, control, attempt_id)
 
 
 def _start(attempt: _Attempt, *command: str, cwd: Path | None = None, **extra: str) -> subprocess.Popen[bytes]:
@@ -78,27 +71,14 @@ def _start(attempt: _Attempt, *command: str, cwd: Path | None = None, **extra: s
     )
 
 
-def _lock_held(path: Path) -> bool:
-    descriptor = os.open(path, os.O_RDWR)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    finally:
-        os.close(descriptor)
-    return False
-
-
 def _wait_for_request(attempt: _Attempt, process: subprocess.Popen[bytes]) -> LaunchRequest:
-    """Wait for the published request, checking that the client held its lock before publishing."""
+    """Wait for the published request."""
 
     deadline = time.monotonic() + _TIMEOUT
     while True:
         names = sorted(attempt.launch.glob("*.request.json")) if attempt.launch.is_dir() else []
         if names:
-            request = decode_request(names[0].read_bytes())
-            assert _lock_held(attempt.locks / lock_name(request.request_id)), "request published without a held lock"
-            return request
+            return decode_request(names[0].read_bytes())
         if process.poll() is not None:
             stdout, stderr = process.communicate()
             pytest.fail(f"client exited early with {process.returncode}: {stdout!r} {stderr!r}")
@@ -214,7 +194,6 @@ def test_signal_creates_stop_and_waits_for_the_stopped_status(
     process.send_signal(signum)
     time.sleep(0.3)
     assert process.poll() is None, "the client exited before the stopped status"
-    assert _lock_held(attempt.locks / lock_name(request.request_id))
     os.write(out, b"ranks reaped\n")
     os.close(out)
     _write_status(attempt, LaunchStatus(request.request_id, "stopped"))
@@ -223,16 +202,17 @@ def test_signal_creates_stop_and_waits_for_the_stopped_status(
     assert stdout == b"ranks reaped\n"
 
 
-def test_sigkill_releases_the_lock(attempt: _Attempt, clients: list[subprocess.Popen[bytes]]) -> None:
+def test_sigkill_ends_the_client_without_a_stop_marker(
+    attempt: _Attempt, clients: list[subprocess.Popen[bytes]]
+) -> None:
+    # Nothing tells the manager about a SIGKILLed client: its launch runs until the attempt ends (note §11).
     process = _start(attempt, "app")
     clients.append(process)
     request = _wait_for_request(attempt, process)
-    lock = attempt.locks / lock_name(request.request_id)
-    assert _lock_held(lock)
     process.kill()
     process.wait(timeout=_TIMEOUT)
-    assert not _lock_held(lock)
     assert not (attempt.launch / stop_name(request.request_id)).exists()
+    assert sorted(path.name for path in attempt.launch.iterdir()) == [f"{request.request_id}.request.json"]
 
 
 def test_a_removed_launch_directory_ends_the_client(attempt: _Attempt, clients: list[subprocess.Popen[bytes]]) -> None:
@@ -252,7 +232,6 @@ def _in_process(
         "HTTK_WORKFLOW_CONTROL_DIR",
         "HTTK_WORKFLOW_JOB_DIR",
         "HTTK_WORKFLOW_CONTEXT",
-        "HTTK_WORKFLOW_LAUNCH_LOCKS",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in (attempt.environment() if environment is None else environment).items():
@@ -260,69 +239,9 @@ def _in_process(
     monkeypatch.chdir(cwd)
 
 
-def test_the_lock_lives_in_the_lock_directory_not_the_launch_directory(
-    attempt: _Attempt, clients: list[subprocess.Popen[bytes]]
-) -> None:
-    process = _start(attempt, "app")
-    clients.append(process)
-    request = _wait_for_request(attempt, process)
-    assert (attempt.locks / lock_name(request.request_id)).is_file()
-    assert not (attempt.launch / lock_name(request.request_id)).exists()
-
-
-def test_a_missing_lock_directory_is_refused(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attempt: _Attempt
-) -> None:
-    shutil.rmtree(attempt.locks)
-    _in_process(monkeypatch, attempt, attempt.job)
-    assert _launch_client.main(["app"]) == 2
-    assert "HTTK_WORKFLOW_LAUNCH_LOCKS" in capsys.readouterr().err
-    assert not attempt.launch.exists()
-
-
-def test_a_symlinked_lock_directory_is_refused(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attempt: _Attempt
-) -> None:
-    real = attempt.locks.with_name("real")
-    attempt.locks.rename(real)
-    attempt.locks.symlink_to(real)
-    _in_process(monkeypatch, attempt, attempt.job)
-    assert _launch_client.main(["app"]) == 2
-    assert "HTTK_WORKFLOW_LAUNCH_LOCKS" in capsys.readouterr().err
-    assert list(real.iterdir()) == []
-
-
-def test_a_pre_existing_lock_file_is_refused(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attempt: _Attempt
-) -> None:
-    request_id = "a" * 32
-    monkeypatch.setattr(_launch_client, "new_request_id", lambda: request_id)
-    forged = attempt.locks / lock_name(request_id)
-    forged.write_bytes(b"")
-    _in_process(monkeypatch, attempt, attempt.job)
-    assert _launch_client.main(["app"]) == 2
-    assert "cannot create the client lock" in capsys.readouterr().err
-    assert not list(attempt.launch.glob("*.request.json"))
-    assert forged.exists()
-
-
-def test_a_flock_failure_is_a_plain_refusal(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attempt: _Attempt
-) -> None:
-    _in_process(monkeypatch, attempt, attempt.job)
-
-    def failing(_descriptor: int, _operation: int) -> None:
-        raise OSError(5, "Input/output error")
-
-    monkeypatch.setattr(fcntl, "flock", failing)
-    assert _launch_client.main(["app"]) == 2
-    assert "cannot lock the client lock" in capsys.readouterr().err
-    assert list(attempt.locks.iterdir()) == []
-
-
 @pytest.mark.parametrize(
     "missing",
-    ["HTTK_WORKFLOW_CONTROL_DIR", "HTTK_WORKFLOW_JOB_DIR", "HTTK_WORKFLOW_CONTEXT", "HTTK_WORKFLOW_LAUNCH_LOCKS"],
+    ["HTTK_WORKFLOW_CONTROL_DIR", "HTTK_WORKFLOW_JOB_DIR", "HTTK_WORKFLOW_CONTEXT"],
 )
 def test_missing_environment_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attempt: _Attempt, missing: str

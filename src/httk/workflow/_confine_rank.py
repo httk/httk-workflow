@@ -1,13 +1,15 @@
 """Rank helper of a confined launch: the trusted program the launch template starts on every rank.
 
-Run as ``python -I -m httk.workflow._confine_rank --launch-dir T`` with ``T`` the manager-owned launch
-directory ``<workspace>/.httk-workspace/managers/<manager_id>/launches/<attempt_id>.<request_id>``. Jobs see
+Run as ``python -I -m httk.workflow._confine_rank --launch-dir T`` with ``T`` the owner's launch
+directory ``<workspace>/.httk-workspace/owners/<owner_id>/launches/<attempt_id>.<request_id>``. Jobs see
 ``.httk-workspace`` read-only, so ``T/launch.json`` is trusted input; it is still read without following a
 symlink below ``.httk-workspace`` and bounded.
 
-The helper opens the workspace and the job directory, joins the per-launch shared-memory directory
-``<confine.shm_root>/httk-<token>`` (the manager's random launch token; the last rank on a node removes
-it), opens the PMIx directory of
+The helper opens the workspace and the job directory, the owner's ``jobs/owned/<owner_id>/`` entry of the
+launch's job key. It first removes every per-launch shared-memory directory on this node that no launch
+record names any more (:func:`httk.workflow._kernel.sweep_unrecorded_shm`), then creates or joins its own
+``<confine.shm_root>/httk-<token>`` (the manager's random launch token; the manager removes it on its own
+node once the launch is reaped, and later rank helpers' sweeps on other nodes), opens the PMIx directory of
 the step when it lies below ``confine.pmix_roots`` and the approved devices, and runs the inner exec
 (:mod:`httk.workflow._confine_exec`) in a Bubblewrap sandbox with host networking in which only the job
 directory is writable. Bubblewrap runs as a child in its own process group, which every process in the
@@ -21,9 +23,7 @@ exits with the sandbox's status, ``128+N`` for signal ``N``, and with 2 when it 
 
 import argparse
 import errno
-import fcntl
 import os
-import shutil
 import signal
 import socket
 import stat
@@ -36,8 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 
-from . import _pmi_proxy
-from ._jobdir import JobDirectory
+from . import _kernel, _pmi_proxy
 from ._launch_protocol import (
     MAX_ENVIRONMENT_ENTRIES,
     MAX_ENVIRONMENT_VALUE_BYTES,
@@ -58,16 +57,8 @@ from ._sandbox import (
     open_device_nofollow,
     open_directory_nofollow,
 )
-from .errors import FormatError
-from .models import (
-    EXCHANGE_DIRECTORY,
-    JOBS_DIRECTORY,
-    LOGS_DIRECTORY,
-    POSTPROCESS_DIRECTORY,
-    check_job_placement,
-    normalize_placement,
-    parse_job_key,
-)
+from .errors import FormatError, WorkflowError
+from .models import JOBS_DIRECTORY, check_job_placement, normalize_placement, parse_job_key
 
 #: The trusted launch description inside the launch directory.
 LAUNCH_FILE = "launch.json"
@@ -81,9 +72,6 @@ _SANDBOX_ENVIRONMENT = {"HOME": "/tmp/home", "TMPDIR": "/tmp"}
 _FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGCONT)
 _ANCHOR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 _DIRECTORY_FLAGS = _ANCHOR_FLAGS | os.O_NOFOLLOW
-_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-_SHM_LOCK = ".lock"
-_SHM_ATTEMPTS = 16
 _GROUP_POLL_SECONDS = 0.05
 _RELAY_JOIN_SECONDS = 1.0
 # Destinations the sandbox owns: a PMIx directory must not be bound over or into them.
@@ -124,7 +112,7 @@ def read_launch(launch_dir: Path) -> tuple[TrustedLaunch, Path, int]:
     a workspace root that is the same directory.
 
     :param launch_dir: The absolute launch directory
-        ``<workspace>/.httk-workspace/managers/<id>/launches/<attempt_id>.<request_id>``.
+        ``<workspace>/.httk-workspace/owners/<id>/launches/<attempt_id>.<request_id>``.
     :return: The description, the workspace's real path and a descriptor of the workspace, owned by the caller.
     :raises ValueError: If the path, the description or the workspace does not match.
     :raises OSError: If a path cannot be opened or read.
@@ -136,11 +124,11 @@ def read_launch(launch_dir: Path) -> tuple[TrustedLaunch, Path, int]:
         or ".." in parts
         or len(parts) < 6
         or parts[-5] != _WORKSPACE_DIRECTORY
-        or parts[-4] != "managers"
+        or parts[-4] != "owners"
         or parts[-2] != "launches"
     ):
         raise ValueError(
-            f"--launch-dir must be <workspace>/{_WORKSPACE_DIRECTORY}/managers/<id>/launches/<attempt_id>.<request_id>"
+            f"--launch-dir must be <workspace>/{_WORKSPACE_DIRECTORY}/owners/<id>/launches/<attempt_id>.<request_id>"
         )
     workspace_fd = os.open(Path(*parts[:-5]), _ANCHOR_FLAGS)
     try:
@@ -160,54 +148,62 @@ def read_launch(launch_dir: Path) -> tuple[TrustedLaunch, Path, int]:
     return launch, workspace, workspace_fd
 
 
-def open_job(launch: TrustedLaunch, workspace: Path) -> tuple[Path, int]:
-    """Open the launch's job directory: placement directories followed, the job key and below not.
+def open_job(launch: TrustedLaunch, workspace: Path, owner_id: str) -> tuple[Path, int]:
+    """Open the launch's job directory: the entry of its job key in ``jobs/owned/<owner_id>/``, never followed.
 
     :param launch: The trusted launch description.
     :param workspace: The workspace's real path.
+    :param owner_id: The owner whose launch directory named this launch.
     :return: The job directory's real path and a descriptor of it, owned by the caller.
-    :raises ValueError: If the placement or job key is invalid, or the job directory is the workspace or
-        lies in its control directory.
+    :raises ValueError: If the placement or job key is invalid, or the owner does not hold exactly one entry
+        of the job key.
     :raises OSError: If the job directory cannot be opened.
     """
 
     try:
-        placement = normalize_placement(launch.placement)
-        check_job_placement(placement)
+        check_job_placement(normalize_placement(launch.placement))
         parse_job_key(launch.job_key)
-        with JobDirectory.open(jobs=workspace / JOBS_DIRECTORY, placement=placement, job_key=launch.job_key) as job:
-            descriptor = os.dup(job.fd)
-            shown = job.path
     except FormatError as exc:
         raise ValueError(str(exc)) from exc
+    owned = workspace / JOBS_DIRECTORY / _kernel.OWNED / owner_id
+    workspace_fd = os.open(workspace, _ANCHOR_FLAGS)
     try:
-        real = Path(os.path.realpath(shown))
-        if not os.path.samestat(os.fstat(descriptor), os.stat(real)):
-            raise ValueError(f"the job directory {shown} changed while it was opened")
-        # Placement directories may be symlinks anywhere, so no positive "below jobs/" check.
-        refused = (_WORKSPACE_DIRECTORY, EXCHANGE_DIRECTORY, LOGS_DIRECTORY, POSTPROCESS_DIRECTORY)
-        if real == workspace or any(real.is_relative_to(workspace / name) for name in refused):
-            raise ValueError(f"the job directory {real} is the workspace or lies in its control directory")
-    except BaseException:
-        os.close(descriptor)
+        owned_fd = _walk(workspace_fd, (JOBS_DIRECTORY, _kernel.OWNED, owner_id))
+    finally:
+        os.close(workspace_fd)
+    try:
+        names = [name for name in os.listdir(owned_fd) if _job_key(name) == launch.job_key]
+        if len(names) != 1:
+            raise ValueError(f"owner {owner_id} holds {len(names)} entries of job {launch.job_key}, not one")
+        descriptor = os.open(names[0], _DIRECTORY_FLAGS, dir_fd=owned_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"the job directory of {launch.job_key} is a symlink or not a directory") from exc
         raise
-    return real, descriptor
+    finally:
+        os.close(owned_fd)
+    return Path(os.path.realpath(owned / names[0])), descriptor
+
+
+def _job_key(name: str) -> str | None:
+    try:
+        return _kernel.parse_job_name(name).job_key
+    except FormatError:
+        return None
 
 
 @dataclass(slots=True)
 class SharedMemory:
-    """A joined per-launch shared-memory directory and the shared lock that marks this rank's use.
+    """A joined per-launch shared-memory directory.
 
     :param root_fd: A descriptor of ``confine.shm_root``.
     :param name: The directory's name, ``httk-<token>``.
     :param fd: A descriptor of the directory.
-    :param lock_fd: A descriptor of its ``.lock`` file, holding ``flock(LOCK_SH)``.
     """
 
     root_fd: int
     name: str
     fd: int
-    lock_fd: int
 
 
 def _filesystem_type(descriptor: int) -> str:
@@ -241,95 +237,73 @@ def _check_shm_root(descriptor: int, path: Path) -> None:
         raise ValueError(f"confine.shm_root {path} is world-writable without being a sticky root directory")
 
 
-def _linked(root_fd: int, name: str, descriptor: int) -> bool:
-    try:
-        return os.path.samestat(os.stat(name, dir_fd=root_fd, follow_symlinks=False), os.fstat(descriptor))
-    except OSError:
-        return False
-
-
 def join_shared_memory(shm_root: Path, token: str) -> SharedMemory:
-    """Create or join the per-launch shared-memory directory and take a shared lock in it.
+    """Create or join the per-launch shared-memory directory.
 
-    An existing directory must be a real directory owned by this user with mode 0700. A directory the
-    last rank removed while this one waited for the lock is created afresh.
+    An existing directory must be a real directory owned by this user with mode 0700. No rank removes it:
+    the manager does on its node once the launch is reaped, and :func:`sweep_shared_memory` on other nodes.
 
     :param shm_root: The node-local parent, ``confine.shm_root``.
     :param token: The launch token of the trusted launch description.
-    :return: The joined directory; release it with :func:`leave_shared_memory`.
+    :return: The joined directory; release its descriptors with :func:`leave_shared_memory`.
     :raises ValueError: If the root or the directory is unsafe.
-    :raises OSError: If the directory cannot be created, opened or locked.
+    :raises OSError: If the directory cannot be created or opened.
     """
 
     name = f"httk-{token}"
     root_fd = open_directory_nofollow(shm_root)
     try:
         _check_shm_root(root_fd, shm_root)
-        for _attempt in range(_SHM_ATTEMPTS):
-            created = True
-            try:
-                os.mkdir(name, 0o700, dir_fd=root_fd)
-            except FileExistsError:
-                created = False
-            try:
-                descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=root_fd)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise ValueError(f"shared-memory directory {shm_root / name} is not a real directory") from exc
-                raise
-            lock_fd = -1
-            try:
-                if created:
-                    os.fchmod(descriptor, 0o700)
-                information = os.fstat(descriptor)
-                if information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700:
-                    raise ValueError(
-                        f"shared-memory directory {shm_root / name} must be owned by this user with mode 0700"
-                    )
-                try:
-                    lock_fd = os.open(_SHM_LOCK, _LOCK_FLAGS, 0o600, dir_fd=descriptor)
-                except FileNotFoundError:
-                    os.close(descriptor)
-                    continue
-                if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
-                    raise ValueError(f"shared-memory lock {shm_root / name / _SHM_LOCK} is not a regular file")
-                fcntl.flock(lock_fd, fcntl.LOCK_SH)
-            except BaseException:
-                if lock_fd >= 0:
-                    _close(lock_fd)
-                _close(descriptor)
-                raise
-            if _linked(root_fd, name, descriptor) and _linked(descriptor, _SHM_LOCK, lock_fd):
-                return SharedMemory(root_fd, name, descriptor, lock_fd)
-            _close(lock_fd)
+        created = True
+        try:
+            os.mkdir(name, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            created = False
+        try:
+            descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=root_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ValueError(f"shared-memory directory {shm_root / name} is not a real directory") from exc
+            raise
+        try:
+            if created:
+                os.fchmod(descriptor, 0o700)
+            information = os.fstat(descriptor)
+            if information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700:
+                raise ValueError(f"shared-memory directory {shm_root / name} must be owned by this user with mode 0700")
+        except BaseException:
             _close(descriptor)
-        raise ValueError(f"cannot join the shared-memory directory {shm_root / name}: it keeps being removed")
+            raise
+        return SharedMemory(root_fd, name, descriptor)
     except BaseException:
         _close(root_fd)
         raise
 
 
 def leave_shared_memory(shared: SharedMemory) -> None:
-    """Release a joined shared-memory directory, removing it when no other rank on the node holds it.
+    """Close a joined shared-memory directory's descriptors; the directory stays for the other ranks.
 
-    :param shared: The joined directory; its descriptors are closed.
+    :param shared: The joined directory.
     """
 
+    for descriptor in (shared.fd, shared.root_fd):
+        _close(descriptor)
+
+
+def sweep_shared_memory(workspace: Path, shm_root: Path) -> None:
+    """Remove the shared-memory directories on this node whose launch record is gone (best effort).
+
+    :param workspace: The workspace's real path.
+    :param shm_root: The node-local parent, ``confine.shm_root``.
+    """
+
+    # Imported here: the workspace module is heavy, and only a starting rank needs it.
+    from .workspace import Workspace
+
     try:
-        try:
-            fcntl.flock(shared.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return
-        if _linked(shared.root_fd, shared.name, shared.fd):
-            try:
-                shutil.rmtree(shared.name, dir_fd=shared.root_fd)
-            except OSError:
-                pass
-    finally:
-        for descriptor in (shared.lock_fd, shared.fd, shared.root_fd):
-            _close(descriptor)
+        _kernel.sweep_unrecorded_shm(Workspace(workspace, durable=False), shm_root)
+    except (OSError, WorkflowError) as exc:
+        print(f"httk-workflow rank: cannot sweep {shm_root}: {exc}", file=sys.stderr, flush=True)
 
 
 def rank_environment(environ: Mapping[str, str], launch: TrustedLaunch) -> dict[str, str]:
@@ -698,8 +672,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             launch, workspace, workspace_fd = read_launch(arguments.launch_dir)
             descriptors.append(workspace_fd)
-            job, job_fd = open_job(launch, workspace)
+            job, job_fd = open_job(launch, workspace, arguments.launch_dir.parts[-3])
             descriptors.append(job_fd)
+            sweep_shared_memory(workspace, launch.confine.shm_root)
             shared = join_shared_memory(launch.confine.shm_root, launch.token)
             pmi_fd = None
             if blocks_mpi_spawn(launch, os.environ):

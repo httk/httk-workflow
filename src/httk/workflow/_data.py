@@ -158,7 +158,7 @@ def discard_uncommitted(job: OwnedJob) -> int:
     job.require_quiescent()
     staging = _transaction_dirs(job, _STAGING)
     for path in staging:
-        job.owner._discard(path)
+        job.discard_subtree(path.relative_to(job.path).as_posix())
     return len(staging)
 
 

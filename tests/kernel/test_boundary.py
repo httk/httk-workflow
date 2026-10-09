@@ -33,8 +33,6 @@ RUNNER_SIDE = frozenset({"runtime_builders.py", "sdk.py"})
 LEGACY_RAW = frozenset(
     {
         "_adoption.py",
-        "_confine.py",
-        "_confine_rank.py",
         "_daemon_client.py",
         "_daemon_keys.py",
         "_daemon_mailbox.py",
@@ -44,7 +42,6 @@ LEGACY_RAW = frozenset(
         "_jobdir.py",
         "_launch_client.py",
         "_logging.py",
-        "_manager_launches.py",
         "_manager_requests.py",
         "_runner_builds.py",
         "_sealing.py",
