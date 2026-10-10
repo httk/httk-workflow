@@ -12,12 +12,13 @@ from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
 from httk.workflow.configuration import read_config
-from httk.workflow.journal import JournalWriter
 from httk.workflow.manifests import verify_manifest, workspace_maintenance_guard
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _common as workflow_common
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
+from v3_helpers import cli_owner, find, install, run, state_of, submit
+from v3_helpers import workspace as v3_workspace
 
 
 def _payload(root: Path) -> tuple[Path, str]:
@@ -109,48 +110,41 @@ def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: P
 def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="active")
-    Workspace.initialize(project / "workspace")
-    workspace = Workspace(project / "workspace")
-    payload, job_id = _payload(tmp_path)
-    submitted = workspace.submit(payload, "jobs")
-    # Construct the active state through the public transition protocol.
-    from httk.workflow.journal import JournalWriter
-
-    with JournalWriter(workspace.control) as writer:
-        workspace.transition(writer, submitted, "running", {"reason": "test"})
-    with pytest.raises(ValueError, match="quiescent"):
-        create_manifest(project)
-    assert workspace.find_marker_by_id(job_id) is not None
+    workspace = Workspace.initialize(project / "workspace")
+    with cli_owner(workspace) as owner:
+        with pytest.raises(ValueError, match="quiescent"):
+            create_manifest(project)
+        assert owner.owner_id in str(_guard_error(workspace))
+    assert create_manifest(project).is_file()
 
 
-def test_maintenance_guard_refuses_cancelling_workspace(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, _job_id = _payload(tmp_path)
-    submitted = workspace.submit(payload, "jobs")
-    with JournalWriter(workspace.control) as writer:
-        running = workspace.transition(writer, submitted, "running", {"reason": "test"})
-        workspace.transition(writer, running, "cancelling", {"reason": "test"})
-    with pytest.raises(ValueError, match="quiescent workspace"), workspace_maintenance_guard(workspace):
+def _guard_error(workspace: Workspace) -> ValueError:
+    with pytest.raises(ValueError) as caught, workspace_maintenance_guard(workspace):
+        pass
+    return caught.value
+
+
+def test_maintenance_guard_refuses_while_a_manager_runs(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        assert "quiescent workspace" in str(_guard_error(workspace)) and manager.manager_id in str(
+            _guard_error(workspace)
+        )
+    with workspace_maintenance_guard(workspace):
         pass
 
 
 def test_oversized_attempt_context_fails_as_protocol_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A context too large for one environment value leaves failure evidence."""
 
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source")
-    workspace.submit(payload, "jobs/oversized-context")
+    workspace = v3_workspace(tmp_path / "workspace")
+    ref = submit(workspace, install(workspace, tmp_path / "package"), {"start": "succeed"})
     monkeypatch.setattr(workspace, "read_settings", lambda: {"huge": "x" * 100_000})
-
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=60.0)
-
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "failed"
-    state = workspace.read_state(marker)
-    assert state["failure"]["code"] == "protocol_error"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-    assert len(list((root / "attempts").iterdir())) == 1
+    run(workspace)
+    failed = find(workspace, ref.job_id)
+    assert failed.state == "failed"
+    doc = state_of(failed)
+    assert doc.failure is not None and doc.failure["code"] == "protocol_error"
 
 
 def test_adapter_json_contract_and_no_shell_interpolation(tmp_path: Path) -> None:

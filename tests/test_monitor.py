@@ -575,18 +575,25 @@ def test_monitor_stdio_tail_restarts_after_truncation(tmp_path: Path, monkeypatc
     assert view._tail_offsets["job"] == 3
 
 
-def test_monitor_remove_mixed_batch_preflights_without_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A mixed terminal/non-terminal removal leaves every target untouched."""
+def test_monitor_remove_applies_per_job_and_reports_the_refused(tmp_path: Path) -> None:
+    """A removal is one ``delete`` request per job: a terminal job goes, a live one stays and is reported."""
 
-    view = WorkspaceView(Workspace.initialize(tmp_path / "remove-mixed"))
-    terminal = SimpleNamespace(kind="succeeded", placement=SimpleNamespace(), job_key="terminal", path=Path("t"))
-    live = SimpleNamespace(kind="running", placement=SimpleNamespace(), job_key="live", path=Path("l"))
-    monkeypatch.setattr(view, "ref_for", lambda job_id: terminal if job_id == "terminal" else live)
-    monkeypatch.setattr(monitor_actions, "_mutable_workspace", lambda _view: SimpleNamespace())
-    with pytest.raises(ValueError, match=r"removed 0 of 2 job\(s\)"):
-        monitor_actions.remove(view, ["terminal", "live"])
+    import v3_helpers as h
+    from httk.workflow import _kernel
+    from httk.workflow._state import Release, StateDoc
+
+    workspace = h.workspace(tmp_path / "remove-mixed")
+    terminal = h.submit(workspace, ("demo--0123456789abcdef", "demo"), {"start": "succeed"}, placement="p/t")
+    live = h.submit(workspace, ("demo--0123456789abcdef", "demo"), {"start": "succeed"}, placement="p/l")
+    with h.cli_owner(workspace) as owner:
+        owned = _kernel.claim(workspace, owner, terminal)
+        assert owned is not None
+        owned.release(StateDoc.empty(owned.job_id), Release("failed", 500))
+    view = WorkspaceView(workspace)
+    with pytest.raises(ValueError, match=r"removed 1 of 2 job\(s\); only terminal or paused jobs are deleted"):
+        monitor_actions.remove(view, [terminal.job_id, live.job_id])
+    assert _kernel.locate(workspace, terminal.job_id, placement_hint=None, exhaustive=True) is None
+    assert h.find(workspace, live.job_id).state == "ready"
 
 
 def test_monitor_requires_a_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

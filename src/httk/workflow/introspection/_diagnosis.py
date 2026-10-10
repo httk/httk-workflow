@@ -186,7 +186,8 @@ def _manager_record(workspace: Workspace, owner: OwnerRecord) -> ManagerRecord:
         heartbeat_age_seconds=age,
         liveness=probe_liveness(workspace, owner.owner_id)[0].value,
         uid=uid,
-        end_time=_number(allocation.get("end_time")) if isinstance(allocation, Mapping) else None,
+        end_time=_number(record.get("end_time"))
+        or (_number(allocation.get("end_time")) if isinstance(allocation, Mapping) else None),
     )
 
 

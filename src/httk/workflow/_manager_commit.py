@@ -43,6 +43,7 @@ from typing import Any
 from . import _fs, _joins
 from ._children import ChildPlan, labeled_join
 from ._job import JobDefinition
+from ._requests import Request
 from ._state import StateDoc
 from ._util import require_int
 from .errors import FormatError
@@ -301,16 +302,23 @@ def _join(outcome: Mapping[str, Any], plans: Sequence[ChildPlan], workspace_id: 
     }
 
 
-def cancel_intent(attempt_id: str, priority: int, request_id: str) -> dict[str, object]:
+def cancel_intent(attempt_id: str, priority: int, request: Request) -> dict[str, object]:
     """Return the intent of an attempt a ``cancel`` request stopped: the job is cancelled, the request applied.
 
     :param attempt_id: The stopped attempt.
     :param priority: The priority the job is released with.
-    :param request_id: The applied ``cancel`` request.
+    :param request: The applied ``cancel`` request; its operator and reason are recorded in the job's history.
     :return: The intent.
     """
 
-    return _intent(attempt_id, "cancel", "cancelled", priority, reason="cancelled", request_id=request_id)
+    document = request.document
+    audit = {"request_id": request.request_id, "action": "cancel", "operator": document["operator"]}
+    audit["reason"] = document["reason"]
+    if "operator_key" in document:
+        audit["operator_key"] = document["operator_key"]
+    return _intent(
+        attempt_id, "cancel", "cancelled", priority, reason="cancelled", request_id=request.request_id, request=audit
+    )
 
 
 def outcome_intent(

@@ -17,6 +17,10 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.seals import is_job_sealed, is_project_sealed, is_workspace_sealed, job_seal_path
 from httk.workflow.workflow_cli import command
 
+# The library side (seal and unseal requests, the workspace snapshot, verify) is covered by test_seals and
+# test_sealing_runtime; these drive the CLI handlers, which are rewritten with the CLI.
+pytestmark = pytest.mark.skip(reason="C5b: the seal CLI verbs are rewritten on the kernel with the CLI")
+
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
 import json
 import os

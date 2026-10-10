@@ -1,65 +1,52 @@
-"""Check workspace consistency and conservatively repair markers.
+"""Check a workspace's job tree for what the kernel cannot read or did not expect.
 
-A marker is the authoritative state of a job, and everything it says beyond its
-kind, priority, and generation lives in the journal frame it references. A lost
-segment, a torn write on a node that crashed, or a marker that was renamed onto
-a frame that never reached storage therefore leaves a job whose state cannot be
-read at all. This module finds those jobs and, when asked, re-points each
-damaged marker at the newest frame of that job which is still readable.
+The check walks ``jobs/`` and reports:
 
-The check is deliberately conservative. It never touches a claimed, running, or
-committing marker whose manager is still heartbeating, it never walks forward
-onto a frame no marker ever committed, and it repairs nothing at all unless
-repair is requested.
+- ``unparsable_name``: an entry that is neither a placement directory nor a job
+  directory name of its state (a file, a symlink, a malformed name, an unknown
+  ``jobs/`` or ``owned/`` entry);
+- ``duplicate_job``: one job UUID in two places;
+- ``orphan_owned``: ``jobs/owned/<owner-id>/`` without ``owners/<owner-id>/``;
+- ``unreadable_state``: a ``state.json`` that exists but cannot be decoded;
+- ``foreign_owner``: a job directory another user owns.
+
+Nothing is repaired: with ``repair`` the unparsable entries are moved to
+``quarantine/``, and every other finding is left to the operator.
 """
 
-import logging
-import time
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field, replace
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+import os
+import stat
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
-from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
-from .errors import WorkflowError
-from .gc import REMOVABLE_KINDS
-from .journal import JournalFrame, JournalWriter, iter_journal_frames, verify_record
-from .models import STATE_KINDS, Marker, placement_text
-from .workspace import MarkerFault
+from . import _kernel
+from ._kernel import JobRef
+from ._state import UNOWNED_STATES, read_state_unowned
+from .errors import FormatError
+from .gc import quarantine
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
 
-_LOGGER = logging.getLogger(__name__)
+__all__ = ["FSCK_REPORT_FORMAT", "FsckFinding", "FsckReport", "check_workspace"]
 
 FSCK_REPORT_FORMAT = "httk-workflow-fsck"
-#: State kinds whose marker may belong to a manager that is still working on
-#: it. A damaged one of these is reported, never repaired, while its manager
-#: keeps heartbeating: the manager owns the transition that follows.
-#:
-#: ``cancelling`` is one of them. Its marker is a fence a live manager put in
-#: place and is still acting on — terminating the attempt and verifying its
-#: exit — so re-pointing it at an older frame would drop the attempt identity
-#: that manager needs and could reanimate a job whose process is being stopped.
-LIVE_KINDS = frozenset({"claimed", "running", "committing", "cancelling"})
-#: What one damaged marker was actually done about.
-ACTIONS = ("reported", "repaired", "quarantined", "skipped_live")
+_OWNER_ID_LENGTH = 32
 
 
 @dataclass(frozen=True)
 class FsckFinding:
-    """Describe one marker finding produced by the check.
+    """One thing the check found.
 
-    :param entry: Marker entry that failed inspection.
-    :param problem: Stable problem code.
-    :param detail: Human-readable problem detail.
-    :param action: Action taken for the finding.
-    :param job_key: Job key from the marker, when readable.
-    :param job_id: Job identifier from the marker, when readable.
-    :param kind: Marker state kind, when readable.
-    :param generation: Marker generation, when readable.
-    :param record_ref: Record reference named by the marker, when readable.
-    :param repaired_record_ref: Replacement reference, when repaired.
+    :param entry: The path.
+    :param problem: ``unparsable_name``, ``duplicate_job``, ``orphan_owned``, ``unreadable_state`` or
+        ``foreign_owner``.
+    :param detail: A human-readable explanation.
+    :param action: ``reported`` or ``quarantined``.
+    :param job_key: The job key, when the name parses.
+    :param job_id: The job UUID, when the name parses.
     """
 
     entry: Path
@@ -68,10 +55,6 @@ class FsckFinding:
     action: str = "reported"
     job_key: str | None = None
     job_id: str | None = None
-    kind: str | None = None
-    generation: int | None = None
-    record_ref: str | None = None
-    repaired_record_ref: str | None = None
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this finding.
@@ -85,50 +68,39 @@ class FsckFinding:
             "detail": self.detail,
             "action": self.action,
         }
-        for name in ("job_key", "job_id", "kind", "generation", "record_ref", "repaired_record_ref"):
-            value = getattr(self, name)
-            if value is not None:
-                result[name] = value
+        if self.job_key is not None:
+            result["job_key"] = self.job_key
+        if self.job_id is not None:
+            result["job_id"] = self.job_id
         return result
 
 
 @dataclass(frozen=True)
 class FsckReport:
-    """Report everything one workspace check found and did.
+    """Everything one check found and did.
 
-    :param workspace_id: Identifier of the checked workspace.
-    :param markers_checked: Number of readable markers inspected.
-    :param findings: Marker findings produced by the check.
-    :param counts: Finding counts by action.
-    :param always_safe_candidates: Total always-safe leftovers found by a
-        non-mutating collection pass.
-    :param always_safe_counts: Always-safe leftovers by category.
+    :param workspace_id: The workspace.
+    :param jobs_checked: The number of job directories inspected.
+    :param findings: The findings.
+    :param counts: Findings by problem.
     """
 
     workspace_id: str
-    markers_checked: int
+    jobs_checked: int
     findings: tuple[FsckFinding, ...] = ()
-    counts: Mapping[str, int] = field(default_factory=dict)
-    always_safe_candidates: int = 0
-    always_safe_counts: Mapping[str, int] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        """Report whether every marker resolved to its own journal frame.
-
-        :return: Whether the check found no findings.
-        """
+        """Whether the check found nothing."""
 
         return not self.findings
 
     @property
     def unresolved(self) -> int:
-        """Return how many findings the run left for an operator to handle.
+        """The number of findings left for the operator (everything not quarantined)."""
 
-        :return: Number of reported or live-skipped findings.
-        """
-
-        return sum(1 for finding in self.findings if finding.action in ("reported", "skipped_live"))
+        return sum(1 for finding in self.findings if finding.action == "reported")
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this report.
@@ -138,338 +110,133 @@ class FsckReport:
 
         return {
             "format": FSCK_REPORT_FORMAT,
-            "format_version": 2,
+            "format_version": 3,
             "workspace_id": self.workspace_id,
-            "markers_checked": self.markers_checked,
+            "jobs_checked": self.jobs_checked,
             "counts": dict(self.counts),
-            "always_safe_candidates": self.always_safe_candidates,
-            "always_safe_counts": dict(self.always_safe_counts),
             "findings": [finding.as_mapping() for finding in self.findings],
         }
 
 
-class _JournalIndex:
-    """Every readable state frame of the journal, grouped by job.
-
-    A damaged marker cannot be followed backwards along its own chain, because
-    the frame holding ``previous_record_ref`` is the unreadable one. The only
-    remaining evidence is the journal itself, so a repair walks the segments
-    once and keeps the frames that name each job.
-    """
-
-    def __init__(self, workspace: "Workspace") -> None:
-        self._workspace = workspace
-        self._by_job: dict[str, list[JournalFrame]] | None = None
-
-    def frames_for(self, job_id: str) -> list[JournalFrame]:
-        """Return every readable state frame naming *job_id*, oldest first."""
-
-        if self._by_job is None:
-            self._by_job = self._build()
-        return self._by_job.get(job_id, [])
-
-    def _build(self) -> dict[str, list[JournalFrame]]:
-        workspace_id = self._workspace.workspace_id
-        grouped: dict[str, list[JournalFrame]] = {}
-        for entry in iter_journal_frames(self._workspace.control):
-            frame = entry.frame
-            if frame.get("format") != "httk-workflow-state" or frame.get("format_version") != 3:
-                continue
-            if frame.get("workspace_id") != workspace_id:
-                continue
-            job_id = frame.get("job_id")
-            if not isinstance(job_id, str):
-                continue
-            grouped.setdefault(job_id, []).append(entry)
-        _LOGGER.debug("indexed journal frames for %d jobs", len(grouped))
-        return grouped
-
-
-def _frame_generation(entry: JournalFrame) -> int | None:
-    value = entry.frame.get("state_generation")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
-
-
-def _identity_problem(workspace: "Workspace", marker: Marker, frame: Mapping[str, Any]) -> str | None:
-    """Return why *frame* is not the frame *marker* names, if it is not."""
-
-    expected: list[tuple[str, object]] = [
-        ("format", "httk-workflow-state"),
-        ("format_version", 3),
-        ("workspace_id", workspace.workspace_id),
-        ("job_id", marker.job_id),
-        ("job_key", marker.job_key),
-        ("kind", marker.kind),
-        ("state_generation", marker.generation),
-    ]
-    for name, value in expected:
-        if frame.get(name) != value:
-            return f"frame {name} is {frame.get(name)!r}, but the marker names {value!r}"
-    return None
-
-
-def _manager_is_live(workspace: "Workspace", manager_id: str, lease_seconds: float) -> bool:
-    """Report whether *manager_id* heartbeated within its own lease."""
-
+def _entries(directory: Path) -> list[os.DirEntry[str]]:
     try:
-        heartbeat = read_json(workspace.control / "managers" / manager_id / "heartbeat.json")
-        updated = timestamp_seconds(str(heartbeat["updated_at"]))
-    except (WorkflowError, KeyError, ValueError):
-        return False
-    return time.time() - updated <= lease_seconds
+        with os.scandir(directory) as listing:
+            return sorted(listing, key=lambda entry: entry.name)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
 
 
-def _live_owner(workspace: "Workspace", marker: Marker, index: _JournalIndex) -> str | None:
-    """Return the manager still working on *marker*, if the evidence shows one.
+def _walk(directory: Path, state: str, placement: PurePosixPath) -> Iterator[JobRef | Path]:
+    """Yield the jobs below one placement directory of an unowned state, and every entry that is not one."""
 
-    The damaged frame cannot say who owns the job, so the owner is taken from
-    the readable frames of the same job. A heartbeat inside that manager's own
-    lease is treated as ownership, and ownership means hands off.
-    """
+    for entry in _entries(directory):
+        path = Path(entry.path)
+        if not entry.is_dir(follow_symlinks=False):
+            yield path
+        elif "~" not in entry.name:
+            yield from _walk(path, state, placement / entry.name)
+        else:
+            try:
+                yield JobRef.from_path(path, state=state, placement=placement)
+            except FormatError:
+                yield path
 
-    if marker.kind not in LIVE_KINDS:
-        return None
-    default_lease = workspace.policy.lease_seconds
-    for entry in reversed(index.frames_for(marker.job_id)):
-        manager_id = entry.frame.get("manager_id")
-        if not isinstance(manager_id, str) or not manager_id:
+
+def _jobs(workspace: "Workspace") -> Iterator[JobRef | Path]:
+    """Yield every job of the workspace, and every entry of ``jobs/`` that is not a job."""
+
+    owned = workspace.jobs / _kernel.OWNED
+    for entry in _entries(workspace.jobs):
+        if entry.name not in (*UNOWNED_STATES, _kernel.OWNED) or not entry.is_dir(follow_symlinks=False):
+            yield Path(entry.path)
+    for state in UNOWNED_STATES:
+        yield from _walk(workspace.jobs / state, state, PurePosixPath())
+    for owner in _entries(owned):
+        if not owner.is_dir(follow_symlinks=False) or len(owner.name) != _OWNER_ID_LENGTH:
+            yield Path(owner.path)
             continue
-        lease = entry.frame.get("lease_seconds")
-        lease_seconds = (
-            float(lease) if isinstance(lease, (int, float)) and not isinstance(lease, bool) else default_lease
-        )
-        if _manager_is_live(workspace, manager_id, lease_seconds):
-            return manager_id
-    return None
-
-
-def _last_good_frame(marker: Marker, index: _JournalIndex) -> JournalFrame | None:
-    """Return the newest readable frame of this job older than *marker*.
-
-    Only strictly older generations are candidates. A frame at or beyond the
-    marker's own generation is either the damaged one or a transition that was
-    appended and never committed by a rename, and adopting either would invent
-    state no marker ever published.
-    """
-
-    best: JournalFrame | None = None
-    best_generation = -1
-    for entry in index.frames_for(marker.job_id):
-        if entry.frame.get("job_key") != marker.job_key:
-            continue
-        if entry.frame.get("kind") not in STATE_KINDS:
-            continue
-        generation = _frame_generation(entry)
-        if generation is None or generation >= marker.generation:
-            continue
-        if generation >= best_generation:
-            best = entry
-            best_generation = generation
-    return best
-
-
-def _repair_frame(workspace: "Workspace", marker: Marker, recovered: JournalFrame, problem: str) -> dict[str, object]:
-    """Build the ``fsck_repair`` frame that replaces an unreadable one.
-
-    The members of the recovered frame are carried forward so that a repaired
-    job keeps its activation, attempt, and data counters, and the marker keeps
-    its own kind, placement, and priority: the state tree is what an operator
-    and every manager already believe about this job.
-    """
-
-    frame: dict[str, object] = dict(recovered.frame)
-    frame.update(
-        {
-            "format": "httk-workflow-state",
-            "format_version": 3,
-            "workspace_id": workspace.workspace_id,
-            "job_id": marker.job_id,
-            "job_key": marker.job_key,
-            "placement": placement_text(marker.placement),
-            "state_generation": marker.generation + 1,
-            "kind": marker.kind,
-            "previous_record_ref": recovered.record_ref,
-            "created_at": utc_now(),
-            "priority": marker.priority,
-            "reason": "fsck_repair",
-            "fsck_repair": {
-                "replaced_record_ref": marker.record_ref,
-                "problem": problem,
-                "recovered_record_ref": recovered.record_ref,
-                "recovered_generation": _frame_generation(recovered),
-                "repaired_at": utc_now(),
-            },
-        }
-    )
-    return frame
-
-
-def _marker_entries(workspace: "Workspace") -> Iterator[Marker | MarkerFault]:
-    """Yield every marker-shaped entry of every state kind, core or not."""
-
-    return workspace.scan_marker_entries(STATE_KINDS)
+        for entry in _entries(Path(owner.path)):
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    raise FormatError(f"{entry.path} is not a directory")
+                yield JobRef.from_path(Path(entry.path), state=_kernel.OWNED, owner_id=owner.name)
+            except FormatError:
+                yield Path(entry.path)
 
 
 def check_workspace(
-    workspace: "Workspace",
-    *,
-    repair: bool = False,
-    quarantine_unrepairable: bool = False,
+    workspace: "Workspace", *, repair: bool = False, quarantine_unrepairable: bool = False
 ) -> FsckReport:
-    """Verify that every marker resolves to its own readable journal frame.
+    """Check the workspace's job tree.
 
-    Without *repair* nothing is written: every damaged marker is reported.
-    With *repair* a damaged marker whose job still has a readable older frame
-    is re-pointed at a fresh ``fsck_repair`` frame written by this check's own
-    journal writer, which leaves the job loadable and schedulable again. A
-    marker with no readable history is left alone unless
-    *quarantine_unrepairable* also asks for it to be moved out of the way.
-
-    :param workspace: Workspace whose markers and journal are checked.
-    :param repair: Whether to repair damaged markers with readable history.
-    :param quarantine_unrepairable: Whether to quarantine markers that cannot be repaired.
-    :return: Workspace consistency report.
-    :raises ValueError: If quarantine is requested without repair.
+    :param workspace: The workspace.
+    :param repair: Quarantine the unparsable entries (the only repair there is).
+    :param quarantine_unrepairable: The same as *repair*.
+    :return: The report.
     """
 
-    if quarantine_unrepairable and not repair:
-        raise ValueError("quarantining unrepairable markers requires repair")
-    index = _JournalIndex(workspace)
     findings: list[FsckFinding] = []
+    unparsable: list[Path] = []
+    seen: dict[str, list[JobRef]] = {}
+    uid = os.geteuid()
     checked = 0
-    writer: JournalWriter | None = None
-    try:
-        for entry in _marker_entries(workspace):
-            if isinstance(entry, MarkerFault):
-                findings.append(
-                    _handle_unrepairable(
-                        workspace,
-                        FsckFinding(entry=entry.path, problem="unparseable_name", detail=entry.reason),
-                        quarantine=quarantine_unrepairable,
-                    )
+    for item in _jobs(workspace):
+        if isinstance(item, Path):
+            unparsable.append(item)
+            continue
+        checked += 1
+        seen.setdefault(item.job_id, []).append(item)
+        ids = {"job_key": item.job_key, "job_id": item.job_id}
+        try:
+            owner_uid = os.lstat(item.path).st_uid
+        except FileNotFoundError:
+            continue  # it moved after the listing
+        if owner_uid != uid:
+            findings.append(FsckFinding(item.path, "foreign_owner", f"owned by uid {owner_uid}, not {uid}", **ids))
+        if read_state_unowned(item.path / "state.json")[1]:
+            findings.append(FsckFinding(item.path / "state.json", "unreadable_state", "cannot be decoded", **ids))
+    findings += _unparsable(workspace, unparsable, quarantining=repair or quarantine_unrepairable)
+    for job_id, refs in sorted(seen.items()):
+        if len(refs) > 1:
+            places = ", ".join(str(ref.path) for ref in refs)
+            findings.extend(
+                FsckFinding(
+                    ref.path,
+                    "duplicate_job",
+                    f"job {job_id} is in {len(refs)} places: {places}",
+                    job_key=ref.job_key,
+                    job_id=job_id,
                 )
-                continue
-            checked += 1
-            problem = _inspect(workspace, entry)
-            if problem is None:
-                continue
-            code, detail = problem
-            finding = FsckFinding(
-                entry=entry.path,
-                problem=code,
-                detail=detail,
-                job_key=entry.job_key,
-                job_id=entry.job_id,
-                kind=entry.kind,
-                generation=entry.generation,
-                record_ref=entry.record_ref,
+                for ref in refs
             )
-            _LOGGER.warning(
-                "marker %s does not resolve: %s (%s)",
-                entry.path,
-                code,
-                detail,
-                extra={"event": "fsck_finding", "entry": str(entry.path), "problem": code},
-            )
-            if code == "payload_missing":
-                findings.append(finding)
-                continue
-            if not repair:
-                findings.append(finding)
-                continue
-            owner = _live_owner(workspace, entry, index)
-            if owner is not None:
-                _LOGGER.info("leaving %s alone: manager %s is still heartbeating", entry.path, owner)
-                findings.append(replace(finding, action="skipped_live", detail=f"{detail}; manager {owner} is live"))
-                continue
-            recovered = _last_good_frame(entry, index)
-            if recovered is None:
-                findings.append(_handle_unrepairable(workspace, finding, quarantine=quarantine_unrepairable))
-                continue
-            if writer is None:
-                writer = workspace.open_journal_writer()
-            repaired = workspace.repoint_marker(writer, entry, _repair_frame(workspace, entry, recovered, code))
-            _LOGGER.warning(
-                "repaired %s: generation %d now references %s recovered from %s",
-                entry.job_key,
-                repaired.generation,
-                repaired.record_ref,
-                recovered.record_ref,
-                extra={"event": "fsck_repaired", "job_key": entry.job_key, "job_id": entry.job_id},
-            )
+    owners = workspace.control / "owners"
+    for entry in _entries(workspace.jobs / _kernel.OWNED):
+        if entry.is_dir(follow_symlinks=False) and not stat.S_ISDIR(_mode(owners / entry.name)):
+            findings.append(FsckFinding(Path(entry.path), "orphan_owned", f"owners/{entry.name}/ does not exist"))
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding.problem] = counts.get(finding.problem, 0) + 1
+    return FsckReport(workspace.workspace_id, checked, tuple(findings), counts)
+
+
+def _unparsable(workspace: "Workspace", entries: list[Path], *, quarantining: bool) -> list[FsckFinding]:
+    detail = "neither a placement nor a job directory of its state"
+    if not quarantining or not entries:
+        return [FsckFinding(entry, "unparsable_name", detail) for entry in entries]
+    findings: list[FsckFinding] = []
+    with _kernel.register_owner(workspace, kind="cli", label="workspace fsck", allocation=None, advertised={}) as owner:
+        for entry in entries:
+            moved = quarantine(workspace, owner, entry, f"fsck: unparsable_name: {entry}")
             findings.append(
-                replace(
-                    finding,
-                    action="repaired",
-                    entry=repaired.path,
-                    repaired_record_ref=repaired.record_ref,
-                )
+                FsckFinding(entry, "unparsable_name", detail)
+                if moved is None
+                else FsckFinding(entry, "unparsable_name", f"{detail}; moved to {moved}", "quarantined")
             )
-    finally:
-        if writer is not None:
-            writer.close()
-    counts = {action: sum(1 for finding in findings if finding.action == action) for action in ACTIONS}
-    from .gc import ALWAYS_SAFE_CATEGORIES
-
-    always_safe_report = workspace.collect_garbage(
-        dry_run=True,
-        categories=ALWAYS_SAFE_CATEGORIES,
-        sizes=False,
-    )
-    always_safe_counts = {
-        category.name: category.candidates
-        for category in always_safe_report.categories
-        if category.name in ALWAYS_SAFE_CATEGORIES
-    }
-    return FsckReport(
-        workspace_id=workspace.workspace_id,
-        markers_checked=checked,
-        findings=tuple(findings),
-        counts=counts,
-        always_safe_candidates=sum(always_safe_counts.values()),
-        always_safe_counts=always_safe_counts,
-    )
+    return findings
 
 
-def _inspect(workspace: "Workspace", marker: Marker) -> tuple[str, str] | None:
-    """Return the problem of one marker, or ``None`` when it resolves."""
-
-    if marker.record_ref == "init":
-        # The only marker without a frame is the one submission creates.
-        if marker.kind != "submitted" or marker.generation != 0:
-            return (
-                "identity_mismatch",
-                f"a marker at generation {marker.generation} in {marker.kind} may not reference the initial state",
-            )
-    else:
-        verification = verify_record(
-            workspace.control,
-            marker.record_ref,
-            deadline_seconds=workspace.visibility_deadline,
-        )
-        if verification.frame is None:
-            return str(verification.problem), verification.detail
-        mismatch = _identity_problem(workspace, marker, verification.frame)
-        if mismatch is not None:
-            return "identity_mismatch", mismatch
-    if marker.kind not in REMOVABLE_KINDS | {"relocating", "transferring"}:
-        payload = workspace.payload_path(marker.placement, marker.job_key)
-        if wait_for_paths((payload,), deadline_seconds=workspace.visibility_deadline):
-            return "payload_missing", f"marker payload directory is absent: {payload}"
-    return None
-
-
-def _handle_unrepairable(
-    workspace: "Workspace",
-    finding: FsckFinding,
-    *,
-    quarantine: bool,
-) -> FsckFinding:
-    """Report, and optionally quarantine, a marker nothing can restore."""
-
-    if not quarantine:
-        return finding
-    destination = workspace.quarantine(finding.entry, reason=f"fsck: {finding.problem}: {finding.detail}")
-    return replace(finding, action="quarantined", detail=f"{finding.detail}; moved to {destination}")
+def _mode(path: Path) -> int:
+    try:
+        return os.lstat(path).st_mode
+    except FileNotFoundError:
+        return 0

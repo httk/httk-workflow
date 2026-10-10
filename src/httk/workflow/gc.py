@@ -1,126 +1,94 @@
-"""Collect bounded, explicitly configured workspace garbage.
+"""Collect a workspace's garbage on the filesystem kernel.
 
-Except for a succeeded attempt's control directory, which its owning committing
-manager removes after the commit is durable and its process is reaped, the
-engine's collection is bounded by explicit safety and retention rules. Managers
-run the always-safe categories at startup and the full policy-gated collection
-at clean exit; policy-gated artefacts orphaned by a crash are left in place.
-Over a long campaign that costs
-real space — one control directory per attempt, one journal writer directory
-and one manager directory per process start, a full copy of every tree a
-transaction replaced, an intact bundle for every transfer already acknowledged
-— and on a quota'd HPC filesystem that is what fails first. Completed transfers
-now eagerly reclaim their bundles and unprotected source journal segments,
-unless retention says to keep them; this collector handles remaining history.
+One collection runs the categories of :data:`GC_CATEGORIES`, in order:
 
-This module is the separate, explicit collector the specification asks for. It
-is driven by ``policy.retention`` for aged categories: ``journal_days`` and
-``trash_days`` default to one day, while an explicit ``null`` or ``"keep"``
-means *keep*. A workspace whose operator has said nothing is still tidied of
-things that cannot carry information at all — empty placement
-mirrors, abandoned staging entries, and long-dead request receipts — plus the
-one conditional case: a removable marker whose payload the operator removed.
+- ``dead_owners``: owners proven dead are recovered (their jobs return to the
+  states they were claimed from); a same-host CLI owner killed by a signal is
+  provable only on its host, so ``httk workspace gc`` there recovers it;
+- ``attempt_control``: ``attempts/<A>/`` of unowned jobs older than
+  ``retention.attempt_control_days`` (claim, remove, release back); a failed or
+  cancelled job keeps its newest attempt;
+- ``placement_directories``: empty placement directories of the unowned states;
+- ``requests``: request files older than a day that are malformed or whose job
+  cannot be found go to ``quarantine/``;
+- ``manager_logs``: ``logs/managers/<owner-id>.log`` of owners that are gone,
+  older than ``retention.trash_days``;
+- ``owner_tombstones``: ``dead.json`` of recovered owners older than
+  ``retention.owner_tombstone_days``;
+- ``tmp_entries``: write temporaries older than a day in ``requests/`` and
+  ``owners/*/``, and ``tmp/trash.<token>`` entries a crashed removal left.
 
-Everything here is conservative by construction. It never touches the
-quarantine, a sealed transfer bundle, a persistent workdir, a payload beyond
-its aged attempt-control directories, a marker of any job except a removable
-job whose payload directory is absent, a journal segment protected by a current
-marker or non-terminal frame chain, the directory of a manager that is still
-heartbeating, ``runner-builds`` (machine-local rebuildable derived state), or
-the runner store. Removal is bottom-up and mutates no
-workspace state, so a collector that is killed halfway leaves a workspace that
-is exactly as consistent as it was before.
+A retention value of ``None`` (``null`` or ``"keep"``) skips its category.
+Every removal goes through :mod:`httk.workflow._fs` or the kernel, so a
+collection killed halfway leaves the workspace as consistent as before.
 """
 
-import functools
 import logging
 import os
-import socket
 import stat
 import time
-import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
-from ._jobdir import JobDirectory
-from ._manager_commit import draft_names
-from ._txn import holds_job_payload, trash
-from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
+from . import _death, _fs, _kernel, _requests
+from ._kernel import Release
+from ._state import UNOWNED_STATES
+from ._util import json_bytes
 from .errors import FormatError, WorkflowError
-from .journal import JournalWriter, iter_record_chain, parse_record_ref
-from .models import (
-    ATTEMPTS_DIRECTORY,
-    LOGS_DIRECTORY,
-    QUIESCENT_KINDS,
-    STATE_KINDS,
-    TERMINAL_KINDS,
-    Marker,
-)
-from .removal import REMOVABLE_KINDS, join_child_parents
+from .models import LOGS_DIRECTORY
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
 
+__all__ = [
+    "GC_CATEGORIES",
+    "GC_REPORT_FORMAT",
+    "REQUEST_GRACE_SECONDS",
+    "TMP_MAXIMUM_AGE_SECONDS",
+    "GcCategory",
+    "GcReport",
+    "collect_garbage",
+    "iter_report_rows",
+    "quarantine",
+    "quarantine_damaged",
+]
+
 _LOGGER = logging.getLogger(__name__)
 
-#: The journal frame one collection appends. It is not a state frame, so every
-#: reader that walks the journal for job history ignores it.
-GC_FRAME_FORMAT = "httk-workflow-gc"
-#: How long an entry may sit in a staging directory before it is certainly
-#: abandoned. Every publication renames its staging entry out within one
-#: operation, so a day is far beyond any honest in-flight window and this needs
-#: no retention policy to be safe.
+GC_REPORT_FORMAT = "httk-workflow-gc"
+#: How old a write temporary or a ``tmp/trash.<token>`` entry must be before it is garbage.
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
-#: The ``tmp/`` transaction directories of the transfer protocol (plan decision
-#: 16): only the protocol steps and the transfer orphan sweep remove them.
-TRANSACTION_PREFIXES = ("import.", "eject.", "abort.", "export.", "birth.")
-#: How long a request claimed by a manager that has since died is kept. The
-#: request either was applied — in which case the file is a receipt nobody
-#: reads — or was interrupted, in which case a month is long past the point at
-#: which replaying it against a moved job would be wanted.
-RETIRED_REQUEST_MAXIMUM_AGE_SECONDS = 30 * 24 * 60 * 60
-#: Every category a report carries, in the order a collection performs them.
+#: How long a malformed request, or one whose job cannot be found, waits before it is quarantined.
+REQUEST_GRACE_SECONDS = 24 * 60 * 60
+#: Every category, in the order a collection runs them.
 GC_CATEGORIES = (
+    "dead_owners",
     "attempt_control",
-    "removed_jobs",
-    "transaction_trash",
-    "retired_bundles",
-    "transfer_records",
-    "transfer_receipts",
-    "tmp_entries",
-    "retired_requests",
-    "journal_segments",
-    "manager_directories",
+    "placement_directories",
+    "requests",
     "manager_logs",
-    "placement_directories",
-)
-#: Categories safe to collect without a retention policy: their entries carry
-#: no information, or (``transfer_receipts``) carry it only until an expiry that
-#: is a pure function of the entry and the clock. Managers run exactly these
-#: categories when they attach.
-ALWAYS_SAFE_CATEGORIES = (
-    "removed_jobs",
-    "transfer_receipts",
+    "owner_tombstones",
     "tmp_entries",
-    "retired_requests",
-    "placement_directories",
 )
-_SECONDS_PER_DAY = 86400.0
+_DAY = 86400.0
+_PRUNE_BUDGET = 100_000
+_TRASH_NAME_LENGTH = len("trash.") + 16
 
 
 @dataclass(frozen=True)
 class GcCategory:
-    """Describe what one garbage category held and what became of it.
+    """What one category found and removed.
 
-    :param name: Category name.
-    :param candidates: Number of entries eligible for collection.
-    :param removed: Number of entries removed.
-    :param bytes_reclaimed: Estimated bytes held by the entries.
-    :param entries: Paths of candidate entries.
-    :param skipped: Whether this category was not selected or was gated.
-    :param skip_reason: Why this category was skipped, when applicable.
+    :param name: The category.
+    :param candidates: Entries eligible for collection.
+    :param removed: Entries removed (or quarantined, or recovered).
+    :param bytes_reclaimed: Estimated bytes the candidates held.
+    :param entries: The candidate paths.
+    :param skipped: Whether the category did not run.
+    :param skip_reason: Why it did not run.
     """
 
     name: str
@@ -150,21 +118,13 @@ class GcCategory:
 
 @dataclass(frozen=True)
 class GcReport:
-    """Everything one collection considered, removed, and reclaimed.
+    """Everything one collection considered and removed.
 
-    ``bytes_reclaimed`` is an estimate taken from the entries themselves before
-    they were removed, so under a dry run it reports what a real run would free
-    rather than what this one did.
-
-    :param workspace_id: Identifier of the collected workspace.
-    :param dry_run: Whether the collection made no filesystem changes.
-    :param collected_at: Timestamp at which the report was produced.
-    :param retention: Retention settings used for the collection.
-    :param categories: Results for each collection category.
-    :param removed_jobs: Job keys whose removable markers were removed.
-    :param record_ref: Journal reference for the collection record, if written.
-    :param skipped: Categories or reasons skipped during collection.
-    :param skipped_foreign: Foreign entries skipped by category.
+    :param workspace_id: The workspace.
+    :param dry_run: Whether nothing was changed.
+    :param collected_at: When the collection ran.
+    :param retention: The retention policy it applied.
+    :param categories: One result per category, in :data:`GC_CATEGORIES` order.
     """
 
     workspace_id: str
@@ -172,49 +132,39 @@ class GcReport:
     collected_at: str
     retention: Mapping[str, object]
     categories: tuple[GcCategory, ...] = ()
-    removed_jobs: tuple[str, ...] = ()
-    record_ref: str | None = None
-    skipped: tuple[str, ...] = ()
-    skipped_foreign: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def candidates(self) -> int:
-        """Return how many entries the run found collectable.
-
-        :return: Number of candidate entries.
-        """
+        """The number of collectable entries found."""
 
         return sum(category.candidates for category in self.categories)
 
     @property
     def removed(self) -> int:
-        """Return how many entries the run actually removed.
-
-        :return: Number of removed entries.
-        """
+        """The number of entries removed."""
 
         return sum(category.removed for category in self.categories)
 
     @property
     def bytes_reclaimed(self) -> int:
-        """Return the estimated bytes the collected entries held.
-
-        :return: Estimated reclaimed bytes.
-        """
+        """The estimated bytes the candidates held."""
 
         return sum(category.bytes_reclaimed for category in self.categories)
 
-    def category(self, name: str) -> GcCategory:
-        """Return one named category, empty when the run collected nothing.
+    @property
+    def skipped(self) -> tuple[str, ...]:
+        """``"<category>: <reason>"`` for every category that did not run."""
 
-        :param name: Category name to find.
-        :return: Matching category or an empty category with that name.
+        return tuple(f"{item.name}: {item.skip_reason}" for item in self.categories if item.skipped)
+
+    def category(self, name: str) -> GcCategory:
+        """Return one category's result, empty when it did not run.
+
+        :param name: The category.
+        :return: Its result.
         """
 
-        for category in self.categories:
-            if category.name == name:
-                return category
-        return GcCategory(name)
+        return next((item for item in self.categories if item.name == name), GcCategory(name))
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this report.
@@ -223,8 +173,8 @@ class GcReport:
         """
 
         return {
-            "format": GC_FRAME_FORMAT,
-            "format_version": 2,
+            "format": GC_REPORT_FORMAT,
+            "format_version": 3,
             "workspace_id": self.workspace_id,
             "dry_run": self.dry_run,
             "collected_at": self.collected_at,
@@ -233,1136 +183,391 @@ class GcReport:
             "removed": self.removed,
             "bytes_reclaimed": self.bytes_reclaimed,
             "skipped": list(self.skipped),
-            "skipped_foreign": dict(self.skipped_foreign),
-            "categories": [category.as_mapping() for category in self.categories],
-            "removed_jobs": list(self.removed_jobs),
-            **({} if self.record_ref is None else {"record_ref": self.record_ref}),
+            "categories": [item.as_mapping() for item in self.categories],
         }
 
 
 @dataclass
-class _Accumulator:
-    """The running total of one category while a collection is in progress."""
-
+class _Tally:
     name: str
     candidates: int = 0
     removed: int = 0
     bytes_reclaimed: int = 0
     entries: list[str] = field(default_factory=list)
-    skipped: bool = False
     skip_reason: str | None = None
+
+    def note(self, path: Path, size: int) -> None:
+        self.candidates += 1
+        self.bytes_reclaimed += size
+        self.entries.append(str(path))
 
     def frozen(self) -> GcCategory:
         return GcCategory(
-            name=self.name,
-            candidates=self.candidates,
-            removed=self.removed,
-            bytes_reclaimed=self.bytes_reclaimed,
-            entries=tuple(self.entries),
-            skipped=self.skipped,
-            skip_reason=self.skip_reason,
+            self.name,
+            self.candidates,
+            self.removed,
+            self.bytes_reclaimed,
+            tuple(self.entries),
+            self.skip_reason is not None,
+            self.skip_reason,
         )
 
 
-def _entry_bytes(path: Path) -> int:
-    """Return the size one directory entry occupies, or zero if it vanished."""
-
+def _names(directory: Path) -> list[str]:
     try:
-        return int(path.lstat().st_size)
-    except OSError:
-        return 0
-
-
-def _tree_bytes(path: Path) -> int:
-    """Estimate the bytes one entry holds, tolerating a concurrent removal.
-
-    Directories are counted alongside files because the cost that bites on a
-    quota'd filesystem is as often inodes and directory blocks as it is data.
-    """
-
-    total = _entry_bytes(path)
-    if not path.is_dir() or path.is_symlink():
-        return total
-    for directory, directories, files in os.walk(path, topdown=True, onerror=lambda _: None):
-        for name in (*directories, *files):
-            total += _entry_bytes(Path(directory, name))
-    return total
-
-
-def _owned_by_current_user(path: Path) -> bool:
-    """Return whether one entry may be removed by this process."""
-
-    try:
-        return path.lstat().st_uid == os.getuid()
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-
-
-def _remove_tree(
-    path: Path,
-    *,
-    dry_run: bool = False,
-    on_foreign: Callable[[], None] | None = None,
-    remover: Callable[[], None] | None = None,
-) -> bool:
-    """Remove one entry bottom-up, reporting whether it is gone afterwards.
-
-    A killed collection must leave a workspace no less consistent than it found
-    it, so removal proceeds from the leaves inwards and every step tolerates an
-    entry that another process removed first. Nothing here is renamed and no
-    state is rewritten, which is what makes an interrupted removal harmless:
-    the partial remains are scratch that the next run collects again.
-
-    A *remover* replaces the path-based removal once the (read-only) ownership
-    preflight has passed. Collection inside a job directory passes a
-    descriptor-anchored one, so an entry the job swaps for a symlink between
-    the preflight and the removal is unlinked rather than followed.
-    """
-
-    def foreign() -> None:
-        if on_foreign is not None:
-            on_foreign()
-
-    if not _owned_by_current_user(path):
-        foreign()
-        return False
-    if path.is_dir() and not path.is_symlink():
-        failed = False
-
-        def traversal_error(_error: OSError) -> None:
-            nonlocal failed
-            failed = True
-            foreign()
-
-        try:
-            for directory, directories, files in os.walk(path, topdown=True, onerror=traversal_error):
-                for name in (*directories, *files):
-                    if not _owned_by_current_user(Path(directory, name)):
-                        failed = True
-                        foreign()
-        except OSError:
-            failed = True
-            foreign()
-        if failed or dry_run:
-            return not failed
-        if remover is not None:
-            return _run_remover(path, remover)
-
-        def remove(entry: Path) -> bool:
-            if not _owned_by_current_user(entry):
-                foreign()
-                return False
-            if entry.is_dir() and not entry.is_symlink():
-                try:
-                    children = sorted(entry.iterdir())
-                except OSError:
-                    foreign()
-                    return False
-                if not all(remove(child) for child in children):
-                    return False
-                try:
-                    entry.rmdir()
-                except FileNotFoundError:
-                    return True
-                except OSError:
-                    return False
-                return True
-            try:
-                entry.unlink()
-            except FileNotFoundError:
-                return True
-            except OSError:
-                return False
-            return True
-
-        return remove(path)
-    if dry_run:
-        return True
-    if remover is not None:
-        return _run_remover(path, remover)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        _LOGGER.debug("cannot remove %s: %s", path, exc)
-    return not path.exists()
-
-
-def _run_remover(path: Path, remover: Callable[[], None]) -> bool:
-    """Run a descriptor-anchored removal, reporting whether it succeeded."""
-
-    try:
-        remover()
-    except (OSError, FormatError) as exc:
-        _LOGGER.debug("cannot remove %s: %s", path, exc)
-        return False
-    return True
+        return sorted(os.listdir(directory))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
 
 
 def _mtime(path: Path) -> float | None:
-    """Return the modification time of *path*, or ``None`` if it vanished."""
-
     try:
-        return path.lstat().st_mtime
-    except OSError:
+        return os.lstat(path).st_mtime
+    except FileNotFoundError:
         return None
 
 
-def _directory_names(directory: JobDirectory) -> list[str]:
-    """List the real subdirectories of one pinned directory, without following links."""
+def _bytes(path: Path, sizes: bool) -> int:
+    """Sum the sizes below *path* without following links (``0`` unless *sizes*)."""
 
-    names: list[str] = []
+    if not sizes:
+        return 0
     try:
-        with os.scandir(directory.fd) as listing:
-            for entry in listing:
-                if stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
-                    names.append(entry.name)
-    except OSError:
-        return []
-    return sorted(names)
-
-
-def _iterdir(path: Path) -> list[Path]:
-    """List one directory, treating an absent or unreadable one as empty."""
-
-    try:
-        return sorted(path.iterdir())
-    except OSError:
-        return []
-
-
-def _holds_launch_records(manager_dir: Path, *, ignoring: frozenset[str] = frozenset()) -> bool:
-    """Return whether a manager directory keeps trusted launch records; an unreadable ``launches/`` keeps them."""
-
-    try:
-        with os.scandir(manager_dir / "launches") as entries:
-            return any(entry.name not in ignoring for entry in entries)
+        information = os.lstat(path)
     except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+        return 0
+    if not stat.S_ISDIR(information.st_mode):
+        return information.st_size
+    total = 0
+    for root, directories, files in os.walk(path):
+        for name in directories + files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except FileNotFoundError:
+                continue
+    return total
 
 
-def _marker_record_ref(name: str) -> str | None:
-    """Return the record reference encoded in one marker basename."""
+def _into_quarantine(workspace: _kernel.KernelWorkspace, entry: Path, reason: str) -> Path:
+    target = workspace.control / "quarantine" / f"{int(time.time())}-{_fs.fresh_token()}"
+    _fs.move_owned(_fs.loc(entry), _fs.loc(target / "entry"), durable=workspace.durable)
+    record = {"source": entry.name, "reason": reason, "at": datetime.now(UTC).isoformat()}
+    _fs.write_file(_fs.loc(target / "reason.json"), json_bytes(record) + b"\n", durable=workspace.durable)
+    _LOGGER.warning("quarantined %s: %s", entry.name, reason, extra={"event": "quarantined", "path": str(target)})
+    return target / "entry"
 
-    reference = name.rsplit(".", 1)[-1]
-    return None if reference == "init" else reference
+
+def _finish_quarantine(owner: _kernel.Owner, scratch: Path) -> bool:
+    """The scratch reconciler of an interrupted quarantine: what was taken goes on to ``quarantine/``."""
+
+    for name in _names(scratch):
+        _into_quarantine(owner.workspace, scratch / name, "an interrupted quarantine")
+    return True
+
+
+_kernel.register_reconciler("quarantine", _finish_quarantine)
+
+
+def quarantine(workspace: "Workspace", owner: _kernel.Owner, path: Path, reason: str) -> Path | None:
+    """Move one contested entry to ``quarantine/<epoch>-<token>/entry`` beside a ``reason.json``.
+
+    The entry is won into the owner's ``quarantine`` scratch first, whose
+    reconciler finishes the move if the owner dies in between.
+
+    :param workspace: The workspace.
+    :param owner: The owner that takes the entry.
+    :param path: The entry.
+    :param reason: Why it is quarantined.
+    :return: The quarantined entry, or ``None`` when another actor moved it first.
+    """
+
+    scratch = _kernel.take(workspace, owner, _fs.loc(path), "quarantine")
+    if scratch is None:
+        return None
+    moved = _into_quarantine(workspace, scratch / path.name, reason)
+    _fs.remove_empty_dir(_fs.loc(scratch))
+    return moved
+
+
+def quarantine_damaged(workspace: "Workspace", owner: _kernel.Owner, job_id: str, reason: str) -> Path | None:
+    """Quarantine a job this owner won but holds no handle of (its ``job.json`` was unreadable at the claim).
+
+    :param workspace: The workspace.
+    :param owner: The owner whose ``owned/<owner-id>/`` holds the job.
+    :param job_id: The job UUID.
+    :param reason: Why.
+    :return: The quarantined entry, or ``None`` when the job is not (or no longer) there.
+    """
+
+    for ref in owner.owned():
+        if ref.job_id == job_id and ref.path not in owner._held:
+            _LOGGER.error("quarantining damaged job %s: %s", ref.job_key, reason, extra={"event": "job_damaged"})
+            return quarantine(workspace, owner, ref.path, reason)
+    return None
 
 
 class _Collection:
-    """One pass over a workspace, driven by its retention policy."""
+    """One pass over a workspace."""
 
     def __init__(
-        self,
-        workspace: "Workspace",
-        *,
-        dry_run: bool,
-        now: float,
-        categories: Sequence[str] | None = None,
-        journal_writer: JournalWriter | None = None,
-        sizes: bool = True,
+        self, workspace: "Workspace", owner: _kernel.Owner | None, *, dry_run: bool, now: float, sizes: bool
     ) -> None:
-        self.workspace = workspace
-        self.control = workspace.control
-        self.dry_run = dry_run
-        self.now = now
+        self.workspace, self.owner, self.dry_run, self.now, self.sizes = workspace, owner, dry_run, now, sizes
         self.retention = workspace.policy.retention
-        self.journal_writer = journal_writer
-        self.sizes = sizes
-        requested = tuple(GC_CATEGORIES if categories is None else categories)
-        unknown = set(requested) - set(GC_CATEGORIES)
-        if unknown:
-            raise ValueError(f"unknown garbage-collection category: {', '.join(sorted(unknown))}")
-        selected = set(requested)
-        # Manager-directory eligibility depends on the journal pass counting
-        # the writer's surviving segments.
-        if "manager_directories" in selected:
-            selected.add("journal_segments")
-            selected.add("manager_logs")
-        self._selected = frozenset(selected)
-        self._accumulators = {name: _Accumulator(name) for name in GC_CATEGORIES}
-        self._skipped: list[str] = []
-        self._skipped_foreign: dict[str, int] = {}
-        self._markers: list[Marker] | None = None
-        self._removed_jobs: list[str] = []
-        self._projected_removed: set[str] = set()
-        self._live_managers: dict[str, str | None] | None = None
-        self._opaque_live_manager = False
-        # writer id -> how many of its segments survive this collection, which
-        # is what decides whether the manager directory naming it is still
-        # worth keeping.
-        self._surviving_segments: dict[str, int] = {}
-
-    # -- shared observations -------------------------------------------------
-
-    def markers(self) -> list[Marker]:
-        """Return every marker of the workspace, scanned exactly once."""
-
-        if self._markers is None:
-            self._markers = list(self.workspace.scan_markers(STATE_KINDS))
-        return self._markers
-
-    def live_managers(self) -> dict[str, str | None]:
-        """Return the manager incarnations still heartbeating within a lease.
-
-        The value is the journal writer each live manager owns, or ``None``
-        when its ``manager.json`` cannot be read. A live manager whose writer
-        cannot be determined makes every writer potentially live, which is
-        recorded so that journal collection stands down entirely rather than
-        guessing. The supplied collection writer and its manager directory are
-        treated as live regardless of heartbeat age.
-        """
-
-        if self._live_managers is None:
-            lease = self.workspace.policy.lease_seconds
-            caller_writer_id = None if self.journal_writer is None else self.journal_writer.writer_id
-            live: dict[str, str | None] = {}
-            for manager_dir in _iterdir(self.control / "managers"):
-                if not manager_dir.is_dir():
-                    continue
-                writer_id = self._writer_of(manager_dir)
-                caller_manager = caller_writer_id is not None and writer_id == caller_writer_id
-                if not caller_manager and not self._heartbeat_within(manager_dir, lease):
-                    continue
-                live[manager_dir.name] = writer_id
-                if writer_id is None:
-                    self._opaque_live_manager = True
-            self._live_managers = live
-        return self._live_managers
-
-    def _heartbeat_within(self, manager_dir: Path, lease_seconds: float) -> bool:
-        try:
-            heartbeat = read_json(manager_dir / "heartbeat.json")
-            updated = timestamp_seconds(str(heartbeat["updated_at"]))
-        except (WorkflowError, KeyError, ValueError):
-            return False
-        return self.now - updated <= lease_seconds
-
-    def _writer_of(self, manager_dir: Path) -> str | None:
-        try:
-            writer_id = read_json(manager_dir / "manager.json").get("writer_id")
-        except WorkflowError:
-            return None
-        return writer_id if isinstance(writer_id, str) and writer_id else None
-
-    def referenced_segments(self) -> set[tuple[str, int]]:
-        """Return every journal segment protected by current history.
-
-        A terminal marker protects only its current segment. A non-terminal
-        marker protects every segment in its frame chain, so collecting cannot
-        remove the history a live job may still need. If a chain frame cannot
-        be read, its named segment is protected and the walk stops there.
-
-        A job being transferred keeps its ``transferring`` marker in the state
-        tree until its transfer completes, so it is protected like any other
-        non-terminal job.
-        """
-
-        referenced: set[tuple[str, int]] = set()
-        markers = self.markers()
-
-        def protect(reference: str, *, walk: bool) -> None:
-            try:
-                writer_id, segment, _offset, _length, _checksum = parse_record_ref(reference)
-            except (FormatError, ValueError):
-                return
-            referenced.add((writer_id, segment))
-            if not walk:
-                return
-            for chain_reference, frame in iter_record_chain(
-                self.control,
-                reference,
-                deadline_seconds=self.workspace.visibility_deadline,
-            ):
-                try:
-                    chain_writer, chain_segment, _offset, _length, _checksum = parse_record_ref(chain_reference)
-                except (FormatError, ValueError):
-                    _LOGGER.debug("stopping journal chain walk at invalid reference %r", chain_reference)
-                    break
-                referenced.add((chain_writer, chain_segment))
-                if frame is None:
-                    _LOGGER.debug(
-                        "stopping journal chain walk at unreadable frame %s; its segment remains protected",
-                        chain_reference,
-                    )
-                    break
-
-        for marker in markers:
-            reference = _marker_record_ref(marker.path.name)
-            if reference is not None:
-                protect(reference, walk=marker.kind not in TERMINAL_KINDS)
-
-        return referenced
-
-    # -- bookkeeping ---------------------------------------------------------
+        self.control = workspace.control
 
     def _cutoff(self, days: float | None) -> float | None:
-        """Return the modification time at which *days* of retention expires."""
-
-        return None if days is None else self.now - days * _SECONDS_PER_DAY
+        return None if days is None else self.now - days * _DAY
 
     def _aged(self, path: Path, cutoff: float) -> bool:
-        modified = _mtime(path)
-        return modified is not None and modified <= cutoff
+        mtime = _mtime(path)
+        return mtime is not None and mtime < cutoff
 
-    def _collect(
-        self, category: str, path: Path, *, size: int | None = None, remover: Callable[[], None] | None = None
-    ) -> bool:
-        """Account for one collectable entry and, unless dry, remove it."""
+    def _remove(self, tally: _Tally, path: Path) -> None:
+        """Remove one file or tree (a tree through a trash name in ``tmp/``), unless dry run."""
 
-        self._account_candidate(category, path, size=size)
-        foreign = 0
-
-        def count_foreign() -> None:
-            nonlocal foreign
-            foreign += 1
-
-        removed = _remove_tree(path, dry_run=self.dry_run, on_foreign=count_foreign, remover=remover)
-        if foreign:
-            self._skipped_foreign[category] = self._skipped_foreign.get(category, 0) + foreign
-            _LOGGER.debug("skipping %s foreign entries below %s", foreign, path)
-        if not self.dry_run and removed:
-            accumulator = self._accumulators[category]
-            accumulator.removed += 1
-            _LOGGER.debug("collected %s entry %s", category, path)
-        return removed
-
-    def _account_candidate(self, category: str, path: Path, *, size: int | None = None) -> None:
-        """Account for a candidate without attempting to remove it."""
-
-        accumulator = self._accumulators[category]
-        accumulator.candidates += 1
-        accumulator.entries.append(str(path))
-        accumulator.bytes_reclaimed += 0 if not self.sizes else (_tree_bytes(path) if size is None else size)
-
-    def _entry_size(self, path: Path) -> int:
-        """Return an entry's size when this pass is measuring sizes."""
-
-        return _entry_bytes(path) if self.sizes else 0
-
-    def _skip(self, category: str, reason: str) -> None:
-        accumulator = self._accumulators[category]
-        accumulator.skipped = True
-        accumulator.skip_reason = reason
-        self._skipped.append(f"{category}: {reason}")
-        _LOGGER.debug("skipping %s collection: %s", category, reason)
-
-    # -- categories ----------------------------------------------------------
-
-    def collect_attempt_control(self) -> None:
-        """Collect aged attempt-control directories of quiescent jobs.
-
-        Failed and cancelled jobs retain their newest directory however old it
-        is: it holds the outcome, the failure breadcrumb, and the runner's own
-        logs for the attempt that decided the job. A succeeded job normally has
-        no retained attempt evidence; a directory left after an owning manager
-        dies before cleanup, or after an inherited commit, is collectable when
-        it ages past this gate and the workspace lease grace. The grace also
-        applies to every other non-failed/cancelled quiescent destination, so a
-        runner lingering after publication is not collected immediately.
-        """
-
-        cutoff = self._cutoff(self.retention.attempt_control_days)
-        if cutoff is None:
-            self._skip("attempt_control", "retention.attempt_control_days is not configured")
+        tally.note(path, _bytes(path, self.sizes))
+        if self.dry_run:
             return
-        lease_cutoff = self.now - self.workspace.policy.lease_seconds
-        for marker in self.markers():
-            if marker.kind not in QUIESCENT_KINDS:
-                continue
-            payload = self.workspace.payload_path(marker.placement, marker.job_key)
-            # The job wrote its own directory, so the attempt container is
-            # reached and listed through no-follow descriptors and every
-            # removal is anchored on them.
-            try:
-                with JobDirectory.open(
-                    jobs=self.workspace.jobs, placement=marker.placement, job_key=marker.job_key
-                ) as job_dir:
-                    attempts = job_dir.directory(ATTEMPTS_DIRECTORY)
-            except (FormatError, OSError):
-                continue
-            with attempts:
-                self._collect_attempt_controls(marker, payload / ATTEMPTS_DIRECTORY, attempts, cutoff, lease_cutoff)
-
-    def _collect_attempt_controls(
-        self, marker: Marker, container: Path, attempts: JobDirectory, cutoff: float, lease_cutoff: float
-    ) -> None:
-        """Collect the aged attempt-control directories of one pinned attempt container."""
-
-        controls: list[tuple[float, str, Path]] = []
         try:
-            with os.scandir(attempts.fd) as listing:
-                entries = sorted(listing, key=lambda entry: entry.name)
-            for listed in entries:
-                information = listed.stat(follow_symlinks=False)
-                if stat.S_ISDIR(information.st_mode):
-                    controls.append((information.st_mtime, listed.name, container / listed.name))
-        except OSError:
+            if stat.S_ISDIR(os.lstat(path).st_mode):
+                tmp = self.control / "tmp"
+                _fs.discard(_fs.loc(path), trash_dir=tmp, durable=self.workspace.durable)
+            else:
+                _fs.remove_file(_fs.loc(path), durable=self.workspace.durable)
+        except FileNotFoundError:
             return
-        if marker.kind in {"failed", "cancelled"} and len(controls) < 2:
+        except (OSError, _fs.UnsafePath) as exc:
+            _LOGGER.warning("could not remove %s: %s", path, exc)
             return
-        controls.sort()
-        retained = controls[-1:] if marker.kind in {"failed", "cancelled"} else ()
-        for control in controls:
-            modified, name, entry = control
-            if control in retained:
+        tally.removed += 1
+
+    # -- categories -------------------------------------------------------------------------------------------
+
+    def dead_owners(self, tally: _Tally) -> None:
+        scheduler, here = _death.SchedulerQueries(), _death.process_identity()
+        for record in _kernel.list_owners(self.workspace):
+            # A closed owner leaves no owner.json; a recovered one keeps only dead.json.
+            if record.record is None or (self.owner is not None and record.owner_id == self.owner.owner_id):
                 continue
-            if modified <= cutoff and (marker.kind in {"failed", "cancelled"} or modified <= lease_cutoff):
-                self._collect("attempt_control", entry, remover=functools.partial(attempts.remove_tree, name))
-
-    def _join_child_parents(self) -> dict[str, set[str]] | None:
-        """Return non-terminal parents that reference each child job id.
-
-        :return: Child job ids mapped to their non-terminal parent job keys, or
-            ``None`` when a non-terminal marker's current state is unreadable.
-        """
-
-        markers = [marker for marker in self.markers() if marker.kind not in TERMINAL_KINDS]
-        parents, error = join_child_parents(self.workspace, markers)
-        if error is not None:
-            self._skip("removed_jobs", error)
-            return None
-        return parents
-
-    def collect_removed_jobs(self) -> None:
-        """Collect removable markers whose complete payload was removed.
-
-        A non-terminal parent keeps a referenced child marker alive until the
-        parent is terminal, because the parent may still need to observe that
-        child's state. An unreadable non-terminal state makes the whole
-        category stand down conservatively. After waiting for payload metadata,
-        the parent map and current ``committing`` markers are checked again
-        immediately before unlinking. This is a TOCTOU window of unbounded
-        length in principle: GC may be descheduled between its rescan and the
-        unlink. If a parent publishes a join referencing the removed child in
-        that window, the join observes a missing child and may fail or stall;
-        this is a scheduling-correctness consequence, not payload data loss.
-        The operator rule is to remove children only when their parent is
-        terminal; this guard is best-effort, not a lock.
-        """
-
-        parents = self._join_child_parents()
-        if parents is None:
-            return
-        candidates: list[tuple[Marker, Path]] = []
-        claims = self.control / "transfers" / "adopting"
-        for marker in self.markers():
-            if marker.kind not in REMOVABLE_KINDS or os.path.lexists(claims / marker.job_id):
-                # A job an unfinished adoption is publishing waits for it.
-                continue
-            payload = self.workspace.payload_path(marker.placement, marker.job_key)
-            if not payload.exists():
-                candidates.append((marker, payload))
-        if not candidates:
-            return
-        absent = set(
-            wait_for_paths(
-                (payload for _marker, payload in candidates), deadline_seconds=self.workspace.visibility_deadline
-            )
-        )
-        candidates = [(marker, payload) for marker, payload in candidates if payload in absent]
-        if not candidates:
-            return
-
-        self._markers = list(self.workspace.scan_markers(STATE_KINDS))
-        rescanned = {marker.path: marker for marker in self._markers if marker.kind in REMOVABLE_KINDS}
-        candidates = [
-            (
-                rescanned[marker.path],
-                self.workspace.payload_path(rescanned[marker.path].placement, rescanned[marker.path].job_key),
-            )
-            for marker, _payload in candidates
-            if marker.path in rescanned
-        ]
-        if not candidates:
-            return
-        parents = self._join_child_parents()
-        if parents is None:
-            return
-        if any(marker.kind == "committing" for marker in self.markers()):
-            self._skip("removed_jobs", "a marker is currently committing")
-            return
-        from .seals import is_workspace_sealed
-
-        # A job seal lives in its payload and vanished with it; a sealed workspace
-        # still pins the job, so its marker stays as evidence of the missing payload.
-        workspace_sealed = is_workspace_sealed(self.workspace)
-        for marker, _payload in candidates:
-            parent_keys = parents.get(marker.job_id)
-            if parent_keys:
-                self._account_candidate("removed_jobs", marker.path, size=self._entry_size(marker.path))
-                parent_text = ", ".join(sorted(parent_keys))
-                self._skip(
-                    "removed_jobs",
-                    f"kept child {marker.job_key}: referenced by non-terminal parent(s) {parent_text}",
+            if self.dry_run or self.owner is None:
+                verdict, _evidence = _death.probe(
+                    record.path, visibility_deadline=self.workspace.visibility_deadline, scheduler=scheduler, here=here
                 )
+                if verdict is _death.Liveness.DEAD:
+                    tally.note(record.path, 0)
                 continue
-            if workspace_sealed:
-                self._account_candidate("removed_jobs", marker.path, size=self._entry_size(marker.path))
-                self._skip("removed_jobs", f"kept job {marker.job_key} of a sealed workspace: unseal it first")
-                continue
-            removed = self._collect("removed_jobs", marker.path, size=self._entry_size(marker.path))
-            if removed:
-                self._markers = [item for item in self.markers() if item.path != marker.path]
-                if self.dry_run:
-                    self._projected_removed.add(str(marker.path))
-                else:
-                    self._removed_jobs.append(marker.job_key)
-
-    def collect_transaction_trash(self) -> None:
-        """Collect what is left in a replayed transaction's trash.
-
-        The manager's replay deletes what it removes or sets aside at once, so
-        this sweeps leftovers: content a replay could not delete, emptied
-        per-owner trash directories, and a runner-side replay's kept trash.
-        The trash of a transaction is what makes its replay idempotent, so it
-        is only collectable once the job has left ``committing`` for a
-        quiescent state: at that point the destination transition has happened
-        and no replay will consult it again.
-        """
-
-        cutoff = self._cutoff(self.retention.trash_days)
-        if cutoff is None:
-            self._skip("transaction_trash", "retention.trash_days is not configured")
-            return
-        for marker in self.markers():
-            if marker.kind not in QUIESCENT_KINDS:
-                continue
-            # The trash lives in the job-written draft, so it is reached, listed
-            # and removed only through no-follow descriptors: a symlink planted
-            # anywhere on the way is skipped, never followed.
             try:
-                with JobDirectory.open(
-                    jobs=self.workspace.jobs, placement=marker.placement, job_key=marker.job_key
-                ) as job_dir:
-                    attempts = job_dir.directory(ATTEMPTS_DIRECTORY)
-            except (FormatError, OSError):
+                if (
+                    _kernel.probe_owner(self.workspace, record.owner_id, scheduler=scheduler)
+                    is not _death.Liveness.DEAD
+                ):
+                    continue
+                tally.note(record.path, 0)
+                report = _kernel.recover(self.workspace, self.owner, record.owner_id)
+            except ValueError:
+                continue  # an owner of this very process is never probed
+            except WorkflowError as exc:
+                _LOGGER.info("recovery of owner %s did not finish: %s", record.owner_id, exc)
                 continue
-            with attempts:
-                for control in _directory_names(attempts):
-                    # A commit renamed its draft to commit.<generation>; a
-                    # listing finds every draft, and one it misses only waits.
-                    try:
-                        with attempts.directory(control) as control_dir:
-                            drafts = draft_names(control_dir)
-                    except (FormatError, OSError):
-                        continue
-                    for draft in drafts:
-                        try:
-                            transaction = attempts.directory(f"{control}/{draft}/transaction")
-                        except (FormatError, OSError):
-                            continue
-                        with transaction:
-                            self._collect_trash(transaction)
+            tally.removed += 1
+            _LOGGER.warning(
+                "recovered dead owner %s: %d job(s) returned, %d quarantined",
+                record.owner_id,
+                len(report.returned),
+                len(report.quarantined),
+                extra={"event": "owner_recovered", "dead_owner": record.owner_id},
+            )
 
-    def _collect_trash(self, transaction: JobDirectory) -> None:
-        """Collect the aged entries of one pinned transaction's trash, then the emptied trash."""
+    def attempt_control(self, tally: _Tally) -> None:
+        cutoff = self._cutoff(self.retention.attempt_control_days)
+        assert cutoff is not None
+        for state in UNOWNED_STATES:
+            for ref in _kernel.list_jobs(self.workspace, state):
+                attempts = ref.path / "attempts"
+                names = [name for name in _names(attempts) if not name.startswith(".")]
+                if state in ("failed", "cancelled") and names:
+                    # The newest attempt explains the outcome: it stays.
+                    newest = max(names, key=lambda name: _mtime(attempts / name) or 0.0)
+                    names.remove(newest)
+                aged = [name for name in names if self._aged(attempts / name, cutoff)]
+                if aged:
+                    self._collect_attempts(tally, ref, aged)
 
+    def _collect_attempts(self, tally: _Tally, ref: _kernel.JobRef, names: list[str]) -> None:
+        for name in names:
+            tally.note(ref.path / "attempts" / name, _bytes(ref.path / "attempts" / name, self.sizes))
+        if self.dry_run or self.owner is None:
+            return
+        from .removal import release
+
+        try:
+            owned = _kernel.claim(self.workspace, self.owner, ref)
+        except (FormatError, _fs.UnsafePath) as exc:
+            quarantine_damaged(self.workspace, self.owner, ref.job_id, f"job.json is damaged: {exc}")
+            return
+        if owned is None:
+            return  # another actor moved it first
+        try:
+            doc = owned.read_state()
+        except (FormatError, _fs.UnsafePath):
+            doc = None
+        if doc is None or owned.pending_release() is not None or doc.commit is not None or doc.phase["kind"] != "idle":
+            # Unfinished owner work is a manager's reconcile; the job goes back unchanged.
+            owned._return()
+            return
+        removed = [name for name in names if owned.discard_subtree(f"attempts/{name}")]
+        tally.removed += len(removed)
+        owned.append_log("collected", detail={"attempts": removed})
+        release(owned, doc, Release(owned.from_state, owned.from_priority))
+
+    def placement_directories(self, tally: _Tally) -> None:
+        if self.dry_run:
+            return
+        removed = _kernel.prune_empty_placements(self.workspace, budget=_PRUNE_BUDGET)
+        tally.candidates += removed
+        tally.removed += removed
+
+    def requests(self, tally: _Tally) -> None:
+        directory = self.control / "requests"
+        cutoff = self.now - REQUEST_GRACE_SECONDS
+        problems: dict[Path, str] = {}
+        wanted: dict[str, list[tuple[Path, PurePosixPath]]] = {}
+        for name in _names(directory):
+            path = directory / name
+            if name.startswith(".") or not self._aged(path, cutoff):
+                continue
+            try:
+                request = _requests.parse(path)
+            except FileNotFoundError:
+                continue
+            except FormatError as exc:
+                problems[path] = f"malformed request: {exc}"
+                continue
+            wanted.setdefault(request.job_id, []).append((path, request.placement))
+        if wanted:
+            placements = sorted({placement for items in wanted.values() for _path, placement in items})
+            found = _kernel.locate_many(self.workspace, sorted(wanted), placements=placements, settle=True)
+            for job_id, items in wanted.items():
+                if job_id not in found:
+                    problems.update((path, f"no job {job_id} at its placement or owned") for path, _ in items)
+        for path, reason in sorted(problems.items()):
+            tally.note(path, _bytes(path, self.sizes))
+            if self.owner is not None and not self.dry_run and quarantine(self.workspace, self.owner, path, reason):
+                tally.removed += 1
+
+    def manager_logs(self, tally: _Tally) -> None:
         cutoff = self._cutoff(self.retention.trash_days)
         assert cutoff is not None
-        try:
-            trash = transaction.directory("trash")
-        except (FormatError, OSError):
-            return
-        with trash:
-            for name in sorted(os.listdir(trash.fd)):
-                information = trash.stat(name)
-                if information is None or information.st_mtime > cutoff:
-                    continue
-                self._collect(
-                    "transaction_trash", trash.path / name, remover=functools.partial(trash.remove_tree, name)
-                )
-        information = transaction.stat("trash")
-        if information is None or not stat.S_ISDIR(information.st_mode):
-            return
-        if information.st_uid != os.getuid():
-            self._skipped_foreign["transaction_trash"] = self._skipped_foreign.get("transaction_trash", 0) + 1
-            _LOGGER.debug("skipping foreign transaction_trash directory %s", transaction.path / "trash")
-            return
-        if self.dry_run:
-            return
-        try:
-            os.rmdir("trash", dir_fd=transaction.fd)
-        except OSError:
-            return
-
-    def collect_retired_bundles(self) -> None:
-        """Collect the transfer bundles a completed handover left behind.
-
-        A retired bundle (``transfers/retired/<T>``) is a full second copy of a
-        payload the destination has already acknowledged, which makes it the
-        largest thing a busy transfer campaign accumulates. It is kept
-        ``trash_days`` after its acknowledgement.
-        """
-
-        cutoff = self._cutoff(self.retention.trash_days)
-        if cutoff is None:
-            self._skip("retired_bundles", "retention.trash_days is not configured")
-            return
-        for entry in _iterdir(self.control / "transfers" / "retired"):
-            if entry.is_dir() and self._aged(entry, cutoff):
-                self._collect("retired_bundles", entry)
-
-    def collect_transfer_records(self) -> None:
-        """Collect the per-transfer receipts of imports already completed.
-
-        An acknowledgement is the destination's idempotency receipt for one
-        import. Collecting it after the configured trash retention means a
-        bundle re-offered later than that is imported afresh, which the
-        duplicate-job check still recognizes for as long as the imported job
-        exists in this workspace.
-        """
-
-        cutoff = self._cutoff(self.retention.trash_days)
-        if cutoff is None:
-            self._skip("transfer_records", "retention.trash_days is not configured")
-            return
-        for entry in _iterdir(self.control / "transfers" / "acks"):
-            if entry.is_file() and entry.suffix == ".json" and self._aged(entry, cutoff):
-                self._collect("transfer_records", entry, size=self._entry_size(entry))
-
-    def collect_transfer_receipts(self) -> None:
-        """Collect the 13.1 receipts no copy of their transfer can be accepted against any more.
-
-        ``transfers/received/<T>`` is deleted once ``now > sealed_at + W + S``
-        (the freshness window plus the clock skew): a copy arriving later is
-        refused as expired by every importer. A receipt that cannot be parsed is
-        never deleted.
-        """
-
-        from ._receipts import read_receipt, receipt_expired
-
-        now_ns = int(self.now * 1e9)
-        for entry in _iterdir(self.control / "transfers" / "received"):
-            try:
-                document = read_receipt(entry)
-            except (OSError, FormatError) as exc:
-                _LOGGER.debug("keeping unreadable transfer receipt %s: %s", entry, exc)
+        logs = self.workspace.root / LOGS_DIRECTORY / "managers"
+        for name in _names(logs):
+            owner_id = name.removesuffix(".1").removesuffix(".log")
+            if not name.endswith((".log", ".log.1")) or (self.control / "owners" / owner_id / "owner.json").exists():
                 continue
-            if receipt_expired(document, now_ns):
-                self._collect("transfer_receipts", entry, size=self._entry_size(entry))
+            if self._aged(logs / name, cutoff):
+                self._remove(tally, logs / name)
 
-    def collect_tmp_entries(self) -> None:
-        """Collect abandoned staging entries, which need no retention policy.
+    def owner_tombstones(self, tally: _Tally) -> None:
+        cutoff = self._cutoff(self.retention.owner_tombstone_days)
+        assert cutoff is not None
+        for record in _kernel.list_owners(self.workspace):
+            tombstone = record.path / "dead.json"
+            # Only a recovered owner: nothing left but its tombstone (and write temporaries).
+            if record.record is not None or record.tombstone is None or not self._aged(tombstone, cutoff):
+                continue
+            if any(not name.startswith(".") for name in _names(record.path) if name != "dead.json"):
+                continue
+            if (self.workspace.jobs / _kernel.OWNED / record.owner_id).exists():
+                continue
+            tally.note(record.path, _bytes(record.path, self.sizes))
+            if self.dry_run:
+                continue
+            for name in _names(record.path):
+                _fs.remove_file(_fs.loc(record.path / name), durable=self.workspace.durable)
+            if _fs.remove_empty_dir(_fs.loc(record.path)):
+                tally.removed += 1
 
-        Every publication creates its staging entry and renames it away inside
-        one operation, so an entry still sitting in a staging directory a day
-        later belongs to a process that died and can never be resumed. The
-        transfer transaction directories are the exception: ``import.*``,
-        ``eject.*``, ``abort.*``, ``export.*`` and ``birth.*`` below ``tmp/`` may be
-        a job's only copy and are only ever removed by the transfer protocol
-        and its recovery, never here. ``trash.*`` is garbage, but one is only
-        removed once it holds no job payload (it may be left by a discarder that
-        died before its own payload check); one that does is quarantined.
-        """
-
+    def tmp_entries(self, tally: _Tally) -> None:
         cutoff = self.now - TMP_MAXIMUM_AGE_SECONDS
-        committing: set[str] | None = None
-        for staging in (self.control / "tmp", self.control / "requests" / "tmp"):
-            for entry in _iterdir(staging):
-                if staging == self.control / "tmp" and entry.name.startswith(TRANSACTION_PREFIXES):
-                    continue
-                if not self._aged(entry, cutoff):
-                    continue
-                if staging == self.control / "tmp" and entry.name.startswith(("child.", "runner.")):
-                    # A staged child bundle is the only copy of a child whose
-                    # parent's commit was interrupted between staging and
-                    # publication, and a staged runner copy may be in the middle
-                    # of its verification and publication; both are kept while
-                    # that commit is unfinished.
-                    if committing is None:
-                        committing = self._committing_attempt_ids()
-                    if committing is None or entry.name.split(".", 2)[1] in committing:
-                        self._skip("tmp_entries", f"kept staged entry {entry.name} of an unfinished commit")
-                        continue
-                if staging == self.control / "tmp" and entry.name.startswith("trash.") and holds_job_payload(entry):
-                    self._skip("tmp_entries", f"{entry.name} holds a job payload; it is quarantined, not removed")
-                    if not self.dry_run:
-                        try:
-                            trash(entry, control=self.control, holds_payload=lambda _path: True)
-                        except OSError as exc:
-                            _LOGGER.warning("cannot quarantine %s: %s", entry, exc, extra={"event": "gc_quarantine"})
-                    continue
-                self._collect("tmp_entries", entry)
+        owners = self.control / "owners"
+        for directory in [self.control / "requests", *(owners / name for name in _names(owners))]:
+            for name in _names(directory):
+                if name.startswith(".") and name.endswith(".tmp") and self._aged(directory / name, cutoff):
+                    self._remove(tally, directory / name)
+        tmp = self.control / "tmp"
+        for name in _names(tmp):
+            # Only entries already moved for deletion carry this name; a crashed removal left them.
+            if name.startswith("trash.") and len(name) == _TRASH_NAME_LENGTH and self._aged(tmp / name, cutoff):
+                self._remove(tally, tmp / name)
 
-    def _committing_attempt_ids(self) -> set[str] | None:
-        """Return the attempt ids of committing jobs, or ``None`` when one cannot be read."""
+    # -- the pass ---------------------------------------------------------------------------------------------
 
-        attempts: set[str] = set()
-        for marker in self.markers():
-            if marker.kind != "committing":
-                continue
-            try:
-                attempt_id = self.workspace.read_state(marker).get("attempt_id")
-            except (WorkflowError, OSError):
-                return None
-            if isinstance(attempt_id, str):
-                attempts.add(attempt_id)
-        return attempts
-
-    def collect_retired_requests(self) -> None:
-        """Collect month-old request leftovers: claimed by the dead, and retired.
-
-        Two directories hold requests that will never be acted on again, and
-        both are always safe to prune after the same month: one claimed by a
-        manager that is no longer heartbeating, and one a manager explicitly
-        retired because it could never become actionable. The retirement record
-        written beside a retired request ages out with it, since it only ever
-        explained that one file.
-        """
-
-        cutoff = self.now - RETIRED_REQUEST_MAXIMUM_AGE_SECONDS
-        live = self.live_managers()
-        for manager_dir in _iterdir(self.control / "requests" / "claimed"):
-            if not manager_dir.is_dir() or manager_dir.name in live:
-                continue
-            for entry in _iterdir(manager_dir):
-                if entry.is_file() and self._aged(entry, cutoff):
-                    self._collect("retired_requests", entry, size=self._entry_size(entry))
-            self._rmdir(manager_dir, "retired_requests")
-        for entry in _iterdir(self.control / "requests" / "retired"):
-            if entry.is_file() and self._aged(entry, cutoff):
-                self._collect("retired_requests", entry, size=self._entry_size(entry))
-
-    def collect_journal_segments(self) -> None:
-        """Collect aged journal segments outside protected frame chains.
-
-        Three conditions must hold together: the segment is older than
-        ``journal_days``, no current marker protects it, and the writer that
-        produced it belongs to no manager still heartbeating. Terminal jobs
-        protect only their current segment; non-terminal jobs (``transferring``
-        included) protect every segment in their frame chain.
-        """
-
-        journal = self.control / "journal"
-        cutoff = self._cutoff(self.retention.journal_days)
-        if cutoff is None:
-            self._skip("journal_segments", "retention.journal_days is not configured")
-            self._count_all_segments(journal)
-            return
-        live = self.live_managers()
-        if self._opaque_live_manager:
-            self._skip("journal_segments", "a live manager does not name its journal writer")
-            self._count_all_segments(journal)
-            return
-        live_writers = {writer_id for writer_id in live.values() if writer_id is not None}
-        if self.journal_writer is not None:
-            live_writers.add(self.journal_writer.writer_id)
-        referenced = self.referenced_segments()
-        for writer_dir in _iterdir(journal):
-            writer_id = _writer_id_of(writer_dir)
-            if writer_id is None:
-                continue
-            segments = [path for path in _iterdir(writer_dir) if path.suffix == ".hwj"]
-            if writer_id in live_writers:
-                self._surviving_segments[writer_id] = len(segments)
-                continue
-            surviving = 0
-            for path in segments:
-                number = _segment_number(path)
-                if number is None or (writer_id, number) in referenced or not self._aged(path, cutoff):
-                    surviving += 1
-                    continue
-                self._collect("journal_segments", path, size=self._entry_size(path))
-            self._surviving_segments[writer_id] = surviving
-            if surviving == 0:
-                self._rmdir(writer_dir, "journal_segments")
-
-    def _count_all_segments(self, journal: Path) -> None:
-        """Record every segment as surviving, for a run that prunes none."""
-
-        for writer_dir in _iterdir(journal):
-            writer_id = _writer_id_of(writer_dir)
-            if writer_id is not None:
-                self._surviving_segments[writer_id] = len([p for p in _iterdir(writer_dir) if p.suffix == ".hwj"])
-
-    def collect_manager_directories(self) -> None:
-        """Collect the directories of dead manager incarnations.
-
-        A manager directory is the only mapping from a journal writer to the
-        host, process, and pools that produced it. A crashed directory may
-        outlive its writer's segments until policy-gated collection removes it;
-        clean managers remove their own directory. One whose
-        ``manager.json`` cannot be read names no writer and is therefore kept:
-        it is already an anomaly, and it is a few hundred bytes. Its trusted
-        launch records are collected first when they provably describe no live
-        launch (the manager silent for its lease times the takeover grace
-        factor, and each recorded process group gone on this host or never
-        recorded); a directory whose ``launches/`` still holds a record is
-        kept, because the record may describe a confined launch that still
-        runs and is the takeover evidence of that launch.
-        """
-
-        cutoff = self._cutoff(self.retention.journal_days)
-        if cutoff is None:
-            self._skip("manager_directories", "retention.journal_days is not configured")
-            return
-        live = self.live_managers()
-        for manager_dir in _iterdir(self.control / "managers"):
-            if not manager_dir.is_dir() or manager_dir.name in live:
-                continue
-            if not self._aged(manager_dir, cutoff):
-                continue
-            dead = self._collect_dead_launch_records(manager_dir)
-            if _holds_launch_records(manager_dir, ignoring=dead if self.dry_run else frozenset()):
-                continue
-            writer_id = self._writer_of(manager_dir)
-            if writer_id is None or self._surviving_segments.get(writer_id, 0) > 0:
-                continue
-            self._collect("manager_directories", manager_dir)
-
-    def collect_manager_logs(self) -> None:
-        """Collect the per-manager logs of managers whose directory is gone.
-
-        ``logs/managers/<id>.log`` (and its ``.1`` backup) outlives the manager
-        so a crash stays diagnosable; once the manager directory is collected
-        and the file is older than ``retention.trash_days`` it is removed.
-        ``logs/batch/`` is never touched.
-        """
-
-        cutoff = self._cutoff(self.retention.trash_days)
-        if cutoff is None:
-            self._skip("manager_logs", "retention.trash_days is not configured")
-            return
-        for entry in _iterdir(self.workspace.root / LOGS_DIRECTORY / "managers"):
-            manager_id = entry.name.removesuffix(".1").removesuffix(".log")
-            if not entry.name.endswith((".log", ".log.1")) or not entry.is_file():
-                continue
-            if (self.control / "managers" / manager_id).exists() or not self._aged(entry, cutoff):
-                continue
-            self._collect("manager_logs", entry, size=self._entry_size(entry))
-
-    def _collect_dead_launch_records(self, manager_dir: Path) -> frozenset[str]:
-        """Collect the trusted launch records of a dead manager that describe no live launch; return their names."""
-
-        from ._manager_launches import LAUNCHES_DIRECTORY, dead_records
-        from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR
-
-        grace = self.workspace.policy.lease_seconds * DEFAULT_TAKEOVER_GRACE_FACTOR
-        names = dead_records(manager_dir, hostname=socket.gethostname(), grace_seconds=grace, now=self.now)
-        for name in names:
-            self._collect("manager_directories", manager_dir / LAUNCHES_DIRECTORY / name)
-        return frozenset(names)
-
-    def collect_placement_directories(self) -> None:
-        """Collect the empty placement mirrors left below every state kind.
-
-        A job's placement is mirrored under each state kind it passes through,
-        so a deep or job-unique placement leaves one empty hierarchy behind per
-        kind. Pruning them needs no retention policy because an empty directory
-        carries nothing, and it races a transition that is recreating exactly
-        this path: the removal is therefore a bare ``rmdir`` whose failure is
-        the expected outcome rather than an error.
-        """
-
-        for kind_dir in _iterdir(self.control / "state"):
-            if not kind_dir.is_dir():
-                continue
-            emptied: set[str] = set()
-            for directory, directories, files in os.walk(kind_dir, topdown=False, onerror=lambda _: None):
-                actual_files = [name for name in files if os.path.join(directory, name) not in self._projected_removed]
-                if directory == str(kind_dir) or actual_files:
-                    continue
-                if any(os.path.join(directory, name) not in emptied for name in directories):
-                    continue
-                path = Path(directory)
-                accumulator = self._accumulators["placement_directories"]
-                accumulator.candidates += 1
-                accumulator.entries.append(directory)
-                if self.sizes:
-                    accumulator.bytes_reclaimed += _entry_bytes(path)
-                if self.dry_run:
-                    if _owned_by_current_user(path):
-                        emptied.add(directory)
-                    else:
-                        self._skipped_foreign["placement_directories"] = (
-                            self._skipped_foreign.get("placement_directories", 0) + 1
-                        )
-                elif self._rmdir(path, "placement_directories"):
-                    accumulator.removed += 1
-                    emptied.add(directory)
-
-    def _rmdir(self, path: Path, category: str) -> bool:
-        """Remove one directory if it is empty, tolerating every reason not to.
-
-        A directory that is not empty, that another process removed first, or
-        that a concurrent transition is repopulating are all ordinary outcomes
-        here, never faults.
-        """
-
-        if not _owned_by_current_user(path):
-            self._skipped_foreign[category] = self._skipped_foreign.get(category, 0) + 1
-            _LOGGER.debug("skipping foreign %s directory %s", category, path)
-            return False
-        if self.dry_run:
-            return False
-        try:
-            path.rmdir()
-        except OSError:
-            return False
-        return True
-
-    # -- driving -------------------------------------------------------------
-
-    def execute(self) -> GcReport:
-        """Perform every category in order and publish the resulting report."""
-
-        for category in GC_CATEGORIES:
-            if category not in self._selected:
-                self._skip(category, "not selected")
-                continue
-            getattr(self, f"collect_{category}")()
-        report = GcReport(
-            workspace_id=self.workspace.workspace_id,
-            dry_run=self.dry_run,
-            collected_at=utc_now(),
-            retention=self.retention.as_mapping(),
-            categories=tuple(self._accumulators[name].frozen() for name in GC_CATEGORIES),
-            removed_jobs=tuple(self._removed_jobs),
-            skipped=tuple(self._skipped),
-            skipped_foreign=dict(self._skipped_foreign),
-        )
-        return self._journal(report)
-
-    def _journal(self, report: GcReport) -> GcReport:
-        """Append one frame describing what was removed, if anything was.
-
-        A run that removed nothing writes nothing: opening a journal writer
-        creates a writer directory, and an empty collection that leaves one
-        behind would be creating the garbage it came to collect.
-        """
-
-        if self.dry_run or not report.removed:
-            return report
-        frame: dict[str, Any] = {
-            "format": GC_FRAME_FORMAT,
-            "format_version": 2,
-            "workspace_id": self.workspace.workspace_id,
-            "collected_at": report.collected_at,
-            "retention": dict(report.retention),
-            "removed": report.removed,
-            "bytes_reclaimed": report.bytes_reclaimed,
-            "removed_jobs": list(report.removed_jobs),
-            "skipped_foreign": dict(report.skipped_foreign),
-            "categories": {
-                category.name: {
-                    "candidates": category.candidates,
-                    "removed": category.removed,
-                    "bytes_reclaimed": category.bytes_reclaimed,
-                    "skipped": category.skipped,
-                    **({} if category.skip_reason is None else {"skip_reason": category.skip_reason}),
-                }
-                for category in report.categories
-            },
+    def execute(self, categories: Sequence[str]) -> GcReport:
+        gates = {
+            "attempt_control": ("attempt_control_days", self.retention.attempt_control_days),
+            "manager_logs": ("trash_days", self.retention.trash_days),
+            "owner_tombstones": ("owner_tombstone_days", self.retention.owner_tombstone_days),
         }
-        if self.journal_writer is not None:
-            record_ref = self.journal_writer.append(frame)
-        else:
-            with self.workspace.open_journal_writer() as writer:
-                record_ref = writer.append(frame)
-        _LOGGER.info(
-            "collected %d entries and about %d bytes from workspace %s",
-            report.removed,
-            report.bytes_reclaimed,
-            self.workspace.workspace_id,
-            extra={
-                "event": "garbage_collected",
-                "workspace_id": self.workspace.workspace_id,
-                "removed": report.removed,
-                "bytes_reclaimed": report.bytes_reclaimed,
-            },
-        )
+        results: list[GcCategory] = []
+        for name in GC_CATEGORIES:
+            tally = _Tally(name)
+            if name not in categories:
+                tally.skip_reason = "not selected"
+            elif name in gates and gates[name][1] is None:
+                tally.skip_reason = f"retention.{gates[name][0]} keeps everything"
+            else:
+                getattr(self, name)(tally)
+            results.append(tally.frozen())
         return GcReport(
-            workspace_id=report.workspace_id,
-            dry_run=report.dry_run,
-            collected_at=report.collected_at,
-            retention=report.retention,
-            categories=report.categories,
-            removed_jobs=report.removed_jobs,
-            record_ref=record_ref,
-            skipped=report.skipped,
-            skipped_foreign=report.skipped_foreign,
+            self.workspace.workspace_id,
+            self.dry_run,
+            datetime.now(UTC).isoformat(),
+            self.retention.as_mapping(),
+            tuple(results),
         )
-
-
-def _writer_id_of(writer_dir: Path) -> str | None:
-    """Return the writer UUID one journal directory name denotes."""
-
-    if not writer_dir.is_dir():
-        return None
-    try:
-        writer_id = str(uuid.UUID(writer_dir.name))
-    except ValueError:
-        return None
-    return writer_id if writer_id == writer_dir.name else None
-
-
-def _segment_number(path: Path) -> int | None:
-    """Return the segment number one journal file name encodes."""
-
-    try:
-        return int(path.stem, 36)
-    except ValueError:
-        return None
 
 
 def collect_garbage(
     workspace: "Workspace",
     *,
+    owner: _kernel.Owner | None = None,
     dry_run: bool = False,
     now: float | None = None,
     categories: Sequence[str] | None = None,
-    journal_writer: JournalWriter | None = None,
     sizes: bool = True,
+    journal_writer: object = None,
 ) -> GcReport:
-    """Collect what the retention policy of *workspace* permits.
+    """Collect what the workspace's retention policy permits.
 
-    Nothing is removed for a category whose limit is unlimited (``None``): the
-    retention defaults gate journal history and trash after one day, while an
-    explicit ``null`` or ``"keep"`` disables a category. The exceptions are
-    the categories that cannot carry information — empty placement mirrors,
-    staging entries abandoned for a day, and month-old request leftovers,
-    whether claimed by a manager that is gone or explicitly retired — plus
-    ``removed_jobs``, which collects terminal and quiescent, unowned markers
-    whose payload was removed, whatever the policy says.
-
-    With *dry_run* the workspace is not touched at all and the report describes
-    what a real run would have removed. *now* overrides the moment every age is
-    measured against, which is how a test ages a workspace deterministically.
-
-    :param workspace: Workspace whose retention policy is applied.
-    :param dry_run: Whether to report candidates without removing them.
-    :param now: Timestamp used to evaluate age limits.
-    :param categories: Restrict collection to these categories, in the
-        canonical :data:`GC_CATEGORIES` order. Selecting
-        ``manager_directories`` also selects ``journal_segments`` because the
-        manager-directory decision depends on that category's surviving
-        segment count, and ``manager_logs``, whose eligibility follows it.
-    :param journal_writer: Append a collection frame to this already-open
-        writer instead of opening a new writer.
-    :param sizes: Whether to calculate byte estimates. Set this to ``False``
-        for count-only scans; no tree byte-sizing is performed and reported
-        reclaimed bytes are zero.
-    :return: Collection report.
+    :param workspace: The workspace.
+    :param owner: The owner that claims and recovers (a manager passes its own); a CLI owner is registered for
+        the collection when omitted (not for a dry run).
+    :param dry_run: Report candidates without changing anything (``placement_directories`` reports nothing).
+    :param now: The moment ages are measured against (tests age a workspace with it).
+    :param categories: Run only these categories of :data:`GC_CATEGORIES`.
+    :param sizes: Estimate the bytes of each candidate.
+    :param journal_writer: Ignored: workspaces have no journal any more.
+    :return: The report.
+    :raises ValueError: For an unknown category.
     """
 
-    return _Collection(
-        workspace,
-        dry_run=dry_run,
-        now=time.time() if now is None else now,
-        categories=categories,
-        journal_writer=journal_writer,
-        sizes=sizes,
-    ).execute()
+    del journal_writer
+    selected = GC_CATEGORIES if categories is None else tuple(categories)
+    unknown = sorted(set(selected) - set(GC_CATEGORIES))
+    if unknown:
+        raise ValueError(f"unknown gc categories: {', '.join(unknown)}")
+    clock = time.time() if now is None else now
+    if owner is not None or dry_run:
+        return _Collection(workspace, owner, dry_run=dry_run, now=clock, sizes=sizes).execute(selected)
+    with _kernel.register_owner(workspace, kind="cli", label="workspace gc", allocation=None, advertised={}) as cli:
+        return _Collection(workspace, cli, dry_run=False, now=clock, sizes=sizes).execute(selected)
 
 
 def iter_report_rows(report: GcReport) -> Iterator[tuple[str, int, int, int]]:
-    """Yield the category rows a command-line collection prints.
+    """Yield the category rows a command-line collection prints, then the total.
 
-    :param report: Collection report to render.
-    :yield: Category row for each report category and the final total.
+    :param report: The report.
+    :yield: ``(category, candidates, removed, bytes)``.
     """
 
     for category in report.categories:

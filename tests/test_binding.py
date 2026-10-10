@@ -448,14 +448,6 @@ publish("succeed")
 """
 
 
-_TILDE_QUOTING = pytest.mark.xfail(
-    strict=True,
-    reason="v3 owned job directory names contain '~', so the nodefile path always needs shell quoting and "
-    "HTTK_WORKFLOW_LAUNCH reads env 'SLURM_HOSTFILE=...' srun ...: the documented `$HTTK_WORKFLOW_LAUNCH vasp_std` "
-    "word-splitting use breaks for every attempt",
-)
-
-
 class _Campaign:
     #: The runner body every job of the campaign runs.
     body = _RECORD
@@ -516,12 +508,24 @@ def test_attempts_are_placed_and_told_their_binding(tmp_path: Path) -> None:
     campaign.submit("small", procs=2)
     with _manager(campaign) as manager:
         seen = campaign.seen(manager, "small")
-        nodefile = seen["binding"]["nodefile"]
+        nodefile, file = seen["binding"]["nodefile"], Path(seen["binding"]["file"])
         assert seen["binding"] == {
             "nodes": [{"host": HOST, "procs": 2, "gpus": 0}],
             "nodefile": nodefile,
-            "file": str(Path(nodefile).with_name("binding.json")),
+            "file": str(file),
         }
+        # The nodefile is the owner's (trusted, no "~" in its path); binding.json is in the attempt control directory.
+        attempt_id = file.parent.name
+        assert file.parent.parent.name == "attempts" and "~" not in nodefile
+        assert (
+            Path(nodefile)
+            == campaign.workspace.control
+            / "owners"
+            / manager.manager_id
+            / "launches"
+            / (f"{attempt_id}.0")
+            / "nodefile"
+        )
         assert seen["env"] == {
             "HTTK_WORKFLOW_NODELIST": HOST,
             "HTTK_WORKFLOW_NODEFILE": nodefile,
@@ -564,7 +568,6 @@ def test_whole_node_job_waits_for_an_idle_node(tmp_path: Path) -> None:
         campaign.finish(manager, "second", "whole")
 
 
-@_TILDE_QUOTING
 @pytest.mark.timing
 def test_slurm_allocation_gets_an_srun_prefix(tmp_path: Path) -> None:
     campaign = _Campaign(tmp_path)
@@ -581,7 +584,6 @@ def test_slurm_allocation_gets_an_srun_prefix(tmp_path: Path) -> None:
         campaign.finish(manager, "mpi")
 
 
-@_TILDE_QUOTING
 @pytest.mark.timing
 def test_launch_mpi_setting_adds_the_srun_mpi_plugin(tmp_path: Path) -> None:
     campaign = _Campaign(tmp_path)

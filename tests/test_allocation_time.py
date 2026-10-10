@@ -127,6 +127,7 @@ def test_manager_json_records_end_time_and_resources_and_introspection_shows_the
         (reason,) = manager_refusals(managed, claim_requirements(job), job=job)
         assert reason.startswith("its allocation ends in 00:5") and reason.endswith("needs mintime 02:00:00")
         record["allocation"]["end_time"] = None
+        del record["end_time"]  # an owner.json written before the top-level end_time
         path.write_text(json.dumps(record))
         (older,) = read_managers(workspace)
         assert older.end_time is None and older.ends() is None

@@ -40,6 +40,8 @@ from . import (
     _manager_scheduling,
     _requests,
     _store,
+    gc,
+    removal,
     seals,
 )
 from ._allocation import (
@@ -80,7 +82,7 @@ from ._manager_commit import (
 )
 from ._manager_launches import AttemptLaunches, LaunchContext
 from ._sandbox import BWRAP_USERNS_BLOCK, PreparedSandbox
-from ._state import MAX_STATE_BYTES, TERMINAL_STATES, StateDoc, read_state_unowned
+from ._state import MAX_STATE_BYTES, StateDoc
 from ._util import json_bytes, utc_now
 from .codes import code_environment
 from .compat import runner_path
@@ -391,18 +393,34 @@ def _listdir(directory: Path) -> list[str]:
         return []
 
 
-def _salvaged_requests(path: Path) -> tuple[str, ...] | None:
-    """Return the ``applied_requests`` of a damaged ``state.json`` when that member still reads, else ``None``."""
+def _salvaged(path: Path) -> dict[str, Any]:
+    """Return what still reads from a damaged ``state.json``: ``applied_requests``, ``origin``, ``exchange_name``.
+
+    Each member is kept only when it parses (the file itself may be a symlink, a FIFO or garbage: it is read
+    without following or blocking, and anything else is ignored).
+    """
 
     try:
         data = _fs.read_bounded(_fs.loc(path), MAX_STATE_BYTES, nonblock=True)
         value = None if data is None else json.loads(data)
-        applied = value.get("applied_requests") if isinstance(value, dict) else None
-        if isinstance(applied, list):
-            return tuple(canonical_uuid(item, "applied request id") for item in applied)
     except (OSError, ValueError, WorkflowError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    kept: dict[str, Any] = {}
+    applied = value.get("applied_requests")
+    try:
+        if isinstance(applied, list):
+            kept["applied_requests"] = tuple(canonical_uuid(item, "applied request id") for item in applied)
+    except (ValueError, WorkflowError):
         pass
-    return None
+    origin, name = value.get("origin"), value.get("exchange_name")
+    if origin in ("local", "exchange"):
+        try:
+            kept.update(origin=origin, exchange_name=None if name is None else canonical_uuid(name, "exchange_name"))
+        except (ValueError, WorkflowError):
+            pass
+    return kept
 
 
 def _text(mapping: Mapping[str, object] | None, key: str) -> str | None:
@@ -429,7 +447,8 @@ class TaskManager:
     :param cancel_grace_seconds: Wait this long after ``SIGTERM`` before killing a stopped attempt.
     :param discovery_budget: Read at most this many ready jobs per claim pass.
     :param placement_prefixes: Restrict scheduling to these placement subtrees.
-    :param gc_interval: Accepted for compatibility; background collection returns with C5a.
+    :param gc_interval: Run :func:`httk.workflow.gc.collect_garbage` (all but ``dead_owners``, which every tick
+        probes) at most this often, in seconds; ``None`` never.
     :param on_attached: Called with the owner id once the owner is registered.
     :param end_time: The epoch second this manager's allocation ends, or ``None`` when unknown.
     :param deadline_margin: Stop claiming work this many seconds before *end_time*.
@@ -531,6 +550,7 @@ class TaskManager:
             self.placement_prefixes = ()
         self.accept_any_pool = accept_any_pool
         self.gc_interval = gc_interval
+        self._next_gc = time.monotonic()
         self._running: dict[str, RunningAttempt] = {}
         self._reported: dict[str, str] = {}
         # The claim pass resumes its window of ready jobs after this cursor.
@@ -565,6 +585,9 @@ class TaskManager:
                 "capabilities": sorted(self.capabilities),
                 "prefixes": [placement_text(prefix) for prefix in self.placement_prefixes],
                 "resources": dict(self.resources),
+                # When the allocation ends and when this manager stops claiming, whatever the allocation says.
+                "end_time": self.end_time,
+                "drain_start": self.drain_start,
             },
         )
         #: This manager's owner id.
@@ -587,8 +610,6 @@ class TaskManager:
                 time.time() - self.drain_start,
                 extra=self._event("drain_point_passed", end_time=self.end_time),
             )
-        if gc_interval is not None:
-            _LOGGER.info("background collection is not run by this manager yet (it returns with C5a)")
         if EXCHANGE_EXTENSION in workspace.extensions:
             _LOGGER.info("this manager does not serve the workspace exchange yet (it returns in phase D)")
 
@@ -712,11 +733,29 @@ class TaskManager:
             changed |= self._supervise()
             if not self._draining and self._confinement_blocked() is None:
                 changed |= _manager_scheduling.claim_pass(self)
+            self._collect_garbage()
             self.heartbeat()
         except _kernel.OwnerLost:
             self._fail_stop()
             raise
         return changed
+
+    def _collect_garbage(self) -> None:
+        """Run the background collection when ``gc_interval`` has passed since the last one."""
+
+        if self.gc_interval is None or time.monotonic() < self._next_gc:
+            return
+        self._next_gc = time.monotonic() + self.gc_interval
+        selected = tuple(name for name in gc.GC_CATEGORIES if name != "dead_owners")
+        try:
+            report = gc.collect_garbage(self.workspace, owner=self.owner, categories=selected, sizes=False)
+        except (WorkflowError, OSError, _fs.UnsafePath) as exc:
+            if isinstance(exc, _kernel.OwnerLost):
+                raise
+            _LOGGER.warning("background collection failed: %s", exc, extra=self._event("gc_failed"))
+            return
+        if report.removed:
+            _LOGGER.info("background collection removed %d entries", report.removed, extra=self._event("gc"))
 
     def _fail_stop(self) -> None:
         """Kill every attempt this owner started and stop serving, touching no job (plan §5.2)."""
@@ -743,7 +782,13 @@ class TaskManager:
                 continue
             # A handle this process still holds is a commit it retries, not a claim it lost track of.
             held = ref.path in self.owner._held
-            owned = self.owner.adopt_owned(ref)
+            try:
+                owned = self.owner.adopt_owned(ref)
+            except (FormatError, _fs.UnsafePath) as exc:
+                # A job won with a damaged job.json (its claim raised): no handle can release it, so quarantine.
+                gc.quarantine_damaged(self.workspace, self.owner, ref.job_id, f"job.json is damaged: {exc}")
+                changed = True
+                continue
             if not held:
                 owned.append_log("recovered", detail="self-healed")
             reconciled = self._reconcile_guarded(owned)
@@ -822,11 +867,14 @@ class TaskManager:
         :raises httk.workflow.errors.WorkflowError: When the job was taken from this owner.
         """
 
-        owned.remove_leftover_temporaries()
         try:
+            owned.remove_leftover_temporaries()
             job = JobDefinition.from_path(owned.path / "job.json")
             doc = owned.read_state()
-        except FormatError as exc:
+        except _kernel.OwnerLost:
+            raise
+        except WorkflowError as exc:
+            # FormatError, and UnsafePath for a symlinked or special state.json the job planted: job damage.
             self._fail_damaged(owned, str(exc))
             return None
         if (pending := owned.pending_release()) is not None and doc is not None:
@@ -859,6 +907,10 @@ class TaskManager:
             if outcome is not None:
                 self._commit_outcome(owned, job, doc, outcome, outcome_dir)
                 return None
+            if (cancel := self._pending_cancel(owned)) is not None:
+                # The dead owner was stopping the attempt for this request (or never saw it): it is cancelled.
+                self._commit(owned, job, doc, cancel_intent(attempt_id, owned.from_priority, cancel))
+                return None
             if doc.owner_id == self.manager_id:
                 # This process ran the attempt and saw it end, but failed before recording the commit.
                 code, message, unclean = "process_failure", "the attempt ended without a committed outcome", False
@@ -883,10 +935,12 @@ class TaskManager:
 
         _LOGGER.error("failing %s: %s", owned.job_key, message, extra=self._event("job_damaged", owned))
         doc = StateDoc.empty(owned.job_id).with_failure(failure("protocol_error", message))
-        applied = _salvaged_requests(owned.path / "state.json")
-        if applied is not None:
+        salvaged = _salvaged(owned.path / "state.json")
+        # An exchange job stays one (its client still asks for it by its name).
+        doc = doc.updated(**{key: salvaged[key] for key in ("origin", "exchange_name") if key in salvaged})
+        if "applied_requests" in salvaged:
             # Applied requests must stay skipped: their files may still exist (plan §3.3).
-            doc = doc.updated(applied_requests=applied)
+            doc = doc.updated(applied_requests=salvaged["applied_requests"])
         else:
             directory = self.workspace.control / "requests"
             for name in _listdir(directory):
@@ -894,7 +948,9 @@ class TaskManager:
                     _fs.remove_file(_fs.loc(directory / name), durable=self.workspace.durable)
         try:
             self._release(owned, doc, Release("failed", owned.from_priority))
-        except FormatError as exc:
+        except _kernel.OwnerLost:
+            raise
+        except WorkflowError as exc:
             # Without a readable placement the kernel cannot release it; fsck and an operator must.
             self._report_anomaly(
                 f"damaged:{owned.job_key}",
@@ -1003,11 +1059,14 @@ class TaskManager:
             self._remove_attempt(owned, attempt_id)
         owned.append_log("committed", attempt_id=attempt_id, to=target, detail=intent["action"])
         priority = intent.get("priority")
-        request_id = intent.get("request_id")
+        request_id, audit = intent.get("request_id"), intent.get("request")
         if isinstance(request_id, str):
             owned.append_log(
                 "request_applied", attempt_id=attempt_id, detail={"request_id": request_id, "action": "cancel"}
             )
+            if isinstance(audit, Mapping):
+                # As _requests.apply records a request it applies: who asked, why, and the move.
+                final = final.with_history("request_applied", **audit, **{"from": owned.from_state, "to": target})
         applied = (request_id,) if isinstance(request_id, str) else ()
         released = Release(target, priority if isinstance(priority, int) else owned.from_priority, applied)
         # The owner's own boundary: requests posted while the attempt ran take effect here, from the commit's
@@ -1027,23 +1086,9 @@ class TaskManager:
         _fs.remove_empty_dir(_fs.loc(owned.path / "attempts"))
 
     def _release(self, owned: OwnedJob, doc: StateDoc, target: Release) -> _kernel.JobRef:
-        """The release rule with this manager's history entry and run-log events."""
+        """The release rule with this owner's history entry and run-log events."""
 
-        moved = {"from": owned.from_state, "to": target.state}
-        doc = doc.updated(owner_id=self.manager_id).with_history("released", owner_id=self.manager_id, **moved)
-        attempt_id = _text(doc.attempt, "id")
-        if target.state == "failed":
-            owned.append_log("failed", attempt_id=attempt_id, detail=_text(doc.failure, "code"))
-        owned.append_log("released", **moved, detail={"priority": target.priority})
-        ref = owned.release(doc, target)
-        _LOGGER.info(
-            "job %s moved from %s to %s",
-            owned.job_key,
-            owned.from_state,
-            target.state,
-            extra=self._event("released", owned, to=target.state),
-        )
-        return ref
+        return removal.release(owned, doc, target)
 
     def _seal_enabled(self, job: JobDefinition) -> bool:
         """Decide the seal of a ``succeed`` commit: the job's ``seal_succeeded``, else the ``seal.succeeded`` setting."""
@@ -1157,6 +1202,15 @@ class TaskManager:
         self._parsed[path.name] = (stamp, request)
         return request
 
+    def _pending_cancel(self, owned: OwnedJob) -> _requests.Request | None:
+        """Return the job's first pending ``cancel`` request, or ``None``."""
+
+        for path in owned.request_files():
+            request = self._parse_request(path)
+            if request is not None and request.job_id == owned.job_id and request.action == "cancel":
+                return request
+        return None
+
     def _cancel_attempt(self, local: RunningAttempt, request: _requests.Request) -> None:
         """Stop a running attempt for a ``cancel`` request: ``SIGTERM``, then ``SIGKILL`` after the grace."""
 
@@ -1199,75 +1253,23 @@ class TaskManager:
         from_priority: int | None = None,
         exclude: Collection[str] = (),
     ) -> StateDoc | None:
-        """Apply the job's pending requests; ``None`` once one released the job.
+        """Apply the job's pending requests (:func:`httk.workflow.removal.apply_requests`); ``None`` once released.
 
         It is the last reconcile step, and the last step of a commit, where the
         job is at the commit's target state (*from_state*, *from_priority*)
         rather than the state it was claimed from; *exclude* names requests the commit itself applies.
         """
 
-        from_state = owned.from_state if from_state is None else from_state
-        from_priority = owned.from_priority if from_priority is None else from_priority
-        for path in owned.request_files():
-            request = self._parse_request(path)
-            if request is None or request.job_id != owned.job_id or request.request_id in exclude:
-                continue
-            new, effect = _requests.apply(
-                job,
-                doc,
-                from_state,
-                from_priority,
-                request,
-                refusal=lambda candidate: self._refusal(job, candidate),
-            )
-            if isinstance(effect, (_requests.Defer, _requests.Eject)):
-                if isinstance(effect, _requests.Eject):
-                    self._report_anomaly(
-                        f"eject:{request.request_id}",
-                        f"eject request {request.request_id} waits: ejection returns in phase D",
-                        {},
-                        level=logging.INFO,
-                    )
-                self._deferred.add(request.request_id)
-                continue
-            self._deferred.discard(request.request_id)
-            detail: dict[str, object] = {"request_id": request.request_id, "action": request.action}
-            if isinstance(effect, _requests.Drop):
-                detail["dropped"] = effect.reason
-            owned.append_log("request_applied", detail=detail)
-            if isinstance(effect, _requests.Discard):
-                owned.discard()
-                _LOGGER.info("deleted %s (request %s)", owned.job_key, request.request_id)
-            elif isinstance(effect, _requests.Drop):
-                self._release(owned, new, Release(from_state, from_priority, (request.request_id,)))
-            else:
-                self._release(owned, new, effect)
-            return None
-        return doc
-
-    def _refusal(self, job: JobDefinition, request: _requests.Request) -> str | None:
-        """The revival guard for ``continue``/``override_step``, and the waiting-parent check for ``delete``."""
-
-        if request.action in ("continue", "override_step"):
-            return _joins.consumed_by_decided_join(self.workspace, job, cache=self._cache)
-        parent = job.parent
-        if request.action != "delete" or parent is None:
-            return None
-        ref = _kernel.locate(
-            self.workspace,
-            str(parent["job_id"]),
-            placement_hint=PurePosixPath(str(parent["placement"])),
+        return removal.apply_requests(
+            owned,
+            job,
+            doc,
+            from_state=from_state,
+            from_priority=from_priority,
+            exclude=exclude,
             cache=self._cache,
+            deferred=self._deferred,
         )
-        if ref is None or ref.state in TERMINAL_STATES:
-            return None
-        parent_doc, _damaged = read_state_unowned(ref.path / "state.json")
-        children = None if parent_doc is None or parent_doc.join is None else parent_doc.join.get("children")
-        if isinstance(children, tuple) and any(
-            isinstance(child, Mapping) and child.get("job_id") == job.id for child in children
-        ):
-            return f"its parent {ref.job_key} ({ref.state}) is waiting on it"
-        return None
 
     def _joins_pass(self) -> bool:
         """Evaluate one bounded window of waiting parents; claim and release each one whose join is decided."""
@@ -1496,10 +1498,13 @@ class TaskManager:
             if confinement is not None:
                 check_job_placement(job.placement)
             deadline = self._attempt_deadline(requirement)
+            # The runner launch's record directory exists before the gate (without process.json a probe counts it
+            # dead); it also holds the trusted nodefile of the launch prefix.
+            launch_dir = self.owner.launch_dir(attempt_id, "0")
             binding, binding_environment, pin_cpus = (
                 (None, {}, None)
                 if placement is None
-                else self._attempt_binding(placement, control, settings, requirement.get("mem"))
+                else self._attempt_binding(placement, control, launch_dir, settings, requirement.get("mem"))
             )
             launch_context: LaunchContext | None = None
             if confinement is not None and "HTTK_WORKFLOW_LAUNCH" in binding_environment:
@@ -1592,7 +1597,6 @@ class TaskManager:
                 runner_fd=None,
             )
             # The launch record is durable before the gate opens (plan §3.6): a probe of a dead owner then finds it.
-            launch_dir = self.owner.launch_dir(attempt_id, "0")
             _manager_launches.write_process_record(
                 self, launch_dir, attempt_id, "0", process.pid, ranks_local_only=True
             )
@@ -1693,19 +1697,13 @@ class TaskManager:
         return ["bash", "-l", str(script), *command]
 
     def _open_chronicle(self, owned: OwnedJob) -> int:
-        """Open ``logs/stdio.out`` for appending without following a symlink or blocking on a FIFO."""
+        """Open ``logs/stdio.out`` for appending (:meth:`~httk.workflow._kernel.OwnedJob.open_log`: never a
+        symlink or FIFO a job planted)."""
 
-        path = _make_dir(owned.path / "logs") / "stdio.out"
         try:
-            # append_file creates the chronicle once; this open never creates.
-            _fs.append_file(_fs.loc(path), b"", durable=False)
-            descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            return owned.open_log("stdio.out")
         except (_fs.UnsafePath, OSError) as exc:
-            raise FormatError(f"cannot open the stdio chronicle {path}: {exc}") from exc
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            os.close(descriptor)
-            raise FormatError(f"{path} is not a regular file")
-        return descriptor
+            raise FormatError(f"cannot open the stdio chronicle of {owned.job_key}: {exc}") from exc
 
     def _chronicle(self, owned: OwnedJob, line: str) -> None:
         """Append one marker to the stdio chronicle; a failure is logged, never raised."""
@@ -1768,8 +1766,16 @@ class TaskManager:
         except OSError as exc:
             # The record describes a reaped process group, which the death proof counts as dead.
             _LOGGER.warning("cannot remove the launch record of attempt %s: %s", attempt_id, exc)
-        doc = owned.read_state()
-        assert doc is not None
+        try:
+            doc = owned.read_state()
+        except _kernel.OwnerLost:
+            raise
+        except WorkflowError as exc:
+            self._fail_damaged(owned, f"state.json is damaged: {exc}")
+            return
+        if doc is None:
+            self._fail_damaged(owned, "state.json is gone")
+            return
         outcome: Mapping[str, Any] | None = None
         problem: str | None = None
         try:
@@ -1790,10 +1796,14 @@ class TaskManager:
         )
         if local.cancel is not None:
             # A cancelled attempt commits as cancelled whatever it published; its committed data still applies.
-            self._commit(owned, job, doc, cancel_intent(attempt_id, owned.from_priority, local.cancel.request_id))
+            self._commit(owned, job, doc, cancel_intent(attempt_id, owned.from_priority, local.cancel))
             return
         if outcome is not None:
             self._commit_outcome(owned, job, doc, outcome, local.control / "outcome.ready")
+            return
+        if (cancel := self._pending_cancel(owned)) is not None:
+            # Without an outcome, a cancel posted while it ran (not yet served) decides: the job is cancelled.
+            self._commit(owned, job, doc, cancel_intent(attempt_id, owned.from_priority, cancel))
             return
         if problem is not None:
             code, message, unclean = "protocol_error", f"published outcome is unusable: {problem}", False
@@ -1901,14 +1911,19 @@ class TaskManager:
         return (share, node) if node.local or same else None
 
     def _attempt_binding(
-        self, placement: Placement, control: Path, settings: Mapping[str, Any], mem: int | None
+        self, placement: Placement, control: Path, launch_dir: Path, settings: Mapping[str, Any], mem: int | None
     ) -> tuple[dict[str, Any], dict[str, str], set[int] | None]:
-        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs."""
+        """Write the attempt's nodefile and ``binding.json``; return its context ``binding``, environment and pin CPUs.
+
+        The nodefile goes to the runner launch's directory below this owner (trusted, and its path has no ``~``
+        that the job directory's name has), so the shell-quoted launch prefix needs no quoting of its own; the
+        job-readable ``binding.json`` stays in the attempt control directory.
+        """
 
         durable = self.workspace.durable
-        nodefile = control / "nodefile"
+        nodefile = launch_dir / "nodefile"
         lines = "".join(f"{host}\n" for host in nodefile_lines(placement)).encode("utf-8")
-        _fs.write_file(_fs.loc(nodefile), lines, durable=durable, mode=0o666)
+        _fs.write_file(_fs.loc(nodefile), lines, durable=durable)
         template = settings.get("manager.launch_template")
         if template is not None and not isinstance(template, str):
             raise FormatError("workspace setting manager.launch_template must be a string")

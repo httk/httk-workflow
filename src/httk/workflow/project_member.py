@@ -132,14 +132,13 @@ class WorkspaceMemberHandler:
         entries: list[dict[str, object]] = [_entry("workspace", workspace.workspace_id, verification)]
         if not deep or not seals.is_workspace_sealed(workspace):
             return tuple(entries)
-        from pathlib import PurePosixPath
-
         seal = seals.read_seal(seals.workspace_seal_path(workspace))
         for record in seal.records:
-            job_key = str(record["job_key"])
-            placement = PurePosixPath(str(record["placement"]))
-            job = seals.verify_job_seal(workspace.payload_path(placement, job_key), trusted_keys=trusted_keys)
-            entries.append(_entry("job", job_key, job))
+            located = seals.recorded_job_path(workspace, record)
+            # A missing job is a discrepancy of the workspace entry; a job recorded without a seal has none.
+            if located is not None and record["seal_sha256"] is not None:
+                job = seals.verify_job_seal(located, trusted_keys=trusted_keys)
+                entries.append(_entry("job", str(record["job_key"]), job))
         return tuple(entries)
 
     def repair(self, member_root: Path, *, apply: bool) -> tuple[dict[str, object], ...]:
@@ -153,10 +152,10 @@ class WorkspaceMemberHandler:
         :return: The workspace's repair findings.
         """
 
-        from .hygiene import _check_maintenance_lock, _check_tmp_leftovers, _check_transfers
+        from .hygiene import _check_owners, _check_tmp_leftovers, _check_transfers
 
         return (
-            _check_maintenance_lock(member_root, apply).as_mapping(),
+            _check_owners(member_root, apply).as_mapping(),
             _check_tmp_leftovers(member_root, apply).as_mapping(),
             _check_transfers(member_root).as_mapping(),
         )
@@ -202,10 +201,10 @@ class WorkspaceMemberHandler:
         return adopt_workspace(member_root, name=name)
 
     def guard(self, member_root: Path) -> AbstractContextManager[object]:
-        """Fence this workspace against maintenance while it is snapshotted.
+        """Refuse to snapshot this workspace while any of its owners is not proven dead (read-only, no lock).
 
         :param member_root: This workspace's root directory.
-        :return: The workspace maintenance guard.
+        :return: A context manager that checks on entry.
         """
 
         from .manifests import workspace_maintenance_guard

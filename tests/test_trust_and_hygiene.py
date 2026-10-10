@@ -3,6 +3,7 @@
 import base64
 import bz2
 import json
+import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_sign
 from httk.core.identity import (
+    identity_key_paths,
     identity_public_key,
     initialize_identity,
     sign_document,
@@ -25,8 +27,8 @@ from httk.core.project.manifests import (
     create_manifest,
 )
 
-from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace
+from conftest import configure_identity
+from httk.workflow import TaskManager, Workspace, _kernel, _requests
 from httk.workflow.adapters import add_remote, store_credentials
 from httk.workflow.configuration import (
     CONFIG_KEYS,
@@ -38,6 +40,7 @@ from httk.workflow.configuration import (
     write_config,
 )
 from httk.workflow.errors import FormatError
+from httk.workflow.gc import collect_garbage
 from httk.workflow.hygiene import describe_remote
 from httk.workflow.manifests import verify_manifest
 from httk.workflow.projects import (
@@ -50,6 +53,8 @@ from httk.workflow.projects import (
     trust_project_key,
 )
 from httk.workflow.workflow_cli import command
+from v3_helpers import find, state_of, submit
+from v3_helpers import workspace as v3_workspace
 
 
 def _init_workspace(project: Path) -> Workspace:
@@ -337,11 +342,10 @@ def test_document_signing_is_optional_and_verifiable(tmp_path: Path, monkeypatch
     assert not verify_document(truncated).valid
 
 
-def _request_workspace(tmp_path: Path) -> tuple[Workspace, str]:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path, pool="unserved")
-    workspace.submit(payload, "jobs")
-    return workspace, job_id
+def _request_workspace(tmp_path: Path) -> tuple[Workspace, _kernel.JobRef]:
+    workspace = v3_workspace(tmp_path / "workspace")
+    # An unserved pool: only the request moves the job.
+    return workspace, submit(workspace, ("demo--0123456789abcdef", "demo"), {"start": "succeed"}, pool="unserved")
 
 
 def _handle_requests(workspace: Workspace) -> None:
@@ -349,102 +353,68 @@ def _handle_requests(workspace: Workspace) -> None:
         manager.tick()
 
 
+def _cancel(workspace: Workspace, ref: _kernel.JobRef, operator: str, seed: Path | None) -> Path:
+    assert ref.placement is not None
+    return _requests.post(
+        workspace,
+        action="cancel",
+        job_id=ref.job_id,
+        placement=ref.placement,
+        operator=operator,
+        reason="request test",
+        seed_path=seed,
+    )
+
+
 def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     created, identity = initialize_identity("Me", "me@example.org")
     assert created and identity.short == "me"
-    workspace, job_id = _request_workspace(tmp_path)
-    ws = register_ws(None, workspace.root)
-    assert (
-        command(
-            [
-                "job",
-                "request",
-                "cancel",
-                "--workspace",
-                ws,
-                job_id,
-                "--operator",
-                "Me <me@example.org>",
-                "--reason",
-                "signed request test",
-            ],
-            CLIContext("httk", tmp_path),
-        )
-        == 0
-    )
-    published = next((workspace.control / "requests" / "ready").iterdir())
+    workspace, ref = _request_workspace(tmp_path)
+    published = _cancel(workspace, ref, "Me <me@example.org>", identity_key_paths("me")[0])
     document = json.loads(published.read_text(encoding="utf-8"))
     assert document["operator_key"] == identity_public_key()
     assert verify_document(document).valid
 
     _handle_requests(workspace)
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "cancelled"
-    state = workspace.read_state(marker)
-    assert state["operator"] == "Me <me@example.org>"
-    assert state["operator_key"] == identity_public_key()
+    cancelled = find(workspace, ref.job_id)
+    assert cancelled.state == "cancelled"
+    applied = next(entry for entry in state_of(cancelled).history_tail if entry["event"] == "request_applied")
+    assert applied["operator"] == "Me <me@example.org>"
+    assert applied["operator_key"] == identity_public_key()
 
 
 def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    workspace, job_id = _request_workspace(tmp_path)
-    ws = register_ws(None, workspace.root)
+    workspace, ref = _request_workspace(tmp_path)
     assert identity_public_key() is None
-    arguments = [
-        "job",
-        "request",
-        "cancel",
-        "--workspace",
-        ws,
-        job_id,
-        "--operator",
-        "Nobody <nobody@example.org>",
-        "--reason",
-        "no key",
-    ]
-    assert command(arguments, CLIContext("httk", tmp_path)) == 0
-    document = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    document = json.loads(_cancel(workspace, ref, "Nobody <nobody@example.org>", None).read_text(encoding="utf-8"))
     assert "signature" not in document and "operator_key" not in document
 
     _handle_requests(workspace)
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "cancelled"
-    assert "operator_key" not in workspace.read_state(marker)
+    cancelled = find(workspace, ref.job_id)
+    assert cancelled.state == "cancelled"
+    applied = next(entry for entry in state_of(cancelled).history_tail if entry["event"] == "request_applied")
+    assert "operator_key" not in applied
 
 
 def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     configure_identity()
-    workspace, job_id = _request_workspace(tmp_path)
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    request = sign_document(
-        {
-            "format": "httk-workflow-request",
-            "format_version": 2,
-            "request_id": str(uuid.uuid4()),
-            "job_id": marker.job_id,
-            "job_key": marker.job_key,
-            "expected_generation": marker.generation,
-            "expected_record_ref": marker.record_ref,
-            "action": "cancel",
-            "operator": "an-impostor",
-            "reason": "forged",
-        }
-    )
+    workspace, ref = _request_workspace(tmp_path)
+    published = _cancel(workspace, ref, "an-impostor", identity_key_paths("local")[0])
     # Everything about the request is honest except who is claimed to have said it.
-    workspace.publish_request({**request, "operator": "somebody-else"})
+    forged = {**json.loads(published.read_text(encoding="utf-8")), "operator": "somebody-else"}
+    published.write_text(json.dumps(forged), encoding="utf-8")
 
     _handle_requests(workspace)
-    unchanged = workspace.find_marker_by_id(job_id)
-    # The request never applied: the job is where the same tick's ordinary
-    # submission pass left it, not cancelled.
-    assert unchanged is not None and unchanged.kind in {"submitted", "ready"}
-    quarantined = list((workspace.control / "quarantine").iterdir())
-    assert len(quarantined) == 1
-    report = json.loads((quarantined[0] / "report.json").read_text(encoding="utf-8"))
-    assert "signature" in report["reason"]
+    # The request never applied, and the manager left the file where it is.
+    assert find(workspace, ref.job_id).state == "ready" and published.is_file()
+    # After its grace, gc quarantines it with the reason.
+    report = collect_garbage(workspace, now=time.time() + 2 * 86400.0, categories=("requests",))
+    assert report.category("requests").removed == 1 and not published.exists()
+    (quarantined,) = (workspace.control / "quarantine").iterdir()
+    assert "signature" in json.loads((quarantined / "reason.json").read_text(encoding="utf-8"))["reason"]
 
 
 def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path: Path, monkeypatch) -> None:

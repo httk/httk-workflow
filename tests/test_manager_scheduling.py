@@ -440,14 +440,19 @@ def test_cancelling_a_running_job_stops_it_then_proves_its_process_is_gone(
     (applied,) = [entry for entry in log if entry["event"] == "request_applied"]
     assert applied["detail"] == {"request_id": request.name.split(".")[1], "action": "cancel"}
     assert state_of(ref).applied_requests == (applied["detail"]["request_id"],)
+    # The history records the request as _requests.apply does: who asked, why, and the move.
+    (entry,) = [item for item in state_of(ref).history_tail if item["event"] == "request_applied"]
+    assert {key: entry[key] for key in ("request_id", "action", "operator", "reason", "from", "to")} == {
+        "request_id": applied["detail"]["request_id"],
+        "action": "cancel",
+        "operator": "tester",
+        "reason": "scheduling test",
+        "from": "ready",
+        "to": "cancelled",
+    }
     assert any("cancelling attempt" in record.getMessage() for record in caplog.records)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a cancel the dying owner was applying is dropped as 'terminal' once recovery fails the attempt "
-    "with owner_lost: reconcile commits the lost attempt before it applies the pending requests",
-)
 def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -466,6 +471,8 @@ def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(
 
     assert _state(workspace, job_id) == "cancelled"
     assert not _requests_left(workspace)
+    events = [item["event"] for item in _doc(workspace, job_id).history_tail]
+    assert "request_applied" in events and "request_dropped" not in events
 
 
 def test_cancelling_a_job_with_no_live_attempt_is_terminal_at_once(tmp_path: Path) -> None:

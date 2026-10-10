@@ -417,7 +417,8 @@ def test_an_unconfined_attempt_keeps_the_rendered_launch_prefix(bench: _Bench) -
     assert bench.outcome(job_id) == ("succeeded", None)
     launch = shlex.split(bench.result(job_id)["launch"])
     assert launch[0] == str(bench.recorder)
-    assert Path(launch[1]).name == "nodefile" and Path(launch[1]).parent.parent.name == "attempts"
+    # The nodefile is the owner's, in the runner launch's record directory.
+    assert Path(launch[1]).name == "nodefile" and Path(launch[1]).parent.parent.name == "launches"
 
 
 # -- refusals ------------------------------------------------------------------------------------------

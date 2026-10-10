@@ -60,13 +60,14 @@ def test_scheduler_hooks_supply_capacity_and_normalized_step_metadata(
     # A stale foreign environment value must not override the probe snapshot.
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "99")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    control = tmp_path / "control"
+    control, launch = tmp_path / "control", tmp_path / "launch"
     control.mkdir()
+    launch.mkdir()
     with TaskManager(workspace, allocation=allocation, end_time=allocation.end_time) as manager:
         assert manager._inventory is not None
         placement = assign(manager._inventory, {"procs": 1})
         assert placement is not None
-        binding, _, _ = manager._attempt_binding(placement, control, {}, None)
-        assert binding["launch"] == ["example-run", "--cpus", "4", "--nodefile", str(control / "nodefile")]
-        assert (control / "nodefile").read_text() == "compute-alias\n"
+        binding, _, _ = manager._attempt_binding(placement, control, launch, {}, None)
+        assert binding["launch"] == ["example-run", "--cpus", "4", "--nodefile", str(launch / "nodefile")]
+        assert (launch / "nodefile").read_text() == "compute-alias\n"
         assert manager._local_share(placement) is not None

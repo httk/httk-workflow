@@ -20,6 +20,8 @@ from httk.workflow._requests import (
     Effect,
     Eject,
     Request,
+    Seal,
+    Unseal,
     apply,
     parse,
     post,
@@ -258,8 +260,13 @@ def _expected(action: str, state: str) -> Effect:
     if action == "eject":
         return Eject("out")
     if action == "delete":
-        return Discard() if terminal or state == "paused" else Drop("")
-    return Defer()  # seal, unseal: until C5a
+        # A succeeded job is deleted only after `job unseal`.
+        return Discard() if (terminal and state != "succeeded") or state == "paused" else Drop("")
+    if action == "seal":
+        return Seal(Release(state, 500)) if state == "succeeded" else Drop("")
+    if action == "unseal":
+        return Unseal(Release(state, 500)) if state == "succeeded" else Drop("")
+    return Defer()
 
 
 @pytest.mark.parametrize("state", UNOWNED_STATES)
@@ -275,6 +282,9 @@ def test_application_table(action: str, state: str) -> None:
             if isinstance(expected, Release)
             else expected
         )
+    if isinstance(expected, (Seal, Unseal)):
+        assert isinstance(effect, (Seal, Unseal))
+        assert effect.release == Release(expected.release.state, 500, (request.request_id,))
     if isinstance(expected, Defer):
         assert new is doc
         return
@@ -362,3 +372,19 @@ def test_mismatched_job_is_refused() -> None:
     other = StateDoc.empty(str(uuid.uuid4()))
     with pytest.raises(ValueError):
         apply(_job(), other, "ready", 500, _request("cancel"))
+
+
+def test_unseal_releases_a_succeeded_job_for_delete() -> None:
+    doc = _doc()
+    new, effect = apply(_job(), doc, "succeeded", 500, _request("unseal"))
+    assert isinstance(effect, Unseal) and new.seal is not None and new.seal["released"] is True
+    assert any(entry["event"] == "unsealed" and entry["reason"] == "unseal" for entry in new.history_tail)
+    _, effect = apply(_job(), new, "succeeded", 500, _request("delete"))
+    assert isinstance(effect, Discard)
+    _, effect = apply(_job(), new, "succeeded", 500, _request("unseal"))
+    assert isinstance(effect, Drop) and "already unsealed" in effect.reason
+    sealed = doc.updated(seal={"sha256": "0" * 64, "signed": False})
+    _, effect = apply(_job(), sealed, "succeeded", 500, _request("seal"))
+    assert isinstance(effect, Drop) and "already sealed" in effect.reason
+    _, effect = apply(_job(), sealed, "succeeded", 500, _request("delete"))
+    assert isinstance(effect, Drop) and "job unseal" in effect.reason

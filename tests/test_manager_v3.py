@@ -585,3 +585,14 @@ def test_the_drain_point_stops_the_attempt_and_releases_the_job(ws: Workspace, i
     doc = state_of(ready)
     assert doc.failure is not None and doc.failure["code"] == "owner_lost"
     assert doc.attempt is not None and doc.attempt["unclean"] is True and doc.attempt["started_at"] is None
+
+
+def test_owner_json_records_the_end_time_and_the_drain_point(tmp_path: Path) -> None:
+    ws = Workspace.initialize(tmp_path / "ws", durable=False)
+    end = time.time() + 3600.0
+    with TaskManager(ws, heartbeat_interval=0.01, end_time=end, deadline_margin=600.0) as manager:
+        record = json.loads((ws.control / "owners" / manager.manager_id / "owner.json").read_text(encoding="utf-8"))
+        assert (record["end_time"], record["drain_start"]) == (end, end - 600.0)
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
+        record = json.loads((ws.control / "owners" / manager.manager_id / "owner.json").read_text(encoding="utf-8"))
+        assert (record["end_time"], record["drain_start"]) == (None, None)

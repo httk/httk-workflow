@@ -78,7 +78,7 @@ WORKSPACE_DIRECTORY = ".httk-workspace"
 # once in format.json so that two implementations attaching the same workspace
 # cannot disagree about them.
 POLICY_KEYS = frozenset({"visibility_deadline_seconds", "lease_seconds", "journal_segment_bytes", "retention"})
-RETENTION_KEYS = frozenset({"attempt_control_days", "journal_days", "trash_days"})
+RETENTION_KEYS = frozenset({"attempt_control_days", "journal_days", "trash_days", "owner_tombstone_days"})
 DEFAULT_LEASE_SECONDS = 900.0
 DEFAULT_JOURNAL_SEGMENT_BYTES = 64 * 1024 * 1024
 # A lease shorter than a second cannot be heartbeated honestly, and a deadline
@@ -917,11 +917,13 @@ class RetentionPolicy:
     :param attempt_control_days: The retention period for attempt controls.
     :param journal_days: The retention period for journal history.
     :param trash_days: The retention period for discarded workspace entries.
+    :param owner_tombstone_days: How long the ``dead.json`` tombstone of a recovered owner is kept.
     """
 
     attempt_control_days: float | None = None
     journal_days: float | None = 1.0
     trash_days: float | None = 1.0
+    owner_tombstone_days: float | None = 30.0
 
     @classmethod
     def from_mapping(cls, value: object, name: str = "policy.retention") -> "RetentionPolicy":
@@ -951,6 +953,7 @@ class RetentionPolicy:
             attempt_control_days=optional_days("attempt_control_days"),
             journal_days=optional_days("journal_days"),
             trash_days=optional_days("trash_days"),
+            owner_tombstone_days=optional_days("owner_tombstone_days"),
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -962,7 +965,7 @@ class RetentionPolicy:
         result: dict[str, object] = {}
         for key in sorted(RETENTION_KEYS):
             value = getattr(self, key)
-            if value is not None or key in {"journal_days", "trash_days"}:
+            if value is not None or key in {"journal_days", "trash_days", "owner_tombstone_days"}:
                 result[key] = value
         return result
 

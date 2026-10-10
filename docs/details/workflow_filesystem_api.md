@@ -1548,7 +1548,6 @@ Attempt control is separate from the application workdir:
 │   ├── outcome.tmp.<nonce>/     # runner: an outcome being composed
 │   ├── outcome.ready/           # runner: the published outcome
 │   ├── commit.<generation>/     # manager: the outcome renamed by its commit owner
-│   ├── nodefile                 # manager: with a node binding (advice only)
 │   ├── binding.json             # manager: with a node binding (advice only)
 │   ├── launch/                  # confined launches of this attempt
 │   ├── error.json               # runner SDK: crash breadcrumb (diagnostic)
@@ -1578,7 +1577,7 @@ was not made for this attempt and refuses the launch); everything in it is
 job-writable. The manager reads back only the published outcome, by the rules
 of [Publishing an outcome](#publishing-an-outcome) and
 [Commit ownership](#commit-ownership), and the launch requests of
-[Confined launches](#confined-launches). `nodefile` and `binding.json` are
+[Confined launches](#confined-launches). `binding.json` is
 written for the runner and never read back. `error.json`
 (`httk-workflow-runner-error`) is the breadcrumb a runner SDK leaves when a
 step handler raises, and `commit-wedge.json` (`httk-workflow-commit-wedge`
@@ -1820,9 +1819,12 @@ The context's `binding` member is present exactly when the launching manager
 places attempts on a node inventory (see {doc}`taskmanager`). It is an object
 with `nodes`, one entry per node the attempt was given (`host`, `procs`, `gpus`
 and, when the inventory places memory, `mem` in MB); `nodefile`, the absolute
-path of a file in the attempt control directory holding one host line per
-processor slot (one line for a node given no processor slot); `file`, the
-absolute path of `binding.json` in the same directory; and, when a launch
+path of a file holding one host line per processor slot (one line for a node
+given no processor slot), which the manager keeps in its own launch record
+directory `.httk-workspace/owners/<owner-id>/launches/<attempt-id>.0/` for the
+attempt's lifetime, so the job cannot change it and its path needs no shell
+quoting beyond the workspace path's own; `file`, the absolute path of
+`binding.json` in the attempt control directory; and, when a launch
 prefix applies, `launch`, the argument vector to put before a parallel command
 (such as `env SLURM_HOSTFILE=... srun --ntasks=8 ...`). `binding.json` holds the same object without
 `file`, with each node's `gpu_ids` and `cpus` (the cpulists of its processor
@@ -1834,8 +1836,8 @@ well-behaved runner; the manager does not confine the attempt to it, except
 that a locally executed attempt sees only its GPUs and, with the
 `manager.bind_cpus` setting, is pinned to its CPUs. Under confinement, launches
 are rendered from the placement in the manager's memory and a manager-owned
-nodefile; the nodefile and `binding.json` in the attempt control directory are
-never read back by the manager.
+nodefile; `binding.json` in the attempt control directory is never read back
+by the manager.
 
 ### Confined launches
 

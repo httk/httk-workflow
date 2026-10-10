@@ -256,9 +256,11 @@ def test_an_operator_request_is_applied_by_exactly_one_manager(
         assert ref.state == "paused"
         applied = [line for line in _log(ref) if line["event"] == "request_applied"]
         assert len(applied) == 1
-        # The release recorded the applied request, so a leftover file could never apply twice.
+        # The release recorded the applied request, so a leftover file could never apply twice. A manager that
+        # listed the request before its file was deleted may later claim the job, find the file gone and prune
+        # the id on release, which is equally safe.
         detail = applied[0]["detail"]
-        assert isinstance(detail, dict) and h.state_of(ref).applied_requests == (detail["request_id"],)
+        assert isinstance(detail, dict) and h.state_of(ref).applied_requests in ((detail["request_id"],), ())
     assert list((ws.control / "requests").iterdir()) == []
 
 

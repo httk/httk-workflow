@@ -10,3 +10,4 @@ tests/test_cli_sealing.py  # fate: port C5a (job seal/unseal resolve selectors t
 tests/test_workspace_names.py  # fate: port C5b (CLI workspace move calls manager.alive(lease_seconds=...))
 tests/test_cli_job_transfer.py  # fate: port D3
 tests/test_docs_parity.py  # fate: port E1 (documentation examples use the removed APIs)
+tests/test_transfer_residuals.py  # fate: port D3 (gc no longer cleans legacy transfer residue; transfer residue reconcilers move to _moving.py)

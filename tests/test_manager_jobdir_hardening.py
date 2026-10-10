@@ -5,7 +5,9 @@ runner plants a symlink, FIFO, oversized or damaged document on one of the
 manager's control paths in its own directory and then exits, so the manager
 meets the tampering while ending that attempt and launching the next one. A
 healthy job in the same workspace must still succeed, nothing outside the job
-directory may change, and nothing may block.
+directory may change, and nothing may block. What a job plants in its owner's
+trusted ``logs/`` is repaired by the kernel and the job proceeds; a damaged
+``state.json`` or ``job.json`` fails it (``protocol_error``).
 """
 
 import json
@@ -60,8 +62,9 @@ publish()
 """
 
 #: What the first attempt of each scenario does to its own job directory, and the failure code the job must end
-#: with. A scenario that exits 1 leaves the next attempt (``retry_on: process_failure``) to meet the tampering.
-_SCENARIOS: dict[str, tuple[str, str]] = {
+#: with, or ``None`` where the kernel repairs the trusted ``logs/`` entry the job planted and the job proceeds.
+#: A scenario that exits 1 leaves the next attempt (``retry_on: process_failure``) to meet the tampering.
+_SCENARIOS: dict[str, tuple[str, str | None]] = {
     # (a) the stdio chronicle is a symlink to a file outside the job directory.
     "stdio_symlink": (
         """
@@ -69,7 +72,7 @@ _SCENARIOS: dict[str, tuple[str, str]] = {
 (job / "logs" / "stdio.out").symlink_to(OUTSIDE / "target")
 sys.exit(1)
 """,
-        "protocol_error",
+        None,
     ),
     # (b) the whole log directory is a symlink to a directory outside.
     "logs_symlink": (
@@ -78,7 +81,7 @@ sys.exit(1)
 (job / "logs").symlink_to(OUTSIDE, target_is_directory=True)
 sys.exit(1)
 """,
-        "protocol_error",
+        None,
     ),
     # (c) the stdio chronicle is a FIFO nobody reads.
     "stdio_fifo": (
@@ -87,7 +90,7 @@ sys.exit(1)
 os.mkfifo(job / "logs" / "stdio.out")
 sys.exit(1)
 """,
-        "protocol_error",
+        None,
     ),
     # (d) the owner run log is a symlink to a file outside.
     "runlog_symlink": (
@@ -96,7 +99,7 @@ sys.exit(1)
 (job / "logs" / "runlog.jsonl").symlink_to(OUTSIDE / "target")
 sys.exit(1)
 """,
-        "protocol_error",
+        None,
     ),
     # (e) the attempt container is a symlink to a directory outside.
     "attempts_symlink": (
@@ -262,15 +265,6 @@ def _failure_code(ws: Workspace, job_id: str) -> tuple[str, str | None]:
     return ref.state, str(doc.failure["code"])
 
 
-#: Scenarios that reveal manager defects (reported; the tests stay strict so a fix turns them green).
-_DEFECTS = {
-    "logs_symlink": "OwnedJob.append_log follows a symlinked logs/ directory: the manager appends runlog.jsonl "
-    "outside the job directory",
-    "runlog_symlink": "a symlink at logs/runlog.jsonl raises UnsafePath, which reconcile does not treat as job "
-    "damage: the job stays owned forever and its manager never becomes idle",
-    "state_json_symlink": "a symlink at state.json raises UnsafePath, which reconcile does not treat as job "
-    "damage: the job stays owned forever and its manager never becomes idle",
-}
 #: How long a scenario may run before the test opens every FIFO in the workspace for reading, unblocking a
 #: manager stuck on one (which the test then reports as a stall instead of hanging).
 _STALL_SECONDS = 20.0
@@ -315,13 +309,7 @@ class _Rescuer:
                     os.close(descriptor)
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=_DEFECTS[name])) if name in _DEFECTS else name
-        for name in sorted(_SCENARIOS)
-    ],
-)
+@pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
 def test_tampering_with_a_control_path_fails_only_that_job(
     ws: Workspace, installed: _store.Installed, outside: Path, scenario: str
 ) -> None:
@@ -345,7 +333,7 @@ def test_tampering_with_a_control_path_fails_only_that_job(
     assert planted.pop("target")[2] == b"outside\n"
     planted = {name: value for name, value in planted.items() if not name.startswith("runner.")}
     assert set(planted) <= {"published", "published/outcome.json", "state", "state/seal.json"}
-    assert _failure_code(ws, hostile.job_id) == ("failed", expected)
+    assert _failure_code(ws, hostile.job_id) == (("succeeded", None) if expected is None else ("failed", expected))
     assert _failure_code(ws, healthy.job_id) == ("succeeded", None)
     assert elapsed < _STALL_SECONDS
 
@@ -470,3 +458,23 @@ def test_a_tampered_job_seal_path_is_a_discrepancy_not_an_error(tmp_path: Path) 
     assert [(item.path, item.kind) for item in verdict.discrepancies] == [("payload", "invalid")]
     assert not is_job_sealed(payload)
     assert json.loads((outside / "seal.json").read_text(encoding="utf-8")) == {}
+
+
+def test_a_job_won_with_a_damaged_definition_is_quarantined(
+    ws: Workspace, installed: _store.Installed, outside: Path
+) -> None:
+    from httk.workflow import _requests
+
+    hostile = _submit(ws, installed, outside, "hostile")
+    (hostile.path / "job.json").unlink()
+    (hostile.path / "job.json").symlink_to(outside / "target")
+    # A request makes a manager claim the job; the claim wins it but cannot read job.json.
+    _requests.post(ws, action="cancel", job_id=hostile.job_id, placement="project/hostile", operator="t", reason="r")
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
+        manager.tick()
+        manager.tick()
+        assert not manager.owner.owned()
+    (entry,) = (ws.control / "quarantine").iterdir()
+    assert (entry / "entry" / "job.json").is_symlink()
+    assert "job.json is damaged" in json.loads((entry / "reason.json").read_text(encoding="utf-8"))["reason"]
+    assert _kernel.locate(ws, hostile.job_id, placement_hint=None, exhaustive=True) is None

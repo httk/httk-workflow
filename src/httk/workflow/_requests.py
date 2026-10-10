@@ -37,10 +37,13 @@ __all__ = [
     "Effect",
     "Eject",
     "Request",
+    "Seal",
+    "Unseal",
     "apply",
     "operator_key",
     "parse",
     "post",
+    "unsealed",
     "validate_envelope",
 ]
 
@@ -126,8 +129,40 @@ class Drop:
     reason: str
 
 
+@dataclass(frozen=True)
+class Seal:
+    """Seal the job's payload (``seals.seal_payload``), record ``state.json`` ``seal``, then release.
+
+    :param release: Where the job goes afterwards (back to ``succeeded``), with the request id.
+    """
+
+    release: Release
+
+
+@dataclass(frozen=True)
+class Unseal:
+    """Remove the job's seal document and release the job with the unsealed document.
+
+    :param release: Where the job goes afterwards (back to ``succeeded``), with the request id.
+    """
+
+    release: Release
+
+
 #: What :func:`apply` decides; :class:`~httk.workflow._state.Release` carries the applied request id.
-type Effect = Release | Discard | Eject | Defer | Drop
+type Effect = Release | Discard | Eject | Defer | Drop | Seal | Unseal
+
+
+def unsealed(doc: StateDoc | None) -> bool:
+    """Report whether an operator released a succeeded job from its seal protection (``job unseal``).
+
+    A succeeded job is never changed by the protocol until then, whether or not it carries a seal.
+
+    :param doc: The job's ``state.json``.
+    :return: Whether ``state.json`` records the release.
+    """
+
+    return doc is not None and doc.seal is not None and doc.seal.get("released") is True
 
 
 def validate_envelope(document: Mapping[str, object]) -> None:
@@ -290,6 +325,14 @@ def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) ->
         return "the job has no parent link to detach"
     if action == "delete" and not (terminal or from_state == "paused"):
         return f"only terminal or paused jobs are deleted, not {from_state}"
+    if action == "delete" and from_state == "succeeded" and not unsealed(doc):
+        return "a succeeded job is never changed; release it with `job unseal` first"
+    if action in ("seal", "unseal") and from_state != "succeeded":
+        return f"only succeeded jobs are {action}ed, not {from_state}"
+    if action == "seal" and doc.seal is not None and isinstance(doc.seal.get("sha256"), str):
+        return "the job is already sealed"
+    if action == "unseal" and unsealed(doc):
+        return "the job is already unsealed"
     return None
 
 
@@ -309,7 +352,9 @@ def apply(
     in ``history_tail``; a :class:`~httk.workflow._state.Release` also carries the id.
     A request that applies while an attempt is live (``phase`` not ``idle``) is
     deferred: for ``cancel`` the manager signals the attempt meanwhile.
-    ``seal`` and ``unseal`` are always deferred until seals land (C5a).
+    ``seal`` (a repair verb for a succeeded job without a seal) and ``unseal``
+    (the operator's release of a succeeded job, after which ``delete`` applies)
+    need the payload, so their effects are executed by the owner.
 
     :param job: The job's definition.
     :param doc: Its current ``state.json``.
@@ -347,8 +392,7 @@ def apply(
     if reason is not None:
         dropped = doc.with_history("request_dropped", **audit, note=reason).updated(applied_requests=applied)
         return dropped, Drop(reason)
-    # ponytail: seal/unseal need the payload digest of seals.py; they wait in the mailbox until C5a applies them.
-    if doc.phase["kind"] != "idle" or action in ("seal", "unseal"):
+    if doc.phase["kind"] != "idle":
         return doc, Defer()
     new, target, priority = doc, from_state, from_priority
     if action == "cancel":
@@ -368,10 +412,19 @@ def apply(
             new = new.next_attempt("manual_continue", unclean=False)
         if (failure := _budget_failure(job, new)) is not None:
             new, target = doc.with_failure(failure), "failed"
+    elif action == "unseal":
+        # The release that makes `delete` apply; the owner removes the seal document.
+        released = {"released": True, "at": datetime.now(UTC).isoformat(), "request_id": request.request_id}
+        new = doc.updated(seal=released).with_history("unsealed", reason="unseal")
     audit["to"] = target
     new = new.with_history("request_applied", **audit).updated(applied_requests=applied)
     if action == "eject":
         return new, Eject(require_string(document["destination"], "request destination"))
     if action == "delete":
         return new, Discard()
-    return new, Release(target, priority, (request.request_id,))
+    release = Release(target, priority, (request.request_id,))
+    if action == "seal":
+        return new, Seal(release)
+    if action == "unseal":
+        return new, Unseal(release)
+    return new, release

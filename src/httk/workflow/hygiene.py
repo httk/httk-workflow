@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._txn import holds_job_payload, trash
+from . import _death, _kernel, gc
+from ._state import UNOWNED_STATES
 from ._util import read_json
 from .adapters import (
     ADAPTER_EXECUTABLE,
@@ -29,12 +30,7 @@ from .adapters import (
 )
 from .configuration import remotes_home
 from .errors import WorkflowError
-from .gc import TRANSACTION_PREFIXES
-from .manifests import (
-    read_maintenance_lock,
-    release_maintenance_lock,
-)
-from .models import STATE_KINDS, WORKSPACE_DIRECTORY
+from .models import WORKSPACE_DIRECTORY
 from .projects import (
     discover_project,
     key_fingerprint,
@@ -48,18 +44,12 @@ _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "REMOTE_DESCRIPTION_FORMAT",
-    "TMP_MAXIMUM_AGE_SECONDS",
     "Finding",
     "describe_remote",
     "remove_remote",
 ]
 
 REMOTE_DESCRIPTION_FORMAT = "httk-remote-description"
-
-#: How long a staging entry may sit below ``.httk-workspace/tmp`` before the
-#: check calls it a leftover. Every publication renames its staging entry out
-#: within one operation, so a day is far beyond any honest in-flight window.
-TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 
 
 def _key_record(value: str) -> dict[str, object]:
@@ -117,10 +107,9 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
     workspace = _workspace_at(_workspace_root(project))
     if workspace is None:
         return summary
-    counts: dict[str, int] = {}
-    for marker in workspace.scan_markers(STATE_KINDS):
-        counts[marker.kind] = counts.get(marker.kind, 0) + 1
-    holder = read_maintenance_lock(workspace)
+    counts = {state: sum(1 for _ref in _kernel.list_jobs(workspace, state)) for state in UNOWNED_STATES}
+    owned = workspace.jobs / _kernel.OWNED
+    counts[_kernel.OWNED] = sum(len(_names(owned / owner_id)) for owner_id in _names(owned))
     summary.update(
         {
             "workspace_id": workspace.workspace_id,
@@ -128,14 +117,17 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
             "extensions": sorted(workspace.extensions),
             "counts": counts,
             "jobs": sum(counts.values()),
-            "maintenance_lock": (
-                None
-                if holder is None
-                else {"holder": holder.describe(), "stale": holder.is_stale(), "path": str(holder.path)}
-            ),
+            "owners": len(_kernel.list_owners(workspace)),
         }
     )
     return summary
+
+
+def _names(directory: Path) -> list[str]:
+    try:
+        return sorted(os.listdir(directory))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
 
 
 def _project_remotes(project: Path) -> list[str]:
@@ -323,33 +315,44 @@ class Finding:
         }
 
 
-def _check_maintenance_lock(workspace_root: Path, repair: bool) -> Finding:
-    """A stale maintenance lock fences every manager for nothing."""
+def _check_owners(workspace_root: Path, repair: bool) -> Finding:
+    """Owners proven dead but not yet recovered (their jobs stay owned), and scratch nobody owns.
+
+    The repair is the ``dead_owners`` category of ``httk workspace gc``.
+    """
 
     workspace = _workspace_at(workspace_root)
     if workspace is None:
-        return Finding("maintenance_lock", "ok", "there is no workspace to hold a maintenance lock")
-    holder = read_maintenance_lock(workspace)
-    if holder is None:
-        return Finding("maintenance_lock", "ok", "no maintenance lock is held")
-    if not holder.is_stale():
-        return Finding(
-            "maintenance_lock",
-            "warning",
-            f"a live maintenance lock is held by {holder.describe()}",
-            details={"path": str(holder.path)},
-        )
+        return Finding("owners", "ok", "there is no workspace to hold owners")
+    scheduler, here = _death.SchedulerQueries(), _death.process_identity()
+    records = _kernel.list_owners(workspace)
+    dead = [
+        record.owner_id
+        for record in records
+        if record.record is not None
+        and _death.probe(
+            record.path, visibility_deadline=workspace.visibility_deadline, scheduler=scheduler, here=here
+        )[0]
+        is _death.Liveness.DEAD
+    ]
+    known = {record.owner_id for record in records}
+    # tmp/<owner-id>.<purpose>.<token>: recovery takes a dead owner's scratch; an unknown owner's is left over.
+    orphaned = [name for name in _names(workspace.control / "tmp") if name.split(".")[0] not in known | {"trash"}]
+    details: dict[str, object] = {"dead_owners": dead, "orphaned_scratch": orphaned}
+    if not dead and not orphaned:
+        return Finding("owners", "ok", "every owner is alive or recovered", details=details)
     finding = Finding(
-        "maintenance_lock",
-        "error",
-        f"a stale maintenance lock is held by {holder.describe()}",
-        repairable=True,
-        details={"path": str(holder.path)},
+        "owners",
+        "warning",
+        f"{len(dead)} dead owner(s) not yet recovered, {len(orphaned)} scratch entr(ies) of unknown owners",
+        repairable=bool(dead),
+        details=details,
     )
-    if repair:
-        finding.action = release_maintenance_lock(Workspace(workspace_root))
-        finding.repaired = True
-        finding.status = "ok"
+    if repair and dead:
+        report = gc.collect_garbage(Workspace(workspace_root), categories=("dead_owners",), sizes=False)
+        finding.action = f"recovered {report.removed} dead owner(s)"
+        finding.repaired = report.removed == len(dead)
+        finding.status = "ok" if finding.repaired and not orphaned else "warning"
     return finding
 
 
@@ -372,6 +375,8 @@ def _check_workspace_default(project: Path) -> Finding | None:
 
 def _check_transfers(workspace_root: Path) -> Finding:
     """Report transfer work that waits for an operator (plan 4.7); this check never repairs anything.
+
+    The legacy transfer machinery it inspects is replaced in phase D (held bundles of eject + copy + adopt).
 
     It names exports held for a copy-out (``httk job eject --resume``), exports
     whose interrupted copy-out may already have delivered them (in doubt: remove
@@ -425,48 +430,25 @@ def _check_transfers(workspace_root: Path) -> Finding:
 
 
 def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
-    """Staging entries nothing renamed out are pure leftovers."""
+    """Write temporaries and ``tmp/trash.<token>`` entries older than a day: the ``tmp_entries`` gc category."""
 
-    tmp = workspace_root / WORKSPACE_DIRECTORY / "tmp"
-    if not tmp.is_dir():
-        return Finding("tmp_leftovers", "ok", "there is no workspace staging directory")
-    deadline = time.time() - TMP_MAXIMUM_AGE_SECONDS
-    try:
-        stale = [entry for entry in sorted(tmp.iterdir()) if entry.lstat().st_mtime < deadline]
-    except PermissionError as exc:
-        return Finding(
-            "tmp_leftovers",
-            "warning",
-            f"cannot inspect workspace staging directory {tmp}: {exc}",
-            details={"path": str(tmp), "error": str(exc)},
-        )
-    # The transfer transaction directories may hold a job's only copy; exactly as
-    # gc, hygiene never removes them (only the transfer protocol does).
-    stale = [entry for entry in stale if not entry.name.startswith(TRANSACTION_PREFIXES)]
-    if not stale:
-        return Finding("tmp_leftovers", "ok", "the workspace staging directory holds nothing abandoned")
+    workspace = _workspace_at(workspace_root)
+    if workspace is None:
+        return Finding("tmp_leftovers", "ok", "there is no workspace to hold leftovers")
+    found = gc.collect_garbage(workspace, dry_run=True, categories=("tmp_entries",), sizes=False)
+    entries = list(found.category("tmp_entries").entries)
+    if not entries:
+        return Finding("tmp_leftovers", "ok", "the workspace holds no abandoned temporaries")
     finding = Finding(
         "tmp_leftovers",
         "warning",
-        f"{len(stale)} abandoned staging entr{'y' if len(stale) == 1 else 'ies'} below {tmp}",
+        f"{len(entries)} abandoned temporar{'y' if len(entries) == 1 else 'ies'}",
         repairable=True,
-        details={"entries": [entry.name for entry in stale]},
+        details={"entries": entries},
     )
     if repair:
-        try:
-            for entry in stale:
-                if entry.name.startswith("trash.") and holds_job_payload(entry):
-                    # A discarder died before its payload check: quarantined, never removed.
-                    trash(entry, control=workspace_root / WORKSPACE_DIRECTORY, holds_payload=lambda _path: True)
-                elif entry.is_dir() and not entry.is_symlink():
-                    shutil.rmtree(entry)
-                else:
-                    entry.unlink(missing_ok=True)
-        except PermissionError as exc:
-            finding.message = f"cannot remove abandoned staging entries below {tmp}: {exc}"
-            finding.details["error"] = str(exc)
-            return finding
-        finding.action = f"removed {len(stale)} staging entries"
+        report = gc.collect_garbage(Workspace(workspace_root), categories=("tmp_entries",), sizes=False)
+        finding.action = f"removed {report.removed} temporaries"
         finding.repaired = True
         finding.status = "ok"
     return finding

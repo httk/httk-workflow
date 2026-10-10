@@ -2,13 +2,9 @@
 
 import base64
 import bz2
-import json
 import os
-import socket
-import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 
 from httk.core.crypto import ed25519_verify
@@ -24,13 +20,8 @@ from httk.core.project.manifests import (
 from httk.core.project.manifests import verify_manifest as _core_verify_manifest
 from httk.core.records import file_records
 
-from ._util import json_bytes, retry_delay, timestamp_seconds, utc_now
-from .models import (
-    QUIESCENT_KINDS,
-    STATE_KINDS,
-    TRANSFER_DIRECTORY,
-    is_payload_private,
-)
+from . import _death, _kernel
+from .models import TRANSFER_DIRECTORY, is_payload_private
 from .projects import (
     PROJECT_DIRECTORY,
     discover_project,
@@ -39,220 +30,95 @@ from .projects import (
 from .workspace import Workspace
 
 __all__ = [
-    "MAINTENANCE_LOCK_FILE",
-    "MAINTENANCE_LOCK_MAX_AGE_SECONDS",
-    "MaintenanceLock",
     "ManifestVerification",
     "payload_file_records",
     "read_maintenance_lock",
     "release_maintenance_lock",
+    "require_quiescent_workspace",
     "verify_legacy_manifest",
     "verify_manifest",
     "workspace_maintenance_guard",
 ]
 
-MAINTENANCE_LOCK_FILE = "maintenance.lock"
-MAINTENANCE_LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
+#: Owner-written entries at a job's root that no payload record covers (besides the runner-private ones).
+_UNRECORDED = frozenset({TRANSFER_DIRECTORY, "state.json", "seal.json"})
 
 
 def payload_file_records(root: Path) -> list[dict[str, object]]:
-    """Return the deterministic records of one job payload, minus runner scratch.
+    """Return the deterministic records of one job payload, minus runner scratch and owner documents.
 
-    A payload's runner-private entries — attempt control, logs, and job state —
-    and the transfer envelope of a detached or ejected job are excluded from
-    every seal record exactly as they are from a transfer payload digest, so
-    publishing an outcome, or moving the job out of its workspace and back,
-    never changes a sealed payload's records.
+    The runner-private entries (``attempts/``, ``logs/``, ``.httk-job/``), the
+    transfer envelope, the owner's ``state.json`` and a root ``seal.json`` are
+    excluded from every seal record exactly as they are from a transfer payload
+    digest, so committing an outcome, or moving the job out of its workspace
+    and back, never changes a sealed payload's records.
+
+    :param root: The job directory.
+    :return: The file records.
     """
 
     base = Path(root)
     return file_records(
-        base,
-        skip=lambda entry: (
-            entry.parent == base and (is_payload_private(entry.name) or entry.name == TRANSFER_DIRECTORY)
-        ),
+        base, skip=lambda entry: entry.parent == base and (is_payload_private(entry.name) or entry.name in _UNRECORDED)
     )
 
 
-@dataclass(frozen=True)
-class MaintenanceLock:
-    """Record the holder of one workspace maintenance lock.
+def require_quiescent_workspace(workspace: Workspace) -> None:
+    """Refuse while any owner of the workspace is not proven dead; read-only, holds nothing.
 
-    :param path: Locate the lock file.
-    :param pid: Record the holder process identifier, when readable.
-    :param hostname: Record the holder host, when readable.
-    :param created: Record the holder creation timestamp, when readable.
-    :param readable: Mark whether the lock contents could be read.
+    A closed owner leaves no ``owners/<id>/``; a dead one is reclaimed by
+    ``httk workspace gc``. The check is a snapshot: an owner registering
+    afterwards is not fenced, which suits manifests and project snapshots of a
+    workspace nobody is running.
+
+    :param workspace: The workspace.
+    :raises ValueError: If an owner is alive or its death cannot be proven.
     """
 
-    path: Path
-    pid: int | None
-    hostname: str | None
-    created: str | None
-    readable: bool = True
-
-    @property
-    def age_seconds(self) -> float | None:
-        """Age of the lock, or ``None`` when its timestamp is unusable."""
-
-        if self.created is None:
-            return None
-        try:
-            return max(0.0, time.time() - timestamp_seconds(self.created))
-        except ValueError:
-            return None
-
-    @property
-    def local(self) -> bool:
-        """Whether the recorded host is the host inspecting the lock."""
-
-        return self.hostname is not None and self.hostname == socket.gethostname()
-
-    @property
-    def dead(self) -> bool:
-        """Whether a same-host holder process is known to be gone."""
-
-        if not self.local or self.pid is None or self.pid <= 0:
-            return False
-        try:
-            os.kill(self.pid, 0)
-        except ProcessLookupError:
-            return True
-        except OSError:
-            # A live process owned by another user still holds the lock.
-            return False
-        return False
-
-    def is_stale(self, *, max_age_seconds: float = MAINTENANCE_LOCK_MAX_AGE_SECONDS) -> bool:
-        """Whether the lock can be reclaimed without operator confirmation."""
-
-        if not self.readable:
-            return False
-        if self.pid is None or self.hostname is None or self.created is None:
-            return True
-        if self.dead:
-            return True
-        age = self.age_seconds
-        return age is None or age > max_age_seconds
-
-    def describe(self) -> str:
-        """Describe the holder for an operator diagnostic."""
-
-        who = "an unrecorded process" if self.pid is None else f"pid {self.pid}"
-        where = "an unrecorded host" if self.hostname is None else f"host {self.hostname}"
-        when = "an unrecorded time" if self.created is None else self.created
-        age = self.age_seconds
-        return f"{who} on {where} since {when}" + ("" if age is None else f" (age {age:.0f}s)")
-
-
-def _read_maintenance_lock(path: Path) -> MaintenanceLock | None:
-    """Describe an existing lock, retrying to distinguish races from damage."""
-
-    for attempt in range(4):
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        except PermissionError:
-            return MaintenanceLock(path=path, pid=None, hostname=None, created=None, readable=False)
-        except (OSError, UnicodeError):
-            raw = ""
-        try:
-            value = json.loads(raw)
-        except json.JSONDecodeError:
-            value = None
-        if isinstance(value, dict):
-            pid = value.get("pid")
-            hostname = value.get("hostname")
-            created = value.get("created")
-            return MaintenanceLock(
-                path=path,
-                pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
-                hostname=hostname if isinstance(hostname, str) and hostname else None,
-                created=created if isinstance(created, str) and created else None,
-            )
-        time.sleep(retry_delay(attempt))
-    # Legacy plain-pid content, truncation, or a foreign writer: reclaimable.
-    return MaintenanceLock(path=path, pid=None, hostname=None, created=None)
-
-
-def read_maintenance_lock(workspace: Workspace) -> MaintenanceLock | None:
-    """Describe the workspace maintenance lock, or ``None`` when it is absent.
-
-    :param workspace: Locate the workspace whose lock to inspect.
-    :return: The recorded lock, or ``None`` when no lock exists.
-    """
-
-    return _read_maintenance_lock(workspace.control / MAINTENANCE_LOCK_FILE)
-
-
-def _acquire_maintenance_lock(path: Path) -> None:
-    """Create the lock exclusively, reclaiming a provably stale predecessor."""
-
-    body = json_bytes({"created": utc_now(), "hostname": socket.gethostname(), "pid": os.getpid()}) + b"\n"
-    for _ in range(3):
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            holder = _read_maintenance_lock(path)
-            if holder is not None and not holder.is_stale():
-                raise ValueError(
-                    "project maintenance is already in progress; the maintenance lock is held by "
-                    f"{holder.describe()}; release it with 'httk workspace unlock' once that "
-                    "operation is known to be finished"
-                ) from None
-            path.unlink(missing_ok=True)
-            continue
-        try:
-            # One write keeps readers from ever observing a partial record.
-            os.fchmod(descriptor, 0o644)
-            os.write(descriptor, body)
-        finally:
-            os.close(descriptor)
-        return
-    raise ValueError(f"cannot acquire the project maintenance lock: {path}")
-
-
-def release_maintenance_lock(workspace: Workspace, *, force: bool = False) -> str:
-    """Remove a stale, or with *force* any, maintenance lock and report it.
-
-    :param workspace: Locate the workspace whose lock to remove.
-    :param force: Permit removal of a lock that does not appear stale.
-    :return: A human-readable removal result.
-    :raises ValueError: If a live lock is protected by the default policy.
-    """
-
-    path = workspace.control / MAINTENANCE_LOCK_FILE
-    holder = read_maintenance_lock(workspace)
-    if holder is None:
-        return f"no maintenance lock is present: {path}"
-    stale = holder.is_stale()
-    if not stale and not force:
-        raise ValueError(f"maintenance lock is held by {holder.describe()}; rerun with --force to remove it anyway")
-    path.unlink(missing_ok=True)
-    return f"removed {'stale' if stale else 'live'} maintenance lock held by {holder.describe()}: {path}"
+    scheduler, here = _death.SchedulerQueries(), _death.process_identity()
+    busy = [
+        record.owner_id
+        for record in _kernel.list_owners(workspace)
+        if _death.probe(record.path, visibility_deadline=0.0, scheduler=scheduler, here=here)[0]
+        is not _death.Liveness.DEAD
+    ]
+    if busy:
+        raise ValueError(f"manifest requires a quiescent workspace; owners not proven dead: {', '.join(busy)}")
 
 
 @contextmanager
 def workspace_maintenance_guard(workspace: Workspace) -> Iterator[None]:
-    """Fence manager launches while a project snapshot is inspected.
+    """Run :func:`require_quiescent_workspace` before the guarded work (no lock is held).
 
-    :param workspace: Lock and inspect this workspace around the guarded work.
-    :return: A context manager that holds the maintenance lock.
-    :raises ValueError: If the workspace is already maintained or not quiescent.
+    :param workspace: The workspace.
+    :return: A context manager.
+    :raises ValueError: If an owner is alive or its death cannot be proven.
     """
 
-    path = workspace.control / MAINTENANCE_LOCK_FILE
-    _acquire_maintenance_lock(path)
-    try:
-        guarded_kinds = tuple(kind for kind in STATE_KINDS if kind not in QUIESCENT_KINDS)
-        unresolved = list(workspace.scan_markers(guarded_kinds))
-        if unresolved:
-            states = ", ".join(f"{item.job_key}:{item.kind}" for item in unresolved)
-            raise ValueError(f"manifest requires a quiescent workspace; unresolved work: {states}")
-        yield
-    finally:
-        path.unlink(missing_ok=True)
+    require_quiescent_workspace(workspace)
+    yield
+
+
+def read_maintenance_lock(workspace: Workspace) -> None:
+    """Return ``None``: workspaces have no maintenance lock any more (kept for the C5b CLI port).
+
+    :param workspace: The workspace.
+    :return: ``None``.
+    """
+
+    del workspace
+
+
+def release_maintenance_lock(workspace: Workspace, *, force: bool = False) -> str:
+    """Report that there is no maintenance lock (kept for the C5b CLI port).
+
+    :param workspace: The workspace.
+    :param force: Ignored.
+    :return: The report.
+    """
+
+    del force
+    return f"no maintenance lock is present: {workspace.control}"
 
 
 def _legacy_file_digest(path: Path) -> str:

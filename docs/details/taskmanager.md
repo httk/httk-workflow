@@ -862,9 +862,9 @@ the attempt control directory: the same object with each node's `gpu_ids` and
 that a large allocation cannot overflow the context's 100000-byte limit (a
 binding too large even without them fails the attempt with `protocol_error`
 naming its node count). The runner environment carries `HTTK_WORKFLOW_NODELIST` (the hosts,
-comma-separated), `HTTK_WORKFLOW_NODEFILE` (a file in the attempt control
-directory with exactly one host line per reserved processor slot, the
-`PBS_NODEFILE` convention) and `HTTK_WORKFLOW_LAUNCH`
+comma-separated), `HTTK_WORKFLOW_NODEFILE` (a file in the manager's launch
+record directory below `.httk-workspace/owners/` with exactly one host line per
+reserved processor slot, the `PBS_NODEFILE` convention) and `HTTK_WORKFLOW_LAUNCH`
 (the launch prefix, shell-quoted). The Python SDK exposes the member as
 `Attempt.binding`, and Bash reads it with `httk_workflow_context binding`.
 
@@ -937,8 +937,8 @@ client, used the same way (`$HTTK_WORKFLOW_LAUNCH vasp_std`); it stays unset
 when no prefix applies. The client asks the trusted manager to start the
 launch, and the manager runs `<rendered launch template> <rank helper>`,
 rendered from the placement in its memory with its own nodefile for
-`{nodefile}` and `SLURM_HOSTFILE`; the nodefile and `binding.json` in the
-attempt control directory stay informational and are never read back. On
+`{nodefile}` and `SLURM_HOSTFILE`; `binding.json` in the attempt control
+directory stays informational and is never read back. On
 every node the rank helper starts each rank in its own sandbox: the job
 directory writable and the workspace read-only, host networking, a per-launch
 shared-memory directory below `confine.shm_root` at `/dev/shm`, the step's PMIx
