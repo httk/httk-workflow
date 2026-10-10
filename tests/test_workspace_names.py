@@ -9,8 +9,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
-from httk.workflow import Workspace
-from httk.workflow._util import utc_now
+from httk.workflow import Workspace, _kernel
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import resolve_workspace, workspaces_path
 from httk.workflow.workflow_cli import _common as workflow_common
@@ -228,29 +227,28 @@ def test_remote_delete_requires_force_before_contacting_remote(tmp_path: Path, r
     assert any("workspace delete --force runs" in item for item in remote.commands())
 
 
-def test_move_updates_the_registry_and_refuses_a_fresh_manager(tmp_path: Path, capsys) -> None:
+def test_move_updates_the_registry_and_refuses_while_an_owner_is_not_proven_dead(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
     command(["workspace", "init", "old"], context)
     capsys.readouterr()
-    root = tmp_path / "old"
-    managers = root / ".httk-workspace" / "managers" / "live"
-    managers.mkdir(parents=True)
-    (managers / "manager.json").write_text(json.dumps({"manager_id": "live"}), encoding="utf-8")
-    (managers / "heartbeat.json").write_text(json.dumps({"updated_at": utc_now()}), encoding="utf-8")
+    # An owner registered by this (running) process is alive, so the workspace is in use.
+    owner = _kernel.register_owner(
+        Workspace(tmp_path / "old"), kind="cli", label="test", allocation=None, advertised={}
+    )
     assert command(["workspace", "move", "old", "new"], context) == 2
-    assert "fresh heartbeat" in capsys.readouterr().err
-    (managers / "heartbeat.json").unlink()
+    assert f"owners not proven dead: {owner.owner_id}" in capsys.readouterr().err
+    assert (tmp_path / "old").is_dir() and not (tmp_path / "new").exists()
+    owner.close()
     assert command(["workspace", "move", "old", "new"], context) == 0
     capsys.readouterr()
     assert _local_rows(context, capsys)[0]["path"] == str(tmp_path / "new")
-    assert not (tmp_path / "new" / ".httk-workspace" / "maintenance.lock").exists()
     assert command(["workspace", "fsck", "old"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "gc", "--dry-run", "old"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "move", "old", "newer"], context) == 0
     capsys.readouterr()
-    assert not (tmp_path / "newer" / ".httk-workspace" / "maintenance.lock").exists()
+    assert (tmp_path / "newer" / ".httk-workspace" / "format.json").is_file()
 
 
 def test_move_refuses_cross_filesystem_without_copying(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -269,22 +267,3 @@ def test_move_refuses_cross_filesystem_without_copying(tmp_path: Path, monkeypat
     assert command(["workspace", "move", "old", "new"], context) == 2
     assert "one filesystem" in capsys.readouterr().err
     assert root.is_dir() and not (tmp_path / "new").exists()
-
-
-def test_move_holds_the_lock_at_the_destination_until_registry_update(tmp_path: Path, monkeypatch, capsys) -> None:
-    context = _context(tmp_path)
-    assert command(["workspace", "init", "old"], context) == 0
-    capsys.readouterr()
-    destination = (tmp_path / "new").resolve()
-    observed: list[bool] = []
-    real_update = workspace_cli._update_workspace_path
-
-    def observe_update(name: str, path: Path, *, durable: bool = True):
-        observed.append((path / ".httk-workspace" / "maintenance.lock").is_file())
-        return real_update(name, path, durable=durable)
-
-    monkeypatch.setattr(workspace_cli, "_update_workspace_path", observe_update)
-    assert command(["workspace", "move", "old", "new"], context) == 0
-    capsys.readouterr()
-    assert observed == [True]
-    assert not (destination / ".httk-workspace" / "maintenance.lock").exists()

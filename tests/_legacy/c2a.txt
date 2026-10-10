@@ -14,8 +14,6 @@ tests/test_fetch.py  # fate: port D3
 tests/test_job_tree.py  # fate: port D3
 tests/test_jobstate_digest.py  # fate: delete C6
 tests/test_launch_end_evidence.py  # fate: delete C6
-tests/test_manager_deployment.py  # fate: port C5b
-tests/test_manager_logs.py  # fate: port C5b
 tests/test_mount_adapter.py  # fate: port D3
 tests/test_remote_adapters.py  # fate: port D3
 tests/test_remote_roundtrip.py  # fate: port D3

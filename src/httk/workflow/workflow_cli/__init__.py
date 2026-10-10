@@ -142,7 +142,6 @@ from ._workspace import (
     handle_workspace_settings_show,
     handle_workspace_settings_unset,
     handle_workspace_status,
-    handle_workspace_unlock,
     handle_workspace_unseal,
     handle_workspace_workflows,
 )
@@ -252,7 +251,6 @@ __all__ = [
     "handle_workspace_settings_show",
     "handle_workspace_settings_unset",
     "handle_workspace_status",
-    "handle_workspace_unlock",
     "handle_workspace_unseal",
     "handle_workspace_workflows",
     "job_command",

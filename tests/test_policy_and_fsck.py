@@ -281,7 +281,6 @@ def test_fsck_reports_a_job_another_user_owns(tmp_path: Path, monkeypatch) -> No
     assert [(finding.entry, finding.problem) for finding in report.findings] == [(ref.path, "foreign_owner")]
 
 
-@pytest.mark.skip(reason="C5b: the workspace fsck handler is rewritten with the CLI")
 def test_the_fsck_command_prints_the_findings(tmp_path: Path, capsys) -> None:
     ws = workspace(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)

@@ -24,7 +24,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "workspace": (
         "init",
         "status",
-        "managers",
+        "owners",
+        "attest-dead",
         "workflows",
         "list",
         "default",
@@ -37,9 +38,9 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "policy",
         "fsck",
         "gc",
-        "unlock",
         "seal",
         "unseal",
+        "verify",
     ),
     "job": (
         "new",
@@ -294,13 +295,11 @@ def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> No
     assert top_level == manager
 
 
-@pytest.mark.skip(reason="C5b-2: the run leaf (workflow_cli/_manager.py) still passes removed manager options")
 def test_top_level_run_defaults_to_until_idle_for_the_project_workspace(tmp_path: Path) -> None:
     initialize_project(tmp_path, name="run-default")
     assert command(["run"], _context(tmp_path)) == 0
 
 
-@pytest.mark.skip(reason="C5b-2: the run leaf (workflow_cli/_manager.py) still passes removed manager options")
 def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Path, capsys) -> None:
     initialize_project(tmp_path, name="run-timeout")
     workspace = _init_workspace(tmp_path)

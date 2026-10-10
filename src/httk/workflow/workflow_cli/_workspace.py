@@ -7,13 +7,15 @@ import os
 import sys
 from contextlib import redirect_stdout
 from copy import copy
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from httk.core.cli import CLIContext
-from httk.core.digests import sha256_file, tree_digest
+from httk.core.identity import configured_operator_identity
 
+from .. import _death, _kernel, _store
 from ..adapters import (
     REMOTE_STATUS_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
@@ -29,19 +31,16 @@ from ..adapters import (
     seed_application_settings,
 )
 from ..configuration import machine_names
-from ..gc import iter_report_rows
-from ..introspection import read_managers
-from ..manifests import read_maintenance_lock, release_maintenance_lock, workspace_maintenance_guard
+from ..fsck import check_workspace
+from ..gc import GC_CATEGORIES, collect_garbage, iter_report_rows
+from ..introspection import JOB_STATES, count_jobs
+from ..manifests import require_quiescent_workspace
 from ..models import (
-    DEFAULT_LEASE_SECONDS,
     POLICY_KEYS,
     RETENTION_KEYS,
-    STATE_KINDS,
     WORKSPACE_DIRECTORY,
     WorkspacePolicy,
-    placement_text,
 )
-from ..packages import load_workflow_package
 from ..projects import discover_project, read_project_section, require_project, write_project_section
 from ..registry import (
     LOCAL_REMOTE,
@@ -61,11 +60,10 @@ from ..seals import (
     default_workspace_keys,
     is_workspace_sealed,
     read_seal,
-    seal_job,
+    require_cli_modifiable,
     seal_workspace,
     unseal_workspace,
-    unsealed_jobs,
-    workspace_seal_path,
+    verify_workspace_seal,
 )
 from ..workspace import Workspace, _validate_setting_key, _validate_settings
 from ._common import (
@@ -78,13 +76,13 @@ from ._common import (
     _leaf,
     _local_root,
     _pairs,
-    _published_runner_entries,
     _remote_workspace_read,
     _resolve_binding,
     add_durability_arguments,
     add_workspace_argument,
     confirm,
 )
+from ._seal import _default_trusted_keys
 
 # ---------------------------------------------------------------------------
 # workspace
@@ -224,9 +222,82 @@ def add_workspace_status_arguments(parser: argparse.ArgumentParser) -> None:
     add_durability_arguments(parser)
 
 
-def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Summarize the authoritative markers of one workspace.
+def _epoch_text(value: object) -> str | None:
+    """Render an epoch second from ``owner.json`` as UTC ISO text, or ``None`` when absent or malformed."""
 
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return datetime.fromtimestamp(value, UTC).isoformat(timespec="seconds")
+
+
+def _owner_rows(workspace: Workspace, *, kind: str | None, tombstoning: bool) -> list[dict[str, object]]:
+    """Describe the owners of a workspace, each with its liveness.
+
+    :param workspace: The workspace.
+    :param kind: List only the owners of this kind, or every owner when ``None``.
+    :param tombstoning: Probe with :func:`httk.workflow._kernel.probe_owner`, which writes the tombstone of an
+        owner it proves dead; otherwise probe read-only.
+    :return: One row per owner, by owner id.
+    """
+
+    scheduler, here = _death.SchedulerQueries(), _death.process_identity()
+    rows: list[dict[str, object]] = []
+    for owner in _kernel.list_owners(workspace):
+        record = owner.record or {}
+        if kind is not None and record.get("kind") != kind:
+            continue
+        tombstone_by = None if owner.tombstone is None else owner.tombstone.get("by")
+        if owner.tombstone is not None:
+            liveness = "dead"
+        elif owner.record is None:
+            # Neither owner.json nor dead.json: a clean close in progress, or an unreadable record.
+            liveness = "unknown"
+        elif tombstoning:
+            try:
+                liveness = _kernel.probe_owner(workspace, owner.owner_id, scheduler=scheduler).value
+            except ValueError:
+                liveness = "alive"  # the owner is this very process
+            tombstone_by = "probe" if liveness == "dead" else None
+        else:
+            verdict, _evidence = _death.probe(owner.path, visibility_deadline=0.0, scheduler=scheduler, here=here)
+            liveness = verdict.value
+        rows.append(
+            {
+                "owner_id": owner.owner_id,
+                "kind": record.get("kind"),
+                "label": record.get("label"),
+                "hostname": record.get("hostname"),
+                "pid": record.get("pid"),
+                "started_at": record.get("started_at"),
+                "end_time": _epoch_text(record.get("end_time")),
+                "drain_start": _epoch_text(record.get("drain_start")),
+                "liveness": liveness,
+                "tombstone_by": tombstone_by,
+            }
+        )
+    return rows
+
+
+def _print_owner_rows(rows: list[dict[str, object]]) -> None:
+    """Print one tab-separated line per owner row."""
+
+    for row in rows:
+        liveness = row["liveness"] if row["tombstone_by"] is None else f"dead (tombstone by {row['tombstone_by']})"
+        line = (
+            f"{row['owner_id']}\t{row['kind'] or '-'}\t{liveness}\t{row['hostname'] or '-'}\tpid={row['pid'] or '-'}\t"
+            f"started={row['started_at'] or '-'}\tlabel={row['label'] or '-'}"
+        )
+        for key in ("end_time", "drain_start"):
+            if row[key] is not None:
+                line += f"\t{key}={row[key]}"
+        print(line)
+
+
+def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Summarize one workspace: its job counts by state, its seal, and its owners with their liveness.
+
+    The owner probe is the tombstone-writing one: an owner proven dead gets its
+    ``dead.json`` here, and the next manager tick or ``workspace gc`` recovers it.
     A remote binding is summarized over its adapter, so ``workspace status NAME``
     reads a remote workspace exactly as it reads a local one.
     """
@@ -240,20 +311,9 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
         assert binding is not None
         return _remote_workspace_read(binding, context, REMOTE_STATUS_COMMAND, arguments, flags=("--json",))
     workspace = Workspace(root, mutable=False, durable=_durable(arguments))
-    counts: dict[str, int] = {}
-    rows: list[dict[str, object]] = []
-    for marker in workspace.scan_markers(STATE_KINDS):
-        counts[marker.kind] = counts.get(marker.kind, 0) + 1
-        rows.append(
-            {
-                "job_id": marker.job_id,
-                "job_key": marker.job_key,
-                "state": marker.kind,
-                "placement": placement_text(marker.placement),
-                "priority": marker.priority,
-                "generation": marker.generation,
-            }
-        )
+    counts = {state: count for state in JOB_STATES if (count := count_jobs(workspace, state))}
+    owners = _owner_rows(workspace, kind=None, tombstoning=True)
+    sealed = is_workspace_sealed(workspace)
     if arguments.json:
         print(
             json.dumps(
@@ -265,131 +325,165 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
                     "workspace_format_version": workspace.format["format_version"],
                     "core_profile": workspace.format["core_profile"],
                     "extensions": sorted(workspace.extensions),
-                    "sealed": is_workspace_sealed(workspace),
+                    "sealed": sealed,
                     "counts": counts,
-                    "jobs": rows,
+                    "owners": owners,
                 },
                 indent=2,
             )
         )
         return 0
     print(f"workspace {workspace.workspace_id}")
-    for kind in sorted(counts):
-        print(f"{kind:12s} {counts[kind]}")
-    print(f"sealed: {'yes' if is_workspace_sealed(workspace) else 'no'}")
+    for state, count in counts.items():
+        print(f"{state:12s} {count}")
+    print(f"sealed: {'yes' if sealed else 'no'}")
+    print(f"owners: {len(owners)}")
+    _print_owner_rows(owners)
     return 0
 
 
-def handle_workspace_managers(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """List the managers registered to serve one workspace.
+def handle_workspace_owners(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """List the owners registered in one workspace (``workspace managers`` is an alias).
 
-    Answers "what serves this workspace?" directly, rather than by running
-    ``job why`` on an arbitrary job: one line per registered manager, its
-    live-or-stale liveness against the default lease, and what it serves.
+    Each owner is shown with its kind, label, host, process, start, allocation
+    end and drain start, and its liveness from the read-only death proof; this
+    listing never writes a tombstone (``workspace status`` and ``workspace gc``
+    do).
     """
 
     if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_managers)
-    workspace = Workspace(_local_root(arguments, context, action="list its managers"), mutable=False)
-    managers = read_managers(workspace)
+        return _workspace_batch(arguments, context, handle_workspace_owners)
+    workspace = Workspace(_local_root(arguments, context, action="list its owners"), mutable=False)
+    rows = _owner_rows(workspace, kind=arguments.kind, tombstoning=False)
     if arguments.json:
-        print(json.dumps([manager.as_mapping() for manager in managers], indent=2, sort_keys=True))
+        print(json.dumps(rows, indent=2, sort_keys=True))
         return 0
-    if not managers:
-        print("no manager has ever registered in this workspace")
+    if not rows:
+        print("no owner is registered in this workspace")
         return 0
-    for manager in managers:
-        live = "live" if manager.alive(lease_seconds=DEFAULT_LEASE_SECONDS) else "stale"
-        age = "no heartbeat" if manager.heartbeat_age_seconds is None else f"{manager.heartbeat_age_seconds:.0f}s ago"
-        pools = "any" if manager.accept_any_pool else ",".join(sorted(manager.pools)) or "-"
-        print(
-            f"{manager.manager_id}\t{live}\t{age}\t{manager.hostname or '-'}\t"
-            f"pools={pools}\tcapabilities={','.join(sorted(manager.capabilities)) or '-'}\t"
-            f"executors={','.join(sorted(manager.executors)) or '-'}\t"
-            f"runner-modules={','.join(manager.runner_modules) or '-'}"
-            + ("" if manager.ends() is None else f"\t{manager.ends()}")
-        )
+    _print_owner_rows(rows)
+    return 0
+
+
+_ATTEST_LIMITATION = (
+    "Attesting an owner that is still running can apply a request twice and run work twice: attest only after "
+    "confirming that the owner process and every launch it started are gone"
+)
+
+
+def handle_workspace_attest_dead(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Attest, as the operator, that an owner and every launch it started have ended.
+
+    This writes the owner's ``dead.json`` tombstone (``by: operator``); the owner's
+    jobs are recovered at the next manager tick or ``httk workspace gc``. An
+    owner whose ``owner.json`` names this very process is refused.
+    """
+
+    workspace = Workspace(_local_root(arguments, context, action="attest an owner dead"))
+    owner_id = arguments.owner
+    owners = {owner.owner_id: owner for owner in _kernel.list_owners(workspace)}
+    if owner_id not in owners and not (workspace.jobs / _kernel.OWNED / owner_id).is_dir():
+        raise ValueError(f"no owner {owner_id!r} is registered in this workspace, and no job is owned by it")
+    record = owners[owner_id].record if owner_id in owners else None
+    here = _death.process_identity()
+    if record is not None and (
+        record.get("hostname"),
+        record.get("boot_id"),
+        record.get("pid"),
+        record.get("process_start_ticks"),
+    ) == (here.hostname, here.boot_id, here.pid, here.start_ticks):
+        raise ValueError(f"owner {owner_id} is this very process; it cannot be attested dead")
+    operator = arguments.operator
+    if operator is None:
+        identity = configured_operator_identity()
+        operator = None if identity is None else identity.label
+    _kernel.attest_dead(
+        workspace,
+        owner_id,
+        by="operator",
+        evidence=[{"subject": f"owner {owner_id}", "rule": "operator", "detail": arguments.reason}],
+        operator=operator,
+        reason=arguments.reason,
+    )
+    print(f"{owner_id}\tattested dead")
+    print("its jobs are recovered at the next manager tick or `httk workspace gc`", file=sys.stderr)
     return 0
 
 
 def handle_workspace_workflows(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """List the runners a workspace publishes, with each tree's workflow identity.
+    """List the workflows installed in a workspace, with each one's id, short name, tree digest and summary.
 
-    A directory package's workflow id, alias, and summary come from loading its
-    manifest with ``register=False`` — the runner is never executed. A file
-    runner can only be described by running it, which this read never does, so it
-    reports no identity. A manifest that fails to load leaves the listing intact:
-    the id column is ``-`` and the error text takes the summary column.
+    The summary comes from parsing the installed manifest; the runner is never
+    executed. A manifest that fails to parse leaves the listing intact: its error
+    text takes the summary column.
     """
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_workflows)
-    workspace = Workspace(_local_root(arguments, context, action="list its runners"), mutable=False)
-    store = workspace.runners
-    entries = list(_published_runner_entries(store)) if store.is_dir() else []
+    workspace = Workspace(_local_root(arguments, context, action="list its workflows"), mutable=False)
     rows: list[dict[str, object]] = []
-    for path in entries:
-        is_tree = path.is_dir()
+    for installed in _store.list_installed(workspace):
         row: dict[str, object] = {
-            "path": path.relative_to(store).as_posix(),
-            "kind": "tree" if is_tree else "file",
-            "sha256": tree_digest(path) if is_tree else sha256_file(path),
-            "workflow": None,
-            "alias": None,
+            "workflow": installed.id,
+            "name": installed.name,
+            "tree_sha256": installed.record.get("tree_sha256"),
             "summary": None,
             "error": None,
         }
-        if is_tree:
-            try:
-                provider = load_workflow_package(path, register=False)
-            except _ERRORS as exc:
-                row["error"] = str(exc)
-            else:
-                row["workflow"] = provider.workflow_id
-                row["alias"] = provider.alias
-                row["summary"] = provider.summary or None
+        try:
+            row["summary"] = installed.provider().summary or None
+        except _ERRORS as exc:
+            row["error"] = str(exc)
         rows.append(row)
     if arguments.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
         return 0
     if not rows:
-        print("no runners published in this workspace")
+        print("no workflows are installed in this workspace")
         return 0
     for row in rows:
-        summary = row["error"] or row["summary"] or "-"
-        print(f"{row['path']}\t{row['kind']}\t{row['workflow'] or '-'}\t{summary}")
+        print(f"{row['workflow']}\t{row['name']}\t{row['error'] or row['summary'] or '-'}")
     return 0
 
 
 def handle_workspace_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Seal a workspace by recording the seal digest of every job it holds.
+    """Seal a workspace: a signed snapshot of the seal digest of every job it holds now.
 
-    Every job must already be sealed. ``--force`` seals the still-unsealed jobs
-    first — any quiescent kind, not just succeeded ones — and then the workspace;
-    without it, the unsealed jobs are listed and the command refuses.
+    Jobs without a seal (unfinished, failed, cancelled, opted out) are recorded
+    as unsealed and listed, for information only. An already sealed workspace is
+    an error.
     """
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_seal)
     workspace = Workspace(_local_root(arguments, context, action="seal it"))
     refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()] if arguments.keys else None
-    resolved = None
-    with workspace_maintenance_guard(workspace):
-        unsealed = unsealed_jobs(workspace)
-        if unsealed and not arguments.force:
-            for marker in unsealed:
-                print(f"{marker.job_id}\t{marker.kind}", file=sys.stderr)
-            return 1
-        resolved = default_workspace_keys(workspace, refs)
-        for marker in unsealed:
-            seal_job(workspace, marker, keys=resolved)
-        seal_workspace(workspace, keys=resolved)
-    seal = read_seal(workspace_seal_path(workspace))
-    roles = ",".join(str(signature.get("role")) for signature in seal.signatures)
+    resolved = default_workspace_keys(workspace, refs)
+    path, unsealed = seal_workspace(workspace, keys=resolved)
+    for ref in unsealed:
+        print(f"unsealed job\t{ref.job_id}\t{ref.state}", file=sys.stderr)
+    roles = ",".join(str(signature.get("role")) for signature in read_seal(path).signatures)
     print(f"{workspace.root}\tsealed\t{roles}")
     if resolved.missing_roles:
         print(f"warning: no key resolved for seal role(s): {', '.join(resolved.missing_roles)}", file=sys.stderr)
     return 0
+
+
+def handle_workspace_verify(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Verify a workspace seal and report every job that drifted since the snapshot; drift exits one."""
+
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_verify)
+    workspace = Workspace(_local_root(arguments, context, action="verify its seal"), mutable=False)
+    trusted = _default_trusted_keys(workspace.root, list(arguments.trusted_key))
+    verification = verify_workspace_seal(workspace, trusted_keys=trusted)
+    if arguments.json:
+        print(json.dumps(verification.as_entry("workspace", workspace.workspace_id), indent=2, sort_keys=True))
+    else:
+        for discrepancy in verification.discrepancies:
+            print(f"{discrepancy.kind}\t{discrepancy.path}")
+        print(f"{workspace.root}\t{verification.verdict}\t{verification.reason or '-'}")
+    return 0 if verification.valid else 1
 
 
 def handle_workspace_unseal(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -448,14 +542,15 @@ def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIConte
     root = _local_root(arguments, context, action="change its policy")
     # A retention member is addressed directly so that setting one limit does
     # not require restating the whole object as JSON.
+    workspace = Workspace(root)
+    require_cli_modifiable(workspace)
     if arguments.key.startswith("retention."):
         member = arguments.key.split(".", 1)[1]
-        workspace = Workspace(root)
         retention = dict(workspace.policy.retention.as_mapping())
         retention[member] = _policy_value(arguments.key, arguments.value)
         policy = workspace.set_policy({"retention": retention})
     else:
-        policy = Workspace(root).set_policy({arguments.key: _policy_value(arguments.key, arguments.value)})
+        policy = workspace.set_policy({arguments.key: _policy_value(arguments.key, arguments.value)})
     return _print_policy(policy, as_json=arguments.json)
 
 
@@ -478,7 +573,7 @@ def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLICon
 
 
 def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Check, and optionally repair, the marker-to-journal integrity."""
+    """Check a workspace's job tree; ``--repair`` quarantines the unparsable entries, the only repair there is."""
 
     if isinstance(arguments.workspace, list):
         if (arguments.repair or arguments.quarantine_unrepairable) and not arguments.workspace:
@@ -494,32 +589,21 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
             arguments,
             flags=("--repair", "--quarantine-unrepairable", "--json"),
         )
-    workspace = Workspace(root, mutable=arguments.repair)
-    report = workspace.check(
-        repair=arguments.repair,
-        quarantine_unrepairable=arguments.quarantine_unrepairable,
-    )
+    repair = arguments.repair or arguments.quarantine_unrepairable
+    report = check_workspace(Workspace(root, mutable=repair), repair=repair)
     if arguments.json:
         print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
     else:
         for finding in report.findings:
             print(f"{finding.action}\t{finding.problem}\t{finding.job_key or '-'}\t{finding.entry}\t{finding.detail}")
-        print(f"checked {report.markers_checked} markers, {len(report.findings)} findings")
-        if report.always_safe_candidates:
-            details = ", ".join(
-                f"{category}={count}" for category, count in sorted(report.always_safe_counts.items()) if count
-            )
-            print(
-                f"{report.always_safe_candidates} always-safe leftovers ({details}); "
-                "any manager run or workspace gc collects them"
-            )
+        print(f"checked {report.jobs_checked} jobs, {len(report.findings)} findings")
     # A clean workspace and a fully repaired one both exit zero; anything an
     # operator still has to deal with exits one, as a check command should.
     return 1 if report.unresolved else 0
 
 
 def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Free the disk the workspace retention policy says may be freed."""
+    """Collect what the workspace retention policy allows, as one CLI owner; dead owners are recovered first."""
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_gc)
@@ -532,9 +616,10 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
             REMOTE_WORKSPACE_GC_COMMAND,
             arguments,
             flags=("--dry-run", "--json"),
+            tail=[item for category in arguments.category or () for item in ("--category", category)],
         )
     workspace = Workspace(root, mutable=not arguments.dry_run)
-    report = workspace.collect_garbage(dry_run=arguments.dry_run)
+    report = collect_garbage(workspace, dry_run=arguments.dry_run, categories=arguments.category or None)
     if arguments.json:
         print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
         return 0
@@ -543,9 +628,6 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
         print(f"{name:<24}{candidates:>12}{removed:>9}{reclaimed:>14}")
     for skipped in report.skipped:
         print(f"skipped {skipped}")
-    if report.skipped_foreign:
-        details = ", ".join(f"{category}={count}" for category, count in sorted(report.skipped_foreign.items()))
-        print(f"skipped foreign: {details}")
     if arguments.dry_run:
         print("dry run: nothing was removed")
     return 0
@@ -559,6 +641,7 @@ def handle_workspace_exchange_enable(arguments: argparse.Namespace, context: CLI
     from .._exchange import enable_exchange, exchange_directory
 
     workspace = Workspace(_local_root(arguments, context, action="enable its exchange"), durable=_durable(arguments))
+    require_cli_modifiable(workspace)
     directory = exchange_directory(workspace)
     if not enable_exchange(workspace):
         print(f"{workspace.root}	exchange already enabled	{directory}")
@@ -569,16 +652,6 @@ def handle_workspace_exchange_enable(arguments: argparse.Namespace, context: CLI
         f"clients write ejected jobs into {directory / 'inbox'} and adopt finished ones from {directory / 'outbox'}",
         file=sys.stderr,
     )
-    return 0
-
-
-def handle_workspace_unlock(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Release a workspace maintenance lock."""
-
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_unlock)
-    workspace = Workspace(_local_root(arguments, context, action="release its lock"))
-    print(release_maintenance_lock(workspace, force=arguments.force))
     return 0
 
 
@@ -697,6 +770,12 @@ def handle_workspace_default(arguments: argparse.Namespace, context: CLIContext)
 
 
 def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move a local workspace within its filesystem and update its registry path.
+
+    Refused unless every owner of the workspace is proven dead: a running
+    manager or CLI owner keeps the workspace in use. A remote binding moves over
+    its adapter.
+    """
     binding = resolve_workspace(arguments.workspace, project=context.cwd)
     if binding.remote != LOCAL_REMOTE:
         target = resolve_remote(binding.remote, project=context.cwd)
@@ -709,39 +788,24 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
         sys.stdout.write(str(result.get("stdout", "")))
         return 0
     assert binding.path is not None
-    workspace = Workspace(binding.path, mutable=False)
-    for manager in read_managers(workspace):
-        if manager.alive(lease_seconds=DEFAULT_LEASE_SECONDS):
-            raise ValueError(f"cannot move workspace while manager {manager.manager_id!r} has a fresh heartbeat")
-    lock = read_maintenance_lock(workspace)
-    if lock is not None and not lock.is_stale():
-        raise ValueError(f"cannot move workspace while the maintenance lock is held by {lock.describe()}")
     destination = (Path(context.cwd) / arguments.destination).resolve()
     if destination.exists():
         raise ValueError(f"workspace move destination already exists: {destination}")
-    renamed = False
     try:
-        with workspace_maintenance_guard(workspace):
-            for manager in read_managers(workspace):
-                if manager.alive(lease_seconds=DEFAULT_LEASE_SECONDS):
-                    raise ValueError(
-                        f"cannot move workspace while manager {manager.manager_id!r} has a fresh heartbeat"
-                    )
-            try:
-                os.rename(binding.path, destination)
-            except OSError as exc:
-                if exc.errno != errno.EXDEV:
-                    raise
-                raise ValueError(
-                    "workspace move must stay within one filesystem; stop managers, copy the workspace manually, "
-                    "then forget the old name and run `workspace init --name NAME <newpath>`"
-                ) from exc
-            renamed = True
-            updated = _update_workspace_path(binding.name, destination, durable=_durable(arguments))
-            move_project_member(Path(binding.path), destination)
-    finally:
-        if renamed:
-            release_maintenance_lock(Workspace(destination), force=True)
+        require_quiescent_workspace(Workspace(binding.path, mutable=False))
+    except ValueError as exc:
+        raise ValueError(f"cannot move the workspace while it is in use: {exc}") from exc
+    try:
+        os.rename(binding.path, destination)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        raise ValueError(
+            "workspace move must stay within one filesystem; stop managers, copy the workspace manually, "
+            "then forget the old name and run `workspace init --name NAME <newpath>`"
+        ) from exc
+    updated = _update_workspace_path(binding.name, destination, durable=_durable(arguments))
+    move_project_member(Path(binding.path), destination)
     print(updated.path)
     return 0
 
@@ -811,7 +875,9 @@ def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContex
             if code:
                 return code
     else:
-        Workspace(root, durable=_durable(arguments)).configure_settings(changes, unset=arguments.unset or ())
+        workspace = Workspace(root, durable=_durable(arguments))
+        require_cli_modifiable(workspace)
+        workspace.configure_settings(changes, unset=arguments.unset or ())
     item = copy(arguments)
     item.key = None
     return handle_workspace_settings_show(item, context)
@@ -835,6 +901,7 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
             tail=("--key", arguments.key, "--value", arguments.value),
         )
     workspace = Workspace(root, durable=_durable(arguments))
+    require_cli_modifiable(workspace)
     settings = workspace.set_setting(arguments.key, value)
     print(json.dumps(settings[arguments.key], sort_keys=True))
     return 0
@@ -857,6 +924,7 @@ def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIC
             tail=("--key", arguments.key),
         )
     workspace = Workspace(root, durable=_durable(arguments))
+    require_cli_modifiable(workspace)
     workspace.unset_setting(arguments.key)
     return 0
 
@@ -939,6 +1007,7 @@ def handle_workspace_workflow_prelude_set(arguments: argparse.Namespace, context
     # argument so the file is read on the far side, as `settings set` forwards.
     value = _prelude_value(arguments.value)
     workspace = Workspace(root, durable=_durable(arguments))
+    require_cli_modifiable(workspace)
     preludes = workspace.set_workflow_prelude(arguments.workflow, value)
     print(preludes[arguments.workflow])
     return 0
@@ -966,6 +1035,7 @@ def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, conte
             tail=("--workflow", arguments.workflow),
         )
     workspace = Workspace(root, durable=_durable(arguments))
+    require_cli_modifiable(workspace)
     workspace.unset_workflow_prelude(arguments.workflow)
     return 0
 
@@ -1055,33 +1125,59 @@ def build_workspace_parser(
     status = _leaf(
         group,
         "status",
-        summary="summarize the authoritative markers",
-        description="Summarize the authoritative markers of one workspace",
+        summary="summarize job counts, the seal, and the owners",
+        description=(
+            "Summarize one workspace: its job counts by state, whether it is sealed, and its owners with their "
+            "liveness; an owner proven dead gets its tombstone, for the next manager tick or workspace gc to recover"
+        ),
         handler=handle_workspace_status,
     )
     _add_workspace_targets(status, help_text="the workspace to summarize")
     status.add_argument("--json", action="store_true", help="print the machine-readable status document")
     _add_by_path_argument(status)
     add_durability_arguments(status)
-    managers = _leaf(
+    for name in ("owners", "managers"):
+        # ``managers`` is the earlier name, kept as a hidden alias leaf of its own (so its prog names it).
+        owners = _leaf(
+            group,
+            name,
+            summary="list the owners (managers, CLI processes, daemons) of this workspace",
+            description=(
+                "List every owner registered in one workspace with its liveness from the read-only death proof "
+                "(managers is an alias)"
+            ),
+            handler=handle_workspace_owners,
+            hidden=name == "managers",
+        )
+        _add_workspace_targets(owners, help_text="the workspace whose owners to list")
+        owners.add_argument("--kind", choices=("manager", "cli", "daemon"), help="list only owners of this kind")
+        owners.add_argument("--json", action="store_true", help="print the owners as one JSON array")
+    attest = _leaf(
         group,
-        "managers",
-        summary="list the managers serving this workspace",
-        description="List every manager registered to serve one workspace, live or stale",
-        handler=handle_workspace_managers,
+        "attest-dead",
+        summary="attest that an owner and its launches have ended",
+        description=(
+            "Write the dead.json tombstone of OWNER as the operator, so the next manager tick or workspace gc "
+            f"recovers its jobs. {_ATTEST_LIMITATION}"
+        ),
+        handler=handle_workspace_attest_dead,
     )
-    _add_workspace_targets(managers, help_text="the workspace whose managers to list")
-    managers.add_argument("--json", action="store_true", help="print the managers as one JSON array")
+    attest.add_argument("owner", metavar="OWNER", help="the owner id, as workspace owners lists it")
+    add_workspace_argument(attest, help_text="the workspace the owner belongs to")
+    attest.add_argument("--reason", required=True, metavar="TEXT", help="why the owner is known dead, recorded")
+    attest.add_argument(
+        "--operator", metavar="NAME", help="who attests, recorded (default: the configured operator identity)"
+    )
 
     workflows = _leaf(
         group,
         "workflows",
-        summary="list the runners this workspace publishes",
-        description="List the runners in a workspace's runner store, with each directory package's workflow identity",
+        summary="list the workflows installed in this workspace",
+        description="List the workflows installed in a workspace, with each one's id, short name and summary",
         handler=handle_workspace_workflows,
     )
-    _add_workspace_targets(workflows, help_text="the workspace whose runners to list")
-    workflows.add_argument("--json", action="store_true", help="print the runners as one JSON array")
+    _add_workspace_targets(workflows, help_text="the workspace whose workflows to list")
+    workflows.add_argument("--json", action="store_true", help="print the workflows as one JSON array")
 
     _, policy_actions = _group(
         group,
@@ -1329,20 +1425,23 @@ def build_workspace_parser(
     fsck = _leaf(
         group,
         "fsck",
-        summary="check that every marker resolves to its journal frame",
-        description="Check, and optionally repair, the marker-to-journal integrity of a workspace",
+        summary="check the job tree for what the kernel cannot read",
+        description=(
+            "Check a workspace's job tree: unparsable names, a job in two places, owned jobs without their owner, "
+            "unreadable state.json, and jobs another user owns; only unparsable entries can be quarantined"
+        ),
         handler=handle_workspace_fsck,
     )
     _add_workspace_targets(fsck, help_text="the workspace to check")
     fsck.add_argument(
         "--repair",
         action="store_true",
-        help="re-point damaged markers at the last readable frame",
+        help="move the unparsable entries into the quarantine; every other finding is left to the operator",
     )
     fsck.add_argument(
         "--quarantine-unrepairable",
         action="store_true",
-        help="with --repair, move a marker with no readable history into the quarantine",
+        help="the same as --repair",
     )
     fsck.add_argument("--json", action="store_true", help="print the findings as one JSON report")
     _add_by_path_argument(fsck)
@@ -1360,36 +1459,26 @@ def build_workspace_parser(
         action="store_true",
         help="report what would be removed without touching it",
     )
+    collect.add_argument(
+        "--category",
+        action="append",
+        choices=GC_CATEGORIES,
+        help="collect only this category (repeatable, default: every category)",
+    )
     collect.add_argument("--json", action="store_true", help="print the collection as one JSON report")
     _add_by_path_argument(collect)
-
-    unlock = _leaf(
-        group,
-        "unlock",
-        summary="release a maintenance lock",
-        description="Release a stale, or with --force a live, workspace maintenance lock",
-        handler=handle_workspace_unlock,
-    )
-    _add_workspace_targets(unlock, help_text="the workspace whose lock to release")
-    unlock.add_argument(
-        "--force",
-        action="store_true",
-        help="also remove a lock whose holder is still alive",
-    )
 
     seal = _leaf(
         group,
         "seal",
-        summary="seal a workspace and the jobs it holds",
-        description="Record the seal digest of every job in a workspace under one signed workspace seal",
+        summary="seal a snapshot of the job seals a workspace holds",
+        description=(
+            "Record the seal digest of every job in a workspace under one signed workspace seal; jobs without a "
+            "seal are recorded and listed as unsealed"
+        ),
         handler=handle_workspace_seal,
     )
     _add_workspace_targets(seal, help_text="the workspace to seal")
-    seal.add_argument(
-        "--force",
-        action="store_true",
-        help="seal every still-unsealed job first, rather than refusing",
-    )
     seal.add_argument(
         "--keys",
         metavar="REFS",
@@ -1405,3 +1494,23 @@ def build_workspace_parser(
     )
     _add_workspace_targets(unseal, help_text="the workspace to unseal")
     unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")
+
+    verify = _leaf(
+        group,
+        "verify",
+        summary="verify a workspace seal and report drift",
+        description=(
+            "Verify a workspace seal's signature and list every job that drifted since the snapshot: "
+            "missing_job, unsealed, missing, mismatch; any drift exits one"
+        ),
+        handler=handle_workspace_verify,
+    )
+    _add_workspace_targets(verify, help_text="the workspace to verify")
+    verify.add_argument("--json", action="store_true", help="print the verdict as one JSON document")
+    verify.add_argument(
+        "--trusted-key",
+        action="append",
+        default=[],
+        metavar="KEY_OR_FINGERPRINT",
+        help="trust this key as well (repeatable); the project's pinned keys and all local identities are trusted",
+    )

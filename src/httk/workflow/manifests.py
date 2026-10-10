@@ -33,7 +33,6 @@ __all__ = [
     "ManifestVerification",
     "payload_file_records",
     "read_maintenance_lock",
-    "release_maintenance_lock",
     "require_quiescent_workspace",
     "verify_legacy_manifest",
     "verify_manifest",
@@ -100,25 +99,13 @@ def workspace_maintenance_guard(workspace: Workspace) -> Iterator[None]:
 
 
 def read_maintenance_lock(workspace: Workspace) -> None:
-    """Return ``None``: workspaces have no maintenance lock any more (kept for the C5b CLI port).
+    """Return ``None``: workspaces have no maintenance lock any more (kept for ``_exchange.py`` until phase D).
 
     :param workspace: The workspace.
     :return: ``None``.
     """
 
     del workspace
-
-
-def release_maintenance_lock(workspace: Workspace, *, force: bool = False) -> str:
-    """Report that there is no maintenance lock (kept for the C5b CLI port).
-
-    :param workspace: The workspace.
-    :param force: Ignored.
-    :return: The report.
-    """
-
-    del force
-    return f"no maintenance lock is present: {workspace.control}"
 
 
 def _legacy_file_digest(path: Path) -> str:

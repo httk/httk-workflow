@@ -1,4 +1,4 @@
-"""Campaign submission and manager launch (the manager launch waits for the CLI manager port, C5b-2).
+"""Campaign submission and manager launch.
 
 Split out of ``test_campaigns.py``; the description below is the original module's.
 
@@ -143,7 +143,6 @@ def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path,
     assert len(every_job(workspaces["south"])) == 2
 
 
-@pytest.mark.skip(reason="C5b-2: campaign manager launch is rewritten on the kernel")
 def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Path) -> None:
     """One manager per selected partition drains its work; a partition subset
     leaves the others alone."""
@@ -155,9 +154,9 @@ def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Pa
 
     report = campaign_managers(partitions=["north"], project=root)
     assert [row["partition"] for row in report] == ["north"]
-    assert all(marker.kind == "succeeded" for marker in workspaces["north"].scan_markers())
+    assert [ref.state for ref in every_job(workspaces["north"])] == ["succeeded"]
     # South was not selected, so its job is still waiting.
-    assert {marker.kind for marker in workspaces["south"].scan_markers()} == {"submitted"}
+    assert [ref.state for ref in every_job(workspaces["south"])] == ["ready"]
 
     campaign_managers(project=root)
-    assert all(marker.kind == "succeeded" for marker in workspaces["south"].scan_markers())
+    assert [ref.state for ref in every_job(workspaces["south"])] == ["succeeded"]

@@ -28,7 +28,7 @@ from .._scheduler import detect_scheduler
 from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
 from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
-from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, NotIdleError, TaskManager
+from ..manager import NotIdleError, TaskManager
 from ..models import LOGS_DIRECTORY, validate_capacity
 from ..registry import WorkspaceBinding
 from ..workspace import Workspace, _validate_setting_key, _validate_setting_value
@@ -264,16 +264,11 @@ def manager_option_defaults() -> dict[str, object]:
         "detach": False,
         "by_path": False,
         "adapter_timeout": None,
-        "lease_seconds": None,
         "heartbeat_interval": 30.0,
         "poll_interval": 1.0,
         "idle": False,
         "idle_timeout": 3600.0,
         "join_grace_seconds": 3600.0,
-        "unsafe_persistent_takeover": False,
-        "unsafe_isolated_takeover": False,
-        "takeover_grace_factor": DEFAULT_TAKEOVER_GRACE_FACTOR,
-        "runner_search_path": [],
         "drain_timeout": 30.0,
         "time_limit": None,
         "deadline_margin": 120.0,
@@ -330,16 +325,10 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     _add_worker_resource_argument(parser)
     _add_setting_argument(parser)
     parser.add_argument(
-        "--lease-seconds",
-        type=float,
-        metavar="SECONDS",
-        help="lease length for this manager (default: the workspace policy's lease_seconds)",
-    )
-    parser.add_argument(
         "--heartbeat-interval",
         type=float,
         metavar="SECONDS",
-        help="how often this manager refreshes its lease (default: 30)",
+        help="how often this manager writes its informational heartbeat (default: 30)",
     )
     parser.add_argument(
         "--poll-interval",
@@ -366,28 +355,6 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
             "how long a waiting job tolerates an unresolvable join child before it fails; measured from when a "
             "manager first records it and persisted in the state frame, so it survives a restart (default: 3600)"
         ),
-    )
-    parser.add_argument(
-        "--unsafe-persistent-takeover",
-        action="store_true",
-        help="take over a persistent workdir on lease expiry alone, without proving the old writer stopped",
-    )
-    parser.add_argument(
-        "--unsafe-isolated-takeover",
-        action="store_true",
-        help="relaunch an isolated-workdir attempt on lease expiry alone, without waiting out the takeover grace",
-    )
-    parser.add_argument(
-        "--takeover-grace-factor",
-        type=float,
-        metavar="FACTOR",
-        help="multiples of the lease a silent attempt is left alone before it may be taken over (default: 2.0)",
-    )
-    parser.add_argument(
-        "--runner-search-path",
-        action="append",
-        metavar="DIRECTORY",
-        help="ordered root for jobs whose runner.source is installed (repeatable)",
     )
     parser.add_argument(
         "--drain-timeout",
@@ -495,16 +462,10 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     _add_launcher_argument(parser)
     parser.add_argument(
-        "--lease-seconds",
-        type=float,
-        metavar="SECONDS",
-        help="lease length for this manager (default: the workspace policy's lease_seconds)",
-    )
-    parser.add_argument(
         "--heartbeat-interval",
         type=float,
         metavar="SECONDS",
-        help="how often this manager refreshes its lease (default: 30)",
+        help="how often this manager writes its informational heartbeat (default: 30)",
     )
     parser.add_argument(
         "--poll-interval",
@@ -517,26 +478,6 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         metavar="SECONDS",
         help="how long a waiting job tolerates an unresolvable join child (default: 3600)",
-    )
-    parser.add_argument(
-        "--unsafe-persistent-takeover", action="store_true", help="take over a persistent workdir on lease expiry alone"
-    )
-    parser.add_argument(
-        "--unsafe-isolated-takeover",
-        action="store_true",
-        help="relaunch an isolated-workdir attempt on lease expiry alone",
-    )
-    parser.add_argument(
-        "--takeover-grace-factor",
-        type=float,
-        metavar="FACTOR",
-        help="multiples of the lease before a silent attempt may be taken over (default: 2.0)",
-    )
-    parser.add_argument(
-        "--runner-search-path",
-        action="append",
-        metavar="DIRECTORY",
-        help="ordered root for installed runners (repeatable)",
     )
     parser.add_argument(
         "--drain-timeout",
@@ -581,8 +522,6 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--capability", capability]
     for prefix in getattr(arguments, "placement_prefix", []):
         argv += ["--placement-prefix", prefix]
-    if getattr(arguments, "lease_seconds", None) is not None:
-        argv += ["--lease-seconds", str(arguments.lease_seconds)]
     if changed("heartbeat_interval"):
         argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
     if changed("poll_interval"):
@@ -603,14 +542,6 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv.append("--idle")
     elif changed("idle_timeout"):
         argv += ["--idle-timeout", str(arguments.idle_timeout)]
-    if getattr(arguments, "unsafe_persistent_takeover", False):
-        argv.append("--unsafe-persistent-takeover")
-    if getattr(arguments, "unsafe_isolated_takeover", False):
-        argv.append("--unsafe-isolated-takeover")
-    if changed("takeover_grace_factor"):
-        argv += ["--takeover-grace-factor", str(arguments.takeover_grace_factor)]
-    for path in getattr(arguments, "runner_search_path", []):
-        argv += ["--runner-search-path", path]
     if changed("drain_timeout"):
         argv += ["--drain-timeout", str(arguments.drain_timeout)]
     # Parsed here because every launch path builds this tail first: a bad
@@ -794,13 +725,8 @@ def _run_in_process_manager(
         resources=capacity,
         placement_prefixes=getattr(arguments, "placement_prefix", []),
         maximum_workers=maximum_workers,
-        lease_seconds=getattr(arguments, "lease_seconds", None),
         heartbeat_interval=getattr(arguments, "heartbeat_interval", 30.0),
         join_grace_seconds=getattr(arguments, "join_grace_seconds", 3600.0),
-        unsafe_persistent_takeover=getattr(arguments, "unsafe_persistent_takeover", False),
-        unsafe_isolated_takeover=getattr(arguments, "unsafe_isolated_takeover", False),
-        takeover_grace_factor=getattr(arguments, "takeover_grace_factor", DEFAULT_TAKEOVER_GRACE_FACTOR),
-        runner_search_paths=getattr(arguments, "runner_search_path", []),
         gc_interval=getattr(arguments, "gc_interval", None),
         on_attached=install_manager_log,
         end_time=end_time,
@@ -816,7 +742,6 @@ def _run_in_process_manager(
             f"manager {manager.manager_id} serving {workspace.root} "
             f"(pools={','.join(sorted(manager.pools)) or '-'}, "
             f"capabilities={','.join(sorted(manager.capabilities)) or '-'}, "
-            f"executors={','.join(sorted(manager.allowed_executors))}, "
             f"resources={','.join(f'{name}={value}' for name, value in manager.resources.items()) or '-'}{ends}); "
             f"log {log_file}"
         )
@@ -839,7 +764,7 @@ def _run_in_process_manager(
                 return 2
             if manager.drained is not None:
                 print(
-                    f"drained ({manager.drained}): {manager.running_attempts} attempt(s) left to lease recovery",
+                    f"drained ({manager.drained}): {manager.running_attempts} attempt(s) left for recovery",
                     file=sys.stderr,
                 )
             else:

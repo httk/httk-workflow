@@ -35,7 +35,6 @@ def _request(name: str, job_id: str, action: str, *options: str) -> list[str]:
     return ["job", "request", action, "--workspace", name, job_id, "--reason", "x", *options]
 
 
-@pytest.mark.skip(reason="C5b-2: the run leaf (workflow_cli/_manager.py) still passes removed manager options")
 def test_run_leaf_capability_claims_a_gated_job(tmp_path: Path, context: CLIContext, capsys) -> None:
     workspace, installed, name = _setup(tmp_path, context, "gated-ws")
     ref = v3.submit(workspace, installed, {"start": "succeed"}, capabilities=("docker",))

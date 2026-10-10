@@ -74,8 +74,7 @@ def test_run_passes_cli_resources_over_slurm(tmp_path: Path, monkeypatch: pytest
         manager_id = "manager"
         pools = frozenset({"default"})
         capabilities: frozenset[str] = frozenset()
-        allowed_executors = frozenset({"path"})
-        manager_directory = workspace.root / ".httk-workspace" / "managers" / "manager"
+        manager_directory = workspace.root / ".httk-workspace" / "owners" / "manager"
         drained: str | None = None
 
         def __init__(self, _workspace, **kwargs: object) -> None:
@@ -190,8 +189,9 @@ def test_local_count_starts_multiple_manager_processes(tmp_path: Path) -> None:
         )
         == 0
     )
-    managers = list((tmp_path / "workspace" / ".httk-workspace" / "managers").iterdir())
-    assert managers == []
+    # Each manager closed cleanly, so neither left its owner directory behind.
+    owners = tmp_path / "workspace" / ".httk-workspace" / "owners"
+    assert not owners.exists() or list(owners.iterdir()) == []
     logs = list((tmp_path / "workspace" / "logs" / "managers").glob("*.log"))
     assert len(logs) == 2
     assert all(log.read_text(encoding="utf-8").splitlines() for log in logs)

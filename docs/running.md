@@ -118,10 +118,11 @@ httk job request cancel --reason "wrong structure" silicon
 httk job delete silicon                # finished or not yet started jobs only
 ```
 
-`httk workspace status` summarizes the workspace; `workspace fsck` verifies the
-state tree and repairs what it can with `--repair`, `workspace gc` frees
-journal and trash space, and `workspace unlock` clears a stale maintenance
-lock. {doc}`details/taskmanager` explains each of them.
+`httk workspace status` summarizes the workspace and its owners; `workspace fsck`
+checks the job tree and quarantines unparsable entries with `--repair`,
+`workspace gc` frees what the retention policy allows and recovers dead owners,
+and `workspace attest-dead OWNER --reason TEXT` declares an owner dead that no
+probe can prove dead. {doc}`details/taskmanager` explains each of them.
 
 ## Moving jobs between machines
 

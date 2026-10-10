@@ -17,7 +17,7 @@ action is reported by its group.
 ## The command tree
 
 ```text
-httk workspace          show | configure | init | adopt | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | policy unset | fsck | gc | unlock | seal | unseal | daemon init | daemon configure | daemon show | daemon check | daemon run
+httk workspace          show | configure | init | adopt | list | default | move | forget | delete | status | owners | attest-dead | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | policy unset | fsck | gc | seal | unseal | verify | daemon init | daemon configure | daemon show | daemon check | daemon run
 httk job                 new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug | transfer
 httk collect             [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list       [--json]
@@ -126,9 +126,10 @@ remote workspace for execution.
 | `workspace move [--no-durable] NAME DEST_DIR` | move a local workspace and update its registry path | |
 | `workspace forget [--force] NAME...` | deregister names, leaving workspaces on disk | |
 | `workspace delete --force NAME...` | destroy workspaces and deregister them | |
-| `workspace status [--json] [NAME...]` | summarize authoritative markers (remote: over the adapter) | |
-| `workspace managers [--json] [NAME...]` | list managers serving workspaces, live or stale | |
-| `workspace workflows [--json] [NAME...]` | list the runners a workspace publishes, with each directory package's workflow identity | |
+| `workspace status [--json] [NAME...]` | summarize job counts by state, the seal, and the owners with their liveness (remote: over the adapter) | |
+| `workspace owners [--kind KIND] [--json] [NAME...]` | list the owners (managers, CLI processes, daemons) with their liveness; `managers` is an alias | |
+| `workspace attest-dead OWNER [NAME] --reason TEXT` | declare an owner and its launches ended, so the next manager tick or `workspace gc` recovers its jobs | optional `--operator` |
+| `workspace workflows [--json] [NAME...]` | list the workflows installed in a workspace, with each one's id, short name and summary | |
 | `workspace show [--key KEY] [--json] [NAME...]` | print application settings | |
 | `workspace configure [NAME...]` | set and unset application settings | `--set KEY=VALUE`, `--unset KEY` (repeatable) |
 | `workspace settings show [--key KEY] [--json] [NAME...]` | print application settings, or one selected key | |
@@ -142,9 +143,9 @@ remote workspace for execution.
 | `workspace policy set --key KEY --value VALUE [--json] [NAME...]` | store one policy member in each workspace | |
 | `workspace fsck [OPTIONS] [NAME...]` | check markers against journal frames; repair modes require names | `--repair`, `--quarantine-unrepairable`, `--json` |
 | `workspace gc [--dry-run] [--json] [NAME...]` | collect what retention policies allow (remote: over the adapter) | |
-| `workspace unlock [--force] [NAME...]` | release maintenance locks | |
-| `workspace seal [--force] [--keys REFS] [NAME...]` | record every job's seal digest under one signed workspace seal | `--force` seals still-unsealed jobs first; `--keys` overrides the `seal.keys` setting |
+| `workspace seal [--keys REFS] [NAME...]` | record every job's seal digest under one signed workspace seal, listing the unsealed jobs | `--keys` overrides the `seal.keys` setting |
 | `workspace unseal [--force] [NAME...]` | remove a workspace's seal, refused while its project is sealed | `--force` skips the confirmation |
+| `workspace verify [--json] [NAME...]` | verify a workspace seal and list the jobs that drifted since it; drift exits `1` | `--trusted-key` |
 
 ### Creating, moving, and removing workspaces
 
@@ -271,16 +272,15 @@ the total and per-category counts of any always-safe leftovers; this line never
 changes the exit status. See [the task-manager guide](taskmanager.md) for the
 problem codes and what a repair will and will not touch.
 
-The maintenance fence is `.httk-workspace/maintenance.lock`, which holds the
-recording process identifier, hostname, and creation time. A lock whose
-same-host process is gone, whose content is malformed or incomplete, or that is
-older than twenty-four hours is reclaimed automatically; any other lock,
-including one this account may not read, is reported with its holder. `workspace unlock` clears a lock explicitly; without `--force` it
-removes only a stale one:
+There is no maintenance lock. `workspace move` refuses while any owner is not
+proven dead. An owner whose death no probe can prove (for example, on a host
+that is gone) is declared dead by the operator, and the next manager tick or
+`workspace gc` then recovers its jobs. Attesting an owner that is still running
+can apply a request twice and run work twice, so attest only after confirming
+that the owner process and every launch it started are gone:
 
 ```console
-httk workspace unlock WORKSPACE
-httk workspace unlock --force WORKSPACE
+httk workspace attest-dead OWNER WORKSPACE --reason "node rebooted"
 ```
 
 ## Freeing disk
@@ -327,7 +327,7 @@ A `null` or `"keep"` retention member means keep. On a fresh workspace,
 
 | Category | Retention limit | What goes |
 | --- | --- | --- |
-| `attempt_control` | `attempt_control_days` | aged `attempts/*` directories; failed and cancelled jobs retain their newest one, while other quiescent leftovers (including succeeded) also wait one workspace `lease_seconds` grace |
+| `attempt_control` | `attempt_control_days` | aged `attempts/*` directories; failed and cancelled jobs retain their newest one |
 | `transaction_trash` | `trash_days` | leftovers in a replayed transaction's trash (what the replay could not delete, and its emptied trash directories), once the job left `committing` |
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
 | `transfer_records` | `trash_days` | acknowledgements below `transfers/acks/` |
@@ -413,8 +413,8 @@ for their owner.
 
 A workflow reached only by explicit path (`--workflow-dir DIR` or
 `--from-runner FILE`) is not registered, so it is not listed; use
-`describe PATH` to report it. To list the runners one workspace has
-*published*, rather than the workflows a name resolves to, use
+`describe PATH` to report it. To list the workflows one workspace has
+*installed*, rather than the workflows a name resolves to, use
 `workspace workflows`.
 
 ### `describe`: inspect a workflow without publishing it
@@ -532,7 +532,6 @@ without modifying the published source tree.
 | `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--files`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
 | `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
-| `job confirm-launches-ended [OPTIONS] JOB...` | vouch that every launch of each running or committing job's attempt has ended, so a manager may begin or take over its commit (remote: over the adapter) | `--workspace`, optional `--operator`, optional `--reason`, `--adapter-timeout` |
 | `job delete [--force] JOB...` | remove selected job payloads and state markers (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal [--keys REFS] JOB...` | seal the payloads of selected quiescent jobs | `--workspace`, `--keys` overrides the `seal.keys` setting |
 | `job unseal [--force] JOB...` | remove the seals of selected jobs, refused while the workspace is sealed | `--workspace`, `--force` skips the confirmation |
@@ -681,22 +680,10 @@ deferred: the manager records it and pauses the job at the next attempt
 boundary, and a terminal outcome supersedes it. An older manager that does not
 understand this in-flight pause request quarantines it as invalid.
 
-`job confirm-launches-ended JOB...` checks every job, then publishes a
-`launches_ended` request for each `running` or `committing` job; any other
-state refuses the whole command. `--reason` defaults to a plain confirmation.
-A commit whose owner is gone is taken over, and the published outcome of a
-gone manager's attempt is committed, only once every launch recorded for its
-attempt is proven to have ended (see
-[launch end evidence](workflow_filesystem_api.md#launch-end-evidence)); for a
-launch on another host whose allocation has neither a passed end time nor a
-scheduler that confirms its end, `job why` names the launch and the takeover
-waits for this request. The operator takes responsibility that no rank of the
-attempt still runs on any host: a live rank would keep writing the job
-directory while the new owner commits, seals or ejects the job. A manager
-applies the request only once the owner is gone and no launch of the attempt
-still runs on its own host (it stops such a launch first), and records the attestation,
-with the request and the operator, in the takeover's state frame. The request
-action is also available as `job request launches_ended`.
+When a job's owner has died somewhere no probe can reach, the operator declares
+that owner dead with `workspace attest-dead OWNER --reason TEXT` (see
+[policy, integrity, and locks](#policy-integrity-and-locks)); the next manager
+tick or `workspace gc` then returns its jobs to the states they were claimed from.
 
 `--wait` is valid only for `pause` and exits 0 only when each requested job was
 observed `paused` at some point during the wait. Jobs are confirmed one by one:
@@ -1050,7 +1037,7 @@ such greetings to stderr or guard them with a non-interactive-shell test.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--setting KEY=VALUE` (repeatable), `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--drain-timeout`, `--time-limit`, `--deadline-margin`, `--gc-interval`, `--setting KEY=VALUE` (repeatable), `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `run` is the recommended spelling and `manager run` the advanced one. Both
 also take `--setting KEY=VALUE` (repeatable, not shown in `--help`), which pins
@@ -1566,8 +1553,8 @@ httk project repair .
 `httk workspace status` and `httk project manifest verify` report the live
 workspace and manifest state.
 
-`project repair` handles conditions that quietly break a project later: a stale
-maintenance lock, staging leftovers, a workspace on disk missing from the
+`project repair` handles conditions that quietly break a project later: dead owners,
+staging leftovers, a workspace on disk missing from the
 registry, and a member not yet adopted on this machine. By default it applies
 the safe repairs and adopts every member workspace here, which is what a freshly
 copied tree needs. It reports what it did and journals the repair in the
