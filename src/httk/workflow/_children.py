@@ -173,7 +173,8 @@ def validate_children(
     :param outcome_dir: ``<job>/attempts/<A>/outcome.ready``.
     :param workspace_id: This workspace's id; children must name it.
     :return: The plans in ``spawn.json`` order; empty when the outcome spawns nothing.
-    :raises httk.workflow.errors.FormatError: If ``spawn.json`` or a child payload is malformed or unsafe.
+    :raises httk.workflow.errors.FormatError: If ``spawn.json`` or a child payload is malformed or unsafe, or a
+        child id names an existing job.
     :raises httk.workflow.errors.UnsupportedExtensionError: If a child names another workspace.
     :raises httk.workflow.errors.WorkflowError: If an attempt of *job* is still live.
     :raises ValueError: If *outcome_dir* is not an outcome directory of *job*.
@@ -261,6 +262,14 @@ def validate_children(
                 initial_state=state.as_mapping(),
             )
         )
+    if plans:
+        # The runner chose the ids: one already taken (owned jobs included) would give two jobs one id.
+        placements = [normalize_placement(plan.placement) for plan in plans] + [parent.placement]
+        ids = [plan.job_id for plan in plans]
+        taken = _kernel.locate_many(job.owner.workspace, ids, placements=placements, settle=False)
+        if taken:
+            ref = taken[min(taken)]
+            raise FormatError(f"spawned child id {ref.job_id} is already the job {ref.job_key} ({ref.state})")
     return plans
 
 

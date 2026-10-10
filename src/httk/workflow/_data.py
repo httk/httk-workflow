@@ -192,6 +192,21 @@ def discard_uncommitted(job: OwnedJob) -> int:
     return len(staging)
 
 
+def discard_transactions(job: OwnedJob) -> None:
+    """Remove every ``attempts/*/txn/`` directory with what it still holds.
+
+    A commit whose transactions cannot be applied fails the job; the failure it records is the evidence, and
+    the unapplied staging goes so that no later commit re-applies it.
+
+    :param job: The quiescent owned job.
+    :raises WorkflowError: While an attempt of the job is live.
+    """
+
+    job.require_quiescent()
+    for attempt in _real_subdirectories(job.path / "attempts"):
+        job.discard_subtree(f"attempts/{attempt}/txn")
+
+
 def apply_transactions(job: OwnedJob) -> int:
     """Apply every committed transaction of the job to its payload, in ``seq`` order.
 

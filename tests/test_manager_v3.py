@@ -541,6 +541,8 @@ def test_a_commit_intent_is_finished_by_a_second_owner(
     assert len(attempts(done)) == 1, "a decided outcome is never relaunched"
     log = events(done)
     assert log.count("launched") == 1 and "recovered" in log and log[-1] == "released"
+    # The replay writes no run-log line of the commit a second time.
+    assert log.count("committed") == 1
 
 
 def test_a_pending_release_is_finished_by_a_second_owner(

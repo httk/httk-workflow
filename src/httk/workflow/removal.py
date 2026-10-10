@@ -8,6 +8,7 @@ as a short-lived CLI owner, which is how ``job delete``, ``job seal`` and
 ``job unseal`` take effect without waiting for a manager.
 """
 
+import dataclasses
 import logging
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
@@ -210,6 +211,12 @@ def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, destinati
     )
 
 
+def _recording(target: Release, extra: tuple[str, ...]) -> Release:
+    """Return *target* also carrying the request ids *extra*."""
+
+    return dataclasses.replace(target, applied_requests=(*target.applied_requests, *extra))
+
+
 def apply_requests(
     owned: OwnedJob,
     job: JobDefinition,
@@ -221,18 +228,20 @@ def apply_requests(
     cache: ListingCache | None = None,
     deferred: set[str] | None = None,
 ) -> StateDoc | None:
-    """Apply the job's pending requests in order; ``None`` once one released (or deleted) the job.
+    """Apply the job's pending requests oldest first; ``None`` once one released (or deleted) the job.
 
     It runs where the job is quiescent: the last step of a reconcile, the last
     step of a commit (where the job is at the commit's target state, given as
-    *from_state* and *from_priority*), and :func:`serve`.
+    *from_state* and *from_priority*), and :func:`serve`. Requests apply in
+    ``created_at`` order, then by request id; the release one makes also
+    records the *exclude* ids.
 
     :param owned: The owned, quiescent job.
     :param job: Its definition.
     :param doc: Its current document.
     :param from_state: The state the job is at; the state it was claimed from by default.
     :param from_priority: The priority it is at; the claimed priority by default.
-    :param exclude: Request ids the caller applies itself.
+    :param exclude: Request ids the caller applies itself; a release made here records them too.
     :param cache: The pass's listings, for the refusal checks.
     :param deferred: Collects the ids of requests that wait for a later boundary.
     :return: The document when every request waits, or ``None`` once the job was released.
@@ -241,10 +250,16 @@ def apply_requests(
     workspace = owned.owner.workspace
     from_state = owned.from_state if from_state is None else from_state
     from_priority = owned.from_priority if from_priority is None else from_priority
-    for path in owned.request_files():
-        request = _parse(path)
-        if request is None or request.job_id != owned.job_id or request.request_id in exclude:
-            continue
+    requests = [
+        request
+        for path in owned.request_files()
+        if (request := _parse(path)) is not None
+        and request.job_id == owned.job_id
+        and request.request_id not in exclude
+    ]
+    requests.sort(key=lambda request: (str(request.document["created_at"]), request.request_id))
+    extra = tuple(exclude)
+    for request in requests:
         new, effect = _requests.apply(
             job,
             doc,
@@ -273,9 +288,9 @@ def apply_requests(
             owned.discard()
             _LOGGER.info("deleted %s (request %s)", owned.job_key, request.request_id)
         elif isinstance(effect, _requests.Drop):
-            release(owned, new, Release(from_state, from_priority, (request.request_id,)))
+            release(owned, new, Release(from_state, from_priority, (request.request_id, *extra)))
         elif isinstance(effect, _requests.Seal):
-            release(owned, _seal(owned, new, request), effect.release)
+            release(owned, _seal(owned, new, request), _recording(effect.release, extra))
         elif isinstance(effect, _requests.Eject):
             _eject(owned, new, request, effect.destination)
         elif isinstance(effect, _requests.Unseal):
@@ -283,9 +298,9 @@ def apply_requests(
                 owned.discard_subtree(".httk-job/seal.json")
             except _fs.UnsafePath as exc:
                 _LOGGER.warning("%s has no real seal document to remove: %s", owned.job_key, exc)
-            release(owned, new, effect.release)
+            release(owned, new, _recording(effect.release, extra))
         else:
-            release(owned, new, effect)
+            release(owned, new, _recording(effect, extra))
         return None
     return doc
 
@@ -302,26 +317,41 @@ def serve(workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef)
     :param ref: The unowned job.
     :return: Whether the job was claimed (``False`` when another actor moved it first).
     :raises httk.workflow.errors.WorkflowError: If ``job.json`` or ``state.json`` cannot be read; the job is
-        released back first (quarantined when ``job.json`` was damaged already at the claim).
+        released back first, or quarantined when that cannot be done (its ``job.json`` was damaged already at
+        the claim, or its ``state.json`` is unreadable).
     """
+
+    from .gc import quarantine, quarantine_damaged
 
     try:
         owned = _kernel.claim(workspace, owner, ref)
-    except (FormatError, _fs.UnsafePath) as exc:
-        from .gc import quarantine_damaged
-
-        quarantine_damaged(cast("Workspace", workspace), owner, ref.job_id, f"job.json is damaged: {exc}")
-        raise
+    except (FormatError, _fs.UnsafePath, OSError) as exc:
+        reason = f"job.json is damaged: {exc}"
+        moved = quarantine_damaged(cast("Workspace", workspace), owner, ref.job_id, reason)
+        raise WorkflowError(
+            f"quarantined {ref.job_key}: {reason}" if moved else f"cannot claim {ref.job_key}: {exc}"
+        ) from exc
     if owned is None:
         return False
     owned.append_log("claimed", **{"from": ref.state, "to": _kernel.OWNED})
     try:
         job = JobDefinition.from_path(owned.path / "job.json")
         doc = owned.read_state()
-    except (FormatError, _fs.UnsafePath):
-        # Back unchanged, as recovery would return it; a manager fails a damaged job.
-        owned.give_back()
-        raise
+    except (FormatError, _fs.UnsafePath, OSError) as exc:
+        try:
+            # Back unchanged, as recovery would return it; a manager fails a damaged job.
+            owned.give_back()
+        except (FormatError, _fs.UnsafePath, OSError):
+            # An unreadable state.json leaves nothing to give back by: the job goes to quarantine, through a
+            # quarantine scratch whose reconciler finishes the move should this owner die in between.
+            scratch = owner.scratch("quarantine")
+            owned.extract(scratch / owned.path.name)
+            quarantine(cast("Workspace", workspace), owner, scratch / owned.path.name, f"damaged: {exc}")
+            _fs.remove_empty_dir(_fs.loc(scratch))
+            raise WorkflowError(f"quarantined {ref.job_key}: {exc}") from exc
+        if isinstance(exc, WorkflowError):
+            raise
+        raise WorkflowError(f"cannot read {ref.job_key}: {exc}") from exc
     if doc is None or doc.activation is None:
         doc = (doc or StateDoc.empty(owned.job_id)).next_activation(job.initial_step, "initial")
     if owned.pending_release() is not None or doc.commit is not None or doc.phase["kind"] != "idle":
@@ -335,7 +365,7 @@ def serve(workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef)
 def request_now(workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, action: str, reason: str) -> str | None:
     """Post one request for a job and apply it now when the job is unowned (``job delete|seal|unseal``).
 
-    A job a manager holds gets the request at its next boundary.
+    A job a manager holds gets the request at its next boundary. Nothing is posted for a job that is not found.
 
     :param workspace: The workspace.
     :param owner: The CLI owner that applies it.
@@ -346,13 +376,13 @@ def request_now(workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, actio
     """
 
     placement = ref.placement if ref.placement is not None else JobDefinition.from_path(ref.path / "job.json").placement
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=placement)
+    if current is None:
+        return "the job was not found"
     path = _requests.post(
         workspace, action=action, job_id=ref.job_id, placement=placement, operator="cli", reason=reason
     )
     request_id = path.name.split(".")[1]
-    current = _kernel.locate(workspace, ref.job_id, placement_hint=placement)
-    if current is None:
-        return "the job was not found"
     if current.state == _kernel.OWNED:
         return "a manager holds the job; the request applies at its next boundary"
     try:
@@ -375,7 +405,7 @@ def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool =
 
     :param workspace: The workspace.
     :param refs: The jobs, as last observed.
-    :param force: Accepted for compatibility; a ``delete`` request has no force (the waiting-parent check holds).
+    :param force: Ignored; a ``delete`` request has no force (the waiting-parent check holds).
     :return: The per-job outcomes.
     """
 

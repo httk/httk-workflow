@@ -250,7 +250,8 @@ def _expected(action: str, state: str) -> Effect:
     if action == "cancel":
         return Drop("") if terminal else Release("cancelled", 500)
     if action == "pause":
-        return Drop("") if terminal or state == "paused" else Release("paused", 500)
+        # A waiting parent is never paused: a later continue would rerun its spawning step.
+        return Drop("") if terminal or state in ("paused", "waiting") else Release("paused", 500)
     if action in ("continue", "override_step"):
         return Release("ready", 500) if state in ("failed", "paused") else Drop("")
     if action == "set_priority":

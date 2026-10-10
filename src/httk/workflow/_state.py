@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Self
+from typing import Any, Self
 
 from httk.workflow import _fs
 from httk.workflow.errors import FormatError, WorkflowError
@@ -32,6 +32,7 @@ __all__ = [
     "decode_state",
     "encode_state",
     "read_state_unowned",
+    "salvage_state",
 ]
 
 STATE_FORMAT = "httk-workflow-state"
@@ -48,6 +49,9 @@ _PHASE_KINDS = ("idle", "launching", "running")
 _ORIGINS = ("local", "exchange")
 _ACTIVATION_REASONS = ("initial", "advance", "retry", "manual_continue", "override_step", "join")
 _OWNER_ID = re.compile(r"[0-9a-f]{32}")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+#: Members a document may lack (it was written before they existed); each reads as ``None``.
+_OPTIONAL_MEMBERS = frozenset({"job_digest"})
 
 type Frozen = None | bool | int | float | str | tuple["Frozen", ...] | Mapping[str, "Frozen"]
 
@@ -175,6 +179,7 @@ class StateDoc:
     :param seal: The authoritative seal record, or ``None``.
     :param workflow_pin: The pinned installed workflow, or ``None``.
     :param history_tail: The last transitions (at most 32).
+    :param job_digest: The digest of ``job.json`` pinned at the job's first activation, or ``None`` before it.
     """
 
     job_id: str
@@ -200,6 +205,7 @@ class StateDoc:
     seal: Mapping[str, Frozen] | None
     workflow_pin: Mapping[str, Frozen] | None
     history_tail: tuple[Mapping[str, Frozen], ...]
+    job_digest: str | None = None
 
     @classmethod
     def empty(cls, job_id: str) -> Self:
@@ -236,12 +242,13 @@ class StateDoc:
                 "seal": None,
                 "workflow_pin": None,
                 "history_tail": [],
+                "job_digest": None,
             }
         )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> Self:
-        """Validate a decoded ``state.json`` strictly: every member present, nothing unknown.
+        """Validate a decoded ``state.json`` strictly: every member present but ``job_digest``, nothing unknown.
 
         :param value: The decoded document.
         :return: The frozen document.
@@ -253,11 +260,11 @@ class StateDoc:
         if len(_encode(value)) > MAX_STATE_BYTES:
             raise FormatError(f"state.json is larger than {MAX_STATE_BYTES} bytes")
         expected = {"format", "format_version"} | {field.name for field in dataclasses.fields(cls)}
-        if set(value) != expected:
-            raise FormatError(f"state.json members differ: {sorted(set(value) ^ expected)}")
+        if not expected - _OPTIONAL_MEMBERS <= set(value) <= expected:
+            raise FormatError(f"state.json members differ: {sorted((set(value) ^ expected) - _OPTIONAL_MEMBERS)}")
         if value["format"] != STATE_FORMAT or value["format_version"] != STATE_FORMAT_VERSION:
             raise FormatError("state.json is not httk-workflow-state version 1")
-        doc = {name: _freeze(item) for name, item in value.items()}
+        doc = {name: None for name in _OPTIONAL_MEMBERS} | {name: _freeze(item) for name, item in value.items()}
         phase = _mapping_or_none(doc["phase"], "phase")
         if phase is None or set(phase) != {"kind", "attempt_id"} or phase["kind"] not in _PHASE_KINDS:
             raise FormatError("state.json phase must be {kind: idle|launching|running, attempt_id}")
@@ -278,6 +285,9 @@ class StateDoc:
         if doc["origin"] not in _ORIGINS:
             raise FormatError("state.json origin must be 'local' or 'exchange'")
         exchange_name = doc["exchange_name"]
+        job_digest = doc["job_digest"]
+        if job_digest is not None and (not isinstance(job_digest, str) or not _DIGEST.fullmatch(job_digest)):
+            raise FormatError("state.json job_digest must be 64 lowercase hex digits or null")
         return cls(
             job_id=canonical_uuid(doc["job_id"], "state.json job_id"),
             updated_at=doc["updated_at"],
@@ -302,6 +312,7 @@ class StateDoc:
             seal=_mapping_or_none(doc["seal"], "seal"),
             workflow_pin=_mapping_or_none(doc["workflow_pin"], "workflow_pin"),
             history_tail=_records(doc["history_tail"], "history_tail", _HISTORY_TAIL_LIMIT),
+            job_digest=job_digest,
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -512,3 +523,40 @@ def read_state_unowned(path: Path) -> tuple[StateDoc | None, bool]:
         return decode_state(data), False
     except FormatError:
         return None, True
+
+
+def salvage_state(path: Path) -> dict[str, Any]:
+    """Return what still reads from a damaged ``state.json``: ``applied_requests``, ``origin`` with
+    ``exchange_name``, and ``job_digest``.
+
+    Each member is kept only when it parses. The file itself may be a symlink, a FIFO or garbage: it is read
+    without following or blocking, and anything else is ignored.
+
+    :param path: The ``state.json`` file.
+    :return: The members that parse, by name; empty when none does.
+    """
+
+    try:
+        data = _fs.read_bounded(_fs.loc(path), MAX_STATE_BYTES, nonblock=True)
+        value = None if data is None else json.loads(data)
+    except (OSError, ValueError, WorkflowError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    kept: dict[str, Any] = {}
+    applied = value.get("applied_requests")
+    try:
+        if isinstance(applied, list):
+            kept["applied_requests"] = tuple(canonical_uuid(item, "applied request id") for item in applied)
+    except (ValueError, WorkflowError):
+        pass
+    origin, name = value.get("origin"), value.get("exchange_name")
+    if origin in _ORIGINS:
+        try:
+            kept.update(origin=origin, exchange_name=None if name is None else canonical_uuid(name, "exchange_name"))
+        except (ValueError, WorkflowError):
+            pass
+    digest = value.get("job_digest")
+    if isinstance(digest, str) and _DIGEST.fullmatch(digest):
+        kept["job_digest"] = digest
+    return kept

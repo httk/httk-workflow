@@ -69,6 +69,9 @@ _CONFINED_ENVIRONMENT = {"HOME": "/tmp/home", "TMPDIR": "/tmp", "HTTK_WORKFLOW_C
 _PROBE_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 _PROBE_TIMEOUT = 10.0
 _STDERR_EXCERPT = 400
+#: The trusted entries of a job directory, overlaid read-only on its writable bind when present (note §3.3),
+#: each with whether it is a directory.
+_TRUSTED_OVERLAYS = (("job.json", False), ("state.json", False), (".httk-job/seal.json", False), ("logs", True))
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +306,42 @@ def _directory_descriptor(descriptor: int, path: Path) -> int:
     return os.dup(descriptor)
 
 
+def _trusted_entry(job_fd: int, relative: str, directory: bool) -> int | None:
+    """Open one trusted entry below the job directory ``O_PATH``, never following a symlink.
+
+    :param job_fd: A directory descriptor of the job directory.
+    :param relative: The entry's path below the job directory.
+    :param directory: Whether the entry must be a directory rather than a regular file.
+    :return: The descriptor, or ``None`` when the entry (or a parent of it) is absent.
+    :raises ValueError: When the entry is not the expected kind of entry.
+    """
+
+    *parents, name = relative.split("/")
+    at = job_fd
+    try:
+        for part in parents:
+            try:
+                parent = os.open(part, O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=at)
+            except (FileNotFoundError, NotADirectoryError):
+                # Absent, or a symlink: no trusted entry can be below it.
+                return None
+            if at != job_fd:
+                os.close(at)
+            at = parent
+        try:
+            descriptor = os.open(name, O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=at)
+        except FileNotFoundError:
+            return None
+    finally:
+        if at != job_fd:
+            os.close(at)
+    mode = os.fstat(descriptor).st_mode
+    if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+        os.close(descriptor)
+        raise ValueError(f"trusted job entry {relative} is not a {'directory' if directory else 'regular file'}")
+    return descriptor
+
+
 def _namespace_options(settings: ConfineSettings, *, block_userns: bool) -> list[str]:
     assert settings.bwrap is not None
     argv = [str(settings.bwrap), "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
@@ -327,10 +366,11 @@ def prepare_attempt_sandbox(
     """Build the Bubblewrap argument vector and descriptor set of one confined attempt.
 
     The sandbox starts from Bubblewrap's empty root with a private ``/tmp`` (and ``/tmp/home``), then binds
-    ``settings.readonly_paths`` read-only, the workspace read-only at its real path and the job directory
-    writable at its real path, in that order: a read-only path may be an ancestor of the workspace (``/home``
-    for a workspace below it), because the later workspace and job binds overlay it. A read-only path at or
-    inside the workspace is refused. ``/proc``, a private ``/dev`` and the device binds follow. There is no
+    ``settings.readonly_paths`` read-only, the workspace read-only at its real path, the job directory
+    writable at its real path and its trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``
+    and ``logs/``, those present) read-only over it, in that order: a read-only path may be an ancestor of the
+    workspace (``/home`` for a workspace below it), because the later workspace and job binds overlay it. A
+    read-only path at or inside the workspace is refused. ``/proc``, a private ``/dev`` and the device binds follow. There is no
     ``--new-session`` and no ``--die-with-parent``: the sandbox stays in its launcher's process group, so
     ``killpg`` reaches the sandboxed command, and an attempt survives a manager exit as unconfined ones do.
 
@@ -348,8 +388,8 @@ def prepare_attempt_sandbox(
     :param block_userns: Whether to block nested user namespaces (the result of :func:`probe_bwrap`).
     :return: The argument vector ending in ``--``, to which the caller appends the command, and the
         inheritable descriptors to pass with ``pass_fds``; the caller closes them after the spawn.
-    :raises ValueError: If a path is not absolute, misplaced, unavailable or overlaps the workspace, or the
-        environment is not a filtered attempt environment.
+    :raises ValueError: If a path is not absolute, misplaced, unavailable or overlaps the workspace, a trusted
+        job entry is a symlink or of the wrong kind, or the environment is not a filtered attempt environment.
     :raises ConfinementUnavailableError: If no Bubblewrap executable is configured.
     """
 
@@ -384,6 +424,12 @@ def prepare_attempt_sandbox(
         argv += ["--ro-bind-fd", str(descriptors[-1]), str(workspace_root)]
         descriptors.append(_directory_descriptor(job_fd, job_path))
         argv += ["--bind-fd", str(descriptors[-1]), str(job_path)]
+        # Binds apply in order, so these overlay the writable job directory. Each binds the inode opened here:
+        # a state.json the manager replaces before the gate opens stays read-only to the job as the old inode.
+        for relative, directory in _TRUSTED_OVERLAYS:
+            if (trusted := _trusted_entry(job_fd, relative, directory)) is not None:
+                descriptors.append(trusted)
+                argv += ["--ro-bind-fd", str(trusted), str(job_path / relative)]
         argv += ["--proc", "/proc", "--dev", "/dev"]
         created: set[Path] = set()
         for device in settings.devices:

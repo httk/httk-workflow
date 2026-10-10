@@ -319,6 +319,9 @@ def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) ->
         return f"the job is already {from_state}"
     if action == "pause" and (terminal or from_state == "paused"):
         return f"the job is already {from_state}"
+    if action == "pause" and from_state == "waiting":
+        # A later continue would rerun the spawning step and orphan the children the join waits on.
+        return "a parent waiting on its children cannot be paused"
     if action in ("continue", "override_step") and from_state not in ("failed", "paused"):
         return f"{action} applies to failed or paused jobs, not {from_state}"
     if action == "detach" and (job.parent is None or doc.detached is not None):
