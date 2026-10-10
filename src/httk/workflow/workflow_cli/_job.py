@@ -1,34 +1,33 @@
-"""Runner and job command groups."""
+"""The ``job`` command group: creating, submitting, inspecting and steering jobs on the filesystem kernel."""
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from httk.core.cli import CLIContext
-from httk.core.digests import sha256_file, tree_digest
 from httk.core.identity import (
     OperatorIdentity,
     configured_operator_identity,
     identity_seed,
     resolve_operator_identity,
     sign_document,
-    verify_document,
 )
 
-from .._job_tree import bound_parent, is_detached
+from .. import _fs, _kernel, _requests
+from .._job import JobDefinition
+from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
-from .._sealing import exports_in_doubt
-from .._util import read_json, utc_now
+from .._state import TERMINAL_STATES
+from .._util import utc_now
 from ..adapters import (
     REMOTE_JOB_DELETE_COMMAND,
     REMOTE_JOB_LIST_COMMAND,
@@ -40,38 +39,35 @@ from ..adapters import (
     resolve_remote,
     run_adapter,
 )
-from ..errors import WorkflowError
+from ..errors import FormatError, WorkflowError
 from ..introspection import (
     JOB_HISTORY_FORMAT,
     JOB_LIST_FORMAT,
+    JOB_STATES,
     JobSelectorResolver,
-    count_markers,
+    claim_requirements,
+    count_jobs,
     debug_job,
     describe_job,
     explain_job,
-    job_frames,
+    job_events,
+    job_placement,
     list_jobs,
+    manager_refusals,
+    read_job,
     read_managers,
-    render_frames,
+    read_state,
+    render_events,
     render_job,
     render_rows,
     resolve_job,
     resolve_job_selectors,
     selector_uses_remote_path,
 )
-from ..models import (
-    QUIESCENT_KINDS,
-    STATE_KINDS,
-    TERMINAL_KINDS,
-    JobDefinition,
-    Marker,
-    canonical_uuid,
-    ensure_step_known,
-    parse_job_key,
-    placement_text,
-)
+from ..introspection._reading import _jsonl
+from ..models import JOB_STATE_DIRECTORY, canonical_uuid, ensure_step_known, parse_job_key, placement_text
 from ..registry import WorkspaceBinding
-from ..removal import RemovalReport, remove_jobs
+from ..removal import RemovalReport, remove_jobs, request_now
 from ..scaffold import (
     DEFAULT_PLACEMENT,
     ScaffoldedJob,
@@ -81,27 +77,16 @@ from ..scaffold import (
     payload_relative,
     registered_workflow_labels,
 )
-from ..seals import (
-    default_workspace_keys,
-    is_job_sealed,
-    job_seal_path,
-    read_seal,
-    seal_job,
-    unseal_job,
-)
-from ..transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST, resume_exports
 from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_adapter_timeout,
-    _durable,
     _group,
     _json_value,
     _leaf,
     _load_inputs,
-    _local_root,
+    _modifiable,
     _pairs,
-    _published_runner_entries,
     _remote_workspace_read,
     _resolve_binding,
     add_durability_arguments,
@@ -110,9 +95,10 @@ from ._common import (
 )
 from ._transfer import _protocol_workspace, build_transfer_parser
 
-# ---------------------------------------------------------------------------
-# runner
-# ---------------------------------------------------------------------------
+_ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
+#: The option each action requires (and that no other action takes).
+_ACTION_OPTIONS = {"priority": "set_priority", "step": "override_step", "destination": "eject"}
+_FORCE_ACTIONS = ("continue", "override_step")
 
 
 def _add_workspace_option(parser: argparse.ArgumentParser, *, help_text: str) -> None:
@@ -123,117 +109,8 @@ def _add_workspace_option(parser: argparse.ArgumentParser, *, help_text: str) ->
     )
 
 
-def handle_runner_publish(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish runner files or directories into a workspace runner store."""
-
-    if arguments.name is not None and len(arguments.files) != 1:
-        raise ValueError("--name can be used only when publishing one FILE_OR_DIRECTORY")
-    workspace = Workspace(_local_root(arguments, context, action="publish a runner into it"))
-    references: list[dict[str, object]] = []
-    failed = False
-    for source in arguments.files:
-        try:
-            reference = workspace.publish_runner(source, name=arguments.name, replace=arguments.replace)
-        except _ERRORS as exc:
-            failed = True
-            print(f"{source}: {exc}", file=sys.stderr)
-            continue
-        references.append(reference)
-        if not arguments.json:
-            print(f"{source}: {reference['path']}")
-    if arguments.json:
-        print(json.dumps(references, indent=2, sort_keys=True))
-    return 1 if failed else 0
-
-
-def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Report the runners a workspace has published, with their digests."""
-
-    workspace = Workspace(_local_root(arguments, context, action="read its runners"), mutable=False)
-    store = workspace.runners
-
-    names = arguments.names
-    references: list[dict[str, object]] = []
-    failed = False
-    for name in names or [None]:
-        try:
-            if name is None:
-                found = list(_published_runner_entries(store)) if store.is_dir() else []
-            else:
-                target = workspace.runner_store_path(name)
-                if not target.is_file() and not target.is_dir():
-                    raise ValueError(f"no such workspace runner: {name}")
-                found = [target]
-            references.extend(
-                {
-                    "source": "workspace",
-                    "path": path.relative_to(store).as_posix(),
-                    "sha256": tree_digest(path) if path.is_dir() else sha256_file(path),
-                    "kind": "tree" if path.is_dir() else "file",
-                    "inferred": path.is_dir(),
-                }
-                for path in found
-            )
-        except _ERRORS as exc:
-            failed = True
-            print(f"{name}: {exc}", file=sys.stderr)
-    if arguments.json:
-        print(json.dumps(references, indent=2, sort_keys=True))
-        return 1 if failed else 0
-    for reference in references:
-        path = workspace.runner_store_path(str(reference["path"]))
-        inferred = "\ttree (inferred)" if path.is_dir() else ""
-        print(f"{reference['path']}\t{reference['sha256']}{inferred}")
-    return 1 if failed else 0
-
-
-def build_runner_parser(
-    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-) -> None:
-    """Declare the ``runner`` group: the shared runners a workspace publishes."""
-
-    _, group = _group(
-        subparsers,
-        "runner",
-        summary="publish and describe the shared runners of a workspace",
-        description="Manage the shared runners one workspace publishes for its jobs",
-    )
-
-    publish = _leaf(
-        group,
-        "publish",
-        summary="publish one runner into a workspace runner store",
-        description="Publish one runner file or directory into a workspace runner store, pinned by digest",
-        handler=handle_runner_publish,
-    )
-    publish.add_argument("files", metavar="FILE_OR_DIRECTORY", nargs="+", help="runner files or directories to publish")
-    _add_workspace_option(publish, help_text="the workspace to publish into")
-    publish.add_argument(
-        "--name",
-        metavar="NAME",
-        help="store name, including any subdirectory (default: the source name)",
-    )
-    publish.add_argument("--json", action="store_true", help="print published references as one JSON array")
-    publish.add_argument(
-        "--replace",
-        action="store_true",
-        help="overwrite a stored runner of the same name whose content differs",
-    )
-
-    describe = _leaf(
-        group,
-        "describe",
-        summary="report the published runners and their digests",
-        description="Report the runners a workspace has published, as the references a job pins",
-        handler=handle_runner_describe,
-    )
-    describe.add_argument("names", metavar="NAME", nargs="*", help="store names (default: every published runner)")
-    _add_workspace_option(describe, help_text="the workspace to read")
-    describe.add_argument("--json", action="store_true", help="print the references as one JSON array")
-
-
 # ---------------------------------------------------------------------------
-# job
+# job new / job submit
 # ---------------------------------------------------------------------------
 
 
@@ -416,16 +293,78 @@ def _expand_file_directories(
     return expanded
 
 
+def _workflow_target(
+    arguments: argparse.Namespace, directory: Path, parameters: Mapping[str, object], files: Mapping[str, object]
+) -> str | Path:
+    """Return what ``job new`` creates jobs of; ``--from-command`` writes its runner into *directory*."""
+
+    if arguments.from_command is not None:
+        # The ad hoc id is adhoc:command@<sha12>: the stem names it, the digest pins the rendered text.
+        runner = directory / "command.sh"
+        runner.write_text(_command_runner_text(arguments.from_command, parameters, files), encoding="utf-8")
+        return runner
+    if arguments.from_runner is not None:
+        path = Path(arguments.from_runner).expanduser()
+        if not path.is_file():
+            raise ValueError(f"--from-runner must name a runner file: {path}")
+        return path.resolve()
+    if arguments.workflow_dir is not None:
+        path = Path(arguments.workflow_dir).expanduser()
+        if not path.is_dir() or not (path / "httk_workflow.toml").is_file():
+            raise ValueError(f"--workflow-dir must name a directory containing httk_workflow.toml: {path}")
+        return path.resolve()
+    path = Path(arguments.workflow).expanduser()
+    if path.is_file():
+        raise ValueError(
+            "--workflow accepts a workflow name, not a runner file; "
+            "use --from-runner FILE (or --workflow-dir DIR for a package)"
+        )
+    if path.is_dir():
+        raise ValueError(
+            "--workflow accepts a workflow name, not a package directory; "
+            "use --workflow-dir DIR (or --from-runner FILE for a runner)"
+        )
+    if not arguments.workflow.startswith("git+") and (
+        "/" in arguments.workflow or path.suffix.lower() in {".py", ".sh", ".bash", ".cwl", ".json", ".yaml", ".yml"}
+    ):
+        raise ValueError(
+            "--workflow accepts workflow names only; use --from-runner FILE for a runner "
+            "or --workflow-dir DIR for a package directory"
+        )
+    return arguments.workflow
+
+
+def _staged_files(arguments: argparse.Namespace, context: CLIContext) -> dict[str, str | Path]:
+    """Return the ``--file``/``--files`` payload files, refusing two that land on one destination."""
+
+    files: dict[str, str | Path] = {}
+    destinations: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    for name, text in _expand_file_directories(arguments.files, arguments.file_directories, context):
+        if name in files:
+            raise ValueError(
+                f"--file entries {name!r} and {name!r} use the same name (sources: {sources[name]!r} and {text!r})"
+            )
+        destination = payload_relative(name).as_posix()
+        previous = destinations.get(destination)
+        if previous is not None:
+            raise ValueError(
+                f"--file entries {previous!r} and {name!r} have the same normalized destination {destination!r} "
+                f"(sources: {sources[previous]!r} and {text!r})"
+            )
+        files[name] = Path(text)
+        sources[name] = text
+        destinations[destination] = name
+    return files
+
+
 def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Scaffold and submit one job or an input-source batch."""
+    """Scaffold and submit one job or an input-source batch of an installed workflow."""
 
     selections = (arguments.workflow, arguments.workflow_dir, arguments.from_runner, arguments.from_command)
     if sum(selection is not None for selection in selections) != 1:
-        raise ValueError(
-            "one of the arguments --workflow --workflow-dir is required; "
-            "choose exactly one of --workflow, --workflow-dir, --from-runner, or --from-command"
-        )
-    workspace = Workspace(_local_root(arguments, context, action="submit into it"))
+        raise ValueError("choose exactly one of --workflow, --workflow-dir, --from-runner, or --from-command")
+    workspace = _modifiable(arguments, context, action="submit into it")
     environment = {
         name: _json_value(text, f"workflow environment {name!r}")
         for name, text in _pairs(arguments.environment, "a workflow environment override")
@@ -434,302 +373,246 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
     }
-    file_arguments = _expand_file_directories(arguments.files, arguments.file_directories, context)
-    files: dict[str, str | Path] = {}
-    file_destinations: dict[str, str] = {}
-    file_sources: dict[str, str] = {}
-    for name, text in file_arguments:
-        if name in files:
-            raise ValueError(
-                f"--file entries {name!r} and {name!r} use the same name (sources: {file_sources[name]!r} and {text!r})"
-            )
-        destination = payload_relative(name).as_posix()
-        previous = file_destinations.get(destination)
-        if previous is not None:
-            raise ValueError(
-                f"--file entries {previous!r} and {name!r} have the same normalized destination {destination!r} "
-                f"(sources: {file_sources[previous]!r} and {text!r})"
-            )
-        files[name] = Path(text)
-        file_sources[name] = text
-        file_destinations[destination] = name
+    files = _staged_files(arguments, context)
     inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
-    command_source: Path | None = None
-    runner_name: str | None = None
-    command_tag: str | None = None
-    workflow_target: str | os.PathLike[str]
-    if arguments.from_command is not None:
-        runner_text = _command_runner_text(arguments.from_command, parameters, files)
-        digest = hashlib.sha256(runner_text.encode("utf-8")).hexdigest()
-        descriptor, source_name = tempfile.mkstemp(prefix="httk-command-", suffix=".sh")
-        os.close(descriptor)
-        command_source = Path(source_name)
-        try:
-            command_source.write_text(runner_text, encoding="utf-8")
-        except BaseException:
-            command_source.unlink(missing_ok=True)
-            raise
-        workflow_target = command_source
-        runner_name = f"command/{digest[:12]}.sh"
-        command_tag = _command_default_tag(parameters)
-    elif arguments.from_runner is not None:
-        runner_path = Path(arguments.from_runner).expanduser()
-        if not runner_path.is_file():
-            raise ValueError(f"--from-runner must name a runner file: {runner_path}")
-        workflow_target = runner_path.resolve()
-    elif arguments.workflow_dir is not None:
-        workflow_dir = Path(arguments.workflow_dir).expanduser()
-        if not workflow_dir.is_dir() or not (workflow_dir / "httk_workflow.toml").is_file():
-            raise ValueError(f"--workflow-dir must name a directory containing httk_workflow.toml: {workflow_dir}")
-        workflow_target = workflow_dir.resolve()
-    else:
-        workflow_path = Path(arguments.workflow).expanduser()
-        if workflow_path.is_file():
-            raise ValueError(
-                "--workflow accepts a workflow name, not a runner file; "
-                "use --from-runner FILE (or --workflow-dir DIR for a package)"
-            )
-        if workflow_path.is_dir():
-            raise ValueError(
-                "--workflow accepts a workflow name, not a package directory; "
-                "use --workflow-dir DIR (or --from-runner FILE for a runner)"
-            )
-        if not arguments.workflow.startswith("git+") and (
-            "/" in arguments.workflow
-            or workflow_path.suffix.lower()
-            in {
-                ".py",
-                ".sh",
-                ".bash",
-                ".cwl",
-                ".json",
-                ".yaml",
-                ".yml",
-            }
-        ):
-            raise ValueError(
-                "--workflow accepts workflow names only; use --from-runner FILE for a runner "
-                "or --workflow-dir DIR for a package directory"
-            )
-        workflow_target = arguments.workflow
-    shared: dict[str, Any] = {
-        "inputs": inputs,
-        "files": files,
-        "parameters": parameters,
-        "environment": environment,
-        "placement": arguments.placement,
-        "priority": arguments.priority,
-        "workdir_mode": arguments.workdir_mode,
-        "data_mode": arguments.data_mode,
-        "publish": arguments.publish,
-        "step": arguments.step,
-        "format": arguments.format,
-        "runner_name": runner_name,
-        "name": arguments.name,
-    }
-    is_batch = bool(items)
-    total = len(items)
-    if items:
-        for item in items:
-            # In a batch, --tag prefixes each item's derived tag (run7-si2o), so
-            # one flag names the whole sweep without erasing per-item identity; a
-            # single-item submission keeps --tag as the whole tag. Re-sanitize the
-            # composed tag so a 48-char derived tag or a prefix ending in '-' can
-            # never emit an over-long tag or a forbidden '--'.
-            derived = item.get("tag")
-            if arguments.tag and derived:
-                item["tag"] = _sanitize_tag(f"{arguments.tag}-{derived}")
-            else:
-                item["tag"] = arguments.tag or derived or command_tag
-        results: Iterator[ScaffoldedJob] = new_jobs(workspace, workflow_target, items, **shared)
-    else:
-        results = (
-            new_job(workspace, workflow_target, tag=arguments.tag or command_tag or input_tag, **shared)
-            for _ in (None,)
-        )
+    command_tag = _command_default_tag(parameters) if arguments.from_command is not None else None
+    with tempfile.TemporaryDirectory(prefix="httk-command-") as directory:
+        target = _workflow_target(arguments, Path(directory), parameters, files)
+        shared: dict[str, Any] = {
+            "inputs": inputs,
+            "files": files,
+            "parameters": parameters,
+            "environment": environment,
+            "placement": arguments.placement,
+            "priority": arguments.priority,
+            "step": arguments.step,
+            "format": arguments.format,
+            "name": arguments.name,
+            "install": arguments.install,
+        }
+        results: Iterator[ScaffoldedJob]
+        if items:
+            for item in items:
+                # In a batch, --tag prefixes each item's derived tag (run7-si2o), so one flag names the whole
+                # sweep without erasing per-item identity; the composed tag is re-sanitized to stay a valid tag.
+                derived = item.get("tag")
+                if arguments.tag and derived:
+                    item["tag"] = _sanitize_tag(f"{arguments.tag}-{derived}")
+                else:
+                    item["tag"] = arguments.tag or derived or command_tag
+            results = new_jobs(workspace, target, items, **shared)
+        else:
+            results = iter([new_job(workspace, target, tag=arguments.tag or command_tag or input_tag, **shared)])
+        return _report_jobs(results, arguments, context, batch=len(items) if items else None)
 
-    program = f"{context.program} workflow"
+
+def _report_jobs(
+    results: Iterator[ScaffoldedJob], arguments: argparse.Namespace, context: CLIContext, *, batch: int | None
+) -> int:
+    """Print each submitted job as it lands (or one JSON array), and a batch's count on stderr."""
+
     seen_warnings: set[str] = set()
-
-    def _emit_warnings(job: ScaffoldedJob) -> None:
-        for warning in job.warnings:
-            if warning not in seen_warnings:
-                seen_warnings.add(warning)
-                print(f"{program}: warning: {warning}", file=sys.stderr)
-
     submitted = 0
     collected: list[ScaffoldedJob] = []
     try:
         for job in results:
             submitted += 1
-            _emit_warnings(job)
+            for warning in job.warnings:
+                if warning not in seen_warnings:
+                    seen_warnings.add(warning)
+                    print(f"{context.program} workflow: warning: {warning}", file=sys.stderr)
             if arguments.json:
                 collected.append(job)
             else:
-                # One tab-separated line per job, so a shell reads the key of one
-                # job with cut and a campaign streams as it is submitted.
+                # One tab-separated line per job, so a shell reads the key with cut and a campaign streams.
                 print(f"{job.job_key}\t{job.payload}")
     except _ERRORS:
-        if is_batch:
-            # A partial batch reports how far it got before failing, so an operator
-            # knows how many jobs already landed; the exit stays 2 via dispatch.
-            print(f"submitted {submitted} of {total} jobs before failing", file=sys.stderr)
+        if batch is not None:
+            print(f"submitted {submitted} of {batch} jobs before failing", file=sys.stderr)
         raise
-    finally:
-        if command_source is not None:
-            command_source.unlink(missing_ok=True)
     if arguments.json:
-        # One self-describing report per job, as an array, exactly as `job_records
-        # --json` prints one array of records.
         print(json.dumps([job.as_mapping() for job in collected], indent=2))
-    if is_batch:
-        # A batch submission ends with one count on stderr, so a scripted
-        # submission of a directory can confirm how many jobs it created.
+    if batch is not None:
         print(f"submitted {submitted} jobs", file=sys.stderr)
     return 0
 
 
-def add_job_submit_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`job submit`."""
-
-    _add_workspace_option(parser, help_text="the workspace to submit into")
-    parser.add_argument("sources", metavar="SOURCE", nargs="+", help="complete payload directories to submit")
-    parser.add_argument(
-        "--placement",
-        metavar="PLACEMENT",
-        required=True,
-        help="where the job lands in the tree",
-    )
-    parser.add_argument("--move", action="store_true", help="rename rather than copy the source")
-    parser.add_argument("--json", action="store_true", help="print submitted markers as one JSON array")
-    add_durability_arguments(parser)
-
-
 def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Submit prepared payload directories."""
+    """Submit prepared payload directories (a ``job.json`` v3 and its files) into ``jobs/ready/``."""
 
-    workspace = Workspace(
-        _local_root(arguments, context, action="submit into it"),
-        durable=_durable(arguments),
-    )
-    markers: list[str] = []
+    workspace = _modifiable(arguments, context, action="submit into it")
+    submitted: list[str] = []
     failed = False
-    for source in arguments.sources:
-        try:
-            marker = workspace.submit(source, arguments.placement, move=arguments.move)
-        except _ERRORS as exc:
-            failed = True
-            print(f"{source}: {exc}", file=sys.stderr)
-            continue
-        markers.append(str(marker.path))
-        if not arguments.json:
-            print(f"{source}: {marker.path}")
+    with _kernel.register_owner(workspace, kind="cli", label="job submit", allocation=None, advertised={}) as owner:
+        for source in arguments.sources:
+            try:
+                ref = _submit_payload(workspace, owner, Path(source).expanduser(), move=arguments.move)
+            except _ERRORS as exc:
+                failed = True
+                print(f"{source}: {exc}", file=sys.stderr)
+                continue
+            submitted.append(str(ref.path))
+            if not arguments.json:
+                print(f"{source}: {ref.path}")
     if arguments.json:
-        print(json.dumps(markers, indent=2))
+        print(json.dumps(submitted, indent=2))
     return 1 if failed else 0
 
 
-def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`job request`."""
+def _submit_payload(workspace: Workspace, owner: _kernel.Owner, source: Path, *, move: bool) -> JobRef:
+    """Copy (or move) one payload into the owner's scratch and submit it; a failed move is moved back."""
 
-    parser.add_argument(
-        "action",
-        metavar="ACTION",
-        choices=("continue", "override_step", "cancel", "set_priority", "pause", "launches_ended"),
-        help="continue, override_step, cancel, set_priority, pause, or launches_ended",
-    )
-    _add_workspace_option(parser, help_text="the workspace holding the job")
-    parser.add_argument(
-        "job_id",
-        metavar="JOB_ID",
-        nargs="+",
-        help="one or more job UUIDs, unique prefixes, or paths inside the workspace",
-    )
-    parser.add_argument(
-        "--operator",
-        metavar="IDENTITY",
-        required=False,
-        help='configured identity short name or a literal "Name <email>"',
-    )
-    parser.add_argument(
-        "--reason",
-        metavar="TEXT",
-        required=True,
-        help="why, recorded in the state frame",
-    )
-    parser.add_argument(
-        "--priority",
-        type=int,
-        metavar="PRIORITY",
-        help="the new priority, for set_priority",
-    )
-    parser.add_argument("--step", metavar="STEP", help="the step to resume at, for override_step")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "accept the hazard of reviving a job a decided join already consumed; "
-            "the hazard is journalled in the resulting state frame"
-        ),
-    )
-    parser.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        metavar="SECONDS",
-        help="stop waiting after SECONDS (requires --wait)",
-    )
-    _add_adapter_timeout(parser)
-    add_durability_arguments(parser)
+    JobDefinition.from_path(source / "job.json")
+    for trusted in ("state.json", "logs"):
+        if (source / trusted).exists() or (source / trusted).is_symlink():
+            raise ValueError(f"a prepared payload may not carry {trusted}; only a job's owner writes it")
+    staging = owner.scratch("submit") / "job"
+    if not move:
+        shutil.copytree(source, staging, symlinks=True)
+        ref = _kernel.submit(workspace, owner, staging)
+    else:
+        _fs.move_owned(_fs.loc(source.resolve()), _fs.loc(staging), durable=workspace.durable)
+        try:
+            ref = _kernel.submit(workspace, owner, staging)
+        except BaseException:
+            # The operator's only copy is in the scratch, which closing the owner would discard.
+            _fs.move_owned(_fs.loc(staging), _fs.loc(source.resolve()), durable=workspace.durable)
+            raise
+    _fs.remove_empty_dir(_fs.loc(staging.parent))
+    return ref
 
 
-def add_job_request_envelopes_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare the hidden remote envelope-building protocol command."""
-
-    parser.add_argument(
-        "action",
-        choices=("continue", "override_step", "cancel", "set_priority", "pause", "launches_ended"),
-        help="the request action",
-    )
-    parser.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
-    parser.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job UUIDs")
-    parser.add_argument("--operator", required=True, help="the operator attribution label")
-    parser.add_argument("--reason", required=True, help="why the request is being made")
-    parser.add_argument("--priority", type=int, help="the new priority")
-    parser.add_argument("--step", help="the step to resume at")
-    parser.add_argument("--force", action="store_true", help="accept an override hazard")
-    parser.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
+# ---------------------------------------------------------------------------
+# job request and the remote signing protocol
+# ---------------------------------------------------------------------------
 
 
-def add_job_publish_requests_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare the hidden remote request-publication protocol command."""
+def _request_options(
+    action: str, *, priority: int | None, step: str | None, force: bool, destination: str | None
+) -> dict[str, object]:
+    """Return the optional request members of *action*, refusing an option it does not take or lacks."""
 
-    parser.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
-    parser.add_argument(
-        "--document",
-        action="append",
-        dest="documents",
-        required=True,
-        metavar="JSON",
-        help="one complete request document",
-    )
-    parser.add_argument("--wait", action="store_true", help="wait for pause requests to reach paused")
-    parser.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS")
-    add_durability_arguments(parser)
+    given = {"priority": priority, "step": step, "destination": destination}
+    for name, owner in _ACTION_OPTIONS.items():
+        if (given[name] is None) == (action == owner):
+            raise ValueError(f"--{name} is required by, and only valid with, the {owner} action")
+    if force and action not in _FORCE_ACTIONS:
+        raise ValueError("--force applies only to the continue and override_step actions")
+    options: dict[str, object] = {name: value for name, value in given.items() if value is not None}
+    if force:
+        options["force"] = True
+    return options
+
+
+def _ref_placement(ref: JobRef) -> PurePosixPath:
+    placement = job_placement(ref)
+    if placement is None:
+        raise ValueError(f"the job.json of {ref.job_key} is unreadable, so its placement is unknown")
+    return placement
+
+
+def _prevalidate(refs: Sequence[JobRef], action: str, step: str | None, *, force: bool) -> None:
+    """Refuse an override_step whose target is outside a job's recorded runner steps, before anything is posted.
+
+    The runner records its real step set in ``state.json`` (``runner_steps``) with
+    its outcomes, so the request is refused against that list unless ``--force``
+    is given. Before the first outcome nothing is recorded, so the request is
+    allowed with a note.
+    """
+
+    if action != "override_step" or step is None:
+        return
+    for ref in refs:
+        doc, _damage = read_state(ref)
+        known = [str(item) for item in (doc.runner_steps if doc is not None and doc.runner_steps else ())]
+        if not known:
+            print(
+                f"the step {step!r} could not be pre-validated: this job has not recorded its runner steps yet, "
+                "so the runner will refuse it at the next attempt if it does not implement it",
+                file=sys.stderr,
+            )
+        elif step not in known:
+            if not force:
+                ensure_step_known(step, known, f"job {ref.job_key}")
+            print(
+                f"the step {step!r} is not one of this job's recorded runner steps ({', '.join(known)}), "
+                "but --force was given: publishing anyway; the runner will refuse it at the next attempt "
+                "if it does not implement it",
+                file=sys.stderr,
+            )
+
+
+def publish_job_requests(
+    workspace: Workspace,
+    refs: Sequence[JobRef],
+    *,
+    action: str,
+    reason: str,
+    operator: str | None = None,
+    priority: int | None = None,
+    step: str | None = None,
+    force: bool = False,
+    destination: str | None = None,
+    identity: OperatorIdentity | None = None,
+) -> list[tuple[JobRef, Path]]:
+    """Post one request per already resolved job, signed with the operator's identity when it has a key.
+
+    Every job is checked before the first request is posted.
+
+    :param workspace: Workspace receiving the requests.
+    :param refs: The jobs, as last observed; no selector scan is performed.
+    :param action: One of :data:`httk.workflow._requests.ACTIONS`.
+    :param reason: Operator explanation.
+    :param operator: Operator label, defaulting to the identity's.
+    :param priority: The new priority, for ``set_priority``.
+    :param step: The step, for ``override_step``.
+    :param force: Accept the revival hazard, for ``continue`` and ``override_step``.
+    :param destination: Where an ``eject`` sends the job.
+    :param identity: Resolved identity used for signing, defaulting to the configured one.
+    :return: The posted request files paired with their jobs.
+    :raises ValueError: For an unknown action, a misplaced option, or an unknown runner step.
+    """
+
+    if action not in _requests.ACTIONS:
+        raise ValueError(f"unknown job request action: {action}")
+    selected = identity or _resolve_request_identity(None)
+    ensure_identity_key(selected)
+    options = _request_options(action, priority=priority, step=step, force=force, destination=destination)
+    _prevalidate(refs, action, step, force=force)
+    placements = [_ref_placement(ref) for ref in refs]
+    return [
+        (
+            ref,
+            _requests.post(
+                workspace,
+                action=action,
+                job_id=ref.job_id,
+                placement=placement,
+                operator=operator or selected.label,
+                reason=reason,
+                seed_path=selected.seed_path,
+                **options,
+            ),
+        )
+        for ref, placement in zip(refs, placements, strict=True)
+    ]
+
+
+def _check_wait(wait: bool, timeout: float | None, actions: Sequence[str]) -> None:
+    if timeout is not None and not wait:
+        raise ValueError("--timeout requires --wait")
+    if wait and any(action != "pause" for action in actions):
+        raise ValueError("--wait is only valid with the pause action")
+    if timeout is not None and timeout < 0:
+        raise ValueError("--timeout must not be negative")
 
 
 def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish operator requests against jobs and optionally wait for pauses."""
+    """Post operator requests against jobs, and optionally wait for pauses to land."""
 
-    if arguments.timeout is not None and not arguments.wait:
-        raise ValueError("--timeout requires --wait")
-    if arguments.wait and arguments.action != "pause":
-        raise ValueError("--wait is only valid with the pause action")
-    if arguments.timeout is not None and arguments.timeout < 0:
-        raise ValueError("--timeout must not be negative")
+    _check_wait(arguments.wait, arguments.timeout, (arguments.action,))
     identity = _resolve_request_identity(arguments.operator)
     ensure_identity_key(identity)
-
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
@@ -746,320 +629,221 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
                 f"remote request envelope build failed (exit {status}); see the relayed remote error above"
             )
         return status
-
-    workspace = Workspace(root, durable=_durable(arguments))
-    markers = resolve_job_selectors(workspace, context.cwd, arguments.job_id)
+    workspace = _modifiable(arguments, context, action="post requests in it")
     published = publish_job_requests(
         workspace,
-        markers,
+        resolve_job_selectors(workspace, context.cwd, arguments.job_id),
         action=arguments.action,
         reason=arguments.reason,
         operator=identity.label,
         priority=arguments.priority,
         step=arguments.step,
         force=bool(arguments.force),
+        destination=arguments.destination,
         identity=identity,
     )
     return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
 
-def _build_request_envelopes(
-    workspace: Workspace,
-    arguments: argparse.Namespace,
-    operator: str,
-    *,
-    cwd: Path,
-    resolve_paths: bool = True,
-) -> list[tuple[str, Marker, dict[str, object]]]:
-    """Resolve jobs and build unsigned operator request envelopes."""
-
-    markers = (
-        resolve_job_selectors(workspace, cwd, arguments.job_id)
-        if resolve_paths
-        else [resolve_job(workspace, selector) for selector in arguments.job_id]
-    )
-    for marker in markers:
-        if arguments.action == "override_step" and arguments.step is not None:
-            _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
-        if arguments.action == "launches_ended":
-            _prevalidate_launches_ended(marker)
-    return [
-        (
-            marker.job_id,
-            marker,
-            _request_document(
-                marker,
-                action=arguments.action,
-                reason=arguments.reason,
-                operator=operator,
-                priority=arguments.priority,
-                step=arguments.step,
-                force=bool(arguments.force),
-            ),
-        )
-        for marker in markers
-    ]
-
-
 def _request_document(
-    marker: Marker,
-    *,
-    action: str,
-    reason: str,
-    operator: str,
-    priority: int | None = None,
-    step: str | None = None,
-    force: bool = False,
+    ref: JobRef, action: str, operator: str, reason: str, options: Mapping[str, object]
 ) -> dict[str, object]:
-    """Build one request document from an already resolved marker."""
+    """Build one unsigned v3 request document (the remote signing protocol's first leg)."""
 
-    request: dict[str, object] = {
-        "format": "httk-workflow-request",
-        "format_version": 2,
+    document: dict[str, object] = {
+        "format": _requests.REQUEST_FORMAT,
+        "format_version": _requests.REQUEST_FORMAT_VERSION,
         "request_id": str(uuid.uuid4()),
-        "job_id": marker.job_id,
-        "job_key": marker.job_key,
-        "placement": placement_text(marker.placement),
-        "expected_generation": marker.generation,
-        "expected_record_ref": marker.record_ref,
+        "job_id": ref.job_id,
+        "placement": placement_text(_ref_placement(ref)),
         "action": action,
         "operator": operator,
         "reason": reason,
         "created_at": utc_now(),
+        **options,
     }
-    if priority is not None:
-        request["priority"] = priority
-    if step is not None:
-        request["step"] = step
-    if force:
-        request["force"] = True
-    return request
+    _requests.validate_envelope(document)
+    return document
 
 
-def publish_job_requests(
-    workspace: Workspace,
-    markers: Sequence[Marker],
-    *,
-    action: str,
-    reason: str,
-    operator: str | None = None,
-    priority: int | None = None,
-    step: str | None = None,
-    force: bool = False,
-    identity: OperatorIdentity | None = None,
-) -> list[tuple[str, Marker, Path]]:
-    """Build and publish requests for already resolved markers.
+def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Build unsigned request documents for a signing client (the hidden protocol's first leg)."""
 
-    :param workspace: Workspace receiving the requests.
-    :param markers: Known current markers; no selector scan is performed.
-    :param action: Request action.
-    :param reason: Operator explanation.
-    :param operator: Operator label, defaulting to the configured identity.
-    :param priority: Optional priority request value.
-    :param step: Optional override step.
-    :param force: Whether to accept an override hazard.
-    :param identity: Resolved identity used for optional signing.
-    :return: Published request paths paired with their target markers.
-    """
-
-    if action not in _REQUEST_ACTIONS:
-        raise ValueError(f"unknown job request action: {action}")
-    selected_identity = identity or _resolve_request_identity(None)
-    ensure_identity_key(selected_identity)
-    label = operator or selected_identity.label
-    published: list[tuple[str, Marker, Path]] = []
-    # Every job is checked before the first request is published.
-    for marker in markers:
-        if action == "override_step" and step is not None:
-            _prevalidate_override_step(workspace, marker, step, force=force)
-        if action == "launches_ended":
-            _prevalidate_launches_ended(marker)
-    for marker in markers:
-        request = _request_document(
-            marker,
-            action=action,
-            reason=reason,
-            operator=label,
-            priority=priority,
-            step=step,
-            force=force,
-        )
-        document = (
-            dict(request)
-            if selected_identity.seed_path is None
-            else sign_document(request, seed_path=selected_identity.seed_path)
-        )
-        if selected_identity.seed_path is not None and not verify_document(document).valid:
-            raise ValueError(f"local signature verification failed for job {marker.job_id}")
-        published.append((marker.job_id, marker, workspace.publish_request(document)))
-    return published
-
-
-_REQUEST_ACTIONS = frozenset(("continue", "override_step", "cancel", "set_priority", "pause", "launches_ended"))
-_REQUEST_MEMBERS = frozenset(
-    {
-        "format",
-        "format_version",
-        "request_id",
-        "job_id",
-        "job_key",
-        "placement",
-        "expected_generation",
-        "expected_record_ref",
-        "action",
-        "operator",
-        "reason",
-        "created_at",
+    workspace = _protocol_workspace(arguments.workspace, context)
+    options = _request_options(
+        arguments.action,
+        priority=arguments.priority,
+        step=arguments.step,
+        force=bool(arguments.force),
+        destination=arguments.destination,
+    )
+    refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
+    _prevalidate(refs, arguments.action, arguments.step, force=bool(arguments.force))
+    document = {
+        "format": _ENVELOPES_FORMAT,
+        "format_version": 2,
+        "envelopes": [
+            _request_document(ref, arguments.action, arguments.operator, arguments.reason, options) for ref in refs
+        ],
+        "job_keys": [ref.job_key for ref in refs],
     }
-)
-_REQUEST_OPTIONAL_MEMBERS = frozenset(("priority", "step", "force"))
-_REQUEST_SIGNATURE_MEMBERS = frozenset(("operator_key", "signature"))
-
-
-def _validate_request_document(
-    document: Mapping[str, object],
-    *,
-    index: int,
-    expected_action: str | None = None,
-    expected_operator: str | None = None,
-    expected_reason: str | None = None,
-    priority: int | None = None,
-    step: str | None = None,
-    force: bool = False,
-    constrain_options: bool = False,
-    allow_signature: bool = False,
-) -> None:
-    """Validate one operator request's exact schema and constrained values.
-
-    :param document: Request document to validate.
-    :param index: Zero-based document index for diagnostics.
-    :param expected_action: Required action when validating a client response.
-    :param expected_operator: Required operator label when validating a client response.
-    :param expected_reason: Required reason when validating a client response.
-    :param priority: Requested priority when client options are constrained.
-    :param step: Requested step when client options are constrained.
-    :param force: Whether the client requested the force member.
-    :param constrain_options: Require optional members to match the client request exactly.
-    :param allow_signature: Permit the optional operator_key/signature pair.
-    :raises ValueError: If a member, type, or constrained value is invalid.
-    """
-
-    label = f"request envelope {index}"
-    if not isinstance(document, Mapping):
-        raise ValueError(f"{label} must be a JSON object")
-    members = set(document)
-    if allow_signature and bool(members & _REQUEST_SIGNATURE_MEMBERS) and not _REQUEST_SIGNATURE_MEMBERS <= members:
-        raise ValueError(f"{label} must contain both operator_key and signature")
-    expected = set(_REQUEST_MEMBERS)
-    if constrain_options:
-        if priority is not None:
-            expected.add("priority")
-        if step is not None:
-            expected.add("step")
-        if force:
-            expected.add("force")
-    else:
-        expected.update(members & _REQUEST_OPTIONAL_MEMBERS)
-    if allow_signature:
-        expected.update(members & _REQUEST_SIGNATURE_MEMBERS)
-    missing = sorted(expected - members)
-    extra = sorted(members - expected)
-    if missing:
-        raise ValueError(f"{label} is missing member {missing[0]!r}")
-    if extra:
-        raise ValueError(f"{label} has unexpected member {extra[0]!r}")
-
-    exact_types: dict[str, type | tuple[type, ...]] = {
-        "request_id": str,
-        "job_id": str,
-        "job_key": str,
-        "placement": str,
-        "expected_generation": int,
-        "expected_record_ref": (str, type(None)),
-        "operator": str,
-        "reason": str,
-        "created_at": str,
-    }
-    for member, expected_type in exact_types.items():
-        value = document[member]
-        if (
-            (type(value) is not expected_type)
-            if isinstance(expected_type, type)
-            else not isinstance(value, expected_type)
-        ):
-            raise ValueError(f"{label} member {member!r} has the wrong type")
-    if type(document["format_version"]) is not int or document["format_version"] != 2:
-        raise ValueError(f"{label} member 'format_version' must be integer 2")
-    if document["format"] != "httk-workflow-request":
-        raise ValueError(f"{label} member 'format' must be 'httk-workflow-request'")
-    action = document["action"]
-    if not isinstance(action, str) or action not in _REQUEST_ACTIONS:
-        raise ValueError(f"{label} member 'action' has an invalid value")
-    if expected_action is not None and action != expected_action:
-        raise ValueError(f"{label} member 'action' disagrees with the requested action")
-    if expected_operator is not None and document["operator"] != expected_operator:
-        raise ValueError(f"{label} member 'operator' disagrees with the requested identity")
-    if expected_reason is not None and document["reason"] != expected_reason:
-        raise ValueError(f"{label} member 'reason' disagrees with the requested reason")
-    if "priority" in document and type(document["priority"]) is not int:
-        raise ValueError(f"{label} member 'priority' has the wrong type")
-    if "step" in document and not isinstance(document["step"], str):
-        raise ValueError(f"{label} member 'step' has the wrong type")
-    if "force" in document and document["force"] is not True:
-        raise ValueError(f"{label} member 'force' must be true")
-    if constrain_options:
-        for member, expected_value in (("priority", priority), ("step", step)):
-            if expected_value is not None and document[member] != expected_value:
-                raise ValueError(f"{label} member {member!r} disagrees with the requested value")
-        if force and document.get("force") is not True:
-            raise ValueError(f"{label} member 'force' disagrees with the requested value")
-    if allow_signature:
-        for member in _REQUEST_SIGNATURE_MEMBERS:
-            if member in document and not isinstance(document[member], str):
-                raise ValueError(f"{label} member {member!r} has the wrong type")
+    print(json.dumps(document, separators=(",", ":")))
+    return 0
 
 
 def _validate_remote_envelopes(
-    envelopes: list[dict[str, object]],
-    arguments: argparse.Namespace,
-    operator: str,
-) -> None:
-    """Validate leg-one envelopes against the exact local request."""
+    document: Mapping[str, object], arguments: argparse.Namespace, operator: str
+) -> list[dict[str, object]]:
+    """Check the far side's envelopes against exactly what was asked, so it cannot get anything else signed.
 
-    if len(envelopes) != len(arguments.job_id):
+    :param document: The envelopes document the far side returned.
+    :param arguments: The local request arguments.
+    :param operator: The operator label the envelopes must carry.
+    :return: The envelopes, in selector order.
+    :raises ValueError: If the document is malformed or any envelope differs from the request.
+    """
+
+    envelopes, keys = document.get("envelopes"), document.get("job_keys")
+    if (
+        document.get("format") != _ENVELOPES_FORMAT
+        or document.get("format_version") != 2
+        or not isinstance(envelopes, list)
+        or not isinstance(keys, list)
+        or not all(isinstance(item, dict) for item in envelopes)
+        or not all(isinstance(item, str) for item in keys)
+    ):
+        raise ValueError("remote did not return a valid request-envelopes document")
+    if len(envelopes) != len(arguments.job_id) or len(keys) != len(envelopes):
         raise ValueError(
             f"remote returned {len(envelopes)} request envelopes for {len(arguments.job_id)} requested jobs"
         )
-    for index, (envelope, selector) in enumerate(zip(envelopes, arguments.job_id, strict=True)):
-        _validate_request_document(
-            envelope,
-            index=index,
-            expected_action=arguments.action,
-            expected_operator=operator,
-            expected_reason=arguments.reason,
-            priority=arguments.priority,
-            step=arguments.step,
-            force=bool(arguments.force),
-            constrain_options=True,
-        )
+    options = _request_options(
+        arguments.action,
+        priority=arguments.priority,
+        step=arguments.step,
+        force=bool(arguments.force),
+        destination=getattr(arguments, "destination", None),
+    )
+    expected = {"priority": None, "step": None, "destination": None, "force": None, **options}
+    expected.update(action=arguments.action, operator=operator, reason=arguments.reason)
+    for index, (envelope, key, selector) in enumerate(zip(envelopes, keys, arguments.job_id, strict=True)):
+        try:
+            _requests.validate_envelope(envelope)
+            _, key_job_id = parse_job_key(key)
+        except (FormatError, WorkflowError) as exc:
+            raise ValueError(f"request envelope {index} is invalid: {exc}") from exc
+        if "signature" in envelope:
+            raise ValueError(f"request envelope {index} is already signed")
+        for member, value in expected.items():
+            if envelope.get(member) != value:
+                raise ValueError(f"request envelope {index} member {member!r} disagrees with the request")
         job_id = envelope["job_id"]
-        job_key = envelope["job_key"]
-        assert isinstance(job_id, str) and isinstance(job_key, str)
-        try:
-            _, key_job_id = parse_job_key(job_key)
-        except WorkflowError as exc:
-            raise ValueError(f"request envelope {index} member 'job_key' is invalid: {exc}") from exc
         if key_job_id != job_id:
-            raise ValueError(f"request envelope {index} member 'job_key' disagrees with 'job_id'")
+            raise ValueError(f"request envelope {index} job key disagrees with its job id")
         try:
-            canonical_selector = str(uuid.UUID(selector)) if len(selector) == 36 else None
-        except ValueError:
-            canonical_selector = None
-        if canonical_selector == selector:
-            if job_id != selector:
-                raise ValueError(f"request envelope {index} does not match UUID selector {selector!r}")
-        elif not (job_id.startswith(selector) or job_key.startswith(selector)):
+            uuid_selector = canonical_uuid(selector, "JOB") == selector
+        except (WorkflowError, ValueError):
+            uuid_selector = False
+        if uuid_selector and job_id != selector:
+            raise ValueError(f"request envelope {index} does not match UUID selector {selector!r}")
+        if not (job_id.startswith(selector) or key.startswith(selector)):
             raise ValueError(f"request envelope {index} does not match requested selector {selector!r}")
+    return envelopes
+
+
+def request_remote_job_result(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    identity: OperatorIdentity,
+) -> tuple[int, str, str]:
+    """Build request documents remotely, sign them here, and post them remotely.
+
+    :param binding: The remote workspace binding.
+    :param context: The invocation context.
+    :param arguments: The request arguments (``action``, ``job_id``, ``reason`` and the options).
+    :param identity: The signing identity.
+    :return: The far side's exit status, standard output and standard error.
+    """
+
+    target = resolve_remote(binding.remote, project=context.cwd)
+    remote_name = binding.name.split(":", 1)[1]
+    argv = [
+        *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
+        arguments.action,
+        f"--workspace={remote_name}",
+        f"--operator={identity.label}",
+        f"--reason={arguments.reason}",
+        "--json",
+    ]
+    for option in ("priority", "step", "destination"):
+        value = getattr(arguments, option, None)
+        if value is not None:
+            argv.append(f"--{option}={value}")
+    if arguments.force:
+        argv.append("--force")
+    argv.extend(arguments.job_id)
+    result = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=arguments.adapter_timeout)
+    stderr = str(result.get("stderr", ""))
+    if result.get("returncode") != 0:
+        return int(result.get("returncode", 1) or 1), "", stderr
+    try:
+        document = json.loads(str(result.get("stdout", "")))
+    except json.JSONDecodeError as exc:
+        raise ValueError("remote did not return a valid request-envelopes document") from exc
+    if not isinstance(document, dict):
+        raise ValueError("remote did not return a valid request-envelopes document")
+    envelopes = _validate_remote_envelopes(document, arguments, identity.label)
+    publish = [*REMOTE_JOB_PUBLISH_REQUESTS_COMMAND, f"--workspace={remote_name}"]
+    for envelope in envelopes:
+        signed = envelope if identity.seed_path is None else sign_document(envelope, seed_path=identity.seed_path)
+        publish.append(f"--document={json.dumps(signed, separators=(',', ':'))}")
+    if arguments.wait:
+        publish.append("--wait")
+    if arguments.timeout is not None:
+        publish.append(f"--timeout={arguments.timeout}")
+    if getattr(arguments, "no_durable", False):
+        publish.append("--no-durable")
+    published = run_adapter(target.bundle, "invoke", {"argv": publish}, timeout=arguments.adapter_timeout)
+    return (
+        int(published.get("returncode", 0) or 0),
+        str(published.get("stdout", "")),
+        stderr + str(published.get("stderr", "")),
+    )
+
+
+def handle_job_publish_requests(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Post request documents a signing client sent (the hidden protocol's second leg)."""
+
+    workspace = _protocol_workspace(arguments.workspace, context)
+    documents: list[dict[str, object]] = []
+    for index, text in enumerate(arguments.documents):
+        try:
+            document = json.loads(text)
+            if not isinstance(document, dict):
+                raise FormatError("not a JSON object")
+            _requests.validate_envelope(document)
+            _requests.operator_key(document)
+        except (ValueError, FormatError) as exc:
+            raise ValueError(f"request document {index} is invalid: {exc}") from exc
+        documents.append(document)
+    _check_wait(arguments.wait, arguments.timeout, [str(document["action"]) for document in documents])
+    # Every job is located before anything is posted.
+    refs: list[JobRef] = []
+    for document in documents:
+        ref = _kernel.locate(
+            workspace,
+            str(document["job_id"]),
+            placement_hint=PurePosixPath(str(document["placement"])),
+            exhaustive=True,
+        )
+        if ref is None:
+            raise ValueError(f"job does not exist: {document['job_id']}")
+        refs.append(ref)
+    published = [
+        (ref, _kernel.post_request(workspace, document)) for ref, document in zip(refs, documents, strict=True)
+    ]
+    return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
 
 def ensure_identity_key(identity: OperatorIdentity) -> None:
@@ -1095,357 +879,86 @@ def _resolve_request_identity(selector: str | None) -> OperatorIdentity:
 
 
 def _complete_job_requests(
-    workspace: Workspace,
-    published: list[tuple[str, Marker, Path]],
-    *,
-    wait: bool,
-    timeout: float | None,
+    workspace: Workspace, published: list[tuple[JobRef, Path]], *, wait: bool, timeout: float | None
 ) -> int:
-    """Print published requests and optionally wait for pause outcomes."""
+    """Print the posted request files, warn about unserved jobs, and optionally wait for pauses."""
 
-    for _, _, path in published:
+    for _, path in published:
         print(path)
-
+    managers = read_managers(workspace)
+    served = [_warn_if_unserved(managers, ref) for ref, _ in published]
     if not wait:
-        for _, marker, _ in published:
-            _warn_if_no_live_manager(workspace, marker)
         return 0
-
-    available = True
-    for _, marker, _ in published:
-        available &= _warn_if_no_live_manager(workspace, marker)
-    if not available:
+    if not all(served):
         print("waiting is pointless until a manager starts", file=sys.stderr)
         return 1
     return _wait_for_pauses(workspace, published, timeout=timeout)
 
 
-def _request_remote_job(
-    binding: WorkspaceBinding,
-    context: CLIContext,
-    arguments: argparse.Namespace,
-    identity: OperatorIdentity,
-) -> int:
-    """Build, sign, publish, and print a remote request result."""
+def _warn_if_unserved(managers: Sequence[Any], ref: JobRef) -> bool:
+    """Warn when no live manager could claim the job, so its request would wait with no error.
 
-    status, stdout, stderr = request_remote_job_result(binding, context, arguments, identity)
-    if stdout:
-        sys.stdout.write(stdout)
-    if stderr:
-        sys.stderr.write(stderr)
-    return status
-
-
-def request_remote_job_result(
-    binding: WorkspaceBinding,
-    context: CLIContext,
-    arguments: argparse.Namespace,
-    identity: OperatorIdentity,
-) -> tuple[int, str, str]:
-    """Build remotely, sign locally, and publish requests remotely."""
-
-    target = resolve_remote(binding.remote, project=context.cwd)
-    remote_name = binding.name.split(":", 1)[1]
-    envelope_argv = [
-        *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
-        arguments.action,
-        f"--workspace={remote_name}",
-        f"--operator={identity.label}",
-        f"--reason={arguments.reason}",
-        "--json",
-    ]
-    for option in ("priority", "step"):
-        value = getattr(arguments, option)
-        if value is not None:
-            envelope_argv.append(f"--{option}={value}")
-    if arguments.force:
-        envelope_argv.append("--force")
-    envelope_argv.extend(arguments.job_id)
-    result = run_adapter(
-        target.bundle,
-        "invoke",
-        {"argv": envelope_argv},
-        timeout=arguments.adapter_timeout,
-    )
-    stderr = str(result.get("stderr", ""))
-    if result.get("returncode") != 0:
-        return int(result.get("returncode", 1) or 1), "", stderr
-    try:
-        document = json.loads(str(result.get("stdout", "")))
-        if document.get("format") != "httk-workflow-request-envelopes" or document.get("format_version") != 1:
-            raise ValueError
-        envelopes = document["envelopes"]
-        if not isinstance(envelopes, list) or not all(isinstance(item, dict) for item in envelopes):
-            raise ValueError
-    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("remote did not return a valid request-envelopes document") from exc
-    _validate_remote_envelopes(envelopes, arguments, identity.label)
-
-    signed: list[str] = []
-    for envelope in envelopes:
-        signed_document = (
-            dict(envelope) if identity.seed_path is None else sign_document(envelope, seed_path=identity.seed_path)
-        )
-        if identity.seed_path is not None and not verify_document(signed_document).valid:
-            raise ValueError(f"local signature verification failed for job {envelope['job_id']}")
-        signed.append(json.dumps(signed_document, separators=(",", ":")))
-
-    publish_argv = [*REMOTE_JOB_PUBLISH_REQUESTS_COMMAND, f"--workspace={remote_name}"]
-    for document_text in signed:
-        publish_argv.append(f"--document={document_text}")
-    if arguments.wait:
-        publish_argv.append("--wait")
-    if arguments.timeout is not None:
-        publish_argv.append(f"--timeout={arguments.timeout}")
-    if getattr(arguments, "durable", False):
-        publish_argv.append("--durable")
-    if getattr(arguments, "no_durable", False):
-        publish_argv.append("--no-durable")
-    published = run_adapter(
-        target.bundle,
-        "invoke",
-        {"argv": publish_argv},
-        timeout=arguments.adapter_timeout,
-    )
-    return (
-        int(published.get("returncode", 0) or 0),
-        str(published.get("stdout", "")),
-        stderr + str(published.get("stderr", "")),
-    )
-
-
-#: The reason a ``confirm-launches-ended`` request records when the operator gives none.
-_CONFIRM_LAUNCHES_ENDED_REASON = "the operator confirmed that every launch of the attempt has ended"
-
-
-def add_job_confirm_launches_ended_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`job confirm-launches-ended`."""
-
-    _add_workspace_option(parser, help_text="the workspace holding the job")
-    parser.add_argument(
-        "job_id",
-        metavar="JOB",
-        nargs="+",
-        help="one or more running or committing jobs: UUIDs, unique prefixes, or paths inside the workspace",
-    )
-    parser.add_argument(
-        "--operator",
-        metavar="IDENTITY",
-        help='configured identity short name or a literal "Name <email>" (default: the configured identity)',
-    )
-    parser.add_argument(
-        "--reason",
-        metavar="TEXT",
-        default=_CONFIRM_LAUNCHES_ENDED_REASON,
-        help="why, recorded in the takeover (default: a plain confirmation)",
-    )
-    _add_adapter_timeout(parser)
-    add_durability_arguments(parser)
-
-
-def handle_job_confirm_launches_ended(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish ``launches_ended`` requests: the operator vouches that the launches of committing jobs ended."""
-
-    request = argparse.Namespace(
-        **vars(arguments), action="launches_ended", priority=None, step=None, force=False, wait=False, timeout=None
-    )
-    return handle_job_request(request, context)
-
-
-def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Build unsigned operator request envelopes for the remote protocol."""
-
-    workspace = _protocol_workspace(arguments.workspace, context)
-    envelopes = _build_request_envelopes(workspace, arguments, arguments.operator, cwd=context.cwd, resolve_paths=False)
-    print(
-        json.dumps(
-            {
-                "format": "httk-workflow-request-envelopes",
-                "format_version": 1,
-                "envelopes": [request for _, _, request in envelopes],
-            },
-            separators=(",", ":"),
-        )
-    )
-    return 0
-
-
-def handle_job_publish_requests(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish request documents received from the local signing client."""
-
-    workspace = _protocol_workspace(arguments.workspace, context)
-    documents: list[dict[str, object]] = []
-    for text in arguments.documents:
-        try:
-            document = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"request document is not valid JSON: {exc}") from exc
-        if not isinstance(document, dict):
-            raise ValueError("request document must be a JSON object")
-        _validate_request_document(document, index=len(documents), allow_signature=True)
-        documents.append(document)
-    if arguments.timeout is not None and not arguments.wait:
-        raise ValueError("--timeout requires --wait")
-    if arguments.wait and any(document["action"] != "pause" for document in documents):
-        raise ValueError("--wait is only valid with the pause action")
-    if arguments.timeout is not None and arguments.timeout < 0:
-        raise ValueError("--timeout must not be negative")
-
-    resolved: list[tuple[str, Marker, dict[str, object]]] = []
-    for document in documents:
-        job_id = document["job_id"]
-        assert isinstance(job_id, str)
-        marker = workspace.find_marker_by_id(job_id)
-        if marker is None:
-            raise ValueError(f"job does not exist: {job_id}")
-        resolved.append((job_id, marker, document))
-    published = [(job_id, marker, workspace.publish_request(document)) for job_id, marker, document in resolved]
-    return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
-
-
-def _prevalidate_launches_ended(marker: Marker) -> None:
-    """Refuse a launches_ended request for a job that is neither running nor committing.
-
-    :param marker: The target job's current marker.
-    :raises ValueError: If the job is in another state, where the request is invalid.
+    The warning is advisory: the request stays valid until a manager starts.
     """
 
-    if marker.kind not in {"running", "committing"}:
-        raise ValueError(
-            f"job {marker.job_id} is {marker.kind}, not running or committing: confirming that launches ended "
-            "only lets a manager begin or take over a commit"
-        )
-
-
-def _prevalidate_override_step(workspace: Workspace, marker: Marker, step: str, *, force: bool) -> None:
-    """Refuse an override_step whose target is outside the job's recorded steps.
-
-    The runner's real step set is recorded in the job's state frame as
-    ``runner_steps`` after its first attempt, so the request can be refused here
-    against that list — unless ``--force`` is given, since a payload runner is
-    mutable and an operator may have edited it to add the step. Before the first
-    attempt nothing is recorded, so the request is allowed with a note.
-
-    :param workspace: The workspace holding the job's state frame.
-    :param marker: Identify the job the request targets.
-    :param step: The step the override_step request names.
-    :param force: Whether ``--force`` downgrades the refusal to a note.
-    :raises httk.workflow.errors.FormatError: If the recorded steps exclude *step* and *force* is not set.
-    """
-
-    try:
-        state = workspace.read_state(marker)
-    except (WorkflowError, OSError):
-        state = {}
-    runner_steps = state.get("runner_steps")
-    if isinstance(runner_steps, list) and runner_steps:
-        known = [str(item) for item in runner_steps]
-        if step in known:
-            return
-        if not force:
-            ensure_step_known(step, known, f"job {marker.job_key}")
-        print(
-            f"the step {step!r} is not one of this job's recorded runner steps ({', '.join(known)}), "
-            "but --force was given: publishing anyway; the runner will refuse it at the next attempt "
-            "if it does not implement it",
-            file=sys.stderr,
-        )
-        return
-    print(
-        f"the step {step!r} could not be pre-validated: this job has not recorded its runner steps yet, "
-        "so the runner will refuse it at the next attempt if it does not implement it",
-        file=sys.stderr,
-    )
-
-
-def _warn_if_no_live_manager(workspace: Workspace, marker: Marker) -> bool:
-    """Warn when no live manager serves the executor a published request needs.
-
-    A request only takes effect when a manager applies it, so a request against
-    a job whose executor nothing serves waits indefinitely with no error. The
-    warning is advisory: the request is already published and stays valid until
-    a manager starts.
-    """
-
-    try:
-        executor = workspace.load_job(marker).runner_executor
-    except (WorkflowError, OSError):
+    job, _error = read_job(ref)
+    if job is None:
         return True
-    if any(executor in record.executors for record in read_managers(workspace) if record.alive()):
+    requirements = claim_requirements(job)
+    if any(record.alive() and not manager_refusals(record, requirements) for record in managers):
         return True
+    capabilities = ",".join(sorted(requirements.capabilities))
     print(
-        f"no live manager currently serves executor {executor!r}; the request will wait until one starts",
+        f"no live manager currently serves claim pool {requirements.pool!r}"
+        f"{f' with capabilities {capabilities}' if capabilities else ''}; the request will wait until one starts",
         file=sys.stderr,
     )
     return False
 
 
-def _wait_for_pauses(
-    workspace: Workspace,
-    published: list[tuple[str, Marker, Path]],
-    *,
-    timeout: float | None,
-) -> int:
-    """Wait for published pause requests and report each final outcome."""
+def _pause_outcome(workspace: Workspace, ref: JobRef, request_id: str) -> tuple[bool, str] | None:
+    """Return whether a pause landed and how, or ``None`` while it is still pending."""
 
-    pending = {path.name: (job_id, marker, path) for job_id, marker, path in published}
-    outcomes: dict[str, str] = {}
-    successful: set[str] = set()
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while pending:
-        for name, (job_id, original, path) in list(pending.items()):
-            marker = workspace.find_marker_by_id(original.job_id)
-            if marker is not None:
-                if marker.kind == "paused":
-                    outcomes[name] = f"{marker.job_key}: paused"
-                    successful.add(name)
-                elif marker.kind in TERMINAL_KINDS:
-                    outcomes[name] = f"{marker.job_key}: {marker.kind} (pause superseded)"
-            if name not in outcomes:
-                retirement = workspace.control / "requests" / "retired" / f"{name}.retirement"
-                if retirement.is_file():
-                    reason = read_json(retirement).get("reason", "unknown reason")
-                    outcomes[name] = f"{job_id}: request retired: {reason}"
-            if name not in outcomes:
-                quarantine = _find_quarantined_request(workspace, name)
-                if quarantine is not None:
-                    outcomes[name] = f"{job_id}: request quarantined ({quarantine})"
-            if name in outcomes:
-                pending.pop(name)
-        if not pending:
-            break
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(1.0, remaining))
-        else:
-            time.sleep(1.0)
-
-    for name, (job_id, _, _) in pending.items():
-        outcomes[name] = f"{job_id}: timeout; still pending (request remains published)"
-    for _, _, path in published:
-        print(outcomes[path.name])
-    return int(len(successful) != len(published))
-
-
-def _find_quarantined_request(workspace: Workspace, request_name: str) -> str | None:
-    """Return a quarantine reason for *request_name*, if one is recorded."""
-
-    quarantine = workspace.control / "quarantine"
-    if not quarantine.is_dir():
-        return None
-    for entry in quarantine.iterdir():
-        report_path = entry / "report.json"
-        if not report_path.is_file():
-            continue
-        try:
-            report = read_json(report_path)
-        except WorkflowError:
-            continue
-        if Path(str(report.get("original_path", ""))).name == request_name:
-            return str(report.get("reason", "invalid request"))
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=job_placement(ref), exhaustive=True)
+    if current is None:
+        return False, f"{ref.job_id}: the job is gone"
+    if current.state == "paused":
+        return True, f"{current.job_key}: paused"
+    if current.state in TERMINAL_STATES:
+        return False, f"{current.job_key}: {current.state} (pause superseded)"
+    doc, _damage = read_state(current)
+    for entry in doc.history_tail if doc is not None else ():
+        if entry.get("request_id") == request_id and entry.get("event") == "request_dropped":
+            return False, f"{current.job_key}: request dropped: {entry.get('note')}"
     return None
+
+
+def _wait_for_pauses(workspace: Workspace, published: list[tuple[JobRef, Path]], *, timeout: float | None) -> int:
+    """Wait for posted pause requests and report each final outcome."""
+
+    pending = {path.name.split(".")[1]: ref for ref, path in published}
+    outcomes: dict[str, tuple[bool, str]] = {}
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        for request_id, ref in list(pending.items()):
+            outcome = _pause_outcome(workspace, ref, request_id)
+            if outcome is not None:
+                outcomes[request_id] = outcome
+                del pending[request_id]
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if not pending or (remaining is not None and remaining <= 0):
+            break
+        time.sleep(1.0 if remaining is None else min(1.0, remaining))
+    for request_id, ref in pending.items():
+        outcomes[request_id] = (False, f"{ref.job_id}: timeout; still pending (request remains published)")
+    for _, path in published:
+        print(outcomes[path.name.split(".")[1]][1])
+    return 0 if all(paused for paused, _ in outcomes.values()) else 1
+
+
+# ---------------------------------------------------------------------------
+# job list / delete / seal / unseal / detach / eject / adopt
+# ---------------------------------------------------------------------------
 
 
 def _validate_remote_job_ids(jobs: list[str], action: str) -> None:
@@ -1461,22 +974,18 @@ def _validate_remote_job_ids(jobs: list[str], action: str) -> None:
 
 
 def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """List the jobs of one workspace as a cheap table."""
+    """List the jobs of one workspace as a cheap table, one page at a time."""
 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
         tail: list[str] = []
-        for kind in arguments.kind or []:
-            tail.extend(("--kind", kind))
-        if arguments.placement is not None:
-            tail.extend(("--placement", arguments.placement))
-        if arguments.after is not None:
-            tail.extend(("--after", arguments.after))
-        if arguments.limit is not None:
-            tail.extend(("--limit", str(arguments.limit)))
-        if arguments.tag_contains is not None:
-            tail.extend(("--tag-contains", arguments.tag_contains))
+        for state in arguments.kind or []:
+            tail.extend(("--kind", state))
+        for option in ("placement", "after", "limit", "tag_contains"):
+            value = getattr(arguments, option)
+            if value is not None:
+                tail.extend((f"--{option.replace('_', '-')}", str(value)))
         tail.append("--workspace")
         return _remote_workspace_read(
             binding,
@@ -1496,22 +1005,20 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
         limit=arguments.limit,
         tag_contains=arguments.tag_contains,
     )
-    rows = page.jobs
-    if arguments.json:
-        document: dict[str, object] = {
-            "format": JOB_LIST_FORMAT,
-            "format_version": 2,
-            "jobs": rows,
-            "next_after": page.next_after,
-        }
-        if arguments.counts:
-            selected = set(arguments.kind or STATE_KINDS)
-            document["counts"] = {
-                kind: count_markers(workspace, kind, arguments.placement) for kind in STATE_KINDS if kind in selected
-            }
-        print(json.dumps(document, indent=2))
+    if not arguments.json:
+        print(render_rows(page.jobs))
         return 0
-    print(render_rows(rows))
+    document: dict[str, object] = {
+        "format": JOB_LIST_FORMAT,
+        "format_version": 3,
+        "jobs": page.jobs,
+        "next_after": page.next_after,
+    }
+    if arguments.counts:
+        document["counts"] = {
+            state: count_jobs(workspace, state, arguments.placement) for state in arguments.kind or JOB_STATES
+        }
+    print(json.dumps(document, indent=2))
     return 0
 
 
@@ -1522,8 +1029,7 @@ def _print_removal_report(report: RemovalReport) -> int:
         if outcome.removed:
             print(f"{outcome.job_key}\t{outcome.kind}\tremoved")
         else:
-            reason = f"\t{outcome.reason}" if outcome.reason else ""
-            print(f"{outcome.job_key}\t{outcome.kind}\trefused{reason}")
+            print(f"{outcome.job_key}\t{outcome.kind}\trefused\t{outcome.reason}")
     print(f"removed {report.removed_count} of {len(report.outcomes)} job(s)")
     return 1 if report.refused else 0
 
@@ -1531,59 +1037,42 @@ def _print_removal_report(report: RemovalReport) -> int:
 def _confirm_job_delete(rows: Sequence[tuple[str, str]]) -> bool:
     """List the jobs to delete, then confirm on the terminal or refuse without one."""
 
-    for job_key, kind in rows:
-        print(f"{job_key}\t{kind}")
+    for job_key, state in rows:
+        print(f"{job_key}\t{state}")
     return confirm(f"Delete {len(rows)} jobs?", force=False)
 
 
 def _remote_delete_rows(
-    binding: WorkspaceBinding,
-    context: CLIContext,
-    arguments: argparse.Namespace,
+    binding: WorkspaceBinding, context: CLIContext, arguments: argparse.Namespace
 ) -> tuple[int, list[tuple[str, str]]]:
-    """Read authoritative remote job keys and states before confirmation."""
+    """Read the remote job keys and states to confirm before deleting."""
 
     remote_name = binding.name.split(":", 1)[1]
     argv = [*REMOTE_JOB_SHOW_COMMAND, "--json", "--no-children", *arguments.jobs, "--workspace", remote_name]
-    status, stdout, stderr = remote_workspace_output(
-        binding,
-        context,
-        argv,
-        timeout=arguments.adapter_timeout,
-    )
+    status, stdout, stderr = remote_workspace_output(binding, context, argv, timeout=arguments.adapter_timeout)
     if status:
-        if stderr:
-            sys.stderr.write(stderr)
+        sys.stderr.write(stderr)
         return 1, []
     try:
         reports = json.loads(stdout)
         if not isinstance(reports, list):
             raise ValueError
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError("remote job show returned an invalid JSON document") from exc
-    by_id = {
-        str(report["job_id"]): report
-        for report in reports
-        if isinstance(report, Mapping) and isinstance(report.get("job_id"), str)
-    }
+    by_id = {str(report.get("job_id")): report for report in reports if isinstance(report, Mapping)}
     missing = [job_id for job_id in arguments.jobs if job_id not in by_id]
+    for job_id in missing:
+        print(f"remote job {job_id}: not found", file=sys.stderr)
     if missing:
-        for job_id in missing:
-            print(f"remote job {job_id}: not found", file=sys.stderr)
         return 1, []
-    rows: list[tuple[str, str]] = []
-    for job_id in arguments.jobs:
-        report = by_id[job_id]
-        job_key = report.get("job_key")
-        state = report.get("state")
-        if not isinstance(job_key, str) or not isinstance(state, str):
-            raise ValueError(f"remote job show returned an incomplete report for {job_id}")
-        rows.append((job_key, state))
-    return 0, rows
+    rows = [(by_id[job_id].get("job_key"), by_id[job_id].get("state")) for job_id in arguments.jobs]
+    if not all(isinstance(key, str) and isinstance(state, str) for key, state in rows):
+        raise ValueError("remote job show returned an incomplete report")
+    return 0, [(str(key), str(state)) for key, state in rows]
 
 
 def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove selected job payloads and their state markers."""
+    """Delete selected terminal or paused jobs: a ``delete`` request, applied now for an unowned job."""
 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
@@ -1600,345 +1089,175 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
         remote_name = binding.name.split(":", 1)[1]
         option = "--force" if arguments.force else "--confirmed"
         argv = [*REMOTE_JOB_DELETE_COMMAND, option, *arguments.jobs, "--workspace", remote_name]
-        status, stdout, stderr = remote_workspace_output(
-            binding,
-            context,
-            argv,
-            timeout=arguments.adapter_timeout,
-        )
-        if stdout:
-            sys.stdout.write(stdout)
-        if stderr:
-            sys.stderr.write(stderr)
+        status, stdout, stderr = remote_workspace_output(binding, context, argv, timeout=arguments.adapter_timeout)
+        sys.stdout.write(stdout)
+        sys.stderr.write(stderr)
         return status
-
-    workspace = Workspace(root)
-    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
-    if (
-        not arguments.force
-        and not getattr(arguments, "confirmed", False)
-        and not _confirm_job_delete([(marker.job_key, marker.kind) for marker in markers])
-    ):
+    workspace = _modifiable(arguments, context, action="delete jobs in it")
+    refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
-    return _print_removal_report(remove_jobs(workspace, markers, force=bool(arguments.force)))
+    return _print_removal_report(remove_jobs(workspace, refs))
 
 
-def _seal_roles(workspace: Workspace, marker: Marker) -> str:
-    """Return the comma-joined signer roles recorded in one job's seal."""
+def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str, done: str) -> int:
+    """Post one *action* request per selected job and apply it now where the job is unowned."""
 
-    seal = read_seal(job_seal_path(workspace.payload_path(marker.placement, marker.job_key)))
-    return ",".join(str(signature.get("role")) for signature in seal.signatures)
+    workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
+    refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    if action == "unseal" and not confirm(f"Unseal {len(refs)} job(s)?", force=arguments.force):
+        return 1
+    failed = False
+    with _kernel.register_owner(workspace, kind="cli", label=f"job {action}", allocation=None, advertised={}) as owner:
+        for ref in refs:
+            refused = request_now(workspace, owner, ref, action, f"job {action}")
+            failed |= refused is not None
+            print(f"{ref.job_id}\t{done if refused is None else refused}")
+    return 1 if failed else 0
 
 
 def handle_job_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Seal the payloads of selected quiescent jobs so tampering becomes visible."""
+    """Seal succeeded jobs that carry no seal, with the workspace's seal keys (a repair verb)."""
 
-    workspace = Workspace(_local_root(arguments, context, action="seal jobs in it"))
-    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
-    refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()] if arguments.keys else None
-    resolved = default_workspace_keys(workspace, refs)
-    failed = False
-    for marker in markers:
-        if marker.kind not in QUIESCENT_KINDS:
-            failed = True
-            print(f"{marker.job_id}: refusing to seal a {marker.kind} job; it is not quiescent", file=sys.stderr)
-            continue
-        try:
-            seal_job(workspace, marker, keys=resolved)
-        except _ERRORS as exc:
-            failed = True
-            print(f"{marker.job_id}: {exc}", file=sys.stderr)
-            continue
-        print(f"{marker.job_id}\tsealed\t{_seal_roles(workspace, marker)}")
-    if resolved.missing_roles:
-        print(f"warning: no key resolved for seal role(s): {', '.join(resolved.missing_roles)}", file=sys.stderr)
-    return 1 if failed else 0
+    return _request_now(arguments, context, "seal", "sealed")
 
 
 def handle_job_unseal(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove the seals of selected jobs, after confirmation."""
+    """Release succeeded jobs from their seal protection, after confirmation, so they may be deleted."""
 
-    workspace = Workspace(_local_root(arguments, context, action="unseal jobs in it"))
-    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
-    if not confirm(f"Unseal {len(markers)} job(s)?", force=arguments.force):
-        return 1
-    failed = False
-    for marker in markers:
-        try:
-            unseal_job(workspace, marker)
-        except _ERRORS as exc:
-            failed = True
-            print(f"{marker.job_id}: {exc}", file=sys.stderr)
-            continue
-        print(f"{marker.job_id}\tunsealed")
-    return 1 if failed else 0
-
-
-def _parent_key(workspace: Workspace, marker: Marker) -> str | None:
-    """Return the recorded parent job key of a spawned job, if it has one."""
-
-    try:
-        parent = workspace.load_job(marker).parent
-    except (WorkflowError, OSError):
-        return None
-    return None if parent is None else str(parent.get("job_key") or parent.get("job_id"))
+    return _request_now(arguments, context, "unseal", "unsealed")
 
 
 def handle_job_detach(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Make spawned jobs independent of their parents, permanently."""
 
-    workspace = Workspace(_local_root(arguments, context, action="detach jobs in it"), durable=_durable(arguments))
-    if arguments.operator is not None:
-        operator: str | None = resolve_operator_identity(arguments.operator).label
-    else:
-        configured = configured_operator_identity()
-        operator = None if configured is None else configured.label
-    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    return _request_now(arguments, context, "detach", "detached")
+
+
+def _handle_moving(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Refuse ``job eject`` and ``job adopt``: moving jobs is being rebuilt on the filesystem kernel."""
+
+    raise WorkflowError(
+        "job eject and job adopt are unavailable in this development version: "
+        "moving jobs between workspaces is being rebuilt on the filesystem kernel"
+    )
+
+
+# ---------------------------------------------------------------------------
+# job show / log / why / debug
+# ---------------------------------------------------------------------------
+
+
+def _remote_detail(arguments: argparse.Namespace, context: CLIContext, binding: WorkspaceBinding, action: str) -> int:
+    """Relay one detail read to a remote workspace by canonical job ids."""
+
+    _validate_remote_job_ids(arguments.jobs, action)
+    command = {"show": REMOTE_JOB_SHOW_COMMAND, "log": REMOTE_JOB_LOG_COMMAND, "why": REMOTE_JOB_WHY_COMMAND}[action]
+    tail: list[str] = []
+    if getattr(arguments, "limit", None) is not None:
+        tail.extend(("--limit", str(arguments.limit)))
+    tail.extend(arguments.jobs)
+    if getattr(arguments, "no_children", False):
+        tail.append("--no-children")
+    tail.append("--workspace")
+    return _remote_workspace_read(
+        binding, context, command, arguments, flags=("--json",), tail=tail, unwrap_json_array=False
+    )
+
+
+def _for_each_job(
+    arguments: argparse.Namespace,
+    context: CLIContext,
+    action: str,
+    report: Callable[[Workspace, JobRef], tuple[dict[str, object], str]],
+) -> int:
+    """Run *report* for every job each selector names; print JSON or the text it returns, per job."""
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_detail(arguments, context, binding, action)
+    workspace = Workspace(root, mutable=False)
+    resolver = JobSelectorResolver(workspace, context.cwd)
+    documents: list[dict[str, object]] = []
     failed = False
-    for marker in markers:
+    for selector in arguments.jobs:
         try:
-            detached = workspace.detach_from_parent(marker.job_id, operator=operator)
-        except ValueError as exc:
+            for ref in resolver.resolve_one(selector):
+                document, text = report(workspace, ref)
+                documents.append(document)
+                if not arguments.json:
+                    print(f"{selector}:")
+                    print(text)
+        except _ERRORS as exc:
             failed = True
-            print(f"{marker.job_id}: {exc}", file=sys.stderr)
-            continue
-        print(f"{marker.job_id}\t{'detached' if detached else 'already detached'}")
+            print(f"{selector}: {exc}", file=sys.stderr)
+    if arguments.json:
+        print(json.dumps(documents, indent=2, sort_keys=True))
     return 1 if failed else 0
-
-
-def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move quiescent jobs out of a workspace to free-standing job directories."""
-
-    workspace = Workspace(_local_root(arguments, context, action="eject jobs from it"), durable=_durable(arguments))
-    # One journal writer serves every transition of this command.
-    with workspace._journal_writer_scope():
-        targets = list(arguments.targets)
-        if arguments.resume:
-            for directory in resume_exports(workspace):
-                print(f"-\tcopied out\t{directory}")
-            doubtful = exports_in_doubt(workspace)
-            for entry in doubtful:
-                print(
-                    f"-\tin doubt\t{entry['held']}\t(may already be at {entry['destination']}: remove the held copy, "
-                    f"or take it back with `httk job adopt {entry['held']}`)"
-                )
-            if not targets:
-                return 1 if doubtful else 0
-        if len(targets) < 2:
-            print("error: eject needs at least one JOB and a DEST (or --resume alone)", file=sys.stderr)
-            return 2
-        markers = resolve_job_selectors(workspace, context.cwd, targets[:-1])
-        destination = Path(targets[-1]).expanduser()
-        if len(markers) > 1 and not destination.is_dir():
-            print(
-                f"error: ejecting {len(markers)} jobs needs an existing directory, not {destination}", file=sys.stderr
-            )
-            return 1
-        selected = {marker.job_id for marker in markers}
-        # A selected job bound to a selected parent leaves inside that parent's directory.
-        deferred: list[Marker] = []
-        for marker in markers:
-            payload = workspace.payload_path(marker.placement, marker.job_key)
-            try:
-                parent = bound_parent(workspace, payload, JobDefinition.from_path(payload / "job.json"))
-            except (WorkflowError, OSError):
-                parent = None
-            if parent is not None and parent.job_id in selected:
-                deferred.append(marker)
-        failed = False
-        carried: set[str] = set()
-        for marker in markers:
-            if marker in deferred:
-                continue
-            try:
-                directory = workspace.eject(marker.job_id, destination)
-            except _ERRORS as exc:
-                failed = True
-                print(f"{marker.job_id}: {exc}", file=sys.stderr)
-                continue
-            manifest = read_json(directory / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-            carried.update(str(entry["job_id"]) for entry in manifest.get("members") or [])
-            print(f"{marker.job_id}\tejected\t{directory}")
-        for marker in deferred:
-            if marker.job_id in carried:
-                print(f"{marker.job_id}\tejected with its parent")
-                continue
-            # Its parent did not take it along (it has no record of it, or failed).
-            try:
-                directory = workspace.eject(marker.job_id, destination)
-            except _ERRORS as exc:
-                failed = True
-                print(f"{marker.job_id}: {exc}", file=sys.stderr)
-                continue
-            manifest = read_json(directory / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-            carried.update(str(entry["job_id"]) for entry in manifest.get("members") or [])
-            print(f"{marker.job_id}\tejected\t{directory}")
-        return 1 if failed else 0
-
-
-def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move free-standing (ejected) job directories into a workspace."""
-
-    workspace = Workspace(_local_root(arguments, context, action="adopt jobs into it"), durable=_durable(arguments))
-    with workspace._journal_writer_scope():
-        failed = False
-        for directory in arguments.directories:
-            try:
-                marker = workspace.adopt(directory, placement=arguments.placement)
-            except _ERRORS as exc:
-                failed = True
-                print(f"{directory}: {exc}", file=sys.stderr)
-                continue
-            payload = workspace.payload_path(marker.placement, marker.job_key)
-            print(f"{marker.job_id}\tadopted\t{marker.kind}\t{payload}")
-        return 1 if failed else 0
 
 
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Describe jobs completely from their authoritative state."""
+    """Describe jobs from ``job.json``, ``state.json`` and their directory names."""
 
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        _validate_remote_job_ids(arguments.jobs, "show")
-        tail = [*arguments.jobs]
-        if arguments.no_children:
-            tail.append("--no-children")
-        tail.append("--workspace")
-        return _remote_workspace_read(
-            binding,
-            context,
-            REMOTE_JOB_SHOW_COMMAND,
-            arguments,
-            flags=("--json",),
-            tail=tail,
-            unwrap_json_array=False,
-        )
-    workspace = Workspace(root, mutable=False)
-    resolver = JobSelectorResolver(workspace, context.cwd)
-    reports: list[dict[str, object]] = []
-    failed = False
-    for job in arguments.jobs:
-        try:
-            markers = resolver.resolve_one(job)
-            for marker in markers:
-                report = describe_job(workspace, marker, include_children=not arguments.no_children)
-                payload = workspace.payload_path(marker.placement, marker.job_key)
-                sealed = is_job_sealed(payload)
-                report["sealed"] = sealed
-                parent = _parent_key(workspace, marker)
-                report["detached"] = is_detached(payload)
-                roles = _seal_roles(workspace, marker) if sealed else ""
-                if sealed:
-                    report["seal_roles"] = roles.split(",")
-                reports.append(report)
-                if not arguments.json:
-                    print(f"{job}:")
-                    print(render_job(report))
-                    print(f"sealed: yes ({roles})" if sealed else "sealed: no")
-                    if parent is not None:
-                        print(f"detached: {'yes' if report['detached'] else 'no'} (parent {parent})")
-        except _ERRORS as exc:
-            failed = True
-            print(f"{job}: {exc}", file=sys.stderr)
-            continue
-    if arguments.json:
-        print(json.dumps(reports, indent=2, sort_keys=True))
-    return 1 if failed else 0
+    def report(workspace: Workspace, ref: JobRef) -> tuple[dict[str, object], str]:
+        document = describe_job(workspace, ref, include_children=not arguments.no_children)
+        return document, render_job(document)
+
+    return _for_each_job(arguments, context, "show", report)
+
+
+def _render_annotations(annotations: Sequence[Mapping[str, Any]]) -> str:
+    return "\n".join(
+        f"{event.get('timestamp') or '-'!s:32s} runner:{event.get('kind') or '?'!s:<9s} {event.get('message') or ''}"
+        for event in annotations
+    )
 
 
 def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Print recorded transition histories, oldest first."""
+    """Print each job's owner run log, oldest first, then the runner's own run-log annotations."""
 
     if arguments.limit is not None and arguments.limit < 1:
         raise ValueError("--limit must be positive")
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        _validate_remote_job_ids(arguments.jobs, "log")
-        tail: list[str] = []
+
+    def report(_workspace: Workspace, ref: JobRef) -> tuple[dict[str, object], str]:
+        events = job_events(ref, limit=arguments.limit)
+        annotations = _jsonl(ref.path / JOB_STATE_DIRECTORY / "runlog.jsonl")
         if arguments.limit is not None:
-            tail.extend(("--limit", str(arguments.limit)))
-        tail.extend(arguments.jobs)
-        tail.append("--workspace")
-        return _remote_workspace_read(
-            binding,
-            context,
-            REMOTE_JOB_LOG_COMMAND,
-            arguments,
-            flags=("--json",),
-            tail=tail,
-            unwrap_json_array=False,
-        )
-    workspace = Workspace(root, mutable=False)
-    resolver = JobSelectorResolver(workspace, context.cwd)
-    reports: list[dict[str, object]] = []
-    failed = False
-    for job in arguments.jobs:
-        try:
-            markers = resolver.resolve_one(job)
-            for marker in markers:
-                frames = job_frames(workspace, marker, limit=arguments.limit)
-                reports.append({"format": JOB_HISTORY_FORMAT, "format_version": 2, "frames": frames})
-                if not arguments.json:
-                    print(f"{job}:")
-                    print(render_frames(frames))
-        except _ERRORS as exc:
-            failed = True
-            print(f"{job}: {exc}", file=sys.stderr)
-            continue
-    if arguments.json:
-        print(json.dumps(reports, indent=2))
-    return 1 if failed else 0
+            annotations = annotations[-arguments.limit :]
+        document: dict[str, object] = {
+            "format": JOB_HISTORY_FORMAT,
+            "format_version": 3,
+            "job_id": ref.job_id,
+            "job_key": ref.job_key,
+            "events": events,
+            "annotations": annotations,
+        }
+        text = render_events(events)
+        if annotations:
+            text += "\n" + _render_annotations(annotations)
+        return document, text
+
+    return _for_each_job(arguments, context, "log", report)
 
 
 def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Explain why jobs are, or are not, making progress."""
 
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        _validate_remote_job_ids(arguments.jobs, "why")
-        return _remote_workspace_read(
-            binding,
-            context,
-            REMOTE_JOB_WHY_COMMAND,
-            arguments,
-            flags=("--json",),
-            tail=(*arguments.jobs, "--workspace"),
-            unwrap_json_array=False,
-        )
-    workspace = Workspace(root, mutable=False)
-    resolver = JobSelectorResolver(workspace, context.cwd)
-    diagnoses: list[dict[str, object]] = []
-    failed = False
-    for job in arguments.jobs:
-        try:
-            markers = resolver.resolve_one(job)
-            for marker in markers:
-                diagnosis = explain_job(workspace, marker)
-                diagnoses.append(diagnosis.as_mapping())
-                if not arguments.json:
-                    print(f"{job}:")
-                    print(diagnosis.render())
-        except _ERRORS as exc:
-            failed = True
-            print(f"{job}: {exc}", file=sys.stderr)
-            continue
-    if arguments.json:
-        print(json.dumps(diagnoses, indent=2, sort_keys=True))
-    return 1 if failed else 0
+    def report(workspace: Workspace, ref: JobRef) -> tuple[dict[str, object], str]:
+        diagnosis = explain_job(workspace, ref)
+        return diagnosis.as_mapping(), diagnosis.render()
+
+    return _for_each_job(arguments, context, "why", report)
 
 
 def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Drive one job to a terminal state in the foreground."""
+    """Drive one job to a terminal state in the foreground, as a CLI owner."""
 
-    # The transitions of the debugged job are reported by the debug runner
-    # itself, so the private manager's own log stays quiet unless asked for.
+    # The debugged job's transitions are reported by the debug driver itself; the log stays quiet unless asked.
     configure_logging(level=arguments.log_level)
-    workspace = Workspace(_local_root(arguments, context, action="debug in it"))
     outcome = debug_job(
-        workspace,
+        _modifiable(arguments, context, action="debug in it"),
         arguments.job,
         placement=arguments.placement,
         step=arguments.step,
@@ -1947,6 +1266,11 @@ def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
         cwd=context.cwd,
     )
     return outcome.exit_code
+
+
+# ---------------------------------------------------------------------------
+# the parser
+# ---------------------------------------------------------------------------
 
 
 def _add_job_selector(parser: argparse.ArgumentParser) -> None:
@@ -1961,57 +1285,59 @@ def _add_job_selector(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def build_job_parser(
-    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-    *,
-    program: str | None = None,
-) -> None:
-    """Declare the ``job`` group: making jobs, and finding out about them."""
+def _add_request_options(parser: argparse.ArgumentParser) -> None:
+    """Add the per-action request options shared by ``request`` and ``request-envelopes``."""
 
-    _, group = _group(
-        subparsers,
-        "job",
-        summary="create, submit, inspect, and debug individual jobs",
-        description="Create, submit, inspect, and debug the jobs of one execution workspace",
-        prog=program,
+    parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the new priority, for set_priority")
+    parser.add_argument("--step", metavar="STEP", help="the step to resume at, for override_step")
+    parser.add_argument("--destination", metavar="DEST", help="where the job goes, for eject")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="accept reviving a job a decided join already consumed (continue, override_step)",
     )
 
+
+def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     new = _leaf(
         group,
         "new",
-        summary="scaffold and submit jobs from a runner workflow",
-        description="Scaffold and submit jobs from a runner workflow",
+        summary="scaffold and submit jobs of an installed workflow",
+        description=(
+            "Scaffold and submit jobs of a workflow installed in the workspace (httk workflow install); "
+            "--install installs it first, and a runner file, command or bare document is installed ad hoc"
+        ),
         handler=handle_job_new,
     )
     _add_workspace_option(new, help_text="the workspace to submit into")
-    workflow_names = list(registered_workflow_labels())
     workflow_group = new.add_mutually_exclusive_group(required=True)
     workflow_group.add_argument(
         "--workflow",
         metavar="WORKFLOW",
-        help="a registered or packaged workflow name ("
-        + ", ".join(workflow_names)
+        help="an installed workflow id or short name, a registered or packaged workflow name ("
+        + ", ".join(registered_workflow_labels())
         + ") or a git URI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
     )
     workflow_group.add_argument(
-        "--workflow-dir",
-        metavar="PATH",
-        help="a workflow package directory containing httk_workflow.toml (path-only; no registry lookup)",
+        "--workflow-dir", metavar="PATH", help="a workflow package directory containing httk_workflow.toml"
     )
     workflow_group.add_argument(
         "--from-runner",
         metavar="FILE",
-        help="submit a single-file runner or workflow document (cwl, pwd, jobflow) from FILE",
+        help="a single-file runner or workflow document (cwl, pwd, jobflow), installed as an adhoc: workflow",
     )
     workflow_group.add_argument(
         "--from-command",
         metavar="TEMPLATE",
         help=(
-            "generate a one-step Bash runner from an argv-only TEMPLATE; "
-            "{name} substitutes a --parameter or staged --file path, "
-            "{{ and }} are literal braces; runner identity is the rendered-text digest "
-            "including sorted workdir staging lines"
+            "generate a one-step Bash runner from an argv-only TEMPLATE, installed as adhoc:command@<digest>; "
+            "{name} substitutes a --parameter or staged --file path, {{ and }} are literal braces"
         ),
+    )
+    new.add_argument(
+        "--install",
+        action="store_true",
+        help="install the workflow (and its calls) into the workspace first when it is not installed",
     )
     new.add_argument(
         "--parameter",
@@ -2033,10 +1359,7 @@ def build_job_parser(
     new.add_argument(
         "--format",
         metavar="FORMAT",
-        help=(
-            "force FORMAT (cwl, pwd, jobflow, httk-v1) for a bare workflow document "
-            "(not a registered or manifest workflow)"
-        ),
+        help="force FORMAT (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
     )
     new.add_argument(
         "--file",
@@ -2070,270 +1393,205 @@ def build_job_parser(
         metavar=("NAME", "SOURCE"),
         help="load a declared input from one or more files, or readable files in a directory (repeatable)",
     )
-    new.add_argument(
-        "--tag",
-        metavar="TAG",
-        help="the readable half of the job key (default: derived from an input source)",
-    )
+    new.add_argument("--tag", metavar="TAG", help="the readable half of the job key (default: derived from an input)")
     new.add_argument("--name", metavar="NAME", help="the human-readable job name")
     new.add_argument(
-        "--placement",
-        metavar="PLACEMENT",
-        default=DEFAULT_PLACEMENT,
-        help="placement subtree (default: the jobs root)",
+        "--placement", metavar="PLACEMENT", default=DEFAULT_PLACEMENT, help="placement subtree (default: the jobs root)"
     )
-    new.add_argument(
-        "--priority",
-        type=int,
-        metavar="PRIORITY",
-        help="scheduling priority (default: the workflow's)",
-    )
-    new.add_argument(
-        "--step",
-        metavar="STEP",
-        help="the step the job starts at (default: the workflow's own)",
-    )
-    new.add_argument(
-        "--data-mode",
-        choices=("none", "transactional"),
-        help="the job's data mode (default: what the workflow needs)",
-    )
-    new.add_argument(
-        "--workdir-mode",
-        choices=("persistent", "isolated"),
-        default="persistent",
-        help="the job's working-directory mode (default: persistent)",
-    )
-    new.add_argument(
-        "--publish",
-        choices=("workspace", "installed"),
-        default="workspace",
-        help="publish the runner into the workspace store (default), or reference a packaged one where it is installed",
-    )
+    new.add_argument("--priority", type=int, metavar="PRIORITY", help="scheduling priority (default: the workflow's)")
+    new.add_argument("--step", metavar="STEP", help="the step the job starts at (default: the workflow's own)")
     new.add_argument("--json", action="store_true", help="print one JSON report per job, as an array")
 
-    add_job_submit_arguments(
-        _leaf(
-            group,
-            "submit",
-            summary="submit a complete payload directory",
-            description="Submit one complete payload directory into a workspace",
-            handler=handle_job_submit,
-        )
+
+def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    request = _leaf(
+        group,
+        "request",
+        summary="post an operator request",
+        description=(
+            "Post one operator request per job; the job's owner applies it at its next boundary "
+            "(a manager claims an unowned job to apply it)"
+        ),
+        handler=handle_job_request,
     )
-    add_job_request_arguments(
-        _leaf(
-            group,
-            "request",
-            summary="publish an operator request",
-            description="Publish one operator request against a job of a workspace",
-            handler=handle_job_request,
-        )
+    request.add_argument("action", metavar="ACTION", choices=_requests.ACTIONS, help=", ".join(_requests.ACTIONS))
+    _add_workspace_option(request, help_text="the workspace holding the job")
+    request.add_argument(
+        "job_id", metavar="JOB_ID", nargs="+", help="job UUIDs, unique prefixes, or paths inside the workspace"
     )
-    add_job_confirm_launches_ended_arguments(
-        _leaf(
-            group,
-            "confirm-launches-ended",
-            summary="vouch that the launches of a job's attempt have ended",
-            description=(
-                "Vouch that every launch of the current attempt of each running or committing job has ended, "
-                "on every host, so that a manager may begin or take over the commit of a gone manager without "
-                "the launch end evidence it cannot find (see 'httk job why'). You take responsibility for "
-                "this: a rank that still runs "
-                "keeps writing the job directory while the new owner commits, seals or ejects the job, and "
-                "nothing can stop it. Confirm only once the scheduler or the hosts show the ranks are gone"
-            ),
-            handler=handle_job_confirm_launches_ended,
-        )
+    request.add_argument(
+        "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
     )
-    add_job_request_envelopes_arguments(
-        _leaf(
-            group,
-            "request-envelopes",
-            description="Build unsigned operator request envelopes for a signing client",
-            summary="build unsigned request envelopes",
-            handler=handle_job_request_envelopes,
-            hidden=True,
-        )
+    request.add_argument("--reason", metavar="TEXT", required=True, help="why, recorded with the request")
+    _add_request_options(request)
+    request.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
+    request.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS (needs --wait)")
+    _add_adapter_timeout(request)
+    add_durability_arguments(request)
+
+    envelopes = _leaf(
+        group,
+        "request-envelopes",
+        description="Build unsigned operator request documents for a signing client",
+        summary="build unsigned request documents",
+        handler=handle_job_request_envelopes,
+        hidden=True,
     )
-    add_job_publish_requests_arguments(
-        _leaf(
-            group,
-            "publish-requests",
-            description="Publish signed operator request documents from a signing client",
-            summary="publish signed request documents",
-            handler=handle_job_publish_requests,
-            hidden=True,
-        )
+    envelopes.add_argument("action", choices=_requests.ACTIONS, help="the request action")
+    envelopes.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
+    envelopes.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job ids or unique prefixes")
+    envelopes.add_argument("--operator", required=True, help="the operator attribution label")
+    envelopes.add_argument("--reason", required=True, help="why the request is being made")
+    _add_request_options(envelopes)
+    envelopes.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
+
+    publish = _leaf(
+        group,
+        "publish-requests",
+        description="Post signed operator request documents from a signing client",
+        summary="post signed request documents",
+        handler=handle_job_publish_requests,
+        hidden=True,
     )
+    publish.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
+    publish.add_argument(
+        "--document", action="append", dest="documents", required=True, metavar="JSON", help="one request document"
+    )
+    publish.add_argument("--wait", action="store_true", help="wait for pause requests to reach paused")
+    publish.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS")
+    add_durability_arguments(publish)
+
+
+def build_job_parser(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    *,
+    program: str | None = None,
+) -> None:
+    """Declare the ``job`` group: making jobs, steering them, and finding out about them."""
+
+    _, group = _group(
+        subparsers,
+        "job",
+        summary="create, submit, inspect, and debug individual jobs",
+        description="Create, submit, inspect, and debug the jobs of one execution workspace",
+        prog=program,
+    )
+    _build_new_parser(group)
+
+    submit = _leaf(
+        group,
+        "submit",
+        summary="submit prepared payload directories",
+        description="Submit prepared payload directories (job.json v3 and its files) into the workspace's ready jobs",
+        handler=handle_job_submit,
+    )
+    _add_workspace_option(submit, help_text="the workspace to submit into")
+    submit.add_argument("sources", metavar="SOURCE", nargs="+", help="complete payload directories to submit")
+    submit.add_argument(
+        "--move", action="store_true", help="move the directory in (same filesystem) rather than copy it"
+    )
+    submit.add_argument("--json", action="store_true", help="print the submitted job directories as one JSON array")
+    add_durability_arguments(submit)
+
+    _build_request_parsers(group)
 
     listing = _leaf(
         group,
         "list",
         summary="list the jobs of a workspace",
-        description="List the jobs of one execution workspace",
+        description="List the jobs of one execution workspace, one page at a time",
         handler=handle_job_list,
     )
     _add_workspace_option(listing, help_text="the workspace to list")
     listing.add_argument(
         "--kind",
         action="append",
-        metavar="KIND",
-        choices=STATE_KINDS,
-        help="state kind to list (repeatable, default: every kind)",
+        metavar="STATE",
+        choices=JOB_STATES,
+        help=f"state to list (repeatable, default: every state: {', '.join(JOB_STATES)})",
     )
-    listing.add_argument(
-        "--placement",
-        metavar="PLACEMENT",
-        help="prune the listing to this placement prefix",
-    )
-    listing.add_argument(
-        "--limit",
-        type=int,
-        metavar="COUNT",
-        help="return at most this many jobs",
-    )
-    listing.add_argument("--after", metavar="CURSOR", help="resume after a job-list cursor")
+    listing.add_argument("--placement", metavar="PLACEMENT", help="prune the listing to this placement prefix")
+    listing.add_argument("--limit", type=int, metavar="COUNT", help="return at most this many jobs")
+    listing.add_argument("--after", metavar="CURSOR", help="resume after a <state>:<cursor> from next_after")
     listing.add_argument("--tag-contains", metavar="TEXT", help="list only jobs whose tag contains TEXT")
-    listing.add_argument("--counts", action="store_true", help="include full marker counts in JSON output")
+    listing.add_argument("--counts", action="store_true", help="include the per-state job counts in JSON output")
     listing.add_argument("--json", action="store_true", help="print the rows as one JSON document")
     _add_adapter_timeout(listing)
 
     delete = _leaf(
         group,
         "delete",
-        summary="remove job payloads and state markers",
-        description="Remove selected removable job payloads and their state markers",
+        summary="delete terminal or paused jobs",
+        description=(
+            "Delete terminal or paused jobs (a succeeded job only after job unseal): a delete request, "
+            "applied now to an unowned job and by its owner otherwise"
+        ),
         handler=handle_job_delete,
     )
     _add_job_selector(delete)
-    delete.add_argument("--force", action="store_true", help="skip confirmation and the join-child safety guard")
+    delete.add_argument("--force", action="store_true", help="skip the confirmation")
     delete.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
     _add_adapter_timeout(delete)
 
-    seal = _leaf(
-        group,
-        "seal",
-        summary="sign a job's payload so tampering becomes detectable",
-        description="Seal the payloads of selected quiescent jobs with a signed record of their file hashes",
-        handler=handle_job_seal,
-    )
-    _add_job_selector(seal)
-    seal.add_argument(
-        "--keys",
-        metavar="REFS",
-        help="comma-separated seal-key refs to sign with (default: the workspace seal.keys setting)",
-    )
-
-    unseal = _leaf(
-        group,
-        "unseal",
-        summary="remove the seals of selected jobs",
-        description="Remove the seals of selected jobs; refused while the enclosing workspace is sealed",
-        handler=handle_job_unseal,
-    )
-    _add_job_selector(unseal)
-    unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")
-
-    detach = _leaf(
-        group,
-        "detach",
-        summary="make spawned jobs independent of their parents",
-        description=(
-            "Make spawned jobs independent of their parents, permanently: a detached job no longer "
-            "moves with its parent's tree, may be transferred on its own, and reads no parent"
-        ),
-        handler=handle_job_detach,
-    )
-    _add_job_selector(detach)
-    detach.add_argument(
-        "--operator",
-        metavar="IDENTITY",
-        help='configured identity short name or a literal "Name <email>" (default: the configured identity)',
-    )
-    add_durability_arguments(detach)
+    for name, handler, summary in (
+        ("seal", handle_job_seal, "seal succeeded jobs that carry no seal"),
+        ("unseal", handle_job_unseal, "release succeeded jobs from their seal, so they may be deleted"),
+        ("detach", handle_job_detach, "make spawned jobs independent of their parents, permanently"),
+    ):
+        leaf = _leaf(
+            group,
+            name,
+            summary=summary,
+            description=f"{summary[0].upper()}{summary[1:]}: a {name} request, applied now to an unowned job",
+            handler=handler,
+        )
+        _add_job_selector(leaf)
+        if name == "unseal":
+            leaf.add_argument("--force", action="store_true", help="skip the confirmation prompt")
 
     eject = _leaf(
         group,
         "eject",
-        summary="move jobs out of a workspace to free-standing directories",
-        description=(
-            "Move quiescent jobs out of the workspace, each to a free-standing job directory that carries "
-            "its payload, seal, state, and pinned runner: `eject JOB... DEST`. Like mv, an existing "
-            "directory DEST receives each job as DEST/<job-key>; otherwise DEST names the one new job "
-            "directory. A job's bound children travel with it inside its directory, and must be paused or "
-            "terminal. The workspace keeps no copy; `job adopt` brings a directory back into any workspace"
-        ),
-        handler=handle_job_eject,
+        summary="move jobs out of a workspace (unavailable in this version)",
+        description="Move quiescent jobs out of the workspace (being rebuilt on the filesystem kernel)",
+        handler=_handle_moving,
     )
     _add_workspace_option(eject, help_text="the workspace holding the job")
-    eject.add_argument(
-        "targets",
-        metavar="JOB... DEST",
-        nargs="*",
-        help="the jobs (UUID, key, unique prefix, or a path inside the workspace), then the new job directory "
-        "or a directory to eject into",
-    )
-    eject.add_argument(
-        "--resume",
-        action="store_true",
-        help="first finish every pending copy-out of an earlier eject to another filesystem; "
-        "with no JOB and DEST, only that",
-    )
-    add_durability_arguments(eject)
-
+    eject.add_argument("targets", metavar="JOB... DEST", nargs="*", help="the jobs, then the destination")
     adopt = _leaf(
         group,
         "adopt",
-        summary="move free-standing job directories into a workspace",
-        description=(
-            "Move free-standing job directories made by `job eject` into the workspace, restoring each "
-            "job to the state it was ejected in; a directory is removed only once the workspace holds its job"
-        ),
-        handler=handle_job_adopt,
+        summary="move ejected jobs into a workspace (unavailable in this version)",
+        description="Move ejected job bundles into the workspace (being rebuilt on the filesystem kernel)",
+        handler=_handle_moving,
     )
     _add_workspace_option(adopt, help_text="the workspace to adopt into")
-    adopt.add_argument("directories", metavar="DIR", nargs="+", help="a free-standing job directory")
-    adopt.add_argument(
-        "--placement",
-        metavar="PLACEMENT",
-        help="where the jobs land (default: the placement they were ejected from)",
-    )
-    add_durability_arguments(adopt)
+    adopt.add_argument("directories", metavar="DIR", nargs="+", help="an ejected job bundle")
 
     build_transfer_parser(group)
 
     show = _leaf(
         group,
         "show",
-        summary="describe jobs from their authoritative state",
-        description="Describe jobs from their authoritative state",
+        summary="describe jobs from their state",
+        description="Describe jobs from job.json, state.json and their directory names",
         handler=handle_job_show,
     )
     _add_job_selector(show)
-    show.add_argument(
-        "--no-children",
-        action="store_true",
-        help="omit per-child observations for waiting jobs",
-    )
-    show.add_argument("--json", action="store_true", help="print the description as one JSON document")
+    show.add_argument("--no-children", action="store_true", help="omit per-child observations for waiting jobs")
+    show.add_argument("--json", action="store_true", help="print the descriptions as one JSON array")
     _add_adapter_timeout(show)
 
     log = _leaf(
         group,
         "log",
-        summary="print transition histories",
-        description="Print recorded transition histories, oldest first",
+        summary="print job run logs",
+        description="Print each job's owner run log, oldest first, then the runner's run-log annotations",
         handler=handle_job_log,
     )
     _add_job_selector(log)
-    log.add_argument(
-        "--limit",
-        type=int,
-        metavar="COUNT",
-        help="read at most this many frames, newest first",
-    )
-    log.add_argument("--json", action="store_true", help="print the frames as one JSON document")
+    log.add_argument("--limit", type=int, metavar="COUNT", help="print only the newest COUNT events of each log")
+    log.add_argument("--json", action="store_true", help="print the logs as one JSON array")
     _add_adapter_timeout(log)
 
     why = _leaf(
@@ -2344,7 +1602,7 @@ def build_job_parser(
         handler=handle_job_why,
     )
     _add_job_selector(why)
-    why.add_argument("--json", action="store_true", help="print the diagnosis as one JSON document")
+    why.add_argument("--json", action="store_true", help="print the diagnoses as one JSON array")
     _add_adapter_timeout(why)
 
     debug = _leaf(
@@ -2367,11 +1625,7 @@ def build_job_parser(
         default="debug",
         help="placement of a freshly submitted payload (default: debug)",
     )
-    debug.add_argument(
-        "--follow-children",
-        action="store_true",
-        help="drive spawned children depth first",
-    )
+    debug.add_argument("--follow-children", action="store_true", help="drive spawned children depth first")
     debug.add_argument(
         "--timeout",
         type=float,

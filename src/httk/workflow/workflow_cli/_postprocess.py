@@ -85,17 +85,17 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
             print("job selectors cannot be combined with --state or --placement", file=sys.stderr)
             return 2
         try:
-            markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+            refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
         except (WorkflowError, ValueError) as exc:
             print(f"{exc}", file=sys.stderr)
             return 1
         wanted = set()
-        for marker in markers:
-            if marker.kind not in COLLECTABLE_KINDS:
+        for ref in refs:
+            if ref.state not in COLLECTABLE_KINDS:
                 failed = True
-                print(f"{marker.job_key}\t{arguments.script}\tERROR\tjob is {marker.kind}; not a postprocessable state")
+                print(f"{ref.job_key}\t{arguments.script}\tERROR\tjob is {ref.state}; not a postprocessable state")
                 continue
-            wanted.add(marker.job_id)
+            wanted.add(ref.job_id)
         states: tuple[str, ...] = COLLECTABLE_KINDS
         placement = None
     else:

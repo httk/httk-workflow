@@ -1,4 +1,4 @@
-"""Remote job list, show, log and why relays (legacy until the CLI port, C5b; split out of ``test_job_paging.py``)."""
+"""Remote job list, show, log and why relays through the adapter (split out of ``test_job_paging.py``)."""
 
 import json
 import shlex
@@ -18,7 +18,9 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
     initialize_project(project, name="paged-remote")
     fake_remote(project)
     workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    job_id = _marker(workspace, "ready", "jobs", tag="remote")
+    _marker(workspace, "ready", "jobs", tag="remote")
+    # A cursor names the job directory: <state>:<placement>/<key>~p<NNN>~<token>.
+    cursor = f"ready:jobs/{next((workspace.jobs / 'ready' / 'jobs').iterdir()).name}"
     context = CLIContext("httk", project)
     register_ws(context, workspace.root, "station")
 
@@ -32,7 +34,7 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
         "--placement",
         "jobs",
         "--after",
-        f"ready:jobs/remote--{job_id}",
+        cursor,
         "--tag-contains",
         "remote",
         "--counts",
@@ -54,7 +56,7 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
         "--placement",
         "jobs",
         "--after",
-        f"ready:jobs/remote--{job_id}",
+        cursor,
         "--limit",
         "5",
         "--tag-contains",
@@ -80,7 +82,7 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
         "--placement",
         "jobs",
         "--after",
-        f"ready:jobs/remote--{job_id}",
+        cursor,
         "--limit",
         "5",
         "--tag-contains",

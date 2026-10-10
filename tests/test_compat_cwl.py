@@ -321,7 +321,6 @@ def test_bare_cwl_document_can_be_forced(package: Path, workspace: Workspace) ->
         resolve_workflow(package / "echo.cwl", format="unknown")
 
 
-@pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Workspace, tmp_path: Path, capsys) -> None:
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "bare-cwl")
     assert (
@@ -769,7 +768,6 @@ def test_load_cwl_inputs_teaches_on_malformed_json(tmp_path: Path) -> None:
         load_cwl_inputs(inputs)
 
 
-@pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, workspace: Workspace, capsys) -> None:
     document = _ECHO_TOOL.replace(
         "baseCommand: echo",
@@ -779,7 +777,17 @@ def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, wor
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "docker-cli")
     assert (
         command(
-            ["job", "new", "--workspace", name, "--workflow-dir", str(package), "--input", "message=contained"],
+            [
+                "job",
+                "new",
+                "--workspace",
+                name,
+                "--install",
+                "--workflow-dir",
+                str(package),
+                "--input",
+                "message=contained",
+            ],
             CLIContext("httk", tmp_path),
         )
         == 0

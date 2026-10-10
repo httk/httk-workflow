@@ -63,10 +63,7 @@ from ._describe import (
     handle_workflow_uninstall,
 )
 from ._job import (
-    add_job_request_arguments,
-    add_job_submit_arguments,
     build_job_parser,
-    build_runner_parser,
     ensure_identity_key,
     handle_job_debug,
     handle_job_delete,
@@ -79,8 +76,6 @@ from ._job import (
     handle_job_submit,
     handle_job_unseal,
     handle_job_why,
-    handle_runner_describe,
-    handle_runner_publish,
     publish_job_requests,
     request_remote_job_result,
 )
@@ -166,8 +161,6 @@ __all__ = [
     "REMOTE_WORKSPACE_MOVE_COMMAND",
     "REMOTE_WORKSPACE_SETTINGS_COMMAND",
     "REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND",
-    "add_job_request_arguments",
-    "add_job_submit_arguments",
     "add_manager_run_arguments",
     "add_run_arguments",
     "add_v1_collect_arguments",
@@ -188,7 +181,6 @@ __all__ = [
     "build_precheck_parser",
     "build_remote_parser",
     "build_run_parser",
-    "build_runner_parser",
     "build_seal_parser",
     "build_transfer_operator_parser",
     "build_transfer_parser",
@@ -237,8 +229,6 @@ __all__ = [
     "handle_remote_list",
     "handle_remote_remove",
     "handle_remote_show",
-    "handle_runner_describe",
-    "handle_runner_publish",
     "handle_seal_verify",
     "handle_transfer",
     "handle_transfer_offer",
@@ -274,7 +264,6 @@ __all__ = [
     "remote_workspace_output",
     "request_remote_job_result",
     "run_transfer_verb_result",
-    "runner_command",
     "seal_command",
     "submit_remote_manager_result",
     "transfer_command",
@@ -301,8 +290,6 @@ def build_parser(
     groups = parser.add_subparsers(metavar="GROUP")
     if include_workspace_job:
         build_workspace_parser(groups, program=f"{context.program} workspace")
-    if include_workspace_job:
-        build_runner_parser(groups)
     if include_workspace_job:
         build_job_parser(groups, program=f"{context.program} job")
     build_describe_parser(groups)
@@ -412,12 +399,6 @@ def collect_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``collect`` command."""
 
     return command(["collect", *argv], context, prog=f"{context.program} collect")
-
-
-def runner_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``runner`` command."""
-
-    return command(["runner", *argv], context, prog=f"{context.program} runner")
 
 
 def manager_command(argv: Sequence[str], context: CLIContext) -> int:

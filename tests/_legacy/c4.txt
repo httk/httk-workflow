@@ -1,13 +1,9 @@
 # Test files C4 split out of the files it ported: they exercise code other packets port.
 # One repository-relative path per line; the comment names its fate (port <packet> | delete <packet>).
 
-tests/test_postprocessing_pending.py  # fate: port C5b (the postprocess CLI resolves selectors to job references)
 tests/test_precheck_transfer.py  # fate: port D3 (transfer-time destination advisories through transfers.py and the transfer CLI)
-tests/test_job_paging_cli.py  # fate: port C5b (remote job list/show/log/why relays through the legacy CLI handlers)
-tests/test_monitor_remote_pending.py  # fate: port C5b (the remote job list handler must accept the v3 states)
-tests/test_cli_job_delete.py  # fate: port C5a (job delete resolves selectors to job references since C4; the tests fabricate legacy markers)
-tests/test_cli_sealing.py  # fate: port C5a (job seal/unseal resolve selectors to job references since C4; the tests fabricate legacy markers)
 tests/test_workspace_names.py  # fate: port C5b (CLI workspace move calls manager.alive(lease_seconds=...))
 tests/test_cli_job_transfer.py  # fate: port D3
 tests/test_docs_parity.py  # fate: port E1 (documentation examples use the removed APIs)
 tests/test_transfer_residuals.py  # fate: port D3 (gc no longer cleans legacy transfer residue; transfer residue reconcilers move to _moving.py)
+tests/test_sealing.py  # fate: delete D4 (legacy _sealing copy-out driven through the removed `job eject --resume`; replaced by _moving.py tests)

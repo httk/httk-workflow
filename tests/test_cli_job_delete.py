@@ -20,61 +20,6 @@ from v3_helpers import workspace as v3_workspace
 
 _WORKFLOW = ("demo--0123456789abcdef", "demo")
 
-_SUCCEED_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
-
-
-def _payload(root: Path, tag: str, runner: str = _SUCCEED_RUNNER) -> tuple[Path, str]:
-    """Create a minimal complete payload."""
-
-    job_id = str(uuid.uuid4())
-    payload = root / tag
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner_path = files / "runner"
-    runner_path.write_text(runner, encoding="utf-8")
-    runner_path.chmod(0o755)
-    (payload / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": job_id,
-                "tag": tag,
-                "name": tag,
-                "workflow": "tests.delete",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "only",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-                "parent": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return payload, job_id
-
 
 def _workspace(tmp_path: Path) -> tuple[Workspace, str]:
     """Create and register a workspace for a CLI test."""
@@ -89,40 +34,6 @@ def _context(cwd: Path) -> CLIContext:
     """Build a CLI context rooted at *cwd*."""
 
     return CLIContext("httk", cwd)
-
-
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
-def test_delete_succeeded_and_submitted_jobs_without_gc(tmp_path: Path) -> None:
-    workspace, name = _workspace(tmp_path)
-    succeeded_payload, succeeded_id = _payload(tmp_path / "source", "succeeded")
-    workspace.submit(succeeded_payload, "succeeded")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=30)
-    submitted_payload, submitted_id = _payload(tmp_path / "source", "submitted")
-    workspace.submit(submitted_payload, "submitted")
-
-    assert (
-        command(["job", "delete", "--force", "--workspace", name, succeeded_id, submitted_id], _context(tmp_path)) == 0
-    )
-    assert workspace.find_marker_by_id(succeeded_id) is None
-    assert workspace.find_marker_by_id(submitted_id) is None
-    assert not (workspace.jobs / "succeeded" / f"succeeded--{succeeded_id}").exists()
-    assert not (workspace.jobs / "submitted" / f"submitted--{submitted_id}").exists()
-
-
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
-def test_delete_ready_job_after_manual_payload_removal(tmp_path: Path) -> None:
-    workspace, name = _workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "ready")
-    marker = workspace.submit(payload, "ready")
-    with workspace.open_journal_writer() as writer:
-        marker = workspace.transition(writer, marker, "ready", {})
-    installed_payload = workspace.payload_path(marker.placement, marker.job_key)
-    shutil.rmtree(installed_payload)
-    assert payload.exists()
-
-    assert command(["job", "delete", "--force", "--workspace", name, job_id], _context(tmp_path)) == 0
-    assert workspace.find_marker_by_id(job_id) is None
 
 
 def _at(workspace: Workspace, state: str, placement: str, **mapping: object) -> _kernel.JobRef:
@@ -183,58 +94,67 @@ def test_delete_removes_a_symlink_in_the_job_without_following_it(tmp_path: Path
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
-def test_delete_refuses_running_job_through_cli_without_mutation(tmp_path: Path, capsys) -> None:
+def test_cli_delete_removes_unowned_failed_and_paused_jobs_and_refuses_the_others(tmp_path: Path, capsys) -> None:
     workspace, name = _workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "running")
-    marker = workspace.submit(payload, "running")
-    with workspace.open_journal_writer() as writer:
-        workspace.transition(writer, marker, "running", {})
+    failed, paused, ready, succeeded = (
+        _at(workspace, state, f"p/{state}") for state in ("failed", "paused", "ready", "succeeded")
+    )
+    selectors = [failed.job_id, paused.job_id, ready.job_id, succeeded.job_id]
 
-    assert command(["job", "delete", "--force", "--workspace", name, job_id], _context(tmp_path)) == 1
-    assert "cancel it first" in capsys.readouterr().out
-    assert workspace.find_marker_by_id(job_id) is not None
-    assert workspace.payload_path(marker.placement, marker.job_key).exists()
+    assert command(["job", "delete", "--force", "--workspace", name, *selectors], _context(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert f"{failed.job_key}\tfailed\tremoved" in out and f"{paused.job_key}\tpaused\tremoved" in out
+    assert f"{ready.job_key}\tready\trefused\tonly terminal or paused jobs are deleted, not ready" in out
+    assert "release it with `job unseal` first" in out and "removed 2 of 4 job(s)" in out
+    assert [
+        _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True) for ref in (failed, paused)
+    ] == [None, None]
+    assert find(workspace, ready.job_id).state == "ready" and find(workspace, succeeded.job_id).state == "succeeded"
 
 
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
+def test_cli_delete_of_a_held_job_leaves_the_request_to_its_owner(tmp_path: Path, capsys) -> None:
+    workspace, name = _workspace(tmp_path)
+    failed = _at(workspace, "failed", "p/held")
+    with cli_owner(workspace) as owner:
+        owned = _kernel.claim(workspace, owner, failed)
+        assert owned is not None
+        assert command(["job", "delete", "--force", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
+        assert "a manager holds the job; the request applies at its next boundary" in capsys.readouterr().out
+        assert owned.path.is_dir()
+        owned.release(owned.read_state() or StateDoc.empty(owned.job_id), Release("failed", 500))
+
+
 def test_delete_prompt_decline_and_non_tty_refusal_leave_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     workspace, name = _workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "prompt")
-    marker = workspace.submit(payload, "prompt")
-    installed_payload = workspace.payload_path(marker.placement, marker.job_key)
+    failed = _at(workspace, "failed", "prompt")
 
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: False)
-    assert command(["job", "delete", "--workspace", name, job_id], _context(tmp_path)) == 1
+    assert command(["job", "delete", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
     assert "without a terminal requires --force" in capsys.readouterr().err
-    assert installed_payload.exists() and marker.path.exists()
-
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
-    assert command(["job", "delete", "--workspace", name, job_id], _context(tmp_path)) == 1
+    assert command(["job", "delete", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
     assert "not removed" in capsys.readouterr().out
-    assert installed_payload.exists() and marker.path.exists()
+    assert find(workspace, failed.job_id).state == "failed"
+    assert not list(workspace.control.glob("requests/*.json"))
 
 
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
 def test_delete_path_glob_and_batch_resolution_are_safe(tmp_path: Path) -> None:
     workspace, name = _workspace(tmp_path)
-    first, first_id = _payload(tmp_path / "source", "silicon-one")
-    second, second_id = _payload(tmp_path / "source", "silicon-two")
-    workspace.submit(first, "silicon-one")
-    workspace.submit(second, "silicon-two")
+    first, second = (_at(workspace, "failed", f"silicon-{index}") for index in ("one", "two"))
     context = _context(workspace.root)
 
-    assert command(["job", "delete", "--force", "--workspace", name, "jobs/silicon*"], context) == 0
-    assert workspace.find_marker_by_id(first_id) is None
-    assert workspace.find_marker_by_id(second_id) is None
+    assert command(["job", "delete", "--force", "--workspace", name, "jobs/failed/silicon*"], context) == 0
+    assert all(
+        _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True) is None for ref in (first, second)
+    )
 
-    third, third_id = _payload(tmp_path / "source", "protected")
-    workspace.submit(third, "protected")
-    assert command(["job", "delete", "--force", "--workspace", name, "missing-selector", third_id], context) != 0
-    assert workspace.find_marker_by_id(third_id) is not None
+    # Every selector resolves before anything is requested.
+    third = _at(workspace, "failed", "protected")
+    assert command(["job", "delete", "--force", "--workspace", name, "missing-selector", third.job_id], context) != 0
+    assert find(workspace, third.job_id).state == "failed"
 
 
 def test_delete_of_a_join_child_is_refused_while_its_parent_waits(tmp_path: Path) -> None:
@@ -260,7 +180,6 @@ def test_delete_of_a_join_child_is_refused_while_its_parent_waits(tmp_path: Path
     assert find(workspace, child.job_id).state == "failed"
 
 
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
 def test_remote_delete_confirms_locally_and_forwards_confirmed(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     binding = WorkspaceBinding("cluster:station", "cluster", None)
     calls: list[list[str]] = []
@@ -308,7 +227,6 @@ def test_remote_delete_confirms_locally_and_forwards_confirmed(monkeypatch: pyte
     ]
 
 
-@pytest.mark.skip(reason="C5b: the job delete handler is rewritten with the CLI")
 def test_remote_delete_rejects_path_selectors_before_confirmation(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     binding = WorkspaceBinding("cluster:station", "cluster", None)
     calls: list[list[str]] = []

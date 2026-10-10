@@ -51,13 +51,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Report pending-job environment and runner readiness without mutation."""
 
     workspace = Workspace(_local_root(arguments, context, action="run a precheck"), mutable=False)
-    findings = list(
-        precheck_jobs(
-            workspace,
-            placement=arguments.placement,
-            runner_search_paths=arguments.runner_search_path,
-        )
-    )
+    findings = list(precheck_jobs(workspace, placement=arguments.placement))
     summary = _summary(findings)
     notice = manager_availability_notice(workspace)
     if arguments.json:
@@ -153,7 +147,10 @@ def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         subparsers,
         "precheck",
         summary="check pending jobs before they start",
-        description="Report declared-environment resolution and runner-reference readiness without changing the workspace",
+        description=(
+            "Report declared-environment resolution, workflow installation and build, and claimability "
+            "of pending jobs without changing the workspace"
+        ),
         handler=handle_precheck,
     )
     parser.add_argument(
@@ -162,11 +159,4 @@ def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         help="the workspace to precheck (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument("--placement", metavar="PLACEMENT", help="check only jobs at or below this placement")
-    parser.add_argument(
-        "--runner-search-path",
-        action="append",
-        default=[],
-        metavar="DIRECTORY",
-        help="root for plain installed runner references (repeatable)",
-    )
     parser.add_argument("--json", action="store_true", help="print the complete report as JSON")

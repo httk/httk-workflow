@@ -40,11 +40,6 @@ from ._reading import (
 )
 from ._rendering import JOB_REPORT_FORMAT, describe_job, render_events, render_job, render_rows
 
-# C5b: the legacy CLI handlers import these names until their port; remove them with it.
-count_markers = count_jobs
-job_frames = job_events
-render_frames = render_events
-
 __all__ = [
     "DEBUG_EXIT_FAILED",
     "DEBUG_EXIT_SUCCEEDED",

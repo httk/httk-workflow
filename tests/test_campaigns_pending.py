@@ -1,4 +1,4 @@
-"""Campaign submission (ported in C3) and manager launch (legacy until the CLI manager port, C5b).
+"""Campaign submission and manager launch (the manager launch waits for the CLI manager port, C5b-2).
 
 Split out of ``test_campaigns.py``; the description below is the original module's.
 
@@ -122,44 +122,28 @@ def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Pa
     assert [ref.job_id for ref in _kernel.list_jobs(workspaces["north"], "ready")] == [job.job_id]
 
 
-@pytest.mark.skip(reason="C5b: the campaign submit CLI is rewritten on installed workflows")
-@pytest.mark.usefixtures("relax_workflow")
 def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.atomistic")
     root, workspaces = _campaign_project(tmp_path, "round-robin")
+    source = package(
+        tmp_path / "relax", "tests.relax", ["start"], extra='\n[workflow.inputs.structure]\ndestination = "POSCAR"\n'
+    )
     structures = tmp_path / "structures"
     structures.mkdir()
-    for name in ("a.vasp", "b.vasp"):
-        (structures / name).write_text(
-            "silicon\n1.0\n2 0 0\n0 2 0\n0 0 2\nSi\n1\nDirect\n0 0 0\n",
-            encoding="utf-8",
-        )
+    for name in ("a.POSCAR", "b.POSCAR"):
+        (structures / name).write_text("silicon\n1.0\n2 0 0\n0 2 0\n0 0 2\nSi\n1\nDirect\n0 0 0\n", encoding="utf-8")
+    argv = ["campaign", "submit", "--workflow", str(source), "--key", "silicon", "--index", "1"]
+    argv += ["--input-from", "structure", str(structures / "a.POSCAR"), str(structures / "b.POSCAR")]
 
-    assert (
-        command(
-            [
-                "campaign",
-                "submit",
-                "--workflow",
-                "test-relax",
-                "--key",
-                "silicon",
-                "--index",
-                "1",
-                "--input-from",
-                "structure",
-                str(structures),
-            ],
-            CLIContext("httk", root),
-        )
-        == 0
-    )
+    assert command(argv, CLIContext("httk", root)) == 2
+    assert "httk workflow install" in capsys.readouterr().err
+    assert command([*argv, "--install"], CLIContext("httk", root)) == 0
     assert len(capsys.readouterr().out.splitlines()) == 2
-    assert len(list(workspaces["north"].scan_markers())) == 0
-    assert len(list(workspaces["south"].scan_markers())) == 2
+    assert every_job(workspaces["north"]) == []
+    assert len(every_job(workspaces["south"])) == 2
 
 
-@pytest.mark.skip(reason="C5b: campaign manager launch is rewritten on the kernel")
+@pytest.mark.skip(reason="C5b-2: campaign manager launch is rewritten on the kernel")
 def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Path) -> None:
     """One manager per selected partition drains its work; a partition subset
     leaves the others alone."""

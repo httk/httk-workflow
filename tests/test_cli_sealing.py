@@ -11,15 +11,17 @@ from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed
 from httk.core.project.cli import command as project_command
 
+import v3_helpers as v3
 from conftest import configure_identity
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import TaskManager, Workspace, _kernel
+from httk.workflow._state import Release, StateDoc
 from httk.workflow.projects import initialize_project
 from httk.workflow.seals import is_job_sealed, is_project_sealed, is_workspace_sealed, job_seal_path
 from httk.workflow.workflow_cli import command
 
 # The library side (seal and unseal requests, the workspace snapshot, verify) is covered by test_seals and
-# test_sealing_runtime; these drive the CLI handlers, which are rewritten with the CLI.
-pytestmark = pytest.mark.skip(reason="C5b: the seal CLI verbs are rewritten on the kernel with the CLI")
+# test_sealing_runtime; these drive the CLI handlers. The workspace and verify verbs wait for C5b-2.
+_C5B2 = pytest.mark.skip(reason="C5b-2: the workspace seal and seal verify CLI verbs are rewritten on the kernel")
 
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
 import json
@@ -111,51 +113,63 @@ def _context(cwd: Path) -> CLIContext:
     return CLIContext("httk", cwd)
 
 
-def test_job_seal_writes_a_seal_and_reports_its_roles(tmp_path: Path, capsys) -> None:
-    project_root, workspace, job_id = _setup(tmp_path)
+def _succeeded(tmp_path: Path) -> tuple[Path, Workspace, _kernel.JobRef]:
+    """A project whose default workspace holds one succeeded job without a seal."""
 
-    assert command(["job", "seal", job_id], _context(project_root)) == 0
-    out = capsys.readouterr().out
-    assert f"{job_id}\tsealed\t" in out
-    assert "identity" in out
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
-    assert job_seal_path(workspace.payload_path(marker.placement, marker.job_key)).is_file()
-
-
-def test_job_seal_refuses_a_non_quiescent_job(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     initialize_project(project_root, name="sealing")
     configure_identity()
     workspace = _init_workspace(project_root)
-    payload, job_id = _payload(tmp_path / "source", "silicon")
-    marker = workspace.submit(payload, "jobs/silicon")
-    with workspace.open_journal_writer() as writer:
-        workspace.transition(writer, marker, "running", {})
+    ref = v3.submit(workspace, ("demo--0123456789abcdef", "demo"), {"start": "succeed"}, placement="jobs/silicon")
+    with v3.cli_owner(workspace) as owner:
+        owned = _kernel.claim(workspace, owner, ref)
+        assert owned is not None
+        ref = owned.release(StateDoc.empty(owned.job_id).next_activation("start", "initial"), Release("succeeded", 500))
+    return project_root, workspace, ref
 
-    assert command(["job", "seal", job_id], _context(project_root)) == 1
-    assert "not quiescent" in capsys.readouterr().err
+
+def test_job_seal_writes_a_seal_and_refuses_twice(tmp_path: Path, capsys) -> None:
+    project_root, workspace, ref = _succeeded(tmp_path)
+
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
+    assert capsys.readouterr().out == f"{ref.job_id}\tsealed\n"
+    payload = v3.find(workspace, ref.job_id).path
+    assert is_job_sealed(payload) and job_seal_path(payload).is_file()
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 1
+    assert "the job is already sealed" in capsys.readouterr().out
 
 
-def test_job_unseal_declined_then_forced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    project_root, workspace, job_id = _setup(tmp_path)
-    assert command(["job", "seal", job_id], _context(project_root)) == 0
-    capsys.readouterr()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
+def test_job_seal_refuses_a_job_that_did_not_succeed(tmp_path: Path, capsys) -> None:
+    project_root, workspace, _ref = _succeeded(tmp_path)
+    ready = v3.submit(workspace, ("demo--0123456789abcdef", "demo"), {"start": "succeed"}, placement="jobs/ready")
+
+    assert command(["job", "seal", ready.job_id], _context(project_root)) == 1
+    assert "only succeeded jobs are sealed, not ready" in capsys.readouterr().out
+
+
+def test_job_unseal_declined_then_forced_and_then_deletable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    project_root, workspace, ref = _succeeded(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
+    assert command(["job", "delete", "--force", ref.job_id], _context(project_root)) == 1
+    assert "release it with `job unseal` first" in capsys.readouterr().out
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
-    assert command(["job", "unseal", job_id], _context(project_root)) == 1
+    assert command(["job", "unseal", ref.job_id], _context(project_root)) == 1
     assert "not removed" in capsys.readouterr().out
-    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    assert is_job_sealed(v3.find(workspace, ref.job_id).path)
 
-    assert command(["job", "unseal", "--force", job_id], _context(project_root)) == 0
-    assert not is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    assert command(["job", "unseal", "--force", ref.job_id], _context(project_root)) == 0
+    assert capsys.readouterr().out == f"{ref.job_id}\tunsealed\n"
+    assert not is_job_sealed(v3.find(workspace, ref.job_id).path)
+    assert command(["job", "delete", "--force", ref.job_id], _context(project_root)) == 0
+    assert _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True) is None
 
 
+@_C5B2
 def test_workspace_seal_refuses_unsealed_jobs_then_forces(tmp_path: Path, capsys) -> None:
     project_root, workspace, job_id = _setup(tmp_path)
 
@@ -170,6 +184,7 @@ def test_workspace_seal_refuses_unsealed_jobs_then_forces(tmp_path: Path, capsys
     assert is_workspace_sealed(workspace)
 
 
+@_C5B2
 def test_project_seal_then_verify_ok_and_tamper_fails(tmp_path: Path, capsys) -> None:
     project_root, workspace, job_id = _setup(tmp_path)
     marker = workspace.find_marker_by_id(job_id)
@@ -195,6 +210,7 @@ def test_project_seal_then_verify_ok_and_tamper_fails(tmp_path: Path, capsys) ->
     assert "  mismatch\tfiles/runner" in tampered
 
 
+@_C5B2
 def test_seal_verify_json_shape(tmp_path: Path, capsys) -> None:
     project_root, _workspace, _job_id = _setup(tmp_path)
     assert command(["workspace", "seal", "--force"], _context(project_root)) == 0
@@ -211,18 +227,17 @@ def test_seal_verify_json_shape(tmp_path: Path, capsys) -> None:
 
 
 def test_confirm_non_tty_refuses_without_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    project_root, workspace, job_id = _setup(tmp_path)
-    assert command(["job", "seal", job_id], _context(project_root)) == 0
+    project_root, workspace, ref = _succeeded(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
     capsys.readouterr()
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    assert command(["job", "unseal", job_id], _context(project_root)) == 1
+    assert command(["job", "unseal", ref.job_id], _context(project_root)) == 1
     assert "requires --force" in capsys.readouterr().err
-    assert is_job_sealed(workspace.payload_path(marker.placement, marker.job_key))
+    assert is_job_sealed(v3.find(workspace, ref.job_id).path)
 
 
+@_C5B2
 def test_job_show_and_workspace_status_report_sealed(tmp_path: Path, capsys) -> None:
     project_root, _workspace, job_id = _setup(tmp_path)
 
@@ -250,6 +265,7 @@ def test_job_show_and_workspace_status_report_sealed(tmp_path: Path, capsys) -> 
     assert json.loads(capsys.readouterr().out)[0]["sealed"] is True
 
 
+@_C5B2
 def test_seal_verify_untrusted_signer_exits_three(tmp_path: Path, capsys) -> None:
     project_root, workspace, job_id = _setup(tmp_path)
     marker = workspace.find_marker_by_id(job_id)
@@ -267,6 +283,7 @@ def test_seal_verify_untrusted_signer_exits_three(tmp_path: Path, capsys) -> Non
     assert "valid_unknown_key" in out
 
 
+@_C5B2
 def test_seal_verify_unsealed_subject_renders_not_sealed(tmp_path: Path, capsys) -> None:
     project_root, _workspace, _job_id = _setup(tmp_path)
 

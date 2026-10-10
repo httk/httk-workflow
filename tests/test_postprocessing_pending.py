@@ -1,4 +1,4 @@
-"""The postprocess CLI job selectors (legacy until the CLI port, C5b; split out of ``test_postprocessing.py``)."""
+"""The postprocess CLI job selectors (split out of ``test_postprocessing.py``)."""
 
 import json
 from pathlib import Path

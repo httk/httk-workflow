@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
-from httk.core.digests import tree_digest
 
-from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, job_records, scaffold
-from httk.workflow.packages import load_workflow_package
+from conftest import fake_remote, register_ws
+from httk.workflow import TaskManager, Workspace, _store, job_records, scaffold
+from httk.workflow.packages import load_workflow_package, source_tree_digest
+from httk.workflow.projects import initialize_project
 from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli import command
 from test_workflow_packages import _MANIFEST, _package
@@ -113,6 +113,7 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
                 "new",
                 "--workspace",
                 workspace,
+                "--install",
                 "--workflow-dir",
                 str(package),
                 "--input-from",
@@ -131,9 +132,7 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
     reports = json.loads(capsys.readouterr().out)
     assert len(reports) == 2
     for report in reports:
-        assert report["workflow"] == "tests.cli.package"
-        assert report["runner"]["source"] == "workspace"
-        assert report["runner"]["sha256"] == tree_digest(package)
+        assert report["workflow"] == {"id": "local:tests.cli.package", "name": "tests.cli.package"}
         assert report["placement"] == "project/screening"
         job = json.loads((Path(report["payload_path"]) / "job.json").read_text(encoding="utf-8"))
         # The declared 'label' default is applied for the name nobody supplied,
@@ -162,6 +161,7 @@ def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tm
                 "new",
                 "--workspace",
                 workspace,
+                "--install",
                 "--workflow-dir",
                 str(package),
                 "--input-from",
@@ -199,6 +199,7 @@ def test_job_new_batch_tag_prefixes_each_derived_tag(tmp_path: Path, capsys) -> 
                 "new",
                 "--workspace",
                 workspace,
+                "--install",
                 "--workflow-dir",
                 str(package),
                 "--tag",
@@ -236,6 +237,7 @@ def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, ca
                 "new",
                 "--workspace",
                 workspace,
+                "--install",
                 "--workflow-dir",
                 str(package),
                 "--tag",
@@ -273,6 +275,7 @@ def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, c
                 "new",
                 "--workspace",
                 workspace,
+                "--install",
                 "--workflow-dir",
                 str(package),
                 "--input",
@@ -303,6 +306,7 @@ def test_job_new_accepts_a_package_directory_and_rejects_workflow_selection_erro
                 "new",
                 "--workspace",
                 workspace,
+                "--install",
                 "--workflow-dir",
                 str(package),
                 "--input",
@@ -464,7 +468,7 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
     structure = tmp_path / "POSCAR"
     structure.write_text(_POSCAR, encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, package, inputs={"structure": structure})
+    job = new_job(workspace, package, inputs={"structure": structure}, install=True)
 
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=120.0)
@@ -473,14 +477,9 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
     assert len(records) == 1
     record = records[0]
     assert record.job_id == job.job_id
-    assert record.job["workflow"] == "tests.cli.package"
-    assert record.job["runner"] == {
-        "executor": "path",
-        "source": "workspace",
-        "path": job.runner["path"],
-        "sha256": tree_digest(package),
-        "arguments": [],
-    }
+    assert record.job["workflow"] == "local:tests.cli.package"
+    # The run pins the installed tree it ran, the sources-only digest of the package.
+    assert record.runner_provenance == {"id": "local:tests.cli.package", "tree_sha256": source_tree_digest(package)}
 
 
 def _compiled_cli_package(root: Path, *, build_command: str = "./build.sh") -> Path:
@@ -495,72 +494,127 @@ def _compiled_cli_package(root: Path, *, build_command: str = "./build.sh") -> P
     return package
 
 
-def test_workflow_build_registers_and_lists_a_package(tmp_path: Path, capsys) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "build")
-    package = _compiled_cli_package(tmp_path / "package")
+def _installed(tmp_path: Path, context: CLIContext, package: Path, capsys, *options: str) -> str:
+    """Register a workspace, install *package* into it through the CLI, and return the workspace name."""
 
-    assert command(["build", "--workspace", name, str(package)], context) == 0
-    assert "platform probe" in capsys.readouterr().out
+    name = register_ws(context, Workspace.initialize(tmp_path / "workspace").root, "store")
+    assert command(["install", "--workspace", name, *options, str(package)], context) == 0
+    capsys.readouterr()
+    return name
+
+
+def test_workflow_build_registers_and_lists_an_installed_package(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    name = _installed(tmp_path, context, _compiled_cli_package(tmp_path / "package"), capsys, "--no-build")
+
     assert command(["build", "--workspace", name, "--list"], context) == 0
-    assert "any" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
+    assert command(["build", "--workspace", name, "tests.package"], context) == 0
+    out = capsys.readouterr().out
+    assert "local:tests.package:" in out and "platform probe" in out and "tag=any" in out
+    assert command(["build", "--workspace", name, "--list"], context) == 0
+    assert capsys.readouterr().out.startswith("local:tests.package\tany\t")
 
 
-def test_workflow_build_uses_syntactic_path_detection_and_pointer_listings(tmp_path: Path, capsys) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "build-targets")
-    package = _compiled_cli_package(tmp_path / "bare")
-    workspace.publish_runner(package, name="bare")
-
-    # The existing local directory named ``bare`` must not shadow the store selector.
-    assert command(["build", "--workspace", name, "bare"], context) == 0
-    capsys.readouterr()
-    assert command(["build", "--workspace", name, "./bare"], context) == 0
-    capsys.readouterr()
-    current = next(workspace.runner_builds.rglob("current.json"))
-    generation = json.loads(current.read_text(encoding="utf-8"))["generation"]
-    (current.parent / generation / "artifacts" / "build.json").write_text("{}", encoding="utf-8")
-    assert command(["build", "--workspace", name, "--list", "--json"], context) == 0
-    rows = json.loads(capsys.readouterr().out)
-    stores = {row["store"] for row in rows}
-    assert "bare" in stores and len(stores) == 2
-
-
-def test_workflow_build_store_option_handles_nested_selectors(tmp_path: Path, capsys) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "build-nested")
-    package = _compiled_cli_package(tmp_path / "nested")
-    workspace.publish_runner(package, name="group/nested")
-
-    assert command(["build", "--workspace", name, "--store", "group/nested"], context) == 0
-    capsys.readouterr()
-    assert command(["build", "--workspace", name, "group/nested"], context) == 1
-    assert "does not exist" in capsys.readouterr().err
-
-
-def test_workflow_build_refuses_a_buildless_package_and_reports_failures(tmp_path: Path, capsys) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "build-errors")
-    buildless = _package(tmp_path / "buildless")
-    assert command(["build", "--workspace", name, str(buildless)], context) == 1
+def test_workflow_build_refuses_uninstalled_and_buildless_workflows_and_reports_failures(
+    tmp_path: Path, capsys
+) -> None:
+    context = _context(tmp_path)
+    name = _installed(tmp_path, context, _package(tmp_path / "buildless"), capsys)
+    assert command(["build", "--workspace", name, "tests.package"], context) == 1
     assert "[workflow.build]" in capsys.readouterr().err
+    assert command(["build", "--workspace", name, str(tmp_path / "buildless")], context) == 1
+    assert "is not installed" in capsys.readouterr().err
 
     failed = _compiled_cli_package(tmp_path / "failed", build_command="./missing.sh")
-    assert command(["build", "--workspace", name, str(failed)], context) == 1
+    failed_manifest = (
+        (failed / "httk_workflow.toml").read_text(encoding="utf-8").replace("tests.package", "tests.failed")
+    )
+    (failed / "httk_workflow.toml").write_text(failed_manifest, encoding="utf-8")
+    assert command(["install", "--workspace", name, "--no-build", str(failed)], context) == 0
+    capsys.readouterr()
+    assert command(["build", "--workspace", name, "tests.failed"], context) == 1
     assert "missing.sh" in capsys.readouterr().err
 
 
 def test_workflow_build_json_is_one_report(tmp_path: Path, capfd) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root, "build-json")
-    package = _compiled_cli_package(tmp_path / "package-json")
-    assert command(["build", "--workspace", name, "--json", str(package)], context) == 0
+    context = _context(tmp_path)
+    name = _installed(tmp_path, context, _compiled_cli_package(tmp_path / "package-json"), capfd, "--no-build")
+    assert command(["build", "--workspace", name, "--json", "tests.package"], context) == 0
     captured = capfd.readouterr()
-    report = json.loads(captured.out)[0]
-    assert report["platform_tag"] == "any"
+    (report,) = json.loads(captured.out)
+    assert report["platform_tag"] == "any" and report["workflow"] == "local:tests.package"
     assert "compiler-output" in captured.err
+
+
+def test_workflow_install_list_describe_and_uninstall_a_workspace_store(tmp_path: Path, capfd) -> None:
+    context = _context(tmp_path)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    name = register_ws(context, workspace.root, "store")
+    package = _compiled_cli_package(tmp_path / "package")
+
+    assert command(["install", "--workspace", name, "--json", str(package)], context) == 0
+    captured = capfd.readouterr()
+    (row,) = json.loads(captured.out)  # the build's output went to stderr
+    assert "compiler-output" in captured.err
+    assert row["id"] == "local:tests.package" and row["builds"] == ["any"]
+    assert row["source"] == str(package.resolve()) and row["tree_sha256"] == source_tree_digest(package)
+
+    assert command(["list", "--workspace", name], context) == 0
+    assert capfd.readouterr().out == f"local:tests.package\ttests.package\t{package.resolve()}\n"
+    assert command(["describe", "--workspace", name, "--json", "tests.package"], context) == 0
+    (described,) = json.loads(capfd.readouterr().out)
+    assert described["workflow"] == "local:tests.package" and described["source"]["kind"] == "workspace"
+    assert described["source"]["id"] == "local:tests.package" and described["build"]["present"] is True
+    assert "data_mode" not in described
+    assert command(["describe", "--workspace", name, "tests.package"], context) == 0
+    assert "source: workspace installation local:tests.package" in capfd.readouterr().out
+    assert command(["describe", "--workspace", name, "tests.missing"], context) == 1
+    assert "is not installed in the workspace" in capfd.readouterr().err
+
+    job = new_job(workspace, "tests.package", inputs={"structure": tmp_path / "package" / "run"})
+    assert command(["uninstall", "--workspace", name, "--check", "tests.package"], context) == 0
+    captured = capfd.readouterr()
+    assert f"unfinished job {job.job_key} uses local:tests.package" in captured.err
+    assert captured.out == "local:tests.package\ttests.package\n"
+    assert command(["list", "--workspace", name, "--json"], context) == 0
+    assert json.loads(capfd.readouterr().out) == []
+    assert command(["uninstall", "--workspace", name, "tests.package"], context) == 1
+    assert "is not installed" in capfd.readouterr().err
+
+
+def test_workflow_install_refuses_a_sealed_workspace(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _common
+
+    context = _context(tmp_path)
+    name = register_ws(context, Workspace.initialize(tmp_path / "workspace").root, "sealed")
+
+    def sealed(_workspace: Workspace) -> None:
+        raise RuntimeError("the workspace is sealed; `httk workspace unseal` it first")
+
+    monkeypatch.setattr(_common, "require_cli_modifiable", sealed)
+    assert command(["install", "--workspace", name, str(_package(tmp_path / "package"))], context) == 2
+    assert "the workspace is sealed" in capsys.readouterr().err
+
+
+def test_workflow_install_on_a_remote_workspace_pushes_the_package_and_installs_it_there(
+    tmp_path: Path, remote, capsys
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="remote-install")
+    fake_remote(project)
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    context = _context(project)
+    register_ws(context, workspace.root, "station")
+    package = _package(tmp_path / "package")
+
+    assert command(["install", "--workspace", "cluster:station", str(package)], context) == 0
+    assert capsys.readouterr().out == "local:tests.package\ttests.package\n"
+    (installed,) = _store.list_installed(workspace)
+    assert installed.id == "local:tests.package"
+    # The pushed copy is consumed by the far side's install.
+    assert not list((workspace.control / "tmp").glob("push.*"))
+    assert command(["list", "--workspace", "cluster:station", "--json"], context) == 0
+    assert [row["id"] for row in json.loads(capsys.readouterr().out)] == ["local:tests.package"]
+    assert command(["uninstall", "--workspace", "cluster:station", "tests.package"], context) == 0
+    assert _store.list_installed(workspace) == []

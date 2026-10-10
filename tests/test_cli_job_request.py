@@ -1,8 +1,7 @@
-"""CLI behavior for repeatable operator requests and pause waiting."""
+"""CLI behavior of operator requests (v3 request files), the remote signing protocol, and pause waiting."""
 
 import argparse
 import json
-import time
 import uuid
 from pathlib import Path
 
@@ -17,61 +16,11 @@ from httk.core.identity import (
     write_identity_config,
 )
 
-from httk.workflow import TaskManager, Workspace, _manager_launches
+import v3_helpers as v3
+from httk.workflow import TaskManager, Workspace, _kernel, _store
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
-
-_SUCCEED_RUNNER = """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-
-context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
-control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-temporary = control / "outcome.tmp.test"
-temporary.mkdir()
-(temporary / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome",
-    "format_version": 2,
-    "job_id": context["job_id"],
-    "activation_id": context["activation_id"],
-    "attempt_id": context["attempt_id"],
-    "action": "succeed",
-}))
-os.rename(temporary, control / "outcome.ready")
-"""
-
-
-def _payload(root: Path, tag: str, runner: str = _SUCCEED_RUNNER) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    files = root / tag / "files"
-    files.mkdir(parents=True)
-    runner_path = files / "runner"
-    runner_path.write_text(runner)
-    runner_path.chmod(0o755)
-    (files.parent / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": job_id,
-                "tag": tag,
-                "name": tag,
-                "workflow": "tests.cli_request",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "only",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-                "parent": None,
-            }
-        )
-    )
-    return files.parent, job_id
 
 
 def _context(root: Path) -> CLIContext:
@@ -100,215 +49,186 @@ def _new_workspace(tmp_path: Path) -> tuple[Workspace, str]:
     return Workspace(root), name
 
 
+def _job(tmp_path: Path, workspace: Workspace, tag: str, placement: str | None = None) -> _kernel.JobRef:
+    """Submit one job of the scriptable runner (installed on first use) that simply succeeds."""
+
+    installed = _store.lookup(workspace, "demo") or v3.install(workspace, tmp_path / "package")
+    return v3.submit(workspace, installed, {"start": "succeed"}, tag=tag, placement=placement or f"project/{tag}")
+
+
+def _requests(workspace: Workspace) -> list[dict[str, object]]:
+    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(workspace.control.glob("requests/*.json"))]
+
+
 def _request_args(workspace_name: str, *job_ids: str, action: str = "pause") -> list[str]:
-    return [
-        "job",
-        "request",
-        action,
-        "--workspace",
-        workspace_name,
-        "--reason",
-        "test request",
-        *job_ids,
-    ]
+    return ["job", "request", action, "--workspace", workspace_name, "--reason", "test request", *job_ids]
 
 
-def test_repeatable_job_ids_publish_one_request_and_path_each(tmp_path: Path, capsys) -> None:
+def test_repeatable_job_ids_post_one_request_and_path_each(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    source = tmp_path / "source"
-    job_ids = []
-    for tag in ("first", "second"):
-        payload, job_id = _payload(source, tag)
-        workspace.submit(payload, f"project/{tag}")
-        job_ids.append(job_id)
+    job_ids = [_job(tmp_path, workspace, tag).job_id for tag in ("first", "second")]
 
     assert command(_request_args(workspace_name, *job_ids), _context(tmp_path)) == 0
     output = capsys.readouterr().out.splitlines()
-    assert len(output) == 2
-    assert all(Path(line).is_file() for line in output)
-    assert len(list((workspace.control / "requests" / "ready").iterdir())) == 2
+    assert len(output) == 2 and all(Path(line).is_file() for line in output)
+    requests = _requests(workspace)
+    assert {request["job_id"] for request in requests} == set(job_ids)
+    assert {request["format_version"] for request in requests} == {3}
+    assert all("expected_generation" not in request and "job_key" not in request for request in requests)
 
 
-def test_job_request_accepts_tag_prefix_selector(tmp_path: Path, capsys) -> None:
+def test_job_request_accepts_tag_prefix_and_directory_selectors(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "tagged")
-    workspace.submit(payload, "project/tagged")
+    tagged = _job(tmp_path, workspace, "tagged", "jobs/first")
+    nested = _job(tmp_path, workspace, "nested", "jobs/nested/second")
 
     assert command(_request_args(workspace_name, "tagged"), _context(tmp_path)) == 0
+    assert [request["job_id"] for request in _requests(workspace)] == [tagged.job_id]
+    for path in workspace.control.glob("requests/*.json"):
+        path.unlink()
+    assert command(_request_args(workspace_name, str(workspace.jobs), action="cancel"), _context(tmp_path)) == 0
     capsys.readouterr()
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
-    assert request["job_id"] == job_id
-
-
-def test_job_request_accepts_a_workspace_directory_selector(tmp_path: Path, capsys) -> None:
-    workspace, workspace_name = _new_workspace(tmp_path)
-    job_ids = []
-    for tag, placement in (("first", "jobs/first"), ("second", "jobs/nested/second")):
-        payload, job_id = _payload(tmp_path / "source", tag)
-        workspace.submit(payload, placement)
-        job_ids.append(job_id)
-
-    selector = str(workspace.root / "jobs")
-    assert command(_request_args(workspace_name, selector, action="cancel"), _context(tmp_path)) == 0
-    capsys.readouterr()
-    requests = [
-        json.loads(path.read_text(encoding="utf-8")) for path in (workspace.control / "requests" / "ready").iterdir()
-    ]
-    assert {request["job_id"] for request in requests} == set(job_ids)
+    assert {request["job_id"] for request in _requests(workspace)} == {tagged.job_id, nested.job_id}
 
 
 def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, capsys) -> None:
     workspace = Workspace.default()
-    payload, job_id = _payload(tmp_path / "source", "default-workspace")
-    workspace.submit(payload, "project/default-workspace")
+    job_id = _job(tmp_path, workspace, "default-workspace").job_id
 
     assert command(["job", "request", "pause", "--reason", "default workspace", job_id], _context(tmp_path)) == 0
     capsys.readouterr()
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
-    assert request["job_id"] == job_id
+    assert [request["job_id"] for request in _requests(workspace)] == [job_id]
+
+
+@pytest.mark.parametrize(
+    ("action", "options", "message"),
+    [
+        ("cancel", ["--step", "start"], "--step is required by, and only valid with, the override_step action"),
+        ("set_priority", [], "--priority is required by"),
+        ("eject", [], "--destination is required by"),
+        ("pause", ["--force"], "--force applies only to"),
+    ],
+)
+def test_job_request_options_belong_to_their_actions(
+    tmp_path: Path, capsys, action: str, options: list[str], message: str
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "options").job_id
+
+    assert command([*_request_args(workspace_name, job_id, action=action), *options], _context(tmp_path)) == 2
+    assert message in capsys.readouterr().err
+    assert not _requests(workspace)
+
+
+def test_job_request_carries_the_action_options(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "options").job_id
+
+    for action, options in (("set_priority", ["--priority", "700"]), ("eject", ["--destination", "exchange/outbox"])):
+        assert command([*_request_args(workspace_name, job_id, action=action), *options], _context(tmp_path)) == 0
+    capsys.readouterr()
+    by_action = {request["action"]: request for request in _requests(workspace)}
+    assert by_action["set_priority"]["priority"] == 700
+    assert by_action["eject"]["destination"] == "exchange/outbox"
+
+
+def test_the_removed_confirm_launches_ended_verb_is_refused(tmp_path: Path, capsys) -> None:
+    # Operator attestation of a dead owner replaces it (workspace attest-dead OWNER).
+    assert command(["job", "confirm-launches-ended", "x"], _context(tmp_path)) == 2
+    assert "invalid choice: 'confirm-launches-ended'" in capsys.readouterr().err
 
 
 def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "protocol")
-    workspace.submit(payload, "project/protocol")
-
-    assert (
-        command(
-            [
-                "job",
-                "request-envelopes",
-                "pause",
-                "--workspace",
-                workspace_name,
-                "--operator=Test User <tester@example.test>",
-                "--reason=protocol",
-                "--json",
-                job_id,
-            ],
-            _context(tmp_path),
-        )
-        == 0
-    )
-    envelope_document = json.loads(capsys.readouterr().out)
-    assert envelope_document["format"] == "httk-workflow-request-envelopes"
-    envelope = envelope_document["envelopes"][0]
+    ref = _job(tmp_path, workspace, "protocol")
+    argv = ["job", "request-envelopes", "pause", "--workspace", workspace_name]
+    argv += ["--operator=Test User <tester@example.test>", "--reason=protocol", "--json", ref.job_id]
+    assert command(argv, _context(tmp_path)) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["format"] == "httk-workflow-request-envelopes" and document["format_version"] == 2
+    assert document["job_keys"] == [ref.job_key]
+    (envelope,) = document["envelopes"]
+    assert envelope["format_version"] == 3 and envelope["placement"] == "project/protocol"
     signed = sign_document(envelope, seed_path=identity_key_paths("tester")[0])
-    assert (
-        command(
-            [
-                "job",
-                "publish-requests",
-                "--workspace",
-                workspace_name,
-                "--document",
-                json.dumps(signed, separators=(",", ":")),
-            ],
-            _context(tmp_path),
-        )
-        == 0
-    )
+    publish = ["job", "publish-requests", "--workspace", workspace_name, "--document", json.dumps(signed)]
+    assert command(publish, _context(tmp_path)) == 0
     capsys.readouterr()
-    stored = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
-    assert stored == signed
+    assert _requests(workspace) == [signed]
 
 
-def test_publish_requests_resolves_all_jobs_before_publishing(tmp_path: Path, capsys) -> None:
-    workspace, workspace_name = _new_workspace(tmp_path)
-    payload, first_id = _payload(tmp_path / "source", "first-protocol")
-    workspace.submit(payload, "project/first-protocol")
-    payload, second_id = _payload(tmp_path / "source", "second-protocol")
-    workspace.submit(payload, "project/second-protocol")
-    first = workspace.find_marker_by_id(first_id)
-    second = workspace.find_marker_by_id(second_id)
-    assert first is not None and second is not None
-
-    def request(marker, job_id: str) -> dict[str, object]:
-        return {
-            "format": "httk-workflow-request",
-            "format_version": 2,
-            "request_id": str(uuid.uuid4()),
-            "job_id": job_id,
-            "job_key": marker.job_key,
-            "placement": marker.placement.as_posix(),
-            "expected_generation": marker.generation,
-            "expected_record_ref": marker.record_ref,
-            "action": "pause",
-            "operator": "Test User <tester@example.test>",
-            "reason": "protocol",
-            "created_at": "2026-01-01T00:00:00Z",
-        }
-
-    assert (
-        command(
-            [
-                "job",
-                "publish-requests",
-                "--workspace",
-                workspace_name,
-                "--document",
-                json.dumps(request(first, first_id)),
-                "--document",
-                json.dumps(request(second, str(uuid.uuid4()))),
-            ],
-            _context(tmp_path),
-        )
-        == 2
-    )
-    capsys.readouterr()
-    assert not list((workspace.control / "requests" / "ready").iterdir())
-
-
-def test_remote_envelope_correspondence_keeps_tag_prefixes_and_rejects_impersonation(
-    tmp_path: Path,
-) -> None:
-    workspace, _ = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "correspondence")
-    workspace.submit(payload, "project/correspondence")
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    envelope = {
+def _document(job_id: str, placement: str = "project/x") -> dict[str, object]:
+    return {
         "format": "httk-workflow-request",
-        "format_version": 2,
+        "format_version": 3,
         "request_id": str(uuid.uuid4()),
-        "job_id": marker.job_id,
-        "job_key": marker.job_key,
-        "placement": marker.placement.as_posix(),
-        "expected_generation": marker.generation,
-        "expected_record_ref": marker.record_ref,
+        "job_id": job_id,
+        "placement": placement,
         "action": "pause",
         "operator": "Test User <tester@example.test>",
-        "reason": "correspondence",
+        "reason": "protocol",
         "created_at": "2026-01-01T00:00:00Z",
     }
+
+
+def test_publish_requests_locates_all_jobs_before_posting_and_checks_signatures(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    first = _job(tmp_path, workspace, "first-protocol")
+    publish = ["job", "publish-requests", "--workspace", workspace_name]
+    documents = [_document(first.job_id, "project/first-protocol"), _document(str(uuid.uuid4()))]
+    argv = [*publish, *(part for document in documents for part in ("--document", json.dumps(document)))]
+    assert command(argv, _context(tmp_path)) == 2
+    assert "job does not exist" in capsys.readouterr().err
+    assert not _requests(workspace)
+
+    forged = {**sign_document(documents[0], seed_path=identity_key_paths("tester")[0]), "reason": "changed"}
+    assert command([*publish, "--document", json.dumps(forged)], _context(tmp_path)) == 2
+    assert "signature" in capsys.readouterr().err
+    assert not _requests(workspace)
+
+
+def test_remote_envelope_correspondence_keeps_tag_prefixes_and_rejects_impersonation(tmp_path: Path) -> None:
+    job_id = str(uuid.uuid4())
+    key = f"correspondence--{job_id}"
+    envelope = {**_document(job_id), "reason": "correspondence"}
     arguments = argparse.Namespace(
-        job_id=[marker.job_key.split("--", 1)[0]],
+        job_id=["correspondence"],
         action="pause",
         reason="correspondence",
         priority=None,
         step=None,
         force=False,
+        destination=None,
     )
-    job_cli._validate_remote_envelopes([envelope], arguments, "Test User <tester@example.test>")
+    operator = "Test User <tester@example.test>"
+
+    def document(envelope: dict[str, object], key: str) -> dict[str, object]:
+        return {
+            "format": "httk-workflow-request-envelopes",
+            "format_version": 2,
+            "envelopes": [envelope],
+            "job_keys": [key],
+        }
+
+    assert job_cli._validate_remote_envelopes(document(envelope, key), arguments, operator) == [envelope]
 
     other_id = str(uuid.uuid4())
-    impersonation = {**envelope, "job_id": other_id, "job_key": f"{job_id}--{other_id}"}
     arguments.job_id = [job_id]
     with pytest.raises(ValueError, match="UUID selector"):
-        job_cli._validate_remote_envelopes([impersonation], arguments, "Test User <tester@example.test>")
-
-    mismatch = {**envelope, "job_id": other_id, "job_key": f"correspondence--{other_id}"}
-    with pytest.raises(ValueError, match="UUID selector"):
-        job_cli._validate_remote_envelopes([mismatch], arguments, "Test User <tester@example.test>")
+        job_cli._validate_remote_envelopes(
+            document({**envelope, "job_id": other_id}, f"{job_id}--{other_id}"), arguments, operator
+        )
+    with pytest.raises(ValueError, match="job key disagrees"):
+        job_cli._validate_remote_envelopes(document(envelope, f"correspondence--{other_id}"), arguments, operator)
+    with pytest.raises(ValueError, match="'action' disagrees"):
+        job_cli._validate_remote_envelopes(document({**envelope, "action": "cancel"}, key), arguments, operator)
 
 
 def test_default_operator_identity_is_recorded_and_signs_request(tmp_path: Path) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "default")
-    workspace.submit(payload, "project/default")
+    job_id = _job(tmp_path, workspace, "default").job_id
 
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    (request,) = _requests(workspace)
     assert request["operator"] == "Test User <tester@example.test>"
     assert request["operator_key"] == identity_public_key(identity_key_paths("tester")[0])
     assert "signature" in request
@@ -316,8 +236,7 @@ def test_default_operator_identity_is_recorded_and_signs_request(tmp_path: Path)
 
 def test_configured_identity_without_key_fails_loudly(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "missing-key")
-    workspace.submit(payload, "project/missing-key")
+    job_id = _job(tmp_path, workspace, "missing-key").job_id
     key_path = identity_key_paths("tester")[0]
     key_path.unlink()
 
@@ -325,7 +244,7 @@ def test_configured_identity_without_key_fails_loudly(tmp_path: Path, capsys) ->
     error = capsys.readouterr().err
     assert f"identity 'tester' has no key file at {key_path}" in error
     assert "identity remove tester" in error and "identity add tester" in error
-    assert not list((workspace.control / "requests" / "ready").iterdir())
+    assert not _requests(workspace)
 
 
 def test_named_operator_identity_selects_its_key(tmp_path: Path) -> None:
@@ -340,236 +259,105 @@ def test_named_operator_identity_selects_its_key(tmp_path: Path) -> None:
     )
     ensure_identity_key("bot")
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "named")
-    workspace.submit(payload, "project/named")
+    job_id = _job(tmp_path, workspace, "named").job_id
 
     assert command(_request_args(workspace_name, job_id) + ["--operator", "bot"], _context(tmp_path)) == 0
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    (request,) = _requests(workspace)
     assert request["operator"] == "Build Bot <bot@example.test>"
     assert request["operator_key"] == identity_public_key(identity_key_paths("bot")[0])
 
 
 def test_unknown_operator_identity_publishes_nothing(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "unknown")
-    workspace.submit(payload, "project/unknown")
+    job_id = _job(tmp_path, workspace, "unknown").job_id
 
     assert command(_request_args(workspace_name, job_id) + ["--operator", "missing"], _context(tmp_path)) == 2
     assert "configured identities: tester" in capsys.readouterr().err
-    assert not list((workspace.control / "requests" / "ready").iterdir())
+    assert not _requests(workspace)
 
 
 def test_request_without_any_identity_is_refused(tmp_path: Path, capsys) -> None:
-    # The autouse fixture configured an identity; forget it so the machine has none.
     identity_config_path().unlink()
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "no-identity")
-    workspace.submit(payload, "project/no-identity")
+    job_id = _job(tmp_path, workspace, "no-identity").job_id
 
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
     error = capsys.readouterr().err
-    assert "no operator identity is configured" in error
-    assert "run `httk init`" in error
-    assert not list((workspace.control / "requests" / "ready").iterdir())
+    assert "no operator identity is configured" in error and "run `httk init`" in error
+    assert not _requests(workspace)
 
 
 def test_literal_operator_label_is_passed_through(tmp_path: Path) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "literal")
-    workspace.submit(payload, "project/literal")
+    job_id = _job(tmp_path, workspace, "literal").job_id
 
-    assert (
-        command(_request_args(workspace_name, job_id) + ["--operator", "Ext Person <ext@x>"], _context(tmp_path)) == 0
-    )
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
-    assert request["operator"] == "Ext Person <ext@x>"
+    argv = _request_args(workspace_name, job_id) + ["--operator", "Ext Person <ext@x>"]
+    assert command(argv, _context(tmp_path)) == 0
+    assert _requests(workspace)[0]["operator"] == "Ext Person <ext@x>"
 
 
 def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data"))
-    monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
-    monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "literal-empty")
-    workspace.submit(payload, "project/literal-empty")
+    job_id = _job(tmp_path, workspace, "literal-empty").job_id
 
     assert command(_request_args(workspace_name, job_id) + ["--operator", "Ext <e@x>"], _context(tmp_path)) == 0
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    (request,) = _requests(workspace)
     assert request["operator"] == "Ext <e@x>"
     assert "operator_key" not in request and "signature" not in request
 
 
-def test_named_operator_identity_is_used_as_the_default(tmp_path: Path) -> None:
-    identity_config_path().unlink()
-    write_identity_config(
-        {
-            "identities": {"legacy": {"name": "Legacy User", "email": "legacy@example.test"}},
-            "default_identity": "legacy",
-        }
-    )
-    ensure_identity_key("legacy")
-    workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "legacy")
-    workspace.submit(payload, "project/legacy")
-
-    assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
-    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
-    assert request["operator"] == "Legacy User <legacy@example.test>"
-    assert request["operator_key"] == identity_public_key(identity_key_paths("legacy")[0])
-
-
 def test_wait_returns_zero_when_manager_pauses_jobs(tmp_path: Path, capsys, monkeypatch) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    source = tmp_path / "source"
-    job_ids = []
-    for tag in ("first", "second"):
-        payload, job_id = _payload(source, tag)
-        workspace.submit(payload, f"project/{tag}")
-        job_ids.append(job_id)
+    job_ids = [_job(tmp_path, workspace, tag).job_id for tag in ("first", "second")]
 
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         monkeypatch.setattr(job_cli.time, "sleep", lambda _: manager.tick())
         assert command(_request_args(workspace_name, *job_ids) + ["--wait"], _context(tmp_path)) == 0
 
-    assert "paused" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert output.count(": paused") == 2
 
 
-@pytest.mark.timing
 def test_wait_reports_terminal_state_and_exits_one(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "finished")
-    workspace.submit(payload, "project/finished")
+    job_id = _job(tmp_path, workspace, "finished").job_id
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            manager.tick()
-            marker = workspace.find_marker_by_id(job_id)
-            if marker is not None and marker.kind == "succeeded":
-                break
-            time.sleep(0.02)
-        else:
-            raise AssertionError("job did not succeed")
+        manager.run_until_idle(timeout=60)
+        assert v3.find(workspace, job_id).state == "succeeded"
         assert command(_request_args(workspace_name, job_id) + ["--wait"], _context(tmp_path)) == 1
 
-    assert "succeeded" in capsys.readouterr().out
+    assert "succeeded (pause superseded)" in capsys.readouterr().out
 
 
 def test_wait_without_live_manager_fails_after_publishing(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "unserved")
-    workspace.submit(payload, "project/unserved")
+    job_id = _job(tmp_path, workspace, "unserved").job_id
 
     assert command(_request_args(workspace_name, job_id) + ["--wait"], _context(tmp_path)) == 1
     captured = capsys.readouterr()
-    assert "no live manager currently serves" in captured.err
+    assert "no live manager currently serves claim pool 'default'" in captured.err
     assert "waiting is pointless until a manager starts" in captured.err
-    assert len(list((workspace.control / "requests" / "ready").iterdir())) == 1
+    assert len(_requests(workspace)) == 1
 
 
 def test_wait_timeout_names_pending_job_and_keeps_request(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "pending")
-    workspace.submit(payload, "project/pending")
+    job_id = _job(tmp_path, workspace, "pending").job_id
 
     with TaskManager(workspace, heartbeat_interval=0.01):
-        assert command(_request_args(workspace_name, job_id) + ["--wait", "--timeout", "0.01"], _context(tmp_path)) == 1
+        argv = _request_args(workspace_name, job_id) + ["--wait", "--timeout", "0.01"]
+        assert command(argv, _context(tmp_path)) == 1
 
     captured = capsys.readouterr()
     assert "timeout" in captured.out and job_id in captured.out
-    assert list((workspace.control / "requests" / "ready").iterdir())
+    assert _requests(workspace)
 
 
 def test_wait_is_rejected_for_non_pause_action(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "cancel")
-    workspace.submit(payload, "project/cancel")
+    job_id = _job(tmp_path, workspace, "cancel").job_id
 
     assert command(_request_args(workspace_name, job_id, action="cancel") + ["--wait"], _context(tmp_path)) == 2
     assert "--wait is only valid with the pause action" in capsys.readouterr().err
-
-
-def _committing_job(tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch, tag: str) -> str:
-    """Return a job left in committing: its manager holds the commit as it would for a live launch."""
-
-    payload, job_id = _payload(tmp_path / "source", tag)
-    workspace.submit(payload, f"project/{tag}")
-    with monkeypatch.context() as held:
-        held.setattr(_manager_launches, "holds_commit", lambda manager, marker: True)
-        with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-            deadline = time.monotonic() + 30
-            while (marker := workspace.find_marker_by_id(job_id)) is None or marker.kind != "committing":
-                assert time.monotonic() < deadline, "the job reaches committing"
-                manager.tick()
-                time.sleep(0.01)
-            manager._running.clear()
-    return job_id
-
-
-def test_confirm_launches_ended_publishes_a_signed_launches_ended_request(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    workspace, workspace_name = _new_workspace(tmp_path)
-    job_id = _committing_job(tmp_path, workspace, monkeypatch, "committing")
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-
-    assert command(["job", "confirm-launches-ended", "--workspace", workspace_name, job_id], _context(tmp_path)) == 0
-    capsys.readouterr()
-    (path,) = (workspace.control / "requests" / "ready").iterdir()
-    request = json.loads(path.read_text(encoding="utf-8"))
-    assert request["action"] == "launches_ended" and request["job_id"] == job_id
-    assert request["expected_generation"] == marker.generation and request["expected_record_ref"] == marker.record_ref
-    assert request["operator"] == "Test User <tester@example.test>" and "signature" in request
-    assert "every launch" in request["reason"]
-    # The remote publisher accepts it, and the generic request verb names it too.
-    job_cli._validate_request_document(request, index=0, allow_signature=True)
-    assert "launches_ended" in job_cli._REQUEST_ACTIONS
-
-
-def test_confirm_launches_ended_refuses_a_job_that_is_not_committing(tmp_path: Path, capsys) -> None:
-    workspace, workspace_name = _new_workspace(tmp_path)
-    payload, job_id = _payload(tmp_path / "source", "submitted")
-    workspace.submit(payload, "project/submitted")
-
-    assert command(["job", "confirm-launches-ended", "--workspace", workspace_name, job_id], _context(tmp_path)) == 2
-    assert "not running or committing" in capsys.readouterr().err
-    assert (
-        command(
-            [
-                "job",
-                "request-envelopes",
-                "launches_ended",
-                "--workspace",
-                workspace_name,
-                "--operator=Test User <tester@example.test>",
-                "--reason=protocol",
-                "--json",
-                job_id,
-            ],
-            _context(tmp_path),
-        )
-        == 2
-    )
-    assert "not running or committing" in capsys.readouterr().err
-    assert not list((workspace.control / "requests" / "ready").iterdir())
-
-
-def test_confirm_launches_ended_help_states_the_operators_responsibility(capsys) -> None:
-    assert command(["job", "confirm-launches-ended", "--help"], CLIContext("httk", Path.cwd())) == 0
-    text = " ".join(capsys.readouterr().out.split())
-    assert "You take responsibility" in text and "keeps writing the job directory" in text
-
-
-def test_confirm_launches_ended_checks_every_job_before_publishing_any(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    workspace, workspace_name = _new_workspace(tmp_path)
-    committing = _committing_job(tmp_path, workspace, monkeypatch, "committing")
-    payload, submitted = _payload(tmp_path / "source", "submitted")
-    workspace.submit(payload, "project/submitted")
-
-    arguments = ["job", "confirm-launches-ended", "--workspace", workspace_name, committing, submitted]
-    assert command(arguments, _context(tmp_path)) == 2
-    assert "not running or committing" in capsys.readouterr().err
-    assert not list((workspace.control / "requests" / "ready").iterdir())

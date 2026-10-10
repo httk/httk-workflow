@@ -1,7 +1,4 @@
-"""The monitor's remote page relay (legacy until the CLI port, C5b; split out of ``test_monitor.py``).
-
-The far side runs the legacy ``job list`` handler, whose ``--kind`` choices do not include ``owned``.
-"""
+"""The monitor's remote page relay through the far side's ``job list`` (split out of ``test_monitor.py``)."""
 
 from pathlib import Path
 

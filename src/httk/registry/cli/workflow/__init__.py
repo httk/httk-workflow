@@ -9,12 +9,6 @@ register_cli_command(
 )
 
 register_cli_command(
-    "runner",
-    "httk.workflow.workflow_cli:runner_command",
-    "publish and inspect workspace runners",
-)
-
-register_cli_command(
     "manager",
     "httk.workflow.workflow_cli:manager_command",
     "run workflow managers",

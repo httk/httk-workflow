@@ -33,6 +33,7 @@ from ..errors import WorkflowError
 from ..packages import MANIFEST_NAME
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, resolve_workspace
 from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
+from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -443,6 +444,14 @@ def _local_root(arguments: argparse.Namespace, context: CLIContext, *, action: s
             f"`httk job transfer` and `httk workspace status {binding.name}`"
         )
     return root
+
+
+def _modifiable(arguments: argparse.Namespace, context: CLIContext, *, action: str) -> Workspace:
+    """Return the local workspace a modifying command changes, refusing it while it or its project is sealed."""
+
+    workspace = Workspace(_local_root(arguments, context, action=action), durable=_durable(arguments))
+    require_cli_modifiable(workspace)
+    return workspace
 
 
 def _run_remote_workspace(

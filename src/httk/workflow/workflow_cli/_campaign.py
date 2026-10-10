@@ -108,22 +108,16 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
     """Assign one root job to a partition and submit it into that workspace."""
 
     workflow = arguments.workflow
-    from ..scaffold import resolve_workflow
-
-    try:
-        resolved = resolve_workflow(workflow)
-    except ValueError as exc:
-        if workflow.startswith("git+"):
-            raise  # a git URI's fetch or manifest error is the diagnostic
+    path = Path(workflow).expanduser()
+    if path.is_file() or ("/" in workflow and not workflow.startswith("git+") and not path.is_dir()):
         raise ValueError(
-            "campaign submit accepts registered or packaged workflow names only; "
-            "use job new --from-runner FILE, --workflow-dir DIR, or --from-command TEMPLATE"
-        ) from exc
-    if resolved.registration_id is None:
-        raise ValueError(
-            "campaign submit accepts registered or packaged workflow names only; "
-            "use job new --from-runner FILE, --workflow-dir DIR, or --from-command TEMPLATE"
+            "campaign submit accepts workflow names only (or a git URI or package directory); "
+            "use job new --from-runner FILE or --from-command TEMPLATE for a runner"
         )
+    if workflow.startswith("git+"):
+        from ..git_workflows import fetch_workflow
+
+        fetch_workflow(workflow)  # an explicit URI is consent to fetch; its git error is the diagnostic
     parameters = {
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
@@ -138,6 +132,7 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
         "placement": DEFAULT_PLACEMENT if arguments.placement is None else arguments.placement,
         "priority": arguments.priority,
         "name": arguments.name,
+        "install": arguments.install,
     }
     if items:
         for item in items:
@@ -376,8 +371,13 @@ def build_campaign_parser(
         "--workflow",
         metavar="WORKFLOW",
         required=True,
-        help="the registered workflow id or alias, or a git+https://HOST/PATH[@REF][#SUBDIR] URI, to scaffold "
-        "(no paths; use job new for files or commands)",
+        help="the workflow installed in the partition's workspace (id or short name), or with --install a "
+        "package directory, git+https://HOST/PATH[@REF][#SUBDIR] URI or workflow name known here",
+    )
+    submit.add_argument(
+        "--install",
+        action="store_true",
+        help="install the workflow into the partition's workspace first when it is not installed",
     )
     submit.add_argument(
         "--key",

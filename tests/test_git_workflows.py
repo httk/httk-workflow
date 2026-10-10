@@ -326,15 +326,21 @@ def test_cli_list_and_describe_report_fetched_workflows(tmp_path: Path, capsys: 
     assert f"installed {uri}" in capsys.readouterr().out
 
 
-@pytest.mark.skip(reason="C5b: the job new CLI is rewritten on installed workflows")
 def test_cli_job_new_accepts_a_git_uri(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
     context = CLIContext("httk", tmp_path)
     Workspace.initialize(tmp_path / "workspace")
     workspace = register_ws(context, tmp_path / "workspace", "git")
-    assert command(["job", "new", "--workspace", workspace, "--workflow", f"git+file://{root}#relax"], context) == 0
-    documents = [json.loads(path.read_text(encoding="utf-8")) for path in (tmp_path / "workspace").glob("**/job.json")]
-    assert [document["workflow"] for document in documents] == [f"git+file://{root}@{commit}#relax"]
+    uri = f"git+file://{root}#relax"
+    assert command(["job", "new", "--workspace", workspace, "--workflow", uri], context) == 2
+    assert "httk workflow install" in capsys.readouterr().err
+    assert command(["job", "new", "--workspace", workspace, "--install", "--workflow", uri], context) == 0
+    documents = [
+        json.loads(path.read_text(encoding="utf-8")) for path in (tmp_path / "workspace").glob("jobs/**/job.json")
+    ]
+    assert [document["workflow"] for document in documents] == [
+        {"id": f"git+file://{root}@{commit}#relax", "name": "tests.git.relax"}
+    ]
 
 
 def test_uri_parse_keeps_the_manifest_name_as_short_name_and_an_explicit_declaration_uri(tmp_path: Path) -> None:

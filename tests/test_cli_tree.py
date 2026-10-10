@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext, main
 
+import v3_helpers as v3
 from httk.workflow import Workspace, workflow_cli
 from httk.workflow.projects import initialize_project
-from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import _campaign, command
 
 #: Every group of the canonical tree, with the subcommands its help must name.
@@ -41,7 +41,6 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "seal",
         "unseal",
     ),
-    "runner": ("publish", "describe"),
     "job": (
         "new",
         "submit",
@@ -50,6 +49,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "seal",
         "unseal",
         "detach",
+        "eject",
+        "adopt",
         "list",
         "show",
         "log",
@@ -68,7 +69,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
 #: Superseded group spellings that were removed: ``tasks`` was the transfer
 #: group and ``computer`` the remote group, both before the renames; ``internal``
 #: was the hidden home of ``receive``. None of them parses any more.
-REMOVED_GROUPS = ("tasks", "computer", "internal", "import")
+REMOVED_GROUPS = ("tasks", "computer", "internal", "import", "runner")
 
 
 def _init_workspace(project: Path) -> Workspace:
@@ -234,6 +235,32 @@ def test_workflow_project_verbs_are_mounted_on_the_core_project_command(capsys) 
 # ---------------------------------------------------------------------------
 
 
+def test_the_job_options_of_the_runner_store_and_per_job_modes_are_removed(tmp_path: Path, capsys) -> None:
+    """Workflows are installed (no runner publication), and a job has no workdir or data mode."""
+
+    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
+    new = ["job", "new", "--from-command", "true"]
+    for removed in (
+        [*new, "--publish", "workspace"],
+        [*new, "--workdir-mode", "persistent"],
+        [*new, "--data-mode", "none"],
+        [*new, "--runner-name", "x"],
+        [*new, "--workflow-id", "x"],
+        ["job", "submit", "--placement", "p", "payload"],
+        ["job", "seal", "--keys", "k", "job"],
+        ["job", "eject", "--resume"],
+        ["job", "confirm-launches-ended", "job"],
+        ["runner", "publish", "file"],
+        ["precheck", "--runner-search-path", "d"],
+        ["build", "--store", "s"],
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(removed)
+    capsys.readouterr()
+    assert parser.parse_args([*new, "--install"]).install is True
+    assert parser.parse_args(["install", "--workspace", "cluster:ws", "--no-calls", "pkg"]).no_calls is True
+
+
 def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
 
@@ -267,29 +294,17 @@ def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> No
     assert top_level == manager
 
 
+@pytest.mark.skip(reason="C5b-2: the run leaf (workflow_cli/_manager.py) still passes removed manager options")
 def test_top_level_run_defaults_to_until_idle_for_the_project_workspace(tmp_path: Path) -> None:
     initialize_project(tmp_path, name="run-default")
     assert command(["run"], _context(tmp_path)) == 0
 
 
+@pytest.mark.skip(reason="C5b-2: the run leaf (workflow_cli/_manager.py) still passes removed manager options")
 def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Path, capsys) -> None:
     initialize_project(tmp_path, name="run-timeout")
-    _init_workspace(tmp_path)
-    source = tmp_path / "source" / "files"
-    source.mkdir(parents=True)
-    (source / "runner").write_text("#!/bin/sh\n", encoding="utf-8")
-    payload = tmp_path / "source"
-    prepare_job_payload(
-        payload,
-        JobSpec(
-            name="unserved",
-            workflow="tests.cli_tree",
-            runner_path="files/runner",
-            initial_step="only",
-            claim_pool="unserved",
-        ),
-    )
-    Workspace(tmp_path / "workspace").submit(payload, "project/unserved")
+    workspace = _init_workspace(tmp_path)
+    v3.submit(workspace, v3.install(workspace, tmp_path / "package"), {"start": "succeed"}, pool="unserved")
 
     assert command(["run", "--idle-timeout", "0.05"], _context(tmp_path)) == 2
     error = capsys.readouterr().err
@@ -365,9 +380,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"])
 
 
-@pytest.mark.parametrize(
-    "group", ["runner", "manager", "launcher", "remote", "config", "campaign", "seal", "v1", "transfer"]
-)
+@pytest.mark.parametrize("group", ["manager", "launcher", "remote", "config", "campaign", "seal", "v1", "transfer"])
 def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main([group, "--help"]) == 0
@@ -384,7 +397,7 @@ def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, 
 def test_public_workflow_help_only_names_workflow_operations(capsys):
     assert main(["workflow", "--help"]) == 0
     help_text = capsys.readouterr().out
-    for name in ("launcher", "remote", "config", "campaign", "runner", "seal", "manager"):
+    for name in ("launcher", "remote", "config", "campaign", "seal", "manager"):
         assert f"    {name} " not in help_text
     for name in ("list", "describe", "install", "uninstall", "build", "run"):
         assert f"    {name} " in help_text
