@@ -621,7 +621,6 @@ STRUCTURE_REFUSALS: dict[str, Callable[[Path, list[dict[str, object]]], object]]
     "jobs a symlink": _move_aside(lambda bundle: bundle / "jobs"),
     "job.json a symlink": _move_aside(lambda bundle: _member(bundle, 0) / "job.json"),
     "job.json a FIFO": _fifo_job,
-    "hard-linked payload file": _hard_link,
     "job.json not JSON": _job_bytes(1, b"{job"),
     "job.json deeply nested": _job_bytes(1, b"[" * 100_000 + b"]" * 100_000),
     "job.json huge integer": _job_bytes(1, b'{"priority": ' + b"9" * 5000 + b"}"),
@@ -751,9 +750,41 @@ def test_walk_limits_are_enforced(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="entries"):
         validate_bundle(bundle, untrusted=True, limits=WalkLimits(entries=entries - 1))
     depth = max(len(path.relative_to(bundle).parts) for path in bundle.rglob("*"))
-    assert validate_bundle(bundle, untrusted=False, limits=WalkLimits(depth=depth)) == manifest
+    assert validate_bundle(bundle, untrusted=True, limits=WalkLimits(depth=depth)) == manifest
     with pytest.raises(BundleError, match="deeper"):
-        validate_bundle(bundle, untrusted=False, limits=WalkLimits(depth=depth - 1))
+        validate_bundle(bundle, untrusted=True, limits=WalkLimits(depth=depth - 1))
+
+
+def test_trusted_payloads_are_job_content(tmp_path: Path) -> None:
+    # A trusted bundle carries complete jobs: hard links, special files, many and deep entries in a payload are
+    # the job's business; only the structural positions are checked.
+    bundle = tmp_path / "b"
+    manifest, jobs = write_bundle(bundle)
+    _hard_link(bundle, jobs)
+    with pytest.raises(BundleError, match="hard-linked"):
+        validate_bundle(bundle, untrusted=True)
+    os.mkfifo(_member(bundle, 0) / "pipe")
+    deep = _member(bundle, 2).joinpath(*["d"] * 8)
+    deep.mkdir(parents=True)
+    tiny = WalkLimits(entries=1, depth=1)
+    with no_hang():
+        assert validate_bundle(bundle, untrusted=False, limits=tiny) == manifest
+        with pytest.raises(BundleError, match="special"):
+            validate_bundle(bundle, untrusted=True)
+    (_member(bundle, 0) / "pipe").unlink()
+    (_member(bundle, 1) / "again.txt").unlink()
+    with pytest.raises(BundleError, match="entries"):
+        validate_bundle(bundle, untrusted=True, limits=tiny)
+
+
+@pytest.mark.parametrize("where", ["top", "jobs", "placement"])
+def test_trusted_structural_positions_refuse_special_files(tmp_path: Path, where: str) -> None:
+    bundle = tmp_path / "b"
+    write_bundle(bundle)
+    directory = {"top": bundle, "jobs": bundle / "jobs", "placement": bundle / "jobs" / "elsewhere"}[where]
+    os.mkfifo(directory / "pipe")
+    with no_hang(), pytest.raises(BundleError, match="not listed"):
+        validate_bundle(bundle, untrusted=False)
 
 
 # -- rekeying -------------------------------------------------------------------------------------------------------

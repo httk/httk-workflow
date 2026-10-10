@@ -1,0 +1,701 @@
+"""Tests of :mod:`httk.workflow._moving`: eject, adopt, holds and their crash reconcilers, on a real filesystem."""
+
+import json
+import uuid
+from collections.abc import Callable, Iterator
+from pathlib import Path, PurePosixPath
+
+import pytest
+
+from httk.workflow import TaskManager, Workspace, _fs, _kernel, _moving, _requests, removal
+from httk.workflow._bundles import BundleError, BundleManifest
+from httk.workflow._job import JobDefinition
+from httk.workflow._state import Release, StateDoc, read_state_unowned
+from httk.workflow.errors import WorkflowError
+from httk.workflow.models import make_job_key
+from test_bundles import family, write_bundle
+from v3_helpers import cli_owner, job_mapping, submit_mapping
+from v3_helpers import workspace as v3_workspace
+
+WORKFLOW = ("demo--0123456789abcdef", "demo")
+
+
+class Crash(BaseException):
+    """A simulated process death: no ``except Exception`` cleanup runs."""
+
+
+@pytest.fixture(autouse=True)
+def _no_faults() -> Iterator[None]:
+    yield
+    _fs.set_fault_injector(None)
+
+
+def parent_link(parent: dict[str, object], workspace_id: str) -> dict[str, object]:
+    return {
+        "workspace_id": workspace_id,
+        "job_id": parent["id"],
+        "job_key": make_job_key(str(parent["id"]), parent["tag"]),  # type: ignore[arg-type]
+        "placement": parent["placement"],
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
+
+
+def place(
+    ws: Workspace, mapping: dict[str, object], state: str, priority: int = 500, children: tuple[dict, ...] = ()
+) -> _kernel.JobRef:
+    """Submit a job with a payload file and move it to *state* and *priority*, recording *children*."""
+
+    ref = submit_mapping(ws, mapping, members={"input.txt": f"payload of {mapping['id']}"})
+    with cli_owner(ws) as owner:
+        owned = _kernel.claim(ws, owner, ref)
+        assert owned is not None
+        doc = StateDoc.empty(owned.job_id).next_activation("start", "initial")
+        entries = [
+            {
+                "job_id": child["id"],
+                "job_key": make_job_key(str(child["id"]), child["tag"]),
+                "placement": child["placement"],
+            }
+            for child in children
+        ]
+        return owned.release(doc.with_children(entries), Release(state, priority))
+
+
+def tree(ws: Workspace) -> list[tuple[dict[str, object], str, int]]:
+    """A root (paused) with two children and one grandchild, placed in *ws*; returned top-down."""
+
+    root = job_mapping(WORKFLOW, {"start": "succeed"}, tag="root", placement="proj/r")
+    first = job_mapping(WORKFLOW, {"start": "succeed"}, tag="a", placement="proj/r/a")
+    second = job_mapping(WORKFLOW, {"start": "succeed"}, tag="b", placement="proj/r/b")
+    grand = job_mapping(WORKFLOW, {"start": "succeed"}, tag="g", placement="deep/g")
+    for child, parent in ((first, root), (second, root), (grand, first)):
+        child["parent"] = parent_link(parent, ws.workspace_id)
+    plan = [(root, "paused", 410), (first, "succeeded", 420), (second, "failed", 430), (grand, "cancelled", 440)]
+    kids = {root["id"]: (first, second), first["id"]: (grand,)}
+    for mapping, state, priority in reversed(plan):
+        place(ws, mapping, state, priority, kids.get(mapping["id"], ()))
+    return plan
+
+
+def single(ws: Workspace, state: str = "succeeded", priority: int = 500) -> tuple[dict[str, object], str, int]:
+    mapping = job_mapping(WORKFLOW, {"start": "succeed"}, tag="solo", placement="proj/solo")
+    place(ws, mapping, state, priority)
+    return mapping, state, priority
+
+
+def find(ws: Workspace, job_id: object) -> _kernel.JobRef | None:
+    return _kernel.locate(ws, str(job_id), placement_hint=None, exhaustive=True)
+
+
+def claim_root(ws: Workspace, owner: _kernel.Owner, job_id: object) -> _kernel.OwnedJob:
+    ref = find(ws, job_id)
+    assert ref is not None
+    owned = _kernel.claim(ws, owner, ref)
+    assert owned is not None
+    return owned
+
+
+def assert_in(ws: Workspace, plan: list[tuple[dict[str, object], str, int]], *, rekeyed: bool = False) -> None:
+    for mapping, state, priority in plan:
+        ref = find(ws, mapping["id"])
+        assert ref is not None, mapping["tag"]
+        assert (ref.state, ref.priority) == (state, priority)
+        assert (ref.path / "input.txt").read_text() == f"payload of {mapping['id']}"
+
+
+def job_ids_below(root: Path) -> list[str]:
+    found = []
+    for path in root.rglob("job.json"):
+        found.append(json.loads(path.read_bytes())["id"])
+    return found
+
+
+def test_eject_and_adopt_a_single_job_keeps_state_priority_and_payload(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    mapping, state, _ = single(source, "succeeded", 500)
+    # A set_priority request changes only the directory name, never job.json.
+    ref = find(source, mapping["id"])
+    assert ref is not None and ref.placement is not None
+    _requests.post(
+        source, action="set_priority", job_id=ref.job_id, placement=ref.placement, operator="t", reason="t", priority=77
+    )
+    with cli_owner(source) as owner:
+        assert removal.serve(source, owner, ref)
+    assert find(source, mapping["id"]).priority == 77  # type: ignore[union-attr]
+    with cli_owner(source) as owner:
+        report = _moving.eject(
+            source, owner, claim_root(source, owner, mapping["id"]), destination=tmp_path / "out", tree=False
+        )
+    assert report.destination == tmp_path / "out" / ref.job_key and report.members == (ref.job_key,)
+    assert find(source, mapping["id"]) is None
+    assert not list((source.control / "tmp").iterdir())
+    with cli_owner(target) as owner:
+        adopted = _moving.adopt(target, owner, report.destination, untrusted=False)
+    assert adopted is not None and not adopted.already_adopted
+    assert adopted.missing_workflows == (WORKFLOW[0],)
+    assert_in(target, [(mapping, state, 77)])
+    assert not report.destination.exists() and not list((target.control / "tmp").iterdir())
+
+
+def test_eject_and_adopt_a_tree(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    with cli_owner(source) as owner:
+        report = _moving.eject(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), destination=tmp_path / "out", tree=True
+        )
+    assert len(report.members) == 4
+    assert all(find(source, mapping["id"]) is None for mapping, _, _ in plan)
+    manifest = BundleManifest.from_json((report.destination / "bundle.json").read_bytes())
+    assert manifest.members[0].state == "paused"
+    with cli_owner(target) as owner:
+        adopted = _moving.adopt(target, owner, report.destination, untrusted=False)
+    assert adopted is not None and len(adopted.published) == 4
+    assert_in(target, plan)
+
+
+def test_detached_and_foreign_children_stay(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    root = job_mapping(WORKFLOW, {"start": "succeed"}, tag="root", placement="p")
+    detached = job_mapping(WORKFLOW, {"start": "succeed"}, tag="d", placement="p/d")
+    foreign = job_mapping(WORKFLOW, {"start": "succeed"}, tag="f", placement="p/f")
+    detached["parent"] = parent_link(root, ws.workspace_id)
+    place(ws, detached, "succeeded")
+    place(ws, foreign, "succeeded")  # recorded by the root, but its job.json names no parent
+    with cli_owner(ws) as owner:
+        owned = claim_root(ws, owner, detached["id"])
+        doc = owned.read_state()
+        assert doc is not None
+        owned.release(doc.updated(detached={"at": "now", "operator": "t"}), Release("succeeded", 500))
+    place(ws, root, "succeeded", children=(detached, foreign))
+    with cli_owner(ws) as owner:
+        report = _moving.eject(ws, owner, claim_root(ws, owner, root["id"]), destination=tmp_path / "out", tree=True)
+    assert len(report.members) == 1
+    assert find(ws, detached["id"]) is not None and find(ws, foreign["id"]) is not None
+
+
+def test_occupied_destination_rolls_back(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    plan = tree(ws)
+    root_key = make_job_key(str(plan[0][0]["id"]), "root")
+    (tmp_path / "out" / root_key).mkdir(parents=True)
+    (tmp_path / "out" / root_key / "something").write_text("taken")
+    with cli_owner(ws) as owner:
+        root = claim_root(ws, owner, plan[0][0]["id"])
+        with pytest.raises(WorkflowError, match="occupied"):
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
+        assert not owner.holds(root.ref)
+    assert_in(ws, plan)
+    assert not list((ws.control / "tmp").iterdir())
+
+
+def test_busy_member_moves_nothing(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    plan = tree(ws)
+    other = cli_owner(ws)
+    blocker = claim_root(ws, other, plan[2][0]["id"])
+    with cli_owner(ws) as owner:
+        root = claim_root(ws, owner, plan[0][0]["id"])
+        with pytest.raises(_moving.Busy) as caught:
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
+        assert caught.value.job_key == blocker.job_key
+        assert owner.holds(root.ref) and len(owner.owned()) == 1
+        root.give_back()
+    blocker.give_back()
+    other.close()
+    assert_in(ws, plan)
+    assert not (tmp_path / "out").exists()
+
+
+def test_busy_on_a_lost_member_claim_gives_back_the_claimed_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    plan = tree(ws)
+    claims = {"n": 0}
+    real = _kernel.claim
+
+    def lose_the_second(*args: object) -> _kernel.OwnedJob | None:
+        claims["n"] += 1
+        return None if claims["n"] == 3 else real(*args)  # type: ignore[arg-type]
+
+    with cli_owner(ws) as owner:
+        root = claim_root(ws, owner, plan[0][0]["id"])
+        monkeypatch.setattr(_kernel, "claim", lose_the_second)
+        with pytest.raises(_moving.Busy):
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
+        monkeypatch.setattr(_kernel, "claim", real)
+        assert [ref.job_id for ref in owner.owned()] == [root.job_id]
+        root.give_back()
+    assert_in(ws, plan)
+
+
+# -- crashes --------------------------------------------------------------------------------------------------------
+
+#: The crash points: before and after each rename (move_once, move_owned, deliver), before each write_file's replace.
+POINTS = {("rename", "before"), ("rename", "after"), ("write", "before_replace")}
+
+
+def count_points(run: Callable[[], object]) -> int:
+    seen = {"n": 0}
+
+    def count(op: str, phase: str, src: object, dst: object) -> None:
+        if (op, phase) in POINTS:
+            seen["n"] += 1
+
+    _fs.set_fault_injector(count)
+    try:
+        run()
+    finally:
+        _fs.set_fault_injector(None)
+    return seen["n"]
+
+
+def crash_at(k: int) -> _fs.Fault:
+    seen = {"n": 0}
+
+    def fault(op: str, phase: str, src: object, dst: object) -> None:
+        if (op, phase) in POINTS:
+            seen["n"] += 1
+            if seen["n"] == k:
+                raise Crash(f"{op} {phase} #{k}")
+
+    return fault
+
+
+def die_and_recover(ws: Workspace, dead: _kernel.Owner) -> None:
+    _fs.set_fault_injector(None)
+    _kernel.attest_dead(ws, dead.owner_id, by="operator", evidence=[], reason="test")
+    with cli_owner(ws) as rescuer:
+        _kernel.recover(ws, rescuer, dead.owner_id)
+
+
+def run_eject(ws: Workspace, owner: _kernel.Owner, root_id: object, destination: Path, tree_: bool) -> None:
+    _moving.eject(ws, owner, claim_root(ws, owner, root_id), destination=destination, tree=tree_)
+
+
+@pytest.mark.parametrize("tree_", [False, True], ids=["single", "tree"])
+def test_eject_crash_matrix(tmp_path: Path, tree_: bool) -> None:
+    probe = v3_workspace(tmp_path / "probe")
+    plan = tree(probe) if tree_ else [single(probe, "paused", 321)]
+    with cli_owner(probe) as owner:
+        total = count_points(lambda: run_eject(probe, owner, plan[0][0]["id"], tmp_path / "probe-out", tree_))
+    assert total >= 4
+    outcomes = set()
+    for k in range(1, total + 1):
+        ws = v3_workspace(tmp_path / f"w{k}")
+        plan = tree(ws) if tree_ else [single(ws, "paused", 321)]
+        out = tmp_path / f"out{k}"
+        owner = cli_owner(ws)
+        _fs.set_fault_injector(crash_at(k))
+        with pytest.raises(Crash):
+            run_eject(ws, owner, plan[0][0]["id"], out, tree_)
+        die_and_recover(ws, owner)
+        ids = [str(mapping["id"]) for mapping, _, _ in plan]
+        here = job_ids_below(ws.jobs)
+        there = job_ids_below(out) if out.exists() else []
+        # Exactly one place for every job, all of them together: delivered, or back where they were.
+        assert sorted(here + there) == sorted(ids), k
+        if here:
+            assert_in(ws, plan)
+            outcomes.add("back")
+        else:
+            assert len(list(out.iterdir())) == 1
+            outcomes.add("delivered")
+        assert not list((ws.control / "tmp").iterdir()), k
+    assert outcomes == {"back", "delivered"}
+
+
+def crash_at_extract(k: int, when: str) -> _fs.Fault:
+    seen = {"n": 0}
+
+    def fault(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        # Extraction is the move of a member into the eject scratch.
+        if op == "rename" and phase == when and dst is not None and ".eject." in str(dst.path):
+            seen["n"] += 1
+            if seen["n"] == k:
+                raise Crash(f"extract #{k} {when}")
+
+    return fault
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+def test_build_bundle_crash_after_k_of_n_extracts_rolls_back(tmp_path: Path, phase: str) -> None:
+    for k in range(1, 5):
+        ws = v3_workspace(tmp_path / f"{phase}{k}")
+        plan = tree(ws)
+        owner = cli_owner(ws)
+        root = claim_root(ws, owner, plan[0][0]["id"])
+        fault = crash_at_extract(k, phase)
+        _fs.set_fault_injector(fault)
+        with pytest.raises(Crash):
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
+        die_and_recover(ws, owner)
+        assert_in(ws, plan)
+        assert not (tmp_path / "out").exists()
+
+
+def test_adopt_crash_matrix(tmp_path: Path) -> None:
+    def setup(name: str) -> tuple[Workspace, list[tuple[dict[str, object], str, int]], Path]:
+        source, target = v3_workspace(tmp_path / f"{name}-a"), v3_workspace(tmp_path / f"{name}-b")
+        plan = tree(source)
+        with cli_owner(source) as owner:
+            report = _moving.eject(
+                source,
+                owner,
+                claim_root(source, owner, plan[0][0]["id"]),
+                destination=tmp_path / f"{name}-out",
+                tree=True,
+            )
+        return target, plan, report.destination
+
+    target, plan, bundle = setup("probe")
+    with cli_owner(target) as owner:
+        total = count_points(lambda: _moving.adopt(target, owner, bundle, untrusted=False))
+    assert total >= 5
+    for k in range(1, total + 1):
+        target, plan, bundle = setup(f"k{k}")
+        owner = cli_owner(target)
+        _fs.set_fault_injector(crash_at(k))
+        with pytest.raises(Crash):
+            _moving.adopt(target, owner, bundle, untrusted=False)
+        die_and_recover(target, owner)
+        ids = sorted(str(mapping["id"]) for mapping, _, _ in plan)
+        published = job_ids_below(target.jobs)
+        at_source = job_ids_below(bundle) if bundle.exists() else []
+        left = job_ids_below(target.control / "tmp")
+        assert sorted(published + at_source + left) == ids, k
+        if published:
+            assert sorted(published) == ids, k
+            assert_in(target, plan)
+        assert not left, k
+
+
+def test_untrusted_adopt_crash_matrix(tmp_path: Path) -> None:
+    def setup(name: str) -> tuple[Workspace, list[dict[str, object]], Path]:
+        bundle = tmp_path / f"{name}-inbox" / "entry"
+        return v3_workspace(tmp_path / f"{name}-ws"), client_bundle(bundle), bundle
+
+    ws, _, bundle = setup("probe")
+    with cli_owner(ws) as owner:
+        total = count_points(lambda: _moving.adopt(ws, owner, bundle, untrusted=True))
+    assert total >= 8
+    for k in range(1, total + 1):
+        ws, jobs, bundle = setup(f"k{k}")
+        owner = cli_owner(ws)
+        _fs.set_fault_injector(crash_at(k))
+        with pytest.raises(Crash):
+            _moving.adopt(ws, owner, bundle, untrusted=True)
+        die_and_recover(ws, owner)
+        published = job_ids_below(ws.jobs)
+        if published:
+            assert len(set(published)) == len(published) == 3 and not bundle.exists(), k
+            names = {json.loads(path.read_bytes())["exchange_name"] for path in ws.jobs.rglob("state.json")}
+            assert names == {str(job["id"]) for job in jobs}, k
+        else:
+            assert sorted(job_ids_below(bundle)) == sorted(str(job["id"]) for job in jobs), k
+        assert not job_ids_below(ws.control / "tmp"), k
+
+
+def test_adopt_rerun_after_a_crash_between_members_publishes_no_duplicates(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    with cli_owner(source) as owner:
+        report = _moving.eject(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), destination=tmp_path / "out", tree=True
+        )
+    owner = cli_owner(target)
+    submits = {"n": 0}
+
+    def fault(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "after" and dst is not None and str(dst.path).startswith(str(target.jobs)):
+            submits["n"] += 1
+            if submits["n"] == 2:
+                raise Crash("between members")
+
+    _fs.set_fault_injector(fault)
+    with pytest.raises(Crash):
+        _moving.adopt(target, owner, report.destination, untrusted=False)
+    assert len(job_ids_below(target.jobs)) == 2
+    die_and_recover(target, owner)
+    published = job_ids_below(target.jobs)
+    assert len(published) == len(set(published)) == 4
+    assert_in(target, plan)
+
+
+def test_already_adopted_and_partial_presence(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    with cli_owner(source) as owner:
+        report = _moving.eject(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), destination=tmp_path / "out", tree=True
+        )
+    copy = tmp_path / "copy" / report.destination.name
+    _fs.copy_tree(report.destination, copy, durable=False)
+    partial = tmp_path / "partial" / report.destination.name
+    _fs.copy_tree(report.destination, partial, durable=False)
+    with cli_owner(target) as owner:
+        assert _moving.adopt(target, owner, report.destination, untrusted=False) is not None
+        again = _moving.adopt(target, owner, copy, untrusted=False)
+        assert again is not None and again.already_adopted and again.published == ()
+        assert not copy.exists()
+        # Delete one member: the second copy is now partially present and refused, back to where it was.
+        ref = find(target, plan[3][0]["id"])
+        assert ref is not None
+        owned = _kernel.claim(target, owner, ref)
+        assert owned is not None
+        owned.discard()
+        with pytest.raises(BundleError, match="already in this workspace"):
+            _moving.adopt(target, owner, partial, untrusted=False)
+        assert (partial / "bundle.json").is_file()
+
+
+def test_a_subtree_whose_parent_is_here_is_refused(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    plan = tree(ws)
+    with cli_owner(ws) as owner:
+        report = _moving.eject(
+            ws, owner, claim_root(ws, owner, plan[1][0]["id"]), destination=tmp_path / "out", tree=True
+        )
+        assert len(report.members) == 2
+        with pytest.raises(BundleError, match="parent"):
+            _moving.adopt(ws, owner, report.destination, untrusted=False)
+    assert report.destination.is_dir()
+
+
+# -- untrusted adoption ---------------------------------------------------------------------------------------------
+
+
+def client_bundle(path: Path, jobs: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
+    return write_bundle(path, jobs)[1]
+
+
+def test_untrusted_adoption_rekeys_and_records_the_exchange_name(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs = client_bundle(tmp_path / "inbox" / "entry")
+    with cli_owner(ws) as owner:
+        report = _moving.adopt(
+            ws, owner, tmp_path / "inbox" / "entry", untrusted=True, refused_to=tmp_path / "rejected"
+        )
+    assert report is not None and len(report.published) == 3
+    client_ids = {str(job["id"]) for job in jobs}
+    names = set()
+    for ref in report.published:
+        assert ref.job_id not in client_ids and ref.state == "ready"
+        doc, damaged = read_state_unowned(ref.path / "state.json")
+        assert doc is not None and not damaged and doc.origin == "exchange"
+        names.add(doc.exchange_name)
+    assert names == client_ids
+    assert (ws.control / "exchange-jobs" / str(jobs[0]["id"]) / "index.json").is_file()
+    # A second delivery of the same client bundle is already adopted.
+    client_bundle(tmp_path / "inbox" / "again", jobs)
+    with cli_owner(ws) as owner:
+        again = _moving.adopt(ws, owner, tmp_path / "inbox" / "again", untrusted=True, refused_to=tmp_path / "rejected")
+    assert again is not None and again.already_adopted
+
+
+def test_untrusted_duplicate_exchange_name_is_refused_to_the_rejected_directory(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs = family(str(uuid.uuid4()))
+    with cli_owner(ws) as owner:
+        assert _kernel.claim_exchange_name(ws, owner, str(jobs[0]["id"]), str(uuid.uuid4()), PurePosixPath("x"))
+    client_bundle(tmp_path / "inbox" / "entry", jobs)
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="already in use"):
+        _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True, refused_to=tmp_path / "rejected")
+    (rejected,) = (tmp_path / "rejected").iterdir()
+    assert rejected.name.startswith("entry.") and (rejected / "bundle.json").is_file()
+    assert job_ids_below(ws.jobs) == [] and not list((ws.control / "tmp").iterdir())
+
+
+def test_untrusted_exchange_name_indexed_at_another_placement(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs = family(str(uuid.uuid4()))
+    client_bundle(tmp_path / "inbox" / "first", jobs)
+    with cli_owner(ws) as owner:
+        first = _moving.adopt(ws, owner, tmp_path / "inbox" / "first", untrusted=True)
+    assert first is not None
+    root_id = first.published[-1].job_id
+    # The client resubmits its root under another placement: the indexed job exists, so it is already adopted.
+    moved = [dict(jobs[0], placement="elsewhere/root")]
+    client_bundle(tmp_path / "inbox" / "second", moved)
+    with cli_owner(ws) as owner:
+        second = _moving.adopt(ws, owner, tmp_path / "inbox" / "second", untrusted=True)
+    assert second is not None and second.already_adopted
+    # An index entry at another placement whose job is gone is refused.
+    other = family(str(uuid.uuid4()))[:1]
+    rekeyed = str(uuid.uuid5(uuid.UUID("b480bb06-dc60-4d16-a78b-cc6b3af734b4"), f"{ws.workspace_id}/{other[0]['id']}"))
+    with cli_owner(ws) as owner:
+        assert _kernel.claim_exchange_name(ws, owner, str(other[0]["id"]), rekeyed, PurePosixPath("gone"))
+    client_bundle(tmp_path / "inbox" / "third", other)
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="another placement"):
+        _moving.adopt(ws, owner, tmp_path / "inbox" / "third", untrusted=True, refused_to=tmp_path / "rejected")
+    assert root_id
+
+
+def test_untrusted_bundle_with_state_json_is_refused(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    jobs = client_bundle(bundle)
+    manifest = BundleManifest.from_json((bundle / "bundle.json").read_bytes())
+    member_dir = manifest.member_dir(bundle, manifest.members[0])
+    (member_dir / "state.json").write_text("{}")
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="fresh"):
+        _moving.adopt(ws, owner, bundle, untrusted=True, refused_to=tmp_path / "rejected")
+    assert len(list((tmp_path / "rejected").iterdir())) == 1 and not bundle.exists()
+    assert jobs and job_ids_below(ws.jobs) == []
+
+
+def test_untrusted_rekey_crash_resumes(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    client_bundle(tmp_path / "inbox" / "entry")
+    owner = cli_owner(ws)
+    writes = {"n": 0}
+
+    def fault(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if (
+            op == "rename"
+            and phase == "after"
+            and dst is not None
+            and ".adopt-untrusted." in str(dst.path)
+            and "jobs" in str(dst.path)
+        ):
+            writes["n"] += 1
+            if writes["n"] == 2:
+                raise Crash("mid rekey")
+
+    _fs.set_fault_injector(fault)
+    with pytest.raises(Crash):
+        _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True)
+    die_and_recover(ws, owner)
+    published = job_ids_below(ws.jobs)
+    assert len(published) == 3
+    for path in ws.jobs.rglob("state.json"):
+        assert json.loads(path.read_bytes())["origin"] == "exchange"
+
+
+# -- across filesystems ---------------------------------------------------------------------------------------------
+
+
+def test_cross_filesystem_eject_and_adopt_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    copies: list[Path] = []
+    real_copy, real_deliver, real_move_once = _fs.copy_tree, _fs.deliver, _fs.move_once
+
+    def spy_copy(src: Path, dst: Path, *, durable: bool) -> None:
+        copies.append(dst)
+        real_copy(src, dst, durable=durable)
+
+    def once(real: Callable[..., object]) -> Callable[..., object]:
+        state = {"raised": False}
+
+        def wrapper(*args: object, **kwargs: object) -> object:
+            if not state["raised"]:
+                state["raised"] = True
+                raise _fs.CrossDevice("simulated")
+            return real(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(_fs, "copy_tree", spy_copy)
+    monkeypatch.setattr(_fs, "deliver", once(real_deliver))
+    with cli_owner(source) as owner:
+        report = _moving.eject(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), destination=tmp_path / "out", tree=True
+        )
+    assert copies == [tmp_path / "out" / f".{report.destination.name}.partial.{report.transfer_id}"]
+    assert (report.destination / "bundle.json").is_file() and not copies[0].exists()
+    assert not list((source.control / "tmp").iterdir())
+    monkeypatch.setattr(_fs, "move_once", once(real_move_once))
+    with cli_owner(target) as owner:
+        adopted = _moving.adopt(target, owner, report.destination, untrusted=False)
+    assert adopted is not None and len(adopted.published) == 4
+    assert len(copies) == 2 and copies[1].parent.name == ".partial"
+    # A copy leaves its source in place.
+    assert (report.destination / "bundle.json").is_file()
+    assert_in(target, plan)
+
+
+def test_incomplete_cross_filesystem_copy_is_discarded_by_the_reconciler(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    owner = cli_owner(ws)
+    scratch = owner.scratch("adopt")
+    (scratch / ".partial" / "bundle").mkdir(parents=True)
+    (scratch / "source.json").write_text('{"source": null, "refused_to": null, "copied": true}')
+    assert _kernel.reconcile_scratch(owner, scratch)
+    assert not scratch.exists()
+    owner.close()
+
+
+# -- holds and the eject request ------------------------------------------------------------------------------------
+
+
+def test_hold_held_release(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    with cli_owner(source) as owner:
+        path = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True)
+    (hold,) = _moving.held(source)
+    assert hold.path == path and path.parent == source.control / "transfers" / "outgoing"
+    assert hold.transfer_id == path.name == hold.manifest.transfer_id and len(hold.manifest.members) == 4
+    # The transfer: copy to the destination, adopt there, then release the hold.
+    landed = tmp_path / "landing" / hold.transfer_id
+    _fs.copy_tree(path, landed, durable=False)
+    with cli_owner(target) as owner:
+        assert _moving.adopt(target, owner, landed, untrusted=False) is not None
+    with cli_owner(source) as owner:
+        assert _moving.release_hold(source, owner, hold.transfer_id)
+        assert not _moving.release_hold(source, owner, hold.transfer_id)
+        with pytest.raises(ValueError):
+            _moving.release_hold(source, owner, "../x")
+    assert _moving.held(source) == []
+    assert_in(target, plan)
+
+
+def test_eject_request_applied_by_a_manager_tick(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    mapping, state, priority = single(ws, "paused", 600)
+    ref = find(ws, mapping["id"])
+    assert ref is not None and ref.placement is not None
+    _requests.post(
+        ws,
+        action="eject",
+        job_id=ref.job_id,
+        placement=ref.placement,
+        operator="t",
+        reason="t",
+        destination=str(tmp_path / "out"),
+    )
+    with TaskManager(ws, heartbeat_interval=0.01) as manager:
+        manager.tick()
+    assert find(ws, mapping["id"]) is None
+    bundle = tmp_path / "out" / ref.job_key
+    manifest = BundleManifest.from_json((bundle / "bundle.json").read_bytes())
+    assert (manifest.members[0].state, manifest.members[0].priority) == (state, priority)
+    member = manifest.member_dir(bundle, manifest.members[0])
+    doc, _ = read_state_unowned(member / "state.json")
+    assert doc is not None and any(entry.get("action") == "eject" for entry in doc.history_tail)
+    assert not list((ws.control / "requests").glob("*.json"))
+    assert JobDefinition.from_path(member / "job.json").id == mapping["id"]
+
+
+def test_eject_request_to_an_occupied_destination_returns_the_job(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    mapping, state, priority = single(ws, "failed", 500)
+    ref = find(ws, mapping["id"])
+    assert ref is not None and ref.placement is not None
+    (tmp_path / "out" / ref.job_key / "x").mkdir(parents=True)
+    _requests.post(
+        ws,
+        action="eject",
+        job_id=ref.job_id,
+        placement=ref.placement,
+        operator="t",
+        reason="t",
+        destination=str(tmp_path / "out"),
+    )
+    with cli_owner(ws) as owner:
+        assert removal.serve(ws, owner, ref)
+    assert_in(ws, [(mapping, state, priority)])
+    assert not list((ws.control / "requests").glob("*.json"))

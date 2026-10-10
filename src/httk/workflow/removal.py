@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
-from . import _fs, _joins, _kernel, _requests
+from . import _fs, _joins, _kernel, _moving, _requests
 from ._job import JobDefinition
 from ._kernel import JobRef, ListingCache, OwnedJob, Release
 from ._state import TERMINAL_STATES, StateDoc, read_state_unowned
@@ -185,6 +185,31 @@ def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDo
     return doc.updated(seal={"sha256": sha256, "signed": signed})
 
 
+def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, destination: str) -> None:
+    """Eject the owned job for an ``eject`` request (the ``Eject`` effect); a refusal leaves it where it was."""
+
+    workspace = cast("Workspace", owned.owner.workspace)
+    # The applied id and its history entry travel with the bundle, so a returning job never re-applies it.
+    # ponytail: at most once; a crash before delivery returns the job with the request applied, and the
+    # operator posts it again.
+    owned.write_state(doc)
+    _fs.remove_file(_fs.loc(request.path), durable=workspace.durable)
+    try:
+        report = _moving.eject(workspace, owned.owner, owned, destination=Path(destination), tree=False)
+    except (WorkflowError, ValueError) as exc:
+        if owned.owner.holds(owned.ref):
+            owned.give_back()
+        _LOGGER.warning("eject request %s for %s refused: %s", request.request_id, owned.job_key, exc)
+        return
+    _LOGGER.info(
+        "ejected %s to %s (request %s)",
+        owned.job_key,
+        report.destination,
+        request.request_id,
+        extra={"event": "ejected", "job_key": owned.job_key, "job_id": owned.job_id},
+    )
+
+
 def apply_requests(
     owned: OwnedJob,
     job: JobDefinition,
@@ -228,9 +253,13 @@ def apply_requests(
             request,
             refusal=lambda candidate: refusal(workspace, job, candidate, cache),
         )
-        if isinstance(effect, (_requests.Defer, _requests.Eject)):
-            if isinstance(effect, _requests.Eject):
-                _LOGGER.info("eject request %s waits: ejection returns in phase D", request.request_id)
+        if isinstance(effect, _requests.Eject) and (from_state, from_priority) != (
+            owned.from_state,
+            owned.from_priority,
+        ):
+            # At a commit the job is not yet where it is released to; the requests pass ejects it from there.
+            continue
+        if isinstance(effect, _requests.Defer):
             if deferred is not None:
                 deferred.add(request.request_id)
             continue
@@ -247,6 +276,8 @@ def apply_requests(
             release(owned, new, Release(from_state, from_priority, (request.request_id,)))
         elif isinstance(effect, _requests.Seal):
             release(owned, _seal(owned, new, request), effect.release)
+        elif isinstance(effect, _requests.Eject):
+            _eject(owned, new, request, effect.destination)
         elif isinstance(effect, _requests.Unseal):
             try:
                 owned.discard_subtree(".httk-job/seal.json")

@@ -30,9 +30,12 @@ the client's UUID as ``exchange_name`` (from :func:`exchange_names`) when it
 publishes.
 """
 
+import contextlib
 import dataclasses
 import json
+import os
 import re
+import stat
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -76,7 +79,7 @@ _DESTINATION_MEMBERS = frozenset({"workspace_id", "locator"})
 _MEMBER_MEMBERS = frozenset({"job_id", "job_key", "placement", "state", "priority", "parent_job_id"})
 _REKEY_MEMBERS = frozenset({"format", "format_version", "manifest", "exchange_names"})
 # Entries that only an owner writes: a fresh job from an untrusted client carries none of them.
-_NOT_FRESH = frozenset({"state.json", "logs", "attempts", ".httk-job"})
+_NOT_FRESH = frozenset({"state.json", "seal.json", "logs", "attempts", ".httk-job"})
 _MANIFEST_NAME = PurePosixPath("bundle.json")
 _JOBS = PurePosixPath("jobs")
 
@@ -527,37 +530,89 @@ def _check_structure(manifest: BundleManifest, kinds: Mapping[PurePosixPath, str
         raise BundleError(f"{missing[0]} is listed in bundle.json but missing")
 
 
+def _kind(mode: int) -> str:
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    return "file" if stat.S_ISREG(mode) else "special"
+
+
+def _structural_kinds(path: Path, manifest: BundleManifest) -> dict[PurePosixPath, str]:
+    # Trusted bundles: the payloads are job content, so only the structural positions are listed: the bundle root,
+    # jobs/ and the placement directories (never descending into anything else), and each member's job.json.
+    members = {_JOBS / member.placement / member.job_key for member in manifest.members}
+    directories = {_JOBS} | {parent for member in members for parent in member.parents if parent != PurePosixPath(".")}
+    kinds: dict[PurePosixPath, str] = {}
+    pending = [PurePosixPath()]
+    while pending:
+        relative = pending.pop()
+        with os.scandir(path / relative) as listing:
+            for item in listing:
+                child = relative / item.name
+                kinds[child] = _kind(item.stat(follow_symlinks=False).st_mode)
+                if kinds[child] != "dir":
+                    continue
+                if child in directories:
+                    pending.append(child)
+                elif child in members:
+                    with contextlib.suppress(FileNotFoundError):
+                        kinds[child / "job.json"] = _kind(os.lstat(path / child / "job.json").st_mode)
+    return kinds
+
+
+def _read_manifest(path: Path, kind: str | None) -> BundleManifest:
+    if kind != "file":
+        raise BundleError(f"{path}/bundle.json is {'missing' if kind is None else f'a {kind}'}, not a regular file")
+    return BundleManifest.from_json(_read(path / _MANIFEST_NAME, MAX_MANIFEST_BYTES))
+
+
 def validate_bundle(path: Path, *, untrusted: bool, limits: _fs.WalkLimits = _fs.DEFAULT_LIMITS) -> BundleManifest:
     """Validate a bundle against its manifest; read-only, nothing moves.
 
-    Every bundle: the tree passes :func:`~httk.workflow._fs.walk_untrusted` (no special or hard-linked
-    files, within *limits*); ``bundle.json`` is strict; the tree holds exactly ``bundle.json``, ``jobs/``,
-    the listed placement and member directories and the member payloads, none of the structural entries a
-    symlink; each member's ``job.json`` agrees with the manifest (id, key and tag, placement, parent); the
-    members form one top-down tree. An untrusted bundle further carries no symlink at all, only fresh jobs
-    (no ``state.json``, ``logs``, ``attempts`` or ``.httk-job``) in state ``ready``, and a root without a
-    parent.
+    Every bundle: ``bundle.json`` is strict; the tree holds exactly ``bundle.json``, ``jobs/``, the listed
+    placement and member directories and the member payloads, none of the structural entries a symlink or a
+    special file; each member's ``job.json`` agrees with the manifest (id, key and tag, placement, parent); the
+    members form one top-down tree. A trusted bundle's payloads are job content and are not examined. An
+    untrusted bundle's whole tree further passes :func:`~httk.workflow._fs.walk_untrusted` (no special or
+    hard-linked files, within *limits*), and it carries no symlink at all, only fresh jobs (no ``state.json``,
+    ``seal.json``, ``logs``, ``attempts`` or ``.httk-job``) in state ``ready``, and a root without a parent.
 
     :param path: The bundle directory.
     :param untrusted: Apply the rules for a bundle from an untrusted client (the exchange).
-    :param limits: The walk's entry-count and depth limits.
+    :param limits: The walk's entry-count and depth limits (untrusted bundles only).
     :return: The manifest.
-    :raises BundleError: With the precise reason, for any refusal.
+    :raises BundleError: With the precise reason, for any refusal, including an entry that vanishes or cannot be
+        read during validation (a live client may still be writing the tree).
     """
 
     try:
-        entries = _fs.walk_untrusted(path, limits=limits)
-    except _fs.UntrustedContentError as exc:
-        raise BundleError(f"{path}: {exc}") from exc
-    kinds = {entry.relative: entry.kind for entry in entries}
-    if (kind := kinds.get(_MANIFEST_NAME)) != "file":
-        raise BundleError(f"{path}/bundle.json is {'missing' if kind is None else f'a {kind}'}, not a regular file")
-    manifest = BundleManifest.from_json(_read(path / _MANIFEST_NAME, MAX_MANIFEST_BYTES))
+        return _validate(path, untrusted=untrusted, limits=limits)
+    except OSError as exc:
+        raise BundleError(f"{path} cannot be validated: {exc}") from exc
+
+
+def _validate(path: Path, *, untrusted: bool, limits: _fs.WalkLimits) -> BundleManifest:
     if untrusted:
+        try:
+            entries = _fs.walk_untrusted(path, limits=limits)
+        except _fs.UntrustedContentError as exc:
+            raise BundleError(f"{path}: {exc}") from exc
+        kinds = {entry.relative: str(entry.kind) for entry in entries}
+        manifest = _read_manifest(path, kinds.get(_MANIFEST_NAME))
         if manifest.members[0].parent_job_id is not None:
             raise BundleError("the root of an untrusted bundle may not have a parent")
         if stale := [member.job_id for member in manifest.members if member.state != "ready"]:
             raise BundleError(f"an untrusted bundle carries only ready jobs; {stale[0]} is not")
+    else:
+        if (root := _kind(os.lstat(path).st_mode)) != "dir":
+            raise BundleError(f"{path} is a {root}, not a bundle directory")
+        try:
+            kind: str | None = _kind(os.lstat(path / _MANIFEST_NAME).st_mode)
+        except FileNotFoundError:
+            kind = None
+        manifest = _read_manifest(path, kind)
+        kinds = _structural_kinds(path, manifest)
     _check_structure(manifest, kinds, untrusted=untrusted)
     by_id = {member.job_id: member for member in manifest.members}
     for index, member in enumerate(manifest.members):
@@ -677,6 +732,11 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
         elif not _fs.exists(_fs.loc(new_dir)):
             raise BundleError(f"member {old.job_id} is missing from {bundle} under both its old and its new key")
     _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), rekeyed.to_json(), durable=True)
+    # A resumed rekey may find the temporaries of a write that died; untrusted validation passed before rekey.json
+    # existed, so at these positions such names are ours.
+    _fs.remove_write_temporaries(bundle, _MANIFEST_NAME.name, durable=True)
+    for member in rekeyed.members:
+        _fs.remove_write_temporaries(rekeyed.member_dir(bundle, member), "job.json", durable=True)
     return rekeyed
 
 

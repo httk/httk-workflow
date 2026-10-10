@@ -14,6 +14,8 @@ import enum
 import errno
 import logging
 import os
+import re
+import shutil
 import stat
 import time
 from dataclasses import dataclass
@@ -259,6 +261,28 @@ def fresh_token() -> str:
     """Return 80 random bits as 16 lowercase base32 characters."""
 
     return base64.b32encode(os.urandom(10)).decode("ascii").lower()
+
+
+def remove_write_temporaries(directory: Path, name: str, *, durable: bool) -> int:
+    """Remove the temporaries an interrupted :func:`write_file` of *name* left in *directory*.
+
+    Only regular files named ``.<name>.<token>.tmp`` are removed; call this only where every such
+    name is the caller's own.
+
+    :param directory: The directory holding *name*.
+    :param name: The target file name.
+    :param durable: Durability of the removals.
+    :return: The number of temporaries removed.
+    """
+
+    pattern = re.compile(rf"\.{re.escape(name)}\.[a-z2-7]{{16}}\.tmp")
+    removed = 0
+    for entry in os.listdir(directory):
+        info = _lstat(Loc(directory / entry)) if pattern.fullmatch(entry) else None
+        if info is not None and stat.S_ISREG(info.st_mode):
+            remove_file(Loc(directory / entry), durable=durable)
+            removed += 1
+    return removed
 
 
 def _fsync_parent(target: Loc) -> None:
@@ -781,6 +805,48 @@ def remove_file(target: Loc, *, durable: bool) -> None:
         pass
     if durable:
         _fsync_parent(target)
+
+
+def _copy_regular(src: str, dst: str) -> None:
+    # copytree hands over every non-directory; a FIFO or device would block or leak, so only regular files copy.
+    if not stat.S_ISREG(os.lstat(src).st_mode):
+        raise UnsafePath(f"{src} is a special file")
+    shutil.copy2(src, dst)
+
+
+def copy_tree(src: Path, dst: Path, *, durable: bool) -> None:
+    """Copy a tree to a fresh name, possibly on another filesystem; symlinks are copied as symlinks.
+
+    The copy is not atomic: callers copy to a private or partial name and move or deliver it afterwards.
+
+    :param src: The directory to copy.
+    :param dst: The destination, which must not exist; its parent is created.
+    :param durable: Fsync every copied file and directory, and the parent of *dst*.
+    :raises FileExistsError: When *dst* exists.
+    :raises UnsafePath: For a special file in *src*.
+    """
+
+    if exists(loc(dst)):
+        raise FileExistsError(errno.EEXIST, "the copy destination exists", str(dst))
+    make_dirs(dst.parent, durable=durable)
+    shutil.copytree(src, dst, symlinks=True, copy_function=_copy_regular)
+    if not durable:
+        return
+    for directory, _, files in os.walk(dst):
+        for name in files:
+            path = Path(directory, name)
+            if not path.is_symlink():
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        descriptor = os.open(directory, _DIR_FLAGS)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    _fsync_parent(loc(dst))
 
 
 @dataclass(frozen=True)

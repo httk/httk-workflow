@@ -22,7 +22,7 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _fs, _kernel, _requests
+from .. import _fs, _kernel, _moving, _requests
 from .._job import JobDefinition
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
@@ -1134,13 +1134,116 @@ def handle_job_detach(arguments: argparse.Namespace, context: CLIContext) -> int
     return _request_now(arguments, context, "detach", "detached")
 
 
-def _handle_moving(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Refuse ``job eject`` and ``job adopt``: moving jobs is being rebuilt on the filesystem kernel."""
+def _eject_once(
+    workspace: Workspace, owner: _kernel.Owner, ref: JobRef, destination: Path, *, tree: bool
+) -> _moving.EjectReport | str:
+    """Claim and eject one job: the report, or why it cannot move now (it stays where it is)."""
 
-    raise WorkflowError(
-        "job eject and job adopt are unavailable in this development version: "
-        "moving jobs between workspaces is being rebuilt on the filesystem kernel"
-    )
+    root = _kernel.claim(workspace, owner, ref)
+    if root is None:
+        return f"{ref.job_key} moved before it could be claimed"
+    try:
+        return _moving.eject(workspace, owner, root, destination=destination, tree=tree)
+    except _moving.Busy as exc:
+        root.give_back()
+        return str(exc)
+    except Exception:
+        # A refusal before the bundle was built leaves the root with us: it goes back unchanged.
+        if owner.holds(root.ref):
+            root.give_back()
+        raise
+
+
+def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move a quiescent job (with ``--tree``, its terminal or paused descendants too) out into a bundle."""
+
+    if arguments.timeout < 0:
+        raise ValueError("--timeout must not be negative")
+    workspace = _modifiable(arguments, context, action="eject jobs from it")
+    refs = resolve_job_selectors(workspace, context.cwd, [arguments.job])
+    if len(refs) != 1:
+        raise ValueError(f"{arguments.job} names {len(refs)} jobs; eject one root at a time")
+    job_id, placement = refs[0].job_id, _ref_placement(refs[0])
+    destination = (context.cwd / Path(arguments.destination).expanduser()).resolve()
+    deadline = time.monotonic() + arguments.timeout
+    paused = False
+    with _kernel.register_owner(workspace, kind="cli", label="job eject", allocation=None, advertised={}) as owner:
+        while True:
+            ref = _kernel.locate(workspace, job_id, placement_hint=placement)
+            if ref is None:
+                print(f"{job_id}: the job was not found", file=sys.stderr)
+                return 1
+            if ref.state == _kernel.OWNED:
+                outcome: _moving.EjectReport | str = f"{ref.job_key} is running or held by an owner"
+                if arguments.wait and not paused:
+                    _requests.post(
+                        workspace,
+                        action="pause",
+                        job_id=job_id,
+                        placement=placement,
+                        operator="cli",
+                        reason="job eject --wait",
+                    )
+                    paused = True
+            else:
+                try:
+                    outcome = _eject_once(workspace, owner, ref, destination, tree=arguments.tree)
+                except _ERRORS as exc:
+                    print(f"{ref.job_key}: {exc}", file=sys.stderr)
+                    return 1
+            if isinstance(outcome, _moving.EjectReport):
+                break
+            remaining = deadline - time.monotonic()
+            if not arguments.wait or remaining <= 0:
+                print(f"{outcome}{'; timed out waiting' if arguments.wait else ''}", file=sys.stderr)
+                return 1
+            time.sleep(min(1.0, remaining))
+    if arguments.json:
+        document = {
+            "destination": str(outcome.destination),
+            "members": list(outcome.members),
+            "transfer_id": outcome.transfer_id,
+        }
+        print(json.dumps(document, indent=2))
+    else:
+        print(f"ejected {len(outcome.members)} job(s) to {outcome.destination}")
+    return 0
+
+
+def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move an ejected bundle into the workspace, publishing its jobs into the states they left."""
+
+    workspace = _modifiable(arguments, context, action="adopt jobs into it")
+    source = context.cwd / Path(arguments.bundle).expanduser()
+    with _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={}) as owner:
+        try:
+            report = _moving.adopt(workspace, owner, source, untrusted=False)
+        except _ERRORS as exc:
+            print(f"{arguments.bundle}: {exc}", file=sys.stderr)
+            return 1
+    if report is None:
+        print(f"{arguments.bundle}: another actor took the bundle first", file=sys.stderr)
+        return 1
+    if report.missing_workflows:
+        print(
+            f"warning: these workflows are not installed, so their jobs wait: {', '.join(report.missing_workflows)}",
+            file=sys.stderr,
+        )
+    if arguments.json:
+        document = {
+            "already_adopted": report.already_adopted,
+            "published": [
+                {"job_key": ref.job_key, "state": ref.state, "path": str(ref.path)} for ref in report.published
+            ],
+            "missing_workflows": list(report.missing_workflows),
+        }
+        print(json.dumps(document, indent=2))
+    elif report.already_adopted:
+        print(f"{arguments.bundle}: already adopted")
+    else:
+        for ref in report.published:
+            print(f"{ref.job_key}\t{ref.state}\t{ref.path}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1552,21 +1655,38 @@ def build_job_parser(
     eject = _leaf(
         group,
         "eject",
-        summary="move jobs out of a workspace (unavailable in this version)",
-        description="Move quiescent jobs out of the workspace (being rebuilt on the filesystem kernel)",
-        handler=_handle_moving,
+        summary="move a job (and with --tree its descendants) out of a workspace",
+        description=(
+            "Move a quiescent job out of the workspace into DEST/<job key>, a bundle that job adopt takes in; "
+            "with --tree its terminal or paused descendants go along"
+        ),
+        handler=handle_job_eject,
     )
     _add_workspace_option(eject, help_text="the workspace holding the job")
-    eject.add_argument("targets", metavar="JOB... DEST", nargs="*", help="the jobs, then the destination")
+    eject.add_argument("job", metavar="JOB", help="job UUID, job key, unique prefix, or a path inside the workspace")
+    eject.add_argument("destination", metavar="DEST", help="the directory to put the bundle in")
+    eject.add_argument("--tree", action="store_true", help="eject the job's descendants too")
+    eject.add_argument("--wait", action="store_true", help="pause a running job and wait until it can move")
+    eject.add_argument(
+        "--timeout",
+        type=float,
+        metavar="SECONDS",
+        default=600.0,
+        help="give up waiting after this long (default: 600)",
+    )
+    eject.add_argument("--json", action="store_true", help="print the result as one JSON document")
+    add_durability_arguments(eject)
     adopt = _leaf(
         group,
         "adopt",
-        summary="move ejected jobs into a workspace (unavailable in this version)",
-        description="Move ejected job bundles into the workspace (being rebuilt on the filesystem kernel)",
-        handler=_handle_moving,
+        summary="move an ejected bundle into a workspace",
+        description="Move an ejected job bundle into the workspace, publishing its jobs into the states they left",
+        handler=handle_job_adopt,
     )
     _add_workspace_option(adopt, help_text="the workspace to adopt into")
-    adopt.add_argument("directories", metavar="DIR", nargs="+", help="an ejected job bundle")
+    adopt.add_argument("bundle", metavar="BUNDLE", help="an ejected job bundle directory")
+    adopt.add_argument("--json", action="store_true", help="print the result as one JSON document")
+    add_durability_arguments(adopt)
 
     build_transfer_parser(group)
 

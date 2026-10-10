@@ -165,9 +165,11 @@ def test_job_show_list_and_why_read_the_kernel_state(tmp_path: Path, context: CL
     assert json.loads(capsys.readouterr().out)[0]["state"] == "ready"
 
 
-def test_job_eject_and_adopt_are_unavailable_until_jobs_can_move(tmp_path: Path, context: CLIContext, capsys) -> None:
+def test_job_eject_and_adopt_report_bad_arguments(tmp_path: Path, context: CLIContext, capsys) -> None:
     _workspace, _installed, name = _setup(tmp_path, context, "moving-ws")
+    # An unknown job is a usage error; a directory that is no bundle is refused.
     assert command(["job", "eject", "--workspace", name, "job", str(tmp_path)], context) == 2
-    assert "unavailable in this development version" in capsys.readouterr().err
-    assert command(["job", "adopt", "--workspace", name, str(tmp_path)], context) == 2
-    assert "unavailable in this development version" in capsys.readouterr().err
+    assert "job" in capsys.readouterr().err
+    (tmp_path / "not-a-bundle").mkdir()
+    assert command(["job", "adopt", "--workspace", name, str(tmp_path / "not-a-bundle")], context) == 1
+    assert "bundle refused" in capsys.readouterr().err

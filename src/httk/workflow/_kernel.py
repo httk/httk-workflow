@@ -714,6 +714,19 @@ class Owner:
 
         self._discard(self._launch_path(attempt_id, n))
 
+    def discard_scratch(self, path: Path) -> None:
+        """Discard one of this owner's own scratch directories; an absent one is already discarded.
+
+        :param path: ``tmp/<owner-id>.<purpose>.<token>/`` of this owner.
+        :raises ValueError: When *path* is not a scratch directory of this owner.
+        """
+
+        parts = _SCRATCH.fullmatch(path.name)
+        if parts is None or parts[1] != self.owner_id or path.parent != _tmp(self.workspace):
+            raise ValueError(f"{path} is not a scratch directory of owner {self.owner_id}")
+        if _fs.exists(_fs.loc(path)):
+            self._discard(path)
+
     def holds(self, ref: JobRef) -> bool:
         """Whether this process holds a handle for *ref*, as opposed to a job left in ``owned/<owner-id>/``.
 
@@ -1424,16 +1437,20 @@ def locate_many(
     return _settled(workspace, wanted, normalized, include_owned=True, settle=settle, cache=cache)
 
 
-def submit(workspace: KernelWorkspace, owner: Owner, staging: Path, *, state: str = "ready") -> JobRef:
+def submit(
+    workspace: KernelWorkspace, owner: Owner, staging: Path, *, state: str = "ready", priority: int | None = None
+) -> JobRef:
     """Publish a complete payload under a fresh name in ``jobs/<state>/<placement>/``.
 
     :param workspace: The workspace.
     :param owner: The owner of *staging* (its scratch, or an outcome of its quiescent job).
     :param staging: The payload; its ``job.json`` gives the key, placement and priority.
     :param state: The unowned state to publish into.
+    :param priority: The priority to publish under instead of ``job.json``'s (a ``set_priority`` request
+        changes only the name, so a returned or moved job carries its priority separately).
     :return: The published reference.
     :raises OwnerLost: When *staging* is gone (recovery took this owner's scratch).
-    :raises ValueError: For an owned or unknown state.
+    :raises ValueError: For an owned or unknown state, or a priority outside ``0``-``999``.
     """
 
     if state not in UNOWNED_STATES:
@@ -1443,7 +1460,7 @@ def submit(workspace: KernelWorkspace, owner: Owner, staging: Path, *, state: st
         raise OwnerLost(f"{staging} of owner {owner.owner_id} is gone")
     header = _read_header(staging)
     target = _state_dir(workspace, state, header.placement) / format_job_name(
-        header.job_key, header.priority, _fs.fresh_token()
+        header.job_key, header.priority if priority is None else priority, _fs.fresh_token()
     )
     _check_placement(workspace, state, header.placement)
     _fs.move_owned(_fs.loc(staging), _fs.loc(target), durable=workspace.durable)
