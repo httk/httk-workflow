@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -27,7 +28,6 @@ from .._bundles import BundleError
 from .._util import write_json_atomic
 from ..adapters import (
     REMOTE_JOB_ADOPT_COMMAND,
-    REMOTE_JOB_EJECT_COMMAND,
     REMOTE_JOB_TRANSFER_COMMAND,
     REMOTE_TRANSFER_STATUS_COMMAND,
     add_remote,
@@ -490,22 +490,59 @@ def _end(value: str | None, context: CLIContext, arguments: argparse.Namespace, 
     return _End(reference.name, binding=reference, root=root, workspace_id=workspace_id)
 
 
-def _remote(end: _End, context: CLIContext, arguments: argparse.Namespace, argv: Sequence[str]) -> tuple[int, str, str]:
+def _remote(
+    end: _End, context: CLIContext, arguments: argparse.Namespace, argv: Sequence[str], cwd: str | None = None
+) -> tuple[int, str, str]:
     assert end.binding is not None
-    return remote_workspace_output(end.binding, context, argv, timeout=arguments.adapter_timeout)
+    return remote_workspace_output(end.binding, context, argv, timeout=arguments.adapter_timeout, cwd=cwd)
+
+
+#: The argument text one remote call carries at most: ssh hands the far side one command string, and Linux
+#: limits a single argument string to 128 KiB.
+_ARGUMENT_BUDGET = 64 * 1024
+
+
+def _chunks(items: list[str], *, flag: str = "") -> list[list[str]]:
+    """Split *items* into runs whose argument text (each item preceded by *flag*) fits :data:`_ARGUMENT_BUDGET`."""
+
+    chunks: list[list[str]] = []
+    size = _ARGUMENT_BUDGET
+    for item in items:
+        cost = len(shlex.quote(item)) + 1 + (len(flag) + 1 if flag else 0)
+        if size + cost > _ARGUMENT_BUDGET:
+            chunks.append([])
+            size = 0
+        chunks[-1].append(item)
+        size += cost
+    return chunks
 
 
 def _adapter(
-    end: _End, context: CLIContext, arguments: argparse.Namespace, operation: str, source: str, destination: str
+    end: _End,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    operation: str,
+    source: str,
+    destination: str,
+    files: list[str],
 ) -> None:
+    """One adapter ``push`` or ``pull`` of *files* (relative to *source*, each landing below *destination*)."""
+
     assert end.binding is not None
     target = resolve_remote(end.binding.remote, project=context.cwd)
     run_adapter(
         target.bundle,
         operation,
-        {"source": source, "destination": destination},
+        {"source": source, "destination": destination, "files": files},
         timeout=arguments.adapter_timeout,
     )
+
+
+def _say(arguments: argparse.Namespace, message: str) -> None:
+    """Print one progress line to stderr, unless ``--quiet``."""
+
+    if not arguments.quiet:
+        print(message, file=sys.stderr, flush=True)
 
 
 def _owner(workspace: Workspace, label: str) -> _kernel.Owner:
@@ -618,135 +655,212 @@ def _hold_jobs(
             canonical_uuid(selector, "JOB")
         except (WorkflowError, ValueError) as exc:
             raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
-    for selector in arguments.jobs:
-        argv = [*REMOTE_JOB_EJECT_COMMAND, "--hold", "--json", "--workspace", src.plain]
-        argv += [*(["--tree"] if arguments.tree else [])]
-        argv += [*(["--destination-id", dst.workspace_id] if dst.workspace_id is not None else [])]
-        argv += ["--", selector, dst.locator]
-        code, out, err = _remote(src, context, arguments, argv)
-        if code:
-            errors.append(f"{selector}: {err.strip() or f'job eject failed on {src.locator}'}")
-            continue
+    argv = [*REMOTE_JOB_TRANSFER_COMMAND, "--hold", "--json", *(["--tree"] if arguments.tree else [])]
+    argv += [*(["--destination-id", dst.workspace_id] if dst.workspace_id is not None else [])]
+    for chunk in _chunks(arguments.jobs, flag="--job"):
+        selected = [item for selector in chunk for item in ("--job", selector)]
+        code, out, err = _remote(src, context, arguments, [*argv, *selected, "--", src.plain, dst.locator])
         try:
-            holds.append(_moving.Hold.from_mapping(json.loads(out)))
-        except ValueError:
-            # The hold may exist: the pass over the source's holds, or a later --resume, drives it.
-            errors.append(f"{selector}: job eject --hold on {src.locator} printed no hold document: {out[:200]!r}")
+            document = json.loads(out)
+            if not isinstance(document, dict) or not all(
+                isinstance(document.get(key), list) for key in ("holds", "errors")
+            ):
+                raise ValueError("no hold document")
+            held = [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
+        except (ValueError, TypeError):
+            # Holds may exist: the pass over the source's holds, or a later --resume, drives them.
+            reason = f": {err.strip()}" if code and err.strip() else ""
+            errors.append(f"job transfer --hold on {src.locator} printed no hold document{reason}: {out[:200]!r}")
+            continue
+        holds += held
+        errors.extend(str(error) for error in document["errors"])
     return holds
 
 
-class _Refused(Exception):
-    """The destination refused the bundle; the message says why."""
+#: The statuses of a ``job adopt --json`` entry.
+_ADOPT_STATUSES = ("adopted", "already_adopted", "refused", "taken", "failed")
 
 
-def _adopt_into(
-    src: _End,
-    workspace: Workspace,
-    owner: _kernel.Owner,
-    hold: _moving.Hold,
-    context: CLIContext,
-    arguments: argparse.Namespace,
-) -> dict[str, Any] | None | Exception:
-    """Adopt a hold into a local *workspace*; an error is returned, so that the owner closes cleanly."""
+def _adopt_local(workspace: Workspace, owner: _kernel.Owner, source: Path) -> dict[str, Any]:
+    """Adopt one bundle into a local *workspace*: an entry as ``job adopt --json`` gives it."""
 
-    transfer_id, path = hold.transfer_id, hold.path
-    landing = None
     try:
-        if src.workspace is not None:
-            # One filesystem: adoption moves the hold in, and a refusal moves it back. Across: it copies.
-            source = Path(path)
-        else:
-            landing = owner.scratch("landing")
-            source = landing / transfer_id
-            _adapter(src, context, arguments, "pull", path, str(source))
         report = _moving.adopt(workspace, owner, source, untrusted=False)
     except BundleError as exc:
-        return _Refused(str(exc))
+        return {"status": "refused", "message": str(exc)}
     except _ERRORS as exc:
-        return exc
-    finally:
-        if landing is not None:
-            owner.discard_scratch(landing)
-    return None if report is None else adopt_document(report)
+        return {"status": "failed", "message": str(exc)}
+    if report is None:
+        return {"status": "taken"}
+    return {"status": "already_adopted" if report.already_adopted else "adopted", **adopt_document(report)}
+
+
+def _adoption(out: str, bundles: list[str]) -> list[dict[str, Any]]:
+    """The entries of a remote ``job adopt --json`` of *bundles*, checked; :class:`ValueError` when malformed."""
+
+    document = json.loads(out)
+    entries = document.get("bundles") if isinstance(document, dict) else None
+    if (
+        not isinstance(entries, list)
+        or len(entries) != len(bundles)
+        or not all(
+            isinstance(entry, dict) and entry.get("bundle") == bundle and entry.get("status") in _ADOPT_STATUSES
+            for entry, bundle in zip(entries, bundles, strict=False)
+        )
+    ):
+        raise ValueError("not an adoption report of the bundles sent")
+    return entries
 
 
 def _deliver(
-    src: _End, dst: _End, hold: _moving.Hold, context: CLIContext, arguments: argparse.Namespace
-) -> dict[str, Any] | None:
-    """Steps 2 and 3: copy the held bundle to *dst* and adopt it there; ``None`` when another actor took it."""
+    src: _End,
+    dst: _End,
+    holds: list[_moving.Hold],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    token: str,
+) -> dict[str, dict[str, Any]]:
+    """Steps 2 and 3 for a chunk: one copy of its held bundles to *dst* and one adoption there.
 
-    transfer_id, path = hold.transfer_id, hold.path
+    A remote *dst* receives them in ``transfers/incoming/<token>/``. The result is each hold's adoption entry by
+    transfer id (``status`` as ``job adopt --json`` gives it); an error raised fails the whole chunk.
+    """
+
+    ids = [hold.transfer_id for hold in holds]
+    # One workspace's holds share its transfers/outgoing/.
+    outgoing = str(PurePosixPath(holds[0].path).parent)
     if dst.workspace is not None:
         require_cli_modifiable(dst.workspace)
+        failure: Exception | None = None
+        entries: dict[str, dict[str, Any]] = {}
         with _owner(dst.workspace, "job transfer") as owner:
-            result = _adopt_into(src, dst.workspace, owner, hold, context, arguments)
-        if isinstance(result, Exception):
-            raise result
-        return result
+            # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
+            scratch = None
+            try:
+                if src.workspace is not None:
+                    # One filesystem: adoption moves each hold in, and a refusal moves it back. Across: it copies.
+                    sources = [Path(hold.path) for hold in holds]
+                else:
+                    scratch = owner.scratch("landing")
+                    _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
+                    _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
+                    sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
+                _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
+                for transfer_id, source in zip(ids, sources, strict=True):
+                    entries[transfer_id] = _adopt_local(dst.workspace, owner, source)
+            except _ERRORS as exc:
+                failure = exc
+            finally:
+                if scratch is not None:
+                    owner.discard_scratch(scratch)
+        if failure is not None:
+            raise failure
+        return entries
     assert dst.root is not None
-    incoming = PurePosixPath(
-        dst.root, WORKSPACE_DIRECTORY, "transfers", "incoming", f"{transfer_id}.{_fs.fresh_token()}"
-    )
+    landing = PurePosixPath(dst.root, WORKSPACE_DIRECTORY, "transfers", "incoming", token)
+    _say(arguments, f"copying {len(ids)} bundle(s) to {dst.locator}")
     if src.workspace is not None:
-        _adapter(dst, context, arguments, "push", path, str(incoming))
+        _adapter(dst, context, arguments, "push", outgoing, str(landing), ids)
     else:
         with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
-            _adapter(src, context, arguments, "pull", path, f"{relay}/{transfer_id}")
-            _adapter(dst, context, arguments, "push", f"{relay}/{transfer_id}", str(incoming))
-    code, out, err = _remote(
-        dst, context, arguments, [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--workspace", dst.plain, str(incoming)]
-    )
-    if code:
-        # The refused copy in transfers/incoming/ was discarded there: the hold stays the only bundle.
-        raise _Refused(err.strip() or f"job adopt failed on {dst.locator}")
-    document = json.loads(out)
-    if not isinstance(document, dict) or not isinstance(document.get("already_adopted"), bool):
-        raise ValueError(f"{dst.locator} returned an invalid adoption report")
-    return document
+            _adapter(src, context, arguments, "pull", outgoing, f"{relay}/outgoing", ids)
+            _adapter(dst, context, arguments, "push", f"{relay}/outgoing", str(landing), ids)
+    _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
+    # Bare transfer ids, adopted from within the landing, keep the command short; the workspace goes by its
+    # probed root, so that resolving it does not depend on the landing as the working directory.
+    argv = [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--by-path", "--workspace", dst.root, *ids]
+    code, out, err = _remote(dst, context, arguments, argv, cwd=str(landing))
+    try:
+        adopted = _adoption(out, ids)
+    except ValueError:
+        # Refused copies in the landing were discarded there: each hold stays the only bundle.
+        if code:
+            raise RuntimeError(err.strip() or f"job adopt failed on {dst.locator}") from None
+        raise ValueError(
+            f"{dst.locator} returned an unrecognised adoption report (it may run an older httk-workflow; upgrade "
+            "it, check whether the jobs arrived with `httk job show`, and release with `httk job transfer --release`)"
+        ) from None
+    return dict(zip(ids, adopted, strict=True))
 
 
-def _release(src: _End, transfer_id: str, context: CLIContext, arguments: argparse.Namespace) -> None:
-    """Step 4: discard the hold on *src*; one already gone (adopted in on one filesystem) is fine."""
+def _release(src: _End, transfer_ids: list[str], context: CLIContext, arguments: argparse.Namespace) -> list[str]:
+    """Step 4: discard the holds on *src*; one already gone (adopted in on one filesystem) is fine.
 
+    The result lists the ids a remote *src* did not confirm (an older remote takes only the last ``--release``).
+    """
+
+    _say(arguments, f"releasing {len(transfer_ids)} hold(s) on {src.locator}")
     if src.workspace is not None:
         with _owner(src.workspace, "job transfer") as owner:
-            _moving.release_hold(src.workspace, owner, transfer_id)
-        return
-    code, _, err = _remote(src, context, arguments, [*REMOTE_JOB_TRANSFER_COMMAND, "--release", transfer_id, src.plain])
+            for transfer_id in transfer_ids:
+                _moving.release_hold(src.workspace, owner, transfer_id)
+        return []
+    releases = [item for transfer_id in transfer_ids for item in ("--release", transfer_id)]
+    code, out, err = _remote(src, context, arguments, [*REMOTE_JOB_TRANSFER_COMMAND, *releases, src.plain])
     if code not in (0, 1):
         raise RuntimeError(err.strip() or f"job transfer --release failed on {src.locator}")
+    # Confirmed: "released T" on stdout, or "T: no such hold ..." on stderr (gone already).
+    confirmed = {line.removeprefix("released ") for line in out.splitlines() if line.startswith("released ")}
+    confirmed |= {line.split(":", 1)[0] for line in err.splitlines() if ": no such hold" in line}
+    return [transfer_id for transfer_id in transfer_ids if transfer_id not in confirmed]
 
 
 def _drive(
-    src: _End, dst: _End, hold: _moving.Hold, context: CLIContext, arguments: argparse.Namespace
-) -> dict[str, Any]:
-    """Copy, adopt and release one hold: the outcome. A hold that was not adopted stays held on *src*."""
+    src: _End, dst: _End, holds: list[_moving.Hold], context: CLIContext, arguments: argparse.Namespace
+) -> list[dict[str, Any]]:
+    """Copy, adopt and release a batch of holds bound for *dst*: one outcome per hold, in order.
 
-    transfer_id = hold.transfer_id
-    outcome: dict[str, Any] = {"transfer_id": transfer_id, "members": list(hold.members), "destination": dst.locator}
-    if hold.destination_workspace_id is not None and dst.workspace_id != hold.destination_workspace_id:
-        message = (
-            f"the hold's destination is not this workspace: {dst.locator} is {dst.workspace_id}, the hold is bound "
-            f"for {hold.destination_workspace_id}; it stays held on {src.locator}"
-        )
-        return {**outcome, "status": "refused", "message": message}
-    try:
-        document = _deliver(src, dst, hold, context, arguments)
-    except _Refused as exc:
-        return {**outcome, "status": "refused", "message": f"bundle refused: {exc}; it stays held on {src.locator}"}
-    except _ERRORS as exc:
-        return {**outcome, "status": "failed", "message": f"{exc}; it stays held on {src.locator}"}
-    if document is None:
-        return {**outcome, "status": "taken", "message": "another actor took the held bundle first"}
-    outcome.update(document, status="already_adopted" if document["already_adopted"] else "adopted")
-    try:
-        _release(src, transfer_id, context, arguments)
-    except _ERRORS as exc:
-        outcome["message"] = (
-            f"the jobs are in {dst.locator}, but the hold was not released: {exc}; "
+    A hold that was not adopted stays held on *src*.
+    """
+
+    outcomes = {
+        hold.transfer_id: {"transfer_id": hold.transfer_id, "members": list(hold.members), "destination": dst.locator}
+        for hold in holds
+    }
+    ready = []
+    for hold in holds:
+        if hold.destination_workspace_id is not None and dst.workspace_id != hold.destination_workspace_id:
+            message = (
+                f"the hold's destination is not this workspace: {dst.locator} is {dst.workspace_id}, the hold is "
+                f"bound for {hold.destination_workspace_id}; it stays held on {src.locator}"
+            )
+            outcomes[hold.transfer_id].update(status="refused", message=message)
+        else:
+            ready.append(hold)
+    entries: dict[str, dict[str, Any]] = {}
+    token = _fs.fresh_token()  # one landing for every chunk
+    by_id = {hold.transfer_id: hold for hold in ready}
+    for chunk in _chunks(list(by_id)):
+        try:
+            entries.update(_deliver(src, dst, [by_id[transfer_id] for transfer_id in chunk], context, arguments, token))
+        except _ERRORS as exc:
+            entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in chunk})
+    delivered = []
+    for transfer_id, entry in entries.items():
+        outcome, status = outcomes[transfer_id], entry["status"]
+        if status in _DELIVERED:
+            outcome.update({key: value for key, value in entry.items() if key not in ("bundle", "message")})
+            delivered.append(transfer_id)
+        elif status == "refused":
+            message = f"bundle refused: {entry.get('message')}; it stays held on {src.locator}"
+            outcome.update(status="refused", message=message)
+        elif status == "taken":
+            outcome.update(status="taken", message="another actor took the held bundle first")
+        else:
+            outcome.update(status="failed", message=f"{entry.get('message')}; it stays held on {src.locator}")
+    unreleased: list[tuple[str, str]] = []
+    for chunk in _chunks(delivered, flag="--release"):
+        try:
+            unconfirmed = _release(src, chunk, context, arguments)
+            unreleased += [(transfer_id, "not confirmed by the source") for transfer_id in unconfirmed]
+        except _ERRORS as exc:
+            unreleased += [(transfer_id, str(exc)) for transfer_id in chunk]
+    for transfer_id, reason in unreleased:
+        outcomes[transfer_id]["message"] = (
+            f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
             f"run `httk job transfer --resume` or `httk job transfer --release {transfer_id}`"
         )
-    return outcome
+    return list(outcomes.values())
 
 
 def _report(outcomes: list[dict[str, Any]], errors: list[str], *, json_output: bool) -> int:
@@ -772,25 +886,50 @@ def _report(outcomes: list[dict[str, Any]], errors: list[str], *, json_output: b
 
 
 def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
-    if arguments.destination is not None or arguments.jobs or arguments.resume:
-        raise ValueError("--release takes one transfer id and at most the workspace holding it")
-    if not _TRANSFER_ID.fullmatch(arguments.release):
-        raise ValueError(f"not a transfer id: {arguments.release!r}")
+    if arguments.destination is not None or arguments.jobs or arguments.resume or arguments.hold:
+        raise ValueError("--release takes transfer ids and at most the workspace holding them")
+    for transfer_id in arguments.release:
+        if not _TRANSFER_ID.fullmatch(transfer_id):
+            raise ValueError(f"not a transfer id: {transfer_id!r}")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
-        code, out, err = _remote(
-            src, context, arguments, [*REMOTE_JOB_TRANSFER_COMMAND, "--release", arguments.release, src.plain]
-        )
+        releases = [item for transfer_id in arguments.release for item in ("--release", transfer_id)]
+        code, out, err = _remote(src, context, arguments, [*REMOTE_JOB_TRANSFER_COMMAND, *releases, src.plain])
         sys.stdout.write(out)
         sys.stderr.write(err)
         return code
     with _owner(src.workspace, "job transfer --release") as owner:
-        released = _moving.release_hold(src.workspace, owner, arguments.release)
-    if not released:
-        print(f"{arguments.release}: no such hold in {src.locator}", file=sys.stderr)
-        return 1
-    print(f"released {arguments.release}")
-    return 0
+        released = [_moving.release_hold(src.workspace, owner, transfer_id) for transfer_id in arguments.release]
+    for transfer_id, done in zip(arguments.release, released, strict=True):
+        if done:
+            print(f"released {transfer_id}")
+        else:
+            print(f"{transfer_id}: no such hold in {src.locator}", file=sys.stderr)
+    return 0 if all(released) else 1
+
+
+def _handle_hold(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Hold the selected jobs of a local SRC for a transfer to the DST locator, recorded as given."""
+
+    if arguments.resume or arguments.source is None or arguments.destination is None or not arguments.jobs:
+        raise ValueError("--hold takes --job, SRC and the destination to record")
+    src = _end(arguments.source, context, arguments)
+    if src.workspace is None:
+        raise ValueError(f"--hold holds jobs in a workspace on this machine, not in {src.locator}")
+    destination_id = arguments.destination_id
+    if destination_id is not None:
+        destination_id = canonical_uuid(destination_id, "--destination-id")
+    errors: list[str] = []
+    dst = _End(arguments.destination, workspace_id=destination_id)
+    holds = _hold_jobs(src, dst, context, arguments, errors)
+    if arguments.json:
+        print(json.dumps({"holds": [hold.as_mapping() for hold in holds], "errors": errors}, indent=2, sort_keys=True))
+    else:
+        for error in errors:
+            print(error, file=sys.stderr)
+        for hold in holds:
+            print(f"held {len(hold.members)} job(s) in {hold.path}")
+    return 1 if errors else 0
 
 
 def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -801,8 +940,12 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     :return: 0 when every transfer was adopted (or already was), else 1.
     """
 
-    if arguments.release is not None:
+    if arguments.release:
         return _handle_release(arguments, context)
+    if arguments.hold:
+        return _handle_hold(arguments, context)
+    if arguments.destination_id is not None:
+        raise ValueError("--destination-id is recorded by --hold; it needs --hold")
     if not arguments.resume and (arguments.source is None or arguments.destination is None or not arguments.jobs):
         raise ValueError("name jobs with --job, and SRC and DST; or re-drive held transfers with --resume")
     if arguments.resume and arguments.jobs:
@@ -821,9 +964,11 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         if dst.workspace is not None:
             # Before anything is held: a destination that cannot take the jobs would only leave them held.
             require_cli_modifiable(dst.workspace)
+        _say(arguments, f"holding {len(arguments.jobs)} job(s) on {src.locator}")
         _hold_jobs(src, dst, context, arguments, errors)
-    outcomes = []
-    # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold).
+    # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold), each
+    # destination's holds as one batch.
+    batches: dict[str, list[_moving.Hold]] = {}
     for hold in _holds(src, context, arguments):
         locator = hold.destination_locator
         if arguments.destination is not None and locator not in ends:
@@ -837,7 +982,10 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             except _ERRORS as exc:
                 errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
                 continue
-        outcomes.append(_drive(src, ends[locator], hold, context, arguments))
+        batches.setdefault(locator, []).append(hold)
+    outcomes = []
+    for locator, holds in batches.items():
+        outcomes.extend(_drive(src, ends[locator], holds, context, arguments))
     return _report(outcomes, errors, json_output=arguments.json)
 
 
@@ -887,6 +1035,8 @@ A transfer holds the jobs on SRC (an eject into SRC's own
 neither workspace), copies the held bundle to DST, adopts it there into the
 states it left, and only then releases the hold. A bundle DST refuses (say,
 because one of its jobs is already there) stays held on SRC and is reported.
+The holds bound for one DST travel as one batch: one copy and one adoption
+call, however many jobs move. Progress goes to stderr unless -q is given.
 
 Recovery: delivery is at least once. Every run, and `job transfer --resume
 [SRC] [DST]`, first re-drives the holds bound for DST (with --resume and no DST,
@@ -895,7 +1045,9 @@ a bundle it already has, and the hold is released. `transfer status` and
 `job why` list held bundles. A transfer abandoned for good is taken back into
 SRC with `job adopt SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs.
-`job transfer --release T [WS]` discards a hold whose jobs DST has."""
+`job transfer --release T [--release T ...] [WS]` discards holds whose jobs
+DST has; `job transfer --hold --job JOB ... SRC DST` only holds, recording DST
+as given (the first leg a client runs on a remote SRC)."""
 
 
 def build_transfer_parser(
@@ -924,7 +1076,24 @@ def build_transfer_parser(
     )
     transfer.add_argument("--tree", action="store_true", help="move each job's descendants with it")
     transfer.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
-    transfer.add_argument("--release", metavar="TRANSFER_ID", help="discard one hold whose jobs DST already has")
+    transfer.add_argument(
+        "--release",
+        action="append",
+        default=[],
+        metavar="TRANSFER_ID",
+        help="discard a hold whose jobs DST already has (repeatable)",
+    )
+    transfer.add_argument(
+        "--hold",
+        action="store_true",
+        help="only hold the jobs in SRC, recording DST as given (the first leg, as a client drives it remotely)",
+    )
+    transfer.add_argument(
+        "--destination-id",
+        metavar="WORKSPACE_ID",
+        help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
+    )
+    transfer.add_argument("-q", "--quiet", action="store_true", help="print no progress lines to stderr")
     _add_adapter_timeout(transfer)
     transfer.add_argument("--json", action="store_true", help="print the outcomes as one JSON document")
     add_durability_arguments(transfer)

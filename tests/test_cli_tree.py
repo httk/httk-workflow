@@ -361,8 +361,8 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
     assert (parsed.source, parsed.destination, parsed.jobs, parsed.tree) == ("a", "b", ["J"], True)
     parsed = parser.parse_args(["job", "transfer", "--resume"])
     assert (parsed.resume, parsed.source, parsed.destination) == (True, None, None)
-    parsed = parser.parse_args(["job", "transfer", "--release", "T", "a"])
-    assert (parsed.release, parsed.source) == ("T", "a")
+    parsed = parser.parse_args(["job", "transfer", "--release", "T", "--release", "U", "a"])
+    assert (parsed.release, parsed.source) == (["T", "U"], "a")
     with pytest.raises(SystemExit):
         parser.parse_args(["job", "transfer", "send", "c", "J"])
     parsed = parser.parse_args(["job", "eject", "--hold", "J"])

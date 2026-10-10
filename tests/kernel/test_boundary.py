@@ -101,8 +101,6 @@ RUNNER_SIDE = frozenset(
 #: Modules whose only raw operations are pathlib-style calls on entries private to one actor.
 METHOD_RAW = frozenset(
     {
-        # Adapter side: removes its own temporary rsync file listing.
-        "adapter_runtime.py",
         # v1 realization: renders templates inside the payload it is staging (private scratch or attempt).
         "compat/v1/realization.py",
         "compat/v1/templates.py",
@@ -141,7 +139,7 @@ TEMPFILE_CALLERS = frozenset(
         # adapter metadata rewrite inside a bundle being imported.
         "adapters.py",
         "launchers.py",
-        # Adapter side: its own rsync file listing in the system temporary directory.
+        # Adapter side: an anonymous file capturing ssh's stderr during a tar transfer.
         "adapter_runtime.py",
         # Runner side: templates rendered inside the attempt or payload the runner owns.
         "runtime_utils.py",

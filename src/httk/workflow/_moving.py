@@ -797,7 +797,8 @@ def _redelivered(workspace: "Workspace", record: _Record) -> bool:
     """Whether a bundle whose jobs are all here is a duplicate delivery that may be discarded (plan §9.3).
 
     That is an exchange bundle, a cross-filesystem copy (its source is untouched), or a bundle the transfer
-    machinery placed: a hold or landing in some workspace's ``transfers/outgoing`` or ``transfers/incoming``, or
+    machinery placed: a hold or landing in some workspace's ``transfers/outgoing`` or ``transfers/incoming``, a
+    landing anywhere below this workspace's own ``transfers/incoming`` (a batch's ``incoming/<token>/<id>``), or
     in this workspace's own scratch (a pulled landing). Any other bundle is an operator's, never destroyed.
     """
 
@@ -807,7 +808,11 @@ def _redelivered(workspace: "Workspace", record: _Record) -> bool:
         return False
     source = Path(record.source)
     transfers = {(WORKSPACE_DIRECTORY, "transfers", "outgoing"), (WORKSPACE_DIRECTORY, "transfers", "incoming")}
-    return source.parent.parts[-3:] in transfers or source.is_relative_to(workspace.control / "tmp")
+    return (
+        source.parent.parts[-3:] in transfers
+        or source.resolve().parent.is_relative_to((workspace.control / "transfers" / "incoming").resolve())
+        or source.is_relative_to(workspace.control / "tmp")
+    )
 
 
 def _presence(workspace: "Workspace", bundle: Path, manifest: BundleManifest, *, untrusted: bool) -> str | None:

@@ -70,12 +70,6 @@ def test_unknown_interactive_mode_is_refused(monkeypatch: pytest.MonkeyPatch, tm
         _transport(monkeypatch, tmp_path, terminal=True, interactive_auth="maybe")
 
 
-def test_rsync_transport_shares_the_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(adapter_runtime, "_terminal_present", lambda: True)
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert "ControlPath=" in adapter_runtime._rsync_transport({"interactive_auth": "yes"})
-
-
 def test_interactive_auth_is_persisted_not_a_credential() -> None:
     persistable, credentials = split_settings({"interactive_auth": "yes"})
     assert persistable == {"interactive_auth": "yes"}

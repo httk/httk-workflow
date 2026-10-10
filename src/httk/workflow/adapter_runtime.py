@@ -8,16 +8,17 @@ selected by the ``kind`` recorded in the bundle's ``remote.json``:
 ``local``
     Files are copied in this filesystem and commands run in this process tree.
 ``ssh``
-    Files move with ``rsync`` over ``ssh`` and commands run on the configured
-    host.
+    Files move as one uncompressed ``tar`` stream over a single ``ssh``
+    connection per push or pull (the remote needs a POSIX ``tar``), and commands
+    run on the configured host.
 ``mount``
     Files are copied through a locally mounted view of the remote filesystem
     (sshfs, NFS, any shared mount) and commands run on the remote through a
     configurable executor command (an argv prefix such as
     ``ssh -o BatchMode=yes host`` or ``/abs/path/bin/hpc run``). A ``files`` batch
     is copied entry by entry, recursing into a directory entry and dereferencing a
-    symlinked file, unlike rsync's ``--files-from``; no caller sends ``files``
-    today.
+    symlinked file, unlike the ``ssh`` tar stream, which keeps it a symlink.
+    The transfer driver sends a ``files`` batch on every push and pull.
 
 Any other kind is refused rather than silently executed in the wrong place.
 
@@ -38,11 +39,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Mapping, Sequence
-from functools import lru_cache
-from pathlib import Path
-from typing import Any, Protocol
+from pathlib import Path, PurePosixPath
+from typing import IO, Any, Protocol
 
 SUPPORTED_KINDS = ("local", "ssh", "mount")
 
@@ -58,7 +59,7 @@ _CONNECT_TIMEOUT = 20
 _FALSE_SETTINGS = frozenset({"0", "false", "no", "off"})
 _WHITESPACE = re.compile(r"\s")
 # OpenSSH's own denial lists the methods it tried; this keeps a remote command's
-# "mkdir: ...: Permission denied" or rsync's "Permission denied (13)" unhinted.
+# "mkdir: ...: Permission denied" or tar's "...: Permission denied" unhinted.
 _SSH_DENIED = re.compile(r"Permission denied \([a-z,-]+\)")
 
 _MISSING_HTTK = (
@@ -318,7 +319,7 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
     terminal is attached (:func:`_terminal_present`), so ssh can ask for a
     password or second factor on ``/dev/tty``; httk never sees the answer.
     ``yes`` also shares one connection for ten minutes through a control socket,
-    so the following ssh and rsync calls do not prompt again; ``per-call`` lets
+    so the following ssh calls do not prompt again; ``per-call`` lets
     every call prompt, for sites that forbid connection sharing.
 
     :param settings: The persisted remote settings and their credentials.
@@ -353,12 +354,11 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
 def _login_hint(settings: Mapping[str, object], completed: "subprocess.CompletedProcess[str]") -> str:
     """Return a hint to append when ssh was denied authentication, else ``""``.
 
-    Only ssh's own failure status 255 (which rsync passes on for its transport)
-    counts: a remote command that itself ran ssh forwards the same denial text
-    with its own status.
+    Only ssh's own failure status 255 counts: a remote command that itself ran
+    ssh forwards the same denial text with its own status.
 
     :param settings: The persisted remote settings and their credentials.
-    :param completed: The finished ssh or rsync call.
+    :param completed: The finished ssh call.
     :return: The hint, starting with ``"; "``, or an empty string.
     """
 
@@ -572,75 +572,159 @@ def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
     return local
 
 
-@lru_cache(maxsize=1)
-def _rsync_help() -> str:
-    completed = subprocess.run(["rsync", "--help"], text=True, capture_output=True, check=False)
-    return completed.stdout + completed.stderr
+def _ssh_tar_argv(settings: Mapping[str, object], command: str) -> list[str]:
+    """Return the ssh call that runs one ``tar`` command line on the remote.
+
+    The ``prelude`` is deliberately left out: ``tar`` is a system binary, and a
+    prelude that prints would corrupt the archive on the connection's stdout.
+
+    :param settings: The persisted remote settings and their credentials.
+    :param command: The remote command line, built by :func:`_shell_command`.
+    :return: The local ssh argument vector.
+    """
+
+    return [*_ssh_transport(settings), "--", _ssh_destination(settings), command]
 
 
-def _rsync_transport(settings: Mapping[str, object]) -> str:
-    """Return the ``-e`` value; rsync splits it on whitespace and nothing else."""
-
-    transport = _ssh_transport(settings)
-    if any(_WHITESPACE.search(part) for part in transport):
-        raise ValueError("ssh transport arguments must not contain whitespace")
-    return " ".join(transport)
-
-
-def _ensure_remote_directory(settings: Mapping[str, object], directory: str) -> None:
-    completed = _ssh_run(settings, ["mkdir", "-p", directory])
-    if completed.returncode != 0:
-        raise RuntimeError(f"cannot create remote directory {directory}: {completed.stderr.strip()}")
-
-
-def _rsync(
-    settings: Mapping[str, object],
-    *,
-    source: str,
-    destination: str,
-    directory: bool,
-    files: list[str] | None,
-    push: bool,
+def _ssh_tar_status(
+    settings: Mapping[str, object], operation: str, argv: list[str], returncode: int, errors: IO[bytes]
 ) -> None:
-    """Transfer one tree, or one explicit batch of files, with real rsync."""
+    """Raise when the ssh tar call failed; otherwise pass its stderr on.
 
+    :param settings: The persisted remote settings and their credentials.
+    :param operation: ``push`` or ``pull``.
+    :param argv: The ssh argument vector that ran.
+    :param returncode: Its exit status.
+    :param errors: The temporary file that holds its stderr.
+    :raises RuntimeError: If ssh or the remote tar exited nonzero.
+    """
+
+    errors.seek(0)
+    stderr = errors.read().decode("utf-8", errors="replace").strip()
+    if returncode != 0:
+        completed = subprocess.CompletedProcess(argv, returncode, "", stderr)
+        raise RuntimeError(f"ssh tar {operation} failed ({returncode}): {stderr}{_login_hint(settings, completed)}")
+    if stderr:
+        print(stderr, file=sys.stderr)
+
+
+def _tar_push(
+    settings: Mapping[str, object], *, source: str, destination: str, directory: bool, files: list[str] | None
+) -> None:
+    """Stream one tree, one file, or one explicit batch of paths over a single ssh connection.
+
+    The archive is written straight into ssh's stdin and never staged on disk;
+    ssh's stderr goes to a temporary file so a chatty remote cannot stall the writer.
+
+    :param settings: The persisted remote settings and their credentials.
+    :param source: The local tree or file.
+    :param destination: The remote directory, or the remote file path for a single file.
+    :param directory: Whether *source* is a tree rather than one file.
+    :param files: The optional batch of paths relative to *source*, each sent recursively.
+    :raises RuntimeError: If ssh or the remote tar failed.
+    """
+
+    local = Path(source).expanduser()
     if files is not None:
-        directory = True
-    argv = ["rsync", "--archive", "--protect-args", "-e", _rsync_transport(settings)]
-    mkpath = "--mkpath" in _rsync_help()
-    if mkpath:
-        argv.append("--mkpath")
+        target, members = destination, [(local / item, item) for item in files]
+    elif directory:
+        target, members = destination, [(local, ".")]
     else:
-        parent = destination.rstrip("/") if directory else str(Path(destination).parent)
-        if push:
-            _ensure_remote_directory(settings, parent)
-        else:
-            Path(parent).expanduser().mkdir(parents=True, exist_ok=True)
-    listing: Path | None = None
-    try:
-        if files is not None:
-            descriptor, name = tempfile.mkstemp(prefix="httk-adapter-files-", suffix=".txt")
-            listing = Path(name)
-            with open(descriptor, "w", encoding="utf-8") as stream:
-                stream.write("".join(f"{item}\n" for item in files))
-            argv.append(f"--files-from={listing}")
-        local_side = source if push else destination
-        remote_side = destination if push else source
-        if directory:
-            local_side = f"{local_side.rstrip('/')}/"
-            remote_side = f"{remote_side.rstrip('/')}/"
-        remote_side = f"{_ssh_destination(settings)}:{remote_side}"
-        argv += [local_side, remote_side] if push else [remote_side, local_side]
-        completed = subprocess.run(argv, text=True, capture_output=True, stdin=subprocess.DEVNULL, check=False)
-    finally:
-        if listing is not None:
-            listing.unlink(missing_ok=True)
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"rsync failed ({completed.returncode}): {completed.stderr.strip()}{_login_hint(settings, completed)}"
-        )
-    if completed.stderr:
-        print(completed.stderr.rstrip("\n"), file=sys.stderr)
+        target, members = str(PurePosixPath(destination).parent), [(local, PurePosixPath(destination).name)]
+    command = f"{_shell_command(['mkdir', '-p', target])} && {_shell_command(['tar', '-xpf', '-', '-C', target])}"
+    argv = _ssh_tar_argv(settings, command)
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors)
+        assert process.stdin is not None
+        try:
+            with process.stdin as pipe, tarfile.open(fileobj=pipe, mode="w|") as archive:
+                for path, name in members:
+                    archive.add(path, arcname=name)
+        except BrokenPipeError:
+            pass  # the far side stopped reading; its exit status and stderr say why
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        _ssh_tar_status(settings, "push", argv, process.wait(), errors)
+
+
+def _extract(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None) -> None:
+    """Extract one tar stream under *target*, member by member.
+
+    tarfile's extraction filters are the trust boundary. Every member except a
+    symlink goes through the ``data`` filter, which refuses names and hard-link
+    targets outside *target* (``..``, through an already-extracted symlink) and
+    device nodes and FIFOs, clears setuid/setgid and group/other write bits, and
+    leaves directory modes at their defaults. Symlinks go through the ``tar``
+    filter, which still refuses a name outside *target* but keeps an absolute
+    link target, which job trees legitimately carry. A leading ``/`` is
+    stripped, so such a member lands inside *target*.
+
+    :param stream: The binary tar stream.
+    :param target: The local directory to extract into.
+    :param rename: ``(member, name)`` for a single file: the only member accepted, a regular file written as *name*.
+    :raises tarfile.TarError: If the stream is malformed or a member is refused.
+    """
+
+    def checked(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
+        if rename is not None:
+            # The landing directory holds the user's other files, so only one regular file may arrive there.
+            if member.name != rename[0] or not member.isreg():
+                raise tarfile.FilterError(f"unexpected member in a single-file pull: {member.name!r}")
+            member = member.replace(name=rename[1], deep=False)
+        # A hard link is checked by data_filter only: tar_filter would let one alias a file outside *target*.
+        return tarfile.tar_filter(member, path) if member.issym() else tarfile.data_filter(member, path)
+
+    # ponytail: tarfile reads a stream cut exactly at a member boundary as a complete archive; only a
+    # remote tar that exits 0 after such a cut slips through, as every dropped connection fails ssh's status.
+    with tarfile.open(fileobj=stream, mode="r|") as archive:
+        archive.extractall(target, filter=checked)
+
+
+def _tar_pull(
+    settings: Mapping[str, object], *, source: str, destination: str, directory: bool, files: list[str] | None
+) -> None:
+    """Receive one tree, one file, or one explicit batch of paths over a single ssh connection.
+
+    :param settings: The persisted remote settings and their credentials.
+    :param source: The remote directory, or the remote file for a single file.
+    :param destination: The local directory, or the local file path for a single file.
+    :param directory: Whether *source* is a tree rather than one file.
+    :param files: The optional batch of paths relative to *source*.
+    :raises RuntimeError: If ssh or the remote tar failed, or the stream was malformed.
+    """
+
+    local = Path(destination).expanduser()
+    rename: tuple[str, str] | None = None
+    if files is not None:
+        remote, names, target = source, files, local
+    elif directory:
+        remote, names, target = source, ["."], local
+    else:
+        remote, names, target = str(PurePosixPath(source).parent), [PurePosixPath(source).name], local.parent
+        rename = (names[0], local.name)
+    argv = _ssh_tar_argv(settings, _shell_command(["tar", "-cf", "-", "-C", remote, "--", *names]))
+    target.mkdir(parents=True, exist_ok=True)
+    broken: Exception | None = None
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors)
+        assert process.stdout is not None
+        try:
+            with process.stdout as stream:
+                _extract(stream, target, rename=rename)
+        except (tarfile.TarError, EOFError) as exc:
+            broken = exc
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        returncode = process.wait()
+        # A refused member closed the stream early, so ssh's own failure would only hide the reason.
+        if not isinstance(broken, tarfile.FilterError):
+            _ssh_tar_status(settings, "pull", argv, returncode, errors)
+    if broken is not None:
+        raise RuntimeError(f"ssh tar pull failed: unusable tar stream: {broken}")
 
 
 def _probe_httk(kind: str, run: _Runner, settings: Mapping[str, object]) -> tuple[list[str], str] | None:
@@ -774,13 +858,9 @@ def _transfer(kind: str, operation: str, request: Mapping[str, object]) -> None:
         else:
             # Only the local side can be inspected; workflow bundles are trees.
             directory = Path(source).expanduser().is_dir() if push else True
-        _rsync(
-            settings,
-            source=source,
-            destination=destination,
-            directory=directory,
-            files=_files(request),
-            push=push,
+        files = _files(request)
+        (_tar_push if push else _tar_pull)(
+            settings, source=source, destination=destination, directory=directory or files is not None, files=files
         )
         _result(operation, path=destination)
         return
@@ -797,7 +877,7 @@ def _transfer(kind: str, operation: str, request: Mapping[str, object]) -> None:
         _result(operation, path=destination)
         return
     resolved = Path(destination).expanduser().resolve()
-    _copy(Path(source).expanduser().resolve(), resolved)
+    _mount_transfer(Path(source).expanduser().resolve(), resolved, files=_files(request))
     _result(operation, path=str(resolved))
 
 

@@ -38,6 +38,13 @@ private credential; use repeatable `--set KEY=VALUE` to add or replace it.
 printing credential values. `remote list`, `remote remove` and
 `remote import-v1` cover the other common management tasks.
 
+Each push or pull is one uncompressed `tar` stream over a single ssh
+connection, however many paths it carries. The local side needs only `ssh`;
+the remote needs a POSIX `tar` on the login shell's `PATH`. A push keeps file
+modes with `tar -p`, but a pull extracts through Python's safe `tarfile`
+filters: pulled files lose group/other write and setuid/setgid bits, and pulled
+directories take default permissions, so a setgid bit is not carried over.
+
 ### Making `httk` available over SSH
 
 `ssh` runs its command in a non-interactive shell. The environment your login
@@ -53,7 +60,9 @@ source ~/venv/bin/activate' kappa
 
 The prelude runs under `set -e`, so a failing line aborts before anything else.
 It runs ahead of every command the adapter sends over ssh, including the
-`httk workspace status` that `remote check` uses to find httk. If only the
+`httk workspace status` that `remote check` uses to find httk, except the
+`tar` that carries a push or pull: that stream must stay free of anything a
+prelude prints. If only the
 `httk` program is somewhere non-standard and the environment is otherwise
 ready, the narrower `httk_command=/path/to/httk` setting is enough.
 
@@ -108,7 +117,7 @@ $ httk remote configure --set interactive_auth=yes kappa
 ```
 
 For sites that forbid connection sharing, `interactive_auth=per-call` prompts on
-every ssh and rsync call instead. Either way, prompts happen only when the
+every ssh call instead. Either way, prompts happen only when the
 command runs in a foreground terminal. Anything without one (a detached
 manager, a cron job, a backgrounded shell job) keeps batch mode and fails with a
 hint instead of hanging. The adapter's `timeout_seconds` (300 s for the `ssh`
@@ -150,8 +159,10 @@ $ httk job transfer --job JOB_UUID kappa:runs default
 A transfer holds the jobs on the source, copies them, adopts them at the
 destination and only then releases the hold, so an interrupted transfer is
 finished by running it again or with `httk job transfer --resume`;
-`httk transfer status` lists what a workspace holds. The steps and their
-recovery are in the `job transfer` section of {doc}`workflow_cli`.
+`httk transfer status` lists what a workspace holds. All jobs of one transfer
+travel together, so it opens the same few ssh connections whether it moves one
+job or a thousand, and it reports each step on stderr (`-q` silences that). The
+steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
 
 ### Local names and second trees
 
@@ -187,7 +198,7 @@ $ httk job transfer --job CHILD default kappa:runs
 Use the `mount` template when the remote filesystem is mounted locally (sshfs,
 NFS, any shared mount) but commands must run on the remote through a separate
 execution channel. An example is a login node reachable only through a
-tunnelled wrapper, with neither `ssh` nor `rsync` available for transfers.
+tunnelled wrapper, with no direct `ssh` login available for transfers.
 Files move as bytes over the mount, and every `httk` command about the
 workspace runs on the remote through the executor.
 

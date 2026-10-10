@@ -22,6 +22,7 @@ from httk.core.identity import (
 )
 
 from .. import _fs, _kernel, _moving, _requests
+from .._bundles import BundleError
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
 from .._state import TERMINAL_STATES
@@ -81,6 +82,7 @@ from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_adapter_timeout,
+    _add_by_path_argument,
     _group,
     _json_value,
     _leaf,
@@ -1220,23 +1222,46 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
 
 
 def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move an ejected bundle into the workspace, publishing its jobs into the states they left.
+    """Move ejected bundles into the workspace in turn, publishing their jobs into the states they left.
 
-    One filesystem moves the bundle in; across filesystems it is copied, and with ``--move`` the source is
+    One filesystem moves a bundle in; across filesystems it is copied, and with ``--move`` the source is
     removed once adopted (for a bundle that is the caller's own to remove, such as a fetched exchange return).
+    A refused bundle does not stop the ones after it. Afterwards, a bundle's parent directory that is a direct
+    child of this workspace's ``transfers/incoming/`` (a transfer's per-batch landing) is removed when empty.
     """
 
     workspace = _modifiable(arguments, context, action="adopt jobs into it")
-    source = context.cwd / Path(arguments.bundle).expanduser()
+    entries: list[dict[str, object]] = []
     with _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={}) as owner:
-        try:
-            report = _moving.adopt(workspace, owner, source, untrusted=False)
-        except _ERRORS as exc:
-            print(f"{arguments.bundle}: {exc}", file=sys.stderr)
-            return 1
+        for bundle in arguments.bundles:
+            entries.append(_adopt_one(workspace, owner, context.cwd / Path(bundle).expanduser(), bundle, arguments))
+    incoming = (workspace.control / "transfers" / "incoming").resolve()
+    for bundle in arguments.bundles:
+        parent = (context.cwd / Path(bundle).expanduser()).parent.resolve()
+        if parent.parent == incoming:
+            try:
+                _fs.remove_empty_dir(_fs.loc(parent))  # kept while a bundle stayed in it
+            except OSError:
+                pass
+    if arguments.json:
+        print(json.dumps({"bundles": entries}, indent=2))
+    return 0 if all(entry["status"] in ("adopted", "already_adopted") for entry in entries) else 1
+
+
+def _adopt_one(
+    workspace: Workspace, owner: _kernel.Owner, source: Path, bundle: str, arguments: argparse.Namespace
+) -> dict[str, object]:
+    """Adopt one bundle of ``job adopt``, printing its human output: its ``--json`` entry."""
+
+    try:
+        report = _moving.adopt(workspace, owner, source, untrusted=False)
+    except _ERRORS as exc:
+        print(f"{bundle}: {exc}", file=sys.stderr)
+        status = "refused" if isinstance(exc, BundleError) else "failed"
+        return {"bundle": bundle, "status": status, "message": str(exc)}
     if report is None:
-        print(f"{arguments.bundle}: another actor took the bundle first", file=sys.stderr)
-        return 1
+        print(f"{bundle}: another actor took the bundle first", file=sys.stderr)
+        return {"bundle": bundle, "status": "taken", "message": "another actor took the bundle first"}
     if arguments.move and report.copied:
         _fs.discard(_fs.loc(source), trash_dir=source.parent, durable=workspace.durable)
     if report.missing_workflows:
@@ -1244,14 +1269,13 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
             f"warning: these workflows are not installed, so their jobs wait: {', '.join(report.missing_workflows)}",
             file=sys.stderr,
         )
-    if arguments.json:
-        print(json.dumps(adopt_document(report), indent=2))
-    elif report.already_adopted:
-        print(f"{arguments.bundle}: already adopted")
-    else:
+    if report.already_adopted and not arguments.json:
+        print(f"{bundle}: already adopted")
+    elif not arguments.json:
         for ref in report.published:
             print(f"{ref.job_key}\t{ref.state}\t{ref.path}")
-    return 0
+    status = "already_adopted" if report.already_adopted else "adopted"
+    return {"bundle": bundle, "status": status, **adopt_document(report)}
 
 
 # ---------------------------------------------------------------------------
@@ -1718,13 +1742,18 @@ def build_job_parser(
         handler=handle_job_adopt,
     )
     _add_workspace_option(adopt, help_text="the workspace to adopt into")
-    adopt.add_argument("bundle", metavar="BUNDLE", help="an ejected job bundle directory")
+    _add_by_path_argument(adopt)
+    adopt.add_argument(
+        "bundles", metavar="BUNDLE", nargs="+", help="an ejected job bundle directory (several are adopted in turn)"
+    )
     adopt.add_argument(
         "--move",
         action="store_true",
         help="remove the bundle once adopted when it had to be copied from another filesystem",
     )
-    adopt.add_argument("--json", action="store_true", help="print the result as one JSON document")
+    adopt.add_argument(
+        "--json", action="store_true", help='print one JSON document, {"bundles": [...]}, an entry per BUNDLE'
+    )
     add_durability_arguments(adopt)
 
     build_transfer_parser(group)

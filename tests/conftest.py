@@ -2,7 +2,7 @@
 
 No test that uses this needs a network or a batch system. A stand-in ``ssh`` on
 ``PATH`` runs the command it is given through a local shell rooted in a per-test
-directory, exactly as a remote sshd would, so genuine ``rsync`` transfers,
+directory, exactly as a remote sshd would, so genuine ``tar`` transfers,
 genuine quoting and genuine exit statuses are exercised. A stand-in ``sbatch``
 spools the script it was handed and prints a Slurm-shaped receipt.
 """
@@ -272,8 +272,8 @@ def install_httk_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
     """Put an ``httk`` shim first on ``PATH`` and expose the package on ``PYTHONPATH``.
 
     This is the part of the stand-in cluster the ``mount`` kind also needs: that
-    kind requires neither ssh nor rsync, so its tests reuse this directly without
-    the ``remote`` fixture's rsync gate or its ssh/sbatch stand-ins.
+    kind requires neither ssh nor tar, so its tests reuse this directly without
+    the ``remote`` fixture's tar gate or its ssh/sbatch stand-ins.
 
     :param tmp_path: The per-test temporary directory the binaries are rooted in.
     :param monkeypatch: The fixture that scopes the ``PATH``/``PYTHONPATH`` edits.
@@ -293,8 +293,8 @@ def install_httk_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
 
 @pytest.fixture
 def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
-    if shutil.which("rsync") is None:  # pragma: no cover - depends on the host
-        pytest.skip("rsync is unavailable, so no honest transfer can be exercised")
+    if shutil.which("tar") is None:  # pragma: no cover - depends on the host
+        pytest.skip("tar is unavailable, so no honest transfer can be exercised")
     binaries = install_httk_toolchain(tmp_path, monkeypatch)
     root = tmp_path / "remote"
     root.mkdir()

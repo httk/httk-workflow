@@ -66,7 +66,7 @@ bundle that stops satisfying it stops being usable.
   "format_version": 2,
   "kind": "pbs",
   "settings": {"host": "login.example.org"},
-  "required_binaries": ["rsync", "ssh"],
+  "required_binaries": ["ssh"],
   "timeout_seconds": 300
 }
 ```
@@ -105,8 +105,9 @@ of, for example, copying a cluster job into the local filesystem.
 #### `required_binaries`
 
 `required_binaries` is checked locally at validation time. Do not list binaries
-that exist only on the far side of a connection. The local `ssh` and `rsync`
-clients are local requirements; a program used by a workspace launcher is not a
+that exist only on the far side of a connection. The local `ssh` client is a
+local requirement, while the `tar` the maintained `ssh` adapter runs on the
+remote is not; a program used by a workspace launcher is not a
 remote-adapter requirement.
 
 ## Running an operation
@@ -307,7 +308,7 @@ target.
 | `source` | nonempty string, required | where the data is now |
 | `destination` | nonempty string, required | where it must end up |
 | `directory` | boolean, optional | whether the transfer is of a directory's *contents*; inferred from the local side when absent |
-| `files` | array of relative paths, optional | transfer only these, relative to `source`; implies a directory transfer |
+| `files` | array of relative paths, optional | transfer only these (a directory entry with its contents), relative to `source`; implies a directory transfer |
 
 `files` entries are refused if they are absolute or contain `..`, so a transfer
 manifest cannot name anything outside the workspace it came from.
@@ -437,10 +438,14 @@ Every remote command string is built by that helper and nothing else. A manager
 launcher owns any generated scheduler script and its quoting; see
 {doc}`/details/launchers` for that separate contract.
 
-`rsync` transfers pass `--protect-args`, so even file names travel inside the
-protocol rather than through the remote shell. An explicit `files` batch is
-written to a temporary file passed as `--files-from=`, not placed on the command
-line.
+The maintained `ssh` adapter moves each push or pull as one uncompressed `tar`
+stream over a single ssh connection: `mkdir -p DEST && tar -xpf - -C DEST` on
+the remote for a push, `tar -cf - -C SRC -- PATH...` for a pull. Both command
+lines, including every name of an explicit `files` batch, are built by
+`_shell_command`. The adapter's `prelude` is not run before them, because
+anything it printed would corrupt the stream. The local side packs and unpacks
+with Python's `tarfile`, extracting with its `tar` filter, so no member can land
+outside the destination.
 
 ## Exit codes, refusals, and timeouts
 
@@ -467,7 +472,7 @@ tells the operator what to do next; a traceback does not.
 
 The timeout is `timeout_seconds` from `remote.json`, overridable per call with
 `--adapter-timeout` on the command line. The caller enforces it by killing the
-operation. An adapter that may legitimately take minutes, such as an `rsync` of
+operation. An adapter that may legitimately take minutes, such as a transfer of
 a large campaign, belongs in a bundle whose `timeout_seconds` allows for it.
 
 ### Scheduler sites
@@ -485,5 +490,5 @@ The shipped implementation is the definitive worked example.
 {py:mod}`httk.workflow.adapter_protocol` is its public name and carries the
 contract in its docstring; {py:mod}`httk.workflow.adapter_runtime` is the
 implementation the `adapter` dispatcher executes. Both names refer to the same
-objects. Read `_shell_command` and `_rsync` there before writing code that
+objects. Read `_shell_command` and `_tar_push` there before writing code that
 composes a command for another machine.

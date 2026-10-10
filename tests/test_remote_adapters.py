@@ -2,15 +2,18 @@
 
 No test here needs a network or a batch system: the stand-in cluster of
 ``conftest`` provides an ``ssh`` that runs the remote command locally and an
-``sbatch`` that spools the script it was handed, so genuine ``rsync``
+``sbatch`` that spools the script it was handed, so genuine ``tar``
 transfers, genuine quoting and genuine exit statuses are exercised.
 """
 
+import io
 import json
 import os
 import shlex
+import shutil
 import stat
 import sys
+import tarfile
 import uuid
 from pathlib import Path
 
@@ -140,27 +143,248 @@ def test_ssh_push_refuses_a_path_that_escapes_the_transfer(tmp_path: Path, remot
         )
 
 
-def test_ssh_push_creates_the_destination_without_rsync_mkpath(
-    tmp_path: Path,
-    remote: Remote,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Older rsync releases lack --mkpath, so the parent is made over the
-    # transport first; the fallback is exercised in this process.
-    monkeypatch.setattr(adapter_runtime, "_rsync_help", lambda: "")
-    source = _tree(tmp_path / "source")
-    destination = remote.root / "deep" / "nested" / "target"
-
-    adapter_runtime._rsync(
-        {"host": FAKE_HOST, "username": "someone"},
-        source=str(source),
-        destination=str(destination),
-        directory=True,
-        files=None,
-        push=True,
+def _push(bundle: Path, source: Path, destination: Path, **request: object) -> dict[str, object]:
+    return run_adapter(
+        bundle, "push", {"remote_settings": {}, "source": str(source), "destination": str(destination), **request}
     )
 
+
+def _pull(bundle: Path, source: Path, destination: Path, **request: object) -> dict[str, object]:
+    return run_adapter(
+        bundle, "pull", {"remote_settings": {}, "source": str(source), "destination": str(destination), **request}
+    )
+
+
+def test_ssh_push_and_pull_each_use_one_connection(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="one-connection")
+    bundle = fake_remote(project)
+    source = tmp_path / "source"
+    for index in range(5):
+        (source / f"job{index}" / "data").mkdir(parents=True)
+        (source / f"job{index}" / "data" / "file.txt").write_text(f"job {index}\n", encoding="utf-8")
+    (source / "skipped").write_text("not listed\n", encoding="utf-8")
+    destination = remote.root / "runs" / "batch"
+    files = [f"job{index}" for index in range(5)]
+
+    _push(bundle, source, destination, files=files)
+    assert len(remote.commands()) == 1
+    # Each listed directory travels recursively; nothing unlisted does.
+    assert (destination / "job4" / "data" / "file.txt").read_text(encoding="utf-8") == "job 4\n"
+    assert not (destination / "skipped").exists()
+
+    back = tmp_path / "back"
+    _pull(bundle, destination, back, files=files)
+    assert len(remote.commands()) == 2
+    assert sorted(item.name for item in back.iterdir()) == files
+    assert (back / "job0" / "data" / "file.txt").read_text(encoding="utf-8") == "job 0\n"
+
+    _push(bundle, source, remote.root / "runs" / "whole")
+    _pull(bundle, remote.root / "runs" / "whole", tmp_path / "whole")
+    assert len(remote.commands()) == 4
+    assert (tmp_path / "whole" / "skipped").read_text(encoding="utf-8") == "not listed\n"
+    assert not any("rsync" in item for item in remote.commands())
+
+
+def test_ssh_push_and_pull_a_single_file(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="single-file")
+    bundle = fake_remote(project)
+    source = tmp_path / "local name.txt"
+    source.write_text("one file\n", encoding="utf-8")
+    destination = remote.root / "files" / "remote name.txt"
+
+    assert _push(bundle, source, destination)["path"] == str(destination)
+    assert destination.read_text(encoding="utf-8") == "one file\n"
+    assert [item.name for item in destination.parent.iterdir()] == ["remote name.txt"]
+
+    back = tmp_path / "back" / "pulled.txt"
+    assert _pull(bundle, destination, back, directory=False)["path"] == str(back)
+    assert back.read_text(encoding="utf-8") == "one file\n"
+    assert [item.name for item in back.parent.iterdir()] == ["pulled.txt"]
+    assert len(remote.commands()) == 2
+
+
+def test_ssh_push_creates_a_missing_destination_directory(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="mkdir")
+    bundle = fake_remote(project)
+    destination = remote.root / "deep" / "nested" / "target"
+
+    _push(bundle, _tree(tmp_path / "source"), destination)
+
     assert (destination / "files" / "runner").read_text(encoding="utf-8") == _RUNNER
+    assert len(remote.commands()) == 1
+
+
+def test_ssh_push_needs_no_rsync(tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="no-rsync")
+    bundle = fake_remote(project)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "python3").write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
+    (tools / "python3").chmod(0o755)
+    for name in ("tar", "mkdir"):
+        found = shutil.which(name)
+        assert found is not None
+        (tools / name).symlink_to(found)
+    path = f"{remote.binaries}{os.pathsep}{tools}"
+    assert shutil.which("rsync", path=path) is None
+    monkeypatch.setenv("PATH", path)
+    destination = remote.root / "runs" / "no-rsync"
+
+    _push(bundle, _tree(tmp_path / "source"), destination)
+
+    assert (destination / "files" / "runner").read_text(encoding="utf-8") == _RUNNER
+
+
+def test_ssh_transfer_reports_a_refused_connection(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="refused")
+    bundle = fake_remote(project)
+    source = _tree(tmp_path / "source")
+    monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
+
+    with pytest.raises(RuntimeError, match=r"ssh tar push failed \(255\).*Connection refused"):
+        _push(bundle, source, remote.root / "runs" / "refused")
+    with pytest.raises(RuntimeError, match=r"ssh tar pull failed \(255\).*Connection refused"):
+        _pull(bundle, remote.root / "runs" / "refused", tmp_path / "back")
+    assert not (remote.root / "runs" / "refused").exists()
+
+
+def test_ssh_pull_reports_a_truncated_stream(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="truncated")
+    bundle = fake_remote(project)
+    big = tmp_path / "big"
+    big.write_bytes(b"x" * 5000)
+    # A remote ``tar`` that exits 0 halfway through a member: only the stream itself shows the damage.
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w", format=tarfile.USTAR_FORMAT) as writer:
+        writer.add(big, arcname="big")
+    half = tmp_path / "half.tar"
+    half.write_bytes(archive.getvalue()[:2048])
+    remote.install("tar", f"#!/bin/sh\ncat {shlex.quote(str(half))}\n")
+
+    with pytest.raises(RuntimeError, match="unusable tar stream"):
+        _pull(bundle, remote.root, tmp_path / "back")
+
+
+def test_ssh_transfer_shares_the_interactive_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(adapter_runtime, "_terminal_present", lambda: True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    argv = adapter_runtime._ssh_tar_argv({"host": FAKE_HOST, "interactive_auth": "yes"}, "true")
+    assert any(item.startswith("ControlPath=") for item in argv)
+
+
+def _hostile(members: list[tuple[tarfile.TarInfo, bytes]]) -> io.BytesIO:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as writer:
+        for info, data in members:
+            info.size = len(data)
+            writer.addfile(info, io.BytesIO(data) if info.isreg() else None)
+    stream.seek(0)
+    return stream
+
+
+def test_ssh_pull_refuses_a_member_that_escapes(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="hostile")
+    bundle = fake_remote(project)
+    hostile = tmp_path / "hostile.tar"
+    hostile.write_bytes(_hostile([(tarfile.TarInfo("../escape"), b"x")]).getvalue())
+    remote.install("tar", f"#!/bin/sh\ncat {shlex.quote(str(hostile))}\n")
+
+    with pytest.raises(RuntimeError, match="outside the destination"):
+        _pull(bundle, remote.root, tmp_path / "back")
+    assert not (tmp_path / "escape").exists()
+
+
+def _typed(name: str, kind: bytes, linkname: str = "") -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = kind, linkname
+    return info
+
+
+def test_local_extraction_refuses_a_hard_link_out_of_the_destination(tmp_path: Path) -> None:
+    victim = tmp_path / "home" / "victim.txt"
+    victim.parent.mkdir()
+    victim.write_text("original\n", encoding="utf-8")
+    destination = tmp_path / "landing"
+    destination.mkdir()
+    # The link would make x share the victim's inode, and the regular x would then overwrite it.
+    stream = _hostile([(_typed("x", tarfile.LNKTYPE, "../home/victim.txt"), b""), (tarfile.TarInfo("x"), b"pwned\n")])
+
+    with pytest.raises(tarfile.LinkOutsideDestinationError):
+        adapter_runtime._extract(stream, destination)
+    assert victim.read_text(encoding="utf-8") == "original\n"
+    assert victim.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("kind", [tarfile.FIFOTYPE, tarfile.CHRTYPE, tarfile.BLKTYPE])
+def test_local_extraction_refuses_special_files(tmp_path: Path, kind: bytes) -> None:
+    with pytest.raises(tarfile.SpecialFileError):
+        adapter_runtime._extract(_hostile([(_typed("bundle.json", kind), b"")]), tmp_path)
+    assert not (tmp_path / "bundle.json").exists()
+
+
+def test_local_extraction_keeps_inner_hard_links_and_absolute_symlinks(tmp_path: Path) -> None:
+    members = [
+        (tarfile.TarInfo("data"), b"payload\n"),
+        (_typed("alias", tarfile.LNKTYPE, "data"), b""),
+        (_typed("potential", tarfile.SYMTYPE, "/opt/pseudopotentials/Si"), b""),
+    ]
+
+    adapter_runtime._extract(_hostile(members), tmp_path)
+
+    assert (tmp_path / "alias").stat().st_ino == (tmp_path / "data").stat().st_ino
+    assert os.readlink(tmp_path / "potential") == "/opt/pseudopotentials/Si"
+
+
+@pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_single_file_pull_accepts_only_a_regular_file(tmp_path: Path, kind: bytes) -> None:
+    sibling = tmp_path / "sibling.txt"
+    sibling.write_text("original\n", encoding="utf-8")
+    # Renamed onto the destination, the link would alias the sibling and the regular member would overwrite it.
+    stream = _hostile([(_typed("remote.txt", kind, "sibling.txt"), b""), (tarfile.TarInfo("remote.txt"), b"pwned\n")])
+
+    with pytest.raises(tarfile.FilterError, match="single-file pull"):
+        adapter_runtime._extract(stream, tmp_path, rename=("remote.txt", "pulled.txt"))
+    assert sibling.read_text(encoding="utf-8") == "original\n"
+    assert not (tmp_path / "pulled.txt").exists()
+
+
+def test_local_extraction_keeps_hostile_members_inside_the_destination(tmp_path: Path) -> None:
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(tarfile.OutsideDestinationError):
+        adapter_runtime._extract(_hostile([(tarfile.TarInfo("../escape"), b"x")]), destination)
+    assert not (tmp_path / "escape").exists()
+
+    # A symlink to an absolute target is kept, but nothing is extracted through it.
+    link = tarfile.TarInfo("link")
+    link.type, link.linkname = tarfile.SYMTYPE, str(outside)
+    with pytest.raises(tarfile.OutsideDestinationError):
+        adapter_runtime._extract(_hostile([(link, b""), (tarfile.TarInfo("link/evil"), b"x")]), destination)
+    assert os.readlink(destination / "link") == str(outside)
+    assert not (outside / "evil").exists()
+
+    # tarfile strips a leading "/", so an absolute name lands inside the destination, never at its own path.
+    absolute = outside / "absolute"
+    adapter_runtime._extract(_hostile([(tarfile.TarInfo(str(absolute)), b"x")]), destination)
+    assert not absolute.exists()
+    assert (destination / str(absolute).lstrip("/")).read_bytes() == b"x"
+
+    setuid = tarfile.TarInfo("setuid")
+    setuid.mode = 0o4755
+    adapter_runtime._extract(_hostile([(setuid, b"x")]), destination)
+    assert stat.S_IMODE((destination / "setuid").stat().st_mode) == 0o755
 
 
 def test_remote_invoke_keeps_quoting_hostile_arguments_intact(tmp_path: Path, remote: Remote) -> None:
@@ -706,8 +930,8 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     # Every step of the flow really crossed the stand-in transport.
     commands = remote.commands()
     assert any("workspace status --json station" in item for item in commands)
-    assert any("job adopt --json --workspace station" in item for item in commands)
-    assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
+    assert any("job adopt --json --by-path --workspace " in item for item in commands)
+    assert any(item.startswith("mkdir -p ") and " && tar -xpf - -C " in item for item in commands)
 
 
 def test_probe_remote_workspace_refuses_an_older_remote_with_the_upgrade(tmp_path: Path) -> None:

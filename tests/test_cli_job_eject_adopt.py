@@ -72,8 +72,9 @@ def test_adopt_json_reports_already_adopted(tmp_path: Path, capsys: pytest.Captu
     assert command(["job", "adopt", "--workspace", target_name, str(bundle)], context(tmp_path)) == 0
     capsys.readouterr()
     assert command(["job", "adopt", "--workspace", target_name, str(incoming), "--json"], context(tmp_path)) == 0
-    document = json.loads(capsys.readouterr().out)
-    assert document["already_adopted"] is True and document["published"] == []
+    (entry,) = json.loads(capsys.readouterr().out)["bundles"]
+    assert entry["bundle"] == str(incoming) and entry["status"] == "already_adopted"
+    assert entry["already_adopted"] is True and entry["published"] == []
     assert not incoming.exists()
     # The operator's own copy is refused and left in place.
     assert command(["job", "adopt", "--workspace", target_name, str(copy / bundle.name)], context(tmp_path)) == 1
@@ -181,3 +182,70 @@ def test_adopt_move_removes_a_bundle_copied_from_another_filesystem(
     # A copy leaves its source; --move removes it, as the client fetching its own outbox entry wants.
     assert bundle.exists() is not move
     assert sorted(os.listdir(tmp_path / "outbox")) == ([] if move else [bundle.name])
+
+
+def _eject(source_name: str, job_id: str, out: Path, capsys: pytest.CaptureFixture[str]) -> Path:
+    argv = ["job", "eject", "--workspace", source_name, job_id, str(out), "--json"]
+    assert command(argv, context(out.parent)) == 0
+    return Path(json.loads(capsys.readouterr().out)["destination"])
+
+
+def test_adopt_takes_several_bundles_and_a_refusal_does_not_stop_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    jobs = [single(source, "succeeded", 10 + index) for index in range(3)]
+    bundles = [_eject(source_name, str(mapping["id"]), tmp_path / "out", capsys) for mapping, _, _ in jobs]
+    # The middle one is refused: its job is in the target already, and the bundle is an operator's own.
+    shutil.copytree(bundles[1], tmp_path / "keep", symlinks=True)
+    assert command(["job", "adopt", "--workspace", target_name, str(tmp_path / "keep")], context(tmp_path)) == 0
+    capsys.readouterr()
+    argv = ["job", "adopt", "--workspace", target_name, "--json", *map(str, bundles)]
+    assert command(argv, context(tmp_path)) == 1
+    entries = json.loads(capsys.readouterr().out)["bundles"]
+    assert [entry["bundle"] for entry in entries] == list(map(str, bundles))
+    assert [entry["status"] for entry in entries] == ["adopted", "refused", "adopted"]
+    assert "already adopted" in entries[1]["message"] and len(entries[2]["published"]) == 1
+    assert_in(target, jobs)
+    assert bundles[1].is_dir() and not bundles[0].exists() and (tmp_path / "out").is_dir()
+
+
+def test_adopt_discards_a_redelivery_from_a_batch_landing_and_removes_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    mapping, state, priority = single(source)
+    bundle = _eject(source_name, str(mapping["id"]), tmp_path / "out", capsys)
+    landing = target.control / "transfers" / "incoming" / "batch-token"
+    shutil.copytree(bundle, landing / bundle.name, symlinks=True)
+    assert command(["job", "adopt", "--workspace", target_name, str(bundle)], context(tmp_path)) == 0
+    capsys.readouterr()
+    # An emptied parent outside the workspace's transfers/incoming is never removed.
+    assert (tmp_path / "out").is_dir() and not any((tmp_path / "out").iterdir())
+    # The batch's copy is a duplicate delivery: discarded, and the emptied landing goes with it.
+    argv = ["job", "adopt", "--workspace", target_name, "--json", str(landing / bundle.name)]
+    assert command(argv, context(tmp_path)) == 0
+    assert json.loads(capsys.readouterr().out)["bundles"][0]["status"] == "already_adopted"
+    assert not landing.exists() and (target.control / "transfers" / "incoming").is_dir()
+    assert_in(target, [(mapping, state, priority)])
+
+
+def test_adopt_reports_an_error_that_is_no_refusal_as_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import _moving
+
+    source, source_name = registered(tmp_path, "a")
+    _, target_name = registered(tmp_path, "b")
+    mapping, _, _ = single(source)
+    bundle = _eject(source_name, str(mapping["id"]), tmp_path / "out", capsys)
+
+    def broken(*_arguments: object, **_options: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_moving, "adopt", broken)
+    assert command(["job", "adopt", "--workspace", target_name, "--json", str(bundle)], context(tmp_path)) == 1
+    (entry,) = json.loads(capsys.readouterr().out)["bundles"]
+    assert entry["status"] == "failed" and entry["message"] == "disk full"

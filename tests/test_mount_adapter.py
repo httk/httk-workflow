@@ -505,7 +505,7 @@ def test_a_job_reaches_a_mount_workspace_and_runs_there(tmp_path: Path, mount: M
     # while the bundle bytes moved through the mount rather than the executor.
     commands = mount.commands()
     assert any("workspace status --json station" in item for item in commands)
-    assert any("job adopt --json --workspace station" in item for item in commands)
+    assert any("job adopt --json --by-path --workspace " in item for item in commands)
     assert not any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
 
