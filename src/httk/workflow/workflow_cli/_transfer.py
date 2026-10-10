@@ -102,7 +102,7 @@ def _remote_batch(
         except _ERRORS as exc:
             print(f"remote {target}: {exc}", file=sys.stderr)
             failed = True
-    if json_output:
+    if json_output and results:
         print(json.dumps(results, indent=2, sort_keys=True))
     return 1 if failed else 0
 
@@ -338,7 +338,9 @@ def build_remote_parser(
             help=(
                 "one adapter setting, e.g. host=, username=, port=, httk_command=, or "
                 "prelude= (shell run before each remote command, e.g. module loads and a "
-                "venv activation); a secret one is stored in credentials.json (repeatable)"
+                "venv activation), or interactive_auth= (yes|per-call lets ssh prompt in the "
+                "terminal for a password or second factor); a secret one is stored in "
+                "credentials.json (repeatable)"
             ),
         )
         parser.add_argument(

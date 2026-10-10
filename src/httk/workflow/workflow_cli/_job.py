@@ -733,6 +733,8 @@ def request_remote_job_result(
     context: CLIContext,
     arguments: argparse.Namespace,
     identity: OperatorIdentity,
+    *,
+    interactive: bool = True,
 ) -> tuple[int, str, str]:
     """Build request documents remotely, sign them here, and post them remotely.
 
@@ -740,6 +742,7 @@ def request_remote_job_result(
     :param context: The invocation context.
     :param arguments: The request arguments (``action``, ``job_id``, ``reason`` and the options).
     :param identity: The signing identity.
+    :param interactive: Whether the adapter may prompt on this terminal.
     :return: The far side's exit status, standard output and standard error.
     """
 
@@ -760,7 +763,9 @@ def request_remote_job_result(
     if arguments.force:
         argv.append("--force")
     argv.extend(arguments.job_id)
-    result = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=arguments.adapter_timeout)
+    result = run_adapter(
+        target.bundle, "invoke", {"argv": argv}, timeout=arguments.adapter_timeout, interactive=interactive
+    )
     stderr = str(result.get("stderr", ""))
     if result.get("returncode") != 0:
         return int(result.get("returncode", 1) or 1), "", stderr
@@ -781,7 +786,9 @@ def request_remote_job_result(
         publish.append(f"--timeout={arguments.timeout}")
     if getattr(arguments, "no_durable", False):
         publish.append("--no-durable")
-    published = run_adapter(target.bundle, "invoke", {"argv": publish}, timeout=arguments.adapter_timeout)
+    published = run_adapter(
+        target.bundle, "invoke", {"argv": publish}, timeout=arguments.adapter_timeout, interactive=interactive
+    )
     return (
         int(published.get("returncode", 0) or 0),
         str(published.get("stdout", "")),

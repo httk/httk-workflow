@@ -857,9 +857,20 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
 
 
 def submit_remote_manager_result(
-    binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext
+    binding: WorkspaceBinding,
+    arguments: argparse.Namespace,
+    context: CLIContext,
+    *,
+    interactive: bool = True,
 ) -> tuple[int, str, str]:
-    """Invoke a remote manager command without writing to process streams."""
+    """Invoke a remote manager command without writing to process streams.
+
+    :param binding: The remote workspace binding.
+    :param arguments: The manager arguments.
+    :param context: The invocation context.
+    :param interactive: Whether the adapter may prompt on this terminal.
+    :return: The far side's exit status, standard output and standard error.
+    """
 
     name = binding.name.split(":", 1)[1]
     return remote_workspace_output(
@@ -867,6 +878,7 @@ def submit_remote_manager_result(
         context,
         _remote_manager_argv(arguments, name),
         timeout=arguments.adapter_timeout,
+        interactive=interactive,
     )
 
 

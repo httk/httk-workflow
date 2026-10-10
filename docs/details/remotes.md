@@ -61,6 +61,61 @@ The adapter `prelude` is not the workspace's `environment.prelude`. The adapter
 prelude prepares the shell so `httk` can run at all; the manager applies
 `environment.prelude` later, once it is already running on the remote.
 
+### Passwords and second factors
+
+The `ssh` adapter runs ssh with `BatchMode=yes`: it logs in with keys only and
+never prompts. A site that asks for a password or a one-time code therefore
+answers `Permission denied (keyboard-interactive)`.
+
+The preferred remedy is OpenSSH connection sharing. Log in once and let later
+ssh calls, including httk's, reuse that connection without authenticating
+again. Add a block to `~/.ssh/config`:
+
+```text
+Host kappa kappa.example.org
+    HostName kappa.example.org
+    User me
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%C
+    ControlPersist 12h
+```
+
+Open the shared connection, answering the prompts, and close it when done:
+
+```console
+$ ssh -fN kappa
+$ ssh -O exit kappa
+```
+
+ssh matches `Host` blocks against the host name on its command line, not
+against `HostName`; httk passes the remote's `host=` setting (a `username@`
+prefix plays no part in the match). Either configure the remote with `host=`
+set to the alias, or list the full hostname on the `Host` line too, as above. The shared connection must be open whenever httk
+reaches the remote; a manager that runs unattended cannot reopen it.
+
+Where connection sharing is not an option, set `interactive_auth=yes`. ssh then
+prompts in your terminal for the password or code; httk never sees the secret.
+httk keeps its own shared connection open for 10 minutes after its last use
+(`ControlPersist=600`, with the socket under `$XDG_RUNTIME_DIR/httk` or
+`/tmp/httk-ssh-UID`), so a command such as `remote check` prompts once. That
+control socket replaces any `ControlPath` from `~/.ssh/config`: if you already
+share connections there, keep the default (or `per-call`), or you are prompted
+despite the open connection. Configuring checks connectivity,
+so the configure command itself already prompts:
+
+```console
+$ httk remote configure --set interactive_auth=yes kappa
+```
+
+For sites that forbid connection sharing, `interactive_auth=per-call` prompts on
+every ssh and rsync call instead. Either way, prompts happen only when the
+command runs in a foreground terminal. Anything without one (a detached
+manager, a cron job, a backgrounded shell job) keeps batch mode and fails with a
+hint instead of hanging. The adapter's `timeout_seconds` (300 s for the `ssh`
+template) still bounds each operation, including the time you spend typing.
+`httk monitor` never prompts; for a remote that needs a second factor, open the
+shared connection first, for example with `httk remote check NAME`.
+
 ## Working with remote workspaces
 
 Initialize a named workspace on the remote by putting the remote name before

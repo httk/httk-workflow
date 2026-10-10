@@ -35,6 +35,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,9 @@ RESULT_FORMAT = "httk-computer-result"
 _CONNECT_TIMEOUT = 20
 _FALSE_SETTINGS = frozenset({"0", "false", "no", "off"})
 _WHITESPACE = re.compile(r"\s")
+# OpenSSH's own denial lists the methods it tried; this keeps a remote command's
+# "mkdir: ...: Permission denied" or rsync's "Permission denied (13)" unhinted.
+_SSH_DENIED = re.compile(r"Permission denied \([a-z,-]+\)")
 
 _MISSING_HTTK = (
     "httk-workflow is not available on the target; log in there and make sure "
@@ -247,8 +251,80 @@ def _remote_httk(argv: Sequence[str], settings: Mapping[str, object]) -> list[st
     return arguments
 
 
+def _terminal_present() -> bool:
+    """Return whether this process may prompt on its controlling terminal.
+
+    ``ssh`` reads passwords and keyboard-interactive answers from ``/dev/tty``.
+    A terminal on stdin is not enough: a backgrounded process that reads
+    ``/dev/tty`` is stopped by ``SIGTTIN``, so the process must also be in the
+    terminal's foreground process group. Anything else -- an unattended
+    manager, a cron job, a backgrounded shell job -- must never block on a
+    prompt and keeps batch mode.
+
+    :return: True only for a foreground process attached to a terminal.
+    """
+
+    try:
+        if sys.stdin is None:  # started with fd 0 closed
+            return False
+        return sys.stdin.isatty() and os.tcgetpgrp(sys.stdin.fileno()) == os.getpgrp()
+    except (OSError, ValueError):
+        return False
+
+
+def _interactive_auth(settings: Mapping[str, object]) -> str:
+    """Return the ``interactive_auth`` mode: ``no``, ``yes`` or ``per-call``.
+
+    :param settings: The persisted remote settings and their credentials.
+    :return: The normalised mode; ``no`` when the setting is absent.
+    :raises ValueError: If the setting names no known mode.
+    """
+
+    value = _text(settings, "interactive_auth")
+    if value is None or value.lower() in _FALSE_SETTINGS:
+        return "no"
+    if value.lower() in {"yes", "true", "1", "on"}:
+        return "yes"
+    if value.lower() == "per-call":
+        return "per-call"
+    raise ValueError(f"remote setting interactive_auth must be no, yes or per-call: {value!r}")
+
+
+def _control_directory() -> Path:
+    """Return the private directory that holds httk's ssh control sockets.
+
+    The fallback is ``/tmp`` itself, not ``tempfile.gettempdir()``: OpenSSH
+    refuses a control socket path of 108 bytes or more, and a long ``TMPDIR``
+    (job scratch, containers) would exceed it once ``%C`` adds 40 characters.
+
+    :return: ``$XDG_RUNTIME_DIR/httk``, or ``/tmp/httk-ssh-UID``.
+    :raises ValueError: If the directory exists but is not one this user owns.
+    """
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    directory = Path(runtime) / "httk" if runtime else Path("/tmp") / f"httk-ssh-{os.getuid()}"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    status = os.lstat(directory)
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+        raise ValueError(f"ssh control directory is not a directory owned by this user: {directory}")
+    return directory
+
+
 def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
-    """Return the ``ssh`` argument vector that carries no remote command."""
+    """Return the ``ssh`` argument vector that carries no remote command.
+
+    By default ssh runs with ``BatchMode=yes``: key-based login only, never a
+    prompt. The ``interactive_auth`` setting lifts that only while a foreground
+    terminal is attached (:func:`_terminal_present`), so ssh can ask for a
+    password or second factor on ``/dev/tty``; httk never sees the answer.
+    ``yes`` also shares one connection for ten minutes through a control socket,
+    so the following ssh and rsync calls do not prompt again; ``per-call`` lets
+    every call prompt, for sites that forbid connection sharing.
+
+    :param settings: The persisted remote settings and their credentials.
+    :return: The ssh argument vector without destination or command.
+    :raises ValueError: If ``port`` or ``interactive_auth`` is malformed.
+    """
 
     argv = ["ssh"]
     port = _text(settings, "port")
@@ -256,8 +332,47 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
         if not port.isdigit():
             raise ValueError(f"remote setting port must be numeric: {port!r}")
         argv += ["-p", port]
-    argv += ["-o", "BatchMode=yes", "-o", f"ConnectTimeout={_CONNECT_TIMEOUT}"]
+    mode = _interactive_auth(settings)
+    if mode == "no" or not _terminal_present():
+        return [*argv, "-o", "BatchMode=yes", "-o", f"ConnectTimeout={_CONNECT_TIMEOUT}"]
+    # OpenSSH counts prompts per method, and a site may enter keyboard-interactive twice
+    # (password, then one-time code); 2 allows that and bounds a typo to one retry.
+    argv += ["-o", f"ConnectTimeout={_CONNECT_TIMEOUT}", "-o", "NumberOfPasswordPrompts=2"]
+    if mode == "yes":
+        argv += [
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            "ControlPersist=600",
+            "-o",
+            f"ControlPath={_control_directory()}/%C",
+        ]
     return argv
+
+
+def _login_hint(settings: Mapping[str, object], completed: "subprocess.CompletedProcess[str]") -> str:
+    """Return a hint to append when ssh was denied authentication, else ``""``.
+
+    Only ssh's own failure status 255 (which rsync passes on for its transport)
+    counts: a remote command that itself ran ssh forwards the same denial text
+    with its own status.
+
+    :param settings: The persisted remote settings and their credentials.
+    :param completed: The finished ssh or rsync call.
+    :return: The hint, starting with ``"; "``, or an empty string.
+    """
+
+    if completed.returncode != 255 or not _SSH_DENIED.search(completed.stderr):
+        return ""
+    if _interactive_auth(settings) == "no":
+        return (
+            "; ssh ran without a terminal prompt (BatchMode): if this site asks for a password or a "
+            "second factor, keep a shared ssh connection open or set interactive_auth=yes "
+            "(see the remotes guide)"
+        )
+    if _terminal_present():
+        return ""  # ssh prompted; the answer itself was refused
+    return "; interactive_auth is set but no terminal is attached: run this command from a foreground terminal"
 
 
 def _ssh_destination(settings: Mapping[str, object]) -> str:
@@ -521,7 +636,9 @@ def _rsync(
         if listing is not None:
             listing.unlink(missing_ok=True)
     if completed.returncode != 0:
-        raise RuntimeError(f"rsync failed ({completed.returncode}): {completed.stderr.strip()}")
+        raise RuntimeError(
+            f"rsync failed ({completed.returncode}): {completed.stderr.strip()}{_login_hint(settings, completed)}"
+        )
     if completed.stderr:
         print(completed.stderr.rstrip("\n"), file=sys.stderr)
 
@@ -553,7 +670,11 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
     if kind == "ssh":
         reachable = run(["true"])
         if reachable.returncode != 0:
-            _refusal("install", f"cannot reach {_ssh_destination(settings)}: {reachable.stderr.strip()}")
+            _refusal(
+                "install",
+                f"cannot reach {_ssh_destination(settings)}: {reachable.stderr.strip()}"
+                f"{_login_hint(settings, reachable)}",
+            )
             return
     elif kind == "mount":
         reachable = run(["true"])
@@ -587,8 +708,8 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
     if completed.returncode != 0:
         _refusal(
             "configure",
-            f"cannot reach {_ssh_destination(settings)}: {completed.stderr.strip() or completed.returncode}; "
-            "set check_connectivity=no to configure the remote anyway",
+            f"cannot reach {_ssh_destination(settings)}: {completed.stderr.strip() or completed.returncode}"
+            f"{_login_hint(settings, completed)}; set check_connectivity=no to configure the remote anyway",
         )
         return
     _result("configure", configured=True, connectivity="ok")
@@ -685,7 +806,11 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
     argv = _argv(request, operation)
     cwd = _cwd(request) if operation == "invoke" else None
     completed = _runner(kind, settings)(argv, cwd=cwd)
-    _result(operation, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+    stderr = completed.stderr
+    hint = _login_hint(settings, completed) if kind == "ssh" else ""
+    if hint:
+        stderr = f"{stderr.rstrip()}{hint}\n"
+    _result(operation, returncode=completed.returncode, stdout=completed.stdout, stderr=stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

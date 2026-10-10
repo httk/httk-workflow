@@ -183,7 +183,11 @@ def main(argv):
     if log:
         with open(log, "a", encoding="utf-8") as stream:
             stream.write(json.dumps({{"destination": destination, "command": command}}) + "\\n")
-    if os.environ.get("HTTK_FAKE_SSH_REFUSE"):
+    refuse = os.environ.get("HTTK_FAKE_SSH_REFUSE")
+    if refuse:
+        if refuse != "1":
+            print(refuse, file=sys.stderr)
+            return 255
         print(f"fake ssh: connect to host {{destination}} port 22: Connection refused", file=sys.stderr)
         return 255
     if not command:

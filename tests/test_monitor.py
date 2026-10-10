@@ -274,7 +274,9 @@ def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(monitor_actions, "_resolve_request_identity", lambda _selector: SimpleNamespace())
     monkeypatch.setattr(monitor_actions, "ensure_identity_key", lambda _identity: None)
 
-    def fake_request(_binding: object, _context: object, arguments: Any, _identity: object) -> tuple[int, str, str]:
+    def fake_request(
+        _binding: object, _context: object, arguments: Any, _identity: object, **_options: object
+    ) -> tuple[int, str, str]:
         seen["request"] = arguments.adapter_timeout
         return 0, "", ""
 

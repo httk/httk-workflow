@@ -47,6 +47,8 @@ def remote_workspace_output(
 ) -> tuple[int, str, str]:
     """Relay one remote read without importing the CLI package eagerly.
 
+    The read is never interactive: ssh must not prompt underneath curses.
+
     :param binding: Remote-qualified workspace binding.
     :param context: CLI context used to resolve the adapter.
     :param argv_tail: Complete command vector for the remote read.
@@ -56,7 +58,7 @@ def remote_workspace_output(
 
     from ..workflow_cli import remote_workspace_output as relay
 
-    return relay(binding, context, argv_tail, timeout=timeout)
+    return relay(binding, context, argv_tail, timeout=timeout, interactive=False)
 
 
 class WorkspaceView:

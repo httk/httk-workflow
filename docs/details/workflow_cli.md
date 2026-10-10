@@ -728,7 +728,8 @@ See {doc}`/details/remotes` for configuration and request-ID retry rules.
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
 `check_connectivity`, `check_mount`, `exec_command`, `exchange`, `host`,
-`httk_command`, `legacy_settings`, `mount_root`, `port`, `prelude`,
+`httk_command`, `interactive_auth`, `legacy_settings`, `mount_root`, `port`,
+`prelude`,
 `remote_root`, `username`, `vasp_command`, and `vasp_pseudo_library` in the
 shareable `remote.json`. Scheduler profile values are workspace settings
 (`slurm.*`, `manager.workers`) and are refused as remote settings. Other keys

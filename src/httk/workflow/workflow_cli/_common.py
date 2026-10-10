@@ -495,6 +495,7 @@ def remote_workspace_output(
     argv_tail: Sequence[str],
     *,
     timeout: float | None = None,
+    interactive: bool = True,
 ) -> tuple[int, str, str]:
     """Invoke a remote workspace command and return status, stdout, stderr.
 
@@ -506,6 +507,7 @@ def remote_workspace_output(
     :param context: CLI context used to resolve the adapter.
     :param argv_tail: Complete command vector for the remote side.
     :param timeout: Adapter timeout override.
+    :param interactive: Whether the adapter may prompt on this terminal.
     :return: Remote return code, standard output, and standard error.
     """
 
@@ -517,6 +519,7 @@ def remote_workspace_output(
         "invoke",
         {"argv": list(argv_tail)},
         timeout=timeout,
+        interactive=interactive,
     )
     return (
         int(result.get("returncode", 0) or 0),

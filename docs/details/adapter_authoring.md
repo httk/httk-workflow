@@ -378,7 +378,8 @@ does not install software or validate compute-node confinement.
 key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
-  (`check_connectivity`, `host`, `httk_command`, `legacy_settings`, `port`,
+  (`check_connectivity`, `host`, `httk_command`, `interactive_auth`,
+  `legacy_settings`, `port`,
   `username`, the mount settings, `exchange` and the three `daemon_*` identity settings documented in
   {doc}`/details/remotes`, `vasp_command` and `vasp_pseudo_library`) are written
   into the flat `settings` object of the shareable, signable `remote.json`.

@@ -117,6 +117,7 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "exec_command",
         "host",
         "httk_command",
+        "interactive_auth",
         "legacy_settings",
         "mount_root",
         "port",
@@ -644,6 +645,7 @@ def run_adapter(
     *,
     timeout: float | None = None,
     unset_settings: Sequence[str] = (),
+    interactive: bool = True,
 ) -> dict[str, Any]:
     """Execute one JSON adapter operation without invoking a shell.
 
@@ -652,6 +654,8 @@ def run_adapter(
     :param request: The operation request members.
     :param timeout: The operation timeout, or the bundle default when omitted.
     :param unset_settings: Stored settings to omit when validating a configuration change.
+    :param interactive: Whether the adapter may see this process's terminal (and
+        so let ssh prompt); False gives it no stdin, e.g. under a curses display.
     :return: The adapter result document.
     :raises TimeoutError: If the adapter exceeds its timeout.
     :raises ValueError: If the request or result violates the adapter protocol.
@@ -681,10 +685,13 @@ def run_adapter(
             stream.write("\n")
         limit = float(metadata.get("timeout_seconds", 60.0) if timeout is None else timeout)
         try:
+            # stdin is inherited deliberately so an adapter can detect an attached
+            # terminal; interactive=False withholds it so nothing can prompt.
             completed = subprocess.run(
                 [str(executable), str(request_path)],
                 text=True,
                 capture_output=True,
+                stdin=None if interactive else subprocess.DEVNULL,
                 timeout=limit,
                 check=False,
             )
