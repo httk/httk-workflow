@@ -19,6 +19,7 @@ import pytest
 from conftest import TestProfile as _TestProfile
 from httk.workflow import _fs, _kernel
 from httk.workflow._fs import Loc
+from httk.workflow._job import MAX_JOB_BYTES
 from httk.workflow._kernel import (
     OWNED,
     JobRef,
@@ -44,6 +45,7 @@ from httk.workflow._kernel import (
     reconcile_scratch,
     record_exchange_translation,
     recover,
+    recoverable_owners,
     register_owner,
     register_reconciler,
     submit,
@@ -574,7 +576,11 @@ def test_close_keeps_owner_when_scratch_or_launch_remains(ws: FakeWorkspace) -> 
     _kernel._RECONCILERS.clear()
     launch = owner.launch_dir(str(uuid.uuid4()), "0")
     owner.close()
-    assert not kept.exists() and launch.exists() and (owner.path / "owner.json").exists()
+    # Without a registered reconciler the eject scratch is kept as well: it may hold the only copy of a job.
+    assert kept.exists() and launch.exists() and (owner.path / "owner.json").exists()
+    owner._discard(kept)
+    owner.close()
+    assert launch.exists() and (owner.path / "owner.json").exists()
     attempt = launch.name.split(".")[0]
     owner.remove_launch(attempt, "0")
     owner.close()
@@ -680,7 +686,10 @@ def test_recover_returns_jobs_scratch_launches_and_keeps_tombstone(
     assert (returned[ready_job.job_id].path / "state.json").exists()  # recovery never writes job content
     assert len(report.quarantined) == 2
     assert all(path.parent.parent == ws.control / "quarantine" for path in report.quarantined)
-    assert reconciled == [ws.control / "tmp" / f"{owner.owner_id}{adopt.name[32:]}"]
+    # Taken under a fresh token, never the dead owner's.
+    (taken,) = reconciled
+    assert taken.parent == ws.control / "tmp" and taken.name.startswith(f"{owner.owner_id}.adopt.")
+    assert taken.name.split(".")[2] != adopt.name.split(".")[2]
     assert len(report.scratch) >= 3 and report.kept_scratch == ()
     assert [name for name in os.listdir(ws.control / "tmp") if name.startswith(dead.owner_id)] == []
     assert not adopt.exists() and not build.exists() and not empty.exists()
@@ -1071,6 +1080,8 @@ def test_exchange_names(ws: FakeWorkspace) -> None:
     # Another job is refused the name; a rerun for the same job (an adopt reconciler whose adopter died) is not.
     assert not claim_exchange_name(ws, second, name, str(uuid.uuid4()), PurePosixPath())
     assert claim_exchange_name(ws, second, name, job_id, PurePosixPath("x/y"))
+    # The same job at another placement is not the same claim.
+    assert not claim_exchange_name(ws, second, name, job_id, PurePosixPath("x"))
     entry = ws.control / "exchange-jobs" / name
     assert json.loads((entry / "index.json").read_text()) == {"job_id": job_id, "placement": "x/y"}
     assert (entry / ".nonce").read_text().startswith(f"{first.owner_id}.")
@@ -1338,3 +1349,158 @@ def test_probe_owner_does_not_tombstone_a_closed_owner(ws: FakeWorkspace, monkey
     assert _kernel.probe_owner(ws, closing.owner_id, scheduler=SchedulerQueries()) is Liveness.UNKNOWN
     # A tombstone here would recreate owners/<id>/ for an owner that left nothing behind.
     assert not closing.path.exists()
+
+
+# -- 17. scratch purposes, re-recovery and damage -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("purpose", ["eject", "adopt", "submit"])
+def test_unregistered_scratch_survives_close_and_recovery(ws: FakeWorkspace, purpose: str) -> None:
+    # It may hold the only copy of a job: without its reconciler in this process it is kept, never discarded.
+    dead, owner = new_owner(ws), new_owner(ws)
+    for holder in (dead, owner):
+        (holder.scratch(purpose) / "job").mkdir()
+    owner.close()
+    (kept,) = [name for name in os.listdir(ws.control / "tmp") if name.startswith(owner.owner_id)]
+    assert (ws.control / "tmp" / kept / "job").is_dir() and (owner.path / "owner.json").exists()
+    attest_dead(ws, dead.owner_id, by="probe", evidence=[])
+    report = recover(ws, owner, dead.owner_id)
+    (taken,) = report.kept_scratch
+    assert (taken / "job").is_dir() and report.scratch == ()
+    owner.close()
+    assert (taken / "job").is_dir() and (ws.control / "tmp" / kept / "job").is_dir()
+
+
+def test_discardable_scratch_needs_no_reconciler(ws: FakeWorkspace) -> None:
+    owner = new_owner(ws)
+    for purpose in sorted(_kernel.DISCARDABLE_PURPOSES):
+        (owner.scratch(purpose) / "partial").write_text("x")
+    owner.scratch("eject")  # empty: discarded whatever its purpose
+    owner.close()
+    assert not owner.path.exists()
+    assert [name for name in os.listdir(ws.control / "tmp") if name.startswith(owner.owner_id)] == []
+
+
+def test_a_job_claimed_into_a_recovered_owner_is_recovered_again(ws: FakeWorkspace) -> None:
+    # A falsely attested owner wakes mid-tick and claims after its recovery: owner.json is gone, the job is not.
+    sleeper, owner = new_owner(ws), new_owner(ws)
+    attest_dead(ws, sleeper.owner_id, by="operator", evidence=[], operator="op")
+    recover(ws, owner, sleeper.owner_id)
+    assert sorted(os.listdir(sleeper.path)) == ["dead.json"]
+    assert sleeper.owner_id not in recoverable_owners(ws)
+    late = claim(ws, sleeper, new_job(ws, owner, state="paused", placement="late"))
+    assert late is not None
+    assert recoverable_owners(ws) == sorted([owner.owner_id, sleeper.owner_id])
+    (returned,) = recover(ws, owner, sleeper.owner_id).returned
+    assert returned.job_id == late.job_id and returned.path.parent == ws.jobs / "paused" / "late"
+    assert sleeper.owner_id not in recoverable_owners(ws)
+    # A launch directory or a scratch left by the woken owner makes it recoverable as well.
+    for make in (lambda: sleeper.launch_dir(str(uuid.uuid4()), "0"), lambda: sleeper.scratch("build")):
+        leftover = make()
+        assert sleeper.owner_id in recoverable_owners(ws)
+        recover(ws, owner, sleeper.owner_id)
+        assert not leftover.exists() and sleeper.owner_id not in recoverable_owners(ws)
+
+
+def test_extract_never_resurrects_a_taken_scratch(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner))
+    assert job is not None
+    scratch = owner.scratch("eject")
+
+    def recoverer_takes_the_scratch(op: str, phase: str, src: Loc | None, dst: Loc | None) -> None:
+        if (op, phase) == ("rename", "before") and scratch.exists():
+            os.rename(scratch, tmp_path / "taken")
+
+    _fs.set_fault_injector(recoverer_takes_the_scratch)
+    with pytest.raises(OwnerLost):
+        job.extract(scratch / "job")
+    assert not scratch.exists() and job.path.is_dir()
+
+
+def test_take_when_its_scratch_was_taken(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    held = ws.control / "transfers" / "incoming" / "T1"
+    held.mkdir(parents=True)
+    taken_by_rival: list[bool] = []
+
+    def recoverer(op: str, phase: str, src: Loc | None, dst: Loc | None) -> None:
+        if (op, phase) != ("rename", "before") or dst is None or not dst.path.parent.exists():
+            return
+        os.rename(dst.path.parent, tmp_path / f"recovered-{len(os.listdir(tmp_path))}")
+        if taken_by_rival:
+            os.rename(held, tmp_path / "rival")
+
+    _fs.set_fault_injector(recoverer)
+    # The scratch alone is taken: the move fails, the entry stays, and the taker is told it was recovered.
+    with pytest.raises(OwnerLost):
+        take(ws, owner, _fs.loc(held), "adopt")
+    assert held.is_dir()
+    # The entry went to a rival and the scratch to a recoverer: not ours, and nothing is recreated.
+    taken_by_rival.append(True)
+    assert take(ws, owner, _fs.loc(held), "adopt") is None
+    assert [name for name in os.listdir(ws.control / "tmp") if name.startswith(owner.owner_id)] == []
+
+
+def test_launch_dirs_are_exclusive_and_durable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ws = make_workspace(tmp_path / "ws", durable=True)
+    owner = new_owner(ws)
+    attempt = str(uuid.uuid4())
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def fsync(descriptor: int) -> None:
+        synced.append(descriptor)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    owner.launch_dir(attempt, "0")
+    assert len(synced) == 2  # launches/ in the owner directory, then the launch directory in launches/
+    with pytest.raises(FileExistsError):
+        owner.launch_dir(attempt, "0")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files whatever their mode")
+def test_unreadable_job_files_are_damage(ws: FakeWorkspace) -> None:
+    # A job may chmod 000 its own job.json or state.json: every reader reports FormatError, never PermissionError.
+    owner = new_owner(ws)
+    ref = new_job(ws, owner)
+    (ref.path / "job.json").chmod(0)
+    with pytest.raises(FormatError):
+        claim(ws, owner, ref)
+    (owned,) = owner.owned()
+    with pytest.raises(FormatError):
+        owner.adopt_owned(owned)
+    with pytest.raises(FormatError):
+        _kernel._read_header(owned.path)
+    (owned.path / "job.json").chmod(0o644)
+    job = owner.adopt_owned(owned)
+    job.write_state(StateDoc.empty(job.job_id))
+    (job.path / "state.json").chmod(0)
+    with pytest.raises(FormatError):
+        job.read_state()
+    (job.path / "state.json").chmod(0o644)
+    job.give_back()
+
+
+def test_job_json_limit_is_the_job_module_limit(ws: FakeWorkspace) -> None:
+    owner = new_owner(ws)
+    staging = owner.scratch("build") / "job"
+    write_payload(staging)
+    document = json.loads((staging / "job.json").read_text())
+    document["padding"] = "x" * MAX_JOB_BYTES
+    (staging / "job.json").write_text(json.dumps(document))
+    with pytest.raises(FormatError):
+        submit(ws, owner, staging)
+
+
+def test_open_log_never_recreates_a_job_moved_away(ws: FakeWorkspace, tmp_path: Path) -> None:
+    owner = new_owner(ws)
+    job = claim(ws, owner, new_job(ws, owner))
+    assert job is not None
+    # A recoverer moves the job right after the presence check: logs/ is created anchored, so nothing is recreated.
+    job._present = lambda: None  # type: ignore[method-assign]
+    job.path.rename(tmp_path / "recovered")
+    with pytest.raises(FileNotFoundError):
+        job.open_log("runlog.jsonl")
+    assert not job.path.exists() and not (tmp_path / "recovered" / "logs").exists()

@@ -7,6 +7,8 @@ The check walks ``jobs/`` and reports:
   ``jobs/`` or ``owned/`` entry);
 - ``duplicate_job``: one job UUID in two places;
 - ``orphan_owned``: ``jobs/owned/<owner-id>/`` without ``owners/<owner-id>/``;
+- ``tombstoned_owner_with_jobs``: a recovered owner (only ``dead.json`` left) that holds jobs, launches or
+  scratch again; the ``dead_owners`` category of ``httk workspace gc`` recovers it;
 - ``unreadable_state``: a ``state.json`` that exists but cannot be decoded;
 - ``foreign_owner``: a job directory another user owns.
 
@@ -41,8 +43,8 @@ class FsckFinding:
     """One thing the check found.
 
     :param entry: The path.
-    :param problem: ``unparsable_name``, ``duplicate_job``, ``orphan_owned``, ``unreadable_state`` or
-        ``foreign_owner``.
+    :param problem: ``unparsable_name``, ``duplicate_job``, ``orphan_owned``, ``tombstoned_owner_with_jobs``,
+        ``unreadable_state`` or ``foreign_owner``.
     :param detail: A human-readable explanation.
     :param action: ``reported`` or ``quarantined``.
     :param job_key: The job key, when the name parses.
@@ -213,6 +215,12 @@ def check_workspace(
     for entry in _entries(workspace.jobs / _kernel.OWNED):
         if entry.is_dir(follow_symlinks=False) and not stat.S_ISDIR(_mode(owners / entry.name)):
             findings.append(FsckFinding(Path(entry.path), "orphan_owned", f"owners/{entry.name}/ does not exist"))
+    recoverable = set(_kernel.recoverable_owners(workspace))
+    findings.extend(
+        FsckFinding(item.path, "tombstoned_owner_with_jobs", "recovered, but holds jobs, launches or scratch again")
+        for item in _kernel.list_owners(workspace)
+        if item.record is None and item.owner_id in recoverable
+    )
     counts: dict[str, int] = {}
     for finding in findings:
         counts[finding.problem] = counts.get(finding.problem, 0) + 1

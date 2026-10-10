@@ -356,13 +356,23 @@ class _Collection:
 
     def dead_owners(self, tally: _Tally) -> None:
         scheduler, here = _death.SchedulerQueries(), _death.process_identity()
+        # A closed owner leaves no owner.json; a recovered one keeps only dead.json unless it acquired work since.
+        recoverable = set(_kernel.recoverable_owners(self.workspace))
+        mine = None if self.owner is None else self.owner.owner_id
         for record in _kernel.list_owners(self.workspace):
-            # A closed owner leaves no owner.json; a recovered one keeps only dead.json.
-            if record.record is None or (self.owner is not None and record.owner_id == self.owner.owner_id):
+            if record.owner_id not in recoverable or record.owner_id == mine:
                 continue
             if self.dry_run or self.owner is None:
-                verdict, _evidence = _death.probe(
-                    record.path, visibility_deadline=self.workspace.visibility_deadline, scheduler=scheduler, here=here
+                # Without owner.json it is a tombstoned owner left with work: recover() needs no further proof.
+                verdict = (
+                    _death.Liveness.DEAD
+                    if record.record is None
+                    else _death.probe(
+                        record.path,
+                        visibility_deadline=self.workspace.visibility_deadline,
+                        scheduler=scheduler,
+                        here=here,
+                    )[0]
                 )
                 if verdict is _death.Liveness.DEAD:
                     tally.note(record.path, 0)

@@ -21,6 +21,11 @@ RAW_CALLS: Mapping[str, frozenset[str]] = {
 }
 #: Creating a file with ``O_CREAT`` is a raw operation wherever the flag is named.
 RAW_FLAG = frozenset({"O_CREAT"})
+#: Pathlib-style calls on any object are raw too: ``.unlink(``, ``.rename(``, ``.rmdir(``, and ``.replace(`` with
+#: exactly one positional argument and no keywords (``str.replace`` takes two, ``Path.replace`` one).
+RAW_METHODS = frozenset({"unlink", "rename", "rmdir", "replace"})
+#: The kernel creates directories only through ``_fs.make_dirs``/``open_dir_under`` (durable mode, symlink checks).
+KERNEL_MKDIR = {"os": frozenset({"mkdir", "makedirs"})}
 CONTESTED = frozenset({"move_once", "publish_dir"})
 #: Never in the new modules: no hard links, no symlinks created, no file locks.
 LINKS = {"os": frozenset({"link", "symlink"})}
@@ -28,7 +33,24 @@ LOCKS = frozenset({"flock", "lockf"})
 NEW_MODULES = ("_death.py", "_fs.py", "_kernel.py", "_state.py", "_store.py")
 
 #: The runner side acts only inside its own attempt directory (P1).
-RUNNER_SIDE = frozenset({"runtime_builders.py", "sdk.py"})
+RUNNER_SIDE = frozenset(
+    {
+        # Inside the attempt sandbox: publishes its own launch requests below the attempt's launch/ directory.
+        "_launch_client.py",
+        "runtime_builders.py",
+        "sdk.py",
+    }
+)
+#: Modules whose only raw operations are pathlib-style calls on entries private to one actor.
+METHOD_RAW = frozenset(
+    {
+        # Adapter side: removes its own temporary rsync file listing.
+        "adapter_runtime.py",
+        # v1 realization: renders templates inside the payload it is staging (private scratch or attempt).
+        "compat/v1/realization.py",
+        "compat/v1/templates.py",
+    }
+)
 # legacy: shrinks per phase; never add to it.
 LEGACY_RAW = frozenset(
     {
@@ -38,7 +60,6 @@ LEGACY_RAW = frozenset(
         "_daemon_setup.py",
         "_daemon_state.py",
         "_exchange.py",
-        "_launch_client.py",
         "_logging.py",
         "_txn.py",
         "_util.py",
@@ -106,8 +127,23 @@ def _names_used(tree: ast.Module, names: frozenset[str]) -> set[str]:
     return found
 
 
+def _method_calls(tree: ast.Module, names: frozenset[str]) -> set[str]:
+    """Every ``.<name>(`` call of *names* on any object; ``.replace(`` only with one argument and no keywords."""
+
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in names
+            and (node.func.attr != "replace" or (len(node.args) == 1 and not node.keywords))
+        ):
+            found.add(f".{node.func.attr}")
+    return found
+
+
 def _raw_uses(tree: ast.Module) -> set[str]:
-    return _module_uses(tree, RAW_CALLS) | _names_used(tree, RAW_FLAG)
+    return _module_uses(tree, RAW_CALLS) | _names_used(tree, RAW_FLAG) | _method_calls(tree, RAW_METHODS)
 
 
 def test_scanner_sees_every_spelling_and_ignores_prose() -> None:
@@ -127,18 +163,31 @@ def f(o, _fs):
     os.replace(a, b)
     sh.rmtree(d)
     o.rename(x)  # another object's method
+    path.unlink(missing_ok=True)
+    text.replace("a", "b")  # str.replace: two arguments, not counted
     _fs.move_once(s, d)
     return os.O_WRONLY | os.O_CREAT
 '''
     )
-    assert _raw_uses(tree) == {"os.replace", "shutil.rmtree", "fcntl.flock", "O_CREAT"}
+    assert _raw_uses(tree) == {
+        "os.replace",
+        "shutil.rmtree",
+        "fcntl.flock",
+        "O_CREAT",
+        ".rename",
+        ".unlink",
+    }
+    assert _method_calls(ast.parse("p.replace(q)\ns.replace(a, b)\np.rmdir()\n"), RAW_METHODS) == {
+        ".replace",
+        ".rmdir",
+    }
     assert _names_used(tree, CONTESTED) == {"move_once", "publish_dir"}
     assert _module_uses(ast.parse("import os\nos.link(a, b)\nos.symlink(a, b)\n"), LINKS) == {"os.link", "os.symlink"}
 
 
 def test_only_fs_performs_raw_operations() -> None:
     # Rule A: a raw rename/unlink/rmdir/lock/O_CREAT outside _fs is a race the reviewed surfaces do not own.
-    allowed = {"_fs.py"} | RUNNER_SIDE | LEGACY_RAW
+    allowed = {"_fs.py"} | RUNNER_SIDE | LEGACY_RAW | METHOD_RAW
     offenders = {
         module: sorted(uses) for module in _modules() if module not in allowed and (uses := _raw_uses(_tree(module)))
     }
@@ -151,6 +200,15 @@ def test_legacy_allowlist_is_tight() -> None:
     present = set(_modules())
     stale = sorted(module for module in LEGACY_RAW if module not in present or not _raw_uses(_tree(module)))
     assert stale == [], f"remove these from LEGACY_RAW: {stale}"
+    # A METHOD_RAW module may hold nothing but pathlib-style calls, and must still hold one.
+    misfiled = sorted(
+        module
+        for module in METHOD_RAW
+        if module not in present
+        or (uses := _raw_uses(_tree(module))) != _method_calls(_tree(module), RAW_METHODS)
+        or not uses
+    )
+    assert misfiled == [], f"fix these METHOD_RAW entries: {misfiled}"
     assert _raw_uses(_tree("_fs.py")), "the scanner no longer recognises _fs.py's raw operations"
 
 
@@ -175,3 +233,9 @@ def test_new_modules_use_no_links_or_locks() -> None:
         if used := _module_uses(tree, LINKS) | _names_used(tree, LOCKS):
             offenders[module] = sorted(used)
     assert offenders == {}, f"links or locks in the new modules: {offenders}"
+
+
+def test_kernel_creates_directories_only_through_fs() -> None:
+    # Raw mkdir bypasses durable mode and the symlink checks; a launch record dir must survive power loss.
+    tree = _tree("_kernel.py")
+    assert _module_uses(tree, KERNEL_MKDIR) | _method_calls(tree, frozenset({"mkdir"})) == set()

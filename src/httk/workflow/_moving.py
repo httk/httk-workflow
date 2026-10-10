@@ -426,18 +426,17 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
         if record.untrusted:
             root = manifest.members[0]
             name = exchange_names(scratch)[root.job_id]
-            if not _kernel.claim_exchange_name(workspace, owner, name, root.job_id, root.placement):
-                return _refuse(owner, scratch, bundle, record, f"the exchange name {name} is already in use")
-            # The entry may predate this bundle: the client resubmitted its job, perhaps under another placement.
-            indexed = _indexed_placement(workspace, name)
+            claimed = _kernel.claim_exchange_name(workspace, owner, name, root.job_id, root.placement)
+            # A claim fails when the name is indexed at another placement: the client resubmitted its job there. Its
+            # rekeyed id derives from the name, so an indexed job that still exists is this one, already adopted.
+            indexed = root.placement if claimed else _indexed_placement(workspace, name, root.job_id)
             if indexed is None:
-                return _refuse(owner, scratch, bundle, record, f"the exchange index entry of {name} is unreadable")
+                return _refuse(owner, scratch, bundle, record, f"the exchange name {name} is already in use")
             # The bundle's own placements were settled by _presence already.
-            moved = indexed != root.placement
-            if _kernel.locate_many(workspace, [root.job_id], placements=[indexed], settle=moved):
+            if _kernel.locate_many(workspace, [root.job_id], placements=[indexed], settle=not claimed):
                 owner.discard_scratch(scratch)
                 return AdoptReport((), True, ())
-            if moved:
+            if not claimed:
                 return _refuse(
                     owner, scratch, bundle, record, f"the exchange name {name} is indexed at another placement"
                 )
@@ -461,12 +460,16 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
     return AdoptReport(tuple(published), False, missing)
 
 
-def _indexed_placement(workspace: "Workspace", exchange_name: str) -> PurePosixPath | None:
+def _indexed_placement(workspace: "Workspace", exchange_name: str, job_id: str) -> PurePosixPath | None:
+    """The placement the exchange index records for *exchange_name*, if the entry names *job_id*."""
+
     path = workspace.control / "exchange-jobs" / exchange_name / "index.json"
     try:
         data = _fs.read_bounded(_fs.loc(path), _RECORD_LIMIT)
         value = None if data is None else json.loads(data)
-        return normalize_placement(str(value["placement"])) if isinstance(value, dict) else None
+        if not isinstance(value, dict) or value.get("job_id") != job_id:
+            return None
+        return normalize_placement(str(value["placement"]))
     except (WorkflowError, ValueError, KeyError):
         return None
 

@@ -147,6 +147,15 @@ def test_open_dir_under(tmp_path: Path) -> None:
     assert sorted(os.listdir("/proc/self/fd")) == before
 
 
+def test_open_dir_under_durable_fsyncs_each_created_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "a").mkdir()
+    calls = _count_fsync(monkeypatch)
+    os.close(_fs.open_dir_under(tmp_path, "a/b/c", create=True, durable=True))
+    assert len(calls) == 2
+    os.close(_fs.open_dir_under(tmp_path, "a/b/c", create=True, durable=True))
+    assert len(calls) == 2  # nothing created, nothing synced
+
+
 @pytest.mark.parametrize("durable", [False, True])
 def test_make_dirs(tmp_path: Path, durable: bool) -> None:
     (tmp_path / "real").mkdir()
@@ -331,6 +340,55 @@ def test_ensure_parent_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(MoveFailed) as raised:
         move_once(loc(tmp_path / "a" / "b" / "dst"), loc(tmp_path / "c" / "dst"), durable=False)
     assert raised.value.errno == errno.ENOENT
+
+
+def test_move_once_refuses_a_destination_that_exists(tmp_path: Path) -> None:
+    # Precondition: dst is fresh. An existing name (empty, non-empty or a file) would be observed as a win.
+    src = _tree(tmp_path / "src")
+    (tmp_path / "empty").mkdir()
+    _tree(tmp_path / "full", "other")
+    (tmp_path / "file").write_text("")
+    for dst in ("empty", "full", "file"):
+        with pytest.raises(ValueError):
+            move_once(loc(src), loc(tmp_path / dst), durable=False)
+    assert (src / "payload").exists() and [path.name for path in (tmp_path / "full").iterdir()] == ["other"]
+
+
+def test_moves_without_parent_creation_fail_on_a_missing_parent(tmp_path: Path) -> None:
+    # A taken scratch is never resurrected: the move fails and leaves the source in place.
+    src = _tree(tmp_path / "src")
+    with pytest.raises(MoveFailed) as raised:
+        move_once(loc(src), loc(tmp_path / "taken" / "dst"), durable=False, create_parents=False)
+    assert raised.value.errno == errno.ENOENT
+    with pytest.raises(MoveFailed):
+        move_owned(loc(src), loc(tmp_path / "taken" / "dst"), durable=True, create_parents=False)
+    assert src.exists() and not (tmp_path / "taken").exists()
+    (tmp_path / "there").mkdir()
+    assert move_once(loc(src), loc(tmp_path / "there" / "a"), durable=False, create_parents=False) is Moved.WON
+    move_owned(loc(tmp_path / "there" / "a"), loc(tmp_path / "there" / "b"), durable=False, create_parents=False)
+    assert (tmp_path / "there" / "b" / "payload").exists()
+
+
+def test_open_listing_closes_its_descriptor_when_listing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "d").mkdir()
+    opened: list[int] = []
+    real_open = os.open
+
+    def tracking_open(*args: object, **kwargs: object) -> int:
+        opened.append(real_open(*args, **kwargs))  # type: ignore[arg-type]
+        return opened[-1]
+
+    def listdir(path: object) -> list[str]:
+        raise OSError(errno.EIO, "io")
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "listdir", listdir)
+    with pytest.raises(OSError):
+        _fs._open_listing(None, str(tmp_path / "d"))
+    (descriptor,) = opened
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF
 
 
 def test_move_once_mixed_anchors(tmp_path: Path) -> None:
@@ -626,6 +684,26 @@ def test_write_file_raises_when_directory_moved_away(tmp_path: Path, monkeypatch
     assert not (tmp_path / "moved" / "f").exists()
 
 
+def test_write_file_landed_check_refuses_a_foreign_file(tmp_path: Path) -> None:
+    # Between the temporary's creation and os.replace the directory moves away and a new one, holding another
+    # file under the name, takes its place: the replace fails and the foreign inode is not taken as ours.
+    (tmp_path / "job").mkdir()
+
+    def fault(op: str, phase: str, src: Loc | None, dst: Loc | None) -> None:
+        assert (op, phase) == ("write", "before_replace")
+        REAL_RENAME(tmp_path / "job", tmp_path / "moved")
+        (tmp_path / "job").mkdir()
+        (tmp_path / "job" / "f").write_bytes(b"theirs")
+
+    set_fault_injector(fault)
+    with pytest.raises(FileNotFoundError):
+        write_file(loc(tmp_path / "job" / "f"), b"ours", durable=True)
+    assert (tmp_path / "job" / "f").read_bytes() == b"theirs"
+    # The cleanup looks for the temporary at the old path; the moved directory keeps it (a recoverer's concern).
+    (leftover,) = (tmp_path / "moved").iterdir()
+    assert re.fullmatch(r"\.f\.[a-z2-7]{16}\.tmp", leftover.name) and leftover.read_bytes() == b"ours"
+
+
 def test_write_file_anchored(tmp_path: Path) -> None:
     descriptor = open_dir(tmp_path)
     try:
@@ -863,13 +941,20 @@ def test_discard_raises_unexpected_rmdir_errors(tmp_path: Path, monkeypatch: pyt
         discard(loc(tmp_path / "job"), trash_dir=tmp_path / "trash", durable=False)
 
 
-def test_discard_refuses_anchored(tmp_path: Path) -> None:
-    descriptor = open_dir(tmp_path)
+def test_discard_anchored_never_follows_a_swapped_parent(tmp_path: Path) -> None:
+    # The entry is moved out of the descriptor's directory, even after its path was swapped for a symlink.
+    _tree(tmp_path / "logs" / "planted")
+    _tree(tmp_path / "outside" / "planted")
+    descriptor = open_dir(tmp_path / "logs")
     try:
-        with pytest.raises(ValueError):
-            discard(anchored(descriptor, "x"), trash_dir=tmp_path, durable=False)
+        (tmp_path / "logs").rename(tmp_path / "logs.moved")
+        (tmp_path / "logs").symlink_to("outside")
+        discard(anchored(descriptor, "planted"), trash_dir=tmp_path / "trash", durable=True)
     finally:
         os.close(descriptor)
+    assert list((tmp_path / "logs.moved").iterdir()) == []
+    assert (tmp_path / "outside" / "planted" / "payload").read_text() == "content"
+    assert list((tmp_path / "trash").iterdir()) == []
 
 
 def test_remove_empty_dir(tmp_path: Path) -> None:

@@ -77,9 +77,10 @@ def test_extract_into_own_scratch(ws: FakeWorkspace) -> None:
         job.placement()
     with pytest.raises(ReleasedJobError):
         job.extract(scratch / "again")
-    # The eject scratch has no reconciler here, so close discards it and the owner goes away entirely.
+    # The eject scratch has no reconciler here and may hold the only copy of a job: close keeps it, and with it
+    # owners/<self>/.
     owner.close()
-    assert not scratch.exists() and not owner.path.exists()
+    assert (target / "payload.txt").is_file() and (owner.path / "owner.json").is_file()
 
 
 def test_close_reconciles_the_scratch_holding_an_extracted_job(ws: FakeWorkspace) -> None:

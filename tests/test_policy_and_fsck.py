@@ -282,6 +282,23 @@ def test_fsck_reports_an_owned_directory_without_its_owner(tmp_path: Path) -> No
     assert [(finding.entry, finding.problem) for finding in report.findings] == [(orphan, "orphan_owned")]
 
 
+def test_fsck_reports_a_recovered_owner_that_holds_jobs_again(tmp_path: Path) -> None:
+    ws = workspace(tmp_path / "workspace")
+    ref = submit(ws, _WORKFLOW, {"start": "succeed"})
+    with cli_owner(ws) as recoverer:
+        sleeper = cli_owner(ws)
+        _kernel.attest_dead(ws, sleeper.owner_id, by="operator", evidence=[], operator="op")
+        _kernel.recover(ws, recoverer, sleeper.owner_id)
+        assert ws.check().ok
+        assert _kernel.claim(ws, sleeper, ref) is not None
+        report = ws.check()
+        assert [(finding.entry, finding.problem) for finding in report.findings] == [
+            (sleeper.path, "tombstoned_owner_with_jobs")
+        ]
+        _kernel.recover(ws, recoverer, sleeper.owner_id)
+    assert ws.check().ok
+
+
 def test_fsck_reports_an_unreadable_state_document(tmp_path: Path) -> None:
     ws = workspace(tmp_path / "workspace")
     ref = submit(ws, _WORKFLOW, {"start": "succeed"})

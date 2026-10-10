@@ -156,7 +156,9 @@ def open_dir(path: Path) -> int:
         raise
 
 
-def open_dir_under(root: Path, relative: str | PurePosixPath, *, create: bool = False, mode: int = 0o700) -> int:
+def open_dir_under(
+    root: Path, relative: str | PurePosixPath, *, create: bool = False, mode: int = 0o700, durable: bool = False
+) -> int:
     """Open a directory below a trusted root, never following a symlink below the root.
 
     *root* is a trusted anchor and is followed; each component of *relative* is
@@ -166,6 +168,7 @@ def open_dir_under(root: Path, relative: str | PurePosixPath, *, create: bool = 
     :param relative: The directory below *root*; ``..``, absolute paths and empty components are refused.
     :param create: Create a missing component with *mode*, like ``mkdir(parents=True)``.
     :param mode: The permission bits of a created directory (before the umask).
+    :param durable: Fsync the parent of every directory created.
     :return: The descriptor of the final directory; the caller closes it.
     :raises ValueError: For an invalid *relative*.
     :raises UnsafePath: When a component is a symlink or not a directory.
@@ -183,6 +186,8 @@ def open_dir_under(root: Path, relative: str | PurePosixPath, *, create: bool = 
             if create:
                 try:
                     os.mkdir(name, mode, dir_fd=descriptor)
+                    if durable:
+                        os.fsync(descriptor)
                 except FileExistsError:
                     pass
             try:
@@ -371,21 +376,26 @@ def _rename(src: Loc, dst: Loc) -> OSError | None:
     return error
 
 
-def move_once(src: Loc, dst: Loc, *, durable: bool, settle: float = 0.0) -> Moved:
+def move_once(src: Loc, dst: Loc, *, durable: bool, settle: float = 0.0, create_parents: bool = True) -> Moved:
     """Move a contested entry to a fresh name that, once there, only the caller can move.
 
     :param src: The entry other actors may also try to move.
-    :param dst: A fresh name (it contains a fresh token or an owner id).
+    :param dst: A fresh name (it contains a fresh token or an owner id); nothing may exist there yet.
     :param durable: Fsync both parent directories after a win.
     :param settle: Seconds to keep re-observing *dst* when both names look absent.
+    :param create_parents: Create *dst*'s missing ancestors; with ``False`` a missing parent fails the move.
     :return: :attr:`Moved.WON` when *dst* was observed, else :attr:`Moved.LOST`.
+    :raises ValueError: When *dst* already exists: an existing name would be observed as a win.
     :raises MoveFailed: When the source stayed in place after every attempt.
     :raises CrossDevice: For a rename across filesystems.
     """
 
+    if _lstat(dst) is not None:
+        raise ValueError(f"{dst.path} is not a fresh name: it already exists")
     error: OSError | None = None
     for _ in range(_ATTEMPTS):
-        _ensure_parent(dst, durable=durable)
+        if create_parents:
+            _ensure_parent(dst, durable=durable)
         error = _rename(src, dst)
         if exists(dst):
             # dst exists: our rename happened even if rename() reported an error (NFS retransmit);
@@ -411,7 +421,7 @@ def move_once(src: Loc, dst: Loc, *, durable: bool, settle: float = 0.0) -> Move
     ) from error
 
 
-def move_owned(src: Loc, dst: Loc, *, durable: bool) -> None:
+def move_owned(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True) -> None:
     """Move an entry only the caller can move, possibly replacing a file or symlink at *dst*.
 
     The outcome is decided by the source alone: *dst* may have existed before
@@ -420,13 +430,15 @@ def move_owned(src: Loc, dst: Loc, *, durable: bool) -> None:
     :param src: The caller-owned entry.
     :param dst: The destination name.
     :param durable: Fsync both parent directories after the move.
+    :param create_parents: Create *dst*'s missing ancestors; with ``False`` a missing parent fails the move.
     :raises MoveFailed: When the source stayed in place after every attempt; ``errno`` carries the last error.
     :raises CrossDevice: For a rename across filesystems.
     """
 
     error: OSError | None = None
     for _ in range(_ATTEMPTS):
-        _ensure_parent(dst, durable=durable)
+        if create_parents:
+            _ensure_parent(dst, durable=durable)
         error = _rename(src, dst)
         if not exists(src):
             # src gone: only we could move it, so the move happened even if rename() reported an error.
@@ -702,7 +714,11 @@ def _open_listing(parent: int | None, name: str) -> tuple[int, list[str]] | None
         if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
             return None
         raise
-    return descriptor, os.listdir(descriptor)
+    try:
+        return descriptor, os.listdir(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _remove_pass(at: int | None, name: str) -> bool:
@@ -757,14 +773,11 @@ def discard(target: Loc, *, trash_dir: Path, durable: bool) -> None:
 
     Symlinks are removed, never followed. An absent *target* is not an error.
 
-    :param target: The plain location to discard.
+    :param target: The location to discard; an anchored one is moved out of its descriptor's directory.
     :param trash_dir: A directory on the same filesystem for the intermediate trash name.
     :param durable: Make the move out of *target*'s directory durable.
-    :raises ValueError: For an anchored *target*.
     """
 
-    if target.at is not None:
-        raise ValueError("discard takes a plain location")
     trash = loc(trash_dir / f"trash.{fresh_token()}")
     move_owned(target, trash, durable=durable)
     _remove_tree(trash)

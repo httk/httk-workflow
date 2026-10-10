@@ -241,6 +241,23 @@ def test_a_dead_same_host_owner_is_recovered(tmp_path: Path) -> None:
     assert not any(name.startswith(dead) for name in os.listdir(ws.control / "tmp"))
 
 
+def test_a_job_claimed_into_a_recovered_owner_is_returned(tmp_path: Path) -> None:
+    # A falsely attested owner wakes after its recovery and claims: only dead.json is left, yet gc finds the job.
+    ws = _workspace(tmp_path / "ws")
+    ref = submit(ws, _WORKFLOW, {"start": "succeed"})
+    with cli_owner(ws) as recoverer:
+        sleeper = cli_owner(ws)
+        _kernel.attest_dead(ws, sleeper.owner_id, by="operator", evidence=[], operator="op")
+        _kernel.recover(ws, recoverer, sleeper.owner_id)
+    assert sorted(os.listdir(sleeper.path)) == ["dead.json"]
+    assert _kernel.claim(ws, sleeper, ref) is not None
+    assert collect_garbage(ws, dry_run=True, categories=("dead_owners",)).category("dead_owners").candidates == 1
+    assert collect_garbage(ws, categories=("dead_owners",)).category("dead_owners").removed == 1
+    assert find(ws, ref.job_id).state == "ready"
+    assert sorted(os.listdir(sleeper.path)) == ["dead.json"]
+    assert collect_garbage(ws, dry_run=True, categories=("dead_owners",)).category("dead_owners").candidates == 0
+
+
 def test_an_interrupted_quarantine_is_finished_by_its_owner(tmp_path: Path) -> None:
     ws = _workspace(tmp_path / "ws")
     with cli_owner(ws) as owner:

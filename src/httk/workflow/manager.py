@@ -797,9 +797,7 @@ class TaskManager:
         """Probe a few foreign owners, chosen at random, and recover the ones proven dead."""
 
         candidates = [
-            item.owner_id
-            for item in _kernel.list_owners(self.workspace)
-            if item.owner_id != self.manager_id and item.record is not None
+            owner_id for owner_id in _kernel.recoverable_owners(self.workspace) if owner_id != self.manager_id
         ]
         changed = False
         for owner_id in random.sample(candidates, min(_PROBES_PER_TICK, len(candidates))):

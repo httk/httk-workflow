@@ -12,8 +12,8 @@ decision here depends on a clock; time only paces visibility retries and dates
 records.
 """
 
-import contextlib
 import dataclasses
+import errno
 import itertools
 import json
 import logging
@@ -30,6 +30,7 @@ from types import MappingProxyType, TracebackType
 from typing import NamedTuple, Protocol, Self
 
 from httk.workflow import _death, _fs
+from httk.workflow._job import MAX_JOB_BYTES
 from httk.workflow._state import (
     MAX_STATE_BYTES,
     TERMINAL_STATES,
@@ -50,6 +51,7 @@ from httk.workflow.models import (
 )
 
 __all__ = [
+    "DISCARDABLE_PURPOSES",
     "OWNED",
     "TERMINAL_STATES",
     "UNOWNED_STATES",
@@ -82,6 +84,7 @@ __all__ = [
     "reconcile_scratch",
     "record_exchange_translation",
     "recover",
+    "recoverable_owners",
     "register_owner",
     "register_reconciler",
     "submit",
@@ -108,7 +111,8 @@ _LOG_TEMPORARY = re.compile(r"\..+\.[a-z2-7]{16}\.tmp")
 _TRUSTED_NAMES = frozenset({"job.json", "state.json", "logs"})
 _LOG_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _EVIDENCE_KEYS = frozenset({"subject", "rule", "detail"})
-_JOB_LIMIT = 8 << 20
+#: A job may break its own trusted files (``chmod 000``) or its disk may fail: such a read is damage.
+_DAMAGE_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EIO})
 _RECORD_LIMIT = 1 << 20
 _ROUNDS = 8
 _SETTLE_STEP = 0.1
@@ -361,9 +365,19 @@ def _subdirectories(directory: Path) -> list[str]:
         return []
 
 
-def _read_json(path: Path, limit: int) -> dict[str, object] | None:
+def _read_bytes(path: Path, limit: int) -> bytes | None:
     # Non-blocking: a FIFO planted in a job-written path must never stall the caller.
-    data = _fs.read_bounded(_fs.loc(path), limit, nonblock=True)
+    try:
+        return _fs.read_bounded(_fs.loc(path), limit, nonblock=True)
+    except OSError as exc:
+        # FormatError routes it to every layer's damage handling instead of crashing the reader.
+        if exc.errno in _DAMAGE_ERRNOS:
+            raise FormatError(f"{path} is unreadable: {exc}") from exc
+        raise
+
+
+def _read_json(path: Path, limit: int) -> dict[str, object] | None:
+    data = _read_bytes(path, limit)
     if data is None:
         return None
     try:
@@ -383,7 +397,7 @@ def _read_json_quietly(path: Path) -> dict[str, object] | None:
 
 
 def _read_header(directory: Path, expect_key: str | None = None) -> JobHeader:
-    value = _read_json(directory / "job.json", _JOB_LIMIT)
+    value = _read_json(directory / "job.json", MAX_JOB_BYTES)
     if value is None:
         raise FormatError(f"{directory} has no job.json")
     if value.get("format") != "httk-workflow-job" or value.get("format_version") != 3:
@@ -500,8 +514,7 @@ def register_owner(
         **advertised,
     }
     path = _owner_dir(workspace, owner_id)
-    os.makedirs(path.parent, exist_ok=True)
-    os.mkdir(path)
+    _fs.make_dirs(path, durable=workspace.durable)
     _fs.write_file(_fs.loc(path / "owner.json"), _encode(record), durable=workspace.durable)
     return Owner(workspace, owner_id, record)
 
@@ -563,7 +576,7 @@ def attest_dead(
     tombstone |= {key: value for key, value in (("operator", operator), ("reason", reason)) if value is not None}
     path = _owner_dir(workspace, owner_id)
     # An operator may attest an owner whose directory is gone but whose owned/<id>/ remains.
-    os.makedirs(path, exist_ok=True)
+    _fs.make_dirs(path, durable=workspace.durable)
     _fs.write_file(_fs.loc(path / "dead.json"), _encode(tombstone), durable=workspace.durable)
 
 
@@ -698,11 +711,14 @@ class Owner:
         :param n: ``"0"`` for the attempt runner, or a launch request id (32 hex digits).
         :return: The new directory.
         :raises ValueError: For a malformed attempt id or *n*.
+        :raises FileExistsError: When the directory already exists.
         """
 
         path = self._launch_path(attempt_id, n)
-        os.makedirs(path.parent, exist_ok=True)
-        os.mkdir(path)
+        # Owner-private, so observe-then-create is exclusive; durable, since the death proof reads these records.
+        if _fs.exists(_fs.loc(path)):
+            raise FileExistsError(errno.EEXIST, "launch directory exists", str(path))
+        _fs.make_dirs(path, durable=self.workspace.durable)
         return path
 
     def remove_launch(self, attempt_id: str, n: str) -> None:
@@ -799,16 +815,17 @@ class Owner:
             raise ValueError(f"launch n must be '0' or 32 lowercase hex digits: {n!r}")
         return self.path / "launches" / f"{attempt_id}.{n}"
 
-    def _discard(self, path: Path) -> None:
+    def _discard(self, path: Path | _fs.Loc) -> None:
         # Directories only (single files use _fs.remove_file). A removal moves the tree into this owner's trash scratch first, so a crash mid-removal leaves an
         # owner-named scratch that close or recovery reconciles. The trash itself goes to the tmp root.
-        if path == self._trash:
-            self._trash, trash_dir = None, path.parent
+        target = path if isinstance(path, _fs.Loc) else _fs.loc(path)
+        if target.at is None and target.path == self._trash:
+            self._trash, trash_dir = None, target.path.parent
         else:
             if self._trash is None or not _fs.exists(_fs.loc(self._trash)):
                 self._trash = self.scratch("trash")
             trash_dir = self._trash
-        _fs.discard(_fs.loc(path), trash_dir=trash_dir, durable=self.workspace.durable)
+        _fs.discard(target, trash_dir=trash_dir, durable=self.workspace.durable)
 
 
 def _owned_refs(directory: Path, owner_id: str) -> list[JobRef]:
@@ -878,12 +895,13 @@ class OwnedJob:
         Callers treat both errors below as a damaged ``state.json``.
 
         :return: The document.
-        :raises httk.workflow.errors.FormatError: If the document is malformed, too large or names another job.
+        :raises httk.workflow.errors.FormatError: If the document is malformed, too large, unreadable (``EACCES``,
+            ``EPERM``, ``EIO``) or names another job.
         :raises httk.workflow._fs.UnsafePath: If ``state.json`` is a symlink or not a regular file.
         """
 
         self._live()
-        data = _fs.read_bounded(_fs.loc(self.path / "state.json"), MAX_STATE_BYTES, nonblock=True)
+        data = _read_bytes(self.path / "state.json", MAX_STATE_BYTES)
         if data is None:
             return None
         doc = decode_state(data)
@@ -955,16 +973,14 @@ class OwnedJob:
         if (mode := _lstat_mode(logs)) is not None and not stat.S_ISDIR(mode):
             _fs.remove_file(_fs.loc(logs), durable=durable)
             mode = None
-        if mode is None:
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(logs)
-        # Every later step is anchored at this descriptor, so a swapped logs/ cannot redirect it.
-        directory = _fs.open_dir(logs)
+        # Every later step is anchored at this descriptor, so a swapped logs/ cannot redirect it; anchored at the
+        # job directory, so a job a recoverer moved away is never recreated here.
+        directory = _fs.open_dir_under(self.path, "logs", create=True, mode=0o777, durable=durable)
         try:
             target = _fs.anchored(directory, name)
             mode = _lstat_mode(Path(name), directory)
             if mode is not None and stat.S_ISDIR(mode):
-                self.owner._discard(logs / name)
+                self.owner._discard(target)
             elif mode is not None and not stat.S_ISREG(mode):
                 _fs.remove_file(target, durable=durable)
             return _fs.open_append(target, durable=durable)
@@ -1094,7 +1110,7 @@ class OwnedJob:
             ``tmp/<owner-id>.<purpose>.<token>/``, whose parent exists.
         :raises httk.workflow.errors.WorkflowError: While an attempt runs, or after the handle was released.
         :raises ValueError: When *destination* is not below this owner's scratch, exists, or has no parent.
-        :raises OwnerLost: When the job directory is gone.
+        :raises OwnerLost: When the job directory or the destination's parent is gone.
         """
 
         self._live()
@@ -1121,7 +1137,15 @@ class OwnedJob:
             raise ValueError(f"the parent of {destination} is not a directory")
         # move_owned decides by the source alone, so a vanished source must be caught first.
         self._present()
-        _fs.move_owned(_fs.loc(self.path), _fs.loc(destination), durable=self.owner.workspace.durable)
+        try:
+            # Never recreate the parent: a recoverer may have taken the scratch since the check above.
+            _fs.move_owned(
+                _fs.loc(self.path), _fs.loc(destination), durable=self.owner.workspace.durable, create_parents=False
+            )
+        except _fs.MoveFailed as exc:
+            if not _fs.exists(_fs.loc(destination.parent)):
+                raise OwnerLost(f"{destination.parent} is gone: owner {self.owner.owner_id} was recovered") from exc
+            raise
         self._retire()
 
     def discard_subtree(self, relative: str | PurePosixPath) -> bool:
@@ -1494,6 +1518,9 @@ def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | N
 
 _RECONCILERS: dict[str, Callable[[Owner, Path], bool]] = {}
 
+#: Scratch purposes whose content is always safe to discard: nothing in them is the only copy of a job.
+DISCARDABLE_PURPOSES = frozenset({"trash", "build", "copy", "landing", "release", "claim"})
+
 
 def register_reconciler(purpose: str, function: Callable[[Owner, Path], bool]) -> None:
     """Register the reconciler of a scratch purpose (``eject`` and ``adopt`` are registered by ``_moving``).
@@ -1513,17 +1540,25 @@ def reconcile_scratch(owner: Owner, path: Path) -> bool:
 
     :param owner: The owner the scratch is named after.
     :param path: ``tmp/<owner-id>.<purpose>.<token>/``.
-    :return: ``False`` when the reconciler could not finish and the scratch is kept.
+    :return: ``False`` when the scratch is kept: its reconciler could not finish, or its purpose has none
+        registered in this process (it may hold the only copy of a job).
     :raises ValueError: When *path* is not this owner's scratch.
     """
 
     parts = _SCRATCH.fullmatch(path.name)
     if parts is None or parts[1] != owner.owner_id or path.parent != _tmp(owner.workspace):
         raise ValueError(f"{path} is not a scratch directory of owner {owner.owner_id}")
-    reconciler = _RECONCILERS.get(parts[2])
-    # §5.4: an empty scratch, and build, copy, trash and unknown purposes, are discarded.
-    if reconciler is not None and _names(path) and not reconciler(owner, path):
-        return False
+    purpose = parts[2]
+    # §5.4: an empty scratch and a discardable purpose are discarded; anything else needs its reconciler.
+    if purpose not in DISCARDABLE_PURPOSES and _names(path):
+        reconciler = _RECONCILERS.get(purpose)
+        if reconciler is None:
+            _LOGGER.error(
+                "keeping scratch %s: no reconciler of purpose %r is registered in this process", path, purpose
+            )
+            return False
+        if not reconciler(owner, path):
+            return False
     if _fs.exists(_fs.loc(path)):
         owner._discard(path)
     return True
@@ -1578,6 +1613,32 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
     raise WorkflowError(f"owner {dead_owner_id} kept acquiring entries during {_ROUNDS} recovery rounds")
 
 
+def recoverable_owners(workspace: KernelWorkspace) -> list[str]:
+    """List the owners recovery must consider: every owner with a record, and every tombstoned one left with work.
+
+    A recovered owner keeps only ``dead.json``; a falsely attested owner that woke up may still claim into
+    ``owned/<id>/`` (or leave a launch or scratch) after its recovery, which this list makes recoverable again.
+
+    :param workspace: The workspace.
+    :return: Owner ids, sorted.
+    """
+
+    scratch_owners = {parts[1] for name in _names(_tmp(workspace)) if (parts := _SCRATCH.fullmatch(name))}
+    return [
+        item.owner_id
+        for item in list_owners(workspace)
+        if item.record is not None
+        or (
+            _fs.exists(_fs.loc(item.path / "dead.json"))
+            and (
+                _names(_owned_dir(workspace, item.owner_id))
+                or _names(item.path / "launches")
+                or item.owner_id in scratch_owners
+            )
+        )
+    ]
+
+
 def _return_jobs(
     workspace: KernelWorkspace, owned_dir: Path, dead_owner_id: str, returned: list[JobRef], quarantined: list[Path]
 ) -> None:
@@ -1619,7 +1680,9 @@ def _dead_scratch(workspace: KernelWorkspace, dead_owner_id: str) -> list[str]:
 def _take_scratch(owner: Owner, dead_owner_id: str, taken: list[Path], kept: list[Path]) -> None:
     tmp = _tmp(owner.workspace)
     for name in _dead_scratch(owner.workspace, dead_owner_id):
-        target = tmp / f"{owner.owner_id}{name[len(dead_owner_id) :]}"
+        purpose = name.split(".")[1]
+        # A fresh token, so the destination is fresh by construction whatever else the recoverer holds.
+        target = tmp / f"{owner.owner_id}.{purpose}.{_fs.fresh_token()}"
         # §5.4 step 2: renaming to the recoverer's name makes exactly one recoverer reconcile it.
         if _fs.move_once(_fs.loc(tmp / name), _fs.loc(target), durable=owner.workspace.durable) is _fs.Moved.WON:
             (taken if reconcile_scratch(owner, target) else kept).append(target)
@@ -1633,14 +1696,24 @@ def take(workspace: KernelWorkspace, owner: Owner, src: _fs.Loc, purpose: str) -
     :param src: The contested entry (anchored for a client-writable directory).
     :param purpose: The scratch purpose.
     :return: The scratch holding the entry under its own name, or ``None`` when another actor took it.
+    :raises OwnerLost: When a recoverer took the new scratch before the move.
     """
 
     scratch = owner.scratch(purpose)
     target = _fs.loc(scratch / src.name())
-    if _fs.move_once(src, target, durable=workspace.durable) is _fs.Moved.WON:
-        return scratch
+    try:
+        # Never recreate the scratch: a recoverer may have taken it.
+        if _fs.move_once(src, target, durable=workspace.durable, create_parents=False) is _fs.Moved.WON:
+            return scratch
+    except _fs.MoveFailed as exc:
+        if not _fs.exists(_fs.loc(scratch)):
+            raise OwnerLost(f"{scratch} is gone: owner {owner.owner_id} was recovered") from exc
+        raise
+    if _fs.remove_empty_dir(_fs.loc(scratch)) or not _fs.exists(_fs.loc(scratch)):
+        # Removed, or already taken by a recoverer: either way the entry is not ours.
+        return None
     # A won move not yet visible leaves the scratch non-empty: then it is ours after all.
-    return None if _fs.remove_empty_dir(_fs.loc(scratch)) else scratch
+    return scratch
 
 
 # -- the exchange index ---------------------------------------------------------------------------------------------
@@ -1656,7 +1729,8 @@ def claim_exchange_name(
     :param exchange_name: The client's name for the job (a UUID).
     :param job_id: The job UUID.
     :param placement: The job's placement.
-    :return: Whether the entry now indexes *job_id* (created here, or by an earlier run for the same job).
+    :return: Whether the entry now indexes *job_id* at *placement* (created here, or by an earlier run for the
+        same job).
     """
 
     job_id = canonical_uuid(job_id, "job_id")
@@ -1664,15 +1738,16 @@ def claim_exchange_name(
     staging = owner.scratch("claim")
     nonce = f"{owner.owner_id}.{_fs.fresh_token()}".encode()
     _fs.write_file(_fs.loc(staging / ".nonce"), nonce, durable=durable)
-    index = {"job_id": job_id, "placement": placement_text(normalize_placement(placement))}
+    index: dict[str, object] = {"job_id": job_id, "placement": placement_text(normalize_placement(placement))}
     _fs.write_file(_fs.loc(staging / "index.json"), _encode(index), durable=durable)
-    os.mkdir(staging / "translated")
+    # Anchored at the staging, so a scratch a recoverer took is never recreated.
+    os.close(_fs.open_dir_under(staging, "translated", create=True, mode=0o777, durable=durable))
     # publish_dir removes the staging whether it won or lost.
     if _fs.publish_dir(_fs.loc(staging), _fs.loc(entry), nonce=nonce, durable=durable):
         return True
     # §13.2: an adopt reconciler rerun after its adopter died finds its own job's entry; that is not a duplicate.
     existing = _read_json_quietly(entry / "index.json")
-    return existing is not None and existing.get("job_id") == job_id
+    return existing is not None and {key: existing.get(key) for key in index} == index
 
 
 def record_exchange_translation(workspace: KernelWorkspace, exchange_name: str, request_id: str) -> None:
@@ -1718,7 +1793,7 @@ def post_request(workspace: KernelWorkspace, doc: Mapping[str, object]) -> Path:
     job_id = canonical_uuid(doc.get("job_id"), "job_id")
     request_id = canonical_uuid(doc.get("request_id"), "request_id")
     directory = _requests_dir(workspace)
-    os.makedirs(directory, exist_ok=True)
+    _fs.make_dirs(directory, durable=workspace.durable)
     path = directory / f"{job_id}.{request_id}.json"
     # A unique name, or a deterministic id with equivalent content (§8.5): write_file is idempotent.
     _fs.write_file(_fs.loc(path), _encode(dict(doc)), durable=workspace.durable)
