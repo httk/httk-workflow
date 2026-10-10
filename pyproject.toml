@@ -167,8 +167,6 @@ markers = [
 target-version = "py312"
 src = ["src", "examples", "tests"]
 line-length = 120
-# Pre-redesign tests kept only as the specification phases D and E port from.
-extend-exclude = ["tests/_legacy"]
 
 [tool.ruff.lint]
 # TRY002: raising plain Exception is accepted httk style.
@@ -195,7 +193,6 @@ quote-style = "preserve"
 [tool.pyright]
 pythonVersion = "3.12"
 include = ["src", "examples", "tests"]
-exclude = ["tests/_legacy"]
 extraPaths = ["src", "../httk-core/src"]
 venvPath = ".."
 venv = ".venv"
@@ -204,7 +201,6 @@ reportMissingImports = true
 [tool.mypy]
 python_version = "3.12"
 files = ["src", "examples", "tests"]
-exclude = ["^tests/_legacy/"]
 mypy_path = ["src", "tests"]
 namespace_packages = true
 explicit_package_bases = true

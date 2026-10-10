@@ -35,10 +35,6 @@ from httk.workflow.registry import (
 )
 from httk.workflow.scaffold import _WORKFLOW_PROVIDERS, WorkflowProvider
 
-#: The pre-redesign tests kept as the specification phases D and E port from (see ``_legacy/pending/README.md``).
-collect_ignore = ["_legacy"]
-
-
 #: The packaged runner of the ``tests.relax`` workflow, a test-only stand-in for a
 #: domain's packaged runner (see ``workflow_fixtures/__init__.py``).
 RELAX_RUNNER = Path(__file__).with_name("workflow_fixtures") / "relax.py"
