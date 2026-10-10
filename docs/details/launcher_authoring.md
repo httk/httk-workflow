@@ -265,7 +265,7 @@ if __name__ == "__main__":
 
 A manager learns its nodes, processors, memory and devices from the allocation
 probe its `--allocation SPEC` selects: `auto`, `none`, `slurm`, `host`, or
-`exec:PATH` (see {doc}`taskmanager` under "Allocations"). A launcher appends the
+`exec:PATH` (see {doc}`/details/taskmanager` under "Allocations"). A launcher appends the
 spec its managers need; the maintained Slurm dispatcher appends the
 `manager.allocation` setting, default `slurm`. A scheduler without a built-in
 probe uses `exec:PATH`: the manager runs PATH, without a shell or arguments,
@@ -295,7 +295,7 @@ stdout:
 | `format`, `format_version` | yes | `httk-workflow-allocation`, `1` |
 | `kind` | yes | A label naming the probe, such as `pbs` |
 | `end_time` | no | Epoch second the allocation ends, a positive number or `null` |
-| `identity` | no | The scheduler's identity of the allocation, an object or `null`: at most 16 entries, keys are labels (`[a-z0-9][a-z0-9._-]{0,47}`), values are strings of at most 256 UTF-8 bytes. It is recorded with every confined launch and handed back to the `ended` query below, which is asked only for an allocation that has one |
+| `identity` | no | The scheduler's identity of the allocation, an object or `null`: at most 16 entries, keys are labels (`[a-z0-9][a-z0-9._-]{0,47}`), values are strings of at most 256 UTF-8 bytes. It is recorded in the manager's `owner.json` and in its launch records, and handed back to the `ended` query below, which is asked only for an allocation that has one |
 | `cpus_per_proc` | no | CPUs per processor slot, a positive integer, default `1` |
 | `nodes` | yes | Non-empty list of nodes with unique `host` names |
 | `nodes[].host` | yes | Non-empty host name |
@@ -374,14 +374,15 @@ httk launcher configure --set manager.allocation=exec:/home/me/.config/httk/laun
 
 ### Has the allocation ended?
 
-Every confined launch records the allocation its ranks run in: the probe
-spec, the kind, the `identity` and the `end_time`. A manager that takes over a
-commit, calls an attempt's writer dead or verifies a cancellation must first
-know that every such launch has ended (see
-[launch end evidence](workflow_filesystem_api.md#launch-end-evidence)), and
-for ranks on other hosts it asks the probe that recorded the allocation (its
-path is recorded absolute), provided the envelope carried an `identity`. It
-runs `PATH ended`, without a shell, with one query on standard input:
+A manager records its allocation, the probe spec, the kind, the `identity` and
+the `end_time`, in its `owner.json` and in every launch record. Recovering a
+dead manager's jobs needs proof that the manager and every launch it started
+have ended (see
+[the death proof](workflow_filesystem_api.md#the-death-proof)). A
+process on another host cannot be observed, so for it the proof asks the probe
+that recorded the allocation (its path is recorded absolute), provided the
+envelope carried an `identity`. It runs `PATH ended`, without a shell, with
+one query on standard input:
 
 ```json
 {"format": "httk-workflow-allocation-query", "format_version": 1,
@@ -396,18 +397,12 @@ and expects exactly one answer on standard output:
 
 Answer `true` only when the scheduler confirms that the allocation ended,
 which means every process it started has ended, and `false` while it is still
-active. The answer outranks the recorded `end_time`: after `false` the waiting
-manager keeps waiting even once that end time has passed, since the time
-limit may have been extended, and it asks again at most once a minute.
-Anything else, a non-zero exit, or no answer within 30 seconds, means the
-probe cannot tell; the recorded `end_time` then counts once 300 seconds plus
-an hour have passed since it. A probe that ignores its argument and prints
-its allocation envelope is therefore safe, but slow: a launch on another host
-is proven ended an hour after its allocation's end, or earlier by an
-operator's `httk job confirm-launches-ended`. Without an `identity`, or on a
-host where PATH does not exist, the probe is not asked, and the end time plus
-300 seconds counts at once.
+active. Anything else, a non-zero exit, or no answer within 30 seconds, means
+the probe cannot tell. Answers are cached for a minute. The recorded
+`end_time` is never evidence: a probe that ignores its argument and prints its
+allocation envelope cannot tell, and neither can one without an `identity` or
+on a host where PATH does not exist.
 
-A probe whose ranks run on other hosts than the manager's MUST answer the
-`ended` query or report an `end_time`; otherwise a commit takeover after its
-manager died waits for an operator.
+A probe whose processes run on other hosts than the manager's MUST answer the
+`ended` query; otherwise recovering its jobs after the manager died waits for
+an operator's `httk workspace attest-dead`.

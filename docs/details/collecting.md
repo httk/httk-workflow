@@ -24,7 +24,7 @@ steps they call, are typically like this.
 
 Every `CollectedJob` also carries `child_runs`: one
 `(label, run source id)` pair per child the job spawned or called, read from
-its spawn records.
+the published `children` of its `state.json`.
 
 When an output role is a single file-valued result, its run edge points to a
 standard `files` entry (`type = "files"`). File lists remain values within
@@ -61,40 +61,43 @@ consumer reads results like this, and nothing in *httk-workflow* knows what
 ```python
 from httk.workflow import Workspace, job_records
 
-workspace = Workspace("workflow-workspace", mutable=False)
+workspace = Workspace("workflow-workspace")
 for record in job_records(workspace):
     store.save(load_vasp(record))
 ```
 
-Every member of a record derives from the authoritative state a manager reads:
-the marker below `state/`, the journal frames its chain names and the
-immutable `job.json`. A record never says anything the workspace does not.
+Every member of a record derives from the job directory alone: the immutable
+`job.json`, the owner-written `state.json` and the owner run log
+`logs/runlog.jsonl`. A record never says anything the workspace does not. It
+identifies its job by `workspace_id` and `job_id`; a job directory moves with
+every state change, so `payload_path` is only where the job was when it was
+read.
 
 ## What a record guarantees
 
 ### The executed code is pinned
 
-A record carries the immutable job digest and the complete runner identity:
-executor, source, path and the SHA-256 the job pinned for every runner outside
-its payload. A runner named by the reserved `pkg:` form also reports its
-installed distribution and version, so a stored result names the software
-that produced it.
+A record carries the immutable job digest and, in `runner_provenance`, the
+installed workflow the job ran: its id and the SHA-256 of its installed package
+tree, as the manager recorded them at launch (`workflow_pin` in `state.json`).
+A stored result therefore names the software that produced it.
 
 ### Damage is reported
 
-A job with a broken journal chain is still collected with whatever remains
-readable, and `provenance.gaps` is set to `true`, so a result does not vanish
-because part of its history was lost. Only a job whose `job.json` cannot be
-read is skipped, with a module-logger message, because a record stands for
-the *validated* job behind a result.
+A job whose run log, `state.json` or observed declarations are damaged is
+still collected with whatever remains readable, and `provenance.gaps` is set to
+`true`, so a result does not vanish because part of its history was lost. Only
+a job whose `job.json` cannot be read is skipped, with a module-logger message,
+because a record stands for the *validated* job behind a result.
 
 ### Collection scales by iteration
 
-`job_records` is a lazy iterator over one scan of the requested state
-directories, and each record reads only its own job's payload and journal
-chain. {doc}`benchmarks` gives a measured local reference point. Partition
-larger campaigns across workspaces and collect them one partition at a time,
-not as one in-memory result array.
+`job_records` is a lazy iterator over one listing of the requested state
+directories, and each record reads only its own job's `job.json`, `state.json`
+and run log. A job that moves between listing and reading is skipped like an
+unreadable one. {doc}`/details/benchmarks` gives a measured local reference
+point. Partition larger campaigns across workspaces and collect them one
+partition at a time, not as one in-memory result array.
 
 ## Members
 
@@ -102,14 +105,13 @@ not as one in-memory result array.
 | --- | --- |
 | `workspace`, `workspace_id` | the absolute workspace root and its identity |
 | `job_id`, `job_key` | the job UUID and the complete `tag--uuid` key |
-| `job` | the validated job definition, including its `digest` and the `runner` identity that executed it |
-| `runner_provenance` | `module`, `resource`, `distribution`, and `version` of a `pkg:` runner; `null` for every other runner |
+| `job` | the validated job definition, including its `digest`, `workflow` (the installed workflow's id) and `workflow_name` |
+| `runner_provenance` | `{"id", "tree_sha256"}` of the installed workflow the job last launched with, or `null` |
 | `state` | the kind this job stopped in: `succeeded`, `failed`, `cancelled`, or `paused` |
 | `failure` | the unified failure record — `code`, `message`, optional `details`, `retryable` — or `null` |
 | `placement` | the placement subtree this job sits in |
-| `payload_path`, `workdir_path`, `data_path` | workspace-relative paths to the payload, the last attempt's workdir, and the transactional data of a job that has one |
-| `data_generation` | the committed data generation, or `null` for `data.mode` `none` |
-| `provenance` | `{"activations": [...], "gaps": bool}` — the journal-derived timeline, oldest first |
+| `payload_path`, `workdir_path`, `data_path` | workspace-relative paths to the job directory, its persistent workdir `run/`, and its `data/` directory when the job committed data |
+| `provenance` | `{"activations": [...], "gaps": bool}` — the timeline derived from the owner run log, oldest first |
 | `runner_steps` | the step set the runner declared, when one was ever recorded |
 | `runner_description` | reserved: a runner's own `--describe` output attaches here in a later phase, `null` today |
 | `children` | the labeled children this job spawned, keyed by spawn label |
@@ -128,10 +130,11 @@ A collect hook reads parameters and finds result files through the record:
   `parameters`. Without a default, a missing name raises `KeyError`, like
   `Attempt.parameter`.
 - `record.result_file(name, data_prefix=..., published=...)` returns the
-  existing file: below the committed data for a job with transactional data
-  (at `published`, default `name`, below `data_prefix`), otherwise in the
-  persistent workdir. A missing file raises `ValueError`; a transactional job
-  never falls back to the workdir.
+  existing file: below the committed data for a job that has a `data/`
+  directory (at `published`, default `name`, below `data_prefix`), otherwise
+  in the persistent workdir. A compressed copy (`OUTCAR.gz`) is found too. A
+  missing file raises `ValueError`; a job with committed data never falls back
+  to the workdir.
 
 ```python
 from httk.codes.vasp.collect import read_total_energy
@@ -146,16 +149,21 @@ The reading helper comes from the code package, here *httk-workflow-vasp*.
 
 ### Provenance, children and declarations
 
-Each entry of `provenance.activations` carries `activation_id`,
-`activation_ordinal`, the `step` it ran, the `reason` it started and its
-`attempts`. Each attempt carries `attempt_id`, `ordinal`, the owning
-`manager_id` and `writer_id`, the `record_ref` of the journal frame that
-opened it, the recorded `claimed_at`, `started_at` and `finished_at`
-timestamps, the `outcome_action` it published and its `failure`.
+The timeline regroups the owner run log: each `attempt_started` event opens
+an attempt, and a change of activation opens an activation. Each entry of
+`provenance.activations` carries `activation_id`, `activation_ordinal`, the
+`step` it ran, the `reason` it started (known for the current activation, from
+`state.json`) and its `attempts`. Each attempt carries `attempt_id`,
+`ordinal`, the `owner_id` that launched it, the `claimed_at`, `started_at` and
+`finished_at` timestamps, the `outcome_action` it published and its `failure`
+(the code from the run log; the full failure for the last attempt). The
+runner's own evidence log `.httk-job/runlog.jsonl` is not part of the record;
+`httk job log` shows both.
 
-`children` maps each spawn label to `job_id`, `job_key` and, when the parent's
-frames recorded it, the child's `kind`. A campaign thus collects as a tree of
-named children, each collected in its own right.
+`children` maps each spawn label to `job_id`, `job_key` and `kind`, the state
+the parent's join last observed the child in (`null` when no join observed
+it). A campaign thus collects as a tree of named children, each collected in
+its own right.
 
 `declarations` reports every declaration name either source knows:
 
@@ -168,12 +176,12 @@ Either is `null` when its source has nothing. They are not merged, because
 reconciling them needs the document's own vocabulary, which is the consumer's
 job. An unreadable observed document is reported as `null` and sets
 `provenance.gaps`. `job` does not repeat the declared documents. See
-{doc}`declarations`.
+{doc}`/details/declarations`.
 
 The observed `environment` declaration is the exact resolved value and source
 snapshot that drove the run (format `httk-workflow-environment-resolution`
 version 2). The `provenance`
-declaration becomes a stored `httk.core.Run`; see {doc}`provenance`.
+declaration becomes a stored `httk.core.Run`; see {doc}`/details/provenance`.
 
 ## Selecting records
 
@@ -206,40 +214,41 @@ below).
 ### Output forms
 
 The workspace is attached read-only. By default `collect` prints one
-`CollectedJob` summary per line. `--raw` prints one `JobRecord` per line, and
-the hidden compatibility `--json` form materializes those raw records as an
-array.
+`CollectedJob` summary per line (format `httk-workflow-collected`). `--raw`
+prints one `JobRecord` per line instead:
 
 ```console
-$ httk collect --workspace workflow-workspace | head -1
-{"children":{},"data_generation":null,"data_path":null,"declarations":{},"failure":null,
- "format":"httk-workflow-collect","format_version":2,
- "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},
-"digest":"0e6f…","id":"5c0a…","initial_step":"only","parameters":{},"job_key":"single--5c0a…",
- "name":"collect single","parent":null,"priority":500,
- "runner":{"arguments":[],"executor":"path","path":"single/run.py","sha256":"41b1…",
- "source":"workspace"},"retry_policy":{…},"resources":{},"tag":"single",
- "workdir":{"mode":"persistent","path":"run"},"workflow":"tests.collect.single"},
- "job_id":"5c0a…","job_key":"single--5c0a…","payload_path":"project/single/single--5c0a…",
- "placement":"project/single","provenance":{"activations":[…],"gaps":false},
- "runner_description":null,"runner_provenance":null,"runner_steps":["only"],
- "state":"succeeded","workdir_path":"project/single/single--5c0a…/run",
- "workspace":"/…/workflow-workspace","workspace_id":"a2d1…"}
+$ httk collect --workspace workflow-workspace --raw | head -1
+{"children":{},"data_path":null,"declarations":{"workflow":{"declared":{"inputs":[],"outputs":[]},
+ "observed":null}},"failure":null,"format":"httk-workflow-collect","format_version":3,
+ "job":{"claim":{"pool":"default","required_capabilities":[]},"digest":"b5e9…",
+ "environment":{"declared":{},"overrides":{}},"id":"6cde…","initial_step":"only",
+ "job_key":"single--6cde…","name":"run: single","parameters":{},"parent":null,"priority":500,
+ "resources":{},"retry_policy":{…},"tag":"single","workflow":"adhoc:run@e977…",
+ "workflow_name":"run"},"job_id":"6cde…","job_key":"single--6cde…",
+ "payload_path":"jobs/succeeded/project/single/single--6cde…~p500~uluonuoo5prwmbss",
+ "placement":"project/single","provenance":{"activations":[{"activation_id":"f5a3…",
+ "activation_ordinal":1,"attempts":[{"attempt_id":"3dfa…","claimed_at":"…","failure":null,
+ "finished_at":"…","ordinal":1,"outcome_action":"succeed","owner_id":"ab79…",
+ "started_at":"…"}],"reason":"initial","step":"only"}],"gaps":false},
+ "runner_description":null,"runner_provenance":{"id":"adhoc:run@e977…","tree_sha256":"9ec2…"},
+ "runner_steps":["only"],"state":"succeeded",
+ "workdir_path":"jobs/succeeded/project/single/single--6cde…~p500~uluonuoo5prwmbss/run",
+ "workspace":"/…/workflow-workspace","workspace_id":"656c…"}
 ```
 
-With `--raw`, each line is exactly `JobRecord.as_mapping()`, and
+Each `--raw` line is exactly `JobRecord.as_mapping()`, and
 `JobRecord.from_mapping()` rebuilds the record, so the stream can be written
 to a file, shipped and read back by the storing process.
 
 Jobs that ran on a remote are collected the same way once home:
-`httk job transfer REMOTE:NAME default` imports them into the local default
-workspace in their terminal state, and collect cannot tell them from local
-jobs. See {doc}`workflow_cli`.
+`httk job transfer --job JOB REMOTE:NAME default` moves them into the local
+default workspace in their terminal state, and collect cannot tell them from
+local jobs. See {doc}`/details/workflow_cli`.
 
 ### Summary line and exit codes
 
-Every `collect` invocation except the pure-array `--json` form ends with one
-JSONL summary line:
+Every `collect` invocation ends with one JSONL summary line:
 
 ```text
 {"format":"httk-workflow-collect-summary","format_version":2,
@@ -324,7 +333,7 @@ for minted entry ids. `--id-series` selects the campaign series and defaults
 to `1`.
 
 By default a sealed *id ledger* allocates these ids so they stay stable across
-rebuilds; see {doc}`stable_ids`. It lives beside the store at
+rebuilds; see {doc}`/details/stable_ids`. It lives beside the store at
 `<into>.ids.sqlite` (relocate it with `--id-ledger PATH`), is created and
 signed on first use, and is announced prominently because it should be kept
 and committed with the store.
@@ -392,24 +401,26 @@ are interpreted live, not historically.
   above).
 - A job whose provider is not registered on the collecting machine stays
   degraded, not run-only, because a collector may exist for it elsewhere.
-- With `--allow-job-collector`, a job pinned to a workspace package tree is
-  decided by that verified tree instead, so an unregistered package with
-  nothing to collect is `run_only` too.
-- A job run from a bare runner file of your own has no manifest to decide from
-  and stays degraded.
+- With `--allow-job-collector`, a job is decided by its verified installed
+  package instead, so an unregistered package with nothing to collect is
+  `run_only` too.
+- A job of a runner file of your own runs an ad hoc installed package whose
+  generated manifest declares no collector and no outputs, so it is degraded
+  without `--allow-job-collector` and `run_only` with it.
 
-`--allow-job-collector` lets collection inspect the job-pinned package tree,
-validate its manifest and digest, and load its collect hook; refusals degrade
-only that job. See {doc}`workflow_packages` for the trust tiers and package
-hook contract.
+`--allow-job-collector` lets collection load the collect hook of the job's
+installed workflow package in the workspace, after checking that its tree
+digest still matches the job's `runner_provenance` (a workflow reinstalled or
+modified since the job ran is refused); refusals degrade only that job. See
+{doc}`/details/workflow_packages` for the trust tiers and package hook
+contract.
 
 ### Executable hooks
 
 An executable `[workflow.collect]` member runs once per matching collection
-window from its package tree. For direct package paths and the opt-in
-job-pinned fallback, that tree is published and digest-checked. A
-registered-directory provider is the explicit-consent exception that runs from
-current source.
+window from its package tree. Under the job-pinned fallback that tree is the
+job's installed package, digest-checked against the pin. A registered-directory
+provider is the explicit-consent exception that runs from current source.
 
 The first stdin line is
 `{"format":"httk-workflow-collect-stream","format_version":2}`, and each
@@ -445,7 +456,7 @@ an ordinary per-job exception degrades that job.
 For a job of a compat format (`workflow_realization = "language"`), provider
 dispatch is followed by the job's own `workflow_language` parameter. A
 provider-less CWL, PWD or jobflow job then uses the format's default
-collector. It reads the output document from the workdir or transactional data
+collector. It reads the output document from the workdir or committed data
 tree, maps ports to declared roles and creates `DataRecord` objects. CWL
 `File` values must stay inside the workspace, workdir or data tree and are
 recorded as a file descriptor and sha256. Jobflow reads
@@ -453,11 +464,10 @@ recorded as a file descriptor and sha256. Jobflow reads
 
 A package with a custom hook records `workflow_collect = "package"`;
 provider-less collection of it degrades with a registration hint instead of
-running the format default. httk-v1 has no default: a manifest package
-degrades with a message to declare `[workflow.collect]`. The `job new` CLI does
-not submit a bare v1 directory; use `--workflow-dir` with a manifest, or
-`remote import-v1`. The `allow_job_collector` pinned-tree fallback is tried
-only after this format fallback, and only with a matching digest and manifest.
+running the format default. httk-v1 has no default: such a job degrades with
+a message to declare `[workflow.collect]` in a package manifest. The
+`allow_job_collector` fallback is tried only after this format fallback, and
+only with a matching digest.
 
 Any per-job collector, load or assembly failure degrades that job without
 stopping the sweep; `fail_fast=True` (`--fail-fast`) stops at the first such
@@ -483,8 +493,8 @@ resolve cross-job provenance; use ordinary streaming collection when that
 memory cost is too high.
 
 For the distinction between declared entry-typed inputs and opaque
-implementation parameters, see {doc}`workflow_packages` and
-{doc}`declarations`.
+implementation parameters, see {doc}`/details/workflow_packages` and
+{doc}`/details/declarations`.
 
 ## Recognized calculations
 
@@ -500,7 +510,7 @@ httk collect calculations/ --into results.sqlite --id-base mydb
 ### Collector packages
 
 Each directory is offered to the *recognized-calculation collectors*: those
-that code packages register (see {doc}`../code_support`) and any given with
+that code packages register (see {doc}`/code_support`) and any given with
 `--collector DIR`. A collector is a workflow package with a
 `[workflow.recognize]` table, a `recognize.py` hook, a `collect.py` hook and
 no runner. It is collected, never run.

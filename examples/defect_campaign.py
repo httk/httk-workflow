@@ -7,7 +7,7 @@ Four steps, and nothing declares the shape of the workflow in advance:
     decides how many defect sites there are and spawns one child job per site,
     then waits for all of them.
 ``relax``
-    the step every child runs. It publishes its result as transactional data, or
+    the step every child runs. It stages its result into its data directory, or
     fails by its own declared failure code.
 ``aggregate``
     runs once the children are terminal, writes a report of the ones that

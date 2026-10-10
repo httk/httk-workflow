@@ -1,9 +1,10 @@
 # Workflows by URI
 
 A workflow package kept in a Git repository can be shared and run by its git
-URI. The URI is the installed workflow's id, and its manifest
-`[workflow] name` becomes its short name once the workflow is known locally.
-Built-in and local workflows keep their plain names as ids.
+URI. The commit-pinned URI is the workflow's id in every workspace it is
+installed in, and its manifest `[workflow] name` is its short name. A package
+directory installs as `local:<name>` and a runner file as
+`adhoc:<name>@<sha12>`.
 
 ```text
 git+https://github.com/<org>/<repo>[@<ref>][#<subdir>]
@@ -12,7 +13,7 @@ git+https://github.com/<org>/<repo>[@<ref>][#<subdir>]
 ## Publish a workflow
 
 Commit a workflow package (a directory with `httk_workflow.toml`, see
-{doc}`workflow_packages`) to a Git repository reachable over https without
+{doc}`/details/workflow_packages`) to a Git repository reachable over https without
 credentials. One repository can hold several workflows, one per
 subdirectory:
 
@@ -30,102 +31,110 @@ workflows-vasp/
 If the repository root holds `httk_workflow.toml`, the URI needs no
 `#subdir`.
 
-## Reference it
+## Install it
 
-Anything that takes a workflow takes a git URI: `httk job new --workflow`,
-`httk campaign submit --workflow`, `httk workflow describe`,
-{py:func}`~httk.workflow.scaffold.new_job`,
-{py:func}`~httk.workflow.scaffold.resolve_workflow`, and `Attempt.call`:
+A job runs only a workflow installed in its workspace, so a git URI is
+installed first, or with `--install` on first use:
 
 ```console
-httk job new --workspace WS \
+httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk job new --workspace WS --workflow vasp.relax --input structure=POSCAR
+
+httk job new --workspace WS --install \
     --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' \
     --input structure=POSCAR
-httk workflow describe 'git+https://github.com/httk/workflows-vasp@main#vasp-relax'
 ```
 
-`@ref` is a branch, a tag, an abbreviated or full commit hash, or omitted for
-the remote default branch. Referencing fetches the repository at that ref and
-installs the workflow; {py:func}`~httk.workflow.git_workflows.fetch_workflow`
-does this directly and returns the provider.
+`httk campaign submit --install`, {py:func}`~httk.workflow.scaffold.new_job`
+with `install=True`, and `[workflow.calls]` of an installed package (which
+must pin the full commit) install the same way.
 
-The job records the **canonical URI**: the ref expanded to the full commit
-hash and the scheme and host lowercased, for example
+`@ref` is a branch, a tag, an abbreviated or full commit hash, or omitted for
+the remote default branch. Installing fetches the repository at that ref into
+this machine's cache ({py:func}`~httk.workflow.git_workflows.fetch_workflow`)
+and copies the package into the workspace's `workflows/` store under the
+**canonical URI**: the ref expanded to the full commit hash and the scheme and
+host lowercased, for example
 `git+https://github.com/httk/workflows-vasp@458aacb2493586faa2c9ac033334457569aeaf75#vasp-relax`.
-The repository path is kept verbatim, so `…/workflows-vasp` and
-`…/workflows-vasp.git` are different URIs.
+Every job of it records that id. The repository path is kept verbatim, so
+`…/workflows-vasp` and `…/workflows-vasp.git` are different URIs.
 
 Only `git+https://`, `git+http://`, and `git+file://` are accepted;
 credentials, queries, and ssh forms are refused. Git runs without global or
 system configuration and without credential helpers, so private repositories
 are not supported.
 
-## Install without creating a job
+`httk workflow describe URI` fetches and describes without installing.
+`httk workflow uninstall --workspace WS SELECTOR` removes an installation by
+id or short name; jobs are not checked unless `--check` is given.
 
-`httk workflow install` fetches and installs without touching a workspace and
-prints each canonical URI and short name. `httk workflow uninstall` forgets
-installed workflows:
+## The machine cache
+
+Without `--workspace`, `httk workflow install URI` only fetches into this
+machine's cache and prints each canonical URI and short name, and
+`httk workflow uninstall SELECTOR` forgets fetched workflows:
 
 ```console
 httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workflow uninstall vasp.relax
 ```
 
-`uninstall` takes a short name or a URI. A pinned URI removes that commit; an
-unpinned URI or a short name removes every installed commit of that
-repository and subdirectory. It refuses workflows registered in-process and
-points plugin workflows to `httk plugin uninstall`. Cached checkouts stay.
+A pinned URI forgets that commit; an unpinned URI or a short name forgets
+every fetched commit of that repository and subdirectory. It refuses
+workflows registered in-process and points plugin workflows to
+`httk plugin uninstall`. Cached checkouts stay.
 
 ## Short names
 
-An installed workflow is also reachable by its short name:
+Within a workspace, `--workflow vasp.relax` selects the installation with that
+short name; two installations sharing it are refused, and the id must be
+used. `httk workflow list --workspace WS` lists them.
 
-```console
-httk job new --workspace WS --workflow vasp.relax --input structure=POSCAR
-httk workflow list
-```
-
-With several commits of one repository and subdirectory installed, the short
-name selects the most recently referenced one, so referencing another commit
-by URI switches it. When different repositories or subdirectories claim the
-same short name, the name is refused and the URI must be used. In-process
-registrations and installed plugins take precedence; an installed workflow
-they shadow logs a warning and stays reachable by its URI.
+On this machine, outside any workspace, a fetched workflow is also known by
+its short name, so `httk workflow install --workspace WS vasp.relax` installs
+it. With several commits of one repository and subdirectory fetched, the
+short name selects the most recently referenced one; when different
+repositories or subdirectories claim the same name, it is refused and the URI
+must be used. In-process registrations and installed plugins take precedence;
+a fetched workflow they shadow logs a warning and stays reachable by its URI.
+`httk workflow list` without `--workspace` lists them.
 
 ## Definition and declaration
 
 The git URI identifies the workflow **definition**, the code that ran. A
 workflow may separately publish a **declaration**, a document describing its
 inputs and outputs whose `$id` is the manifest's `declaration_uri` (see
-{doc}`declarations`). The two are independent: a git workflow without
+{doc}`/details/declarations`). The two are independent: a git workflow without
 `declaration_uri` has no declaration `$id`. Collection records both on the
 `Run`, as `workflow_definition_uri` (the job's pinned git URI) and
-`workflow_declaration_uri`; see {doc}`provenance`.
+`workflow_declaration_uri`; see {doc}`/details/provenance`.
 
 ## The same repository as a plugin
 
 A repository may also carry an `httk_plugin.toml` listing its workflow
 directories, so that `httk plugin install git+https://github.com/httk/workflows-vasp`
-installs them as a plugin. Both routes can coexist, and plugin names take
-precedence over installed short names.
+makes them known on this machine as a plugin. Both routes can coexist, and
+plugin names take precedence over fetched short names; either way a workspace
+runs a workflow only once it is installed there.
 
 ## Cache and trust
 
 Checkouts live under `data_home()/git` (`HTTK_DATA_HOME`, or
 `~/.local/share/httk`), one per repository and commit, shared with other git
-consumers such as project templates. Installed workflow entries live under
+consumers such as project templates; fetched workflow entries live under
 `data_home()/workflows/installed`. A pinned URI with a cached checkout is
-reused without running git. A package that could never be published (for
-example one containing a symlink) is refused before it is installed.
+reused without running git. A package that could never be installed (for
+example one containing a symlink) is refused when it is fetched.
 
-Referencing a URI is consent to run its code with the trust of an installed
-plugin package. Its instantiate hook runs from the digest-pinned tree
-published into the workspace; its collect hook and postprocess scripts run
-from the installed cache tree, like those of plugin and registered-directory
-packages. Collection never fetches: a finished job whose URI is not installed
-on this machine is collected as a job without a provider (see
-{doc}`collecting`), and nothing named in a job payload causes a download.
+Installing a URI is consent to run its code with the trust of an installed
+plugin package. Its runner runs from the workspace's installed copy, and its
+instantiate hook from that copy verified against its tree digest; its collect hook and
+postprocess scripts run from the cache tree, like those of plugin and
+registered-directory packages, or from the verified installed copy with
+`--allow-job-collector` (see {doc}`/details/collecting`). Nothing named in a
+job payload causes a download: managers and collection only look up what is
+already installed or fetched.
 
-The full reference, including the grammar and resolution precedence, is in
-{doc}`workflow_packages`. The API is {py:mod}`httk.workflow.git_workflows`,
-built on the shared `httk.core.git_sources`.
+The full manifest reference is in {doc}`/details/workflow_packages`. The API
+is {py:mod}`httk.workflow.git_workflows`, built on the shared
+`httk.core.git_sources`.

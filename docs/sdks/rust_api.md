@@ -57,10 +57,9 @@ httk_workflow = { path = ".../httk/workflow/languages/rust" }
 cargo build --release --offline
 ```
 
-The compiled binary is the runner file a job references. It is executable, so the
-manager runs it directly and the scaffolder describes it by running it — a job
-that starts from a runner file of your own is resolved the same way whatever
-language wrote it.
+The compiled binary is an executable runner file: `httk job new --from-runner`
+describes it by running it and installs it as an `adhoc:` workflow whatever
+language wrote it, and the manager runs the installed copy directly.
 
 A Cargo path cannot name an environment variable, so a workflow package depends
 on `httk_workflow = { path = "target/sdk" }` and its `[workflow.build]` command
@@ -215,7 +214,6 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Attempt::runlog_append(message, files)` | `httk_workflow_runlog_append` |
 | `Attempt::log(level, message)` | `httk_workflow_log` |
 | `Attempt::put(source, destination)` | `httk_workflow_put` |
-| `Attempt::remove(destination, missing_ok)` | `httk_workflow_remove` |
 | `Attempt::spawn(label, args)` | `httk_workflow_spawn` |
 | `Attempt::call(label, workflow, args)` | `httk_workflow_call` |
 | `Attempt::children(selection)` | `httk_workflow_children` |
@@ -235,13 +233,13 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Attempt::compress(args)` | `httk_compress` |
 | `Attempt::decompress(args)` | `httk_decompress` |
 
-Booleans are Rust `bool`: `Attempt::remove`'s `missing_ok`, and `Attempt::fail`'s
-`retryable`. `Attempt::stage_input` returns `Ok(true)` when staged and
+Booleans are Rust `bool`, as `Attempt::fail`'s `retryable`. `Attempt::put`
+returns the staged path `data/<destination>`; explicit transactions
+(`transaction begin|put|commit`) go through `Attempt::invoke`. `Attempt::stage_input` returns `Ok(true)` when staged and
 `Ok(false)` when the payload has no such file. `Attempt::parent` returns
-`Ok(None)` when the job has no reachable parent, and `Attempt::parent(Some("workdir"))`
-is `Ok(None)` for a parent that uses isolated workdirs. `Attempt::call` spawns
-another registered workflow (an id or alias, a git URI, a runner file, or a
-package directory) as a child and returns its job key; `args` carries the
+`Ok(None)` when the job has no reachable parent. `Attempt::call` spawns a job
+of another installed workflow, named by a `[workflow.calls]` alias of this
+job's workflow or the installed id it names, as a child and returns its job key; `args` carries the
 `call` options (`--file NAME=PATH`, `--input NAME=PATH`, `--parameter K=V`, …). `Attempt::gather` takes a `Gather` options struct with `when`,
 `count`, `on_impossible`, and `priority` fields, each `Option`, defaulting to the
 bridge's own default (`Gather::default()`). As in C, a code's Bash API, such as
@@ -276,6 +274,7 @@ was terminated, and `125` when a checker or diagnostic stopped it.
 
 The `vasp-relax-rust` package of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
-`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
-and publishing to transactional data. Its workflow is `vasp.relax-rust`; run it
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible;
+results stay in the workdir, and its `publish_data` parameter also copies them
+to `data/`. Its workflow is `vasp.relax-rust`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-rust`.

@@ -4,7 +4,7 @@ A *workflow declaration* is a property-like document that states what a
 workflow is: the inputs it consumes, the method it applies, and the outputs it
 produces, without describing a graph. A data layer stores it next to a result
 so the result can later be explained. It records what was meant to run; the
-trace of what actually ran is the {doc}`collecting` provenance.
+trace of what actually ran is the {doc}`/details/collecting` provenance.
 
 OPTIMADE is standardizing this document, graph-free and versioned like its
 other property definitions. That work is in progress, so *httk-workflow* takes
@@ -25,17 +25,17 @@ digest, and reports them faithfully.
 ### Where declarations come from
 
 - Packaged workflows may carry declarations into every scaffolded `job.json`.
-  The built-in VASP workflows declare their `workflow` `$id` with the
-  published `schemas.httk.org` URIs. {doc}`provenance` describes the rule that
-  uses this `$id` as the workflow URI fallback.
+  The VASP workflows of *workflows-vasp* declare their `workflow` `$id` with
+  the published `schemas.httk.org` URIs. {doc}`/details/provenance` describes
+  the rule that uses this `$id` as the workflow URI fallback.
 - Directory packages can generate the declaration from their manifest or carry
   an externally authored, validated declaration file; see
-  {doc}`workflow_packages`.
+  {doc}`/details/workflow_packages`.
 
 A declaration `$id` names the declaration document, never the code. A
 workflow referenced by git URI keeps that URI as its *definition* URI, and its
 generated declaration carries a `$id` only when the manifest names a
-`declaration_uri`. See {doc}`workflow_uris`.
+`declaration_uri`. See {doc}`/details/workflow_uris`.
 
 ## Declared and observed
 
@@ -64,7 +64,7 @@ The document below is one plausible shape, shown to make the mechanics
 concrete; the normative shape is the one OPTIMADE settles on.
 
 ```python
-from httk.workflow import JobSpec, prepare_job_payload
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 
 RELAXATION = {
     "$id": "https://example.org/workflows/vasp-relax/v1.0.0",
@@ -84,8 +84,8 @@ prepare_job_payload(
     payload,
     JobSpec(
         name="Silicon relaxation",
-        workflow="example.vasp-relax",
-        runner_path="files/runner",
+        workflow_id="local:example.vasp-relax",
+        workflow_name="example.vasp-relax",
         parameters={"kpoint_density": 30.0},
         declarations={"workflow": RELAXATION},
     ),
@@ -138,8 +138,8 @@ Declaration names are both keys and file basenames, so they are single safe
 path components: letters, digits, `_`, `.`, and `-`, starting with a letter,
 digit, or underscore, at most 64 characters. The whole `declarations` object
 of one `job.json` is limited to 262144 serialized bytes, the same allowance
-`inputs` has and for the same reason: bulk content belongs in the payload or
-in transactional `data/`.
+`parameters` has and for the same reason: bulk content belongs in the payload or
+in committed `data/`.
 
 ## What a collect reports
 
@@ -163,8 +163,8 @@ runner wrote has `"declared": null`. An observed document that cannot be read
 is reported as `null` and sets `provenance.gaps` on the record, like all
 damaged evidence a collect reports rather than hides.
 
-See {doc}`collecting` for the record as a whole, {doc}`runtime_helpers` and
-{doc}`../sdks/bash_api` for the two authoring APIs, and
-{doc}`workflow_filesystem_api` for the normative statement of the
+See {doc}`/details/collecting` for the record as a whole, {doc}`/details/runtime_helpers` and
+{doc}`/sdks/bash_api` for the two authoring APIs, and
+{doc}`/details/workflow_filesystem_api` for the normative statement of the
 `declarations` member and the payload area it is stored in. See
-{doc}`provenance` for the collection of the `provenance` declaration.
+{doc}`/details/provenance` for the collection of the `provenance` declaration.

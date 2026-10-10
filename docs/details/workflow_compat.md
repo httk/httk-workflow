@@ -2,17 +2,25 @@
 
 `httk.workflow.compat` runs workflows written as CWL, PWD, jobflow Maker
 documents or *httk* v1 task templates. These integrations are runner
-realizations, not import commands: `job new` turns the document or template
-into an ordinary job that the normal machinery claims, retries, checkpoints,
-journals and collects. A *format* name selects the realization: `cwl`, `pwd`,
-`jobflow` or `httk-v1`.
+realizations, not import commands: a document or template is installed in the
+workspace like any workflow package, and its jobs are ordinary jobs that the
+normal machinery claims, retries, checkpoints, logs and collects. A *format*
+name selects the realization: `cwl`, `pwd`, `jobflow` or `httk-v1`.
 
-| Format | Bare document or package form | Installed runner |
+An installed package of a format records it as `runner.builtin` in its
+`install.json`. The manager then runs the realization's own runner from its
+*httk* installation; the package carries no runner.
+
+| Format | Bare document or package form | Built-in runner |
 | --- | --- | --- |
-| CWL | `job new --workspace WS --from-runner flow.cwl` | `pkg:httk.workflow.compat.cwl/cwl_runner.py` |
-| PWD | `job new --workspace WS --from-runner graph.json` | `pkg:httk.workflow.compat.pwd/pwd_runner.py` |
-| jobflow | `job new --workspace WS --from-runner maker.json`, or a package with `format = "jobflow"` | `pkg:httk.workflow.compat.jobflow/jobflow_runner.py` |
-| httk-v1 | a package with `format = "httk-v1"` | `pkg:httk.workflow.compat.v1/v1_runner.py` through the ordinary `path` runner |
+| CWL | `job new --workspace WS --from-runner flow.cwl` | `httk.workflow.compat.cwl/cwl_runner.py` |
+| PWD | `job new --workspace WS --from-runner graph.json` | `httk.workflow.compat.pwd/pwd_runner.py` |
+| jobflow | `job new --workspace WS --from-runner maker.json`, or a package with `format = "jobflow"` | `httk.workflow.compat.jobflow/jobflow_runner.py` |
+| httk-v1 | a package with `format = "httk-v1"` | `httk.workflow.compat.v1/v1_runner.py` |
+
+A package directory is installed first, with `httk workflow install
+--workspace WS DIR`, `job new --workflow-dir DIR --install` or
+`new_job(..., install=True)`; see {doc}`/details/workflow_packages`.
 
 ## Optional extras
 
@@ -219,16 +227,16 @@ file = "collect.py"
 
 The directory must contain an executable `ht_steps` or `ht_run`, possibly as
 `.template`. `taskset` selects the claim pool and `attempts` sets the v1 retry
-budget. `data_mode` and `workdir_mode` are forbidden: the realization forces
-no transactional data and a persistent `ht.run.current`. The packaged
-`v1_runner.py` runs through the normal `path` executor, with no v1-specific
-manager or capability. {doc}`v1_compatibility` covers the environment entries
-and legacy runtime behavior.
+budget. `data_mode` and `workdir_mode` are forbidden (as for jobflow): the
+realization keeps a persistent `ht.run.current`. The built-in `v1_runner.py`
+runs like any other runner, with no v1-specific manager or capability.
+{doc}`/details/v1_compatibility` covers the environment entries and legacy
+runtime behavior.
 
 ## Bare documents and one-shot jobs
 
 `job new` recognizes a bare CWL document, a PWD `.json` graph or a jobflow
-Maker `.json` document:
+Maker `.json` document, and installs it ad hoc before creating the job:
 
 ```console
 httk job new --workspace WS --from-runner flow.cwl --input message=echo
@@ -238,13 +246,17 @@ httk job new --workspace WS --from-runner maker.json
 ```
 
 When path matching is not appropriate, `--format FORMAT` selects the reader:
-`cwl`, `pwd` or `jobflow`. A manifest package directory or registered workflow
-id rejects `--format`, since its format is already declared.
+`cwl`, `pwd` or `jobflow`. A package directory rejects `--format`, since its
+format is already declared. `httk workflow install --format FORMAT` installs a
+bare document, or with `httk-v1` a bare task directory
+({doc}`/details/v1_compatibility`), the same way without creating a job.
 
 ### Synthesized workflows
 
-The resolver synthesizes an anonymous workflow with id `<format>.<stem>` and
-generates its declaration. Document input ports become hook-consumed inputs;
+The installer wraps the document in a generated package named
+`<format>.<stem>`, installed as `adhoc:<format>.<stem>@<sha12>` (the first 12
+hex digits of the document's SHA-256). Document input ports become
+hook-consumed inputs;
 document outputs become `records`-typed outputs. A bare jobflow Maker document
 exposes only its `output` result, so inputs must be embedded in the document
 or declared in a package. Bare PWD module roots come from `pwd_module_path`,
@@ -253,12 +265,11 @@ and bare v1 template globals from `--parameter` values.
 ### Campaigns
 
 `--input-from` can batch a document or package input. The workflow is
-resolved and prepared once, then instantiated per job. httk-v1 snapshots the
-source package at preparation, so edits during a campaign cannot leak into
-later jobs; symlinks in a v1 package are rejected. Realization-produced
-parameters are reserved, and a caller collision is an error. `publish=` is
-ignored, because these realizations supply installed runners instead of
-copying them to the workspace runner store.
+resolved and prepared once, then instantiated per job. Every job is built from
+the installed copy, so edits to the source during a campaign cannot leak into
+later jobs; symlinks in a package are rejected at installation.
+Realization-produced parameters are reserved, and a caller collision is an
+error.
 
 ## Collection
 
@@ -285,7 +296,7 @@ or hook collector degrades that job without stopping its siblings.
 ### Default collectors
 
 The CWL, PWD and jobflow defaults read the output JSON from the workdir or
-transactional data tree, map document ports to manifest roles and return
+committed data tree, map document ports to manifest roles and return
 `DataRecord` values. A CWL single `File` output must also have a readable path
 inside the workspace, workdir or data tree; it becomes a standard `files`
 entry. File lists keep their descriptor values and record sha256 evidence.
@@ -335,8 +346,8 @@ Unsupported hints are dropped with a warning. Failure codes include
 ## Python API and registry
 
 The format registry is `httk.workflow.compat.available_languages()`,
-`language(name)` (by format name), `match_document(path)`,
-`runner_path(package, name)` and `runner_reference(package, name)`. The
+`language(name)` (by format name), `match_document(path)` and
+`runner_path(package, name)`. The
 format loaders are `httk.workflow.compat.cwl.load_cwl_plan` and
 `httk.workflow.compat.pwd.load_pwd_document`;
 `httk.workflow.compat.jobflow.document_from_maker` creates a jobflow document
@@ -346,6 +357,6 @@ from an MSONable Maker.
 from httk.workflow import Workspace, new_job
 
 workspace = Workspace("workflow-workspace")
-job = new_job(workspace, "flow.cwl", inputs={"message": "echo"})
+job = new_job(workspace, "flow.cwl", inputs={"message": "echo"})  # installed ad hoc
 print(job.job_key)
 ```

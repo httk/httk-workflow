@@ -16,8 +16,10 @@ The breadcrumb labels summarize the errors as ShellError; CError for C, Fortran,
 
 Single-file compiled runners are architecture-bound and should transfer only
 between matching machines. A self-contained package with a `[workflow.build]`
-declaration is the portable alternative: transfer its sources, then build once
-per platform class. Build commands and runners find the installed SDKs under
+declaration is the portable alternative: `httk workflow install` copies its
+sources into a workspace and builds them for the installing machine's platform,
+and `httk workflow build`, run on a machine of another platform class, adds that
+build. Build commands and runners find the installed SDKs under
 `$HTTK_WORKFLOW_LANGUAGES_DIR`, one subdirectory per language (`bash`, `c`, `cpp`,
 `fortran`, `rust`, `ada`, `java`, `perl`); see {doc}`../details/workflow_packages`.
 A Bash runner still sources `$HTTK_WORKFLOW_BASH_API`, which names the

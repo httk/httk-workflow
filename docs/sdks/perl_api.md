@@ -51,7 +51,7 @@ trailing newline:
 
 `HTTK_WORKFLOW_DESCRIBE=1` has the same effect. Managers and the describe
 helper export `HTTK_WORKFLOW_PERL_API` as the installed `languages/perl` directory;
-use that environment variable in `use lib` so published and transferred
+use that environment variable in `use lib` so installed and transferred
 single-file runners find the SDK (it equals `$HTTK_WORKFLOW_LANGUAGES_DIR/perl`).
 Set it yourself to run a runner by hand. The runner is interpreted; the module is one
 `HttkWorkflow.pm` file and has no CPAN dependencies.
@@ -92,31 +92,31 @@ read default means the bridge's absent convention applies.
 | `children`, `child`, `spawn`, `call` | same-named methods | same-named bridge functions |
 | `runlog_note`, `runlog_headline`, `runlog_append` | `log.append` | same-named bridge functions |
 | `log` | logging | `httk_workflow_log` |
-| `put`, `remove` | same-named methods | same-named bridge functions |
+| `put` | same-named method | same-named bridge function |
 | `advance`, `gather` | same-named methods | same-named bridge functions |
 | `succeed`, `fail`, `retry`, `pause` | same-named methods | same-named bridge functions |
 | `batch`, `job_prepare`, `workdir_apply` | same-named methods | same-named bridge functions |
 | `run`, `calc`, `template_render` | same-named methods | same-named bridge functions |
 | `compress`, `decompress` | same-named methods | same-named bridge functions |
 
-`fail($code, $message, $retryable)` and `remove($path, $missing_ok)` take Perl
-booleans. `gather($step, { when => ..., count => ..., on_impossible => ...,
+`fail($code, $message, $retryable)` takes a Perl boolean. `gather($step, { when => ..., count => ..., on_impossible => ...,
 priority => ... })` forwards only defined options. The `invoke` method is the
 escape hatch for bridge subcommands without a dedicated wrapper. `parent` with
 no field returns the parent job as compact JSON and `parent($field)` one of
-its fields; both return `undef` when the job has no reachable parent, and
-`parent('workdir')` is `undef` for a parent that uses isolated workdirs.
-`call($label, $workflow, \@args)` spawns another registered workflow (an id or
-alias, a git URI, a runner file, or a package directory) as a child and
-returns its job key; `\@args` carries the `call` options (`--file NAME=PATH`,
+its fields; both return `undef` when the job has no reachable parent.
+Explicit transactions (`transaction begin|put|commit`) go through `invoke`.
+`call($label, $workflow, \@args)` spawns a job of another installed workflow,
+named by a `[workflow.calls]` alias of this job's workflow or the installed id
+it names, as a child and returns its job key; `\@args` carries the `call` options (`--file NAME=PATH`,
 `--input NAME=PATH`, `--parameter K=V`, …).
 
 ## A VASP relaxation package
 
 The `vasp-relax-perl` package of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
-`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
-and publishing to transactional data. Its workflow is `vasp.relax-perl`; run it
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible;
+results stay in the workdir, and its `publish_data` parameter also copies them
+to `data/`. Its workflow is `vasp.relax-perl`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-perl`.
 It needs no build and no `run` bridge script: its manifest runs the script with
 `command = ["perl", "{package}/relax.pl"]`.

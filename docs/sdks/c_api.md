@@ -48,10 +48,9 @@ cc -std=c99 -Wall -Wextra runner.c \
    -I.../httk/workflow/languages/c -o runner
 ```
 
-The compiled binary is the runner file a job references. It is executable, so the
-manager runs it directly and the scaffolder describes it by running it — a job
-that starts from a runner file of your own is resolved the same way whatever
-language wrote it.
+The compiled binary is an executable runner file: `httk job new --from-runner`
+describes it by running it and installs it as an `adhoc:` workflow whatever
+language wrote it, and the manager runs the installed copy directly.
 
 From a workflow package, build against the installed SDK through
 `HTTK_WORKFLOW_LANGUAGES_DIR`, which `[workflow.build]` commands and attempts both
@@ -166,7 +165,6 @@ bridge exit status out-parameter.
 | `httk_workflow_runlog_append(message, files)` | `httk_workflow_runlog_append` | `RunLog.append` |
 | `httk_workflow_log(level, message)` | `httk_workflow_log` | — (`logging`) |
 | `httk_workflow_put(source, dest, status)` | `httk_workflow_put` | `Attempt.put` |
-| `httk_workflow_remove(dest, missing_ok, status)` | `httk_workflow_remove` | `Attempt.remove` |
 | `httk_workflow_spawn(label, args, status)` | `httk_workflow_spawn` | `Attempt.spawn` |
 | `httk_workflow_call(label, workflow, args, status)` | `httk_workflow_call` | `Attempt.call` |
 | `httk_workflow_children(selection, status)` | `httk_workflow_children` | `Attempt.children` |
@@ -191,8 +189,10 @@ bridge exit status out-parameter.
 
 `httk_workflow_parent` returns the parent job as compact JSON, or one field of
 it (`job_id`, `payload`, `workdir`, ...), and reports `HTTK_WORKFLOW_ABSENT` when
-the job has no reachable parent; `workdir` is also absent for a parent that uses
-isolated workdirs.
+the job has no reachable parent. `httk_workflow_put` returns the staged path
+`data/<dest>`; explicit transactions (`transaction begin|put|commit`, Bash
+`httk_workflow_transaction`, Python `Attempt.transaction`) go through
+`httk_workflow_invoke`.
 
 The last three rows are local helpers that never call the bridge: they exist
 because C has no standard way to copy a file, test for a regular file, or join
@@ -237,6 +237,7 @@ terminated, and `125` when a checker or diagnostic stopped it.
 
 The `vasp-relax-c` package of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
-`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
-and publishing to transactional data. Its workflow is `vasp.relax-c`; run it
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible;
+results stay in the workdir, and its `publish_data` parameter also copies them
+to `data/`. Its workflow is `vasp.relax-c`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-c`.

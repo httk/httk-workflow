@@ -4,14 +4,15 @@ This page is for operators who bring existing `ht_steps` or `ht_run` task
 directories onto the ordinary *httk-workflow* engine.
 
 The primary path is a converted workflow package. Put the legacy task files and
-an `httk_workflow.toml` manifest in one directory and submit it with the normal
-`job new` command. The package prepares an ordinary job that uses the packaged
-path runner `httk.workflow.compat.v1.v1_runner`. There is no special manager,
-capability or executor: run it with the normal manager and select its claim
-pool with `--pool`.
+an `httk_workflow.toml` manifest in one directory, install it in the workspace
+and submit jobs with the normal `job new` command. Each job is an ordinary job
+run by the built-in runner `httk.workflow.compat.v1.v1_runner`. There is no
+special manager, capability or executor: run it with the normal manager and
+select its claim pool with `--pool`.
 
 ```console
 httk workspace init WORKSPACE
+httk workflow install --workspace WORKSPACE ./legacy-package
 httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
   --placement project-a/00/17
 httk workflow run --workspace WORKSPACE --pool vasp
@@ -40,14 +41,14 @@ file = "collect.py"
 
 The package contains an executable `ht_steps` or `ht_run`, or one of their
 `.template` forms, plus regular support files. Preparation snapshots the
-package, renders every `*.template` member, runs `ht.instantiate.py` when
-present, and seals the job. The template and instantiator see the inputs and
+installed package into the payload, renders every `*.template` member and runs
+`ht.instantiate.py` when present. The template and instantiator see the inputs and
 parameters; path-valued structure inputs are loaded through `httk.core`.
 
 `taskset` becomes the job's claim pool and `attempts` is the legacy retry
-budget. The realization forces a persistent `ht.run.current` workdir and no
-transactional data. It has no format-default collector, so a package that
-needs collection declares `[workflow.collect]`.
+budget. The realization keeps a persistent `ht.run.current` workdir, and the
+manifest may not set `data_mode` or `workdir_mode`. It has no format-default
+collector, so a package that needs collection declares `[workflow.collect]`.
 
 ## Runtime fidelity
 
@@ -92,8 +93,7 @@ path recursively. State-based deduplication stops a legacy directory from being
 registered twice.
 
 The original legacy directories stay in the workdir as directories; they are
-not replaced by `ht.task.*` symlinks. The native child payload and state marker
-are authoritative.
+not replaced by `ht.task.*` symlinks. The native child jobs are authoritative.
 
 ## Environment knobs
 
@@ -116,18 +116,32 @@ httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
 ```python
 from httk.workflow import new_job
 
-new_job(workspace, "./legacy-package", environment={"httk_v1.wrapper": "/usr/bin/time"})
+new_job(
+    workspace,
+    "./legacy-package",
+    environment={"httk_v1.wrapper": "/usr/bin/time"},
+    install=True,
+)
 ```
 
 Resolution order is the job override, the declared setting's `HTTK_*`
 variable, the workspace setting, then the declaration default; see
-{doc}`workflow_packages`.
+{doc}`/details/workflow_packages`.
 
 ## Bare directories and `--format`
 
-`job new` does not accept a bare v1 directory, and this CLI has no
-bare-directory `--format` mode. Add a workflow manifest and submit with
-`--workflow-dir`, or import the legacy machine setup with `remote import-v1`.
+`job new` does not accept a bare v1 directory, but the installer does when the
+format is given: it wraps the directory in a generated package named
+`httk-v1.<directory name>`, installed as `adhoc:httk-v1.<directory name>@<sha12>`.
+
+```console
+httk workflow install --workspace WORKSPACE --format httk-v1 ./legacy
+httk job new --workspace WORKSPACE --workflow httk-v1.legacy
+```
+
+`new_job(workspace, "./legacy", format="httk-v1")` does both. Such a package
+declares no inputs, pool, retry budget or collect hook; add a manifest for
+those. `remote import-v1` imports the legacy machine setup.
 
 ## Finished-tree harvest
 
@@ -166,5 +180,5 @@ result.
   workspace manager does not migrate or claim them.
 - `ht.instantiate.py` and arbitrary shell code are trusted input. The
   compatibility layer does not recreate the old Python package imports.
-- Native child jobs and their state markers are the source of truth, so legacy
+- Native child jobs are the source of truth, so legacy
   pathname suffixes are not workflow state transitions.

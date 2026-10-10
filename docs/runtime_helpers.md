@@ -30,11 +30,11 @@ def relax(a):
 raise SystemExit(run.main())
 ```
 
-`httk job new --from-runner ./relax.py` publishes the file into the
-workspace, pins it by digest, and creates a job for it. Inside a
+`httk job new --from-runner ./relax.py --step prepare` installs the file in
+the workspace as an `adhoc:` workflow and creates a job of it. Inside a
 step, the `Attempt` object `a` gives the job's parameters, settings and
 declared environment, a private `state` that survives retries, the workdir and
-payload paths, transactional data, and the outcomes: `advance`, `retry`,
+payload paths, data commits (`put`, `transaction`), and the outcomes: `advance`, `retry`,
 `succeed`, `fail`. `a.spawn` fans a job out into children that run this
 runner's steps and `a.gather` waits for them; `a.call` runs another workflow
 as a child ({doc}`workflow_packages`).

@@ -8,7 +8,7 @@ replace the legacy API with the native *httk₂* Bash or Python API.
 Migrate task definitions and newly instantiated task directories, not a live
 *httk* v1 task-manager queue. The *httk₂* manager never claims or rewrites an
 existing v1 queue tree. Once a task has been prepared and submitted to an
-*httk₂* workspace, its `job.json`, marker and journal are authoritative.
+*httk₂* workspace, its `job.json`, `state.json` and run log are authoritative.
 
 ## 1. Choose a migration route
 
@@ -18,8 +18,8 @@ You do not need to migrate every workflow at once.
 | --- | --- | --- | --- |
 | Converted package | None, normally | normal `httk workflow run --pool POOL` | Establish an *httk₂* operational baseline quickly |
 | Mixed | Per job type | the normal manager on one workspace | Incremental migration with a direct fallback |
-| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk manager run` | Preserve a shell-oriented workflow |
-| Native Python | Replace the runner with Python calls | `httk manager run` | New development and more structured logic |
+| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk workflow run` | Preserve a shell-oriented workflow |
+| Native Python | Replace the runner with Python calls | `httk workflow run` | New development and more structured logic |
 
 Start with a converted package unless tests already describe the workflow's
 inputs, outputs, restart behavior and child tasks. A package run gives a
@@ -56,9 +56,11 @@ Initialize an *httk₂* workspace:
 httk workspace init workflow-workspace
 ```
 
-Wrap the task in a converted package and submit it through the normal path:
+Wrap the task in a converted package, install it, and submit it through the
+normal path:
 
 ```console
+httk workflow install --workspace workflow-workspace ./legacy-package
 httk job new --workspace workflow-workspace --workflow-dir ./legacy-package \
   --placement migration/reference/silicon-relax
 httk workflow run --workspace workflow-workspace --pool vasp --workers 4
@@ -81,7 +83,7 @@ httk workspace status --json workflow-workspace
 The packaged v1 runner keeps the persistent `ht.run.current/` workdir,
 translates v1 decisions and dynamic subtasks, and completes published v1
 atomic sections after an interruption. See
-[*httk* v1 task compatibility](v1_compatibility.md) for the exact
+{doc}`/details/v1_compatibility` for the exact
 compatibility boundary.
 
 ### Wrap an existing template as a package
@@ -123,9 +125,10 @@ file = "collect.py"
 Pre-rename alpha jobs that carry the `workflow_postprocess` parameter lose
 package-hook collection; re-scaffold them.
 
-Submit a one-shot job or a structure campaign:
+Install it, then submit a one-shot job or a structure campaign:
 
 ```console
+httk workflow install --workspace WS ./silicon-relax
 httk job new --workspace WS --workflow-dir ./silicon-relax \
   --input-from structure structures/*.cif --parameter encut=520
 httk workflow run --workspace WS --pool vasp
@@ -134,7 +137,7 @@ httk collect --workspace WS
 
 ### Template rendering and `ht.instantiate.py`
 
-At preparation the package is snapshotted, and each job gets its own rendered
+At preparation the installed package is snapshotted, and each job gets its own rendered
 payload. `ht_steps` or `ht_run` must be executable after rendering. The v1
 template engine is trusted and supports `$name`, `$(expr)`, `${code}`, escaped
 `\$` and `.template` filenames. It is available as `apply_templates` in
@@ -177,8 +180,7 @@ httk project import-v1 --source ./ht.project .
 This imports safe metadata and public identities, not private keys or the v1
 queue. Imported project metadata records `legacy_queue_imported: false`. The
 project can record a workspace default, but the core-v3 workspace itself stays
-outside the project. Detached transfer and transactional data are available to
-native jobs.
+outside the project.
 
 ### Workspaces and remotes
 
@@ -213,15 +215,14 @@ converted package's `taskset` with the manager pool:
 
 ```console
 httk workflow run --workspace workflow-workspace --pool vasp --workers 2
-httk workflow run --workspace workflow-workspace --pool vasp-native --workers 2
+httk workflow run --workspace workflow-workspace --workers 2
 ```
 
-The shared core-v3 workspace already provides transactional data and detached
-transfer for native jobs.
+The second manager serves the `default` pool, where native jobs land.
 
 Give the first native version a new job UUID and preferably a distinct tag and
 placement. Do not edit the immutable `job.json` of a submitted job to change
-its runner executor. Migrate one representative task first and compare it
+its workflow. Migrate one representative task first and compare it
 with the compatibility reference before moving a larger batch.
 
 ## 6. Replace the *httk* v1 control flow with native Bash
@@ -322,59 +323,43 @@ Each outcome function publishes one decision and then returns;
 `httk_workflow_main` owns the process exit status. Do not also return a legacy
 decision code or write `ht.nextstep`.
 
-The `collect` step uses transactional data, in a core-v3 workspace:
+The `collect` step commits copies of the results to the job's `data/` with
+`httk_workflow_put`; the manager applies them exactly once when the outcome
+commits. A job that never puts anything keeps its results in its persistent
+workdir only.
+
+### Install the native workflow and submit a job
+
+Make the runner the `run` entry of a workflow package:
+
+```text
+native-relax/
+├── httk_workflow.toml
+└── run                  the Bash runner above, executable
+```
+
+```toml
+[workflow]
+name = "vasp.relax"
+
+[workflow.runner]
+steps = ["prepare", "run", "collect"]
+initial_step = "prepare"
+```
+
+Install it, stage the static inputs into a job, and run it:
 
 ```console
 httk workspace init native-workspace
+httk workflow install --workspace native-workspace ./native-relax
+httk job new --workspace native-workspace --workflow-dir ./native-relax \
+  --file POSCAR=POSCAR --file INCAR=INCAR --file vasp-options.json=vasp-options.json \
+  --placement migration/native/silicon-relax --tag silicon-relax --priority 700
+httk workflow run --workspace native-workspace
 ```
 
-A job with `data.mode: "none"` omits the transaction and keeps restartable
-working files in its persistent workdir instead.
-
-### Prepare the native payload
-
-Put the runner and static inputs below one payload directory:
-
-```console
-mkdir -p native-job/files
-cp run.sh vasp-options.json POSCAR INCAR native-job/files/
-chmod +x native-job/files/run.sh
-```
-
-Create the immutable `job.json` with the Python builder:
-
-```python
-from httk.workflow import JobSpec, prepare_job_payload
-
-prepare_job_payload(
-    "native-job",
-    JobSpec(
-        name="silicon relaxation",
-        workflow="example.vasp-relax",
-        runner_path="files/run.sh",
-        initial_step="prepare",
-        tag="silicon-relax",
-        workdir_mode="persistent",
-        data_mode="transactional",
-        priority=700,
-        claim_pool="vasp-native",
-        maximum_attempts_per_activation=5,
-        maximum_total_attempts=20,
-    ),
-)
-```
-
-Submit and run it:
-
-```console
-httk job submit --workspace native-workspace \
-  --placement migration/native/silicon-relax native-job
-httk manager run --workspace native-workspace \
-  --pool vasp-native
-```
-
-Static payload files are below `HTTK_WORKFLOW_JOB_DIR`, and the selected
-workdir is `HTTK_WORKFLOW_WORKDIR`. Copy or link static inputs into the
+Staged files are below `HTTK_WORKFLOW_JOB_DIR` (a bare `--file` name lands in
+`files/`), and the persistent workdir is `HTTK_WORKFLOW_WORKDIR`. Copy or link static inputs into the
 workdir in an explicit preparation step when needed.
 
 ## 7. Translate the common task helpers
@@ -388,7 +373,7 @@ The native API is not a respelling of the v1 API.
 | `HT_TASK_FINISHED` | `httk_workflow_succeed` | `a.succeed()` |
 | `HT_TASK_BROKEN` | `httk_workflow_fail CODE MESSAGE` | `a.fail(code, message)` |
 | `HT_TASK_SUBTASKS` | `httk_workflow_spawn` plus `httk_workflow_gather` | `a.spawn(ChildSpec(...), label=...)` plus `a.gather(step)` |
-| `HT_TASK_ATOMIC_*` | `httk_workflow_put` / `remove` or a workdir spec | `a.put()` / `a.remove()` or `a.workdir_batch()` |
+| `HT_TASK_ATOMIC_*` | `httk_workflow_put` / `httk_workflow_transaction`, or a workdir spec | `a.put()` / `a.transaction()`, or `a.workdir_batch()` |
 | `HT_TASK_STORE_VAR` | `httk_workflow_state_set` | `a.state["name"] = value` |
 | `HT_TASK_RUN_CONTROLLED` | `httk_workflow_run` | `a.run(argv)` or `ProcessSupervisor` |
 | `HT_TASK_SET_PRIORITY` | `--priority` on an outcome | `priority=` on publication |
@@ -563,64 +548,31 @@ earlier v1 contributor work.
 ## 10. Migrate dynamic subtasks
 
 Do not recreate the v1 `ht.task.<set>...waitstart` filename protocol in a
-native workflow. Prepare explicit child payloads and publish their identities
-with the parent outcome.
-
-A Python parent can create a fixed child set:
+native workflow. Children are published with the parent outcome, by step and
+parameters. A child whose steps live in the same runner needs no payload:
+spawn a `ChildSpec`, which synthesizes the whole child job and runs the
+parent's installed workflow.
 
 ```python
-import shutil
-import tempfile
-import uuid
-from pathlib import Path
-
-from httk.workflow import JobSpec, Runner, prepare_job_payload
+from httk.workflow import ChildSpec, Runner
 
 run = Runner("example.volume-scan")
 
 
 @run.step
 def branch(a):
-    with tempfile.TemporaryDirectory(dir=a.workdir) as draft_root:
-        for index, parameter in enumerate(("0.95", "1.00", "1.05")):
-            child = Path(draft_root) / f"child-{index}"
-            shutil.copytree(a.payload / "files" / "child-template", child)
-            (child / "parameter.txt").write_text(
-                parameter + "\n",
-                encoding="utf-8",
-            )
-            child_id = uuid.uuid5(
-                uuid.UUID(a.context.job_id),
-                f"volume-{index}",
-            )
-            prepare_job_payload(
-                child,
-                JobSpec(
-                    name=f"volume point {index}",
-                    workflow="example.volume-point",
-                    runner_path="files/run.py",
-                    tag=f"volume-{index}",
-                    job_id=str(child_id),
-                    initial_step="run",
-                    claim_pool="vasp-native",
-                ),
-            )
-            a.spawn(
-                child,
-                label=f"volume-{index}",
-                placement=f"volume-scan/{index:03d}",
-            )
+    for index, scale in enumerate(("0.95", "1.00", "1.05")):
+        a.spawn(
+            ChildSpec(step="run", parameters={"scale": scale}),
+            label=f"volume-{index}",
+            placement=f"volume-scan/{index:03d}",
+        )
     a.gather("collect", when="all_terminal")
 ```
 
-A child whose steps live in the same runner needs no payload. Publish the
-runner once in the workspace and spawn a `ChildSpec`; it synthesizes the whole
-child job from its step and parameters and inherits the parent's runner
-reference.
-
-```python
-a.spawn(ChildSpec(step="run", parameters={"scale": parameter}), label=f"volume-{index}")
-```
+A child of another workflow is started with `a.call(alias, label=...)`, where
+the alias is declared in the parent's `[workflow.calls]` and the called
+workflow is installed in the workspace; see {doc}`/details/composing_workflows`.
 
 A Bash step spawns the same children by step and parameters, and gathers
 exactly the ones it spawned:
@@ -642,9 +594,9 @@ Use `all_succeeded` when any failed child should make the join impossible.
 descendant no longer counts as active. The other native conditions are
 `any_succeeded` and `at_least`.
 
-The complete child set is sealed with the outcome, and a native parent cannot
-add untracked children after publication. Child UUIDs must stay stable if the
-parent recreates the same unpublished outcome after an interrupted attempt.
+The complete child set is fixed by the outcome, and a native parent cannot add
+untracked children after publication. An interrupted attempt publishes
+nothing, so its retry spawns afresh.
 
 ## 11. Migrate to a Python runner
 
@@ -720,8 +672,8 @@ if __name__ == "__main__":
 There is no step-dispatch chain or `unknown_step` branch to write.
 `Runner.main` dispatches the step the manager asked for, and reports an
 unimplemented step, a step that published nothing and a step that raised as
-the corresponding outcomes. As in the Bash example, the transaction requires
-a transactional-data job in a core-v3 workspace.
+the corresponding outcomes. As in the Bash example, the copies `a.put` stages
+are committed with the outcome.
 
 ## 12. Converting your `ht.instantiate.py`
 
@@ -745,7 +697,7 @@ Callers pass the structure object, and the scaffold writes it to
 provides the POSCAR writer). A path input is copied instead. In the Python
 API, use `new_job(ws, workflow, inputs={"structure": obj})`, or `new_jobs(...)`
 items such as `{"inputs": {"structure": obj}}` for a batch. The command-line
-spellings are in {doc}`workflow_cli`.
+spellings are in {doc}`/details/workflow_cli`.
 
 ### The script produced derived creation-time files
 
@@ -787,8 +739,8 @@ mapping is:
 
 Declarative staging happens before the hook. `ctx.inputs` is read-only;
 `ctx.parameters` is mutable and becomes the job's opaque parameter mapping.
-The hook runs in process on the creating machine. See {doc}`runtime_helpers`
-for the hook reference and {doc}`workflow_cli` for `--parameter NAME=VALUE`
+The hook runs in process on the creating machine. See {doc}`/details/runtime_helpers`
+for the hook reference and {doc}`/details/workflow_cli` for `--parameter NAME=VALUE`
 and `--input-from NAME SOURCE...`.
 
 ### The work belongs at run time
@@ -807,7 +759,7 @@ support `@run.instantiate`.
 
 For each migrated job type:
 
-1. Run one fixed input through the converted package's normal path runner.
+1. Run one fixed input through the converted package.
 2. Run the same fixed input through the native runner under a new UUID.
 3. Compare prepared `INCAR`, `KPOINTS`, POTCAR metadata, final energies,
    structures and retained result files.
@@ -816,8 +768,8 @@ For each migrated job type:
    result publication; verify that restart neither duplicates work nor loses
    the authoritative outcome.
 6. Exercise a failed child as well as an all-successful child set.
-7. Check `httk workspace status --json workflow-workspace` and the journal
-   instead of relying on directory names.
+7. Check `httk job show` and `httk job log` instead of relying on directory
+   names.
 8. Run several jobs with the intended pool, capabilities, resources and
    worker count.
 
@@ -893,7 +845,6 @@ still needs it.
 - [ ] Project/configuration/remote imports were reviewed separately.
 - [ ] No live *httk* v1 queue is being treated as an *httk₂* workspace.
 - [ ] Persistent scratch and committed result files are distinguished.
-- [ ] The core-v3 workspace matches the native job's data model.
 - [ ] Every `HT_TASK_*` and `VASP_*` dependency has an explicit replacement.
 - [ ] Automatic remedies became explicit plan-and-apply decisions.
 - [ ] Child jobs use stable identities and an explicit join condition.
@@ -901,7 +852,7 @@ still needs it.
 - [ ] Compatibility and native reference results agree.
 - [ ] Restart and interruption boundaries were exercised.
 - [ ] Every `ht.instantiate.py` is converted to declared parameters or `@run.instantiate`.
-- [ ] New production submissions use native payloads and new UUIDs.
+- [ ] New production submissions use the installed native workflow and new UUIDs.
 
 For API details, continue with {doc}`/sdks/bash_api`,
-{doc}`runtime_helpers` and {doc}`workflow_filesystem_api`.
+{doc}`/details/runtime_helpers` and {doc}`/details/workflow_filesystem_api`.

@@ -85,32 +85,31 @@ if __name__ == "__main__":
 ```
 
 The runner is a single file, and every child job runs the same file at a
-different step. Publish it once in the workspace, and every job, parent and
-child, references those bytes by digest:
+different step. Creating a job from the file installs it in the workspace as
+an `adhoc:defects@<sha12>` workflow, and every job, parent and child, runs that
+installation:
 
 ```console
-httk runner publish --workspace workflow-workspace --name defects/run.py defects.py
+httk job new --workspace workflow-workspace --from-runner defects.py --step characterize \
+    --parameter encut=520 --parameter 'supercell=[2, 2, 2]' --placement project/si-vacancies
 ```
 
 ```python
-from httk.workflow import JobSpec, Workspace, prepare_job_payload
+from httk.workflow import Workspace, new_job
 
 workspace = Workspace("workflow-workspace")
-reference = workspace.publish_runner("defects.py", name="defects/run.py")
-job = prepare_job_payload(
-    "prepared-job",
-    JobSpec(
-        name="Si vacancies",
-        workflow="defects",
-        runner_source="workspace",
-        runner_path=str(reference["path"]),
-        runner_sha256=str(reference["sha256"]),
-        initial_step="characterize",
-        parameters={"encut": 520, "supercell": [2, 2, 2]},
-    ),
+job = new_job(
+    workspace,
+    "defects.py",
+    step="characterize",
+    parameters={"encut": 520, "supercell": [2, 2, 2]},
+    placement="project/si-vacancies",
 )
-workspace.submit("prepared-job", "project/si-vacancies")
 ```
+
+A directory package is installed the same way with `httk workflow install
+--workspace WS DIR`, or by `job new --install` / `new_job(..., install=True)`;
+see {doc}`/details/workflow_packages`.
 
 ## Steps and dispatch
 
@@ -146,7 +145,7 @@ inherits this runner.
 `{"format": "httk-workflow-runner-description", "format_version": 2, "workflow":
 ..., "steps": [...]}` and exit without binding an attempt or touching
 anything, so a tool can list the steps of a runner it is not running. The
-step set is also recorded in the job's state frame as `runner_steps`, from the
+step set is also recorded in the job's `state.json` as `runner_steps`, from the
 first outcome the job publishes.
 
 ### Creation-time instantiation
@@ -174,7 +173,7 @@ def instantiate(ctx):
 ```
 
 The hook may write anywhere below `payload`. It is trusted workflow code,
-since the file is published and executed anyway.
+since the file is installed and executed anyway.
 
 A directory package may instead name any executable member in
 `[workflow.instantiate].file`. The framework starts it in the staging payload,
@@ -185,7 +184,7 @@ malformed output aborts submission. This language-neutral form has the same
 parameter, tag, payload, and input semantics as the Python hook: `parameters`
 holds only caller-supplied values, and the declared defaults arrive
 separately (`defaults`, like `ctx.defaults`) and are applied after the hook.
-{doc}`workflow_packages` holds the normative envelope and serialization
+{doc}`/details/workflow_packages` holds the normative envelope and serialization
 rules.
 
 ## What an attempt reads
@@ -194,19 +193,19 @@ rules.
 | --- | --- |
 | `a.context` | the immutable identity and restart evidence of this attempt |
 | `a.step` | the step this attempt runs |
-| `a.payload`, `a.workdir`, `a.workspace`, `a.data` | absolute paths; `a.data` is set only for a transactional job |
+| `a.payload`, `a.workdir`, `a.workspace`, `a.data` | absolute paths; `a.workdir` is the persistent `run/` and `a.data` is `data/` of the payload, which exists once a transaction put something there |
 | `a.job`, `a.parameters`, `a.parameter(name[, default])` | the job definition and its opaque implementation `parameters` object |
 | `a.stage_input(name, destination[, default])` | copies the payload file parameter `name` names into the workdir at `destination`; `None` when the payload has no such file |
 | `a.state` | dict-like JSON state that belongs to the **job** |
-| `a.log` | the append-only structured run log of the job payload (`logs/runlog.jsonl`) |
+| `a.log` | the runner's append-only structured evidence log (`.httk-job/runlog.jsonl`); the owner-written timeline is `logs/runlog.jsonl` |
 | `a.children` | the typed children of the join that started this activation |
 | `a.parent` | the job that spawned this one, located for reading its files in place; `None` for a root job |
 | `a.declaration(name)` | one workflow declaration: the observed document, else the declared one, else `None` |
 
 ### Job state
 
-`a.state` is stored in the payload below `.httk-job/`, so it survives retries,
-step advances, and isolated workdirs, and travels with a transferred job. The
+`a.state` is stored in the payload below `.httk-job/`, so it survives retries
+and step advances, and travels with a transferred job. The
 directory is excluded from every payload digest, so writing state never
 disturbs an immutability check. Keys are strings, values are JSON, and every
 mutation is one atomic replace:
@@ -241,7 +240,8 @@ collect reports.
 is a frozen `ChildResult` with its `label`, `job_id`, `job_key`, terminal
 `kind`, its published `failure` as the canonical `Failure`, and absolute
 `payload`, `workdir`, and `data` paths, so reading a child's results is a
-plain file read:
+plain file read. The manager locates each child when it launches the attempt;
+under confinement the children are visible read-only:
 
 ```python
 for child in a.children.succeeded:
@@ -259,13 +259,14 @@ An activation reached by `advance` observes no children, which is why
 `a.parent` is the other direction: a frozen `ParentJob` for the job that
 spawned this one, with its `job_id`, `job_key`, `placement`, and absolute
 `payload` and `workdir` paths, located from the `parent` member of this job's
-`job.json`. `workdir` is `None` when the parent uses isolated workdirs.
-`a.parent` itself is `None` for a root job and for a child whose parent is not
-reachable in this workspace:
+`job.json` with a read-only lookup at its recorded placement; `workdir` is
+the parent's `run/`. Under confinement the parent is visible read-only.
+`a.parent` itself is `None` for a root job, for a detached child, and for a
+child whose parent is not found in this workspace:
 
 ```python
 parent = a.parent
-if parent is not None and parent.workdir is not None:
+if parent is not None:
     chgcar = parent.workdir / "CHGCAR"
 ```
 
@@ -277,7 +278,7 @@ rules that keep it safe, are in the "Sharing files with children" section of
 
 ## What an attempt publishes
 
-Each attempt publishes exactly one outcome. `spawn`, `put`, and `remove`
+Each attempt publishes exactly one outcome. `spawn`, `call`, and `put`
 accumulate in one implicit draft below the attempt control directory. The
 draft has no effect until a terminal call publishes it with a single atomic
 rename. A second terminal call raises, and the draft of a handler that raises
@@ -309,25 +310,20 @@ child's default job tag, so its payload directory is readable at a glance.
 
 A `ChildSpec` needs no prepared payload. It synthesizes a complete `job.json`
 from the child's starting step and parameters, and everything else follows
-the spawning job: workflow, claim pool, priority, resources, and runner. A
-child never inherits `mintime`, and its `maxtime` is capped at the spawning
-attempt's `maxtime`. The
-default, `RunnerRef.inherit()`, copies the parent's own
-`(source, path, sha256)`, which suits a campaign whose steps all live in one
-published runner. `RunnerRef.workspace(path, sha256)` and
-`RunnerRef.installed(path, sha256)` name another shared runner. Shared
-runners execute from their published file or tree, and compiled package
-runners use the manager-provided `HTTK_WORKFLOW_RUNNER_ARTIFACTS` directory
-for registered build outputs.
+the spawning job: its installed workflow, claim pool, priority, resources, and
+sealing. A child never inherits `mintime`, and its `maxtime` is capped at the
+spawning attempt's `maxtime`. To start a different workflow, use `a.call`.
 
-A payload runner cannot be inherited, because a synthesized child has no
-payload to copy it into. Publish it with `Workspace.publish_runner`, or spawn
-a prepared payload directory instead:
+A prepared payload directory is spawned as written, with its `job.json` from
+`protocol.prepare_job_payload`; its workflow must be installed by the time the
+child is claimed:
 
 ```python
+from httk.workflow.protocol import JobSpec, prepare_job_payload
+
 prepare_job_payload(
     a.workdir / "child",
-    JobSpec(name="Child", workflow="defects", runner_path="files/runner"),
+    JobSpec(name="Child", workflow_id=a.job.workflow_id, workflow_name=a.job.workflow_name, initial_step="relax"),
 )
 a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 ```
@@ -336,14 +332,20 @@ a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 
 `a.call(workflow, label=..., files=..., ...)` spawns a different workflow as a
 child job, which runs that workflow's own runner rather than a step of this
-one. `workflow` is resolved as `new_job` resolves it: a registered id or
-alias, a git URI or the short name of an installed workflow like
-`"vasp.relax"`, a runner file of your own, a package directory, or a language
-document. `call` scaffolds a complete child payload, stages its `files` and
-`inputs`, and registers it as a child:
+one. `workflow` is an alias declared in `[workflow.calls]` of this job's
+installed workflow, or the installed id an alias names; the called workflow
+must be installed in the workspace too (`httk workflow install` installs the
+declared calls with the caller). `call` builds a complete child payload from
+the installed package, stages its `files` and `inputs`, runs its instantiate
+hook, and registers it as a child:
+
+```toml
+[workflow.calls]
+relax = "vasp.relax"
+```
 
 ```python
-a.call("vasp.relax", label="relax", files={"POSCAR": path})
+a.call("relax", label="relax", files={"POSCAR": path})
 a.gather("after_relax", on_impossible="triage")
 ```
 
@@ -354,11 +356,10 @@ def after_relax(a):
     ...
 ```
 
-A packaged workflow is referenced through `pkg:` and copies nothing; a runner
-file of your own is published into the content-addressed, idempotent
-workspace runner store. Calling needs the workspace root reachable from the
-step, as `a.children` does. {doc}`composing_workflows` covers the full model,
-a worked example, failure semantics, and how results move between calls.
+An undeclared or uninstalled workflow is refused at the call. Calling needs
+the workspace root readable from the step, as `a.children` does.
+{doc}`/details/composing_workflows` covers the full model, a worked example, failure
+semantics, and how results move between calls.
 
 ### Gathering children
 
@@ -373,20 +374,30 @@ grace expires, rather than waiting forever.
 
 ### Data and workdir changes
 
-For a job with `data_mode="transactional"`, `a.put(source, destination)`
-stages a file or directory and `a.remove(destination, missing_ok=...)` stages
-a removal. The manager applies them exactly once when it commits the outcome.
-A `put` overwrites its destination whether the source is a file or a
-directory: a directory put replaces an existing tree in the committed data, so
-a step that advances back onto a step and re-puts the same tree succeeds.
-Operation identifiers are generated in call order (`op-0001`, `op-0002`, …),
-so replaying a step produces the same manifest:
+`a.put(source, destination)` stages a copy of a file or directory for
+`data/<destination>` in the attempt's implicit transaction, which commits
+with the outcome; the manager applies it exactly once when it commits the
+outcome, whatever the action. A file replaces what is there, and a directory
+is merged into what is there:
 
 ```python
 a.put(a.workdir / "energy.json", "results/energy.json")
 a.put(a.workdir / "bands", "results/bands")
-a.remove("scratch", missing_ok=True)
 a.succeed()
+```
+
+`a.transaction()` is a commit point in the middle of a step: stage with
+`put(source, destination)`, where destinations are relative to the job
+directory (`data/result` lands in `data/`), then `commit()`. The manager
+applies every committed transaction at the next attempt boundary, before any
+later attempt starts, whatever the outcome; an uncommitted one is discarded.
+Destinations below `job.json`, `state.json`, `seal.json`, `logs` and
+`attempts` are refused, and there is no removal operation:
+
+```python
+checkpoint = a.transaction()
+checkpoint.put(a.workdir / "WAVECAR", "data/checkpoint/WAVECAR")
+checkpoint.commit()
 ```
 
 `a.workdir_batch()` groups changes to the workdir into a sealed batch that is
@@ -421,5 +432,4 @@ interfaces that use only the Python standard library and other
 
 For unchanged *httk* v1 `ht_steps`, keep sourcing the historic filenames
 under `$HTTK_DIR/Execution/tasks/`. They are thin redirects to the attributed
-compatibility implementation described in [*httk* v1 task
-compatibility](v1_compatibility.md).
+compatibility implementation described in {doc}`/details/v1_compatibility`.

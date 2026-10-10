@@ -21,22 +21,24 @@ parameters, failure codes, postprocess scripts (`relaxation-report`,
 
 ## Install, run, uninstall
 
-Referencing a URI fetches and installs the workflow; the job records its
-canonical URI, pinned to the full commit (append `@<ref>` before `#` to choose a
-branch, tag or commit). `httk workflow install` does the same without creating a
-job. Once installed, the short name selects it:
+A workflow is installed in a workspace before jobs of it are created.
+Installing a URI fetches it and records its canonical URI, pinned to the full
+commit (append `@<ref>` before `#` to choose a branch, tag or commit); every
+job of it records that id. Once installed, the short name selects it, and
+`job new --workflow URI --install` installs on first use:
 
 ```console
-httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workspace settings set --key vasp.command --value vasp_std default
 httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 httk workflow run
 httk collect
-httk workflow uninstall vasp.relax
+httk workflow uninstall --workspace default vasp.relax
 ```
 
-`httk plugin install git+https://github.com/httk/workflows-vasp` installs all
-four at once as a plugin instead. See {doc}`details/workflow_uris` for URI resolution,
+`httk plugin install git+https://github.com/httk/workflows-vasp` makes all
+four known on this machine by short name, still to be installed in each
+workspace. See {doc}`details/workflow_uris` for URI resolution,
 short names and the trust model.
 
 The VASP command is the `vasp.command` application setting, resolved most
@@ -50,10 +52,9 @@ kind; otherwise the built-in `srun` prefix inside a Slurm allocation; outside an
 allocation without a template there is none), and `run_vasp` prepends it. A command that
 itself starts with `srun` or `mpirun` is refused when a prefix applies; see
 {doc}`details/taskmanager`.
-See {doc}`sdks/sdk_parity` for the resolution table. The workflows default to
-`data.mode="none"`: the persistent `run/` workdir is the result; pass
-`--data-mode transactional` to `job new` to also publish a curated copy into
-`data/`.
+See {doc}`sdks/sdk_parity` for the resolution table. The persistent `run/`
+workdir is the result; the workflows' own `publish_data` parameter
+(`--parameter publish_data=true`) also publishes a curated copy into `data/`.
 
 ## Writing a VASP runner of your own
 

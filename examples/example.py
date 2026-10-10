@@ -4,9 +4,10 @@
 The same path as ``docs/quickstart.md``, one call per command:
 
 * :meth:`httk.workflow.Workspace.initialize` creates the workspace;
-* :func:`httk.workflow.scaffold.new_job` builds and submits one job of the
-  ``vasp.relax`` workflow, referenced by its git URI ``git+https://github.com/httk/workflows-vasp#vasp-relax``
-  (fetching it needs git and, the first time, network access);
+* :func:`httk.workflow.scaffold.new_job` installs the ``vasp.relax`` workflow,
+  referenced by its git URI ``git+https://github.com/httk/workflows-vasp#vasp-relax``
+  (fetching it needs git and, the first time, network access), and builds and
+  submits one job of it;
 * :class:`httk.workflow.TaskManager` runs everything that is ready;
 * :func:`httk.workflow.collect` reads the finished jobs back.
 
@@ -50,13 +51,13 @@ def main() -> int:
     os.environ.setdefault("HTTK_VASP_COMMAND", str(Path(__file__).with_name("mock_vasp.py")))
 
     # One workspace is the whole state of the work. VASP results stay in the
-    # persistent workdir by default; data_mode="transactional" opts into a copy.
+    # job's persistent workdir.
     workspace = Workspace.initialize(Path("example-workflow-workspace"))
     print(f"workspace {workspace.workspace_id} at {workspace.root}")
 
-    # One job of the vasp.relax workflow. Referencing its URI fetches and installs
-    # it; the job records the URI pinned to the full commit, and the structure is
-    # staged where the runner reads it, as files/POSCAR.
+    # One job of the vasp.relax workflow. install=True fetches it and installs it
+    # in the workspace first; the job records the URI pinned to the full commit,
+    # and the structure is staged where the runner reads it, as files/POSCAR.
     structure = Path("POSCAR")
     structure.write_text(POSCAR, encoding="utf-8")
     job = new_job(
@@ -65,6 +66,7 @@ def main() -> int:
         files={"POSCAR": structure},
         parameters={"kpoint_density": 20.0, "incar_tags": {"ENCUT": 320}},
         tag="silicon",
+        install=True,
     )
     print(f"submitted {job.job_key} at {job.placement}, running workflow {job.workflow}")
 

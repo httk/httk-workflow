@@ -23,12 +23,13 @@ changes nothing.
 ## What a record holds
 
 The low-level `job_records()` iterator yields one `JobRecord` per stopped
-job: the validated job definition with its digest and pinned runner identity,
-the terminal state and failure, the paths of the payload, workdir and
-committed data, the attempt timeline derived from the journal, the children
-it spawned, and its declarations. A job whose journal is damaged is still
-collected, with `provenance.gaps` set, so a result never becomes invisible
-because part of its history did not survive.
+job, read from its `job.json`, its `state.json` and its run log: the validated
+job definition with its digest, the installed workflow it ran (id and tree
+digest), the terminal state and failure, the paths of the payload, workdir and
+committed data, the attempt timeline, the children it spawned, and its
+declarations. A job whose run log or state is damaged is still collected, with
+`provenance.gaps` set, so a result never becomes invisible because part of its
+history did not survive.
 
 `collect()` dispatches each record through the collector its workflow
 provides and yields a `CollectedJob` with role-keyed outputs, the run, and
@@ -53,7 +54,7 @@ From Python, a consumer reads a workspace like this:
 ```python
 from httk.workflow import Workspace, collect
 
-workspace = Workspace("default", mutable=False)
+workspace = Workspace("workspace")  # the workspace directory
 for item in collect(workspace, states=("succeeded",)):
     print(item.record.job_key, item.outputs)
 ```

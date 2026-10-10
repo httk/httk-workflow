@@ -112,7 +112,7 @@ language, and compares everything both left behind.
 | `Attempt.payload` | — | The immutable job payload directory. | `HTTK_WORKFLOW_CONTEXT` → absolute `payload`; **$HTTK_WORKFLOW_JOB_DIR** |
 | `Attempt.workdir` | — | The directory the step does its work in. | **$HTTK_WORKFLOW_WORKDIR** |
 | `Attempt.workspace` | — | The workspace root this job belongs to. | **$HTTK_WORKFLOW_WORKSPACE_DIR** |
-| `Attempt.data` | — | The job's published transactional data, or `None` when the job has `data.mode` `none`. | **$HTTK_WORKFLOW_DATA_DIR** |
+| `Attempt.data` | — | The job's `data/` directory, where `put` and committed transactions land; it exists once one did. | **$HTTK_WORKFLOW_DATA_DIR** |
 | `runtime.AttemptContext.durable` | `httk_workflow_context durable` | The workspace durability mode, threaded into every artifact the attempt publishes so an outcome, transaction, or child is synchronized before it is renamed authoritative. Neither SDK needs a call to act on it. | `HTTK_WORKFLOW_CONTEXT` → `durable`; **$HTTK_WORKFLOW_DURABLE** |
 | `Attempt.deadline` | `httk_workflow_context deadline` | The epoch second at which the manager stops this attempt, or none when it has no `maxtime`; a step can checkpoint or publish `retry` before it. Bash also reads it from the environment. | `HTTK_WORKFLOW_CONTEXT` → `deadline`; **$HTTK_WORKFLOW_DEADLINE** |
 | `Attempt.binding` | `httk_workflow_context binding` | The nodes (host, `procs`, `gpus` and, when placed, `mem`), nodefile, full `binding.json` path (adding per-node `gpu_ids` and `cpus`) and launch prefix this attempt was given, or none when its manager has no node inventory. Bash also reads the host list, nodefile and launch prefix from the environment. | `HTTK_WORKFLOW_CONTEXT` → `binding`; **$HTTK_WORKFLOW_NODELIST**, **$HTTK_WORKFLOW_NODEFILE**, **$HTTK_WORKFLOW_LAUNCH** |
@@ -123,13 +123,13 @@ language, and compares everything both left behind.
 | `Attempt.stage_input` | `httk_workflow_stage_input` | Copy the payload file one parameter names (with an optional default payload-relative path) to a workdir destination, byte for byte; when the payload has no such file the answer is absent: `None` in Python, exit 1 in Bash. | the copied file in the workdir |
 | `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `parameters[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `parameters`, manager-built attempt environment, `HTTK_WORKFLOW_CONTEXT` → `settings` |
 | `Attempt.environment` | `httk_workflow_environment` | One declared workflow environment value. The start gate resolves every entry before a handler runs and snapshots the result for the attempt; direct reads retain the override → environment variable → workspace setting → manifest default → call-default order. An undeclared or unresolved value raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `environment`, manager-built attempt environment, `HTTK_WORKFLOW_CONTEXT` → `settings` |
-| `Runner.main` | `httk_workflow_main` | Before dispatch, a declared environment is resolved eagerly. Missing or ill-typed values publish non-retryable `environment_unresolved`; successful changes are recorded with their source and logged once after the handler completes. Describe mode and jobs without declarations are unchanged. | `fail` outcome, `.httk-job/declarations/environment.json`, `logs/runlog.jsonl` |
-| `Attempt.state` | — | The job's private JSON state mapping, surviving every advance, every retry, and every isolated workdir. | `.httk-job/state.json` |
+| `Runner.main` | `httk_workflow_main` | Before dispatch, a declared environment is resolved eagerly. Missing or ill-typed values publish non-retryable `environment_unresolved`; successful changes are recorded with their source and logged once after the handler completes. Describe mode and jobs without declarations are unchanged. | `fail` outcome, `.httk-job/declarations/environment.json`, `.httk-job/runlog.jsonl` |
+| `Attempt.state` | — | The job's private JSON state mapping, surviving every advance and every retry. | `.httk-job/state.json` |
 | `JobState.read` | `httk_workflow_state_get` | Read the whole state document, or in Bash one key; an unset key exits 1. | `.httk-job/state.json` |
 | `JobState.set` | `httk_workflow_state_set` | Store one JSON value in one atomic replace. | `.httk-job/state.json` |
 | `JobState.delete` | `httk_workflow_state_delete` | Remove one key, reporting whether it was present. | `.httk-job/state.json` |
 | `JobState.merge` | `httk_workflow_state_merge` | Write several keys in one atomic replace. | `.httk-job/state.json` |
-| `Attempt.log` | — | The append-only structured run log of this job payload. | `logs/runlog.jsonl` |
+| `Attempt.log` | — | The runner's append-only structured evidence log; `job log` shows it beside the owner-written `logs/runlog.jsonl` timeline, and `job show` its last headline. | `.httk-job/runlog.jsonl` |
 | `protocol.RunLog.append` | `httk_workflow_runlog_note` | Append one ordinary evidence event. | one `httk-workflow-runlog-event` line, kind `note` |
 | `protocol.RunLog.append` | `httk_workflow_runlog_headline` | Append one event meant to be read first when the job is inspected. | one `httk-workflow-runlog-event` line, kind `headline` |
 | `protocol.RunLog.append` | `httk_workflow_runlog_append` | Append one event with whole files attached by content and digest. | one `httk-workflow-runlog-event` line, kind `files` |
@@ -143,11 +143,11 @@ language, and compares everything both left behind.
 | `Attempt.workdir_batch` | `httk_workflow_workdir_apply` | Group workdir changes so that an interrupted apply is replayed on the next attempt instead of being left half-done. | `.httk-runner/workdir-ready/<uuid>/`, then `workdir-applied/` |
 | `ChildSpec` | `httk_workflow_spawn --step` | Describe a synthesized child job by its step and parameters; everything else follows the spawning job, except that `mintime` is never inherited and `maxtime` is capped at the spawning attempt's. | one entry of `outcome.tmp.<uuid>/children/spawn.json` and the child's `job.json` |
 | `Attempt.spawn` | `httk_workflow_spawn` | Register one child under a mandatory unique label — a `ChildSpec`, or the path of a prepared payload directory — created when the outcome is published. | `outcome.tmp.<uuid>/children/spawn.json` |
-| `Attempt.call` | `httk_workflow_call` | Scaffold another registered workflow — a registered id or alias, a runner file, a package directory, or a language document, resolved exactly as `new_job` resolves it — into a child payload with its `files`/`inputs` staged, and register it under a mandatory unique label. Every `maxtime` of the child is capped at the calling attempt's. A packaged workflow is referenced through `pkg:` and copies nothing; a runner file or workflow directory of your own is staged into the outcome draft, and the manager publishes it into the workspace runner store when it commits the outcome; the step never writes the store. A different runner already in the store under the same name is refused at the call; one another job publishes only after the call fails the caller's commit with `protocol_error`, and one refused child or runner prevents publishing its siblings. | `outcome.tmp.<uuid>/children/spawn.json`, the child's `job.json`, and `children/runners/<store name>` |
+| `Attempt.call` | `httk_workflow_call` | Build a child of another installed workflow — an alias declared in `[workflow.calls]` of this job's installed workflow, or the installed id it names — from the installed package, with its `files`/`inputs` staged and its instantiate hook run, and register it under a mandatory unique label. An undeclared or uninstalled workflow is refused at the call. Every `maxtime` of the child is capped at the calling attempt's. | `outcome.tmp.<uuid>/children/spawn.json` and the child's `job.json` |
 | `Attempt.children` | `httk_workflow_children` | The children observed by the join that started this activation; empty when no join did, so it can be read unconditionally. | `HTTK_WORKFLOW_CONTEXT` → `children` |
-| `ChildResult` | `httk_workflow_child` | One observed child by label: its state, identity, failure, and absolute payload, workdir and data paths. | `HTTK_WORKFLOW_CONTEXT` → `children[]` |
-| `Attempt.parent` | `httk_workflow_parent` | The job that spawned this one, located in this workspace for reading its files in place; absent (`None` in Python, exit 1 in Bash) when there is no parent or no parent payload is found at its recorded placement in this workspace. | `job.json` → `parent`, and the parent's `job.json` (read-only) |
-| `ParentJob` | `httk_workflow_parent FIELD` | The located parent: its identity, placement, and absolute payload and persistent-workdir paths; the workdir is absent for a parent with isolated workdirs. Unlike `context`, a null field is absent (exit 1), and an unknown field is refused (exit 2). | `job.json` → `parent` |
+| `ChildResult` | `httk_workflow_child` | One observed child by label: its state, identity, failure, and absolute payload, workdir and data paths, located by the manager at launch (read-only under confinement). | `HTTK_WORKFLOW_CONTEXT` → `children[]` |
+| `Attempt.parent` | `httk_workflow_parent` | The job that spawned this one, located in this workspace for reading its files in place; absent (`None` in Python, exit 1 in Bash) when there is no parent, the job was detached, or no parent is found at its recorded placement in this workspace. | `job.json` → `parent`, and the parent's `job.json` (read-only) |
+| `ParentJob` | `httk_workflow_parent FIELD` | The located parent: its identity, placement, and absolute payload and `run/` workdir paths (read-only under confinement). Unlike `context`, a null field is absent (exit 1), and an unknown field is refused (exit 2). | `job.json` → `parent` |
 | `Attempt.advance` | `httk_workflow_advance` | Publish a new activation of this job at another step, optionally merging state first so the next step finds what decided to run it. `resources=` / `--resource NAME=VALUE` optionally sets its requirement; values are integers, except Slurm duration strings such as `1:30:00` for `maxtime` and `mintime`. | outcome action `advance` |
 | `Attempt.gather` | `httk_workflow_gather` | Python `a.gather(step, *, when="all_succeeded", count=None, on_impossible=None, rejoin=(), priority=None, resources=None)` waits for children spawned on this attempt plus earlier-activation labels named by `rejoin`; Bash waits for children spawned on this attempt. `when` is `all_succeeded`, `all_terminal`, `any_succeeded`, `any_terminal`, or `at_least` with `count`; when the condition can no longer be met the job advances to `on_impossible` if one is named, and fails with `dependency_failure` otherwise. `priority` and `resources=` optionally change the join activation. | outcome action `wait` with a `join` |
 | `Attempt.succeed` | `httk_workflow_succeed` | Publish the successful completion of this job. | outcome action `succeed` |
@@ -155,7 +155,7 @@ language, and compares everything both left behind.
 | `Attempt.retry` | `httk_workflow_retry` | Ask for another attempt of this same activation. | outcome action `retry` |
 | `Attempt.pause` | `httk_workflow_pause` | Pause this job until an operator resumes it. | outcome action `pause` |
 | `Attempt.published` | — | Whether this attempt already published; a second outcome is refused before anything of the first is disturbed. | the existence of `outcome.ready/` |
-| `protocol.JobSpec` | `httk_workflow_job_prepare` | The complete member set of a job definition, including the runner reference and the parameters. | `job.json` |
+| `protocol.JobSpec` | `httk_workflow_job_prepare` | The complete member set of a job definition, including the installed workflow's id and name and the parameters. | `job.json` |
 | `protocol.prepare_job_payload` | `httk_workflow_job_prepare` | Write `job.json` into a prepared payload directory from that specification. | `job.json` of a new payload |
 | — | `httk_workflow_batch` | Run several bridge commands, one per line, in one interpreter start; a batch stops at its first failing line. | none |
 | `runtime_utils.evaluate_expression` | `httk_calc` | Evaluate one arithmetic expression without a shell. | none |
@@ -171,11 +171,12 @@ wins. Boolean and non-scalar settings are not exported. The
 **`HTTK_WORKFLOW_*`** namespace is reserved and no setting may derive a
 variable in it.
 
-For a shared runner, the manager also exports **`HTTK_WORKFLOW_RUNNER_ROOT`**
-with the runner file or tree root. For a workspace package with a registered
-build, it exports **`HTTK_WORKFLOW_RUNNER_ARTIFACTS`** with the build-artifacts
-directory; a package's `[workflow.runner] command` names it as `{artifacts}`,
-and a `run` entry uses the variable to locate compiled binaries.
+The manager also exports **`HTTK_WORKFLOW_RUNNER_ROOT`** with the installed
+workflow's `package/` directory. For an installed workflow with a
+`[workflow.build]`, it exports **`HTTK_WORKFLOW_RUNNER_ARTIFACTS`** with
+`builds/<platform>/artifacts` of the installation (built by `workflow install`
+or `httk workflow build`); a package's `[workflow.runner] command` names it as
+`{artifacts}`, and a `run` entry uses the variable to locate compiled binaries.
 
 ## Exit-code discipline
 

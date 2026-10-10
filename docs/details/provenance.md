@@ -25,7 +25,8 @@ output roles yield run edges with `type = "files"` and the corresponding
 
 ## Declared and observed
 
-Inputs known while scaffolding can be declared in `JobSpec`:
+Inputs known while scaffolding can be declared in
+`httk.workflow.protocol.JobSpec`:
 
 ```python
 declared = {
@@ -63,10 +64,10 @@ A `Run` names the workflow twice, for two different things:
 
 - `workflow_declaration_uri` is the `$id` of the workflow *declaration*, the
   document describing what the workflow consumes and produces (see
-  {doc}`declarations`).
+  {doc}`/details/declarations`).
 - `workflow_definition_uri` identifies the workflow *definition*, the code
   that ran. `run_record` sets it to the job's `workflow` when that is a
-  commit-pinned git URI (see {doc}`workflow_uris`), and to `None` otherwise.
+  commit-pinned git URI (see {doc}`/details/workflow_uris`), and to `None` otherwise.
 
 A git workflow without a `declaration_uri` therefore has a definition URI but
 no declaration URI. The v1 reader records its package's declaration URI, if
@@ -96,15 +97,15 @@ left `None` for *httk-store* to mint as its per-revision identifier.
 to its own `Run`, including a child that only called or spawned further jobs,
 and `collect --into` links them: the parent's stored run gains a
 `has_artifact` edge of type `runs` to each child's run (see
-{doc}`collecting`). A parent still names child products explicitly in its
-observed declaration. Runner identity, the attempt timeline, and failure stay
-on the `JobRecord` for callers that need them.
+{doc}`/details/collecting`). A parent still names child products explicitly in its
+observed declaration. The installed-workflow pin (`runner_provenance`), the
+attempt timeline, and failure stay on the `JobRecord` for callers that need
+them.
 
-For directory workflows, the runner tree digest and the generated or external
-workflow declaration travel with the job and anchor this provenance chain to
-the exact published package; see {doc}`workflow_packages`. VASP runners will
-adopt this declaration in future work. Built-in VASP result collection is
-documented in {doc}`collecting`.
+For package workflows, the installed tree digest in `runner_provenance` and
+the generated or external workflow declaration in `job.json` anchor this
+provenance chain to the exact installed package; see
+{doc}`/details/workflow_packages`.
 
 ## Provenance and sealing
 
@@ -112,4 +113,4 @@ Provenance records where a result came from; a **seal** proves it has not
 changed since. A manager seals each job as it succeeds, signing its payload's
 file hashes, and workspaces and projects can be sealed on top to pin whole
 trees under one signature that travels with a transfer. When integrity, not
-only origin, matters, see {doc}`sealing`.
+only origin, matters, see {doc}`/details/sealing`.

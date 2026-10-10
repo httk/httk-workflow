@@ -66,10 +66,9 @@ gfortran -std=f2008    .../httk/workflow/languages/fortran/httk_workflow.f90 \
          runner.f90 httk_workflow_c.o -o runner
 ```
 
-The compiled binary is the runner file a job references. It is executable, so the
-manager runs it directly and the scaffolder describes it by running it — a job
-that starts from a runner file of your own is resolved the same way whatever
-language wrote it.
+The compiled binary is an executable runner file: `httk job new --from-runner`
+describes it by running it and installs it as an `adhoc:` workflow whatever
+language wrote it, and the manager runs the installed copy directly.
 
 From a workflow package, build against the installed SDK through
 `HTTK_WORKFLOW_LANGUAGES_DIR`, which `[workflow.build]` commands and attempts both
@@ -215,7 +214,6 @@ status.
 | `httk_workflow_runlog_append(message, files)` | `httk_workflow_runlog_append` |
 | `httk_workflow_log(level, message)` | `httk_workflow_log` |
 | *`sub`* `httk_workflow_put(source, destination, operation, status)` | `httk_workflow_put` |
-| *`sub`* `httk_workflow_remove(destination, operation, missing_ok, status)` | `httk_workflow_remove` |
 | *`sub`* `httk_workflow_spawn(label, job_key, args, status)` | `httk_workflow_spawn` |
 | *`sub`* `httk_workflow_call(label, workflow, job_key, args, status)` | `httk_workflow_call` |
 | *`sub`* `httk_workflow_children(value, selection, status)` | `httk_workflow_children` |
@@ -238,14 +236,14 @@ status.
 | `httk_getenv(name, fallback)` | (pure Fortran, `get_environment_variable`) |
 
 `httk_workflow_parent` leaves `value` unallocated with status `1` when the job has
-no reachable parent, and for `field="workdir"` when the parent uses isolated
-workdirs.
+no reachable parent. `httk_workflow_put` returns the staged path in `operation`;
+explicit transactions (`transaction begin|put|commit`) go through
+`httk_workflow_invoke`.
 
 `httk_getenv` is a function returning an always-allocated string: the variable's
 value, or `fallback` (default `""`) when it is unset or empty.
 
-Booleans are Fortran `logical`: `httk_workflow_remove`'s `missing_ok` is an
-optional `logical`, marshalled to the C `int` flag. As in C, a code's Bash API,
+As in C, a code's Bash API,
 such as *httk-workflow-vasp*'s `httk_vasp_*`, has no dedicated wrappers; reach a
 `<code>-*` verb such as `vasp-*` through
 `httk_workflow_invoke`, which is why the example below runs the configured
@@ -281,6 +279,7 @@ terminated, and `125` when a checker or diagnostic stopped it.
 
 The `vasp-relax-fortran` package of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
-`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
-and publishing to transactional data. Its workflow is `vasp.relax-fortran`; run it
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible;
+results stay in the workdir, and its `publish_data` parameter also copies them
+to `data/`. Its workflow is `vasp.relax-fortran`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-fortran`.

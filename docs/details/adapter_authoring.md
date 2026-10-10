@@ -6,7 +6,7 @@ templates do not cover. It specifies the base and optional operations with
 their JSON request and result documents, how settings and credentials reach an
 adapter, and the rules an implementation must follow. The operator-facing
 description of the maintained adapters, and the command-line options that drive
-them, is in {doc}`workflow_cli`.
+them, is in {doc}`/details/workflow_cli`.
 
 A *remote adapter* is a versioned directory with one dispatcher executable.
 Everything *httk-workflow* does on another machine (push a job bundle, run a
@@ -313,7 +313,7 @@ target.
 manifest cannot name anything outside the workspace it came from.
 
 ```json
-{"destination": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c…",
+{"destination": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c….k4q2…",
  "format": "httk-computer-request", "format_version": 2, "operation": "push",
  "source": "/home/me/ws/.httk-workspace/transfers/outgoing/6f1c…",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
@@ -322,7 +322,7 @@ manifest cannot name anything outside the workspace it came from.
 
 ```json
 {"format": "httk-computer-result", "format_version": 2, "operation": "push", "ok": true,
- "path": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c…"}
+ "path": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c….k4q2…"}
 ```
 
 `path` is where the data actually landed, and callers use it instead of the

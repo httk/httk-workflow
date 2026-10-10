@@ -88,7 +88,7 @@ protocol state; the current attempt is selected by the manager's environment.
 | `Attempt::state_get`, `state_set`, `state_delete`, `state_merge` | corresponding `httk_workflow_state_*` functions |
 | `Attempt::declaration`, `declare` | `httk_workflow_declaration`, `httk_workflow_declare` |
 | `Attempt::runlog_note`, `runlog_headline`, `runlog_append`, `log` | corresponding `httk_workflow_*` functions |
-| `Attempt::put`, `remove`, `spawn`, `call` | corresponding transactional/child C functions |
+| `Attempt::put`, `spawn`, `call` | `httk_workflow_put`, `httk_workflow_spawn`, `httk_workflow_call` |
 | `Attempt::children`, `child` | `httk_workflow_children`, `httk_workflow_child` |
 | `Attempt::advance`, `gather`, `succeed`, `fail`, `retry`, `pause` | corresponding outcome C functions |
 | `Attempt::batch`, `job_prepare`, `workdir_apply` | corresponding C functions |
@@ -99,9 +99,9 @@ Methods taking tail arguments use `Attempt::Arguments`, an alias for
 `std::vector<std::string>`, and pass a temporary NULL-terminated C array. An
 empty vector is passed as a C NULL pointer. Methods with a fallback have an
 overload with and without that fallback. `Attempt::parent()` and
-`Attempt::parent(field)` are `std::nullopt` when the job has no reachable parent,
-and `parent("workdir")` is `std::nullopt` for a parent that uses isolated
-workdirs. C++ runners do local file work with
+`Attempt::parent(field)` are `std::nullopt` when the job has no reachable parent.
+Explicit transactions (`transaction begin|put|commit`) go through
+`Attempt::invoke`. C++ runners do local file work with
 `std::filesystem` rather than the C SDK's `httk_copy_file`, `httk_file_exists`,
 and `httk_join_path` helpers.
 
@@ -136,6 +136,7 @@ optional result shape. Command verbs return the C bridge status directly;
 
 The `vasp-relax-cpp` package of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
-`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
-and publishing to transactional data. Its workflow is `vasp.relax-cpp`; run it
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible;
+results stay in the workdir, and its `publish_data` parameter also copies them
+to `data/`. Its workflow is `vasp.relax-cpp`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-cpp`.

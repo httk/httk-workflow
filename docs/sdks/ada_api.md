@@ -87,7 +87,7 @@ The public package keeps the C names and groups, with Ada strings copied into
 | `Httk_Workflow_State_Get`, `State_Set`, `State_Delete`, `State_Merge` | corresponding `httk_workflow_state_*` functions |
 | `Httk_Workflow_Declaration`, `Declare` | `httk_workflow_declaration`, `httk_workflow_declare` |
 | `Httk_Workflow_Runlog_Note`, `Runlog_Headline`, `Runlog_Append`, `Log` | corresponding `httk_workflow_*` functions |
-| `Httk_Workflow_Put`, `Remove`, `Spawn`, `Call` | corresponding transactional/child C functions |
+| `Httk_Workflow_Put`, `Spawn`, `Call` | `httk_workflow_put`, `httk_workflow_spawn`, `httk_workflow_call` |
 | `Httk_Workflow_Children`, `Child` | `httk_workflow_children`, `httk_workflow_child` |
 | `Httk_Workflow_Advance`, `Gather`, `Succeed`, `Fail`, `Retry`, `Pause` | corresponding outcome C functions |
 | `Httk_Workflow_Batch`, `Job_Prepare`, `Workdir_Apply` | corresponding C functions |
@@ -99,8 +99,9 @@ passes a C NULL array. `Httk_Workflow_Parameter`, `Setting`, `Environment`, and
 `Stage_Input` have overloads with and without a fallback. `Httk_Workflow_Exit` is the Ada
 counterpart of returning from a C `main`. `Httk_Workflow_Parent`, like
 `Httk_Workflow_Context`, has overloads with and without `Field`; it reads
-`Present = False` with status `1` when the job has no reachable parent, and for
-`Field => "workdir"` when the parent uses isolated workdirs.
+`Present = False` with status `1` when the job has no reachable parent.
+Explicit transactions (`transaction begin|put|commit`) go through
+`Httk_Workflow_Invoke`.
 
 ## Strings, ownership, and absent reads
 
@@ -121,7 +122,7 @@ Httk_Workflow_State_Get ("energy", Value, Present, Status);
 An allocated empty C string means `Present = True` and `Status = 0`. A NULL
 answer means `Present = False`; status `1` is a legitimate absent answer and
 status `2` is a refused call. Thus absent and present-empty values do not
-collapse. The same rule applies to operation ids, child keys, declarations,
+collapse. The same rule applies to staged paths, child keys, declarations,
 context values, calculated values, and other C string returns.
 
 The status constants are `HTTK_WORKFLOW_OK` (`0`),
@@ -134,6 +135,7 @@ checker or diagnostic stop.
 
 The `vasp-relax-ada` package of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
-`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
-and publishing to transactional data. Its workflow is `vasp.relax-ada`; run it
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible;
+results stay in the workdir, and its `publish_data` parameter also copies them
+to `data/`. Its workflow is `vasp.relax-ada`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-ada`.

@@ -89,7 +89,7 @@ removed; stderr and stdin remain inherited.
 | `declaration`, `declare` | `declaration`, `declare` |
 | `runlogNote`, `runlogHeadline`, `runlogAppend` | `runlog` |
 | `log` | local stderr helper |
-| `put`, `remove` | `put`, `remove` |
+| `put` | `put` |
 | `children`, `child`, `spawn`, `call` | `children`, `child`, `spawn`, `call` |
 | `advance`, `gather` | `advance`, `gather` |
 | `succeed`, `fail`, `retry`, `pause` | same-named commands |
@@ -101,8 +101,9 @@ removed; stderr and stdin remain inherited.
 values through chainable setters. Array arguments are passed as literal
 `ProcessBuilder` arguments and never through a shell. `parent()` returns the
 parent job as compact JSON and `parent(field)` one of its fields; both are
-empty when the job has no reachable parent, and `parent("workdir")` is empty
-for a parent that uses isolated workdirs. `call(label, workflow, args...)`
-spawns another registered workflow (an id or alias, a git URI, a runner file,
-or a package directory) as a child and returns its job key; `args` carries the
+empty when the job has no reachable parent. Explicit transactions
+(`transaction begin|put|commit`) go through `invoke`. `call(label, workflow,
+args...)` spawns a job of another installed workflow, named by a
+`[workflow.calls]` alias of this job's workflow or the installed id it names,
+as a child and returns its job key; `args` carries the
 `call` options (`--file NAME=PATH`, `--input NAME=PATH`, `--parameter K=V`, …).

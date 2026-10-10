@@ -1,8 +1,9 @@
 # Workflow packages and URIs
 
 A workflow package is one portable directory: a manifest, `httk_workflow.toml`,
-beside a runner written in any language. The whole directory is published into
-the workspace content-addressed and pinned by digest in every job made from it.
+beside a runner written in any language. A workflow is installed into a
+workspace before jobs of it are created: the whole directory is copied into the
+workspace's `workflows/` store, where the manager runs it from.
 
 ```text
 my-workflow/
@@ -31,8 +32,15 @@ entry_type = "structures"
 default = 520
 ```
 
-`httk job new --workflow-dir my-workflow --input structure=POSCAR` instantiates
-a job from it. Beyond runner, inputs and parameters, the manifest can declare
+```console
+httk workflow install --workspace WS my-workflow
+httk job new --workspace WS --workflow example.relax --input structure=POSCAR
+```
+
+installs it (id `local:example.relax`) and instantiates a job from it;
+`httk job new --workflow-dir my-workflow --install ...` does both in one
+command. A single runner file (`--from-runner`) or command
+(`--from-command`) needs no package: `job new` installs it ad hoc. Beyond runner, inputs and parameters, the manifest can declare
 typed workspace settings the runner consumes (`[workflow.environment.*]`),
 hooks that run at instantiation and collection (`[workflow.instantiate]`,
 `[workflow.collect]`), curated postprocess scripts
@@ -51,16 +59,15 @@ git+https://github.com/<org>/<repo>[@<ref>][#<subdir>]
 ```
 
 ```console
-httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR
-httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job new --workflow vasp.relax --input structure=POSCAR
-httk workflow uninstall vasp.relax
+httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk job new --workspace WS --workflow vasp.relax --input structure=POSCAR
+httk workflow uninstall --workspace WS vasp.relax
 ```
 
-Referencing a URI fetches the repository and installs the workflow; the job
-records the canonical URI with the ref expanded to the full commit, so what a
-queued job runs cannot change under it. Once installed, the manifest's
-`name` is its short name. Only `git+https://`, `git+http://` and `git+file://`
+Installing a URI fetches the repository and installs the workflow under the
+canonical URI with the ref expanded to the full commit; every job records that
+id. Once installed, the manifest's `name` is its short name, and
+`job new --workflow URI --install` installs on first use. Only `git+https://`, `git+http://` and `git+file://`
 URIs without credentials are accepted. Referencing a URI is consent to run its
 code with the trust of an installed plugin. A repository that also carries an
 `httk_plugin.toml` installs as a plugin with `httk plugin install`.
@@ -69,7 +76,9 @@ code with the trust of an installed plugin. A repository that also carries an
 
 A runner can call another workflow as a child job and resume when it finishes,
 which is how one workflow is assembled from others without copying their
-steps. A package declares what it calls, and a step calls it by alias:
+steps. A package declares what it calls, as a workflow name or a git URI pinned
+to a full commit; installing the package installs its calls too, and a step
+calls one by alias:
 
 ```toml
 [workflow.calls]

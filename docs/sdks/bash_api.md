@@ -63,8 +63,7 @@ step_characterize() {
         httk_workflow_spawn "site-$site" \
             --step relax \
             --parameter site="$site" \
-            --parameter structure=@"defect-$site.json" \
-            --data-mode transactional >/dev/null
+            --parameter structure=@"defect-$site.json" >/dev/null
     done <sites.txt
     httk_workflow_gather aggregate --when all_terminal --on-impossible triage
 }
@@ -105,37 +104,19 @@ httk_workflow_main
 ```
 
 The runner is a single file, and every child job runs the same file at a
-different step. Publish it once in the workspace and every job — parent and
-child — references those bytes by digest:
+different step. Creating a job from the file installs it in the workspace as
+an `adhoc:defects@<sha12>` workflow, and every job, parent and child, runs that
+installation:
 
 ```console
-httk runner publish --workspace workflow-workspace --name defects/run.sh defects.sh
-```
-
-```python
-from httk.workflow import JobSpec, Workspace, prepare_job_payload
-
-workspace = Workspace("workflow-workspace")
-reference = workspace.publish_runner("defects.sh", name="defects/run.sh")
-prepare_job_payload(
-    "prepared-job",
-    JobSpec(
-        name="Si vacancies",
-        workflow="defects",
-        runner_source="workspace",
-        runner_path=str(reference["path"]),
-        runner_sha256=str(reference["sha256"]),
-        initial_step="characterize",
-        parameters={"encut": 520},
-    ),
-)
-workspace.submit("prepared-job", "project/si-vacancies")
+httk job new --workspace workflow-workspace --from-runner defects.sh --step characterize \
+    --parameter encut=520 --placement project/si-vacancies
 ```
 
 A Bash step can also prepare a payload itself, with
 `httk_workflow_job_prepare DESTINATION SPEC.json`, where the spec object holds
-the members of `JobSpec` — including `runner_executor`, `runner_source`,
-`runner_sha256`, and `parameters` — and the created job's identity is printed back as
+the members of `JobSpec` — including `name`, `workflow_id`, `workflow_name`,
+`initial_step`, and `parameters` — and the created job's identity is printed back as
 JSON.
 
 The libraries require Bash 4.2 or newer and work with `set -euo pipefail`. They
@@ -167,11 +148,11 @@ apply, and then dispatches. It turns every ending of a step into an outcome:
 tool can enumerate the steps of a runner it is not running. It is produced by the
 shell itself: describing a runner reads no attempt context, needs no interpreter,
 and touches nothing on disk. `httk_workflow_main --describe` does the same. The
-step set is also recorded in the job's state frame as `runner_steps`, from the
+step set is also recorded in the job's `state.json` as `runner_steps`, from the
 first outcome the job publishes.
 
 `job new --from-runner FILE` executes FILE in this describe mode to infer its
-workflow and initial step. The file must call `httk_workflow_runner WORKFLOW
+workflow and initial step when it installs FILE as an `adhoc:` workflow. The file must call `httk_workflow_runner WORKFLOW
 STEP...` before any work, including before `httk_workflow_main`; a file that
 never registers fails deterministically with the file name and that missing-call
 message.
@@ -214,7 +195,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `httk_workflow_child LABEL FIELD` | one field of one observed child |
 | `httk_workflow_parent [FIELD]` | the job that spawned this one, or one field of it; 1 when there is no reachable parent |
 | `$HTTK_WORKFLOW_STEP` | the step this attempt runs |
-| `$HTTK_WORKFLOW_WORKDIR`, `$HTTK_WORKFLOW_JOB_DIR`, `$HTTK_WORKFLOW_DATA_DIR` | absolute paths; the data directory is set only for a transactional job |
+| `$HTTK_WORKFLOW_WORKDIR`, `$HTTK_WORKFLOW_JOB_DIR`, `$HTTK_WORKFLOW_DATA_DIR` | absolute paths: the persistent `run/` workdir, the job directory, and its `data/`, which exists once a transaction put something there |
 | `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
 | `httk_workflow_context deadline`, `$HTTK_WORKFLOW_DEADLINE` | the epoch second at which the manager stops this attempt; only when the attempt has a `maxtime`, otherwise the call exits 1 and the variable is unset |
 | `httk_workflow_context binding`, `$HTTK_WORKFLOW_NODELIST`, `$HTTK_WORKFLOW_NODEFILE`, `$HTTK_WORKFLOW_LAUNCH` | the nodes, nodefile and launch prefix the attempt was given: the context object (its `file` member names `binding.json`, which adds per-node `gpu_ids` and `cpus`), the comma-separated hosts, the nodefile path (one host line per processor slot), and the shell-quoted launch prefix (such as `srun ...`, or in a confined attempt the launch client that has the manager start the ranks; set only when one applies; run it with `eval` when it may hold quoted words); only when the manager has a node inventory, otherwise the call exits 1 and the variables are unset |
@@ -267,8 +248,7 @@ bytes by hand should honour the same flag; a step that only calls the packaged
 functions never has to look at it.
 
 Job state is stored inside the payload, below `.httk-job/`, so it survives
-retries, step advances, and isolated workdirs, and it travels with a transferred
-job. `httk_workflow_state_set NAME VALUE` stores one value,
+retries and step advances, and it travels with a transferred job. `httk_workflow_state_set NAME VALUE` stores one value,
 `httk_workflow_state_merge NAME=VALUE ...` several in one atomic replace, and
 `httk_workflow_state_delete NAME` removes one. A value that parses as JSON is
 stored as that JSON value, and anything else as the string it is, so
@@ -295,8 +275,9 @@ reports.
 
 `httk_workflow_children` prints `label`, terminal state, job key, workdir, and
 data directory, separated by tabs; the workdir and data columns are absolute
-paths and are empty when the child has none. That is one row per child, so the
-whole join reads with `read`:
+paths, located when the manager launched this attempt, and are empty when the
+child was not found. Under confinement the children are visible read-only.
+That is one row per child, so the whole join reads with `read`:
 
 ```bash
 while IFS=$'\t' read -r label state job_key workdir data; do
@@ -306,16 +287,17 @@ done < <(httk_workflow_children --succeeded)
 
 `httk_workflow_child LABEL FIELD` reads one field of one child, where `FIELD` is
 `label`, `state`, `job_id`, `job_key`, `failure_code`, `failure_message`,
-`payload`, `workdir`, `data`, or `data_generation`. The observation is empty
+`payload`, `workdir`, or `data`. The observation is empty
 unless this activation followed a gather, which is why `aggregate` above hands
 what it learned to `triage` through job state.
 
 `httk_workflow_parent` reads the other direction: the job that spawned this one.
 Without a field it prints the parent as one JSON object; `FIELD` is `job_id`,
 `job_key`, `placement`, `workspace_id`, `activation_id`, `spawn_id`, `payload`, or
-`workdir`, the last two as absolute paths. It exits 1 for a root job, for a child
-whose parent is not reachable in this workspace, and for `workdir` when the
-parent uses isolated workdirs; an unknown field is refused with 2. Assign the
+`workdir`, the last two as absolute paths (the workdir is the parent's `run/`,
+read-only under confinement). It exits 1 for a root job, for a detached child,
+and for a child whose parent is not found at its recorded placement in this
+workspace; an unknown field is refused with 2. Assign the
 answer before using it, because a command substitution inside another
 command's arguments loses its exit status under `set -e`:
 
@@ -331,16 +313,16 @@ for when reading in place is the right choice and what keeps it safe.
 
 ## What a step publishes
 
-Exactly one outcome per attempt. `httk_workflow_spawn`, `httk_workflow_put`, and
-`httk_workflow_remove` accumulate in one implicit draft below the attempt control
+Exactly one outcome per attempt. `httk_workflow_spawn`, `httk_workflow_call`, and
+`httk_workflow_put` accumulate in one implicit draft below the attempt control
 directory, and the draft has no effect until a terminal call publishes it with a
 single atomic rename. A second terminal call is refused, and a draft left by an
 aborted handler is discarded, so no half-outcome ever reaches the manager.
 
 The draft lives in the control directory rather than in shell state, which is
 what lets a Bash step compose it across as many bridge calls as it likes: the
-spawned children, the staged data transaction, and the operation counter are all
-read back from the draft by whichever process asks next.
+spawned children and the implicit data transaction are read back from the
+draft by whichever process asks next.
 
 | Call | Meaning |
 | --- | --- |
@@ -355,8 +337,8 @@ read back from the draft by whichever process asks next.
 `{"code", "message", "details", "retryable"}`, which is exactly what a Python
 runner and the manager itself publish. `CODE` is the string a job lists in
 `retry_on`; `--retryable` declares that repeating the attempt could help, which
-the manager honours within the job's budgets; `--priority` changes the terminal
-marker priority.
+the manager honours within the job's budgets; `--priority` changes the
+priority the failed job is released with.
 
 Every step name these calls accept is checked against the registered set at the
 call that names it, so `httk_workflow_advance colect` is refused immediately,
@@ -374,44 +356,37 @@ directory is readable at a glance.
 
 A spawned child needs no prepared payload at all. `--step` and `--parameter`
 synthesize a complete `job.json`, and everything not given follows the spawning
-job: its workflow, its claim pool, its priority, its resources, and its runner.
+job: its installed workflow, its claim pool, its priority, its resources, and
+its sealing. A child never inherits `mintime`, and its `maxtime` is capped at
+this attempt's.
 
 | Option | Meaning |
 | --- | --- |
 | `--step STEP` | the step the child starts at; required unless `--payload` is given |
 | `--parameter NAME=VALUE`, `--parameter NAME=@FILE.json` | one member of the child's `parameters` object |
-| `--payload DIRECTORY` | spawn a prepared payload directory instead of synthesizing a job |
-| `--runner inherit\|ws:PATH@SHA256\|installed:PATH@SHA256` | which runner the child executes; `inherit` is the default |
+| `--payload DIRECTORY` | spawn a prepared payload directory (from `httk_workflow_job_prepare`) instead of synthesizing a job |
 | `--placement PATH` | where the child is created; the placement of this job by default |
-| `--tag TAG`, `--name NAME`, `--workflow WORKFLOW` | override what the child is called |
+| `--tag TAG`, `--name NAME` | override what the child is called |
 | `--priority N`, `--claim-pool POOL`, `--capability NAME` | override how the child is scheduled |
-| `--workdir-mode persistent\|isolated`, `--workdir-path PATH` | the child's workdir |
-| `--data-mode none\|transactional` | whether the child owns durable data |
 | `--retry-on CODE`, `--max-attempts-per-activation N`, `--max-total-attempts N`, `--max-activations N` | the child's retry policy |
 | `--resources @FILE.json` | the child's requested resources (`maxtime` and `mintime` as Slurm duration strings) |
 | `--step-resources @FILE.json` | the child's per-step resource requirements (time labels as Slurm duration strings) |
 
-`inherit` copies this job's own `(source, path, sha256)`, which is what a campaign
-whose steps all live in one published runner wants. A payload runner cannot be
-inherited, because a synthesized child has no payload to copy it into: publish it
-with `httk runner publish` and name it with `--runner ws:PATH@SHA256`, or
-prepare a payload directory and spawn that with `--payload`.
+To start a different workflow, use `httk_workflow_call`.
 
 ### Calling another workflow
 
-`httk_workflow_call LABEL WORKFLOW ...` spawns a *different* registered workflow
-as a child job and prints its job key. Where `httk_workflow_spawn` runs a step of
-this same runner (or a payload you prepared yourself), `call` scaffolds a
-complete child payload for `WORKFLOW` — resolved exactly as `httk workflow job
-new` resolves it: a registered id or alias, a git URI or the short name of a
-installed workflow (`vasp.relax`), a runner file of your own, a workflow package directory, or a bare language document. Its `--file` and
-`--input` arguments are staged into the child payload and its `job.json` is
+`httk_workflow_call LABEL WORKFLOW ...` spawns a *different* workflow as a
+child job and prints its job key. `WORKFLOW` is an alias declared in
+`[workflow.calls]` of this job's installed workflow, or the installed id an
+alias names, and the called workflow must be installed in the workspace too
+(`httk workflow install` installs the declared calls with the caller). `call`
+builds a complete child payload from the installed package: its `--file` and
+`--input` arguments are staged, its instantiate hook runs, and its `job.json` is
 written, so the child runs that workflow's own runner. Wait for it with
 `httk_workflow_gather` and read it back with `httk_workflow_children`, exactly as
-for a spawned child. A registered packaged workflow is referenced through the
-reserved `pkg:` form and copies nothing; a runner file of your own is published
-into the workspace runner store, which is content-addressed and idempotent. The
-child's job tag defaults to the label, just as with `spawn`.
+for a spawned child. The child's job tag defaults to the label, just as with
+`spawn`, and its every `maxtime` is capped at this attempt's.
 
 | Option | Meaning |
 | --- | --- |
@@ -422,12 +397,10 @@ child's job tag defaults to the label, just as with `spawn`.
 | `--tag TAG`, `--name NAME` | what the child is called; the tag defaults to `LABEL` |
 | `--placement PATH` | where the child is created; the placement of this job by default |
 | `--priority N` | the child's scheduling priority |
-| `--workdir-mode persistent\|isolated` | the child's workdir mode |
-| `--data-mode none\|transactional` | override the called workflow's data mode |
 | `--step STEP` | override the called workflow's initial step |
-| `--workflow-id ID` | override the workflow id written into the child's `job.json` |
 
-Calling needs the workspace root reachable from where the step runs, the same
+An undeclared or uninstalled workflow is refused. Calling needs the workspace
+root readable from where the step runs, the same
 condition `httk_workflow_children` needs. See {doc}`../details/composing_workflows` for
 the full model, a worked example, and how results move between calls.
 
@@ -448,22 +421,30 @@ value is an integer, except for the reserved time labels `maxtime` and
 
 ### Data and workdir changes
 
-For a job with `data.mode` `transactional`, `httk_workflow_put SOURCE DESTINATION`
-stages a file or a directory and `httk_workflow_remove DESTINATION [--missing-ok]`
-stages a removal. The manager applies them exactly once when it commits the
-outcome. Operation identifiers are generated in call order and printed, and the
-counter lives in the draft rather than in one process, so `op-0001`, `op-0002`, …
-come out in the same sequence however many bridge calls a step makes:
+`httk_workflow_put SOURCE DESTINATION` stages a copy of a file or a directory
+for `data/DESTINATION` in the attempt's implicit transaction, which commits with
+the outcome, and prints the payload-relative destination. The manager applies it
+exactly once when it commits the outcome, whatever the action; a file replaces
+what is there and a directory is merged into what is there:
 
 ```bash
-httk_workflow_put energy.json results/energy.json      # op-0001
-httk_workflow_put bands results/bands                  # op-0002
-httk_workflow_remove scratch --missing-ok              # op-0003
+httk_workflow_put energy.json results/energy.json      # prints data/results/energy.json
+httk_workflow_put bands results/bands
 httk_workflow_succeed
 ```
 
-A job with `data.mode` `none` has no data transaction, and these calls say so
-rather than staging something that could never be committed.
+`httk_workflow_transaction` is a commit point in the middle of a step. `begin`
+prints a handle, `put HANDLE SOURCE DESTINATION` stages into it with
+destinations relative to the job directory (`data/...` lands in `data/`), and
+`commit HANDLE` commits it. The manager applies every committed transaction at
+the next attempt boundary, before any later attempt starts, whatever the
+outcome; an uncommitted one is discarded. There is no removal operation:
+
+```bash
+txn=$(httk_workflow_transaction begin)
+httk_workflow_transaction put "$txn" WAVECAR data/checkpoint/WAVECAR
+httk_workflow_transaction commit "$txn"
+```
 
 `httk_workflow_workdir_apply SPEC.json` applies a replayable batch of changes to
 the *workdir*, which `httk_workflow_main` completes on the next attempt if this
@@ -484,7 +465,7 @@ httk_workflow_batch <<'EOF'
 state-set converged true
 state-set energy -12.5
 put energy.json results/energy.json
-remove scratch --missing-ok
+put bands results/bands
 EOF
 ```
 
@@ -548,7 +529,8 @@ belong on stderr.
 
 `httk_workflow_runlog_note`, `httk_workflow_runlog_headline`, and
 `httk_workflow_runlog_append MESSAGE FILE...` retain structured evidence in the
-job's `logs/runlog.jsonl`; `httk_workflow_log LEVEL MESSAGE...` writes a
+job's `.httk-job/runlog.jsonl`, which `httk job log` shows
+beside the owner-written timeline; `httk_workflow_log LEVEL MESSAGE...` writes a
 timestamped line to stderr, which the manager retains too. `httk_calc`,
 `httk_template_render`,
 `httk_compress`, and `httk_decompress` are safe replacements for commonly used
@@ -590,8 +572,8 @@ defaults, in Bash and in Python at once:
 
 `httk_vasp_remedy_plan` prints the diagnosed problem on stdout, takes `--directory`
 (the calculation the remedy is validated against) and `--policy`, and records the
-escalation ladder in the job state directory rather than in the workdir, so a job
-with an isolated workdir keeps climbing it. A complete Bash VASP runner built on
+escalation ladder in the job state directory rather than in the workdir, so a
+cleaned workdir does not reset it. A complete Bash VASP runner built on
 these functions is `vasp.relax-bash` of workflows-vasp: see {doc}`../vasp_runners`.
 
 ## Mapping from *httk* v1
@@ -600,7 +582,7 @@ these functions is `vasp.relax-bash` of workflows-vasp: see {doc}`../vasp_runner
 | --- | --- |
 | `HT_TASK_INIT`, next/finished/broken | `httk_workflow_runner`, `step_` functions, and the outcome functions |
 | `HT_TASK_SUBTASKS`, `HT_TASK_CREATE` | `httk_workflow_spawn` and `httk_workflow_gather` |
-| `HT_TASK_ATOMIC_*` | `httk_workflow_put` / `remove`, or `httk_workflow_workdir_apply` |
+| `HT_TASK_ATOMIC_*` | `httk_workflow_put` / `httk_workflow_transaction`, or `httk_workflow_workdir_apply` |
 | `HT_TASK_STORE_VAR` | `httk_workflow_state_set` and `state_get`, which belong to the job |
 | `HT_TASK_RUN_CONTROLLED`, follow-file checkers | `httk_workflow_run` and the checker JSON-lines protocol |
 | priority file | `--priority` on the published outcome |

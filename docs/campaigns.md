@@ -68,8 +68,9 @@ silicon--0c4f…	/…/screening-a/workspace/jobs/silicon--0c4f…
 ```
 
 `campaign submit` assigns `--key` to a partition and submits one root job into
-that partition's workspace. Everything the root later spawns follows it there.
-In Python:
+that partition's workspace. The workflow must be installed in that workspace;
+`--install` installs it there first. Everything the root later spawns follows
+it there. In Python:
 
 ```python
 from httk.workflow.campaigns import assign_partition, campaign_submit
@@ -84,6 +85,7 @@ job = campaign_submit(
     project="my-project",
     files={"POSCAR": "structures/Si.vasp"},
     tag="silicon",
+    install=True,
 )
 ```
 
@@ -110,7 +112,7 @@ options as `httk collect`. Both take `--partition` to act on a subset.
 
 Partitioning bounds how many jobs one workspace holds; within a workspace,
 `--placement` bounds how wide any one directory gets, since a shallow tree is
-cheaper to scan and resume than one flat directory of markers. The engine
+cheaper to list than one flat directory of jobs. The engine
 imposes no scheme; common ones are a short hash prefix of the job key
 (`project/<hash-prefix>/<batch>`), one subtree per submission batch
 (`project/<date>/<run>`), or one per structure family. A manager started with

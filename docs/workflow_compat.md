@@ -3,8 +3,9 @@
 Workflows written for other systems run as ordinary jobs. `httk.workflow.compat`
 provides a runner *realization* for each format, selected by name: `cwl`,
 `pwd` (Python Workflow Definition), `jobflow` (including atomate2 Makers), and
-`httk-v1`. The document or template is not rewritten; `job new` resolves it
-into a job that is claimed, retried, journalled and collected like any other.
+`httk-v1`. The document or template is not rewritten; it is installed in the
+workspace like any workflow, and its jobs are claimed, retried, logged and
+collected like any other.
 
 | Format | How a job is made | Needs |
 | --- | --- | --- |
@@ -13,8 +14,9 @@ into a job that is claimed, retried, journalled and collected like any other.
 | jobflow | `job new --from-runner maker.json`, or a package with `format = "jobflow"` | `httk-workflow[jobflow]` (and `[atomate2]`) where the job runs |
 | httk v1 | a package with `format = "httk-v1"` | nothing extra |
 
-A bare document becomes an anonymous workflow named `<format>.<stem>`. A
-workflow package declares the format in `[workflow.runner]` instead, which
+`job new --from-runner` installs a bare document ad hoc as a workflow named
+`<format>.<stem>`. A workflow package, installed with
+`httk workflow install --workspace WS DIR` (or `job new --install`), declares the format in `[workflow.runner]` instead, which
 lets it name inputs, outputs and parameters properly:
 
 ```toml
