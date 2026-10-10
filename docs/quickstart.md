@@ -51,7 +51,7 @@ END
 $ httk init --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
 $ httk workspace init --name default workspace
-$ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
+$ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
 $ httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
 $ httk collect --into results.sqlite --id-base httk.quickstart
@@ -73,27 +73,30 @@ unchanged.
 **`project init`** created the project anchor. The next command initialized and
 registered the workspace at the project root as `default`; project creation
 does not create or contain a workspace.
-The workspace is the state of the work. The VASP workflows default to
-`data.mode="none"`: the persistent `run/` workdir holds the results, and no
-`data/` copy is created. Add `--data-mode transactional` to `job new` to also
-publish a curated copy into `data/vasp/`.
+The workspace is the state of the work. The VASP workflows keep their results
+in the persistent `run/` workdir and create no `data/` copy; add
+`--parameter publish_data=true` to `job new` to also publish a curated copy
+into `data/`.
 
 **`job new`** built and submitted one job. `--workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax'`
-names the `vasp.relax` workflow of the workflows-vasp repository — one runner,
-three steps, the reviewed remedy ladder — so no runner had to be written.
-Referencing the URI fetched and installed the workflow; the job records its
-canonical URI, pinned to the full commit, and the workflow package is published
-into the workspace by digest, so neither a new commit of the repository nor an
-upgrade of *httk-workflow* underneath a queued campaign can change what its jobs
-execute. Once installed, the short name `vasp.relax` selects it too; see
-{doc}`vasp_runners`. `--input structure=POSCAR` staged the
-declared structure input as the
-`files/POSCAR` the runner reads, and `--tag silicon` made the job's key readable.
-The command printed the job key and the payload directory:
+names the `vasp.relax` workflow of the workflows-vasp repository (one runner,
+three steps, the reviewed remedy ladder), so no runner had to be written. A job
+runs only a workflow installed in its workspace, and `--install` fetched the
+repository and installed the workflow there first; `httk workflow install
+--workspace default URI` does the same on its own. The job records the
+canonical URI, pinned to the full commit, and runs the installed copy, so a new
+commit of the repository cannot change what a queued job executes. Once
+installed, the short name `vasp.relax` selects it; see {doc}`vasp_runners`.
+`--input structure=POSCAR` staged the declared structure input as the
+`files/POSCAR` the runner reads, and `--tag silicon` made the job's key
+readable. The command printed the job key and the directory the job is in now:
 
 ```console
-silicon--0c4f…	/…/workspace/jobs/silicon--0c4f…
+silicon--0c4f…	/…/workspace/jobs/ready/silicon--0c4f…~p500~…
 ```
+
+A job's directory moves with its state (`jobs/ready/`, `jobs/owned/…`,
+`jobs/succeeded/`), so name a job by its key or UUID, not by its path.
 
 **`settings set`** stored workspace state that travels with the job wherever it
 runs. The manager exports scalar settings into each attempt environment, so
@@ -104,7 +107,7 @@ from the job's resources. A real environment variable remains a deployment
 override and wins over the workspace setting.
 
 **`run`** ran a task manager until nothing was ready, driving the job through
-`prepare`, `run`, and `publish`. With `--idle` the same manager keeps serving
+`prepare`, `run`, and `publish`, and sealed it when it succeeded. With `--idle` the same manager keeps serving
 the workspace, which is how a campaign is run.
 
 **`collect --into`** printed one JSON summary per finished job and stored its
@@ -127,22 +130,23 @@ instead of every succeeded job, pass its id:
 
 ```console
 $ httk job list
-JOB                                  STATE       STEP             PRI PLACEMENT
-silicon--0c4f…                       succeeded   publish          500 jobs
+JOB                                     STATE      STEP             PRI PLACEMENT
+silicon--0c4f…                          succeeded  publish          500 -
 
 $ httk job show silicon
 $ httk job why silicon
 ```
 
-The job commands also accept a path inside the workspace, such as `workspace/jobs` or
-`workspace/jobs/silicon--...`.
+The job commands also accept a path inside the workspace, such as
+`workspace/jobs/succeeded`.
 
 Any job UUID, complete `tag--uuid` key, or unique prefix of either names a job.
 `job show` describes it from its authoritative state, and `job why` explains a job
 that is *not* progressing — an unmet capability, a paused job, no manager
-running. When something did go wrong, the finished job's results and logs are in
-the payload directory `job new` printed: `run/` holds the results; `data/`
-exists only when transactional data is enabled. `job log` prints the transitions.
+running. The finished job's results are in its directory, which `job show`
+prints: `run/` holds the results, `data/` exists only when the workflow
+publishes data, and `logs/` holds its run log and output. `job log` prints the
+transitions.
 
 `job debug --workspace WORKSPACE JOB` drives one job in the foreground and prints every
 transition, which is the fastest loop while a runner is still being written.
@@ -153,16 +157,13 @@ Point `--input-from structure` at a *directory* and every readable structure
 file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk job new --workspace quickstart-workspace --workflow vasp.relax --input-from structure structures/ \
+$ httk job new --workspace default --workflow vasp.relax --input-from structure structures/ \
       --parameter kpoint_density=30.0 --placement project/screening
 ```
 
-The runner is published once for the whole set, and the jobs are submitted as they
-are generated. In Python the same thing streams, which is how a campaign of any
-size is built:
-
-One `job new --from-command` call creates one job; use a shell loop (or
-`new_jobs`) to make a sweep with parameter or file placeholders.
+The workflow is installed once for the whole set, and the jobs are submitted as
+they are generated. In Python the same thing streams, which is how a campaign
+of any size is built:
 
 ```python
 from pathlib import Path
@@ -176,15 +177,14 @@ for job in new_jobs(workspace, "vasp.relax", items, parameters={"kpoint_density"
     print(job.job_key)
 ```
 
-Neither side of that loop is ever materialized: one runner publication is
-amortized over every job, and each job costs one payload directory and one state
-marker.
+Neither side of that loop is ever materialized, and each job costs one
+directory.
 
 ## Launchers, remotes, and other machines
 
-Managers run in-process until the workspace's `manager.launch` setting names a
-launcher such as `slurm`; a remote reaches another machine, so that jobs can be
-moved to a workspace there and run by its own launcher. A whole project is
+Managers run as local processes until the workspace's `manager.launch` setting
+names a launcher such as `slurm`; a remote reaches another machine, so that jobs
+can be moved to a workspace there and run by its own launcher. A whole project is
 moved by copying its directory and running `httk project repair` inside it.
 {doc}`workspaces` sets all of this up, and {doc}`running` covers the job
 cycle in full.
@@ -195,8 +195,8 @@ cycle in full.
   remotes, and creating, running, inspecting, transferring and sealing jobs.
 - {doc}`vasp_runners`: the VASP workflows of the workflows-vasp repository.
 - {doc}`runtime_helpers`: writing a runner of your own, which
-  `job new --from-runner ./my_runner.py` publishes and pins by digest exactly
-  like a registered one; {doc}`sdks/bash_api` is the same protocol from Bash.
+  `job new --from-runner ./my_runner.py` installs into the workspace ad hoc;
+  {doc}`sdks/bash_api` is the same protocol from Bash.
 - {doc}`workflow_packages`: packaging a workflow with its manifest and hooks.
 - {doc}`workflow_compat`: running CWL, PWD, jobflow and httk v1 workflows as jobs.
 - {doc}`collecting`: turning finished jobs into stored results.

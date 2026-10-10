@@ -6,11 +6,10 @@ command answers `--help`:
 ```text
 httk init | identity     operator identities (core-owned)
 httk project             init | show | repair | manifest | seal | unseal | verify-seal | import-v1
-httk workspace           init | list | default | show | configure | status | managers | settings | policy | workflow-prelude | fsck | gc | unlock | seal | unseal | daemon | ...
+httk workspace           init | list | default | show | configure | status | owners | attest-dead | settings | policy | workflow-prelude | fsck | gc | seal | unseal | verify | exchange | daemon | ...
 httk job                 new | submit | request | delete | detach | seal | unseal | list | show | log | why | debug | transfer | eject | adopt
 httk collect             workspaces and calculation trees
 httk workflow            run | list | describe | install | uninstall | precheck | postprocess | build | monitor
-httk runner     publish | describe
 httk seal       verify
 httk manager    run
 httk campaign   init | show | configure | remove | submit | collect | start-managers
@@ -18,8 +17,7 @@ httk launcher   list | add | configure | check | show | remove
 httk remote     list | add | configure | check | show | remove | import-v1 | daemon
 httk config              show | configure | set | unset | import-v1
 httk v1                  collect
-httk transfer            status | retire | reclaim
-httk workflow transfer   receive | offer | retire      (hidden protocol; remote peers invoke it by exact name)
+httk transfer            status
 ```
 
 {doc}`quickstart` walks the everyday sequence, {doc}`workspaces` and

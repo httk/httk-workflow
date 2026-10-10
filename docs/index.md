@@ -4,9 +4,10 @@ This site documents the *httk-workflow* module. For the full documentation of
 *httk₂*, see [docs.httk.org](https://docs.httk.org).
 
 *httk-workflow* runs computational workflows from the filesystem. A
-**workspace** holds jobs as directories, each with one atomically renamed state
-marker as its source of truth, so an interrupted manager, node or calculation
-is resumed from what is on disk rather than cleaned up. A **runner** implements
+**workspace** holds jobs as directories whose location is their state: a job
+changes state, or owner, only by one atomic rename, with no locks and no shared
+journal, so an interrupted manager, node or calculation is recovered from what
+is on disk rather than cleaned up. A **runner** implements
 the steps of a workflow in any language and decides at run time what to spawn
 and what runs next; there is no graph language. Managers run the jobs, on the
 local machine or through a scheduler, and `collect` hands the finished results
@@ -59,7 +60,7 @@ and one manager that runs it:
 httk init --name "Your Name" --email you@example.org
 httk project init --name quickstart .
 httk workspace init --name default workspace
-httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
+httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk collect

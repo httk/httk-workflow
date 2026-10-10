@@ -52,9 +52,23 @@ The manager exports each scalar setting into the attempt environment under its
 environment variable is a deployment override and wins over the workspace
 setting; a job's own parameter of the same name wins over both.
 
-Engine tunables such as claim leases and retention are *workspace policy*, kept
-apart from application settings and edited with `workspace policy show|set`;
-see {doc}`details/taskmanager`.
+Engine tunables (the visibility deadline of a shared filesystem and the
+retention limits of `gc`) are *workspace policy*, kept apart from application
+settings and edited with `workspace policy show|set`; see
+{doc}`details/taskmanager`.
+
+## Installed workflows
+
+A workspace runs only workflows installed in it, under `workflows/`. Install
+once per workspace, locally or on a remote:
+
+```console
+httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk workspace workflows default
+```
+
+`job new --install` installs a missing workflow on the fly. Workflows never
+travel with jobs: install them in every workspace that runs those jobs.
 
 ## Environment preludes
 
@@ -126,7 +140,8 @@ httk workflow run --workspace kappa:runs --count 4
 ```
 
 `NAME:WORKSPACE` is a binding, not a path. Jobs are created locally and moved
-with `httk job transfer`; see {doc}`running`. Besides `ssh`, the packaged
+with `httk job transfer`, after `httk workflow install --workspace kappa:runs …`
+installed their workflow there; see {doc}`running`. Besides `ssh`, the packaged
 templates are `local` (a second tree on this machine), `mount` (files over a
 shared mount, commands through a separate executor) and `mount-daemon` (files
 as the only channel, through an exchange directory: the workspace's managers serve it, and the confined broker only starts, queries and cancels managers).
@@ -147,8 +162,8 @@ elsewhere.
 ## Further reading
 
 - {doc}`details/taskmanager` covers workspace policy, durability and
-  filesystem requirements, resources and scheduling, and repair with `fsck`,
-  `gc` and `unlock`.
+  filesystem requirements, resources and scheduling, owners and recovery, and
+  maintenance with `fsck` and `gc`.
 - {doc}`details/workflow_cli` is the complete command reference, including
   the `workspace`, `launcher`, `remote`, `config` and `project` groups.
 - {doc}`campaigns` spreads one very large run across several workspaces.

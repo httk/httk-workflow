@@ -17,9 +17,9 @@ surface (`httk.workflow` — `Runner`, `Attempt`), and orchestration and managem
 (`Workspace`, `TaskManager`, `collect`, and named submodules) — and registers
 `httk workflow`, the command tree for everything below. Legacy
 `ht_steps`/`ht_run` workflows are converted to packages and execute through
-the normal manager in the same *httk₂* workspace. Jobs communicate through atomically
-published filesystem state, so interrupted managers and calculations can be
-recovered without cleanup hooks.
+the normal manager in the same *httk₂* workspace. Jobs change state and owner only
+by atomic renames of their directories, with no file locks, so interrupted
+managers and calculations are recovered without cleanup hooks.
 
 *httk₂* workflows are language-independent: runners, hooks, and postprocess
 scripts can be written in any language; a workflow is a manifest plus the
@@ -37,7 +37,7 @@ the `vasp.relax` workflow of
 httk init --name "Your Name" --email you@example.org
 httk project init --name quickstart .
 httk workspace init --name default workspace
-httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
+httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk collect
@@ -99,9 +99,10 @@ local clone. Module CI does not set it yet, so these tests skip there.
   [in modern Fortran](docs/sdks/fortran_api.md), or
   [in safe Rust](docs/sdks/rust_api.md), with a
   [normative parity table](docs/sdks/sdk_parity.md) between the language SDKs.
-- **Recovers instead of cleaning up.** One atomically renamed state marker per
-  job is the source of truth, so an interrupted manager, node, or calculation is
-  resumed from what is on disk. The protocol is specified in
+- **Recovers instead of cleaning up.** A job's directory location is its state
+  and only its owner writes it; work changes hands only when the owner is
+  proven dead, so an interrupted manager, node, or calculation is resumed from
+  what is on disk. The protocol is specified in
   [`docs/workflow_filesystem_api.md`](docs/workflow_filesystem_api.md).
 - **Runs ready-made VASP workflows** from
   [workflows-vasp](https://github.com/httk/workflows-vasp) by git URI, so an
@@ -114,9 +115,9 @@ local clone. Module CI does not set it yet, so these tests skip there.
   [`docs/workflow_compat.md`](docs/workflow_compat.md).
 - **Reaches other machines.** Versioned [remote adapters](docs/details/remotes.md)
   transport files and run commands on a cluster; the workspace's [launcher](docs/details/launchers.md)
-  starts its managers, and crash-recoverable detached transfer fetches results back.
+  starts its managers, and crash-recoverable `job transfer` moves jobs there and back.
 - **Manages projects and identity**: XDG configuration, signed project
-  manifests, and workspace policy — see
+  manifests, and workspace policy; see
   [`docs/workflow_cli.md`](docs/workflow_cli.md).
 - **Hands results to a data layer.** [`collect`](docs/collecting.md) yields one
   collected result per stopped job; *httk-workflow* itself has no database dependency.
@@ -126,7 +127,7 @@ local clone. Module CI does not set it yet, so these tests skip there.
   [migration guide](docs/httk_v1_migration_guide.md).
 
 ```console
-httk workflow project init --name example .
-httk workflow project manifest create .
+httk project init --name example .
+httk project manifest create .
 httk workspace status
 ```

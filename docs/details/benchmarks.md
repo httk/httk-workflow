@@ -1,5 +1,15 @@
 # Scale benchmarks
 
+```{admonition} Measured on the previous layout
+:class: warning
+
+This snapshot predates the current filesystem kernel: it was measured on the
+earlier workspace layout, with state markers, a packed journal and leases, and
+the runner `benchmarks/run_benchmarks.py` has not been ported yet, so it does
+not run against this version. The numbers below are a historical reference
+until they are re-measured.
+```
+
 This page records a measured scale snapshot from the opt-in runner
 `benchmarks/run_benchmarks.py`. It describes one local configuration and is not
 a capacity guarantee. Run it with:

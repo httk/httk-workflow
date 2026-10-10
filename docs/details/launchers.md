@@ -179,7 +179,7 @@ launcher or as workspace settings:
 | `confine.bwrap` | `bwrap` on `PATH` | Absolute path of the Bubblewrap executable. |
 | `confine.devices` | none | Colon-separated device nodes below `/dev` bound into attempts and ranks, such as GPU or InfiniBand devices. |
 | `confine.pmix_roots` | none | Colon-separated approved parents of the per-step PMIx directory exposed to ranks. |
-| `confine.shm_root` | `/dev/shm` | Node-local parent of the per-launch shared-memory directories and of the launch client's liveness lock directory `httk-launch-<attempt_id>/`; it must be a tmpfs, which the manager checks at start and each rank helper checks before joining. |
+| `confine.shm_root` | `/dev/shm` | Node-local parent of the per-launch shared-memory directories `httk-<token>/`; it must be a tmpfs, which the manager checks at start and each rank helper checks before joining. |
 | `confine.environment.<NAME>` | none | A variable set in rank sandboxes, such as site MPI tuning; `NAME` is a portable identifier outside `HTTK_*`, the value at most 4096 bytes. |
 
 Values are strings; an unknown `confine.*` key or a malformed value refuses the
@@ -224,7 +224,7 @@ When `confine.readonly_paths` is not set yet, the list starts from the default
 computed by the interpreter running this command, so adding one path does not
 drop the system directories, Python prefixes and *httk* import roots. List
 everything a prelude or code needs at run time there: module trees, conda or
-virtual-environment prefixes, code binaries and installed runner search paths.
+virtual-environment prefixes and code binaries.
 
 ## From Python
 

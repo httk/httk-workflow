@@ -48,7 +48,7 @@ adapter and an unconfined Slurm launcher lack these guarantees.
 | Component | Runs | Can write |
 | --- | --- | --- |
 | broker (`httk workspace daemon`) | in its own Bubblewrap sandbox on the login or service node, with the host filesystem read-only | `WORKSPACE/exchange` and its private state |
-| manager | unconfined, as you, in the Slurm batch job: `httk manager run --idle` | the workspace |
+| manager | unconfined, as you, in the Slurm batch job: `httk workflow manager run --idle` | the workspace |
 | job attempt | in a Bubblewrap sandbox the manager builds, on the manager's node | its own job directory |
 | rank of a confined launch | in a Bubblewrap sandbox the trusted rank helper builds, on every node of the launch | its own job directory, the launch's shared-memory directory |
 
@@ -58,12 +58,11 @@ settings and the workspace settings. What it does not do on the trusted side:
 - it never runs a job's postprocess scripts; `httk workflow postprocess` and
   `httk collect` are client-side verbs that you run on adopted jobs, unconfined
   wherever you run them;
-- it never runs the `[workflow.build].platform` probe of a runner tree that
-  arrived in a bundle unless an operator's `httk workflow build` already
-  registered a build of that source with the same probe command; otherwise
-  the job fails with `runner_not_built` without executing anything. Building a
-  compiled runner with `httk workflow build` is an operator action and runs
-  unconfined, so review what you build.
+- it runs only workflows an operator installed in the workspace
+  (`httk workflow install`); workflows never arrive in bundles, so a client's
+  job whose workflow is not installed waits. Installing and building a
+  workflow (`httk workflow install`, `httk workflow build`) is an operator
+  action and runs unconfined, so review what you install.
 
 Every unrestricted manager of the workspace serves the exchange once the
 extension is enabled (`httk workspace exchange enable`, which `daemon init` also
@@ -89,9 +88,9 @@ workspace setting.
   refuses to start without it.
 - Slurm 23.11.6 or later.
 - For parallel launches, a tmpfs at `confine.shm_root` (default `/dev/shm`)
-  on the nodes: the launch client's lock lives in
-  `<confine.shm_root>/httk-launch-<attempt_id>/`, and that root must be a
-  tmpfs, which is checked. The workspace filesystem needs no lock support.
+  on the nodes, which is checked: the ranks' per-launch shared-memory
+  directories live there. Nothing takes a lock, so the workspace filesystem
+  needs no lock support.
 
 The daemon's ledger needs no local filesystem and no locking: any filesystem
 with POSIX rename semantics works (no hard links). Startup refuses missing
@@ -177,8 +176,8 @@ The attempt cannot write the workspace root, `.httk-workspace/`, or any other
 job. The workflow prelude runs inside the sandbox; the launcher's
 `environment.prelude` runs before the manager, and its environment reaches the
 attempt through the filter above. Anything a prelude or a code needs at run
-time, such as a module tree, a conda or virtual-environment prefix, code
-binaries or the installed runner search paths, must therefore be listed in
+time, such as a module tree, a conda or virtual-environment prefix or code
+binaries, must therefore be listed in
 `confine.readonly_paths`. The default covers `/usr` (with the `/bin`, `/lib`,
 `/lib64` and `/sbin` links of merged-`/usr` systems), `/etc`, the manager's
 Python installation and the directories *httk* itself is imported from.
@@ -365,7 +364,7 @@ the login shell and the prelude, not from the daemon; `NIL` was observed to
 break the login-shell Lmod environment on one site, so `NONE` is the default.
 The workspace's own `environment.prelude` does not apply to daemon submissions.
 
-The manager is `httk manager run --by-path --workspace WORKSPACE
+The manager is `httk workflow manager run --by-path --workspace WORKSPACE
 --idle` with the launcher's `--workers` (from `manager.workers`),
 `--allocation` (from `manager.allocation`, default `slurm`) and its pinned
 `--setting` values. Like every unrestricted confined manager it serves the
@@ -418,12 +417,16 @@ Send a job from the client with the ordinary eject verb:
 httk job eject JOB /mnt/cluster/exchange/inbox
 ```
 
-The export is made by a local atomic ejection and then copied into the
-mount (`--resume` continues an interrupted copy). Every unrestricted confined
-manager of the workspace adopts bundles from `inbox` itself: it takes the
-entry, copies it anchored at directory descriptors into its own scratch, and
-verifies, filters and publishes only that copy. It refuses special files,
-symlinks pointing outside the bundle and hard-linked files. A client that keeps
+The bundle is copied into the mount under a hidden partial name and renamed
+into `inbox/` when complete; a failed delivery returns the job to the state it
+left. Every unrestricted confined manager of the workspace adopts bundles from
+`inbox` itself: it takes the entry, copies it anchored at directory descriptors
+into its own scratch, and validates, rekeys and publishes only that copy. An
+inbox bundle is untrusted input: it must hold only fresh jobs (never run, no
+`state.json`, logs, attempts or seal) in state `ready`, with no symlink, special
+file or hard-linked file, and a root without a parent. The job's workflow must
+be installed in the workspace (an operator task); until then the adopted job
+waits, and `status.json` shows it `ready`. A client that keeps
 descriptors open on its entry can change its bytes only until the copy
 completes; such a change affects only its own job. A refused bundle appears in
 `outbox/rejected/<unique>/`, as the bundle `<name>` and a `reason.json`, which
@@ -448,17 +451,22 @@ fetched, the return waits. Fetch it, removing it from the outbox:
 httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
-Managers also handle the job actions `stop_job`, `cancel_job` and `eject_job`
-from `requests/`, signed by a key of the workspace setting
+Managers also handle signed job control: the actions `stop_job` (a pause),
+`cancel_job` and `eject_job` (an early return of the tree to the outbox) in
+`requests/`, signed by a key of the workspace setting
 `exchange.authorized_keys` (comma- or space-separated) and naming the job by
-its client UUID; each is applied once and answered with an unsigned
-`responses/<id>.json` (`accepted`, or `refused` with a reason; a request
-replayed after its job was returned is refused `request_replayed`). The daemon
-leaves job actions to the managers. Job actions are protocol-level for now:
-there is no client command that publishes them yet.
+its client UUID. Each is translated into an ordinary workspace request, applied
+once by the job's owner, and answered with an unsigned `responses/<id>.json`
+(`accepted`, or `refused` with `request_unauthorized`, `request_expired`,
+`wrong_workspace`, `unknown_job` or `request_replayed` for a request replayed
+after its job was returned). The daemon leaves job actions to the managers.
+Signed job control is protocol-level for now: there is no client command that
+publishes it yet; the document format is in
+[the filesystem protocol](workflow_filesystem_api.md#job-control).
 
 `job adopt --move` copies the tree across filesystems, verifies it and then
-removes the source. A failed job
+removes the source; without `--move` the copy in the outbox stays, and the next
+return of that job waits until it is gone. A failed job
 is never retried automatically. To resume one, adopt it, fix it, and eject it
 to the `inbox` again.
 
@@ -639,9 +647,10 @@ $HTTK_WORKFLOW_LAUNCH ./program input.dat
 The client asks the trusted manager to start the launch, and the manager runs
 `<rendered launch template> <rank helper>`: the template is rendered from the
 placement held in the manager's memory, with a manager-owned nodefile for
-`{nodefile}` and `SLURM_HOSTFILE` in the trusted launch directory
-`.httk-workspace/managers/<manager_id>/launches/<attempt_id>.<request_id>/`,
-which jobs can only read. The manager never interprets the program
+`{nodefile}` and `SLURM_HOSTFILE` in the trusted launch record
+`.httk-workspace/owners/<owner-id>/launches/<attempt_id>.<request_id>/`,
+which jobs can only read and which the manager writes before the launch
+starts. The manager never interprets the program
 and arguments. The request, status and trusted launch files are specified in
 [the filesystem protocol](workflow_filesystem_api.md#confined-launches). The code run helpers prepend the prefix themselves, so code
 command settings and workflow packages are the same confined and unconfined.
@@ -670,19 +679,14 @@ command settings and workflow packages are the same confined and unconfined.
   When a killed `srun` leaves remote tasks, they end when Slurm cleans up the
   step, possibly a few seconds later.
 - The attempt keeps its placement and is not committed, sealed or ejected
-  by its manager until every launch it made has been reaped. A manager that
-  takes over the commit, or begins the commit of its published outcome,
-  after that manager died first needs evidence that every launch recorded
-  for the attempt has ended: its process group is gone on the successor's
-  host (a live one there is stopped), Slurm or the site allocation probe
-  confirms the allocation ended, or, when neither can tell, its allocation's
-  recorded end lies more than 300 seconds (and, for a scheduler that is
-  installed but cannot answer, an hour more) back (see
-  [launch end evidence](workflow_filesystem_api.md#launch-end-evidence)).
-  Otherwise the takeover waits, `httk job why` names the launch, and
-  `httk job confirm-launches-ended` is the operator's override. A launch
-  whose processes outlive `SIGKILL` is reported as uncertain, and that
-  attempt can start no further launches.
+  by its manager until every launch it made has been reaped. If the manager
+  dies, its jobs are recovered only once the death proof shows that every
+  launch it recorded has ended: its process group is gone on the prober's
+  host, or Slurm or the site allocation probe confirms the allocation ended
+  (see [launch end evidence](workflow_filesystem_api.md#launch-end-evidence)).
+  No clock rule applies; an allocation nobody can ask about needs
+  `httk workspace attest-dead`. A launch whose processes outlive `SIGKILL` is
+  reported as uncertain, and that attempt can start no further launches.
 - Commands run without the prefix run inside the attempt sandbox on the
   manager's node, as unconfined commands run on that node.
 
@@ -721,12 +725,14 @@ the attempt do not: set them as `confine.environment.<NAME>`.
 
 The ranks of one launch on a node share a private directory
 `<confine.shm_root>/httk-<token>` (default root `/dev/shm`, mode 0700,
-owner checked; the token is a random name the manager chose for the launch), mounted at `/dev/shm`. This supports POSIX shared-memory files
-without exposing unrelated host shared-memory objects. The last rank to leave
-a node removes the directory. After a node failure or a killed rank a stale
-directory may remain; removing it is a site cleanup item, for example in a
-trusted epilog once Slurm confirms the job is gone. Do not use age-only
-deletion, which can remove a live launch's storage.
+owner checked; the token is a random name the manager chose for the launch),
+mounted at `/dev/shm`. This supports POSIX shared-memory files without exposing
+unrelated host shared-memory objects. The manager removes the directory on its
+own node once the launch is reaped, and every rank helper first removes the
+directories on its node that no launch record names any more, judged from two
+listings one visibility deadline apart. A node that runs no later launch keeps
+a stale directory after a failure; removing it is a site cleanup item. Do not
+use age-only deletion, which can remove a live launch's storage.
 
 Each rank has its own PID namespace, which defeats single-copy transports such
 as CMA and XPMEM, and private IPC namespaces prevent cross-rank SysV IPC. Sites

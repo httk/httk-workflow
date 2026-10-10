@@ -23,17 +23,22 @@ in the job's own directory at `<payload>/.httk-job/seal.json`, so it moves with
 the job directory. It names only the job (its id and key), never the workspace
 or placement that held it.
 
-It covers the payload's own files but not the payload-private scratch
-directories `attempts/`, `logs/` and `.httk-job/`. A job legitimately rewrites
-that working state, so it may change without breaking the seal. The seal never
-covers itself. `httk seal verify <payload>` checks a job directory on
-its own, whether or not it is inside a workspace.
+It covers the payload's own files but not `attempts/`, `logs/`, `.httk-job/`
+and the owner's `state.json`, which change as the job moves without breaking
+the seal. The seal never covers itself. `httk seal verify <payload>` checks a
+job directory on its own, whether or not it is inside a workspace.
+
+The authority is the job's `state.json`, which records the SHA-256 of the seal
+document the manager wrote: a seal document a job planted itself proves
+nothing.
 
 ### Workspace seal
 
-A workspace seal records the digest of every job's seal. It lives at
-`.httk-workspace/seal.json`. Every job must be sealed before the workspace can
-be.
+A workspace seal records the digest of every job's seal, or `null` for a job
+without one, which `workspace seal` lists as unsealed. It lives at
+`.httk-workspace/seal.json`. `httk workspace verify` lists every job that
+drifted since the snapshot (`missing_job`, `unsealed`, `missing`, `mismatch`)
+and exits `1` on any drift.
 
 ### Project seal
 
@@ -59,14 +64,17 @@ this project trusts?
 
 ## Auto-sealing succeeded jobs
 
-By default a manager seals each job as soon as it succeeds. Sealing is not part
-of the job's success: a missing key, a conflicting existing seal, or a
-filesystem error is logged and ignored, and the job stays succeeded.
+By default a manager seals each job as part of committing its success. With no
+resolvable key the seal is unsigned. A payload the job made unsealable (a FIFO,
+a symlinked `.httk-job`) fails the job with `protocol_error` instead; an I/O
+error leaves the commit to be retried.
 
-Two workspace application settings control this:
+A job's `seal_succeeded` member decides, and when it is unset two workspace
+application settings do:
 
-- `seal.succeeded`: whether to auto-seal succeeded jobs. Default on; set it to
-  `false` (also `0`, `no`, `off`) to turn it off.
+- `seal.succeeded`: whether to seal succeeded jobs. Default on; set it to
+  `false` (also `0`, `no`, `off`) to turn it off. A succeeded job without a seal
+  records that sealing was disabled.
 - `seal.keys`: the comma-separated key refs to sign with. Default
   `project,identity`.
 
@@ -86,36 +94,31 @@ A seal is signed by one or more keys, each named by a *ref*:
 | `identity:<short>` | a named operator identity |
 | a path | a base64 Ed25519 seed file |
 
-The `--keys REFS` option on `job seal`, `workspace seal` and `project seal`
-overrides the setting (or the project's `seal_keys` member) for that call. A
-ref that cannot be resolved is skipped with a warning; only resolving no key at
-all is an error.
+The `--keys REFS` option on `workspace seal` and `project seal` overrides the
+setting (or the project's `seal_keys` member) for that call; `job seal` uses
+the setting. A ref that cannot be resolved is skipped with a warning.
 
 ## What a seal refuses
 
-While an entity is sealed, the protocol refuses anything that would change what
-the seal commits to:
-
-- **Sealed job:** state changes (submit, transitions, requests), `job delete`,
-  and a runner publish that would alter its payload; unsealing it while its
-  workspace is still sealed.
-- **Sealed workspace:** the same, plus unsealing it while its project is still
-  sealed.
-- **Sealed project:** `workspace init` that would add a workspace the project
-  seal does not cover.
-- **In general:** re-sealing a job whose recorded contents differ (unseal it
-  first), and changing a policy or setting that a seal depends on.
+- **Succeeded job:** the protocol never changes a succeeded job, sealed or not,
+  until `httk job unseal` releases it (recording the release and removing the
+  seal document); only then does `job delete` apply. `job seal` seals a
+  succeeded job that has none. Both are requests applied by the job's owner.
+- **Sealed workspace or project:** modifying CLI commands (job creation,
+  requests, deletion, eject, adopt, transfer, installs) are refused until it is
+  unsealed; managers and jobs do not check it. A workspace cannot be unsealed
+  while its project is sealed.
 
 These still work unchanged:
 
 - every read-only command (`status`, `show`, `log`, `why`, `seal verify`);
-- `gc`, `fsck` and `unlock`;
+- `gc` and `fsck`;
 - `workflow postprocess`, which writes outside the payload. A sealed job can be
   postprocessed; the output is excluded from the job seal and, when it lives in
   the project tree, from the project seal too;
-- transfers. The seal travels inside the payload and the transfer manifest pins
-  its digest, so a job sealed here arrives exactly as sealed, and verifiable,
-  on the destination machine.
+- moving a job out of an unsealed workspace. The seal travels inside the
+  payload, so a job sealed here arrives exactly as sealed, and verifiable, on
+  the destination machine.
 
 ## Sealing and unsealing in order
 
@@ -123,8 +126,8 @@ Seals nest downward, so they are written bottom-up and removed top-down.
 
 ```console
 # Seal: jobs, then the workspace, then the project.
-httk job seal <JOB>...
-httk workspace seal          # or: httk workspace seal --force  (seals unsealed jobs first)
+httk job seal <JOB>...       # only succeeded jobs that have no seal yet
+httk workspace seal
 httk project seal
 
 # Unseal: project first, which frees the workspaces, which free the jobs.
@@ -133,10 +136,9 @@ httk workspace unseal
 httk job unseal <JOB>...
 ```
 
-`workspace seal` runs inside the maintenance guard, so the workspace must be
-quiescent. Without `--force` it lists the still-unsealed jobs and refuses. With
-`--force` it first seals each of them (any quiescent kind, not just succeeded)
-and then the workspace.
+`workspace seal` records every job's seal digest as it finds it and lists the
+jobs without a seal; seal the succeeded ones with `job seal` first when they
+should be covered.
 
 `job unseal`, `workspace unseal` and `project unseal` ask for confirmation,
 which `--force` skips. Without a terminal and without `--force` they refuse
@@ -182,11 +184,10 @@ trusted, so a tree sealed by its own project or identity verifies as
 
 ## Not to be confused with
 
-- **A transfer's "sealed bundle".** A transfer bundle is sealed in the sense of
-  being a finalized, checksummed archive ready to move between machines. That
-  is a property of the transport envelope, unrelated to the signed seals
-  described here, although a sealed payload keeps its seal inside the bundle and
-  stays verifiable on arrival.
+- **A transfer bundle.** An ejected or held bundle is a plain directory with a
+  `bundle.json` manifest, unrelated to the signed seals described here,
+  although a sealed payload keeps its seal inside the bundle and stays
+  verifiable on arrival.
 - **`httk project export`.** The core command that packages a project as a
   signed ZIP for distribution is an *export*. In this guide, *seal* means only
   the integrity seal.

@@ -71,23 +71,32 @@ $ httk workspace init --name runs kappa:/scratch/me/httk/runs
 $ httk workspace status kappa:runs
 ```
 
-The `NAME:WORKSPACE` spelling is a binding, not a filesystem path. Transfer a
-job into that workspace and run its manager there:
+The `NAME:WORKSPACE` spelling is a binding, not a filesystem path. Install the
+job's workflow there, transfer the job and run its manager there:
 
 ```console
+$ httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 $ httk job transfer --job JOB default kappa:runs
 $ httk workflow run --workspace kappa:runs --count 4
 ```
 
-The remote invocation asks the owning machine to run
-`httk manager run --workspace runs --detach …`. The target workspace
+Workflows never travel with jobs: a transferred job whose workflow is not
+installed at the destination waits there, and the transfer warns about it. The
+remote invocation asks the owning machine to run
+`httk workflow manager run --workspace runs --detach …`. The target workspace
 then applies its own `manager.launch`, `manager.workers`, scheduler settings and
 `environment.prelude`, as if the command had been run on the login node. Fetch
-finished jobs back with the reverse transfer:
+finished jobs back with the reverse transfer, naming each job by its UUID:
 
 ```console
-$ httk job transfer kappa:runs default
+$ httk job transfer --job JOB_UUID kappa:runs default
 ```
+
+A transfer holds the jobs on the source, copies them, adopts them at the
+destination and only then releases the hold, so an interrupted transfer is
+finished by running it again or with `httk job transfer --resume`;
+`httk transfer status` lists what a workspace holds. The steps and their
+recovery are in the `job transfer` section of {doc}`workflow_cli`.
 
 ### Local names and second trees
 
@@ -104,26 +113,19 @@ $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 
 ### Job trees travel together
 
-A child job spawned by another job travels with its parent. Transferring the
-parent moves its whole tree of spawned descendants, root first, with their
-placements kept, even when a `--state` or `--placement` filter would have
-matched only the parent. A child cannot be transferred on its own while its
-parent is still in the workspace, because a child may read its parent's files
-in place (see {doc}`composing_workflows`). Detach a child first if it should
-leave alone:
+A child job spawned by another job travels with its parent. `--tree` moves a
+job together with its spawned descendants, with their placements kept; without
+it, a job whose descendants are present is refused. Every descendant must be
+paused or terminal, so a fetch of finished work brings a campaign back whole
+once it is done; to move a tree still in flight, pause its unfinished children
+first. A child that should leave alone is detached first, because a child may
+read its parent's files in place (see {doc}`composing_workflows`):
 
 ```console
+$ httk job transfer --tree --job ROOT_UUID kappa:runs default
 $ httk job detach CHILD
 $ httk job transfer --job CHILD default kappa:runs
 ```
-
-A tree leaves only when nothing in it can start while it moves: every member
-except the root must be paused or finished, and no member may still be waited
-on by a gather. A fetch of finished work therefore brings a campaign back whole
-once it is done. While some child is still running, the fetch skips the tree
-with a warning naming the blocking jobs. To move a tree that is still in
-flight, pause its unfinished children first. `--destination-placement` is
-refused for a tree, because the children record where their parent is.
 
 ## Mounted filesystem with a separate executor (`mount`)
 
@@ -171,6 +173,7 @@ against the mounted tree. The remote machine owns the workspace, so every
 
 ```console
 $ httk workspace init --name runs sigma:/proj/x/users/me/httk/runs
+$ httk workflow install --workspace sigma:runs ./my-workflow
 $ httk job transfer --job JOB default sigma:runs
 $ httk workflow run --workspace sigma:runs --count 4
 $ httk workspace status sigma:runs
@@ -220,11 +223,15 @@ $ httk remote daemon start confined --configuration small --request-id REQUEST_I
 $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
 $ httk remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
-$ httk job adopt /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
+$ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
-`job eject` exports the job by a local atomic ejection and then copies it into
-the mount (`--resume` continues an interrupted copy); `job adopt` copies the
+`job eject` copies the bundle into the mount under a hidden partial name and
+renames it into `inbox/` when complete; the job must be fresh (never run) and
+have no parent there, since managers adopt it as untrusted input with fresh
+UUIDs, keeping your job UUID as its exchange name. Its workflow must be
+installed in the workspace, an operator task; until then the adopted job waits.
+`job adopt --move` copies the
 returned tree, verifies it and removes the source from the exchange.
 `--configuration` names one of the global `slurm` launchers the operator
 approved for the daemon (each sets `manager.confine=bwrap`); `daemon.json`
@@ -241,8 +248,8 @@ daemon log confined --handle MANAGER_HANDLE` prints its published log.
 To give up on a bundle that no manager has adopted, run `httk remote
 daemon take-back confined NAME [DESTINATION]`. It is client-only: it renames
 `inbox/NAME` to a dot name (managers ignore it), copies it out and removes it.
-If the name is gone, a manager took it, so cancel the job instead. See
-{doc}`workspace_daemon` for the job lifecycle, rejected bundles and trust.
+If the name is gone, a manager took it. See {doc}`workspace_daemon` for the job
+lifecycle, rejected bundles, `status.json` and signed job control.
 
 ### Request ids and retries
 
@@ -275,8 +282,8 @@ that the job has terminated. Finished jobs appear in the exchange `outbox` on th
 
 ### What is refused
 
-Generic `confined:workspace` commands, arbitrary invocation, and adapter
-push/pull are refused. Manage workspace configuration at the destination
+Generic `confined:workspace` commands (including `job transfer`), arbitrary
+invocation, and adapter push/pull are refused. Manage workspace configuration at the destination
 through the operator. The older `mount` adapter still uses its separate
 executor as described above and does not gain confinement from this feature.
 
@@ -361,6 +368,4 @@ unavailable required binaries, unsupported operations, non-zero dispatcher
 exits, and malformed or unsuccessful result documents.
 
 The complete bundle layout, operation request and result documents, settings
-and credential handling, and refusal rules are in {doc}`adapter_authoring`. For
-the transfer steps and their crash recovery, see the `job transfer` section of
-{doc}`workflow_cli`.
+and credential handling, and refusal rules are in {doc}`adapter_authoring`.

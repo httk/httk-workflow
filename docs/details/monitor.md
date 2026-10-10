@@ -40,23 +40,21 @@ and worker errors appear in the status line.
 
 ## Bounded reads
 
-The monitor never materializes a workspace's job set. Counts use the marker
-names, and the list uses the cursor-stable `job list` page API. A refresh reads
+The monitor never materializes a workspace's job set. Counts use the job
+directory names, and the list uses the cursor-stable `job list` page API. A refresh reads
 the current page and the selected workspace's counts; a detail read touches only
 the selected job. Memory and state reads therefore stay bounded even when a
 workspace contains 100,000 jobs or more. Page cursors are exclusive and stable
 within the weak-consistency guarantees of the workspace protocol.
 
-A flat placement containing 100,000 markers costs one directory listing and
+A flat placement containing 100,000 jobs costs one directory listing and
 sort, roughly the filesystem's directory-listing cost (often about 100 ms). This
 is the expected cost for that placement, and the monitor builds no persistent
 index. With a finite page limit and tag filtering, the reader examines at most
-`max(limit * 100, 10,000)` markers per page. A filtered page can therefore be
+`max(limit * 100, 10,000)` jobs per page. A filtered page can therefore be
 partial even when fewer than `limit` matches were found; its `next_after`
 cursor continues the filter scan. A human table request without a limit scans
-the complete selected stream. Transfer parent checks inspect only the `waiting`
-state subtree, so their cost is bounded by waiting jobs rather than all jobs.
-
+the complete selected stream. 
 ## Remote workspaces
 
 Remote workspaces use the existing adapter JSON read protocol. Page, show,
@@ -76,6 +74,7 @@ Some features are unavailable remotely:
 
 ## Removing jobs
 
-Removal is local-only and targeted. It preflights every selected marker as
-removable, applies the same parent-join guard as garbage collection, then
-removes that marker and its payload. Use `httk job delete` for remote removal.
+Removal is local-only and targeted. It posts a `delete` request for each
+selected job, as `httk job delete` does: an unowned job is deleted at once, a
+job a manager holds is deleted at its next boundary, and a succeeded job must
+be unsealed first. Use `httk job delete` for remote removal.
