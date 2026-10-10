@@ -221,9 +221,9 @@ def find(workspace: Workspace, job_id: str) -> _kernel.JobRef:
     for ref in _kernel.list_jobs(workspace, "ready"):
         if ref.job_id == job_id:
             return ref
-    ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
-    assert ref is not None, job_id
-    return ref
+    located = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
+    assert located is not None, job_id
+    return located
 
 
 def _submit(workspace: Workspace, root: Path, tag: str, *, body: str = "", **options: Any) -> tuple[str, str]:

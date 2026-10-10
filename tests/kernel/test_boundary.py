@@ -32,19 +32,14 @@ RUNNER_SIDE = frozenset({"runtime_builders.py", "sdk.py"})
 # legacy: shrinks per phase; never add to it.
 LEGACY_RAW = frozenset(
     {
-        "_adoption.py",
         "_daemon_client.py",
         "_daemon_keys.py",
         "_daemon_mailbox.py",
         "_daemon_setup.py",
         "_daemon_state.py",
         "_exchange.py",
-        "_jobdir.py",
         "_launch_client.py",
         "_logging.py",
-        "_manager_requests.py",
-        "_runner_builds.py",
-        "_sealing.py",
         "_txn.py",
         "_util.py",
         "adapters.py",
@@ -55,9 +50,7 @@ LEGACY_RAW = frozenset(
         "launchers.py",
         "registry.py",
         "runtime_utils.py",
-        "transactions.py",
         "workflow_cli/_workspace.py",
-        "workspace.py",
     }
 )
 #: Who may call each contested primitive besides its definition in ``_fs.py``.

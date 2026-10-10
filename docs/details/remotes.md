@@ -63,6 +63,10 @@ prelude prepares the shell so `httk` can run at all; the manager applies
 
 ## Working with remote workspaces
 
+Moving jobs between workspaces (`httk job transfer` and the job-moving examples
+below) is being rebuilt in this development version and refuses with exit
+status 2 until it returns.
+
 Initialize a named workspace on the remote by putting the remote name before
 the path:
 

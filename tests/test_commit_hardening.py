@@ -379,7 +379,7 @@ def test_a_runner_side_replay_with_paths_still_follows_a_symlinked_workdir_direc
 
     from httk.core.digests import tree_digest
 
-    from httk.workflow.transactions import replay_transaction
+    from httk.workflow.runtime_builders import replay_transaction
 
     scratch = tmp_path / "scratch"
     scratch.mkdir()

@@ -1,7 +1,5 @@
 """The workflow workspace as a core project member: registration and verbs."""
 
-import json
-import uuid
 from pathlib import Path
 
 from httk.core.cli import CLIContext
@@ -21,34 +19,6 @@ from httk.workflow.registry import (
 )
 from httk.workflow.seals import is_project_sealed, seal_job, seal_workspace
 from httk.workflow.workflow_cli import command
-
-
-def _payload(root: Path, tag: str) -> Path:
-    payload = root / tag
-    (payload / "files").mkdir(parents=True)
-    (payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (payload / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": str(uuid.uuid4()),
-                "tag": tag,
-                "name": tag,
-                "workflow": "tests.member",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "start",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    return payload
 
 
 def test_workspace_init_registers_a_project_member(tmp_path: Path) -> None:
@@ -112,9 +82,10 @@ def test_project_seal_end_to_end_via_the_core_cli(tmp_path: Path) -> None:
     configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="member")
-    workspace = Workspace.initialize(project / "workspace")
-    marker = workspace.submit(_payload(tmp_path / "src", "job"), "jobs")
-    seal_job(workspace, marker)
+    from test_seals import _succeeded
+
+    workspace = Workspace.initialize(project / "workspace", durable=False)
+    assert seal_job(workspace, _succeeded(workspace, "jobs")) is None
     seal_workspace(workspace)
 
     context = CLIContext("httk", project)

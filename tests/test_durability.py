@@ -75,9 +75,9 @@ def test_transaction_replay_accepts_a_durability_argument() -> None:
     being dropped in a refactor.
     """
 
-    from httk.workflow import transactions
+    from httk.workflow import runtime_builders
 
-    tree = ast.parse(Path(str(transactions.__file__)).read_text(encoding="utf-8"))
+    tree = ast.parse(Path(str(runtime_builders.__file__)).read_text(encoding="utf-8"))
     replay = next(
         node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "replay_transaction"
     )

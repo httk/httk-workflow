@@ -226,7 +226,7 @@ def parse_job_name(name: str) -> JobName:
 class JobRef:
     """A job directory as last observed: a hint until a claim wins it.
 
-    :param state: One of :data:`UNOWNED_STATES`, or :data:`OWNED`.
+    :param state: One of :data:`~httk.workflow._state.UNOWNED_STATES`, or :data:`~httk.workflow._kernel.OWNED`.
     :param placement: The placement of an unowned job; ``None`` for an owned one (read it from ``job.json``).
     :param job_key: The job key.
     :param job_id: The job UUID.
@@ -274,7 +274,7 @@ class JobRef:
 
     @property
     def cursor(self) -> str:
-        """The ``start`` value of :func:`list_jobs` that resumes after this job."""
+        """The ``start`` value of :func:`~httk.workflow._kernel.list_jobs` that resumes after this job."""
 
         return ((self.placement or PurePosixPath()) / self.path.name).as_posix()
 

@@ -112,8 +112,6 @@ _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 DEFAULT_DISCOVERY_BUDGET = 4096
 #: How long a stopped attempt has to exit after ``SIGTERM`` before its process group is killed.
 DEFAULT_CANCEL_GRACE_SECONDS = 10.0
-#: TODO(C5b): read only by the legacy CLI, which C5b rewrites; this manager has no takeover.
-DEFAULT_TAKEOVER_GRACE_FACTOR = 2.0
 #: How long a failed Bubblewrap probe stands before the manager probes again.
 CONFINE_REPROBE_SECONDS = 60.0
 #: At most this many foreign owners are probed per tick (plan §7.7).
@@ -343,7 +341,7 @@ class RunningAttempt:
     :param timed_out: Whether this manager stopped the attempt for exceeding its ``maxtime``.
     :param interrupted: Whether this manager signalled the attempt while draining or closing.
     :param placement: The nodes and slots the attempt was given, or ``None`` without a node inventory.
-    :param launches: The confined launches of the attempt (C2b), or ``None``.
+    :param launches: The confined launches of the attempt, or ``None``.
     :param cancel: The ``cancel`` request stopping the attempt, which then commits as cancelled.
     """
 
@@ -461,6 +459,9 @@ class TaskManager:
         and Bubblewrap cannot build the attempt sandbox here, or the workspace has the exchange extension and
         attempts are not confined.
     """
+
+    # Set by _reset_drain() and the drain signal handler; declared here because mypy meets reads first.
+    _draining: bool
 
     def __init__(
         self,
@@ -1196,7 +1197,7 @@ class TaskManager:
         except FileNotFoundError:
             return None
         except FormatError as exc:
-            # ponytail: a malformed request stays where it is; gc quarantines it (C5a).
+            # ponytail: a malformed request stays where it is; gc quarantines it.
             self._report_anomaly(f"request:{path.name}", f"ignoring malformed request {path}: {exc}", {})
             return None
         self._parsed[path.name] = (stamp, request)

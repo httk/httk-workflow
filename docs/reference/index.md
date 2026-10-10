@@ -10,12 +10,10 @@ in its `__all__` — rather than every source object. The three layers are:
   `Attempt`, and the small job and result types), with `httk.workflow.sdk`,
   `httk.workflow.runtime`, `httk.workflow.runtime_utils`, and
   `httk.workflow.hookapi`,
-  `httk.workflow.scaffold`, `httk.workflow.executors`, and
-  `httk.workflow.shell_bridge`.
+  `httk.workflow.scaffold`, and `httk.workflow.shell_bridge`.
 - **Orchestration and management** — `httk.workflow.collecting`,
   `httk.workflow.calculations`, `httk.workflow.storing`,
-  `httk.workflow.supervision`, `httk.workflow.transfers`,
-  `httk.workflow.manifests`, `httk.workflow.hygiene`, `httk.workflow.adapters`,
+  `httk.workflow.supervision`, `httk.workflow.manifests`, `httk.workflow.hygiene`, `httk.workflow.adapters`,
   `httk.workflow.adapter_protocol`, `httk.workflow.configuration`, and
   `httk.workflow.projects`, plus the `httk.workflow.codes` toolkit for
   simulation-code support distributions (such as *httk-workflow-vasp*, whose

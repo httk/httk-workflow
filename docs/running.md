@@ -126,6 +126,9 @@ probe can prove dead. {doc}`details/taskmanager` explains each of them.
 
 ## Moving jobs between machines
 
+`httk job transfer` is being rebuilt in this development version and refuses with
+exit status 2 until it returns; the rest of this section describes it as it will be.
+
 Jobs are created locally and moved to the workspace that will run them; when
 they have stopped, the reverse transfer brings them home:
 

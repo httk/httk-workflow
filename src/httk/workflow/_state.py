@@ -335,9 +335,9 @@ class StateDoc:
         )
 
     def updated(self, **members: object) -> Self:
-        """Return a validated copy with *members* replaced and ``updated_at`` set to now.
+        r"""Return a validated copy with *members* replaced and ``updated_at`` set to now.
 
-        :param **members: Document members and their new JSON values.
+        :param \*\*members: Document members and their new JSON values.
         :return: The new document.
         :raises httk.workflow.errors.FormatError: If the result is not a valid document.
         """
@@ -448,10 +448,10 @@ class StateDoc:
         return self.updated(children=children)
 
     def with_history(self, event: str, /, **detail: object) -> Self:
-        """Return the document with one ``{at, event, **detail}`` entry appended to the bounded ``history_tail``.
+        r"""Return the document with one ``{at, event, **detail}`` entry appended to the bounded ``history_tail``.
 
         :param event: The event name.
-        :param **detail: Further JSON members of the entry (``from``, ``to``, ``owner_id``, ...).
+        :param \*\*detail: Further JSON members of the entry (``from``, ``to``, ``owner_id``, ...).
         :return: The new document.
         """
 

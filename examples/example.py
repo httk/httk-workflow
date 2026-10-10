@@ -66,7 +66,7 @@ def main() -> int:
         parameters={"kpoint_density": 20.0, "incar_tags": {"ENCUT": 320}},
         tag="silicon",
     )
-    print(f"submitted {job.job_key} at {job.placement}, running {job.runner['path']}")
+    print(f"submitted {job.job_key} at {job.placement}, running workflow {job.workflow}")
 
     # One manager, in this process, until nothing is ready. A deployment runs the
     # same manager as `httk workflow manager run --workspace WORKSPACE` instead.

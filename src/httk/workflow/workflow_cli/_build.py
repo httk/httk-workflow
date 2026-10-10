@@ -84,7 +84,7 @@ def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
     if not arguments.targets:
         raise ValueError("workflow build requires at least one installed WORKFLOW unless --list is given")
     workspace = _modifiable(arguments, context, action="build workflows in it")
-    rows: list[dict[str, object]] = []
+    rows = []
     failed = False
     with _kernel.register_owner(workspace, kind="cli", label="workflow build", allocation=None, advertised={}) as owner:
         for target in arguments.targets:

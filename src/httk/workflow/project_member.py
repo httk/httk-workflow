@@ -152,12 +152,11 @@ class WorkspaceMemberHandler:
         :return: The workspace's repair findings.
         """
 
-        from .hygiene import _check_owners, _check_tmp_leftovers, _check_transfers
+        from .hygiene import _check_owners, _check_tmp_leftovers
 
         return (
             _check_owners(member_root, apply).as_mapping(),
             _check_tmp_leftovers(member_root, apply).as_mapping(),
-            _check_transfers(member_root).as_mapping(),
         )
 
     def scan_project(self, project_root: Path, *, apply: bool, adopt: bool) -> tuple[dict[str, object], ...]:

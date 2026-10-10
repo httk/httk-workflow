@@ -1,32 +1,29 @@
-"""Remote and transfer command groups."""
+"""Remote and transfer command groups.
+
+Moving jobs between workspaces is being rebuilt on the filesystem kernel
+(phase D): the ``transfer`` verbs and their protocol spellings keep their
+command tree and help, and every one of them refuses with exit status 2.
+"""
 
 import argparse
 import json
 import os
 import sys
-import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from httk.core.cli import CLIContext
 
-from .._runner_builds import workspace_build_command
-from .._sealing import Transaction, pending_outgoing
 from .._util import write_json_atomic
 from ..adapters import (
-    REMOTE_OFFER_COMMAND,
-    REMOTE_RECEIVE_COMMAND,
-    REMOTE_RETIRE_COMMAND,
-    REMOTE_WORKSPACE_SETTINGS_COMMAND,
     add_remote,
     import_v1_remote,
     list_remotes,
     metadata_path,
-    probe_remote_workspace,
     read_credentials,
     read_metadata,
     resolve_remote,
@@ -34,38 +31,11 @@ from ..adapters import (
     split_settings,
     store_credentials,
 )
-from ..adapters import (
-    run_adapter as read_adapter,
-)
 from ..collecting import COLLECTABLE_KINDS
 from ..errors import ResolutionMiss, WorkflowError
-from ..hygiene import _check_transfers, describe_remote, remove_remote
-from ..introspection import JobSelectorResolver
-from ..models import (
-    QUIESCENT_KINDS,
-    WORKSPACE_DIRECTORY,
-    JobDefinition,
-    Marker,
-    canonical_uuid,
-    normalize_placement,
-    parse_job_key,
-)
-from ..packages import read_build_spec
-from ..precheck import environment_findings
-from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
-from ..transfers import (
-    DEFAULT_OFFER_STATES,
-    TRANSFER_OFFER_FORMAT,
-    TRANSFER_RETIREMENT_FORMAT,
-    TransferCandidate,
-    _waiting_parent_map,
-    acknowledge_transfers,
-    import_bundles,
-    offer_transfers,
-    reclaim_transfer,
-    retire_transfers,
-    select_transfer_jobs,
-)
+from ..hygiene import describe_remote, remove_remote
+from ..models import canonical_uuid
+from ..registry import LOCAL_REMOTE, list_workspaces, resolve_workspace
 from ..workspace import Workspace
 from ._common import (
     _ERRORS,
@@ -77,55 +47,6 @@ from ._common import (
     _settings,
     confirm,
 )
-
-
-def _skipped_report(job_ids: Sequence[str], records: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    completed = {str(record.get("job_id")) for record in records}
-    skipped = [
-        {"job_id": job_id, "reason": "not found or already completed"}
-        for job_id in dict.fromkeys(job_ids)
-        if job_id not in completed
-    ]
-    return {"skipped": skipped} if skipped else {}
-
-
-def _print_skipped(report: Mapping[str, object]) -> None:
-    entries = report.get("skipped", [])
-    assert isinstance(entries, list)
-    for entry in entries:
-        print(f"skipped {entry['job_id']}: {entry['reason']}", file=sys.stderr)
-
-
-def _print_build_reminder(
-    workspace: Workspace,
-    acknowledgement: Mapping[str, object],
-) -> None:
-    """Remind users to register artifacts for an imported compiled runner."""
-
-    try:
-        payload = workspace.payload_path(
-            PurePosixPath(str(acknowledgement["placement"])), str(acknowledgement["job_key"])
-        )
-        job = JobDefinition.from_path(payload / "job.json")
-        if job.runner_source != "workspace":
-            return
-        runner = workspace.runner_store_path(job.runner_path)
-        if runner.is_dir() and read_build_spec(runner) is not None:
-            print(
-                f"workflow {job.workflow} declares a build; run: {workspace_build_command(workspace, job.runner_path)} before starting managers here",
-                file=sys.stderr,
-            )
-    except (OSError, ValueError, KeyError):
-        pass
-
-
-def _relay_success_stderr(result: Mapping[str, object]) -> None:
-    """Relay diagnostics emitted by a successful remote protocol command."""
-
-    stderr = result.get("stderr")
-    if isinstance(stderr, str) and stderr:
-        print(stderr, file=sys.stderr, end="" if stderr.endswith("\n") else "\n")
-
 
 # ---------------------------------------------------------------------------
 # remote
@@ -320,12 +241,7 @@ def handle_remote_show(arguments: argparse.Namespace, context: CLIContext) -> in
 
 
 def handle_remote_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove one remote bundle, after asking unless told not to.
-
-    ``--force`` skips the confirmation, and nothing else: a remote a sealed
-    transfer still depends on is refused either way, because removing it would
-    leave that transfer with no way home.
-    """
+    """Remove one remote bundle, after asking unless told not to (``--force`` skips the confirmation)."""
 
     if isinstance(arguments.name, list):
         return _remote_batch(arguments, context, handle_remote_remove, "name", json_output=True)
@@ -454,14 +370,14 @@ def build_remote_parser(
         group,
         "remove",
         summary="remove one remote bundle",
-        description="Remove one remote bundle, refusing while a sealed transfer still needs it",
+        description="Remove one remote bundle",
         handler=handle_remote_remove,
     )
     remove.add_argument("name", metavar="NAME", nargs="+", help="the remote to remove")
     remove.add_argument(
         "--force",
         action="store_true",
-        help="skip the confirmation; a remote an unretired transfer still needs is refused either way",
+        help="skip the confirmation",
     )
 
     from ._daemon_remote import build_daemon_remote_parser
@@ -470,421 +386,18 @@ def build_remote_parser(
 
 
 # ---------------------------------------------------------------------------
-# transfer (formerly tasks, then remote)
+# transfer: unavailable until phase D
 # ---------------------------------------------------------------------------
 
-
-def _remote_workspace_probe(
-    target: Any,
-    name: str,
-    *,
-    timeout: float | None,
-    noun: str = "destination",
-) -> tuple[str, str]:
-    """Probe a remote workspace through the CLI adapter seam."""
-
-    return probe_remote_workspace(target, name, timeout=timeout, noun=noun, adapter=run_adapter)
+_UNAVAILABLE = (
+    "is unavailable in this development version: moving jobs between workspaces is being rebuilt "
+    "on the filesystem kernel"
+)
 
 
-def _environment_advisory(
-    source: Workspace,
-    jobs: Sequence[str],
-    settings: Mapping[str, object] | None,
-    *,
-    strict: bool,
-    candidates: Sequence[TransferCandidate] | None = None,
-    quiet: bool = False,
-) -> None:
-    """Warn about destination environment gaps before transfer state moves."""
-
-    if settings is None:
-        message = (
-            "warning: destination environment could not be prechecked remotely; "
-            "transfer continues (use --strict-environment to block)"
-        )
-        if strict:
-            if not quiet:
-                print(message, file=sys.stderr)
-            raise ValueError("strict environment mode blocked an unreachable destination precheck")
-        if not quiet:
-            print(message, file=sys.stderr)
-        return
-    problems: list[str] = []
-    selected_candidates = candidates
-    if selected_candidates is None:
-        loaded: list[TransferCandidate] = []
-        for job_id in jobs:
-            marker = source.find_marker_by_id(job_id)
-            if marker is not None:
-                try:
-                    job = source.load_job(marker)
-                    problem = None
-                except (WorkflowError, OSError) as exc:
-                    job = None
-                    problem = str(exc)
-                loaded.append(
-                    TransferCandidate(
-                        marker.job_id,
-                        marker.job_key,
-                        marker.kind,
-                        marker.placement,
-                        None,
-                        marker,
-                        job,
-                        None,
-                        problem,
-                    )
-                )
-        selected_candidates = loaded
-    for candidate in selected_candidates:
-        if candidate.tree_blocked:
-            # Not an environment gap: the job does not leave, and the selection says why.
-            continue
-        if candidate.problem is not None:
-            problems.append(f"{candidate.job_id}: {candidate.problem}")
-            continue
-        job = candidate.job
-        if job is None:
-            problems.append(f"{candidate.job_id}: job definition is unreadable")
-            continue
-        finding = environment_findings(job, settings, include_process_environment=False)
-        entries = finding["entries"]
-        assert isinstance(entries, list)
-        names = [
-            str(entry["name"])
-            for entry in entries
-            if isinstance(entry, Mapping) and entry.get("status") == "unresolved"
-        ]
-        problems_found = finding["problems"]
-        assert isinstance(problems_found, list)
-        detail = [str(item) for item in problems_found]
-        if names or detail:
-            problems.append(f"{job.id}: {', '.join(names + detail)}")
-    if not problems:
-        return
-    message = "destination environment unresolved: " + "; ".join(problems)
-    if strict:
-        raise ValueError(f"strict environment precheck blocked transfer: {message}")
-    if not quiet:
-        print(f"warning: {message}", file=sys.stderr)
-
-
-def _require_whole_trees(candidates: Sequence[TransferCandidate]) -> None:
-    """Refuse an explicit selection that would split a job tree.
-
-    Only explicitly requested jobs can be blocked (a closure member never is:
-    its whole tree is blocked through its root instead), so every blocked
-    candidate is a requested job that cannot leave as asked.
-    """
-
-    blocked = [candidate for candidate in candidates if candidate.tree_blocked]
-    if blocked:
-        details = "; ".join(f"{candidate.job_id}: {candidate.problem}" for candidate in blocked)
-        raise ValueError(f"requested transfer jobs cannot leave as selected: {details}")
-
-
-def _refuse_tree_placement(candidates: Sequence[TransferCandidate], destination_placement: str | None) -> None:
-    """Refuse to re-place a selection that moves a job tree."""
-
-    if destination_placement is None:
-        return
-    members = [candidate for candidate in candidates if candidate.tree_root is not None]
-    roots = sorted({candidate.job_key for candidate in members if candidate.tree_root == candidate.job_id}) or sorted(
-        {candidate.job_key for candidate in members}
-    )
-    if roots:
-        raise ValueError(
-            f"--destination-placement cannot re-place a job tree ({', '.join(roots)}): its children record "
-            "their parent's placement; transfer the tree without it"
-        )
-
-
-def _announce_tree_members(candidates: Sequence[TransferCandidate], jobs: Sequence[str], *, quiet: bool) -> None:
-    """Tell the operator which unrequested jobs move because their tree does."""
-
-    if quiet:
-        return
-    requested = set(jobs)
-    keys = {candidate.job_id: candidate.job_key for candidate in candidates}
-    for candidate in candidates:
-        root = candidate.tree_root
-        if root is not None and root != candidate.job_id and candidate.job_id not in requested:
-            print(f"{candidate.job_key}: moves with its tree root {keys.get(root, root)}", file=sys.stderr)
-
-
-def _seal_trees[T](
-    candidates: Sequence[TransferCandidate],
-    seal: Callable[[TransferCandidate], T],
-    *,
-    quiet: bool,
-) -> list[T]:
-    """Seal *candidates* in selection order: every tree root before its members.
-
-    A root or independent job that cannot be sealed stops the transfer, as any
-    explicit selection does. A member can then only fail through a concurrent
-    operator action; the fenced part of its tree still moves, and the member
-    and its own descendants stay behind to follow in a later transfer.
-    """
-
-    sealed: list[T] = []
-    stayed: set[str] = set()
-    for candidate in candidates:
-        if candidate.tree_parent is not None and candidate.tree_parent in stayed:
-            stayed.add(candidate.job_id)
-            if not quiet:
-                print(f"warning: {candidate.job_key} stays behind with its parent", file=sys.stderr)
-            continue
-        try:
-            sealed.append(seal(candidate))
-        except ValueError as exc:
-            if candidate.tree_parent is None:
-                raise
-            stayed.add(candidate.job_id)
-            if not quiet:
-                print(
-                    f"warning: {candidate.job_key} stays behind: {exc}; it can follow in a later transfer",
-                    file=sys.stderr,
-                )
-    return sealed
-
-
-def _resolve_transfer_jobs(workspace: Workspace, cwd: Path, selectors: Sequence[str]) -> list[str]:
-    """Resolve public transfer selectors, retaining exact IDs for resumptions."""
-
-    resolver = JobSelectorResolver(workspace, cwd)
-    job_ids: list[str] = []
-    seen: set[str] = set()
-    for selector in selectors:
-        try:
-            markers = resolver.resolve_one(selector)
-        except ValueError as exc:
-            if str(exc) != f"no job in {workspace.root} matches {selector!r}":
-                raise
-            try:
-                try:
-                    job_id = canonical_uuid(selector)
-                except (WorkflowError, ValueError, TypeError):
-                    _, job_id = parse_job_key(selector)
-            except (WorkflowError, ValueError, TypeError):
-                raise exc from None
-            resolved_ids = [job_id]
-        else:
-            resolved_ids = [marker.job_id for marker in markers]
-        for job_id in resolved_ids:
-            if job_id not in seen:
-                seen.add(job_id)
-                job_ids.append(job_id)
-    return job_ids
-
-
-def _remote_workspace_settings(target: Any, name: str, *, timeout: float | None) -> dict[str, object] | None:
-    """Read destination settings through a remote adapter, or report unavailable."""
-
-    result = read_adapter(
-        target.bundle,
-        "invoke",
-        {"argv": [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show", "--json", name]},
-        timeout=timeout,
-    )
-    if result.get("returncode") != 0:
-        raise RuntimeError(f"remote destination settings read failed: {result.get('stderr', '')}")
-    try:
-        values = json.loads(str(result.get("stdout", "")))
-    except json.JSONDecodeError as exc:
-        raise ValueError("remote destination settings were not a JSON object") from exc
-    if not isinstance(values, list) or len(values) != 1:
-        raise ValueError("remote destination settings were not a JSON object")
-    value = values[0]
-    if not isinstance(value, dict):
-        raise ValueError("remote destination settings were not a JSON object")
-    return value
-
-
-def _receive_remote(
-    target: Any, name: str, bundles: Sequence[str], *, timeout: float | None, quiet: bool
-) -> list[dict[str, object]]:
-    """Ask the destination to import pushed bundles; return its per-bundle results."""
-
-    if not bundles:
-        return []
-    argv = [*REMOTE_RECEIVE_COMMAND, "--workspace", name]
-    for bundle in bundles:
-        argv += ["--bundle", bundle]
-    response = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
-    if response.get("returncode") != 0:
-        raise RuntimeError(f"destination import failed: {response.get('stderr', '')}")
-    if not quiet:
-        _relay_success_stderr(response)
-    try:
-        results = json.loads(str(response.get("stdout", "")))["results"]
-        if not isinstance(results, list) or len(results) != len(bundles):
-            raise ValueError
-        if not all(isinstance(result, dict) for result in results):
-            raise ValueError
-    except (ValueError, KeyError, TypeError) as exc:
-        raise ValueError("destination import did not return one result per bundle") from exc
-    return results
-
-
-def _acknowledged(results: Sequence[Mapping[str, object]]) -> tuple[list[dict[str, object]], list[str]]:
-    """Split import results into the acknowledgements to retire with and the problems to report."""
-
-    acknowledgements: list[dict[str, object]] = []
-    problems: list[str] = []
-    for result in results:
-        acknowledgement = result.get("acknowledgement")
-        if result.get("status") in {"imported", "replay"} and isinstance(acknowledgement, dict):
-            acknowledgements.append(acknowledgement)
-        else:
-            problems.append(
-                f"{result.get('job_key') or result.get('transfer_id')}: {result.get('status')}: {result.get('reason')}"
-            )
-    return acknowledgements, problems
-
-
-def _raise_problems(problems: Sequence[str]) -> None:
-    if problems:
-        raise ValueError("some bundles were not imported: " + "; ".join(problems))
-
-
-def _send_jobs_to_remote(
-    source: Workspace,
-    target: Any,
-    destination_name: str,
-    jobs: Sequence[str],
-    *,
-    destination_placement: str | None,
-    timeout: float | None,
-    destination_settings: Mapping[str, object] | None = None,
-    strict_environment: bool = False,
-    quiet: bool = False,
-    known_markers: Sequence[Marker] | None = None,
-) -> list[dict[str, object]]:
-    """Detach the named jobs from *source* and import them on a remote.
-
-    This is the local→remote leg of the ``transfer`` verb: probe the destination
-    workspace, then for each job seal a detached bundle, push it, and ask the far
-    side to import it. Every step is idempotent, so an interrupted transfer is
-    finished by running the same command again.
-    """
-
-    # One journal writer serves every transition of this batch.
-    with source._journal_writer_scope():
-        destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
-        waiting_parent_map = _waiting_parent_map(source)
-        # One expanded selection drives the whole leg: the requested jobs plus the
-        # bound descendants that travel with them, roots first.
-        precheck_candidates = select_transfer_jobs(
-            source,
-            destination_workspace_id=destination_workspace_id,
-            states=(*QUIESCENT_KINDS, "transferring"),
-            job_ids=jobs,
-            destination_remote=target.name,
-            include_transferring=True,
-            known_markers=known_markers,
-            waiting_parent_map=waiting_parent_map,
-        )
-        _require_whole_trees(precheck_candidates)
-        _refuse_tree_placement(precheck_candidates, destination_placement)
-        if destination_settings is not None:
-            _environment_advisory(
-                source,
-                jobs,
-                destination_settings,
-                strict=strict_environment,
-                candidates=precheck_candidates,
-                quiet=quiet,
-            )
-        _announce_tree_members(precheck_candidates, jobs, quiet=quiet)
-        source.recover_transfers()
-        pending_by_job: dict[str, list[Transaction]] = {}
-        for root_marker, _frame, txn in pending_outgoing(source):
-            pending_by_job.setdefault(root_marker.job_id, []).append(txn)
-        known_by_id = {
-            candidate.job_id: candidate.marker for candidate in precheck_candidates if candidate.marker is not None
-        }
-        if known_markers is not None:
-            known_by_id.update({marker.job_id: marker for marker in known_markers})
-
-        def seal_and_push(job_id: str, *, with_tree: bool) -> str | None:
-            resumable = [
-                txn
-                for txn in pending_by_job.get(job_id, [])
-                if txn.destination_workspace_id == destination_workspace_id and txn.destination_remote == target.name
-            ]
-            if not resumable and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
-                return None
-            transfer_id = resumable[0].transfer_id if resumable else None
-            if resumable and destination_placement is not None:
-                requested = normalize_placement(str(destination_placement))
-                if resumable[0].destination_placement != requested:
-                    raise ValueError("resumed transfer destination placement disagrees with the request")
-            bundle = source.detach(
-                job_id,
-                marker=known_by_id.get(job_id),
-                waiting_parent_map=waiting_parent_map,
-                destination_workspace_id=destination_workspace_id,
-                destination_remote=target.name,
-                destination_placement=destination_placement,
-                transfer_id=transfer_id,
-                with_tree=with_tree,
-            )
-            incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{bundle.name}"
-            push = run_adapter(
-                target.bundle,
-                "push",
-                {"source": str(bundle), "destination": incoming},
-                timeout=timeout,
-            )
-            return str(push.get("path", incoming))
-
-        selected = {candidate.job_id for candidate in precheck_candidates}
-        # A requested job the selection left out is ineligible or already gone; trying
-        # it first states why before anything else has moved.
-        pushed = [seal_and_push(job_id, with_tree=False) for job_id in jobs if job_id not in selected]
-        pushed += _seal_trees(
-            precheck_candidates,
-            lambda candidate: seal_and_push(candidate.job_id, with_tree=candidate.tree_root is not None),
-            quiet=quiet,
-        )
-        remote_bundles = [bundle for bundle in pushed if bundle is not None]
-        results = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
-        acknowledgements, problems = _acknowledged(results)
-        acknowledge_transfers(source, acknowledgements)
-        _raise_problems(problems)
-        return acknowledgements
-
-
-def _transfer_endpoint(value: str, context: CLIContext) -> WorkspaceBinding:
-    """Resolve one ``job transfer`` endpoint: a registered name, else a directory.
-
-    A registered workspace name is tried first, exactly as workspace resolution
-    ordinarily works. When it does not resolve, *value* is tried as a workspace
-    directory — one whose root directly contains ``.httk-workspace/`` (no
-    upward discovery) — so an unregistered workspace can be addressed without
-    registering it. A registered name always wins over a same-named directory;
-    ``./NAME`` addresses the directory unambiguously.
-
-    :param value: The command-line SRC or DST argument.
-    :param context: Current CLI invocation, used to resolve a relative path.
-    :return: The resolved workspace binding.
-    :raises httk.workflow.errors.ResolutionMiss: If *value* is neither a
-        registered name nor a workspace directory.
-    """
-
-    try:
-        return resolve_workspace(value, project=context.cwd)
-    except ResolutionMiss as exc:
-        path = Path(value).expanduser()
-        if not path.is_absolute():
-            path = Path(context.cwd) / path
-        if (path / WORKSPACE_DIRECTORY).is_dir():
-            resolved = str(path.resolve())
-            return WorkspaceBinding(resolved, LOCAL_REMOTE, resolved)
-        raise ResolutionMiss(
-            f"{value!r} is neither a registered workspace name nor a workspace directory "
-            f"(no {WORKSPACE_DIRECTORY}/ in {path})"
-        ) from exc
+def _refuse(verb: str) -> int:
+    print(f"{verb} {_UNAVAILABLE}", file=sys.stderr)
+    return 2
 
 
 def _protocol_workspace(value: str, context: CLIContext) -> Workspace:
@@ -911,748 +424,87 @@ def _protocol_workspace(value: str, context: CLIContext) -> Workspace:
     return Workspace(binding.path)
 
 
-def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Import pushed bundles by registry name, with an explicit-path compatibility fallback.
-
-    Names are tried first. A path is accepted only when it contains a path
-    separator or already names an existing directory; receive has no hidden
-    ``--by-path`` spelling. It prints ``{"results": [...]}``, one result per
-    bundle, and one bundle's result never aborts the others.
-    """
-
-    workspace = _protocol_workspace(arguments.workspace, context)
-    bundles = arguments.bundle if isinstance(arguments.bundle, list) else [arguments.bundle]
-    with workspace._journal_writer_scope():
-        results = import_bundles(workspace, bundles)
-    for result in results:
-        acknowledgement = result.get("acknowledgement")
-        if isinstance(acknowledgement, Mapping):
-            _print_build_reminder(workspace, acknowledgement)
-    print(json.dumps({"results": results}, sort_keys=True, separators=(",", ":")))
-    return 0
-
-
-def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Seal the finished jobs of this workspace for one that will fetch them."""
-
-    workspace = _protocol_workspace(arguments.workspace, context)
-    offer_states = tuple(
-        arguments.state
-        if arguments.state is not None
-        else (QUIESCENT_KINDS if arguments.jobs else DEFAULT_OFFER_STATES)
-    )
-    environment_settings = None
-    if arguments.environment_settings:
-        try:
-            environment_settings = json.loads(arguments.environment_settings)
-        except json.JSONDecodeError as exc:
-            raise ValueError("remote offer environment settings are not valid JSON") from exc
-        if not isinstance(environment_settings, dict):
-            raise ValueError("remote offer environment settings must be an object")
-        candidates = select_transfer_jobs(
-            workspace,
-            destination_workspace_id=arguments.destination_workspace_id,
-            states=(*offer_states, "transferring"),
-            placement=arguments.placement,
-            job_ids=arguments.jobs or None,
-            include_transferring=True,
-        )
-        _environment_advisory(
-            workspace,
-            [candidate.job_id for candidate in candidates],
-            environment_settings,
-            strict=arguments.strict_environment,
-            candidates=candidates,
-        )
-    with workspace._journal_writer_scope():
-        offers = offer_transfers(
-            workspace,
-            destination_workspace_id=arguments.destination_workspace_id,
-            states=offer_states,
-            placement=arguments.placement,
-            job_ids=arguments.jobs or None,
-        )
-    if arguments.json:
-        document = {
-            "format": TRANSFER_OFFER_FORMAT,
-            "format_version": 2,
-            "workspace_id": workspace.workspace_id,
-            "destination_workspace_id": arguments.destination_workspace_id,
-            "offers": offers,
-            **_skipped_report(arguments.jobs, offers),
-        }
-        print(json.dumps(document, sort_keys=True, separators=(",", ":")))
-        return 0
-    _print_skipped(_skipped_report(arguments.jobs, offers))
-    for offer in offers:
-        print(f"{offer['job_key']}\t{offer['state']}\t{offer['bundle_path']}")
-    return 0
-
-
-def _operator_workspace(name: str | None, context: CLIContext) -> Workspace:
-    """Resolve the workspace of an operator transfer verb: named, enclosing, or the default."""
-
-    if name is not None:
-        return _protocol_workspace(name, context)
-    discovered = Workspace.discover(context.cwd)
-    if discovered is not None:
-        return Workspace(discovered)
-    binding = default_workspace(project=context.cwd)
-    if binding.remote != LOCAL_REMOTE or binding.path is None:
-        raise ValueError(f"the default workspace {binding.name!r} is not local; name a local one with --workspace")
-    return Workspace(binding.path)
-
-
-def _is_job_id(value: str) -> bool:
-    try:
-        canonical_uuid(value)
-    except (WorkflowError, ValueError, TypeError):
-        return False
-    return True
-
-
-def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Retire the sealed source bundles of jobs another workspace has imported.
-
-    The protocol spelling names the workspace first; the operator spelling
-    (``transfer retire [--workspace W] JOB_ID...``) retires a delivered transfer
-    as an acknowledgement without a document.
-    """
-
-    words = list(arguments.words)
-    if arguments.operator_workspace is not None or _is_job_id(words[0]):
-        workspace = _operator_workspace(arguments.operator_workspace, context)
-        arguments.jobs = words
-    else:
-        if len(words) < 2:
-            raise ValueError("transfer retire needs a WORKSPACE and at least one JOB_ID")
-        workspace = _protocol_workspace(words[0], context)
-        arguments.jobs = words[1:]
-    envelopes = getattr(arguments, "acknowledgements_json", None)
-    if envelopes is None:
-        retired = retire_transfers(
-            workspace,
-            arguments.jobs,
-            destination_workspace_id=arguments.destination_workspace_id,
-        )
-    else:
-        acknowledgements = json.loads(envelopes)
-        if not isinstance(acknowledgements, list) or not all(isinstance(ack, dict) for ack in acknowledgements):
-            raise ValueError("retirement acknowledgements must be an array of objects")
-        if {ack.get("job_id") for ack in acknowledgements} != set(arguments.jobs):
-            raise ValueError("retirement acknowledgements disagree with requested jobs")
-        retired = []
-        for ack in acknowledgements:
-            if ack.get("destination_workspace_id") != arguments.destination_workspace_id:
-                raise ValueError("retirement acknowledgement names another destination")
-        paths = acknowledge_transfers(workspace, acknowledgements)
-        for ack, path in zip(acknowledgements, paths, strict=True):
-            retired.append(
-                {
-                    "transfer_id": ack["transfer_id"],
-                    "job_id": ack["job_id"],
-                    "job_key": ack["job_key"],
-                    "status": "retired",
-                    "retired_bundle": str(path),
-                }
-            )
-    if arguments.json:
-        document = {
-            "format": TRANSFER_RETIREMENT_FORMAT,
-            "format_version": 2,
-            "retired": retired,
-            **_skipped_report(arguments.jobs, retired),
-        }
-        print(json.dumps(document, sort_keys=True, separators=(",", ":")))
-        return 0
-    _print_skipped(_skipped_report(arguments.jobs, retired))
-    for entry in retired:
-        print(f"{entry['job_key']}\t{entry['status']}\t{entry['retired_bundle']}")
-    return 0
-
-
-def handle_transfer_reclaim(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Take back undelivered addressed transfers once no destination can accept them any more."""
-
-    workspace = _operator_workspace(arguments.operator_workspace, context)
-    with workspace._journal_writer_scope():
-        reclaimed = [reclaim_transfer(workspace, canonical_uuid(job, "job_id")) for job in arguments.jobs]
-    if arguments.json:
-        print(json.dumps({"reclaimed": reclaimed}, sort_keys=True, separators=(",", ":")))
-        return 0
-    for entry in reclaimed:
-        print(f"{entry['job_key']}\treclaimed\t{entry['transfer_id']}")
-    return 0
-
-
-_TRANSFER_STATUS_DETAILS = ("held_exports", "exports_in_doubt", "outgoing_in_doubt", "stale_claims")
-
-
-def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Report the transfer work of one workspace that waits for an operator; read only.
-
-    It names exports held for a copy-out, exports whose interrupted copy-out may
-    already have delivered them (in doubt), addressed transfers unacknowledged
-    past their freshness window (in doubt) and adoption claims without their lineage,
-    exactly as the workspace hygiene check does. The exit status is 0 when
-    nothing waits, 1 when something needs the operator.
-    """
-
-    workspace = _operator_workspace(arguments.operator_workspace, context)
-    finding = _check_transfers(workspace.root)
-    if arguments.json:
-        print(json.dumps({"workspace": str(workspace.root), **finding.as_mapping()}, indent=2, sort_keys=True))
-    else:
-        print(f"{finding.status}: {finding.message}")
-        held, doubtful, in_doubt, stale = (finding.details.get(name, []) for name in _TRANSFER_STATUS_DETAILS)
-        assert isinstance(held, list) and isinstance(doubtful, list)
-        assert isinstance(in_doubt, list) and isinstance(stale, list)
-        for name in held:
-            print(f"held export\t{name}\t(`httk job eject --resume`)")
-        for entry in doubtful:
-            assert isinstance(entry, Mapping)
-            print(
-                f"export in doubt\t{entry['transfer_id']}\t{entry['held']}\t(may already be at {entry['destination']}: "
-                f"remove the held copy, or `httk job adopt {entry['held']}`)"
-            )
-        for entry in in_doubt:
-            assert isinstance(entry, Mapping)
-            print(f"in doubt\t{entry['job_key']}\t{entry['transfer_id']}\t(`httk transfer retire|reclaim`)")
-        for job_id in stale:
-            print(f"stale claim\t{job_id}")
-    return 0 if finding.status == "ok" else 1
-
-
-def _remote_offer(
-    target: Any,
-    remote_name: str,
-    destination_workspace_id: str,
-    *,
-    states: Sequence[str] | None,
-    placement: str | None,
-    timeout: float | None,
-    job_ids: Sequence[str] | None = None,
-    environment_settings: Mapping[str, object] | None = None,
-    strict_environment: bool = False,
-    quiet: bool = False,
-) -> list[dict[str, object]]:
-    """Ask a remote to seal its finished jobs and return the offers it made."""
-
-    argv = [
-        *REMOTE_OFFER_COMMAND,
-        "--destination-workspace-id",
-        destination_workspace_id,
-        "--json",
-    ]
-    if states is not None:
-        for state in states:
-            argv += ["--state", state]
-    elif not job_ids:
-        for state in DEFAULT_OFFER_STATES:
-            argv += ["--state", state]
-    for job_id in job_ids or ():
-        argv += ["--job", job_id]
-    if placement is not None:
-        argv += ["--placement", placement]
-    if environment_settings is not None:
-        argv += ["--environment-settings", json.dumps(environment_settings, sort_keys=True, separators=(",", ":"))]
-    if strict_environment:
-        argv += ["--strict-environment"]
-    argv.append(remote_name)
-    offered = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
-    if offered.get("returncode") != 0:
-        raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
-    printed: set[str] = set()
-    for field in ("stderr", "diagnostics"):
-        diagnostics = offered.get(field)
-        if diagnostics and str(diagnostics) not in printed:
-            rendered = str(diagnostics)
-            if not quiet:
-                print(rendered, file=sys.stderr, end="" if rendered.endswith("\n") else "\n")
-            printed.add(rendered)
-    try:
-        document = json.loads(str(offered.get("stdout", "")))
-        if document.get("format") != TRANSFER_OFFER_FORMAT or document.get("format_version") != 2:
-            raise ValueError
-        offers = document["offers"]
-        if not isinstance(offers, list):
-            raise ValueError
-    except (
-        AttributeError,
-        json.JSONDecodeError,
-        KeyError,
-        ValueError,
-        TypeError,
-    ) as exc:
-        raise ValueError("remote offer did not return a transfer offer document") from exc
-    return [offer for offer in offers if isinstance(offer, dict)]
-
-
-def _require_offers_for_jobs(offers: Sequence[Mapping[str, object]], jobs: Sequence[str]) -> None:
-    """Refuse an explicit offer that names jobs nobody asked for.
-
-    A requested tree root legitimately brings its bound descendants, which the
-    offer marks with that root's ``tree_root``; any other unrequested job is
-    unexpected.
-    """
-
-    if not jobs:
-        return
-    requested = set(jobs)
-    unexpected = sorted(
-        str(offer.get("job_id"))
-        for offer in offers
-        if str(offer.get("job_id")) not in requested and offer.get("tree_root") not in requested
-    )
-    if unexpected:
-        details = []
-        if unexpected:
-            details.append(f"unexpected: {', '.join(unexpected)}")
-        raise ValueError(f"remote offer did not exactly match requested jobs ({'; '.join(details)})")
-
-
-def _announce_offered_members(offers: Sequence[Mapping[str, object]], jobs: Sequence[str], *, quiet: bool) -> None:
-    """Tell the operator which offered jobs came along with a requested tree root."""
-
-    if quiet or not jobs:
-        return
-    requested = set(jobs)
-    for offer in offers:
-        if str(offer.get("job_id")) not in requested and offer.get("tree_root") in requested:
-            print(f"{offer.get('job_key')}: moves with its tree root {offer.get('tree_root')}", file=sys.stderr)
-
-
-def _remote_retire(
-    target: Any,
-    remote_name: str,
-    job_ids: Sequence[str],
-    destination_workspace_id: str,
-    *,
-    timeout: float | None,
-    acknowledgements: Sequence[Mapping[str, object]] | None = None,
-) -> list[object]:
-    """Tell a remote the sources of imported jobs are no longer needed there."""
-
-    if not job_ids:
-        return []
-    argv = [
-        *REMOTE_RETIRE_COMMAND,
-        "--destination-workspace-id",
-        destination_workspace_id,
-        "--json",
-        remote_name,
-        *job_ids,
-    ]
-    if acknowledgements is not None:
-        argv += ["--acknowledgements-json", json.dumps(list(acknowledgements), separators=(",", ":"))]
-    response = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
-    if response.get("returncode") != 0:
-        raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
-    try:
-        report = json.loads(str(response.get("stdout", "")))
-        return list(report["retired"])
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise ValueError("remote retirement did not return a retirement report") from exc
-
-
-def _fetch_jobs_from_remote(
-    local: Workspace,
-    target: Any,
-    remote_name: str,
-    *,
-    states: Sequence[str] | None,
-    placement: str | None,
-    timeout: float | None,
-    jobs: Sequence[str] = (),
-    destination_settings: Mapping[str, object] | None = None,
-    strict_environment: bool = False,
-    quiet: bool = False,
-) -> tuple[list[dict[str, object]], list[object]]:
-    """Bring the jobs that finished on one remote back into *local*.
-
-    Probe the remote workspace, ask it to offer what stopped there, pull each
-    offered bundle into local staging, import it, and only then tell the remote
-    to retire the sources it still holds. Every step is idempotent, so an
-    interrupted fetch is finished by running the same command again.
-    """
-
-    _remote_workspace_probe(target, remote_name, timeout=timeout, noun="remote")
-    offers = _remote_offer(
-        target,
-        remote_name,
-        local.workspace_id,
-        states=states,
-        job_ids=jobs,
-        placement=placement,
-        timeout=timeout,
-        environment_settings=destination_settings,
-        strict_environment=strict_environment,
-        quiet=quiet,
-    )
-    _require_offers_for_jobs(offers, jobs)
-    _announce_offered_members(offers, jobs, quiet=quiet)
-    staging_root = local.control / "transfers" / "incoming"
-    pulled_paths: list[str] = []
-    for offer in offers:
-        transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
-        staging = staging_root / transfer_id
-        pulled = run_adapter(
-            target.bundle,
-            "pull",
-            {
-                "source": str(offer["bundle_path"]),
-                "destination": str(staging),
-            },
-            timeout=timeout,
-        )
-        pulled_paths.append(str(pulled.get("path", staging)))
-    with local._journal_writer_scope():
-        acknowledgements, problems = _acknowledged(import_bundles(local, pulled_paths))
-    if not quiet:
-        for acknowledgement in acknowledgements:
-            _print_build_reminder(local, acknowledgement)
-    retired = _remote_retire(
-        target,
-        remote_name,
-        [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
-        local.workspace_id,
-        timeout=timeout,
-        acknowledgements=acknowledgements,
-    )
-    _raise_problems(problems)
-    return acknowledgements, retired
-
-
-def _transfer_local_to_local(
-    source: Workspace,
-    destination: Workspace,
-    jobs: Sequence[str],
-    *,
-    strict_environment: bool = False,
-    quiet: bool = False,
-    known_markers: Sequence[Marker] | None = None,
-    destination_placement: str | None = None,
-) -> list[dict[str, object]]:
-    """Move explicit jobs from one local workspace into another, directly.
-
-    Every requested job brings the bound descendants of its job tree; a bound
-    child requested without its parent is refused.
-    """
-
-    # One journal writer per workspace serves every transition of this batch.
-    with source._journal_writer_scope(), destination._journal_writer_scope():
-        if not jobs:
-            raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
-        waiting_parent_map = _waiting_parent_map(source)
-
-        def select(states: Sequence[str], *, include_transferring: bool) -> list[TransferCandidate]:
-            candidates = select_transfer_jobs(
-                source,
-                destination_workspace_id=destination.workspace_id,
-                states=states,
-                job_ids=jobs,
-                include_transferring=include_transferring,
-                known_markers=known_markers,
-                waiting_parent_map=waiting_parent_map,
-            )
-            _require_whole_trees(candidates)
-            _refuse_tree_placement(candidates, destination_placement)
-            return candidates
-
-        candidates = select((*QUIESCENT_KINDS, "transferring"), include_transferring=True)
-        _environment_advisory(
-            source,
-            jobs,
-            destination.read_settings(),
-            strict=strict_environment,
-            candidates=candidates,
-            quiet=quiet,
-        )
-        source.recover_transfers()
-        if any(candidate.marker is not None and candidate.marker.kind == "transferring" for candidate in candidates):
-            candidates = select(tuple(QUIESCENT_KINDS), include_transferring=False)
-        _announce_tree_members(candidates, jobs, quiet=quiet)
-        known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
-        selected = {candidate.job_id for candidate in candidates}
-        bundles: list[Path] = []
-        for job_id in jobs:
-            if job_id in selected or source.find_marker_by_id(job_id) is None:
-                continue
-            # A requested live job the selection left out is ineligible; detaching it
-            # states why, before anything else has moved.
-            bundles.append(
-                source.detach(
-                    job_id,
-                    marker=known_by_id.get(job_id),
-                    waiting_parent_map=waiting_parent_map,
-                    destination_workspace_id=destination.workspace_id,
-                )
-            )
-
-        def seal(candidate: TransferCandidate) -> Path:
-            if candidate.bundle is not None:
-                return candidate.bundle
-            return source.detach(
-                candidate.job_id,
-                marker=known_by_id.get(candidate.job_id) or candidate.marker,
-                waiting_parent_map=waiting_parent_map,
-                destination_workspace_id=destination.workspace_id,
-                with_tree=candidate.tree_root is not None,
-            )
-
-        bundles += _seal_trees(candidates, seal, quiet=quiet)
-        acknowledgements, problems = _acknowledged(import_bundles(destination, bundles))
-        if not quiet:
-            for acknowledgement in acknowledgements:
-                _print_build_reminder(destination, acknowledgement)
-        acknowledge_transfers(source, acknowledgements)
-        _raise_problems(problems)
-        return acknowledgements
-
-
-def _transfer_remote_to_remote(
-    source_binding: WorkspaceBinding,
-    destination_binding: WorkspaceBinding,
-    context: CLIContext,
-    *,
-    states: Sequence[str] | None,
-    placement: str | None,
-    timeout: float | None,
-    jobs: Sequence[str] = (),
-    destination_settings: Mapping[str, object] | None = None,
-    strict_environment: bool = False,
-    quiet: bool = False,
-) -> tuple[list[dict[str, object]], list[object]]:
-    """Relay jobs between two remotes through this client (v1 semantics).
-
-    A direct remote-to-remote copy is deferred: this pulls each offered bundle
-    from the source into local staging and pushes it to the destination, then
-    asks the destination to import it and the source to retire the sources it
-    still holds. Every leg reuses the same offer, pull, push, receive and retire
-    the single-hop transfers use.
-    """
-
-    source_target = resolve_remote(source_binding.remote, project=context.cwd)
-    destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
-    destination_name = destination_binding.name.split(":", 1)[1]
-    source_name = source_binding.name.split(":", 1)[1]
-    destination_workspace_id, destination_root = _remote_workspace_probe(
-        destination_target, destination_name, timeout=timeout
-    )
-    _source_workspace_id, _source_root = _remote_workspace_probe(
-        source_target, source_name, timeout=timeout, noun="source"
-    )
-    offers = _remote_offer(
-        source_target,
-        source_name,
-        destination_workspace_id,
-        states=states,
-        job_ids=jobs,
-        placement=placement,
-        timeout=timeout,
-        environment_settings=destination_settings,
-        strict_environment=strict_environment,
-        quiet=quiet,
-    )
-    _require_offers_for_jobs(offers, jobs)
-    _announce_offered_members(offers, jobs, quiet=quiet)
-    remote_bundles: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="httk-relay-") as relay:
-        for offer in offers:
-            transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
-            staging = Path(relay) / transfer_id
-            pulled = run_adapter(
-                source_target.bundle,
-                "pull",
-                {
-                    "source": str(offer["bundle_path"]),
-                    "destination": str(staging),
-                },
-                timeout=timeout,
-            )
-            local_bundle = str(pulled.get("path", staging))
-            incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{transfer_id}"
-            pushed = run_adapter(
-                destination_target.bundle,
-                "push",
-                {
-                    "source": local_bundle,
-                    "destination": incoming,
-                },
-                timeout=timeout,
-            )
-            remote_bundle = str(pushed.get("path", incoming))
-            remote_bundles.append(remote_bundle)
-    acknowledgements, problems = _acknowledged(
-        _receive_remote(destination_target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
-    )
-    retired = _remote_retire(
-        source_target,
-        source_name,
-        [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
-        destination_workspace_id,
-        timeout=timeout,
-        acknowledgements=acknowledgements,
-    )
-    _raise_problems(problems)
-    return acknowledgements, retired
-
-
 def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move jobs between two workspaces, named or by directory.
+    """Refuse ``job transfer SRC DST``: moving jobs is unavailable in this development version.
 
-    ``job transfer SRC DST`` is the canonical verb. Each of SRC and DST is tried
-    first as a registered workspace name, then as a workspace directory, and it
-    moves work whichever way they point: local→remote seals and imports on the
-    remote, remote→local fetches finished jobs home, local→local imports
-    directly, and remote→remote relays through this client. The hidden
-    ``receive``, ``offer``, and ``retire`` spellings are the frozen protocol one
-    machine runs on another, and remain under ``httk workflow transfer``.
+    :param arguments: The parsed arguments.
+    :param context: The CLI invocation.
+    :return: Exit status 2.
     """
 
-    return _run_transfer_verb(arguments, context)
-
-
-def _run_transfer_verb(
-    arguments: argparse.Namespace,
-    context: CLIContext,
-) -> int:
-    """Run the transfer operation and print its report."""
-
-    return _report_transfer(arguments, run_transfer_verb_result(arguments, context))
+    return _refuse("job transfer")
 
 
 def run_transfer_verb_result(
     arguments: argparse.Namespace,
     context: CLIContext,
     quiet: bool = False,
-    known_markers: Sequence[Marker] | None = None,
 ) -> Mapping[str, object]:
-    """Run the parsed transfer verb and return its report without formatting."""
+    """Refuse a parsed transfer: moving jobs is unavailable in this development version.
 
-    source_binding = _transfer_endpoint(arguments.source, context)
-    destination_binding = _transfer_endpoint(arguments.destination, context)
-    source_local = source_binding.remote == LOCAL_REMOTE
-    destination_local = destination_binding.remote == LOCAL_REMOTE
-    timeout = arguments.adapter_timeout
+    :param arguments: The parsed transfer arguments.
+    :param context: The CLI invocation.
+    :param quiet: Unused; kept for the monitor's call.
+    :return: Never returns.
+    :raises httk.workflow.errors.WorkflowError: Always.
+    """
 
-    if source_local and known_markers is None:
-        assert source_binding.path is not None
-        arguments.jobs = _resolve_transfer_jobs(Workspace(source_binding.path), context.cwd, arguments.jobs)
-    elif not source_local:
-        for selector in arguments.jobs:
-            try:
-                canonical_uuid(selector)
-            except (WorkflowError, ValueError, TypeError):
-                raise ValueError("remote source requires canonical job ids; path and prefix selectors are not allowed")
-
-    if source_local and not destination_local:
-        assert source_binding.path is not None
-        target = resolve_remote(destination_binding.remote, project=context.cwd)
-        if not arguments.jobs:
-            raise ValueError("a local-to-remote transfer needs at least one --job JOB_ID")
-        try:
-            destination_settings = _remote_workspace_settings(
-                target, destination_binding.name.split(":", 1)[1], timeout=timeout
-            )
-        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
-            notice = (
-                f"warning: destination environment could not be prechecked remotely: {exc}; "
-                "transfer continues (use --strict-environment to block)"
-            )
-            if arguments.strict_environment:
-                if not quiet:
-                    print(notice, file=sys.stderr)
-                raise ValueError("strict environment mode blocked an unreachable destination precheck") from exc
-            if not quiet:
-                print(notice, file=sys.stderr)
-            destination_settings = None
-        acknowledgements = _send_jobs_to_remote(
-            Workspace(source_binding.path),
-            target,
-            destination_binding.name.split(":", 1)[1],
-            arguments.jobs,
-            destination_placement=arguments.destination_placement,
-            timeout=timeout,
-            destination_settings=destination_settings,
-            strict_environment=arguments.strict_environment,
-            quiet=quiet,
-            known_markers=known_markers,
-        )
-        return {"moved": acknowledgements, **_skipped_report(arguments.jobs, acknowledgements)}
-    if destination_local and not source_local:
-        assert destination_binding.path is not None
-        target = resolve_remote(source_binding.remote, project=context.cwd)
-        acknowledgements, retired = _fetch_jobs_from_remote(
-            Workspace(destination_binding.path),
-            target,
-            source_binding.name.split(":", 1)[1],
-            states=arguments.state,
-            jobs=arguments.jobs,
-            placement=arguments.placement,
-            timeout=timeout,
-            destination_settings=Workspace(destination_binding.path, mutable=False).read_settings(),
-            strict_environment=arguments.strict_environment,
-            quiet=quiet,
-        )
-        return {"moved": acknowledgements, "retired": retired, **_skipped_report(arguments.jobs, acknowledgements)}
-    if source_local and destination_local:
-        assert source_binding.path is not None and destination_binding.path is not None
-        acknowledgements = _transfer_local_to_local(
-            Workspace(source_binding.path),
-            Workspace(destination_binding.path),
-            arguments.jobs,
-            strict_environment=arguments.strict_environment,
-            quiet=quiet,
-            known_markers=known_markers,
-            destination_placement=getattr(arguments, "destination_placement", None),
-        )
-        return {"moved": acknowledgements, **_skipped_report(arguments.jobs, acknowledgements)}
-    destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
-    try:
-        destination_settings = _remote_workspace_settings(
-            destination_target, destination_binding.name.split(":", 1)[1], timeout=timeout
-        )
-    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
-        notice = (
-            f"warning: destination environment could not be prechecked remotely: {exc}; "
-            "transfer continues (use --strict-environment to block)"
-        )
-        if arguments.strict_environment:
-            if not quiet:
-                print(notice, file=sys.stderr)
-            raise ValueError("strict environment mode blocked an unreachable destination precheck") from exc
-        if not quiet:
-            print(notice, file=sys.stderr)
-        destination_settings = None
-    acknowledgements, retired = _transfer_remote_to_remote(
-        source_binding,
-        destination_binding,
-        context,
-        states=arguments.state,
-        jobs=arguments.jobs,
-        placement=arguments.placement,
-        timeout=timeout,
-        destination_settings=destination_settings,
-        strict_environment=arguments.strict_environment,
-        quiet=quiet,
-    )
-    return {"moved": acknowledgements, "retired": retired, **_skipped_report(arguments.jobs, acknowledgements)}
+    raise WorkflowError(f"transfer {_UNAVAILABLE}")
 
 
-def _report_transfer(arguments: argparse.Namespace, report: Mapping[str, object]) -> int:
-    """Print the result of one ``transfer`` verb run."""
+def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Refuse the ``transfer receive`` protocol command (unavailable in this development version).
 
-    if arguments.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return 0
-    _print_skipped(report)
-    moved = report.get("moved", [])
-    assert isinstance(moved, list)
-    for acknowledgement in moved:
-        assert isinstance(acknowledgement, Mapping)
-        print(f"{acknowledgement['job_key']}\t{acknowledgement['state']}\t{acknowledgement['placement']}")
-    return 0
+    :param arguments: The parsed arguments.
+    :param context: The CLI invocation.
+    :return: Exit status 2.
+    """
+
+    return _refuse("transfer receive")
+
+
+def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Refuse the ``transfer offer`` protocol command (unavailable in this development version).
+
+    :param arguments: The parsed arguments.
+    :param context: The CLI invocation.
+    :return: Exit status 2.
+    """
+
+    return _refuse("transfer offer")
+
+
+def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Refuse ``transfer retire`` (unavailable in this development version).
+
+    :param arguments: The parsed arguments.
+    :param context: The CLI invocation.
+    :return: Exit status 2.
+    """
+
+    return _refuse("transfer retire")
+
+
+def handle_transfer_reclaim(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Refuse ``transfer reclaim`` (unavailable in this development version).
+
+    :param arguments: The parsed arguments.
+    :param context: The CLI invocation.
+    :return: Exit status 2.
+    """
+
+    return _refuse("transfer reclaim")
+
+
+def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Refuse ``transfer status`` (unavailable in this development version).
+
+    :param arguments: The parsed arguments.
+    :param context: The CLI invocation.
+    :return: Exit status 2.
+    """
+
+    return _refuse("transfer status")
 
 
 def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> int:
@@ -1749,7 +601,7 @@ def build_transfer_parser(
         action="append",
         metavar="STATE",
         choices=COLLECTABLE_KINDS,
-        help=f"state kind to move when fetching (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+        help="state kind to move when fetching (repeatable, default: succeeded, failed)",
     )
     transfer.add_argument("--placement", metavar="PLACEMENT", help="move only jobs at or below this placement")
     transfer.add_argument(

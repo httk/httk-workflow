@@ -867,9 +867,9 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
             summary = f"this job failed with {failure.get('code')} and stays failed until an operator resumes it"
         else:
             summary = "this job failed without a readable failure record"
-        for item in () if doc is None else doc.observations:
-            if item.get("state") != "succeeded":
-                report.check("dependency child", False, _describe_child(item, with_failure=True))
+        for observed in () if doc is None else doc.observations:
+            if observed.get("state") != "succeeded":
+                report.check("dependency child", False, _describe_child(observed, with_failure=True))
         _breadcrumb_check(control, report)
         report.check("attempt logs", None, f"the job wrote {_retained_log_path(ref, doc)}")
         _continue_checks(job, doc, report)

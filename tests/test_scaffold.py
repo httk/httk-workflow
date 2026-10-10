@@ -111,7 +111,7 @@ def test_job_spec_round_trips_step_resource_requirements_and_refuses_bad_members
     assert definition.placement == PurePosixPath("project/x") and definition.parent is None
     for bad in ({"resources": {"procs": -1}}, {"placement": "a~b"}, {"tag": "a~b"}):
         with pytest.raises(FormatError):
-            dataclasses.replace(spec, **bad).as_mapping()  # type: ignore[arg-type]
+            dataclasses.replace(spec, **bad).as_mapping()
 
 
 def test_a_bare_pwd_document_is_synthesized_with_a_declaration(tmp_path: Path) -> None:

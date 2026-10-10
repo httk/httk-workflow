@@ -32,7 +32,6 @@ from .workspace import Workspace
 __all__ = [
     "ManifestVerification",
     "payload_file_records",
-    "read_maintenance_lock",
     "require_quiescent_workspace",
     "verify_legacy_manifest",
     "verify_manifest",
@@ -96,16 +95,6 @@ def workspace_maintenance_guard(workspace: Workspace) -> Iterator[None]:
 
     require_quiescent_workspace(workspace)
     yield
-
-
-def read_maintenance_lock(workspace: Workspace) -> None:
-    """Return ``None``: workspaces have no maintenance lock any more (kept for ``_exchange.py`` until phase D).
-
-    :param workspace: The workspace.
-    :return: ``None``.
-    """
-
-    del workspace
 
 
 def _legacy_file_digest(path: Path) -> str:

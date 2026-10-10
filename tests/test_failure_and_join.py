@@ -100,7 +100,7 @@ def joins(ws: Workspace, tmp_path: Path) -> _store.Installed:
     )
 
 
-def _parent(ws: Workspace, installed: _store.Installed, steps: dict[str, object], **options: Any) -> _kernel.JobRef:
+def _parent(ws: Workspace, installed: _store.Installed, steps: Mapping[str, object], **options: Any) -> _kernel.JobRef:
     first = next(iter(steps))
     return h.submit(
         ws, installed, {name: "join" for name in steps}, initial_step=first, parameters={"steps": steps}, **options

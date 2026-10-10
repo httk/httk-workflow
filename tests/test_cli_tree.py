@@ -411,9 +411,8 @@ def test_operator_transfer_help_and_status(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     initialize_project(tmp_path, name="transfer-help")
     _init_workspace(tmp_path)
-    assert main(["transfer", "status", "--json"]) == 0
-    import json
-
-    assert isinstance(json.loads(capsys.readouterr().out), dict)
+    # The operator verbs keep their tree and refuse until moving returns (phase D).
+    assert main(["transfer", "status", "--json"]) == 2
+    assert "transfer status is unavailable in this development version" in capsys.readouterr().err
     assert main(["transfer", "receive", "--help"]) == 2
     assert "invalid choice" in capsys.readouterr().err

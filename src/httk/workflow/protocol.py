@@ -10,12 +10,15 @@ alone.
 
 Nothing here is manager bookkeeping, a subprocess wrapper, a CLI handler, or a
 scheduling pass — those live in their own modules and are not part of the
-protocol. The implementations are owned by the modules re-exported below
-(:mod:`~httk.workflow.models`, :mod:`~httk.workflow.journal`,
-:mod:`~httk.workflow.transactions`, and the runtime builders), which are
-internal detail from the protocol's point of view; import the names from here.
+protocol. The implementations are owned by the modules re-exported below (the
+job model, the state document, the job-name format of the filesystem kernel,
+:mod:`~httk.workflow.models` and the runtime builders), which are internal
+detail from the protocol's point of view; import the names from here.
 """
 
+from ._job import JobDefinition
+from ._kernel import JobName, JobRef, format_job_name, parse_job_name
+from ._state import StateDoc
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -26,60 +29,34 @@ from .errors import (
     WorkspaceCorruptionError,
     WorkspaceUnavailableError,
 )
-from .journal import (
-    JournalFrame,
-    RecordVerification,
-    encode_record_ref,
-    iter_journal_frames,
-    iter_segment_frames,
-    parse_record_ref,
-    read_record,
-    segment_path,
-    verify_record,
-)
 from .models import (
     ATTEMPTS_DIRECTORY,
-    CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
-    CORE_STATE_KINDS,
     EXCHANGE_DIRECTORY,
     JOB_STATE_DIRECTORY,
     JOBS_DIRECTORY,
     LOGS_DIRECTORY,
     POSTPROCESS_DIRECTORY,
-    QUIESCENT_KINDS,
-    RUNNER_SOURCES,
-    STATE_KINDS,
     SUPPORTED_EXTENSIONS,
-    TERMINAL_KINDS,
     Failure,
-    JobDefinition,
-    Marker,
     RetentionPolicy,
     RetryPolicy,
-    StateFrame,
     WorkspacePolicy,
     canonical_uuid,
     check_job_placement,
     is_payload_private,
     job_digest,
     make_job_key,
-    marker_basename,
     normalize_placement,
     parse_job_key,
-    parse_package_runner,
     parse_placement_text,
     placement_text,
-    to_base36,
-    validate_attempt_control,
     validate_declaration_name,
     validate_declarations,
     validate_failure,
     validate_label,
     validate_parameters,
     validate_resources,
-    validate_runner_path,
-    validate_sha256,
     validate_step,
 )
 from .runtime import AttemptContext
@@ -94,89 +71,69 @@ from .runtime_builders import (
     TransactionBuilder,
     join_mapping,
     prepare_job_payload,
+    replay_transaction,
 )
-from .transactions import replay_transaction
-from .workspace import MarkerFault
 
 __all__ = [
-    "ATTEMPTS_DIRECTORY",
-    "CARRIED_STATE_MEMBERS",
     # -- workspace format and profile ------------------------------------
+    "ATTEMPTS_DIRECTORY",
     "CORE_PROFILE",
-    "CORE_STATE_KINDS",
     "EXCHANGE_DIRECTORY",
     "JOBS_DIRECTORY",
     "JOB_STATE_DIRECTORY",
     "LOGS_DIRECTORY",
     "POSTPROCESS_DIRECTORY",
-    "QUIESCENT_KINDS",
-    "RUNNER_SOURCES",
-    "STATE_KINDS",
     "SUPPORTED_EXTENSIONS",
-    "TERMINAL_KINDS",
     # -- attempt context and outcome documents ---------------------------
     "AttemptContext",
     "ChildReference",
     "Failure",
+    # -- protocol error family -------------------------------------------
     "FormatError",
-    # -- immutable job definitions ---------------------------------------
+    # -- immutable job definitions and state documents -------------------
     "JobDefinition",
+    # -- job names and references ----------------------------------------
+    "JobName",
+    "JobRef",
     "JobSpec",
     "JoinCondition",
-    "JournalFrame",
-    # -- markers and transitions -----------------------------------------
-    "Marker",
-    "MarkerFault",
     "OutcomeAction",
     "OutcomeDraft",
-    "RecordVerification",
+    # -- replayable data transactions ------------------------------------
     "ReplayableWorkdirBatch",
     "RetentionPolicy",
     "RetryPolicy",
     "RunLog",
     "RunnerResolutionError",
-    "StateFrame",
-    # -- replayable data transactions ------------------------------------
+    "StateDoc",
     "TransactionBuilder",
     "TransactionError",
     "TransitionLostError",
     "UnsupportedExtensionError",
-    # -- protocol error family -------------------------------------------
     "WorkflowError",
     "WorkspaceCorruptionError",
     "WorkspacePolicy",
     "WorkspaceUnavailableError",
+    # -- validators ------------------------------------------------------
     "canonical_uuid",
     "check_job_placement",
-    # -- journal records and references ----------------------------------
-    "encode_record_ref",
+    "format_job_name",
     "is_payload_private",
-    "iter_journal_frames",
-    "iter_segment_frames",
     "job_digest",
     "join_mapping",
     "make_job_key",
-    "marker_basename",
     "normalize_placement",
     "parse_job_key",
-    "parse_package_runner",
+    "parse_job_name",
     "parse_placement_text",
-    "parse_record_ref",
     "placement_text",
     "prepare_job_payload",
-    "read_record",
     "replay_transaction",
-    "segment_path",
-    "to_base36",
-    "validate_attempt_control",
     "validate_declaration_name",
     "validate_declarations",
     "validate_failure",
     "validate_label",
     "validate_parameters",
     "validate_resources",
-    "validate_runner_path",
-    "validate_sha256",
     "validate_step",
-    "verify_record",
 ]

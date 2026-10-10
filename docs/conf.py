@@ -137,8 +137,16 @@ nitpick_ignore = [
 # type aliases the same signatures mention are ignored for the same reason.
 _INTERNAL_MODULES = (
     "models",
-    "journal",
-    "transactions",
+    # The filesystem kernel and the job model behind httk.workflow.protocol.
+    "_fs",
+    "_kernel",
+    "_state",
+    "_job",
+    "_data",
+    "_requests",
+    "_children",
+    "_joins",
+    "_store",
     "runtime_builders",
     "workspace",
     "manager",
@@ -160,7 +168,7 @@ nitpick_ignore_regex = [
     (
         r"py:.*",
         r"(DataMode|WorkdirMode|PublishMode|RunnerSource|StepHandler|JoinCondition"
-        r"|DiagnosticSeverity|EventMonitor|RemedyChange|RemedySequence|MarkerFault)",
+        r"|DiagnosticSeverity|EventMonitor|RemedyChange|RemedySequence|Frozen|Release)",
     ),
 ]
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
@@ -194,7 +202,6 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.runtime_utils",
         "httk.workflow.hookapi",
         "httk.workflow.scaffold",
-        "httk.workflow.executors",
         "httk.workflow.shell_bridge",
         # Orchestration and management.
         "httk.workflow.collecting",
@@ -202,7 +209,6 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.storing",
         "httk.workflow.provenance",
         "httk.workflow.supervision",
-        "httk.workflow.transfers",
         "httk.workflow.manifests",
         "httk.workflow.hygiene",
         "httk.workflow.adapters",

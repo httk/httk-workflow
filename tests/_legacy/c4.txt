@@ -1,8 +1,0 @@
-# Test files C4 split out of the files it ported: they exercise code other packets port.
-# One repository-relative path per line; the comment names its fate (port <packet> | delete <packet>).
-
-tests/test_precheck_transfer.py  # fate: port D3 (transfer-time destination advisories through transfers.py and the transfer CLI)
-tests/test_cli_job_transfer.py  # fate: port D3
-tests/test_docs_parity.py  # fate: port E1 (documentation examples use the removed APIs)
-tests/test_transfer_residuals.py  # fate: port D3 (gc no longer cleans legacy transfer residue; transfer residue reconcilers move to _moving.py)
-tests/test_sealing.py  # fate: delete D4 (legacy _sealing copy-out driven through the removed `job eject --resume`; replaced by _moving.py tests)

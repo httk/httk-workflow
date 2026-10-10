@@ -39,7 +39,6 @@ from httk.workflow.configuration import (
     unset_config_key,
     write_config,
 )
-from httk.workflow.errors import FormatError
 from httk.workflow.gc import collect_garbage
 from httk.workflow.hygiene import describe_remote
 from httk.workflow.manifests import verify_manifest
@@ -107,37 +106,6 @@ def _rekey(project: Path) -> str:
 
 def _write_project(project: Path, metadata: dict[str, object]) -> None:
     (project / PROJECT_DIRECTORY / PROJECT_FILE).write_text(json.dumps(metadata), encoding="utf-8")
-
-
-def _payload(root: Path, *, pool: str = "default") -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / f"payload-{job_id[:8]}"
-    (payload / "files").mkdir(parents=True)
-    runner = payload / "files" / "runner"
-    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    runner.chmod(0o755)
-    (payload / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": job_id,
-                "tag": "test",
-                "name": "test",
-                "workflow": "tests",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "start",
-                "priority": 500,
-                "claim": {"pool": pool, "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    return payload, job_id
 
 
 # ---------------------------------------------------------------------------
@@ -266,32 +234,8 @@ def test_workspace_payloads_are_excluded_from_the_project_manifest(tmp_path: Pat
 
     project = _project(tmp_path, monkeypatch)  # root-as-workspace, a registered member
     workspace = Workspace(project / "workspace")
-    source = tmp_path / "src" / "job"
-    (source / "files").mkdir(parents=True)
-    (source / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (source / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": str(uuid.uuid4()),
-                "tag": "priv",
-                "name": "priv",
-                "workflow": "tests.priv",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "start",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    marker = workspace.submit(source, "jobs")
-    payload = workspace.payload_path(marker.placement, marker.job_key)
+    ref = submit(workspace, ("demo--0123456789abcdef", "demo"), {"start": "succeed"}, tag="priv", placement="jobs")
+    payload = ref.path
     (payload / "attempts" / "a").mkdir(parents=True)
     (payload / "attempts" / "a" / "f").write_text("private\n", encoding="utf-8")
 
@@ -303,7 +247,7 @@ def test_workspace_payloads_are_excluded_from_the_project_manifest(tmp_path: Pat
     body = "\n".join(bz2.decompress(manifest.read_bytes()).decode("utf-8").splitlines()[1:])
     # The workspace subtree is excluded whole — payload and its private trees alike;
     # it is covered through the workspace seal chain, not the loose manifest records.
-    assert marker.job_key not in body
+    assert ref.job_key not in body
     assert "attempts" not in body
     assert '"path":"docs/notes.txt"' in body
     assert '"path":"content.txt"' in body
@@ -415,28 +359,6 @@ def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> 
     assert report.category("requests").removed == 1 and not published.exists()
     (quarantined,) = (workspace.control / "quarantine").iterdir()
     assert "signature" in json.loads((quarantined / "reason.json").read_text(encoding="utf-8"))["reason"]
-
-
-def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path: Path, monkeypatch) -> None:
-    _isolate(tmp_path, monkeypatch)
-    configure_identity()
-    source = Workspace.initialize(tmp_path / "source")
-    destination = Workspace.initialize(tmp_path / "destination")
-    payload, job_id = _payload(tmp_path)
-    source.submit(payload, "jobs")
-    bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
-
-    acknowledgement = destination.import_bundle(bundle)
-    assert acknowledgement["operator_key"] == identity_public_key()
-    assert verify_document(acknowledgement).valid
-
-    forged = {**acknowledgement, "signature": base64.b64encode(b"\0" * 64).decode("ascii")}
-    with pytest.raises(FormatError, match="signature is invalid"):
-        source.acknowledge_transfer(forged)
-
-    assert bundle.is_dir()  # A rejected acknowledgement cannot reclaim the source.
-    retired = source.acknowledge_transfer(acknowledgement)
-    assert retired.is_dir()  # Kept for retention.trash_days.
 
 
 # ---------------------------------------------------------------------------

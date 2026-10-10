@@ -43,6 +43,8 @@ _HOOK: Callable[[str], None] | None = None
 #: How long a CLI owner (``httk job adopt``, ``httk job eject``) is presumed
 #: alive when nothing on this host can prove that its process is gone.
 CLI_OWNER_SECONDS = 24 * 3600
+#: Multiply the manager lease into the grace after which a silent manager owner is taken over.
+DEFAULT_TAKEOVER_GRACE_FACTOR = 2.0
 #: The largest name-encoded time: claim and seal times are signed 64-bit UTC nanoseconds.
 MAXIMUM_NS = (1 << 63) - 1
 #: The bound of the walk :func:`holds_job_payload` makes before it answers "yes" to be safe.
@@ -675,8 +677,6 @@ def manager_gone(
     :param since: When the owner started the work, in UTC seconds, to age an unreadable heartbeat from.
     :return: The evidence mapping (``evidence`` plus what was observed), or ``None``.
     """
-
-    from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR
 
     factor = DEFAULT_TAKEOVER_GRACE_FACTOR if grace_factor is None else grace_factor
     grace = lease_seconds * factor

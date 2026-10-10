@@ -300,7 +300,7 @@ def test_the_workflow_system_realizations_live_in_compat(tmp_path: Path) -> None
 def test_the_language_sdks_live_in_languages() -> None:
     import importlib
 
-    from httk.workflow import _runner_builds
+    from httk.workflow import _store
 
     root = Path(httk.workflow.__file__).parent
     with pytest.raises(ModuleNotFoundError):
@@ -308,5 +308,5 @@ def test_the_language_sdks_live_in_languages() -> None:
     assert not (root / "native").exists()
     assert (root / "languages" / "c" / "httk_workflow.h").is_file()
     assert not (root / "languages" / "__init__.py").exists()
-    assert _runner_builds._environment()["HTTK_WORKFLOW_LANGUAGES_DIR"] == str(root / "languages")
-    assert "HTTK_WORKFLOW_NATIVE_API" not in _runner_builds._environment()
+    assert _store._environment()["HTTK_WORKFLOW_LANGUAGES_DIR"] == str(root / "languages")
+    assert "HTTK_WORKFLOW_NATIVE_API" not in _store._environment()

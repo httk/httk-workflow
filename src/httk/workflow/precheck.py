@@ -4,7 +4,6 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import PurePosixPath
-from typing import Any, cast
 
 from . import _store, compat
 from ._job import JobDefinition
@@ -59,16 +58,15 @@ def _environment_entries(
     for name in sorted(declared):
         metadata = declared[name]
         setting = metadata.get("setting", name) if isinstance(metadata, Mapping) else name
-        entry = {"name": name, "setting": setting}
+        entry: dict[str, object] = {"name": name, "setting": setting}
         single_overrides = {name: overrides[name]} if isinstance(overrides, Mapping) and name in overrides else {}
         single_job = replace(
             job,
             environment={"declared": {name: metadata}, "overrides": single_overrides},
         )
         try:
-            # C3: the SDK's environment resolution reads only ``environment``; it moves to the v3 job model there.
             values, unresolved = resolve_declared_environment(
-                cast(Any, single_job),
+                single_job,
                 settings,
                 include_process_environment=include_process_environment,
             )

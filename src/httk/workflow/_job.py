@@ -162,7 +162,7 @@ class JobDefinition:
 
     @property
     def digest(self) -> str:
-        """The job digest: SHA-256 of the stored bytes, or of :meth:`encode` for an unstored definition."""
+        """The SHA-256 job digest of the stored bytes, or of :meth:`encode` for an unstored definition."""
 
         return self.stored_digest if self.stored_digest is not None else job_digest(self.encode())
 
@@ -289,7 +289,7 @@ class JobDefinition:
         """Encode the document as ``job.json`` is written: compact sorted UTF-8 JSON and a newline.
 
         :return: The bytes.
-        :raises httk.workflow.errors.FormatError: If the encoding exceeds :data:`MAX_JOB_BYTES`.
+        :raises httk.workflow.errors.FormatError: If the encoding exceeds :data:`~httk.workflow._job.MAX_JOB_BYTES`.
         """
 
         data = json_bytes(self.as_mapping()) + b"\n"

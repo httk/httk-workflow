@@ -16,7 +16,7 @@ The package presents three layers, each with its own import home:
   ``HTTK_WORKFLOW_LANGUAGES_DIR``.
 * **Orchestration and management** — :class:`Workspace`, :class:`TaskManager`,
   and :func:`job_records` drive and inspect a running workspace. The management
-  operations that surround them (transfers, manifests, hygiene, configuration,
+  operations that surround them (manifests, hygiene, configuration,
   adapters, supervision, the :mod:`httk.workflow.codes` toolkit for
   simulation-code support packages, and the :mod:`httk.workflow.compat`
   consumers of other workflow systems) live in their own named submodules

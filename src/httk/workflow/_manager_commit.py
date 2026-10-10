@@ -34,8 +34,6 @@ and, as relevant, ``attempt_id``, ``activation_id``, ``step``, ``from``,
 
 import json
 import logging
-import os
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -462,20 +460,3 @@ def decide_join(job: JobDefinition, doc: StateDoc, decision: _joins.JoinDecision
     if maximum is not None and _count(doc.counters, "activations") + 1 > maximum:
         return doc.with_failure(failure("budget_exhausted", "maximum_activations exceeded")), "failed"
     return doc.with_failure(None).next_activation(step, "join"), "ready"
-
-
-_DRAFT_NAME = re.compile(r"commit\.(0|[1-9][0-9]{0,19})")
-
-
-def draft_names(control: Any) -> list[str]:
-    """List the legacy commit-draft names of an attempt-control directory, newest first, then ``outcome.ready``.
-
-    Legacy: ``gc.py`` imports it until C5a rewrites garbage collection.
-
-    :param control: The pinned attempt-control directory (a legacy ``JobDirectory``).
-    :return: Every ``commit.<g>`` entry by descending *g*, then ``outcome.ready``.
-    """
-
-    found = (_DRAFT_NAME.fullmatch(name) for name in os.listdir(control.fd))
-    generations = sorted((int(match[1]) for match in found if match), reverse=True)
-    return [f"commit.{generation}" for generation in generations] + ["outcome.ready"]

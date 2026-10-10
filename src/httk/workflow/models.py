@@ -1,18 +1,11 @@
 """Protocol models and validation."""
 
-import dataclasses
 import hashlib
-import json
-import os
 import re
-import stat
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
-
-from httk.core.requirements import parse_requirements
 
 from ._durations import TIME_RESOURCES, parse_slurm_duration
 from ._util import (
@@ -30,33 +23,7 @@ CORE_PROFILE = "core-v3"
 #: inbox of ejected bundles and an outbox of returned ones.
 EXCHANGE_EXTENSION = "exchange"
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({EXCHANGE_EXTENSION})
-RUNNER_SOURCES = frozenset({"payload", "workspace", "installed"})
-PACKAGE_RUNNER_PREFIX = "pkg:"
 RESERVED_WORKFLOW_ENVIRONMENT_PREFIX = "HTTK_WORKFLOW_"
-STATE_KINDS = (
-    "submitted",
-    "ready",
-    "claimed",
-    "running",
-    "committing",
-    "cancelling",
-    "relocating",
-    "transferring",
-    "waiting",
-    "paused",
-    "succeeded",
-    "failed",
-    "cancelled",
-)
-CORE_STATE_KINDS = tuple(kind for kind in STATE_KINDS if kind not in {"relocating", "transferring"})
-TERMINAL_KINDS = frozenset({"succeeded", "failed", "cancelled"})
-# The core kinds a job can still move on from, and the only ones a scheduling
-# scan ever has to visit. Finished jobs remain below the terminal kinds, so
-# anything scaling with active work — the
-# streaming scheduler's scans and the in-memory marker index — is scoped to
-# these rather than to every marker that ever existed.
-ACTIVE_STATE_KINDS = tuple(kind for kind in CORE_STATE_KINDS if kind not in TERMINAL_KINDS)
-QUIESCENT_KINDS = frozenset({"submitted", "ready", "waiting", "paused", "failed", "succeeded", "cancelled"})
 
 # Payload entries that belong to a runner rather than to the immutable job: the
 # control directory of one attempt, the future run-log directory, and the state
@@ -77,16 +44,16 @@ WORKSPACE_DIRECTORY = ".httk-workspace"
 # Workspace policy: the tunables the specification calls "configured", stored
 # once in format.json so that two implementations attaching the same workspace
 # cannot disagree about them.
-POLICY_KEYS = frozenset({"visibility_deadline_seconds", "lease_seconds", "journal_segment_bytes", "retention"})
-RETENTION_KEYS = frozenset({"attempt_control_days", "journal_days", "trash_days", "owner_tombstone_days"})
+POLICY_KEYS = frozenset({"visibility_deadline_seconds", "lease_seconds", "retention"})
+RETENTION_KEYS = frozenset({"attempt_control_days", "trash_days", "owner_tombstone_days"})
+#: Members older workspaces still store; reading ignores them and the next policy write drops them.
+_RETIRED_POLICY_KEYS = frozenset({"journal_segment_bytes"})
+_RETIRED_RETENTION_KEYS = frozenset({"journal_days"})
 DEFAULT_LEASE_SECONDS = 900.0
-DEFAULT_JOURNAL_SEGMENT_BYTES = 64 * 1024 * 1024
 # A lease shorter than a second cannot be heartbeated honestly, and a deadline
 # longer than a day is a hang rather than a filesystem waiting to settle.
 MINIMUM_LEASE_SECONDS = 1.0
 MAXIMUM_VISIBILITY_DEADLINE_SECONDS = 86400.0
-MINIMUM_JOURNAL_SEGMENT_BYTES = 4096
-MAXIMUM_JOURNAL_SEGMENT_BYTES = 1 << 40
 
 # The serialized budget of the optional application-defined ``parameters`` object.
 # Parameters describe one job; bulk data belongs in the payload or in transactional
@@ -102,51 +69,16 @@ MAXIMUM_ENVIRONMENT_BYTES = 262144
 # workflow announced, so a later precheck can consume it. Same allowance, same
 # reason — it describes one job rather than carrying bulk content.
 MAXIMUM_DECLARED_BYTES = 262144
-# The largest stored ``job.json`` a reader accepts. The document is read on
-# every manager poll, so its size is bounded before it is parsed.
-_MAXIMUM_JOB_DOCUMENT_BYTES = 1024 * 1024
 
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
-_MARKER_PATTERN = re.compile(
-    r"(?P<job_key>.+)\.p(?P<priority>[0-9]{3})\.g(?P<generation>[0-9a-z]+)\.(?P<record_ref>init|w[0-9a-f]{32}-s[0-9a-z]+-o[0-9a-z]+-l[0-9a-z]+-h[0-9a-f]{32})"
-)
 _LABEL_PATTERN = _TAG_PATTERN
 # A declaration name is also one file basename below ``.httk-job/declarations/``,
 # so it stays within the same conservative character set as every other name the
 # protocol coins, plus the underscore the property vocabularies use.
 _DECLARATION_NAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _FAILURE_MEMBERS = frozenset({"code", "message", "details", "retryable"})
-_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-_MODULE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 _UNSAFE_PATH_COMPONENTS = frozenset({"", ".", "..", WORKSPACE_DIRECTORY})
-
-
-def validate_process(value: object) -> Mapping[str, object] | None:
-    """Return a valid recorded process identity, or ``None`` if malformed.
-
-    :param value: The process identity to validate.
-    :return: The identity when all required members have their exact protocol types.
-    """
-
-    if not isinstance(value, Mapping):
-        return None
-    pid = value.get("pid")
-    process_group = value.get("process_group")
-    hostname = value.get("hostname")
-    launched_at = value.get("launched_at")
-    if (
-        type(pid) is not int
-        or pid <= 0
-        or type(process_group) is not int
-        or process_group <= 0
-        or not isinstance(hostname, str)
-        or not hostname
-        or not isinstance(launched_at, str)
-        or not launched_at
-    ):
-        return None
-    return value
 
 
 def canonical_uuid(value: object, name: str = "id") -> str:
@@ -194,29 +126,6 @@ def is_payload_private(name: str) -> bool:
     """
 
     return name in {ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY}
-
-
-def validate_attempt_control(value: object, name: str = "attempt_control") -> str:
-    """Validate one attempt-control directory name read from a state frame.
-
-    The name is joined below a job payload to reach the control directory of an
-    attempt, so it is exactly the canonical ``attempts/<attempt-id>`` shape.
-    Validating it before it is joined is
-    what keeps a hostile or damaged frame from naming a path outside the job.
-
-    :param value: The attempt-control name to validate.
-    :param name: The field name used in validation errors.
-    :return: The validated attempt-control name.
-    :raises httk.workflow.errors.FormatError: If the value is not a canonical attempt-control name.
-    """
-
-    text = require_string(value, name)
-    prefix = f"{ATTEMPTS_DIRECTORY}/"
-    if not text.startswith(prefix):
-        raise FormatError(f"{name} must name an {prefix}<attempt-id> directory")
-    attempt_id = text[len(prefix) :]
-    canonical_uuid(attempt_id, f"{name} attempt id")
-    return text
 
 
 def validate_parameters(value: object, name: str = "parameters") -> dict[str, object]:
@@ -510,47 +419,6 @@ def validate_declarations(value: object, name: str = "declarations") -> dict[str
     return result
 
 
-def validate_sha256(value: object, name: str) -> str:
-    """Validate one lowercase hexadecimal SHA-256 digest string.
-
-    :param value: The digest to validate.
-    :param name: The field name used in validation errors.
-    :return: The validated digest.
-    :raises httk.workflow.errors.FormatError: If the value is not a lowercase hexadecimal digest.
-    """
-
-    text = require_string(value, name)
-    if not _SHA256_PATTERN.fullmatch(text):
-        raise FormatError(f"{name} must be a lowercase hexadecimal SHA-256 digest")
-    return text
-
-
-def parse_package_runner(value: str) -> tuple[str, PurePosixPath] | None:
-    """Split the reserved ``pkg:<module>/<resource>`` installed runner form.
-
-    Return ``None`` when *value* is an ordinary relative runner path, so callers
-    can treat the reserved form as one alternative spelling of ``runner.path``
-    rather than as a separate protocol member.
-
-    :param value: The runner path to inspect.
-    :return: The package module and resource, or ``None`` for an ordinary path.
-    :raises httk.workflow.errors.FormatError: If the reserved package form is malformed.
-    """
-
-    if not value.startswith(PACKAGE_RUNNER_PREFIX):
-        return None
-    module, separator, resource = value[len(PACKAGE_RUNNER_PREFIX) :].partition("/")
-    if not separator or not _MODULE_PATTERN.fullmatch(module):
-        raise FormatError("runner.path must spell the reserved package form pkg:<module>/<resource>")
-    relative = PurePosixPath(resource)
-    if relative.is_absolute() or not relative.parts:
-        raise FormatError("runner.path package resource must be a nonempty relative path")
-    for part in relative.parts:
-        if part in _UNSAFE_PATH_COMPONENTS or "\x00" in part:
-            raise FormatError(f"invalid runner.path package resource component: {part!r}")
-    return module, relative
-
-
 def validate_calls(value: object, source: str) -> dict[str, str]:
     """Validate a mapping from call alias to workflow reference.
 
@@ -585,35 +453,6 @@ def validate_calls(value: object, source: str) -> dict[str, str]:
     if shadowed:
         raise FormatError(f"{source} alias {shadowed[0]!r} is also another call's reference")
     return calls
-
-
-def validate_runner_path(value: object, source: str) -> PurePosixPath:
-    """Validate ``runner.path`` against the root implied by ``runner.source``.
-
-    Every source resolves the same relative path below a different root: the job
-    payload, the workspace runner store, or one configured installed-runner
-    search path. The path must therefore stay below its root under every source,
-    and only an installed runner may use the reserved ``pkg:`` form.
-
-    :param value: The runner path to validate.
-    :param source: The runner source that determines the permitted path form.
-    :return: The validated runner path.
-    :raises httk.workflow.errors.FormatError: If the path is absolute, unsafe, or incompatible with its source.
-    """
-
-    text = require_string(value, "runner.path")
-    package = parse_package_runner(text)
-    if package is not None:
-        if source != "installed":
-            raise FormatError("runner.path may use the pkg: form only when runner.source is installed")
-        return PurePosixPath(text)
-    path = PurePosixPath(text)
-    if path.is_absolute() or not path.parts:
-        raise FormatError(f"runner.path must be a nonempty path below the {source} runner root")
-    for part in path.parts:
-        if part in _UNSAFE_PATH_COMPONENTS or "\x00" in part:
-            raise FormatError(f"runner.path must remain below the {source} runner root: {part!r}")
-    return path
 
 
 _RUNNER_COMMAND_ELEMENT = re.compile(
@@ -843,35 +682,6 @@ def check_job_placement(placement: PurePosixPath) -> None:
         )
 
 
-def _read_regular_file(path: Path, limit: int, *, follow_symlinks: bool = False) -> bytes:
-    """Read one bounded regular file without blocking on it or, by default, following a symlink.
-
-    The file is opened ``O_NONBLOCK`` and checked with ``fstat`` before any
-    read, so a FIFO or device in its place cannot hang or feed the reader.
-
-    :param path: The file to read.
-    :param limit: The largest accepted size in bytes.
-    :param follow_symlinks: Follow a symlink at the final component instead of refusing it.
-    :return: The file content.
-    :raises OSError: If the file cannot be opened or read; a refused symlink raises ``ELOOP``.
-    :raises httk.workflow.errors.FormatError: If the file is not a regular file or exceeds *limit*.
-    """
-
-    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (0 if follow_symlinks else os.O_NOFOLLOW)
-    descriptor = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise FormatError(f"cannot read {path}: not a regular file")
-        data = bytearray()
-        while chunk := os.read(descriptor, limit + 1 - len(data)):
-            data.extend(chunk)
-            if len(data) > limit:
-                raise FormatError(f"cannot read {path}: larger than {limit} bytes")
-        return bytes(data)
-    finally:
-        os.close(descriptor)
-
-
 def make_job_key(job_id: str, tag: str | None) -> str:
     """Compose the stable job key from an identifier and optional tag.
 
@@ -904,24 +714,18 @@ def parse_job_key(value: str) -> tuple[str | None, str]:
 class RetentionPolicy:
     """How long a workspace keeps the history it is allowed to collect.
 
-    ``journal_days`` and ``trash_days`` default to one day. An explicit
-    ``null`` or ``"keep"`` value means that category has no limit; omitted
-    ``attempt_control_days`` likewise remains unlimited. The collector that
-    acts on these numbers is a separate concern; the workspace only carries
-    them so that every implementation attaching to it agrees on what may be
-    removed and when. Completed transfers are reclaimed eagerly, ignoring
-    numeric ages: set ``trash_days`` to ``null`` or ``"keep"`` to retain both
-    retired bundles and their source journals at retirement. ``journal_days``
-    set to ``null`` or ``"keep"`` independently preserves source journals.
+    ``trash_days`` defaults to one day. An explicit ``null`` or ``"keep"``
+    value means that category has no limit; omitted ``attempt_control_days``
+    likewise remains unlimited. The collector that acts on these numbers is a
+    separate concern; the workspace only carries them so that every
+    implementation attaching to it agrees on what may be removed and when.
 
     :param attempt_control_days: The retention period for attempt controls.
-    :param journal_days: The retention period for journal history.
     :param trash_days: The retention period for discarded workspace entries.
     :param owner_tombstone_days: How long the ``dead.json`` tombstone of a recovered owner is kept.
     """
 
     attempt_control_days: float | None = None
-    journal_days: float | None = 1.0
     trash_days: float | None = 1.0
     owner_tombstone_days: float | None = 30.0
 
@@ -935,7 +739,7 @@ class RetentionPolicy:
         :raises httk.workflow.errors.FormatError: If the mapping contains unsupported or invalid members.
         """
         mapping = require_mapping(value, name)
-        unsupported = sorted(set(mapping) - RETENTION_KEYS)
+        unsupported = sorted(set(mapping) - RETENTION_KEYS - _RETIRED_RETENTION_KEYS)
         if unsupported:
             raise FormatError(f"{name} has unsupported members: {', '.join(unsupported)}")
 
@@ -951,7 +755,6 @@ class RetentionPolicy:
 
         return cls(
             attempt_control_days=optional_days("attempt_control_days"),
-            journal_days=optional_days("journal_days"),
             trash_days=optional_days("trash_days"),
             owner_tombstone_days=optional_days("owner_tombstone_days"),
         )
@@ -965,7 +768,7 @@ class RetentionPolicy:
         result: dict[str, object] = {}
         for key in sorted(RETENTION_KEYS):
             value = getattr(self, key)
-            if value is not None or key in {"journal_days", "trash_days", "owner_tombstone_days"}:
+            if value is not None or key in {"trash_days", "owner_tombstone_days"}:
                 result[key] = value
         return result
 
@@ -981,13 +784,11 @@ class WorkspacePolicy:
 
     :param visibility_deadline_seconds: The marker visibility deadline.
     :param lease_seconds: The manager claim lease duration.
-    :param journal_segment_bytes: The journal segment size.
     :param retention: The workspace retention policy.
     """
 
     visibility_deadline_seconds: float = DEFAULT_VISIBILITY_DEADLINE_SECONDS
     lease_seconds: float = DEFAULT_LEASE_SECONDS
-    journal_segment_bytes: int = DEFAULT_JOURNAL_SEGMENT_BYTES
     retention: RetentionPolicy = RetentionPolicy()
 
     @classmethod
@@ -1001,7 +802,7 @@ class WorkspacePolicy:
         """
 
         mapping = require_mapping(value, name)
-        unsupported = sorted(set(mapping) - POLICY_KEYS)
+        unsupported = sorted(set(mapping) - POLICY_KEYS - _RETIRED_POLICY_KEYS)
         if unsupported:
             raise FormatError(
                 f"{name} has unsupported members: {', '.join(unsupported)}; "
@@ -1010,7 +811,6 @@ class WorkspacePolicy:
         defaults = cls()
         deadline = mapping.get("visibility_deadline_seconds")
         lease = mapping.get("lease_seconds")
-        segment = mapping.get("journal_segment_bytes")
         retention = mapping.get("retention")
         return cls(
             visibility_deadline_seconds=(
@@ -1028,16 +828,6 @@ class WorkspacePolicy:
                 if lease is None
                 else require_number(lease, f"{name}.lease_seconds", minimum=MINIMUM_LEASE_SECONDS)
             ),
-            journal_segment_bytes=(
-                defaults.journal_segment_bytes
-                if segment is None
-                else require_int(
-                    segment,
-                    f"{name}.journal_segment_bytes",
-                    minimum=MINIMUM_JOURNAL_SEGMENT_BYTES,
-                    maximum=MAXIMUM_JOURNAL_SEGMENT_BYTES,
-                )
-            ),
             retention=(
                 defaults.retention
                 if retention is None
@@ -1054,7 +844,6 @@ class WorkspacePolicy:
         return {
             "visibility_deadline_seconds": self.visibility_deadline_seconds,
             "lease_seconds": self.lease_seconds,
-            "journal_segment_bytes": self.journal_segment_bytes,
             "retention": self.retention.as_mapping(),
         }
 
@@ -1068,6 +857,10 @@ class WorkspacePolicy:
         """
 
         unsupported = sorted(set(changes) - POLICY_KEYS)
+        retention = changes.get("retention")
+        if isinstance(retention, Mapping):
+            # Reading tolerates the retired members; writing one is refused.
+            unsupported += [f"retention.{key}" for key in sorted(set(retention) & _RETIRED_RETENTION_KEYS)]
         if unsupported:
             raise FormatError(
                 f"{name} has unsupported members: {', '.join(unsupported)}; "
@@ -1195,775 +988,3 @@ def validate_failure(value: object, name: str = "failure") -> Failure:
         details=None if details is None else dict(details),
         retryable=retryable,
     )
-
-
-class _Unset:
-    """One absent state-frame member, distinct from one whose value is null.
-
-    A frame that carries ``"data_generation": null`` says something different
-    from a frame that never mentions the member at all, and the difference has
-    to survive a round trip, so absence needs a value of its own.
-    """
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover - a debugging aid
-        return "UNSET"
-
-
-# Deliberately typed as ``Any`` so that every keyword of :meth:`StateFrame.replace`
-# can declare the type of its member and still default to absence. Nothing
-# outside this module ever observes the value.
-_UNSET: Any = _Unset()
-
-#: The members every transition of one activation carries forward. They name
-#: the activation and attempt a job is in, so a frame that dropped one of them
-#: would lose the identity of work that is still running.
-CARRIED_STATE_MEMBERS = (
-    "step",
-    "activation_id",
-    "activation_ordinal",
-    "attempt_id",
-    "attempt_ordinal",
-    "total_attempts",
-    "data_generation",
-    # The dynamic requirement selected for this activation. A new activation
-    # replaces it with the requirement published by its preceding outcome.
-    "resources",
-    # The observed children of the join that started this activation are inputs
-    # of the activation, exactly like its step: every attempt of it, including
-    # one recovered from an abandoned claim or a retry, must see the same
-    # children. A new activation resets the member.
-    "join_summary",
-    # An operator pause requested during an in-flight attempt survives until
-    # the manager reaches the next attempt boundary.
-    "pause_requested",
-    # The step set the runner of this job declared, carried forward until a
-    # later outcome declares a different one.
-    "runner_steps",
-)
-
-#: The provenance members :meth:`~httk.workflow.workspace.Workspace.transition`
-#: repeats in every later state frame of a job, unless the update sets them:
-#: ``transfer`` (how the job arrived: transfer id, source workspace, payload
-#: digest, seal time) and ``origin`` (``"exchange"`` for a job adopted from the
-#: exchange inbox). They are trusted state written only by the import, so
-#: "arrived by this transfer" is one read of the current frame, also after the
-#: import frame itself has been collected.
-CARRIED_PROVENANCE_MEMBERS = ("transfer", "origin")
-
-
-@dataclass(frozen=True)
-class StateFrame:
-    """The members of one state frame, typed for the manager that uses them.
-
-    The frame is held exactly as it is on disk, so every member round-trips
-    verbatim — including one written by a newer implementation or by an enabled
-    extension. What this implementation
-    reads and writes goes through the typed accessors and through :meth:`replace`,
-    so a mistyped member name is a type error at the call site rather than a
-    silently defaulted value at runtime.
-
-    The envelope members ``format``, ``workspace_id``, ``job_id``, ``kind``,
-    ``state_generation``, and their siblings belong to the transition that
-    publishes a frame and are supplied by the workspace, never here.
-
-    :param members: The state members carried by this frame.
-    """
-
-    members: Mapping[str, Any] = dataclasses.field(default_factory=dict)
-
-    @classmethod
-    def from_mapping(cls, value: object, name: str = "state frame") -> "StateFrame":
-        """Read one stored state frame, keeping every member verbatim.
-
-        :param value: The state-frame mapping to read.
-        :param name: The field name used in validation errors.
-        :return: The state frame.
-        :raises httk.workflow.errors.FormatError: If the value is not a mapping.
-        """
-
-        return cls(dict(require_mapping(value, name)))
-
-    def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation, member for member.
-
-        :return: The state-frame member mapping.
-        """
-
-        return dict(self.members)
-
-    def has(self, name: str) -> bool:
-        """Report whether the frame carries *name* at all, null included.
-
-        :param name: The member name to check.
-        :return: Whether the member is present.
-        """
-
-        return name in self.members
-
-    @classmethod
-    def replace(
-        cls,
-        base: "StateFrame | None" = None,
-        *,
-        step: str = _UNSET,
-        activation_id: str = _UNSET,
-        activation_ordinal: int = _UNSET,
-        attempt_id: str = _UNSET,
-        attempt_ordinal: int = _UNSET,
-        total_attempts: int = _UNSET,
-        data_generation: int | None = _UNSET,
-        resources: Mapping[str, int] | None = _UNSET,
-        reservation: Mapping[str, int] = _UNSET,
-        join_summary: Sequence[object] | None = _UNSET,
-        runner_steps: Sequence[str] = _UNSET,
-        manager_id: str = _UNSET,
-        writer_id: str = _UNSET,
-        claim_id: str = _UNSET,
-        attempt_control: str = _UNSET,
-        lease_seconds: float = _UNSET,
-        matched_pool: str = _UNSET,
-        matched_capabilities: Sequence[str] = _UNSET,
-        process: Mapping[str, object] = _UNSET,
-        started_at: str = _UNSET,
-        workdir: str = _UNSET,
-        outcome_action: str = _UNSET,
-        child_digests: Mapping[str, str] = _UNSET,
-        child_labels: Mapping[str, str] = _UNSET,
-        commit_base_generation: int = _UNSET,
-        previous_manager_id: str | None = _UNSET,
-        next_step: str = _UNSET,
-        join: Mapping[str, object] = _UNSET,
-        pause: object = _UNSET,
-        pause_requested: Mapping[str, object] | None = _UNSET,
-        failure: Mapping[str, object] = _UNSET,
-        job_digest: str = _UNSET,
-        join_unresolved: Mapping[str, object] = _UNSET,
-        unclean_restart: bool = _UNSET,
-        unsafe_persistent_takeover: bool = _UNSET,
-        takeover_evidence: Mapping[str, object] = _UNSET,
-        launch_end_evidence: Sequence[Mapping[str, object]] = _UNSET,
-        cancellation: Mapping[str, object] = _UNSET,
-        previous_attempt_id: str | None = _UNSET,
-        operator: object = _UNSET,
-        operator_key: object = _UNSET,
-        operator_reason: object = _UNSET,
-        request_id: object = _UNSET,
-        revival_hazard: Mapping[str, object] = _UNSET,
-        reason: str = _UNSET,
-    ) -> "StateFrame":
-        """Return *base* with the named members set, absent ones untouched.
-
-        Every member a manager writes is one declared keyword, so the complete
-        vocabulary of a state frame is visible in one signature and no call site
-        can invent a member by misspelling one. Passing ``None`` writes the JSON
-        null the protocol distinguishes from an absent member.
-
-        :param base: The frame to update, or an empty frame when omitted.
-        :param step: The activation step.
-        :param activation_id: The activation identifier.
-        :param activation_ordinal: The activation ordinal.
-        :param attempt_id: The attempt identifier.
-        :param attempt_ordinal: The attempt ordinal.
-        :param total_attempts: The total attempt count.
-        :param data_generation: The transactional data generation.
-        :param resources: The dynamic requirement of this activation.
-        :param reservation: The effective requirement this manager reserved for the attempt, fair share included.
-        :param join_summary: The children observed by the activation.
-        :param runner_steps: The runner's registered step names.
-        :param manager_id: The owning manager identifier.
-        :param writer_id: The writer identifier.
-        :param claim_id: The claim identifier.
-        :param attempt_control: The attempt-control directory name.
-        :param lease_seconds: The claim lease duration.
-        :param matched_pool: The pool selected for the claim.
-        :param matched_capabilities: The capabilities matched by the claim.
-        :param process: The launched process identity.
-        :param started_at: The attempt start timestamp.
-        :param workdir: The attempt workdir.
-        :param outcome_action: The published outcome action.
-        :param child_digests: The child payload digests.
-        :param child_labels: The child labels.
-        :param commit_base_generation: The generation of the first committing frame of this attempt.
-        :param previous_manager_id: The manager a commit was taken over from.
-        :param next_step: The next activation step.
-        :param join: The child join condition.
-        :param pause: The pause record.
-        :param pause_requested: The deferred operator pause request.
-        :param failure: The failure record.
-        :param job_digest: The immutable job digest.
-        :param join_unresolved: The persisted first-unresolved child and timestamp of a waiting join.
-        :param unclean_restart: Whether the previous attempt ended uncleanly.
-        :param unsafe_persistent_takeover: Whether persistent takeover was unsafe.
-        :param takeover_evidence: Evidence for the persistent takeover.
-        :param launch_end_evidence: Why every launch of a taken-over commit's attempt has ended.
-        :param cancellation: The cancellation record.
-        :param previous_attempt_id: The previous attempt identifier.
-        :param operator: The operator identity.
-        :param operator_key: The operator key.
-        :param operator_reason: The operator reason.
-        :param request_id: The request identifier.
-        :param revival_hazard: Evidence of a revival hazard.
-        :param reason: The transition reason.
-        :return: The updated state frame.
-        """
-
-        written: tuple[tuple[str, object], ...] = (
-            ("step", step),
-            ("activation_id", activation_id),
-            ("activation_ordinal", activation_ordinal),
-            ("attempt_id", attempt_id),
-            ("attempt_ordinal", attempt_ordinal),
-            ("total_attempts", total_attempts),
-            ("data_generation", data_generation),
-            ("resources", resources),
-            ("reservation", reservation),
-            ("join_summary", join_summary),
-            ("runner_steps", runner_steps),
-            ("manager_id", manager_id),
-            ("writer_id", writer_id),
-            ("claim_id", claim_id),
-            ("attempt_control", attempt_control),
-            ("lease_seconds", lease_seconds),
-            ("matched_pool", matched_pool),
-            ("matched_capabilities", matched_capabilities),
-            ("process", process),
-            ("started_at", started_at),
-            ("workdir", workdir),
-            ("outcome_action", outcome_action),
-            ("child_digests", child_digests),
-            ("child_labels", child_labels),
-            ("commit_base_generation", commit_base_generation),
-            ("previous_manager_id", previous_manager_id),
-            ("next_step", next_step),
-            ("join", join),
-            ("pause", pause),
-            ("pause_requested", pause_requested),
-            ("failure", failure),
-            ("job_digest", job_digest),
-            ("join_unresolved", join_unresolved),
-            ("unclean_restart", unclean_restart),
-            ("unsafe_persistent_takeover", unsafe_persistent_takeover),
-            ("takeover_evidence", takeover_evidence),
-            ("launch_end_evidence", launch_end_evidence),
-            ("cancellation", cancellation),
-            ("previous_attempt_id", previous_attempt_id),
-            ("operator", operator),
-            ("operator_key", operator_key),
-            ("operator_reason", operator_reason),
-            ("request_id", request_id),
-            ("revival_hazard", revival_hazard),
-            ("reason", reason),
-        )
-        members: dict[str, Any] = {} if base is None else dict(base.members)
-        for name, value in written:
-            if value is not _UNSET:
-                members[name] = value
-        return cls(members)
-
-    def carried(self) -> "StateFrame":
-        """Return only the members every transition of this activation repeats.
-
-        :return: The carried state frame.
-        """
-
-        return StateFrame({name: self.members[name] for name in CARRIED_STATE_MEMBERS if name in self.members})
-
-    def select(self, names: Sequence[str]) -> "StateFrame":
-        """Return only the named members this frame actually carries.
-
-        :param names: The member names to retain.
-        :return: A frame containing the selected members.
-        """
-
-        return StateFrame({name: self.members[name] for name in names if name in self.members})
-
-    # -- typed reads ------------------------------------------------------
-
-    def _string(self, name: str) -> str | None:
-        value = self.members.get(name)
-        return value if isinstance(value, str) and value else None
-
-    def _integer(self, name: str) -> int | None:
-        value = self.members.get(name)
-        if isinstance(value, bool) or not isinstance(value, int):
-            return None
-        return value
-
-    def _mapping(self, name: str) -> Mapping[str, object] | None:
-        value = self.members.get(name)
-        return value if isinstance(value, Mapping) else None
-
-    def _flag(self, name: str) -> bool:
-        return self.members.get(name) is True
-
-    @property
-    def step(self) -> str | None:
-        """Return the activation step, when present."""
-        return self._string("step")
-
-    @property
-    def activation_id(self) -> str | None:
-        """Return the activation identifier, when present."""
-        return self._string("activation_id")
-
-    @property
-    def activation_ordinal(self) -> int | None:
-        """Return the activation ordinal, when present."""
-        return self._integer("activation_ordinal")
-
-    @property
-    def attempt_id(self) -> str | None:
-        """Return the attempt identifier, when present."""
-        return self._string("attempt_id")
-
-    @property
-    def attempt_ordinal(self) -> int | None:
-        """Return the attempt ordinal, when present."""
-        return self._integer("attempt_ordinal")
-
-    @property
-    def total_attempts(self) -> int | None:
-        """Return the total attempt count, when present."""
-        return self._integer("total_attempts")
-
-    @property
-    def data_generation(self) -> int | None:
-        """Return the transactional data generation, when present."""
-        return self._integer("data_generation")
-
-    @property
-    def resources(self) -> dict[str, int] | None:
-        """Return the validated dynamic resource requirement, when present."""
-        value = self.members.get("resources")
-        return None if value is None else validate_resources(value, "state.resources")
-
-    @property
-    def reservation(self) -> dict[str, int] | None:
-        """Return the validated effective requirement reserved for the attempt, when present."""
-        value = self.members.get("reservation")
-        return None if value is None else validate_resources(value, "state.reservation")
-
-    @property
-    def join_summary(self) -> object:
-        """Return the observed child summary, when present."""
-        return self.members.get("join_summary")
-
-    @property
-    def join_unresolved(self) -> Mapping[str, object] | None:
-        """Return the persisted first-unresolved join child and timestamp.
-
-        A waiting frame records this once, the first time a manager finds a
-        join child unresolvable, so the grace before the join fails is measured
-        from that instant and survives a manager restart rather than resetting.
-        """
-        return self._mapping("join_unresolved")
-
-    @property
-    def manager_id(self) -> str | None:
-        """Return the owning manager, refusing anything that is not one.
-
-        The value is joined below ``managers/`` to reach a heartbeat, so a frame
-        that does not name a canonical manager UUID is a protocol violation
-        rather than a path to try.
-        """
-
-        value = self._string("manager_id")
-        return None if value is None else canonical_uuid(value, "state.manager_id")
-
-    @property
-    def attempt_control(self) -> str | None:
-        """Return the validated attempt-control component of this frame."""
-
-        value = self._string("attempt_control")
-        return None if value is None else validate_attempt_control(value, "state.attempt_control")
-
-    @property
-    def lease_seconds(self) -> float | None:
-        """Return the claim lease duration, when present."""
-        value = self.members.get("lease_seconds")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return float(value)
-
-    @property
-    def started_at(self) -> str | None:
-        """Return the attempt start timestamp, when present."""
-        return self._string("started_at")
-
-    @property
-    def workdir(self) -> str | None:
-        """Return the attempt workdir, when present."""
-        return self._string("workdir")
-
-    @property
-    def next_step(self) -> str | None:
-        """Return the next activation step, when present."""
-        return self._string("next_step")
-
-    @property
-    def join(self) -> Mapping[str, object] | None:
-        """Return the child join condition, when present."""
-        return self._mapping("join")
-
-    @property
-    def failure(self) -> Mapping[str, object] | None:
-        """Return the failure record, when present."""
-        return self._mapping("failure")
-
-    @property
-    def pause(self) -> object:
-        """Return the pause record, when present."""
-        return self.members.get("pause")
-
-    @property
-    def pause_requested(self) -> Mapping[str, object] | None:
-        """Return the deferred operator pause request, when present."""
-        return self._mapping("pause_requested")
-
-    @property
-    def cancellation(self) -> Mapping[str, object] | None:
-        """Return the cancellation record, when present."""
-        return self._mapping("cancellation")
-
-    @property
-    def child_digests(self) -> Mapping[str, object] | None:
-        """Return the child digests, when present."""
-        return self._mapping("child_digests")
-
-    @property
-    def commit_base_generation(self) -> int | None:
-        """Return the generation of the first committing frame of this attempt, when present."""
-        return self._integer("commit_base_generation")
-
-    @property
-    def previous_attempt_id(self) -> str | None:
-        """Return the previous attempt identifier, when present."""
-        return self._string("previous_attempt_id")
-
-    @property
-    def unclean_restart(self) -> bool:
-        """Report whether the previous attempt ended uncleanly."""
-        return self._flag("unclean_restart")
-
-    @property
-    def unsafe_persistent_takeover(self) -> bool:
-        """Report whether persistent takeover was unsafe."""
-        return self._flag("unsafe_persistent_takeover")
-
-    @property
-    def reason(self) -> str | None:
-        """Return the transition reason, when present."""
-        return self._string("reason")
-
-
-@dataclass(frozen=True)
-class JobDefinition:
-    """The immutable declaration and execution settings of one job.
-
-    The mapping carried in :attr:`parameters` contains opaque implementation
-    knobs; declared staged objects belong to the SDK's input declarations.
-    """
-
-    id: str
-    tag: str | None
-    name: str
-    workflow: str
-    runner_executor: str
-    runner_source: str
-    runner_path: PurePosixPath
-    runner_sha256: str | None
-    runner_arguments: tuple[str, ...]
-    workdir_mode: str
-    workdir_path: PurePosixPath
-    data_mode: str
-    initial_step: str
-    priority: int
-    claim_pool: str
-    required_capabilities: frozenset[str]
-    retry_policy: RetryPolicy
-    resources: Mapping[str, int]
-    step_resources: Mapping[str, Mapping[str, int]]
-    parameters: Mapping[str, object]
-    #: The declared and overridden workflow environment of this job.
-    environment: Mapping[str, object]
-    #: The workflow declarations of this job, carried verbatim, keyed by name.
-    declarations: Mapping[str, Mapping[str, object]]
-    #: The parameter and input metadata the workflow declared, keyed by section.
-    declared: Mapping[str, Mapping[str, Mapping[str, object]]]
-    parent: Mapping[str, object] | None
-    raw: Mapping[str, object]
-    #: The ``NAME>=VERSION`` distributions a claiming manager's environment must meet.
-    requires: tuple[str, ...] = ()
-    #: The workflows this job may call, alias to resolved reference, when its
-    #: workflow declared them; ``None`` for a job that declares nothing.
-    calls: Mapping[str, str] | None = None
-    #: The unexpanded package command run instead of the tree ``run`` entry, when declared.
-    runner_command: tuple[str, ...] | None = None
-    stored_digest: str | None = None
-
-    @property
-    def job_key(self) -> str:
-        """Return the stable key of this job."""
-        return make_job_key(self.id, self.tag)
-
-    @property
-    def digest(self) -> str:
-        """Return the immutable job digest.
-
-        Normatively the digest is :func:`~httk.workflow.models.job_digest` over the stored ``job.json``
-        file bytes exactly as submitted, which is what every definition read
-        through :meth:`from_bytes` carries. A definition composed in memory has
-        no stored bytes yet, so its canonical serialization is hashed instead;
-        the two agree as soon as that serialization is what gets written.
-        """
-
-        if self.stored_digest is not None:
-            return self.stored_digest
-        return job_digest(json_bytes(self.raw))
-
-    @classmethod
-    def from_bytes(cls, data: bytes, *, name: str = "job.json") -> "JobDefinition":
-        """Parse stored ``job.json`` bytes, pinning the normative job digest.
-
-        :param data: The stored job document bytes.
-        :param name: The document name used in validation errors.
-        :return: The parsed job definition.
-        :raises httk.workflow.errors.FormatError: If the bytes do not contain a valid job document.
-        """
-
-        try:
-            value = json.loads(data.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise FormatError(f"cannot read JSON object {name}: {exc}") from exc
-        if not isinstance(value, Mapping):
-            raise FormatError(f"expected JSON object in {name}")
-        job = cls.from_mapping(value)
-        return dataclasses.replace(job, stored_digest=job_digest(data))
-
-    @classmethod
-    def from_path(cls, path: Path, *, follow_symlinks: bool = False) -> "JobDefinition":
-        """Read one stored ``job.json``, pinning the normative job digest.
-
-        The document must be a regular file of at most 1 MiB; it is opened
-        without blocking, so a
-        FIFO or special file fails the read instead of hanging it, and a
-        symlink is refused unless *follow_symlinks* is set.
-
-        :param path: The path of the stored job document.
-        :param follow_symlinks: Follow a symlinked ``job.json``, for a source directory supplied by the user.
-        :return: The parsed job definition.
-        :raises httk.workflow.errors.FormatError: If the file cannot be read, is a symlink, is not a
-            regular file, is too large, or is invalid.
-        """
-
-        try:
-            data = _read_regular_file(path, _MAXIMUM_JOB_DOCUMENT_BYTES, follow_symlinks=follow_symlinks)
-        except OSError as exc:
-            raise FormatError(f"cannot read JSON object {path}: {exc}") from exc
-        return cls.from_bytes(data, name=str(path))
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "JobDefinition":
-        """Parse one job definition mapping.
-
-        :param value: The job document mapping.
-        :return: The parsed job definition.
-        :raises httk.workflow.errors.FormatError: If the mapping does not satisfy the job protocol.
-        """
-        if value.get("format") != "httk-workflow-job" or value.get("format_version") != 2:
-            raise FormatError("job format must be httk-workflow-job version 2")
-        job_id = canonical_uuid(value.get("id"))
-        tag_raw = value.get("tag")
-        tag = None if tag_raw is None else validate_label(tag_raw, "tag")
-        runner = require_mapping(value.get("runner"), "runner")
-        runner_executor = validate_label(runner.get("executor", "path"), "runner.executor")
-        arguments_raw = runner.get("arguments", [])
-        if not isinstance(arguments_raw, Sequence) or isinstance(arguments_raw, (str, bytes)):
-            raise FormatError("runner.arguments must be an array")
-        arguments = tuple(require_string(item, "runner argument") for item in arguments_raw)
-        runner_source = require_string(runner.get("source", "payload"), "runner.source")
-        if runner_source not in RUNNER_SOURCES:
-            raise FormatError(f"runner.source must be one of {', '.join(sorted(RUNNER_SOURCES))}")
-        runner_path = validate_runner_path(runner.get("path"), runner_source)
-        # A payload runner is already pinned by the immutable job digest, so a
-        # second digest for it could only ever disagree with the payload. Every
-        # shared runner lives outside the payload and must be pinned explicitly.
-        if runner_source == "payload":
-            if runner.get("sha256") is not None:
-                raise FormatError("runner.sha256 is forbidden for a payload runner")
-            runner_sha256 = None
-        else:
-            runner_sha256 = validate_sha256(runner.get("sha256"), "runner.sha256")
-        runner_command: tuple[str, ...] | None = None
-        if "command" in runner:
-            if runner_source == "payload":
-                raise FormatError("runner.command is forbidden for a payload runner")
-            runner_command = validate_runner_command(runner["command"])
-        workdir = require_mapping(value.get("workdir"), "workdir")
-        workdir_mode = require_string(workdir.get("mode"), "workdir.mode")
-        if workdir_mode not in {"persistent", "isolated"}:
-            raise FormatError("workdir.mode must be persistent or isolated")
-        workdir_path = PurePosixPath(require_string(workdir.get("path", "run"), "workdir.path"))
-        if workdir_path.is_absolute() or ".." in workdir_path.parts or not workdir_path.parts:
-            raise FormatError("workdir.path must remain below the job directory")
-        data = require_mapping(value.get("data"), "data")
-        data_mode = require_string(data.get("mode"), "data.mode")
-        if data_mode not in {"none", "transactional"}:
-            raise FormatError("data.mode must be none or transactional")
-        claim = require_mapping(value.get("claim"), "claim")
-        capabilities_raw = claim.get("required_capabilities", [])
-        if not isinstance(capabilities_raw, Sequence) or isinstance(capabilities_raw, (str, bytes)):
-            raise FormatError("claim.required_capabilities must be an array")
-        capabilities = frozenset(validate_label(item, "capability") for item in capabilities_raw)
-        resources = validate_resources(value.get("resources", {}))
-        step_resources = _validate_step_resources(value.get("step_resources", {}))
-        parameters_raw = value.get("parameters")
-        parameters = {} if parameters_raw is None else validate_parameters(parameters_raw)
-        environment_raw = value.get("environment")
-        environment = {} if environment_raw is None else validate_environment(environment_raw)
-        declarations_raw = value.get("declarations")
-        declarations = {} if declarations_raw is None else validate_declarations(declarations_raw)
-        declared_raw = value.get("declared")
-        declared = {} if declared_raw is None else validate_declared(declared_raw)
-        parent_raw = value.get("parent")
-        parent = None if parent_raw is None else require_mapping(parent_raw, "parent")
-        if parent is not None:
-            parent_id = canonical_uuid(parent.get("job_id"), "parent.job_id")
-            parent_key = require_string(parent.get("job_key"), "parent.job_key")
-            if parse_job_key(parent_key)[1] != parent_id:
-                raise FormatError("parent.job_key does not carry the parent.job_id")
-            parse_placement_text(parent.get("placement"), "parent.placement")
-        requires_raw = value.get("requires")
-        try:
-            requires = () if requires_raw is None else parse_requirements(requires_raw, "requires")
-        except ValueError as exc:
-            raise FormatError(str(exc)) from exc
-        calls_raw = value.get("calls")
-        calls = None if calls_raw is None else validate_calls(calls_raw, "calls")
-        return cls(
-            id=job_id,
-            tag=tag,
-            name=require_string(value.get("name"), "name"),
-            workflow=require_string(value.get("workflow"), "workflow"),
-            runner_executor=runner_executor,
-            runner_source=runner_source,
-            runner_path=runner_path,
-            runner_sha256=runner_sha256,
-            runner_arguments=arguments,
-            workdir_mode=workdir_mode,
-            workdir_path=workdir_path,
-            data_mode=data_mode,
-            initial_step=validate_step(value.get("initial_step"), "initial_step"),
-            priority=require_int(value.get("priority"), "priority", maximum=999),
-            claim_pool=validate_label(claim.get("pool"), "claim.pool"),
-            required_capabilities=capabilities,
-            retry_policy=RetryPolicy.from_mapping(value.get("retry_policy", {})),
-            resources=dict(resources),
-            step_resources={step: dict(requirement) for step, requirement in step_resources.items()},
-            parameters=parameters,
-            environment=environment,
-            declarations=declarations,
-            declared=declared,
-            parent=None if parent is None else dict(parent),
-            raw=dict(value),
-            requires=tuple(item.text for item in requires),
-            calls=calls,
-            runner_command=runner_command,
-        )
-
-
-@dataclass(frozen=True)
-class Marker:
-    """The state marker locating one job transition in a workspace.
-
-    :param kind: The state kind encoded by the marker.
-    :param placement: The workspace placement of the job.
-    :param job_key: The stable job key.
-    :param priority: The marker priority.
-    :param generation: The state generation.
-    :param record_ref: The transition record reference.
-    :param path: The marker path.
-    """
-
-    kind: str
-    placement: PurePosixPath
-    job_key: str
-    priority: int
-    generation: int
-    record_ref: str
-    path: Path
-
-    @property
-    def job_id(self) -> str:
-        """Return the job identifier encoded in this marker."""
-        return parse_job_key(self.job_key)[1]
-
-    @classmethod
-    def from_path(cls, state_root: Path, path: Path) -> "Marker":
-        """Parse one marker path below a workspace state root.
-
-        :param state_root: The workspace state directory.
-        :param path: The marker path to parse.
-        :return: The parsed state marker.
-        :raises httk.workflow.errors.FormatError: If the path does not use marker syntax.
-        """
-        relative = path.relative_to(state_root)
-        if len(relative.parts) < 2:
-            raise FormatError(f"marker has no state kind: {path}")
-        kind = relative.parts[0]
-        if kind not in STATE_KINDS:
-            raise FormatError(f"unknown state kind: {kind}")
-        placement = normalize_placement(PurePosixPath(*relative.parts[1:-1]))
-        match = _MARKER_PATTERN.fullmatch(relative.name)
-        if match is None:
-            raise FormatError(f"invalid marker basename: {relative.name}")
-        job_key = match.group("job_key")
-        parse_job_key(job_key)
-        priority = int(match.group("priority"))
-        generation = int(match.group("generation"), 36)
-        if generation > (1 << 64) - 1:
-            raise FormatError("state generation exceeds unsigned 64-bit range")
-        return cls(kind, placement, job_key, priority, generation, match.group("record_ref"), path)
-
-
-def marker_basename(job_key: str, priority: int, generation: int, record_ref: str) -> str:
-    """Build one bounded state-marker basename.
-
-    :param job_key: The stable job key.
-    :param priority: The marker priority.
-    :param generation: The state generation.
-    :param record_ref: The transition record reference.
-    :return: The marker basename.
-    :raises httk.workflow.errors.FormatError: If a component is invalid or the basename exceeds the profile limit.
-    """
-    parse_job_key(job_key)
-    if not 0 <= priority <= 999:
-        raise FormatError("priority must be 0 through 999")
-    if not 0 <= generation <= (1 << 64) - 1:
-        raise FormatError("generation exceeds unsigned 64-bit range")
-    generation_text = to_base36(generation)
-    result = f"{job_key}.p{priority:03d}.g{generation_text}.{record_ref}"
-    if len(result.encode("ascii")) > 213:
-        raise FormatError("marker exceeds the core profile 213-byte budget")
-    return result
-
-
-def to_base36(value: int) -> str:
-    """Encode a nonnegative integer in lowercase base 36.
-
-    :param value: The integer to encode.
-    :return: The base-36 representation.
-    :raises ValueError: If the value is negative.
-    """
-    if value < 0:
-        raise ValueError("base-36 values cannot be negative")
-    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-    if value == 0:
-        return "0"
-    digits = ""
-    while value:
-        value, remainder = divmod(value, 36)
-        digits = alphabet[remainder] + digits
-    return digits

@@ -108,8 +108,8 @@ def test_mutating_workspace_commands_resolve_the_enclosing_workspace(tmp_path: P
     settings = json.loads(capsys.readouterr().out)
     assert settings[0]["vasp.command"] == "mock"
     assert (
-        command(["workspace", "policy", "set", "--key", "retention.journal_days", "--value", "keep"], _context(nested))
+        command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "keep"], _context(nested))
         == 0
     )
     capsys.readouterr()
-    assert Workspace(enclosing.root).policy.retention.journal_days is None
+    assert Workspace(enclosing.root).policy.retention.trash_days is None

@@ -10,7 +10,6 @@ surface through core's ``httk project repair``; each repair is explicit.
 import logging
 import os
 import shutil
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,7 +36,7 @@ from .projects import (
     read_project,
     read_project_section,
 )
-from .registry import list_workspaces, resolve_workspace
+from .registry import resolve_workspace
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -219,53 +218,21 @@ def describe_remote(
     }
 
 
-def _pending_remote_transfers(remote: str) -> list[str]:
-    """Return registered local workspace names with unacknowledged transfers to *remote*.
-
-    A transfer is pending while its root job is ``transferring`` under an
-    addressed transaction naming the remote.
-    """
-
-    from ._sealing import pending_outgoing
-
-    names: list[str] = []
-    for binding in list_workspaces():
-        assert binding.path is not None
-        try:
-            workspace = Workspace(binding.path, mutable=False)
-            pending = pending_outgoing(workspace)
-        except (WorkflowError, OSError, ValueError):
-            continue
-        if any(txn.destination_remote == remote for _marker, _frame, txn in pending):
-            names.append(binding.name)
-    return names
-
-
 def remove_remote(
     name: str,
     *,
     project: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
-    """Remove one remote bundle, refusing while a transfer still needs it.
-
-    A sealed bundle that has not been acknowledged is work this remote still
-    owes an answer about, and the adapter is how that answer is fetched.
-    Removing the remote would leave the transfer with no way home, so it is
-    refused by name — retire or fetch the transfer first.
+    """Remove one remote bundle.
 
     :param name: Remote bundle name.
     :param project: Project directory used for project-local lookup.
     :return: JSON-compatible removal result.
-    :raises ValueError: If the remote is invalid, unknown, or still has transfers.
+    :raises ValueError: If the remote is invalid or unknown.
     """
 
+    # ponytail: no in-flight transfer guard while transfers are unavailable; phase D restores it with _moving.py.
     bundle, scope = _remote_bundle(name, project=project)
-    pending = _pending_remote_transfers(name)
-    if pending:
-        raise ValueError(
-            f"remote {name!r} still has unretired transfers from workspace {', '.join(pending)}; "
-            "fetch or retire them first"
-        )
     shutil.rmtree(bundle)
     _LOGGER.info(
         "removed the %s remote %s at %s",
@@ -371,62 +338,6 @@ def _check_workspace_default(project: Path) -> Finding | None:
         f"recorded default workspace {name!r} does not resolve",
         details={"name": name, "resolves": False},
     )
-
-
-def _check_transfers(workspace_root: Path) -> Finding:
-    """Report transfer work that waits for an operator (plan 4.7); this check never repairs anything.
-
-    The legacy transfer machinery it inspects is replaced in phase D (held bundles of eject + copy + adopt).
-
-    It names exports held for a copy-out (``httk job eject --resume``), exports
-    whose interrupted copy-out may already have delivered them (in doubt: remove
-    the held copy, or take it back with ``httk job adopt``), addressed bundles
-    still unacknowledged past their freshness window (in doubt: retire them if
-    the destination has the job, reclaim them if not), and per-job adoption
-    claims whose lineage directory is gone.
-    """
-
-    from ._adoption import stale_claims
-    from ._receipts import FRESHNESS_WINDOW_NS
-    from ._sealing import exports_in_doubt, held_exports, pending_outgoing
-
-    try:
-        workspace = Workspace(workspace_root, mutable=False)
-    except (WorkflowError, OSError) as exc:
-        return Finding("transfers", "ok", f"there is no readable workspace to check transfers in: {exc}")
-    doubtful = exports_in_doubt(workspace)
-    held = held_exports(workspace)
-    now = time.time_ns()
-    in_doubt = [
-        {"transfer_id": txn.transfer_id, "job_key": marker.job_key, "sealed_at": txn.sealed_at}
-        for marker, _frame, txn in pending_outgoing(workspace)
-        if now > txn.sealed_at + FRESHNESS_WINDOW_NS
-    ]
-    orphaned = stale_claims(workspace)
-    details: dict[str, object] = {
-        "held_exports": held,
-        "exports_in_doubt": doubtful,
-        "outgoing_in_doubt": in_doubt,
-        "stale_claims": orphaned,
-    }
-    if not (held or doubtful or in_doubt or orphaned):
-        return Finding("transfers", "ok", "no transfer waits for an operator", details=details)
-    parts = []
-    if held:
-        parts.append(f"{len(held)} export(s) held for copy-out (`httk job eject --resume`)")
-    if doubtful:
-        parts.append(
-            f"{len(doubtful)} export(s) in doubt, perhaps already delivered "
-            "(remove the held copy, or take it back with `httk job adopt HELD`)"
-        )
-    if in_doubt:
-        parts.append(
-            f"{len(in_doubt)} outgoing transfer(s) unacknowledged past their window "
-            "(`httk workflow transfer retire|reclaim JOB_ID`)"
-        )
-    if orphaned:
-        parts.append(f"{len(orphaned)} adoption claim(s) without their lineage")
-    return Finding("transfers", "warning", "; ".join(parts), details=details)
 
 
 def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
