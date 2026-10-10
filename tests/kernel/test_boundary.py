@@ -21,9 +21,11 @@ RAW_CALLS: Mapping[str, frozenset[str]] = {
 }
 #: Creating a file with ``O_CREAT`` is a raw operation wherever the flag is named.
 RAW_FLAG = frozenset({"O_CREAT"})
-#: Pathlib-style calls on any object are raw too: ``.unlink(``, ``.rename(``, ``.rmdir(``, and ``.replace(`` with
-#: exactly one positional argument and no keywords (``str.replace`` takes two, ``Path.replace`` one).
-RAW_METHODS = frozenset({"unlink", "rename", "rmdir", "replace"})
+#: Pathlib-style calls on any object are raw too: ``.unlink(``, ``.rename(``, ``.rmdir(``, ``.replace(`` with
+#: exactly one positional argument and no keywords (``str.replace`` takes two, ``Path.replace`` one), and the
+#: plain-path writes ``.write_text(``, ``.write_bytes(`` and ``.touch(``.
+WRITE_METHODS = frozenset({"write_text", "write_bytes", "touch"})
+RAW_METHODS = frozenset({"unlink", "rename", "rmdir", "replace"}) | WRITE_METHODS
 CONTESTED = frozenset({"move_once", "publish_dir", "publish_record"})
 #: Never in any module: no hard links, no symlinks created, no file locks.
 LINKS = {"os": frozenset({"link", "symlink"})}
@@ -185,6 +187,28 @@ UTIL_JSON_CALLERS = frozenset(
         "codes/__init__.py",
     }
 )
+#: The plain-path writes (:data:`WRITE_METHODS`) outside the modules allowed raw operations, by function; each
+#: writes a file private to one actor.
+WRITE_ALLOWED = frozenset(
+    {
+        # Store installations: manifests written in the owner's private build scratch, installed by rename.
+        "_store.py:_adhoc_package",
+        "_store.py:_document_package",
+        # Preparing a payload in a private directory before it is submitted through the kernel.
+        "scaffold.py:_build_payload",
+        "compat/cwl/__init__.py:_prepare.instantiate",
+        "workflow_cli/_job.py:_workflow_target",
+        # Runner side: the outputs document in the runner's own work directory.
+        "compat/pwd/pwd_runner.py:publish_outputs",
+        # Manager side: truncates the attempt's own stdout/stderr files before its process starts.
+        "supervision.py:ProcessSupervisor.run",
+        # A batch script under a fresh uuid name, private to the launching process until sbatch reads it.
+        "launch_runtime.py:_start_slurm",
+    }
+)
+#: The builtin ``open(`` calls with a writing mode literal in protocol modules, by function (none today: they
+#: write through ``_fs.write_file``).
+OPEN_WRITE_ALLOWED: frozenset[str] = frozenset()
 #: The directory creations in protocol modules that do not go through ``_fs``, by function.
 MKDIR_ALLOWED = frozenset(
     {
@@ -281,14 +305,41 @@ def _protocol(module: str) -> bool:
 
 
 def _util_json(tree: ast.Module) -> set[str]:
-    """Every name of :data:`UTIL_JSON` imported from ``_util`` (any spelling) or read as ``_util.<name>``."""
+    """Every name of :data:`UTIL_JSON` imported from ``_util`` (any spelling) or read as ``<_util module>.<name>``,
+    including ``import httk.workflow._util as u``."""
 
+    modules = {"_util"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.asname for alias in node.names if alias.asname and alias.name.endswith("._util"))
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] == "_util":
             found.update(alias.name for alias in node.names if alias.name in UTIL_JSON)
-        elif isinstance(node, ast.Attribute) and node.attr in UTIL_JSON and getattr(node.value, "id", None) == "_util":
-            found.add(node.attr)
+        elif isinstance(node, ast.Attribute) and node.attr in UTIL_JSON:
+            value = node.value
+            if getattr(value, "id", None) in modules or getattr(value, "attr", None) == "_util":
+                found.add(node.attr)
+    return found
+
+
+def _open_for_writing(tree: ast.Module) -> set[str]:
+    """The qualified name of every function calling the builtin ``open(`` with a mode literal that writes."""
+
+    found: set[str] = set()
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                visit(child, (*scope, child.name))
+                continue
+            if isinstance(child, ast.Call) and getattr(child.func, "id", None) == "open":
+                modes = [*child.args[1:2], *(keyword.value for keyword in child.keywords if keyword.arg == "mode")]
+                if any(isinstance(mode, ast.Constant) and set(str(mode.value)) & set("wxa") for mode in modes):
+                    found.add(".".join(scope) or "<module>")
+            visit(child, scope)
+
+    visit(tree, ())
     return found
 
 
@@ -373,16 +424,62 @@ def g():
     assert _module_uses(spelled, TEMPFILE) == {"tempfile.mkstemp"}
     assert _module_uses(spelled, SHUTIL_COPY) == {"shutil.copytree"}
     assert _util_json(spelled) == {"read_json", "write_json_atomic"}
+    assert _util_json(ast.parse("import httk.workflow._util as u\nu.read_json(p)\n")) == {"read_json"}
+    assert _util_json(ast.parse("import httk.workflow._util\nhttk.workflow._util.write_json_atomic(p, {})\n")) == {
+        "write_json_atomic"
+    }
     assert _calls_by_function(spelled, MKDIR) == {"A.f", "g"}
+    writes = ast.parse(
+        """
+def f(p):
+    p.write_text("x")
+    open(p, "ab")
+    open(p, mode="x")
+    open(p)
+    open(p, "rb")
+"""
+    )
+    assert _method_calls(writes, RAW_METHODS) == {".write_text"}
+    assert _open_for_writing(writes) == {"f"}
+    assert _open_for_writing(ast.parse("def g(p):\n    open(p, 'r')\n")) == set()
+
+
+def _listed_writes(module: str) -> set[str]:
+    """The :data:`WRITE_METHODS` calls of *module* when every function making one is in :data:`WRITE_ALLOWED`."""
+
+    tree = _tree(module)
+    callers = {f"{module}:{function}" for function in _calls_by_function(tree, WRITE_METHODS)}
+    return _method_calls(tree, WRITE_METHODS) if callers <= WRITE_ALLOWED else set()
 
 
 def test_only_fs_performs_raw_operations() -> None:
-    # Rule A: a raw rename/unlink/rmdir/lock/O_CREAT outside _fs is a race the reviewed surfaces do not own.
+    # Rule A: a raw rename/unlink/rmdir/lock/O_CREAT or plain-path write outside _fs is a race the reviewed
+    # surfaces do not own; listed private writes excepted.
     allowed = {"_fs.py"} | RUNNER_SIDE | LEGACY_RAW | METHOD_RAW
     offenders = {
-        module: sorted(uses) for module in _modules() if module not in allowed and (uses := _raw_uses(_tree(module)))
+        module: sorted(uses)
+        for module in _modules()
+        if module not in allowed and (uses := _raw_uses(_tree(module)) - _listed_writes(module))
     }
     assert offenders == {}, f"raw filesystem operations outside _fs.py: {offenders}"
+    found = {
+        f"{module}:{function}"
+        for module in _modules()
+        if module not in allowed
+        for function in _calls_by_function(_tree(module), WRITE_METHODS)
+    }
+    assert WRITE_ALLOWED - found == set(), f"remove these from WRITE_ALLOWED: {sorted(WRITE_ALLOWED - found)}"
+
+
+def test_protocol_modules_open_files_for_writing_only_through_fs() -> None:
+    # Rule G: a builtin open() for writing creates or truncates by plain path, without O_NOFOLLOW or durability.
+    found = {
+        f"{module}:{function}"
+        for module in _modules()
+        if _protocol(module) and module != "_fs.py"
+        for function in _open_for_writing(_tree(module))
+    }
+    assert found == OPEN_WRITE_ALLOWED, f"open() for writing outside _fs: {sorted(found ^ OPEN_WRITE_ALLOWED)}"
 
 
 def test_legacy_allowlist_is_tight() -> None:
@@ -391,6 +488,8 @@ def test_legacy_allowlist_is_tight() -> None:
     present = set(_modules())
     stale = sorted(module for module in LEGACY_RAW if module not in present or not _raw_uses(_tree(module)))
     assert stale == [], f"remove these from LEGACY_RAW: {stale}"
+    idle = sorted(module for module in RUNNER_SIDE if module not in present or not _raw_uses(_tree(module)))
+    assert idle == [], f"remove these from RUNNER_SIDE: {idle}"
     # A METHOD_RAW module may hold nothing but pathlib-style calls, and must still hold one.
     misfiled = sorted(
         module

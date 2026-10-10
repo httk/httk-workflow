@@ -4,15 +4,16 @@ import json
 import os
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
-from httk.workflow import Workspace, _kernel
+from httk.workflow import Workspace, _fs, _kernel
 from httk.workflow import _util as util_module
 from httk.workflow._state import Release, StateDoc
-from httk.workflow.errors import FormatError
+from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.models import RetentionPolicy, WorkspacePolicy
 from httk.workflow.workflow_cli import command
 from v3_helpers import cli_owner, find, submit, workspace
@@ -45,6 +46,41 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
     assert attached.policy.retention.trash_days == 30.0
     assert attached.workspace_id == workspace.workspace_id
     assert attached.format["core_profile"] == "core-v3"
+
+
+@pytest.mark.parametrize(
+    ("write", "check"),
+    [
+        (lambda ws: ws.set_policy({"visibility_deadline_seconds": 90}), lambda ws: ws.visibility_deadline == 90.0),
+        (lambda ws: ws.set_setting("vasp.command", "vasp_std"), lambda ws: ws.settings == {"vasp.command": "vasp_std"}),
+        (
+            lambda ws: ws.set_workflow_prelude("relax-vasp", "module load VASP"),
+            lambda ws: ws.read_workflow_preludes() == {"relax-vasp": "module load VASP"},
+        ),
+        (lambda ws: ws._add_extension("exchange"), lambda ws: "exchange" in ws.extensions),
+    ],
+    ids=["policy", "settings", "prelude", "extension"],
+)
+def test_format_writers_verify_by_rereading_and_redo_a_replaced_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: Any, check: Any
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    original = (workspace.control / "format.json").read_bytes()
+    real_write = _fs.write_file
+    clobbers = [1]
+
+    def written_then_replaced(dst: _fs.Loc, data: bytes, **kwargs: Any) -> None:
+        real_write(dst, data, **kwargs)
+        if dst.name() == "format.json" and clobbers[0]:
+            clobbers[0] -= 1
+            real_write(dst, original, **kwargs)  # a concurrent writer that read before this one
+
+    monkeypatch.setattr(_fs, "write_file", written_then_replaced)
+    write(workspace)
+    assert clobbers == [0] and check(Workspace(tmp_path / "workspace"))
+    clobbers[0] = 1 << 10
+    with pytest.raises(WorkflowError, match="concurrent writers"):
+        workspace.set_setting("other.key", 1)
 
 
 def test_initialize_creates_jobs_and_every_format_section(tmp_path: Path) -> None:

@@ -132,8 +132,10 @@ UUID. The refusals are listed in §Changes from the previous format.
 A retention value of `null` or `"keep"` keeps everything in its category. The
 retired members `lease_seconds`, `journal_segment_bytes` and
 `retention.journal_days` are ignored on read and refused on write, like every
-unknown member. Policy, settings and preludes change by read-modify-write of
-`format.json` through `write_file`, last writer wins. Managers read the policy
+unknown member. Policy, settings, preludes and extensions change by
+read-modify-write of `format.json` through `write_file`, verified by
+re-reading it and redone (a bounded number of times) when a concurrent writer
+replaced it in between; writers are not serialized, so last writer wins. Managers read the policy
 at attach and re-read settings and extensions while they run. `settings` maps
 dotted names to JSON scalars; the protocol reads `seal.succeeded`, `seal.keys`,
 `exchange.authorized_keys`, `manager.confine`, `confine.*` and
@@ -1225,7 +1227,10 @@ one sequence, run by an owner that has claimed the root in any unowned state:
 1. **Check the destination:** absolute without `..`, and a real directory or a
    missing name whose parent is a real directory; below `WORKSPACE/exchange`,
    every directory from the workspace root down is opened (and created) with
-   `open_dir_under`. Otherwise the root is given back.
+   `open_dir_under`. A destination whose canonical path (`realpath` of its
+   existing prefix) lies below `WORKSPACE/exchange` while its lexical path does
+   not reaches the exchange through a symlink and is refused. Otherwise the
+   root is given back.
 2. **Members.** With `tree`, the descendants are the children recorded in each
    `state.json`, confirmed from the child's side (its `job.json` names the
    parent and it is not detached), located with settling. Each MUST be
@@ -1238,24 +1243,32 @@ one sequence, run by an owner that has claimed the root in any unowned state:
    to each member's run log and extract each member (`move_owned` out of
    `owned/`) into `bundle/jobs/<placement>/<key>`.
 4. **Record** `<scratch>/eject.json` (`{target, token, transfer_id,
-   exchange}`: the target path, the `bundle.json` bytes, and the exchange name
-   and job id of an exchange root, read from its `state.json` in the scratch,
-   or `null`) beside `bundle/`.
+   exchange}`: the target path, the `bundle.json` bytes, and for an exchange
+   root `[exchange name, job id, adoption nonce]`, the name read from its
+   `state.json` in the scratch and the nonce from its index entry, or `null`)
+   beside `bundle/`.
 5. **Deliver** with `deliver(…, token = the bundle.json bytes)` to
    `DEST/<root key>` (a hold: `transfers/outgoing/<transfer-id>`); a target
    below `WORKSPACE/exchange` is anchored at its parent, opened with
    `open_dir_under` from the workspace root. Across filesystems the bundle is
    first copied to `DEST/.<name>.partial.<transfer-id>` and that copy is
    delivered; never into the exchange, which the enabling rename probe proved
-   to share the filesystem. `DONE` removes an exchange root's index entry and
-   discards the scratch.
+   to share the filesystem. `DONE` removes an exchange root's index entry
+   (only while it carries the recorded nonce: a client's resubmission rekeys
+   to the same job id under a new adoption, whose entry stays) and discards
+   the scratch.
 6. **Occupied or failed:** the reconciler's decision runs at once. Without
    `eject.json` nothing was delivered. With it, the delivery happened when
-   `bundle/` has left the scratch (only its owner moves it) or the target
-   carries the token; then the recorded exchange root leaves the index.
-   Otherwise the partial copy is discarded and every member still in the bundle
-   is submitted back to its recorded state and priority. A destination that
-   cannot be read keeps the scratch for the reconciler.
+   the target carries the token, or when `bundle/` has left the scratch (only
+   its owner moves it) and `eject.json` is still there when looked at again
+   afterwards: a recoverer takes the whole scratch, so a scratch gone with it
+   was taken (`OwnerLost`; the index is untouched). On delivery the recorded
+   exchange root leaves the index, under the recorded nonce. Otherwise the
+   partial copy is discarded and every member still in the bundle is submitted
+   back to its recorded state and priority. A destination that cannot be read
+   keeps the scratch for the reconciler. An `eject.json` that does not decode
+   (a torn write) is logged and treated as absent, except that a scratch whose
+   bundle is gone as well is kept rather than decided.
 
 The `eject` reconciler makes the same decision after a crash; the scratch is
 never empty while a delivery is in doubt, so it always runs.
@@ -1398,7 +1411,8 @@ The **exchange index** `.httk-workspace/exchange-jobs/<exchange-name>/` is
 trusted: `.nonce`, `index.json` (`{job_id, placement, adoption_nonce}`) and
 `translated/<request-id>` markers. It is created once per exchange root before
 the root is published (§Adopt step 5) and removed only by the root's owner when
-the root is deleted or returned, and only while it indexes that job.
+the root is deleted or returned, and only while it indexes that job under the
+adoption nonce the remover read (an eject records it in `eject.json`).
 
 ### Inbox adoption
 
@@ -1551,7 +1565,7 @@ There is no age-based collection of scratch, held bundles or quarantine.
 | `tombstoned_owner_with_jobs` | A recovered owner that holds jobs, launches or scratch again; `gc` recovers it. |
 | `unreadable_state` | A `state.json` that exists but does not decode. |
 | `foreign_owner` | A job directory another uid owns. |
-| `stale_exchange_index` | An exchange index entry whose job is not here (a settled lookup), nor in a hold or an eject or adopt scratch (checked after the lookup, so an eject extracting the job meanwhile is seen). With `--repair` it is removed. |
+| `stale_exchange_index` | An exchange index entry whose job is not here (a settled lookup), nor in a hold or an eject or adopt scratch, in its bundle or recorded in its `eject.json` (checked after the lookup, so an eject extracting the job meanwhile is seen), nor here at a second settled lookup (a job gone home from a scratch meanwhile). With `--repair` it is removed under the nonce it was read with; when a hold or scratch cannot be read (another uid's), the finding is reported and nothing is removed. |
 
 Everything but unparsable entries and stale exchange index entries is left to
 the operator.

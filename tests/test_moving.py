@@ -1257,6 +1257,160 @@ def test_fsck_repair_keeps_the_index_of_a_job_an_eject_extracts_meanwhile(
     assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
 
 
+def _crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+    if op == "rename" and phase == "after" and src is not None and src.name() == "bundle":
+        raise Crash("delivered, not yet out of the index")
+
+
+def test_recovery_after_a_resubmission_keeps_the_new_adoptions_index_entry(tmp_path: Path) -> None:
+    # A resubmission rekeys to the same job id under a new adoption nonce: the dead ejector's roll-forward must
+    # not remove the new adoption's entry.
+    from httk.workflow.fsck import check_workspace
+
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    name = str(jobs[0]["id"])
+    destination = _outbox(ws, name)
+    owner = cli_owner(ws)
+    _fs.set_fault_injector(_crash_after_delivery)
+    try:
+        with pytest.raises(Crash):
+            _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
+    finally:
+        _fs.set_fault_injector(None)
+    (scratch,) = [entry for entry in os.listdir(ws.control / "tmp") if ".eject." in entry]
+    assert os.listdir(ws.control / "tmp" / scratch) == ["eject.json"]
+    old = _kernel.exchange_index(ws, name)
+    assert old is not None and old[0] == root.job_id
+    # fsck counts the job recorded in eject.json as in flight.
+    report = check_workspace(ws, repair=True)
+    assert not [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
+    assert _kernel.exchange_index(ws, name) == old
+    # The entry goes anyway (by hand, say); the client fetches its return and sends the same jobs again.
+    shutil.rmtree(ws.control / "exchange-jobs" / name)
+    shutil.rmtree(destination)
+    client_bundle(tmp_path / "inbox" / "again", jobs)
+    with cli_owner(ws) as again:
+        resent = _moving.adopt(ws, again, tmp_path / "inbox" / "again", untrusted=True)
+    assert resent is not None and len(resent.published) == 3
+    new = _kernel.exchange_index(ws, name)
+    assert new is not None and new[0] == root.job_id and new[2] != old[2]
+    # The dead ejector's eject rolls forward, under the nonce it recorded: the new entry stays.
+    die_and_recover(ws, owner)
+    assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, name) == new
+
+
+@pytest.mark.parametrize("where", ["scratch", "hold"])
+def test_fsck_repair_removes_nothing_while_a_scratch_or_hold_cannot_be_read(tmp_path: Path, where: str) -> None:
+    from httk.workflow.fsck import check_workspace
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 directory")
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    name = str(jobs[0]["id"])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_kernel, "drop_exchange_index", lambda *_args: None)
+        with cli_owner(ws) as owner:
+            _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+    # Another uid's scratch or hold: fsck cannot know what it holds.
+    if where == "scratch":
+        unreadable = ws.control / "tmp" / f"{'0' * 32}.eject.{_fs.fresh_token()}"
+    else:
+        unreadable = ws.control / "transfers" / "outgoing" / uuid.uuid4().hex
+    unreadable.mkdir(parents=True)
+    os.chmod(unreadable, 0)
+    try:
+        report = check_workspace(ws, repair=True)
+    finally:
+        os.chmod(unreadable, 0o700)
+    (finding,) = [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
+    assert finding.action == "reported" and "not removed" in finding.detail
+    assert _kernel.exchange_index(ws, name) is not None
+    unreadable.rmdir()
+    repaired = check_workspace(ws, repair=True)
+    assert [finding.action for finding in repaired.findings] == ["removed"]
+
+
+def test_settle_does_not_mistake_a_taken_scratch_for_a_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A recoverer (of a falsely attested owner) renames the whole scratch between reading eject.json and looking
+    # for bundle/: bundle/ is gone, but it was not delivered.
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    name = str(jobs[0]["id"])
+    destination = _outbox(ws, name)
+    real_carried = _moving._carried
+    taken: list[Path] = []
+
+    def carried_then_taken(workspace: Any, target: Path, token: bytes) -> bool:
+        result = real_carried(workspace, target, token)
+        if not taken:
+            (scratch,) = [entry for entry in os.listdir(ws.control / "tmp") if ".eject." in entry]
+            moved = ws.control / "tmp" / f"{'0' * 32}.eject.{_fs.fresh_token()}"
+            os.rename(ws.control / "tmp" / scratch, moved)
+            taken.append(moved)
+        return result
+
+    monkeypatch.setattr(_moving, "_carried", carried_then_taken)
+    destination.mkdir(parents=True)
+    os.symlink(tmp_path / "elsewhere", destination / root.job_key)  # occupied: the reconciler decides at once
+    with cli_owner(ws) as owner, pytest.raises(_kernel.OwnerLost, match="taken"):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
+    assert sorted(os.listdir(taken[0])) == ["bundle", "eject.json"]
+    assert _kernel.exchange_index(ws, name) is not None
+
+
+@pytest.mark.parametrize("record", [b"", b"{not json", b'{"target": 1}', b"[]"])
+def test_a_torn_eject_record_rolls_back_or_keeps_the_scratch(tmp_path: Path, record: bytes) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    name = str(jobs[0]["id"])
+
+    def crash_before_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "before" and src is not None and src.name() == "bundle":
+            raise Crash("recorded, not yet delivered")
+
+    # Before the delivery: the record is ignored and the manifest rolls the members back.
+    owner = cli_owner(ws)
+    _fs.set_fault_injector(crash_before_delivery)
+    try:
+        with pytest.raises(Crash):
+            _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+    finally:
+        _fs.set_fault_injector(None)
+    (scratch,) = [ws.control / "tmp" / entry for entry in os.listdir(ws.control / "tmp") if ".eject." in entry]
+    (scratch / "eject.json").write_bytes(record)
+    assert _moving.reconcile_eject(owner, scratch) is True
+    assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, name) is not None
+    owner.discard_scratch(scratch)
+    owner.close()
+    # After the delivery the bundle is gone too: nothing decides it, so the scratch stays.
+    owner = cli_owner(ws)
+    _fs.set_fault_injector(_crash_after_delivery)
+    try:
+        with pytest.raises(Crash):
+            _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out2", tree=True)
+    finally:
+        _fs.set_fault_injector(None)
+    (scratch,) = [ws.control / "tmp" / entry for entry in os.listdir(ws.control / "tmp") if ".eject." in entry]
+    (scratch / "eject.json").write_bytes(record)
+    assert _moving.reconcile_eject(owner, scratch) is False
+    assert os.listdir(scratch) == ["eject.json"] and _kernel.exchange_index(ws, name) is not None
+
+
+def test_a_destination_reaching_the_exchange_through_a_symlink_is_refused(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    (ws.root / "exchange" / "outbox").mkdir(parents=True)
+    # The last directory is real, so only the canonical path shows that the delivery would land in the exchange.
+    os.symlink(ws.root / "exchange", tmp_path / "shortcut")
+    problem = _moving.destination_problem(tmp_path / "shortcut" / "outbox" / "name", ws)
+    assert problem is not None and "through a symlink" in problem
+    assert _moving.destination_problem(ws.root / "exchange" / "outbox" / "name", ws) is None
+    assert _moving.destination_problem(tmp_path / "out", ws) is None
+
+
 @pytest.mark.parametrize("planted", ["outbox", "outbox/name"])
 def test_a_symlink_in_the_outbox_never_redirects_an_eject(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str

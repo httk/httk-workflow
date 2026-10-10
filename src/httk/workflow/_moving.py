@@ -69,7 +69,7 @@ from httk.workflow._bundles import (
     validate_bundle,
 )
 from httk.workflow._job import JobDefinition
-from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner
+from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner, OwnerLost
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
@@ -346,7 +346,8 @@ def destination_problem(destination: Path, workspace: _kernel.KernelWorkspace | 
 
     It must be absolute without ``..``, and either a real directory or a missing name whose parent is a real
     directory; a symlink is neither. Below *workspace*'s exchange directory, every directory from the workspace
-    root down is opened (and created) without following a symlink, as the delivery does.
+    root down is opened (and created) without following a symlink, as the delivery does; a destination that
+    reaches the exchange only through a symlink is refused, since anchoring is decided on the lexical path.
 
     :param destination: The eject destination.
     :param workspace: The ejecting workspace.
@@ -355,7 +356,8 @@ def destination_problem(destination: Path, workspace: _kernel.KernelWorkspace | 
 
     if not destination.is_absolute() or ".." in destination.parts:
         return f"the eject destination must be absolute and without '..': {destination}"
-    if workspace is not None and destination.is_relative_to(workspace.root / EXCHANGE_DIRECTORY):
+    exchange = None if workspace is None else workspace.root / EXCHANGE_DIRECTORY
+    if workspace is not None and exchange is not None and destination.is_relative_to(exchange):
         try:
             descriptor, _target = _anchored_target(workspace, destination / "probe", create=True)
         except (OSError, _fs.UnsafePath, ValueError) as exc:
@@ -363,6 +365,9 @@ def destination_problem(destination: Path, workspace: _kernel.KernelWorkspace | 
         if descriptor is not None:
             os.close(descriptor)
         return None
+    if exchange is not None and Path(os.path.realpath(destination)).is_relative_to(exchange):
+        # Anchoring is decided on the lexical path: one that reaches the exchange through a symlink is refused.
+        return f"the eject destination {destination} leads into {exchange} through a symlink; name it directly"
     checked = destination
     try:
         try:
@@ -412,18 +417,25 @@ def _roll_back(owner: Owner, bundle: Path, manifest: BundleManifest) -> list[Job
     return returned
 
 
-def _exchange_root(bundle: Path, manifest: BundleManifest) -> tuple[str, str] | None:
-    """The exchange name and job id of a bundle whose root is an exchange job, from the root's ``state.json``."""
+type _Exchange = tuple[str, str, str | None]
+
+
+def _exchange_root(workspace: _kernel.KernelWorkspace, bundle: Path, manifest: BundleManifest) -> _Exchange | None:
+    """The exchange name, job id and index entry's adoption nonce of a bundle whose root is an exchange job, from
+    the root's ``state.json`` and the index."""
 
     root = manifest.members[0]
     doc, _damaged = read_state_unowned(manifest.member_dir(bundle, root) / "state.json")
     if doc is None or doc.origin != "exchange" or doc.exchange_name is None:
         return None
-    return doc.exchange_name, root.job_id
+    indexed = _kernel.exchange_index(workspace, doc.exchange_name)
+    nonce = indexed[2] if indexed is not None and indexed[0] == root.job_id else None
+    return doc.exchange_name, root.job_id, nonce
 
 
-def _leave_index(owner: Owner, exchange: tuple[str, str] | None) -> None:
-    # A delivered exchange root (returned, ejected or held) leaves the index; a child's entry is its root's.
+def _leave_index(owner: Owner, exchange: _Exchange | None) -> None:
+    # A delivered exchange root (returned, ejected or held) leaves the index; a child's entry is its root's. The
+    # nonce keeps a resubmission's entry (same rekeyed id, another adoption) from going with the earlier one.
     if exchange is not None:
         _kernel.drop_exchange_index(owner, *exchange)
 
@@ -435,7 +447,7 @@ class _Delivery:
     target: Path
     token: bytes
     transfer_id: str
-    exchange: tuple[str, str] | None
+    exchange: _Exchange | None
 
     def encode(self) -> bytes:
         exchange = None if self.exchange is None else list(self.exchange)
@@ -449,17 +461,32 @@ class _Delivery:
 
     @classmethod
     def read(cls, scratch: Path) -> Self | None:
-        data = _fs.read_bounded(_fs.loc(scratch / _DELIVERY), _RECORD_LIMIT)
-        if data is None:
-            return None
-        value = json.loads(data)
-        exchange = value["exchange"]
-        return cls(
-            Path(value["target"]),
-            str(value["token"]).encode("utf-8"),
-            str(value["transfer_id"]),
-            None if exchange is None else (str(exchange[0]), str(exchange[1])),
-        )
+        """Read *scratch*'s record.
+
+        :param scratch: The ``eject`` or ``hold`` scratch.
+        :return: The record, or ``None`` when it has none.
+        :raises ValueError: For a record that is not a regular file of the expected shape (a torn write).
+        """
+
+        try:
+            data = _fs.read_bounded(_fs.loc(scratch / _DELIVERY), _RECORD_LIMIT)
+            if data is None:
+                return None
+            value = json.loads(data)
+        except (_fs.UnsafePath, _fs.TooLarge) as exc:
+            raise ValueError(str(exc)) from exc
+        fields = value if isinstance(value, dict) else {}
+        target, token, transfer_id = fields.get("target"), fields.get("token"), fields.get("transfer_id")
+        exchange = fields.get("exchange", ())
+        if not (isinstance(target, str) and isinstance(token, str) and isinstance(transfer_id, str)):
+            raise ValueError(f"malformed {_DELIVERY}")
+        if exchange is None:
+            return cls(Path(target), token.encode("utf-8"), transfer_id, None)
+        match exchange:
+            case [str(name), str(job_id), str() | None as nonce]:
+                return cls(Path(target), token.encode("utf-8"), transfer_id, (name, job_id, nonce))
+            case _:
+                raise ValueError(f"malformed {_DELIVERY}")
 
 
 def _carried(workspace: _kernel.KernelWorkspace, target: Path, token: bytes) -> bool:
@@ -476,19 +503,40 @@ def _carried(workspace: _kernel.KernelWorkspace, target: Path, token: bytes) -> 
             os.close(descriptor)
 
 
+def delivered_exchange_job(scratch: Path) -> str | None:
+    """The exchange job an ``eject`` or ``hold`` scratch is delivering, from its ``eject.json``.
+
+    :param scratch: The scratch.
+    :return: The recorded exchange root's job id, or ``None`` when the scratch records none.
+    :raises ValueError: For a torn or malformed record.
+    """
+
+    delivery = _Delivery.read(scratch)
+    return None if delivery is None or delivery.exchange is None else delivery.exchange[1]
+
+
 def _settle(owner: Owner, scratch: Path) -> bool | None:
     """Resolve an ``eject`` or ``hold`` scratch: ``True`` when its bundle was delivered, ``False`` when every member
-    still in it went back (or none was taken), ``None`` when the destination cannot be read (the scratch stays)."""
+    still in it went back (or none was taken), ``None`` when the destination cannot be read or a torn ``eject.json``
+    leaves an empty bundle undecided (the scratch stays); :class:`OwnerLost` when a recoverer took the scratch."""
 
     bundle = scratch / _BUNDLE
-    delivery = _Delivery.read(scratch)
+    try:
+        delivery, torn = _Delivery.read(scratch), False
+    except ValueError as exc:
+        # A torn record decides nothing: the members still in the bundle go back.
+        _LOGGER.warning("ignoring the unreadable %s in %s: %s", _DELIVERY, scratch, exc)
+        delivery, torn = None, True
     if delivery is not None:
         target = delivery.target
         try:
             carried = _carried(owner.workspace, target, delivery.token)
             if carried or not _fs.exists(_fs.loc(bundle)):
-                # Only this owner moves its scratch: a bundle gone from it was delivered.
                 if not carried:
+                    # Only this owner moves bundle/ out of its scratch, but a recoverer takes the whole scratch:
+                    # looked at again after bundle/ was seen gone, a record still here means it was delivered.
+                    if not _fs.exists(_fs.loc(scratch / _DELIVERY)):
+                        raise OwnerLost(f"the scratch {scratch} was taken by a recoverer")
                     _LOGGER.warning("the eject %s left %s, which does not carry it now", delivery.transfer_id, target)
                 _leave_index(owner, delivery.exchange)
                 return True
@@ -502,8 +550,9 @@ def _settle(owner: Owner, scratch: Path) -> bool | None:
             return None
     read = read_manifest(bundle / "bundle.json")
     if read is None:
-        # build_bundle writes bundle.json before any member moves: nothing to return.
-        return False
+        # build_bundle writes bundle.json before any member moves: nothing to return. After a torn record the
+        # bundle may have been delivered: the scratch stays for the operator.
+        return None if torn else False
     returned = _roll_back(owner, bundle, read[1])
     _LOGGER.warning("rolled back the eject %s: %d jobs returned", read[1].transfer_id, len(returned))
     return False
@@ -553,7 +602,7 @@ def _eject(
     target = destination / (manifest.transfer_id if hold else root.job_key)
     report = EjectReport(target, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
     # Read in the scratch, before the bundle reaches a destination others may write.
-    exchange = _exchange_root(bundle, manifest)
+    exchange = _exchange_root(workspace, bundle, manifest)
     error: Exception | None = None
     try:
         # Recorded first: a crash after the delivery leaves a scratch whose reconciler can still decide it.
@@ -614,6 +663,7 @@ def reconcile_eject(owner: Owner, scratch: Path) -> bool:
     :param scratch: ``tmp/<owner-id>.eject.<token>/`` or ``tmp/<owner-id>.hold.<token>/``.
     :return: ``True`` when resolved (the kernel then discards the scratch); ``False`` when the destination
         cannot be read, which keeps the scratch.
+    :raises httk.workflow._kernel.OwnerLost: When a recoverer took the scratch meanwhile.
     """
 
     return _settle(owner, scratch) is not None

@@ -1117,8 +1117,11 @@ class OwnedJob:
             _LOGGER.warning("deleting %s with an unreadable state.json", self.path, exc_info=True)
             doc = None
         if doc is not None and doc.origin == "exchange" and doc.exchange_name is not None:
-            # §8.5: the index goes first; a crash before the job goes leaves the delete request pending.
-            drop_exchange_index(self.owner, doc.exchange_name, self.job_id)
+            # §8.5: the index goes first; a crash before the job goes leaves the delete request pending. The job is
+            # held here, so no other adoption of its id can hold the entry: its current nonce is this job's.
+            indexed = exchange_index(self.owner.workspace, doc.exchange_name)
+            if indexed is not None:
+                drop_exchange_index(self.owner, doc.exchange_name, self.job_id, indexed[2])
         self._present()
         self.owner.discard_tree(self.path)
         self._retire()
@@ -1292,18 +1295,20 @@ def _request_id(name: str, job_id: str) -> str | None:
         return None
 
 
-def drop_exchange_index(owner: Owner, exchange_name: str, job_id: str) -> None:
-    """Discard the exchange index entry of *exchange_name*, but only while it indexes *job_id*.
+def drop_exchange_index(owner: Owner, exchange_name: str, job_id: str, nonce: str | None) -> None:
+    """Discard the exchange index entry of *exchange_name*, but only while it indexes *job_id* by *nonce*.
 
     :param owner: The owner whose trash receives the entry.
     :param exchange_name: The exchange name (the client's job UUID).
     :param job_id: The job the entry must index (an exchange root leaving the workspace).
+    :param nonce: The adoption nonce the entry must carry (``None`` for an entry without one): a resubmission
+        rekeys to the same job id under another adoption, whose entry is never removed for the earlier one.
     """
 
     entry = _exchange_entry(owner.workspace, exchange_name)
     index = _read_json_quietly(entry / "index.json")
-    # Never remove an entry that indexes another job.
-    if index is not None and index.get("job_id") == job_id:
+    # Never remove an entry that indexes another job, or this job for another adoption.
+    if index is not None and index.get("job_id") == job_id and index.get("adoption_nonce") == nonce:
         owner.discard_tree(entry)
 
 

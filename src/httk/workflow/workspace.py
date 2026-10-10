@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
@@ -13,7 +13,7 @@ from . import _fs
 from ._kernel import OWNED
 from ._state import UNOWNED_STATES
 from ._util import json_bytes, utc_now
-from .errors import FormatError, SealedError, UnsupportedExtensionError
+from .errors import FormatError, SealedError, UnsupportedExtensionError, WorkflowError
 from .models import (
     CORE_PROFILE,
     EXCHANGE_EXTENSION,
@@ -35,6 +35,8 @@ WORKFLOWS_DIRECTORY = "workflows"
 
 #: The largest accepted ``format.json``.
 _FORMAT_LIMIT = 1 << 20
+#: How many times a ``format.json`` read-modify-write is redone when a concurrent writer replaced it.
+_FORMAT_ATTEMPTS = 5
 
 
 def _read_format(control: Path) -> dict[str, Any]:
@@ -357,27 +359,47 @@ class Workspace:
 
         return self._policy.visibility_deadline_seconds
 
-    def _write_format(self, stored: Mapping[str, object]) -> None:
-        _fs.write_file(_fs.loc(self.control / "format.json"), json_bytes(stored) + b"\n", durable=self.durable)
+    def _update_format[T](self, mutate: Callable[[dict[str, Any]], T]) -> T:
+        """Read-modify-write ``format.json``: apply *mutate* to a fresh read, write it with ``write_file`` and
+        verify by re-reading it, redoing all three when a concurrent writer replaced it in between.
+
+        Writers are not serialized (there is no lock): one that read before this write may still replace it later.
+
+        :param mutate: Changes the document in place; what it returns is returned.
+        :return: What *mutate* returned for the document that was verified.
+        :raises httk.workflow.errors.WorkflowError: When concurrent writers replaced every attempt.
+        """
+
+        for _ in range(_FORMAT_ATTEMPTS):
+            stored = _read_format(self.control)
+            result = mutate(stored)
+            written = json_bytes(stored)
+            _fs.write_file(_fs.loc(self.control / "format.json"), written + b"\n", durable=self.durable)
+            if json_bytes(_read_format(self.control)) == written:
+                self.format = stored
+                return result
+        raise WorkflowError(f"concurrent writers kept replacing {self.control / 'format.json'}; run the command again")
 
     def _add_extension(self, name: str) -> None:
-        """Record *name* in ``format.json`` ``extensions`` (a read-modify-write) and re-read the extensions."""
+        """Record *name* in ``format.json`` ``extensions`` (a verified read-modify-write) and re-read the extensions."""
 
-        stored = _read_format(self.control)
-        extensions = stored.get("extensions", [])
-        if not isinstance(extensions, list):
-            raise FormatError("workspace extensions must be an array of strings")
-        stored["extensions"] = sorted({*extensions, name})
-        self._write_format(stored)
+        def add(stored: dict[str, Any]) -> None:
+            extensions = stored.get("extensions", [])
+            if not isinstance(extensions, list):
+                raise FormatError("workspace extensions must be an array of strings")
+            stored["extensions"] = sorted({*extensions, name})
+
+        self._update_format(add)
         self.refresh_format()
 
     def set_policy(self, changes: Mapping[str, object]) -> WorkspacePolicy:
         """Validate *changes*, merge them into the stored policy, and publish it.
 
-        The write is an ordinary read-modify-write of ``format.json`` through an
+        The write is a read-modify-write of ``format.json`` through an
         exclusively created temporary file and a rename, so a reader never sees
-        a torn object. It is deliberately not serialized against another writer:
-        policy is administrative, changes are rare, and last writer wins.
+        a torn object, verified by re-reading it and redone when a concurrent
+        writer replaced it. It is deliberately not serialized against another
+        writer: policy is administrative, changes are rare, and last writer wins.
 
         :param changes: Supply policy values to validate and merge.
         :return: The resulting workspace policy.
@@ -387,11 +409,13 @@ class Workspace:
         from .seals import require_cli_modifiable
 
         require_cli_modifiable(self)
-        stored = _read_format(self.control)
-        merged = WorkspacePolicy.from_mapping(_section(stored, "policy")).updated(changes)
-        stored["policy"] = merged.as_mapping()
-        self._write_format(stored)
-        self.format = stored
+
+        def merge(stored: dict[str, Any]) -> WorkspacePolicy:
+            merged = WorkspacePolicy.from_mapping(_section(stored, "policy")).updated(changes)
+            stored["policy"] = merged.as_mapping()
+            return merged
+
+        merged = self._update_format(merge)
         self._policy = merged
         _LOGGER.info(
             "workspace %s policy updated: %s",
@@ -468,7 +492,8 @@ class Workspace:
 
         The write is the same read-modify-write of ``format.json`` that
         :meth:`set_policy` uses: an exclusively created temporary and a rename,
-        so a reader never sees a torn object, and last writer wins.
+        so a reader never sees a torn object, verified by re-reading, and last
+        writer wins.
 
         :param key: Name the application setting to store.
         :param value: Supply the setting value.
@@ -503,21 +528,22 @@ class Workspace:
         from .seals import require_cli_modifiable
 
         require_cli_modifiable(self)
-        stored = _read_format(self.control)
-        settings = _validate_settings(_section(stored, "settings"))
-        for key in unset:
-            if key not in settings:
-                raise ValueError(f"application setting is not set: {key}")
-            del settings[key]
-        for key, value in changes.items():
-            _validate_setting_key(key)
-            _validate_setting_value(key, value)
-            self._check_setting_collision(key, settings)
-            settings[key] = value
-        stored["settings"] = settings
-        self._write_format(stored)
-        self.format = stored
-        return dict(settings)
+
+        def configure(stored: dict[str, Any]) -> dict[str, object]:
+            settings = _validate_settings(_section(stored, "settings"))
+            for key in unset:
+                if key not in settings:
+                    raise ValueError(f"application setting is not set: {key}")
+                del settings[key]
+            for key, value in changes.items():
+                _validate_setting_key(key)
+                _validate_setting_value(key, value)
+                self._check_setting_collision(key, settings)
+                settings[key] = value
+            stored["settings"] = settings
+            return dict(settings)
+
+        return self._update_format(configure)
 
     def seed_settings(self, seeds: Mapping[str, object]) -> dict[str, object]:
         """Merge *seeds* into the settings, keeping any value already set.
@@ -533,19 +559,20 @@ class Workspace:
         """
 
         merged = _validate_settings(seeds)
-        stored = _read_format(self.control)
-        current = _validate_settings(_section(stored, "settings"))
-        for key, value in merged.items():
-            if any(
-                existing != key and _setting_variable_name(existing) == _setting_variable_name(key)
-                for existing in current
-            ):
-                continue
-            current.setdefault(key, value)
-        stored["settings"] = current
-        self._write_format(stored)
-        self.format = stored
-        return dict(current)
+
+        def seed(stored: dict[str, Any]) -> dict[str, object]:
+            current = _validate_settings(_section(stored, "settings"))
+            for key, value in merged.items():
+                if any(
+                    existing != key and _setting_variable_name(existing) == _setting_variable_name(key)
+                    for existing in current
+                ):
+                    continue
+                current.setdefault(key, value)
+            stored["settings"] = current
+            return dict(current)
+
+        return self._update_format(seed)
 
     def read_workflow_preludes(self) -> dict[str, str]:
         """Read and validate the workflow-in-workspace preludes from disk.
@@ -564,7 +591,8 @@ class Workspace:
 
         The write is the same read-modify-write of ``format.json`` that
         :meth:`set_setting` uses: an exclusively created temporary and a rename,
-        so a reader never sees a torn object, and last writer wins.
+        so a reader never sees a torn object, verified by re-reading, and last
+        writer wins.
 
         :param workflow_id: Name the workflow whose prelude to store.
         :param value: Supply the shell prelude text.
@@ -578,13 +606,14 @@ class Workspace:
         require_cli_modifiable(self)
         _validate_workflow_prelude_id(workflow_id)
         _validate_workflow_prelude_value(workflow_id, value)
-        stored = _read_format(self.control)
-        preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
-        preludes[workflow_id] = value
-        stored["workflow_preludes"] = preludes
-        self._write_format(stored)
-        self.format = stored
-        return dict(preludes)
+
+        def set_prelude(stored: dict[str, Any]) -> dict[str, str]:
+            preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
+            preludes[workflow_id] = value
+            stored["workflow_preludes"] = preludes
+            return dict(preludes)
+
+        return self._update_format(set_prelude)
 
     def unset_workflow_prelude(self, workflow_id: str) -> dict[str, str]:
         """Remove one workflow prelude, refusing one that is not set.
@@ -598,15 +627,16 @@ class Workspace:
         from .seals import require_cli_modifiable
 
         require_cli_modifiable(self)
-        stored = _read_format(self.control)
-        preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
-        if workflow_id not in preludes:
-            raise ValueError(f"workflow prelude is not set: {workflow_id}")
-        del preludes[workflow_id]
-        stored["workflow_preludes"] = preludes
-        self._write_format(stored)
-        self.format = stored
-        return dict(preludes)
+
+        def unset_prelude(stored: dict[str, Any]) -> dict[str, str]:
+            preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
+            if workflow_id not in preludes:
+                raise ValueError(f"workflow prelude is not set: {workflow_id}")
+            del preludes[workflow_id]
+            stored["workflow_preludes"] = preludes
+            return dict(preludes)
+
+        return self._update_format(unset_prelude)
 
     def check(self, *, repair: bool = False) -> "FsckReport":
         """Check the workspace's job tree (:func:`httk.workflow.fsck.check_workspace`).

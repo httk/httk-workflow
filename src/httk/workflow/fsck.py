@@ -17,14 +17,15 @@ The check walks ``jobs/`` and reports:
   the client's resubmission of that name.
 
 With ``repair`` the unparsable entries are moved to ``quarantine/`` and stale exchange index entries are
-removed; every other finding is left to the operator.
+removed, unless a hold or scratch cannot be read (another user's), which leaves them reported; every other
+finding is left to the operator.
 """
 
 import contextlib
 import json
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -35,7 +36,6 @@ from ._kernel import JobRef
 from ._state import UNOWNED_STATES, read_state_unowned
 from .errors import FormatError
 from .gc import quarantine
-from .models import parse_job_key
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
@@ -259,23 +259,43 @@ def _mode(path: Path) -> int:
         return 0
 
 
-def _in_flight(workspace: "Workspace") -> tuple[set[str], set[str]]:
-    """The job ids in holds and in owners' eject or hold scratch, and the adoption nonces of adopt scratch."""
+def _readable[T](read: Callable[[Path], T], path: Path) -> T | None:
+    """*read* of *path*, with ``None`` for a missing, torn or foreign file; any other :class:`OSError` (a scratch
+    another uid made unreadable) propagates."""
 
-    ids = {parse_job_key(key)[1] for hold in _moving.held(workspace) for key in hold.members}
+    try:
+        return read(path)
+    except (BundleError, ValueError, _fs.UnsafePath, NotADirectoryError):
+        return None
+
+
+def _read_json(path: Path) -> object:
+    data = _fs.read_bounded(_fs.loc(path), 1 << 16)
+    return None if data is None else json.loads(data)
+
+
+def _in_flight(workspace: "Workspace") -> tuple[set[str], set[str]] | None:
+    """The job ids in holds and in owners' eject or hold scratch (in the bundle, or recorded in ``eject.json`` once
+    the bundle left), and the adoption nonces of adopt scratch; ``None`` when a hold or scratch cannot be read
+    (another uid's, say), so that no job is known not to be in flight."""
+
+    ids: set[str] = set()
     nonces: set[str] = set()
-    tmp = workspace.control / "tmp"
-    for name in _kernel.list_names(tmp):
-        try:
-            read = read_manifest(tmp / name / "bundle" / "bundle.json")
-            source = _fs.read_bounded(_fs.loc(tmp / name / "source.json"), 1 << 16)
-            record = None if source is None else json.loads(source)
-        except (BundleError, ValueError, _fs.UnsafePath, OSError):
-            continue
-        if read is not None:
-            ids.update(member.job_id for member in read[1].members)
-        if isinstance(record, dict) and isinstance(record.get("nonce"), str):
-            nonces.add(record["nonce"])
+    outgoing, tmp = workspace.control / "transfers" / "outgoing", workspace.control / "tmp"
+    try:
+        for name in _kernel.list_names(outgoing):
+            if (held := _readable(read_manifest, outgoing / name / "bundle.json")) is not None:
+                ids.update(member.job_id for member in held[1].members)
+        for name in _kernel.list_names(tmp):
+            if (read := _readable(read_manifest, tmp / name / "bundle" / "bundle.json")) is not None:
+                ids.update(member.job_id for member in read[1].members)
+            if (job_id := _readable(_moving.delivered_exchange_job, tmp / name)) is not None:
+                ids.add(job_id)
+            record = _readable(_read_json, tmp / name / "source.json")
+            if isinstance(record, dict) and isinstance(nonce := record.get("nonce"), str):
+                nonces.add(nonce)
+    except OSError:
+        return None
     return ids, nonces
 
 
@@ -301,10 +321,15 @@ def _stale_exchange_index(workspace: "Workspace", *, removing: bool) -> list[Fsc
             # catches a job that went back home from a scratch in between.
             if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is not None:
                 continue
-            ids, nonces = _in_flight(workspace)
-            if job_id in ids or nonce in nonces:
+            in_flight = _in_flight(workspace)
+            if in_flight is not None and (job_id in in_flight[0] or nonce in in_flight[1]):
                 continue
-            if _kernel.locate(workspace, job_id, placement_hint=placement, settle=False) is not None:
+            if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is not None:
+                continue
+            if in_flight is None:
+                # An unreadable hold or scratch may hold the job: reported, never removed.
+                unknown = f"{detail} (a hold or scratch cannot be read, so it is not removed)"
+                findings.append(FsckFinding(directory / name, "stale_exchange_index", unknown, job_id=job_id))
                 continue
             if not removing:
                 findings.append(FsckFinding(directory / name, "stale_exchange_index", detail, job_id=job_id))
@@ -315,7 +340,7 @@ def _stale_exchange_index(workspace: "Workspace", *, removing: bool) -> list[Fsc
                         workspace, kind="cli", label="workspace fsck", allocation=None, advertised={}
                     )
                 )
-            _kernel.drop_exchange_index(owner, name, job_id)
+            _kernel.drop_exchange_index(owner, name, job_id, nonce)
             findings.append(
                 FsckFinding(directory / name, "stale_exchange_index", f"{detail}; removed", "removed", job_id=job_id)
             )
