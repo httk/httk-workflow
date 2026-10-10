@@ -104,6 +104,7 @@ namespaces = true
 [tool.setuptools.package-data]
 "httk.workflow" = [
   "py.typed",
+  "__init__.pyi",
   # The Bash authoring SDK (see docs/sdks/bash_api).
   "languages/bash/*.sh",
   # The C authoring SDK ships beside the Bash library as one .h/.c

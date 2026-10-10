@@ -104,6 +104,9 @@ autoapi_ignore = []  # scan everything; the reference is curated by skip_member 
 
 autoapi_type = "python"
 autoapi_dirs = ["../src/httk"]
+# Stubs first: the package root re-exports lazily (PEP 562), and its ``__init__.pyi``
+# holds the static imports the reference documents (AutoAPI keeps the first match).
+autoapi_file_patterns = ["*.pyi", "*.py"]
 autoapi_add_toctree_entry = False
 autoapi_keep_files = True
 autoapi_member_order = "bysource"

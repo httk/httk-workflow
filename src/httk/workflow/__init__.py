@@ -27,34 +27,14 @@ Only the deliberate top-level surface is re-exported here; everything else is
 reached through its submodule.
 """
 
-from .calculations import AmbiguousClaimError, DirectoryClaim, IdentityCollisionError, claims, collect_tree
-from .collecting import CollectedJob, JobRecord, collect, job_records
-from .errors import (
-    FormatError,
-    RunnerResolutionError,
-    TransactionError,
-    TransitionLostError,
-    UnsupportedExtensionError,
-    WorkflowError,
-    WorkspaceCorruptionError,
-    WorkspaceUnavailableError,
-)
-from .hookapi import Claim, Unclaimed
-from .id_keys import UnstableIdentityError, ledger_key
-from .manager import NotIdleError, TaskManager, WorkCensus
-from .runtime_builders import JobState
-from .scaffold import ScaffoldedJob, new_job, new_jobs, scaffold_job
-from .sdk import (
-    Attempt,
-    ChildrenView,
-    ChildResult,
-    ChildSpec,
-    InstantiateHandler,
-    ParentJob,
-    Runner,
-)
-from .storing import store_collected
-from .workspace import Workspace
+import importlib
+from typing import Any
+
+# The root re-exports resolve lazily (PEP 562 ``__getattr__``, the SPEC 1 pattern) so that
+# ``import httk.workflow``, and therefore ``python3 -m httk.workflow.adapter_runtime`` (the packaged remote
+# adapter, spawned once per remote operation), stays free of httk.core and numpy. Their static view, for type
+# checkers and the API reference, is the ``__init__.pyi`` stub beside this file.
+# pyright: reportUnsupportedDunderAll=false
 
 __all__ = [
     "AmbiguousClaimError",
@@ -99,3 +79,67 @@ __all__ = [
     "scaffold_job",
     "store_collected",
 ]
+
+_LAZY_EXPORTS = {
+    "AmbiguousClaimError": "calculations",
+    "DirectoryClaim": "calculations",
+    "IdentityCollisionError": "calculations",
+    "claims": "calculations",
+    "collect_tree": "calculations",
+    "CollectedJob": "collecting",
+    "JobRecord": "collecting",
+    "collect": "collecting",
+    "job_records": "collecting",
+    "FormatError": "errors",
+    "RunnerResolutionError": "errors",
+    "TransactionError": "errors",
+    "TransitionLostError": "errors",
+    "UnsupportedExtensionError": "errors",
+    "WorkflowError": "errors",
+    "WorkspaceCorruptionError": "errors",
+    "WorkspaceUnavailableError": "errors",
+    "Claim": "hookapi",
+    "Unclaimed": "hookapi",
+    "UnstableIdentityError": "id_keys",
+    "ledger_key": "id_keys",
+    "NotIdleError": "manager",
+    "TaskManager": "manager",
+    "WorkCensus": "manager",
+    "JobState": "runtime_builders",
+    "ScaffoldedJob": "scaffold",
+    "new_job": "scaffold",
+    "new_jobs": "scaffold",
+    "scaffold_job": "scaffold",
+    "Attempt": "sdk",
+    "ChildrenView": "sdk",
+    "ChildResult": "sdk",
+    "ChildSpec": "sdk",
+    "InstantiateHandler": "sdk",
+    "ParentJob": "sdk",
+    "Runner": "sdk",
+    "store_collected": "storing",
+    "Workspace": "workspace",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Import a root re-export from its submodule on first access.
+
+    :param name: The module attribute to resolve.
+    :return: The requested re-export.
+    :raises AttributeError: If ``name`` is not a root re-export.
+    """
+    submodule = _LAZY_EXPORTS.get(name)
+    if submodule is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(f".{submodule}", __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """List the module attributes, including the not yet resolved re-exports.
+
+    :return: The sorted attribute names.
+    """
+    return sorted(set(globals()) | set(__all__))

@@ -12,7 +12,6 @@ from .._job import JobDefinition
 from .._kernel import JobRef
 from .._state import TERMINAL_STATES, StateDoc
 from ..errors import WorkflowError
-from ..manager import TaskManager
 from ..models import LOGS_DIRECTORY, normalize_placement, placement_text, validate_step
 from ..scaffold import submit_payload
 from ..workspace import Workspace
@@ -201,6 +200,10 @@ def _drive(
     write: Callable[[str], None],
 ) -> JobRef:
     """Drive one job with a private manager that claims only this job, until it stops progressing."""
+
+    # Imported here: ``manager`` reaches ``introspection`` through ``gc`` and ``_exchange``, a cycle the
+    # lazy package root no longer pre-orders.
+    from ..manager import TaskManager
 
     meta = "debug" if label is None else f"debug child:{label}"
     job, job_error = read_job(ref)
