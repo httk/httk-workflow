@@ -97,7 +97,7 @@ def test_prepare_request_reuses_exact_signature_without_resigning(
     assert calls == 1
     assert encode_request(first) == encode_request(second)
     assert (first.created_at, first.expires_at) == (1_100, 4_700)
-    cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / f"{REQUEST_ID}.json"
+    cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / REQUEST_ID / "record"
     envelope = json.loads(cache.read_bytes())
     assert envelope["request"] == json.loads(encode_request(first))
     assert envelope["binding"]["daemon_public_key"] == endpoint.public_key
@@ -190,7 +190,7 @@ def test_reload_cannot_retarget_cached_request_id(endpoint: Endpoint) -> None:
     with pytest.raises(ValueError, match="intent conflicts"):
         prepare_request(endpoint, changed_intent)
 
-    cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / f"{REQUEST_ID}.json"
+    cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / REQUEST_ID / "record"
     assert json.loads(cache.read_bytes())["request"] == json.loads(encode_request(signed))
 
 
@@ -204,7 +204,7 @@ def test_new_start_requires_approved_configuration(endpoint: Endpoint) -> None:
 def test_prepare_request_refuses_partial_and_corrupt_cache(endpoint: Endpoint) -> None:
     prepare_request(endpoint, _intent())
     cache_root = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID
-    request_path = cache_root / f"{REQUEST_ID}.json"
+    request_path = cache_root / REQUEST_ID / "record"
     envelope = request_path.read_bytes()
     request_path.write_bytes(envelope[: len(envelope) // 2])
     with pytest.raises(ValueError, match="corrupt"):
@@ -220,24 +220,26 @@ def test_failed_publication_leaves_no_cache_and_retry_signs_fresh(
 ) -> None:
     calls = 0
     original_sign = client_module.sign_request
-    original_link = client_module.os.link
+    original_rename = os.rename
 
     def counted(request: Request, *, lifetime: int = 3600) -> Request:
         nonlocal calls
         calls += 1
         return original_sign(request, now=3_000 + calls, lifetime=lifetime)
 
-    def fail_link(*_args: object, **_kwargs: object) -> None:
-        raise OSError("injected publication failure")
+    def fail_publication(src: object, dst: object, **kwargs: object) -> None:
+        if str(dst).endswith(REQUEST_ID):
+            raise OSError("injected publication failure")
+        original_rename(src, dst, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(client_module, "sign_request", counted)
-    monkeypatch.setattr(client_module.os, "link", fail_link)
-    with pytest.raises(OSError, match="publication failure"):
+    monkeypatch.setattr(os, "rename", fail_publication)
+    with pytest.raises(OSError, match="could not be published"):
         prepare_request(endpoint, _intent())
-    cache = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID / f"{REQUEST_ID}.json"
-    assert not cache.exists()
+    cache_root = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID
+    assert list(cache_root.iterdir()) == []
 
-    monkeypatch.setattr(client_module.os, "link", original_link)
+    monkeypatch.setattr(os, "rename", original_rename)
     retried = prepare_request(endpoint, _intent())
     assert calls == 2
     assert retried.created_at == 3_002
@@ -254,11 +256,15 @@ def test_fsync_failure_after_install_reuses_exact_request(endpoint: Endpoint, mo
         signed.append(result)
         return result
 
+    cache_root = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID
+
     def fail_directory_fsync(descriptor: int) -> None:
+        # The cache directory is first synchronized right after the entry was published into it.
         nonlocal fsync_calls
-        fsync_calls += 1
-        if fsync_calls == 2:
-            raise OSError("injected directory fsync failure")
+        if os.readlink(f"/proc/self/fd/{descriptor}") == str(cache_root):
+            fsync_calls += 1
+            if fsync_calls == 1:
+                raise OSError("injected directory fsync failure")
         original_fsync(descriptor)
 
     monkeypatch.setattr(client_module, "sign_request", captured)
@@ -305,7 +311,7 @@ def test_concurrent_prepare_converges_on_one_cached_request(
     assert errors == []
     assert len(results) == 4
     assert len({encode_request(result) for result in results}) == 1
-    assert len(list(client_module._cache_directory(endpoint.require_daemon()[0]).glob("*.json"))) == 1
+    assert len(list(client_module._cache_directory(endpoint.require_daemon()[0]).glob(REQUEST_ID))) == 1
     assert prepare_request(endpoint, _intent()) == results[0]
 
 

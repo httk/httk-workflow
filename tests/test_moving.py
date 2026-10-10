@@ -1,6 +1,7 @@
 """Tests of :mod:`httk.workflow._moving`: eject, adopt, holds and their crash reconcilers, on a real filesystem."""
 
 import json
+import os
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
@@ -499,12 +500,18 @@ def test_untrusted_duplicate_exchange_name_is_refused_to_the_rejected_directory(
     ws = v3_workspace(tmp_path / "ws")
     jobs = family(str(uuid.uuid4()))
     with cli_owner(ws) as owner:
-        assert _kernel.claim_exchange_name(ws, owner, str(jobs[0]["id"]), str(uuid.uuid4()), PurePosixPath("x"))
+        claim = _kernel.claim_exchange_name(
+            ws, owner, str(jobs[0]["id"]), str(uuid.uuid4()), PurePosixPath("x"), nonce="other"
+        )
+        assert claim is _kernel.ExchangeClaim.WON
     client_bundle(tmp_path / "inbox" / "entry", jobs)
     with cli_owner(ws) as owner, pytest.raises(BundleError, match="already in use"):
         _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True, refused_to=tmp_path / "rejected")
     (rejected,) = (tmp_path / "rejected").iterdir()
-    assert rejected.name.startswith("entry.") and (rejected / "bundle.json").is_file()
+    assert (rejected / "entry" / "bundle.json").is_file()
+    reason = json.loads((rejected / "reason.json").read_bytes())
+    assert reason["format"] == "httk-workspace-exchange-rejection" and reason["name"] == "entry"
+    assert "already in use" in reason["reason"]
     assert job_ids_below(ws.jobs) == [] and not list((ws.control / "tmp").iterdir())
 
 
@@ -526,9 +533,10 @@ def test_untrusted_exchange_name_indexed_at_another_placement(tmp_path: Path) ->
     other = family(str(uuid.uuid4()))[:1]
     rekeyed = str(uuid.uuid5(uuid.UUID("b480bb06-dc60-4d16-a78b-cc6b3af734b4"), f"{ws.workspace_id}/{other[0]['id']}"))
     with cli_owner(ws) as owner:
-        assert _kernel.claim_exchange_name(ws, owner, str(other[0]["id"]), rekeyed, PurePosixPath("gone"))
+        claim = _kernel.claim_exchange_name(ws, owner, str(other[0]["id"]), rekeyed, PurePosixPath("gone"), nonce="x")
+        assert claim is _kernel.ExchangeClaim.WON
     client_bundle(tmp_path / "inbox" / "third", other)
-    with cli_owner(ws) as owner, pytest.raises(BundleError, match="another placement"):
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="another adoption whose job is not here"):
         _moving.adopt(ws, owner, tmp_path / "inbox" / "third", untrusted=True, refused_to=tmp_path / "rejected")
     assert root_id
 
@@ -572,6 +580,145 @@ def test_untrusted_rekey_crash_resumes(tmp_path: Path) -> None:
     assert len(published) == 3
     for path in ws.jobs.rglob("state.json"):
         assert json.loads(path.read_bytes())["origin"] == "exchange"
+
+
+def test_two_adopters_of_copies_of_one_client_bundle_publish_one_set_of_jobs(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs = client_bundle(tmp_path / "inbox" / "first")
+    client_bundle(tmp_path / "inbox" / "second", jobs)
+    client_bundle(tmp_path / "inbox" / "third", jobs)
+    crashed = cli_owner(ws)
+
+    def crash_after_the_plan(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "write" and phase == "before_replace" and dst is not None and dst.path.name == "plan.json":
+            _fs.set_fault_injector(None)
+            raise Crash("after the plan")
+
+    # A claims the exchange name and records its plan, then dies before publishing.
+    _fs.set_fault_injector(crash_after_the_plan)
+    with pytest.raises(Crash):
+        _moving.adopt(ws, crashed, tmp_path / "inbox" / "first", untrusted=True, refused_to=tmp_path / "rejected")
+    # B adopts a copy meanwhile: the name carries A's nonce and A's job is not here, so B's copy is refused.
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="another adoption"):
+        _moving.adopt(ws, owner, tmp_path / "inbox" / "second", untrusted=True, refused_to=tmp_path / "rejected")
+    assert job_ids_below(ws.jobs) == []
+    # A's recovery is a rerun of the same adoption (its nonce): it publishes.
+    die_and_recover(ws, crashed)
+    published = job_ids_below(ws.jobs)
+    assert len(published) == len(set(published)) == 3
+    # A later copy finds A's jobs and is already adopted; its scratch is discarded.
+    with cli_owner(ws) as owner:
+        late = _moving.adopt(ws, owner, tmp_path / "inbox" / "third", untrusted=True, refused_to=tmp_path / "rejected")
+    assert late is not None and late.already_adopted
+    assert sorted(job_ids_below(ws.jobs)) == sorted(published)
+    assert not job_ids_below(ws.control / "tmp")
+
+
+def test_an_untrusted_scratch_without_its_record_refuses_to_the_exchange_rejections(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    client_bundle(bundle)
+    (bundle / "junk").write_text("not part of the bundle")
+    owner = cli_owner(ws)
+
+    def crash_after_the_take(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "after" and dst is not None and ".adopt-untrusted." in str(dst.path):
+            _fs.set_fault_injector(None)
+            raise Crash("after the take")
+
+    _fs.set_fault_injector(crash_after_the_take)
+    with pytest.raises(Crash):
+        _moving.adopt(ws, owner, bundle, untrusted=True, refused_to=tmp_path / "elsewhere")
+    die_and_recover(ws, owner)
+    (rejected,) = (ws.root / "exchange" / "outbox" / "rejected").iterdir()
+    assert (rejected / "entry" / "junk").is_file() and (rejected / "reason.json").is_file()
+    assert not list((ws.control / "tmp").iterdir())
+
+
+def test_a_symlinked_rejection_directory_is_never_written_through(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    client_bundle(bundle)
+    (bundle / "junk").write_text("not part of the bundle")
+    (ws.root / "exchange" / "outbox").mkdir(parents=True)
+    (tmp_path / "steered").mkdir()
+    (ws.root / "exchange" / "outbox" / "rejected").symlink_to(tmp_path / "steered")
+    owner = cli_owner(ws)
+    with pytest.raises(BundleError, match="stays in"):
+        _moving.adopt(ws, owner, bundle, untrusted=True, refused_to=ws.root / "exchange" / "outbox" / "rejected")
+    owner.close()  # the reconciler cannot place it either: the scratch and the owner record stay for recovery
+    assert list((tmp_path / "steered").iterdir()) == []
+    assert [name for name in os.listdir(ws.control / "tmp") if ".adopt-untrusted." in name]
+    # Once the client repairs the directory, recovery refuses the bundle into it.
+    (ws.root / "exchange" / "outbox" / "rejected").unlink()
+    die_and_recover(ws, owner)
+    (rejected,) = (ws.root / "exchange" / "outbox" / "rejected").iterdir()
+    assert (rejected / "entry" / "junk").is_file()
+
+
+def test_eject_without_tree_refuses_a_root_with_children(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    plan = tree(ws)
+    with cli_owner(ws) as owner:
+        root = claim_root(ws, owner, plan[0][0]["id"])
+        with pytest.raises(_moving.Busy, match="child of the job"):
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=False)
+        assert owner.holds(root.ref)
+        root.give_back()
+    assert_in(ws, plan)
+    # The request path: an eject request without tree is refused and the jobs stay; with tree it ejects them all.
+    ref = find(ws, plan[0][0]["id"])
+    assert ref is not None and ref.placement is not None
+    for tree_ in (False, True):
+        _requests.post(
+            ws,
+            action="eject",
+            job_id=ref.job_id,
+            placement=ref.placement,
+            operator="t",
+            reason="t",
+            destination=str(tmp_path / "out"),
+            tree=tree_,
+        )
+        current = find(ws, plan[0][0]["id"])
+        assert current is not None
+        with cli_owner(ws) as owner:
+            assert removal.serve(ws, owner, current)
+        if not tree_:
+            assert all(find(ws, mapping["id"]) is not None for mapping, _, _ in plan)
+    assert all(find(ws, mapping["id"]) is None for mapping, _, _ in plan)
+    manifest = BundleManifest.from_json((tmp_path / "out" / ref.job_key / "bundle.json").read_bytes())
+    assert len(manifest.members) == 4
+
+
+def test_the_eject_verb_without_tree_refuses_a_root_with_children(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.core.cli import CLIContext
+
+    from httk.workflow.workflow_cli import command
+    from test_cli_job_eject_adopt import registered
+
+    ws, name = registered(tmp_path, "a")
+    plan = tree(ws)
+    root_id = str(plan[0][0]["id"])
+    argv = ["job", "eject", "--workspace", name, root_id, str(tmp_path / "out")]
+    assert command(argv, CLIContext("httk", tmp_path)) != 0
+    assert "child of the job" in capsys.readouterr().err
+    assert_in(ws, plan)
+    assert command([*argv, "--tree"], CLIContext("httk", tmp_path)) == 0
+    assert all(find(ws, mapping["id"]) is None for mapping, _, _ in plan)
+
+
+def test_a_symlinked_destination_never_carries_the_token(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "bundle.json").write_bytes(b"token")
+    (tmp_path / "link").symlink_to(real)
+    assert _fs.carries(_fs.loc(real), "bundle.json", b"token")
+    assert not _fs.carries(_fs.loc(tmp_path / "link"), "bundle.json", b"token")
+    assert not _fs.carries(_fs.loc(real), "bundle.json", b"other")
+    assert not _fs.carries(_fs.loc(tmp_path / "absent"), "bundle.json", b"token")
 
 
 # -- across filesystems ---------------------------------------------------------------------------------------------

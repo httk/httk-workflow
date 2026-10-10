@@ -94,7 +94,7 @@ workspace setting.
   tmpfs, which is checked. The workspace filesystem needs no lock support.
 
 The daemon's ledger needs no local filesystem and no locking: any filesystem
-with POSIX rename and link semantics works. Startup refuses missing
+with POSIX rename semantics works (no hard links). Startup refuses missing
 requirements; there is no unsandboxed fallback. The Python installation, its
 packages, the global launchers and the initial operator environment must be
 trusted: use a protected installation, not editable packages in uploaded
@@ -110,12 +110,13 @@ WORKSPACE/
   exchange/              the only client-mounted directory
     exchange.json        workspace identity, written when the extension is enabled
     daemon.json          the daemon's public menu, written by the daemon
-    status.json          job states, written by the managers
+    status.json          exchange jobs, states and progress, written by the managers
     managers.json        manager rows, written by the daemon
     managers/<handle>.log   published manager logs, written by the daemon
     inbox/               the client drops job bundles here
-    outbox/              returned jobs; outbox/rejected/<unique>/{<name>, reason.json}
-    requests/ responses/ signed command mailbox
+    outbox/              returned trees in outbox/<client job UUID>/;
+                         outbox/rejected/<unique>/{<name>, reason.json}
+    requests/ responses/ signed daemon actions and job actions
 ```
 
 - The broker's sandbox binds only `WORKSPACE/exchange` (and its private state)
@@ -324,8 +325,8 @@ in a file's group is trusted like you; on a host with shared project groups,
 remove group write with `chmod g-w`.
 
 The ledger is a directory of small records under `<state>/ledger/`, written
-with POSIX renames and links and no file locks, so it works on any filesystem
-with those semantics. Any number of daemon instances may run against one
+with POSIX renames, no hard links and no file locks, so it works on any
+filesystem with those semantics. Any number of daemon instances may run against one
 enrollment, for example a supervised standby; they share the ledger. An
 interrupted initialization keeps its partial artifacts and refuses automatic
 replacement. Keep the ledger and keys when diagnosing failures, and do not
@@ -435,21 +436,31 @@ httk remote daemon take-back REMOTE NAME [DESTINATION]
 to `DESTINATION` (default `./NAME`) and removes it. If the name is gone, a
 manager took it: cancel the job instead.
 
-A job that arrived through the exchange and finishes (`succeeded`, `failed` or
-`cancelled`), has no parent job and no unfinished child work is returned by the
-manager to `outbox/<job_key>` about 60 seconds later. Fetch it:
+Adoption gives the jobs fresh UUIDs and keeps the client's job UUID as the
+job's exchange name. Once the root and every job of its tree are finished
+(`succeeded`, `failed` or `cancelled`), a manager returns the whole tree to
+`outbox/<client job UUID>/<job key>`; while an earlier copy there is not
+fetched, the return is retried. Fetch it:
 
 ```console
-httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
+httk job adopt /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
+
+Managers also handle the job actions `stop_job`, `cancel_job` and `eject_job`
+from `requests/`, signed by a key of the workspace setting
+`exchange.authorized_keys` (comma- or space-separated) and naming the job by
+its client UUID; each is applied once and answered with an unsigned
+`responses/<id>.json` (`accepted`, or `refused` with a reason). The daemon
+leaves job actions to the managers.
 
 `job adopt` copies the tree, verifies it and removes the source. A failed job
 is never retried automatically. To resume one, adopt it, fix it, and eject it
 to the `inbox` again.
 
-`status.json` at the exchange root lists only job states
-(`jobs[{job_id, job_key, state}]`, `updated_at`, `truncated`); the managers
-write it. `managers.json` (format version 3) lists the
+`status.json` at the exchange root lists the exchange jobs
+(`jobs[{exchange_name, job_id, job_key, state, progress}]`, `updated_at`,
+`truncated`), where `progress` is a bounded excerpt of the scalar members of a
+`progress.json` the job keeps in its payload; the managers write it. `managers.json` (format version 3) lists the
 daemon's manager starts with their ledger state, Slurm job ID, scheduler state,
 exit code and start and end times. Unknown values are `null`. Both files are
 informational: `status.json` is rewritten at most every 10 seconds while a

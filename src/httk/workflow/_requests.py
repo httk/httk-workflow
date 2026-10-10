@@ -75,7 +75,10 @@ _OPTIONS = {
     "step": ("override_step",),
     "destination": ("eject",),
     "force": ("continue", "override_step"),
+    "tree": ("eject",),
 }
+#: Optional flags: present only as ``true``.
+_FLAGS = frozenset({"force", "tree"})
 _SIGNATURE = frozenset({"operator_key", "signature"})
 
 
@@ -109,9 +112,11 @@ class Eject:
     """Eject the owned job to *destination* (``_moving.eject``).
 
     :param destination: The request's destination.
+    :param tree: Eject the job's descendants with it (the request's ``tree``).
     """
 
     destination: str
+    tree: bool = False
 
 
 @dataclass(frozen=True)
@@ -179,7 +184,7 @@ def validate_envelope(document: Mapping[str, object]) -> None:
     if action not in ACTIONS:
         raise FormatError(f"request action {action!r} is not one of {', '.join(ACTIONS)}")
     allowed = {name for name, actions in _OPTIONS.items() if action in actions}
-    required = _REQUIRED | {name for name in allowed if name != "force"}
+    required = _REQUIRED | (allowed - _FLAGS)
     if not required <= members <= required | allowed | _SIGNATURE:
         raise FormatError(f"{action} request members differ: {sorted(members ^ required)}")
     if document["format"] != REQUEST_FORMAT or document["format_version"] != REQUEST_FORMAT_VERSION:
@@ -195,8 +200,9 @@ def validate_envelope(document: Mapping[str, object]) -> None:
         require_int(document["priority"], "request priority", maximum=999)
     if "step" in allowed:
         validate_step(document["step"], "request step")
-    if "force" in members and document["force"] is not True:
-        raise FormatError("request force must be true")
+    for flag in sorted(_FLAGS & members):
+        if document[flag] is not True:
+            raise FormatError(f"request {flag} must be true")
     if len(json_bytes(document)) > MAX_REQUEST_BYTES:
         raise FormatError(f"request is larger than {MAX_REQUEST_BYTES} bytes")
 
@@ -239,8 +245,8 @@ def post(
     :param operator: The operator label.
     :param reason: The operator's explanation.
     :param seed_path: Sign with this identity seed; ``None`` posts unsigned.
-    :param **extra: ``priority``, ``step``, ``force``, ``destination`` (``None`` or ``False`` are left out), or a
-        deterministic ``request_id``.
+    :param **extra: ``priority``, ``step``, ``force``, ``destination``, ``tree`` (``None`` or ``False`` are left
+        out), or a deterministic ``request_id`` and ``created_at``.
     :return: The posted request file.
     :raises httk.workflow.errors.FormatError: If the document would be invalid.
     """
@@ -422,7 +428,7 @@ def apply(
     audit["to"] = target
     new = new.with_history("request_applied", **audit).updated(applied_requests=applied)
     if action == "eject":
-        return new, Eject(require_string(document["destination"], "request destination"))
+        return new, Eject(require_string(document["destination"], "request destination"), document.get("tree") is True)
     if action == "delete":
         return new, Discard()
     release = Release(target, priority, (request.request_id,))

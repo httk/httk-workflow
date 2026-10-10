@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from httk.workflow import _daemon_state as state_module
-from httk.workflow import _txn
+from httk.workflow import _fs
 from httk.workflow._daemon_protocol import Request, Response, encode_response, request_digest
 from httk.workflow._daemon_state import (
     CapacityError,
@@ -25,7 +25,6 @@ from httk.workflow._daemon_state import (
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
-_REAL_LINK = os.link
 _REAL_RENAME = os.rename
 
 
@@ -88,7 +87,7 @@ def _open(state: Path, *, initialize: bool = False, max_records: int = 4096, max
 
 @pytest.fixture
 def hook() -> Iterator[list[Callable[[str], None]]]:
-    """Install a list of step callbacks as the ``_txn`` hook."""
+    """Install a list of step callbacks as the ledger's step hook."""
 
     callbacks: list[Callable[[str], None]] = []
 
@@ -96,16 +95,28 @@ def hook() -> Iterator[list[Callable[[str], None]]]:
         for callback in callbacks:
             callback(step)
 
-    _txn._HOOK = run
+    state_module._HOOK = run
     try:
         yield callbacks
     finally:
-        _txn._HOOK = None
+        state_module._HOOK = None
+
+
+def _plant(record: Path, data: bytes) -> None:
+    """Write a record directory by hand, as another instance (or a tamperer) would leave it."""
+
+    record.mkdir()
+    (record / "record").write_bytes(data)
+    (record / ".nonce").write_bytes(b"planted")
+
+
+def _visible(directory: Path) -> list[str]:
+    return sorted(path.name for path in directory.iterdir() if not path.name.startswith("."))
 
 
 def _slots(state: Path) -> dict[str, bytes]:
     directory = state / "ledger" / "slots"
-    return {path.name: path.read_bytes() for path in directory.iterdir() if not path.name.startswith(".")}
+    return {name: (directory / name / "record").read_bytes() for name in _visible(directory)}
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +126,7 @@ def _slots(state: Path) -> dict[str, bytes]:
 
 def test_initialize_creates_the_directory_layout_exclusively_and_instances_share_it(state: Path) -> None:
     root = state / "ledger"
-    assert sorted(path.name for path in root.iterdir()) == [
+    assert _visible(root) == [
         "format",
         "handles",
         "observations",
@@ -123,9 +134,9 @@ def test_initialize_creates_the_directory_layout_exclusively_and_instances_share
         "req",
         "slots",
     ]
-    assert (root / "format").read_bytes() == f"httk-workspace-daemon-ledger 2 {WORKSPACE_ID} {ENROLLMENT_ID}\n".encode()
+    assert (root / "format").read_bytes() == f"httk-workspace-daemon-ledger 3 {WORKSPACE_ID} {ENROLLMENT_ID}\n".encode()
     assert root.stat().st_mode & 0o777 == 0o700
-    assert not [path for path in state.iterdir() if path.name.startswith("birth.")]
+    assert not [path for path in state.iterdir() if path.name.startswith(".")]
     with pytest.raises(FileExistsError):
         _open(state, initialize=True)
     # No lock: any number of instances open the same ledger, each with its own nonce.
@@ -164,7 +175,7 @@ def test_missing_wrong_identity_unsupported_and_incomplete_ledgers_fail_closed(t
         Ledger(state, WORKSPACE_ID, "f" * 32)
     format_file = state / "ledger" / "format"
     original = format_file.read_bytes()
-    format_file.write_bytes(original.replace(b" 2 ", b" 1 "))  # the previous (three-file anchor) format
+    format_file.write_bytes(original.replace(b" 3 ", b" 2 "))  # the previous (hard-linked file record) format
     with pytest.raises(LedgerError, match="unsupported daemon ledger format"):
         _open(state)
     format_file.write_bytes(original)
@@ -208,10 +219,10 @@ def test_admission_writes_the_anchor_and_replays_by_canonical_bytes(state: Path)
         health = ledger.admit(_request(1))
         assert (health.state, health.handle, health.owner) == ("received", None, ledger.nonce)
         anchor = state / "ledger" / "req" / f"{1:032x}"
-        assert sorted(path.name for path in anchor.iterdir()) == ["envelope"]
+        assert _visible(anchor) == ["envelope"]
         start = ledger.admit(_start(2))
         assert start.handle is not None and start.decision is None
-        assert (state / "ledger" / "handles" / start.handle).read_bytes() == f"{2:032x}\n".encode()
+        assert (state / "ledger" / "handles" / start.handle / "record").read_bytes() == f"{2:032x}\n".encode()
         assert ledger.admit(_start(2)) == start
         with pytest.raises(ConflictError):
             ledger.admit(_request(2))
@@ -254,8 +265,8 @@ def _stored_start(state: Path) -> tuple[Path, Request, str]:
 
 
 def _symlinked_response(anchor: Path, _request: Request, _handle: str) -> None:
-    (anchor / "response").unlink()
-    (anchor / "response").symlink_to(anchor / "envelope")
+    (anchor / "response" / "record").unlink()
+    (anchor / "response" / "record").symlink_to(anchor / "envelope")
 
 
 def _edit_envelope(anchor: Path, **changes: object) -> None:
@@ -278,25 +289,29 @@ _MUTATIONS: dict[str, Callable[[Path, Request, str], object]] = {
     "extra envelope field": lambda anchor, _r, _h: _edit_envelope(anchor, extra=1),
     "other envelope version": lambda anchor, _r, _h: _edit_envelope(anchor, format_version=2),
     "oversized envelope": lambda anchor, _r, _h: (anchor / "envelope").write_bytes(b" " * (17 * 1024)),
-    "bad decision": lambda anchor, _r, _h: (anchor / "decision").write_bytes(b"submit 01 " + b"a" * 32 + b"\n"),
-    "unknown decision": lambda anchor, _r, _h: (anchor / "decision").write_bytes(b"maybe x " + b"a" * 32 + b"\n"),
-    "missing decision": lambda anchor, _r, _h: (anchor / "decision").unlink(),
-    "refuse decision under a submitted response": lambda anchor, _r, _h: (anchor / "decision").write_bytes(
+    "bad decision": lambda anchor, _r, _h: (anchor / "decision" / "record").write_bytes(
+        b"submit 01 " + b"a" * 32 + b"\n"
+    ),
+    "unknown decision": lambda anchor, _r, _h: (anchor / "decision" / "record").write_bytes(
+        b"maybe x " + b"a" * 32 + b"\n"
+    ),
+    "missing decision": lambda anchor, _r, _h: shutil.rmtree(anchor / "decision"),
+    "refuse decision under a submitted response": lambda anchor, _r, _h: (anchor / "decision" / "record").write_bytes(
         b"refuse stale_configuration " + b"a" * 32 + b"\n"
     ),
-    "bad scheduler": lambda anchor, _r, _h: (anchor / "scheduler").write_bytes(b"042 cluster-1\n"),
-    "submitted without scheduler": lambda anchor, _r, _h: (anchor / "scheduler").unlink(),
-    "signed response": lambda anchor, request, handle: (anchor / "response").write_bytes(
+    "bad scheduler": lambda anchor, _r, _h: (anchor / "scheduler" / "record").write_bytes(b"042 cluster-1\n"),
+    "submitted without scheduler": lambda anchor, _r, _h: shutil.rmtree(anchor / "scheduler"),
+    "signed response": lambda anchor, request, handle: (anchor / "response" / "record").write_bytes(
         encode_response(replace(_response(request, "submitted", handle=handle), operator_key="k", signature="s"))
     ),
-    "foreign response handle": lambda anchor, request, _h: (anchor / "response").write_bytes(
+    "foreign response handle": lambda anchor, request, _h: (anchor / "response" / "record").write_bytes(
         encode_response(_response(request, "submitted", handle="b" * 32))
     ),
-    "refused despite submit": lambda anchor, request, handle: (anchor / "response").write_bytes(
+    "refused despite submit": lambda anchor, request, handle: (anchor / "response" / "record").write_bytes(
         encode_response(_response(request, "refused", handle=handle, reason="x"))
     ),
     "symlinked response": _symlinked_response,
-    "oversized response": lambda anchor, _r, _h: (anchor / "response").write_bytes(b" " * (17 * 1024)),
+    "oversized response": lambda anchor, _r, _h: (anchor / "response" / "record").write_bytes(b" " * (17 * 1024)),
 }
 
 
@@ -362,8 +377,8 @@ def test_responses_must_belong_to_the_request_and_follow_its_decision(state: Pat
             other.record_scheduler(start.request_id, "42", "cluster-1")
         ledger.record_scheduler(start.request_id, "42", "cluster-1")
         ledger.record_scheduler(start.request_id, "42", "cluster-1")  # a repeat of the same identity is harmless
-        (state / "ledger" / "req" / start.request_id / "scheduler").unlink()
-        (state / "ledger" / "req" / start.request_id / "scheduler").write_bytes(b"43 cluster-1\n")
+        shutil.rmtree(state / "ledger" / "req" / start.request_id / "scheduler")
+        _plant(state / "ledger" / "req" / start.request_id / "scheduler", b"43 cluster-1\n")
         with pytest.raises(LedgerError, match="different scheduler identity"):
             ledger.record_scheduler(start.request_id, "42", "cluster-1")
 
@@ -396,7 +411,7 @@ def test_the_slot_scan_starts_at_the_listing_hint_wraps_and_is_busy_only_after_e
 ) -> None:
     slots = state / "ledger" / "slots"
     for k in (1, 3):
-        (slots / f"record.{k}").write_bytes(f"{9:032x} {'f' * 32}\n".encode())
+        _plant(slots / f"record.{k}", f"{9:032x} {'f' * 32}\n".encode())
     attempts: list[str] = []
     hook.append(attempts.append)
     with _open(state, max_records=4, max_submissions=1) as ledger:
@@ -416,7 +431,7 @@ def test_a_slot_taken_between_lookup_and_creation_is_skipped(state: Path, hook: 
 
     def take(step: str) -> None:
         if step == "ledger.slot" and not (slots / "record.0").exists():
-            (slots / "record.0").write_bytes(f"{9:032x} {'f' * 32}\n".encode())
+            _plant(slots / "record.0", f"{9:032x} {'f' * 32}\n".encode())
 
     hook.append(take)
     with _open(state, max_records=2, max_submissions=1) as ledger:
@@ -431,7 +446,7 @@ def test_a_slot_taken_between_lookup_and_creation_is_skipped(state: Path, hook: 
 
 @pytest.fixture
 def events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Record fsyncs (by path), renames and links in order."""
+    """Record fsyncs (by path) and renames in order."""
 
     recorded: list[tuple[str, str]] = []
     real_fsync = os.fsync
@@ -444,13 +459,8 @@ def events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         _REAL_RENAME(src, dst, **options)  # type: ignore[arg-type]
         recorded.append(("rename", str(dst)))
 
-    def link(src: object, dst: object, **options: object) -> None:
-        _REAL_LINK(src, dst, **options)  # type: ignore[arg-type]
-        recorded.append(("link", str(dst)))
-
     monkeypatch.setattr(os, "fsync", fsync)
     monkeypatch.setattr(os, "rename", rename)
-    monkeypatch.setattr(os, "link", link)
     return recorded
 
 
@@ -469,25 +479,26 @@ def test_files_are_synchronized_before_their_directories_and_the_anchor_before_t
         anchor = root / "req" / request.request_id
         renamed = _index(events, "rename", anchor)
         prepared = [path for kind, path in events[:renamed] if kind == "fsync" and "/prep/" in path]
-        # The one envelope file is fsynced, then the prepared directory, all before the rename.
-        assert Path(prepared[0]).name == "envelope"
-        assert Path(prepared[1]).parent == root / "prep"
+        # The envelope file is fsynced, then the prepared directory, all before the publishing rename.
+        envelope = next(index for index, path in enumerate(prepared) if Path(path).name.startswith(".envelope."))
+        assert Path(prepared[envelope + 1]).parent == root / "prep"
         req_synced = _index(events, "fsync", root / "req")
         assert req_synced > renamed
-        handle_linked = _index(events, "link", root / "handles" / entry.handle)
-        assert handle_linked > req_synced
-        assert _index(events, "fsync", root / "handles") > handle_linked
+        handle_published = _index(events, "rename", root / "handles" / entry.handle)
+        assert handle_published > req_synced
+        assert _index(events, "fsync", root / "handles") > handle_published
 
         events.clear()
         ledger.decide(request.request_id)
-        linked = _index(events, "link", anchor / "decision")
-        assert events[linked - 1][0] == "fsync" and "decision" in Path(events[linked - 1][1]).name
-        assert events[linked + 1] == ("fsync", str(anchor))
+        published = _index(events, "rename", anchor / "decision")
+        # The staged record directory is synchronized before it is renamed into place, the anchor after.
+        assert events[published - 1][0] == "fsync" and ".decision.stage-" in Path(events[published - 1][1]).name
+        assert events[published + 1] == ("fsync", str(anchor))
 
         events.clear()
         ledger.record_scheduler(request.request_id, "42", "cluster-1")
         ledger.finish(request.request_id, _response(request, "submitted", handle=entry.handle))
-        assert _index(events, "link", anchor / "scheduler") < _index(events, "link", anchor / "response")
+        assert _index(events, "rename", anchor / "scheduler") < _index(events, "rename", anchor / "response")
         assert events[-1] == ("fsync", str(anchor))
 
 
@@ -556,14 +567,14 @@ def test_a_retransmitted_anchor_rename_still_belongs_to_its_instance(
         if "/req/" in str(dst):
             raise OSError(errno.ENOTEMPTY, "retransmitted rename")
 
-    monkeypatch.setattr(_txn.os, "rename", retransmitted)
+    monkeypatch.setattr(os, "rename", retransmitted)
     with _open(state) as ledger:
         entry = ledger.admit(_start(1))
         assert entry.owner == ledger.nonce
         assert len(_slots(state)) == 2  # the winner kept its slots despite the error
 
 
-def test_a_retransmitted_decision_link_still_wins_and_the_other_instance_loses(
+def test_a_retransmitted_decision_rename_still_wins_and_the_other_instance_loses(
     state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first, second = _open(state), _open(state)
@@ -571,14 +582,14 @@ def test_a_retransmitted_decision_link_still_wins_and_the_other_instance_loses(
     first.admit(request)
 
     def retransmitted(src: object, dst: object, **options: object) -> None:
-        _REAL_LINK(src, dst, **options)  # type: ignore[arg-type]
+        _REAL_RENAME(src, dst, **options)  # type: ignore[arg-type]
         if str(dst).endswith("/decision"):
-            raise FileExistsError(errno.EEXIST, "retransmitted link")
+            raise FileExistsError(errno.EEXIST, "retransmitted rename")
 
-    monkeypatch.setattr(_txn.os, "link", retransmitted)
+    monkeypatch.setattr(os, "rename", retransmitted)
     entry, won = first.decide(request.request_id)
     assert won and entry.decision is not None and entry.decision.nonce == first.nonce
-    monkeypatch.setattr(_txn.os, "link", _REAL_LINK)
+    monkeypatch.setattr(os, "rename", _REAL_RENAME)
     later, lost = second.decide(request.request_id, reason="stale_configuration")
     assert not lost and later.decision == entry.decision
 
@@ -591,7 +602,7 @@ def test_two_instances_deciding_at_once_have_exactly_one_winner(state: Path, hoo
     raced: list[None] = []
 
     def other_decides(step: str) -> None:
-        if step == "link_new.written" and not raced:
+        if step == "ledger.staged" and not raced:
             raced.append(None)
             _entry, won = second.decide(request.request_id)
             outcomes.append(won)
@@ -663,9 +674,9 @@ def test_managers_list_handles_cross_checked_and_skip_orphans(state: Path) -> No
         ledger.decide(decided.request.request_id, reason="invalid_configuration")
         ledger.admit(_request(3))
         handles = state / "ledger" / "handles"
-        (handles / ("c" * 32)).write_bytes(f"{3:032x}\n".encode())  # names a request without that handle
-        (handles / ("d" * 32)).write_bytes(f"{7:032x}\n".encode())  # names no request
-        (handles / ".dddd.link-1234").write_bytes(b"crash leftover")
+        _plant(handles / ("c" * 32), f"{3:032x}\n".encode())  # names a request without that handle
+        _plant(handles / ("d" * 32), f"{7:032x}\n".encode())  # names no request
+        (handles / ".dddd.stage-1234").mkdir()  # a crash leftover
         rows = ledger.managers()
         assert [(row["request_id"], row["state"], row["job_id"]) for row in rows] == [
             (f"{1:032x}", "received", None),
@@ -688,8 +699,9 @@ def test_crash_leftovers_are_swept_after_an_hour(state: Path, hook: list[Callabl
         crashed.admit(_request(1))
     hook.clear()
     (prepared,) = (state / "ledger" / "prep").iterdir()
-    leftover = state / "ledger" / "slots" / ".record.5.link-abcd"
-    leftover.write_bytes(b"x")
+    leftover = state / "ledger" / "slots" / ".record.5.stage-abcd"
+    leftover.mkdir()
+    (leftover / "record").write_bytes(b"x")
     with _open(state) as ledger:
         ledger.recover(older_than=95.0)
         assert prepared.exists() and leftover.exists()
@@ -772,7 +784,7 @@ def test_the_sweep_fences_a_slow_owners_prepared_anchor_and_the_owner_loses_clea
     hook.clear()
     assert swept and entry.owner == owner.nonce and entry.handle is not None
     anchor = state / "ledger" / "req" / request.request_id
-    assert sorted(path.name for path in anchor.iterdir()) == ["envelope"]
+    assert _visible(anchor) == ["envelope"]
     assert list(prep.iterdir()) == []
     # The lost round released its own slots; the settled admission holds one record and one start slot.
     assert len(_slots(state)) == 2
@@ -784,31 +796,31 @@ def test_a_prepared_anchor_fenced_while_it_is_written_is_prepared_again(
     state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     owner, sweeper = _open(state), _open(state)
-    real = state_module.fsync_directory
+    real = state_module._write
     swept: list[None] = []
 
-    def sweep_before_sync(path: Path) -> None:
-        if path.parent.name == "prep" and not swept:
+    def sweep_before_the_envelope(path: Path, data: bytes) -> None:
+        if path.name == "envelope" and path.parent.parent.name == "prep" and not swept:
             swept.append(None)
-            sweeper.recover(older_than=95.0, now_ns=path.stat().st_mtime_ns + 3601 * 10**9)
-        real(path)
+            sweeper.recover(older_than=95.0, now_ns=path.parent.stat().st_mtime_ns + 3601 * 10**9)
+        real(path, data)
 
-    monkeypatch.setattr(state_module, "fsync_directory", sweep_before_sync)
+    monkeypatch.setattr(state_module, "_write", sweep_before_the_envelope)
     entry = owner.admit(_request(1))
     assert swept and entry.owner == owner.nonce
     assert list((state / "ledger" / "prep").iterdir()) == []
     assert owner.verify() == 1
 
 
-def test_a_link_whose_temporary_was_swept_is_retried_once(state: Path, hook: list[Callable[[str], None]]) -> None:
+def test_a_record_whose_staging_was_swept_is_retried_once(state: Path, hook: list[Callable[[str], None]]) -> None:
     slots = state / "ledger" / "slots"
     swept: list[Path] = []
 
     def sweep_temporary(step: str) -> None:
-        if step == "link_new.written" and not swept:
-            (temporary,) = slots.glob(".record.*")
-            temporary.unlink()  # the leftover sweep took the stalled link's temporary
-            swept.append(temporary)
+        if step == "ledger.staged" and not swept:
+            (staging,) = slots.glob(".record.*")
+            shutil.rmtree(staging)  # the leftover sweep took the stalled publication's staging
+            swept.append(staging)
 
     hook.append(sweep_temporary)
     with _open(state) as ledger:
@@ -819,15 +831,16 @@ def test_a_link_whose_temporary_was_swept_is_retried_once(state: Path, hook: lis
 
 
 def test_an_error_after_the_anchor_is_installed_keeps_its_slots(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    real = state_module.fsync_directory
+    real = _fs.publish_dir
     request = _start(1)
 
-    def fail_after_install(path: Path) -> None:
-        if path == state / "ledger" / "req":
-            raise OSError(errno.EIO, "injected directory sync failure")
-        real(path)
+    def fail_after_install(staging: _fs.Loc, dst: _fs.Loc, *, nonce: bytes, durable: bool) -> bool:
+        won = real(staging, dst, nonce=nonce, durable=durable)
+        if dst.path.parent == state / "ledger" / "req":
+            raise OSError(errno.EIO, "injected failure after the install")
+        return won
 
-    monkeypatch.setattr(state_module, "fsync_directory", fail_after_install)
+    monkeypatch.setattr(_fs, "publish_dir", fail_after_install)
     with _open(state) as ledger, pytest.raises(OSError, match="injected"):
         ledger.admit(request)
     monkeypatch.undo()
@@ -867,7 +880,7 @@ def test_an_anchor_another_instance_installed_is_made_durable_before_this_one_ex
     assert ("fsync", str(state / "ledger" / "req")) in events
     second.decide(request.request_id)
     assert events.index(("fsync", str(state / "ledger" / "req"))) < events.index(
-        ("link", str(state / "ledger" / "req" / request.request_id / "decision"))
+        ("rename", str(state / "ledger" / "req" / request.request_id / "decision"))
     )
     # An answered entry needs no further durability work to be replayed.
     health = _request(2)

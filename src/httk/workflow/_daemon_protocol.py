@@ -11,14 +11,17 @@ _MAX_REQUEST_SIZE = 16 * 1024
 _REQUEST_FORMAT = "httk-workspace-command"
 _RESPONSE_FORMAT = "httk-workspace-response"
 _FORMAT_VERSION = 4
-_OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"})
+#: The job actions a client signs for the workspace's managers (the daemon leaves them alone): each names the job
+#: by its exchange name, the client's own job UUID.
+JOB_OPERATIONS = frozenset({"stop_job", "cancel_job", "eject_job"})
+_OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"}) | JOB_OPERATIONS
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _PROFILE_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
 _REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
-_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy"})
+_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy", "accepted"})
 #: A job bundle name in the exchange; the reserved names are the exchange's own entries.
 _BUNDLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _RESERVED_NAMES = frozenset(
@@ -48,6 +51,7 @@ class Request:
     :param profile: Select a configured profile for ``start_manager``.
     :param handle: Identify a broker-issued manager handle.
     :param configuration_digest: Pin the selected approved configuration.
+    :param job: Name the job of a job action by its exchange name (a canonical UUID).
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
 
@@ -62,6 +66,7 @@ class Request:
     operator_key: str | None = field(default=None, kw_only=True)
     signature: str | None = field(default=None, kw_only=True)
     configuration_digest: str | None = field(default=None, kw_only=True)
+    job: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
@@ -95,8 +100,18 @@ class Request:
             raise ValueError("invalid profile")
         if self.handle is not None and type(self.handle) is not str:
             raise ValueError("invalid handle")
+        if (self.job is not None) != (self.operation in JOB_OPERATIONS):
+            raise ValueError("a job is named by job actions only")
 
-        if self.operation == "health":
+        if self.operation in JOB_OPERATIONS:
+            if self.profile is not None or self.handle is not None or self.configuration_digest is not None:
+                raise ValueError("a job action requires job only")
+            try:
+                if type(self.job) is not str or str(uuid.UUID(self.job)) != self.job:
+                    raise ValueError
+            except (ValueError, AttributeError) as exc:
+                raise ValueError("invalid job") from exc
+        elif self.operation == "health":
             if self.profile is not None or self.handle is not None or self.configuration_digest is not None:
                 raise ValueError("health forbids operation fields")
         elif self.operation == "start_manager":
@@ -197,6 +212,8 @@ def _request_fields(request: Request) -> dict[str, object]:
         fields["configuration_digest"] = request.configuration_digest
     elif request.operation in {"manager_status", "cancel_manager"}:
         fields["handle"] = request.handle
+    elif request.operation in JOB_OPERATIONS:
+        fields["job"] = request.job
     return fields
 
 
@@ -234,6 +251,8 @@ def decode_request(data: bytes) -> Request:
         keys.update({"configuration", "configuration_digest"})
     elif operation in {"manager_status", "cancel_manager"}:
         keys.add("handle")
+    elif operation in JOB_OPERATIONS:
+        keys.add("job")
     if set(value) != keys:
         raise ValueError("invalid request fields")
     request_id = value["request_id"]
@@ -242,6 +261,7 @@ def decode_request(data: bytes) -> Request:
     profile = value.get("configuration")
     configuration_digest = value.get("configuration_digest")
     handle = value.get("handle")
+    job = value.get("job")
     created_at = value["created_at"]
     expires_at = value["expires_at"]
     operator_key = value["operator_key"]
@@ -253,6 +273,8 @@ def decode_request(data: bytes) -> Request:
     if "configuration_digest" in value and type(configuration_digest) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
+        raise ValueError("invalid request fields")
+    if "job" in value and type(job) is not str:
         raise ValueError("invalid request fields")
     if type(created_at) is not int or type(expires_at) is not int:
         raise ValueError("invalid request fields")
@@ -273,6 +295,7 @@ def decode_request(data: bytes) -> Request:
             operator_key=cast(str | None, operator_key),
             signature=cast(str | None, signature),
             configuration_digest=cast(str | None, configuration_digest),
+            job=cast(str | None, job),
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
@@ -365,6 +388,7 @@ class Response:
             "uncertain": has_handle and not has_state and has_reason,
             "refused": not has_state and has_reason,
             "busy": not has_handle and not has_state and has_reason,
+            "accepted": not has_handle and not has_state and not has_reason,
         }[self.outcome]
         if not valid:
             raise ValueError("invalid outcome fields")
@@ -468,6 +492,7 @@ def request_digest(request: Request) -> str:
 
 
 __all__ = [
+    "JOB_OPERATIONS",
     "Request",
     "Response",
     "decode_request",

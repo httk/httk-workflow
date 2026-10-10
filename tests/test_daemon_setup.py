@@ -16,7 +16,7 @@ from typing import cast
 import pytest
 from httk.core.identity import identity_public_key
 
-from httk.workflow import _daemon_cli, _daemon_policy, _daemon_service, _daemon_setup, _txn, launchers
+from httk.workflow import _daemon_cli, _daemon_policy, _daemon_service, _daemon_setup, _daemon_state, launchers
 from httk.workflow._daemon_activation import read_active_snapshot
 from httk.workflow._daemon_auth import sign_request
 from httk.workflow._daemon_keys import response_public_key, response_seed_path
@@ -758,11 +758,11 @@ def test_activation_retires_running_daemons_at_their_next_admission_or_decision(
                 _configure(layout, ("set", f"sbatch={layout.broker / 'sbatch'}"))
                 _daemon_setup.activate(layout.workspace.root)
 
-        _txn._HOOK = activate_again
+        _daemon_state._HOOK = activate_again
         try:
             successor.process_once(stop)
         finally:
-            _txn._HOOK = None
+            _daemon_state._HOOK = None
         entry = successor.ledger.lookup_request(pending.request_id)
         assert successor.retired and entry is not None and entry.state == "received"
         assert not cast(_Gateway, successor.gateway).submissions

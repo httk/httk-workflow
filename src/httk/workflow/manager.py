@@ -56,6 +56,7 @@ from ._allocation import (
 from ._attempt_env import attempt_context, runner_environment
 from ._attempt_process import start_gated, write_marker
 from ._durations import format_duration
+from ._exchange import ExchangeService
 from ._job import JobDefinition
 from ._kernel import OwnedJob, Release
 from ._launch_protocol import LaunchConfinement
@@ -606,8 +607,11 @@ class TaskManager:
                 time.time() - self.drain_start,
                 extra=self._event("drain_point_passed", end_time=self.end_time),
             )
-        if EXCHANGE_EXTENSION in workspace.extensions:
-            _LOGGER.info("this manager does not serve the workspace exchange yet (it returns in phase D)")
+        # Only an unrestricted manager serves the exchange (whether the extension is enabled, and attempts are
+        # confined, is decided again on every tick): a restricted one could adopt jobs no manager runs.
+        self._exchange: ExchangeService | None = None
+        if not self.placement_prefixes and (self.accept_any_pool or "default" in self.pools):
+            self._exchange = ExchangeService(workspace, self.owner)
 
     def __repr__(self) -> str:
         return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
@@ -722,13 +726,19 @@ class TaskManager:
             self.owner.check_alive()
             changed = self._self_heal()
             changed |= self._recover_dead_owners()
-            # The exchange pass returns in phase D.
+            serving = not self._draining and self._confinement_blocked() is None
+            if self._exchange is not None and serving and EXCHANGE_EXTENSION in self.workspace.extensions:
+                # First, so an adopted job is claimed and a translated request applied in this same tick.
+                changed |= self._exchange.run()
             self._cache = _kernel.ListingCache()
             changed |= self._requests_pass()
             changed |= self._joins_pass()
             changed |= self._supervise()
-            if not self._draining and self._confinement_blocked() is None:
+            if serving:
                 changed |= _manager_scheduling.claim_pass(self)
+            if changed and self._exchange is not None:
+                # A job may just have finished: the next pass looks for finished exchange trees at once.
+                self._exchange.invalidate()
             self._collect_garbage()
             self.heartbeat()
         except _kernel.OwnerLost:
@@ -1221,7 +1231,19 @@ class TaskManager:
                 continue
             local = running.get(job_id)
             if local is not None:
-                cancel = next((request for request in requests if request.action == "cancel"), None)
+                try:
+                    doc = local.owned.read_state()
+                except (FormatError, _fs.UnsafePath):
+                    doc = None  # the commit fails a damaged job; a cancel still stops it
+                cancel = next(
+                    (
+                        request
+                        for request in requests
+                        if request.action == "cancel"
+                        and (doc is None or not removal.translation_applied(self.workspace, doc, request))
+                    ),
+                    None,
+                )
                 if cancel is not None and local.cancel is None:
                     self._cancel_attempt(local, cancel)
                     changed = True

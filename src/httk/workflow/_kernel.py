@@ -13,6 +13,7 @@ records.
 """
 
 import dataclasses
+import enum
 import errno
 import itertools
 import json
@@ -55,6 +56,7 @@ __all__ = [
     "OWNED",
     "TERMINAL_STATES",
     "UNOWNED_STATES",
+    "ExchangeClaim",
     "JobHeader",
     "JobName",
     "JobRef",
@@ -71,6 +73,7 @@ __all__ = [
     "attest_dead",
     "claim",
     "claim_exchange_name",
+    "exchange_index",
     "exchange_translation_applied",
     "format_job_name",
     "list_jobs",
@@ -1719,9 +1722,26 @@ def take(workspace: KernelWorkspace, owner: Owner, src: _fs.Loc, purpose: str) -
 # -- the exchange index ---------------------------------------------------------------------------------------------
 
 
+class ExchangeClaim(enum.Enum):
+    """The outcome of :func:`claim_exchange_name`."""
+
+    #: This call created the entry.
+    WON = "won"
+    #: The entry carries the caller's adoption nonce: an earlier run of the same adoption created it.
+    SAME = "same"
+    #: Another adoption (or another job) holds the name.
+    OTHER = "other"
+
+
 def claim_exchange_name(
-    workspace: KernelWorkspace, owner: Owner, exchange_name: str, job_id: str, placement: PurePosixPath
-) -> bool:
+    workspace: KernelWorkspace,
+    owner: Owner,
+    exchange_name: str,
+    job_id: str,
+    placement: PurePosixPath,
+    *,
+    nonce: str,
+) -> ExchangeClaim:
     """Create the exchange index entry ``exchange-jobs/<name>/`` at most once, before the job is submitted.
 
     :param workspace: The workspace.
@@ -1729,25 +1749,50 @@ def claim_exchange_name(
     :param exchange_name: The client's name for the job (a UUID).
     :param job_id: The job UUID.
     :param placement: The job's placement.
-    :return: Whether the entry now indexes *job_id* at *placement* (created here, or by an earlier run for the
-        same job).
+    :param nonce: The adoption's own nonce, kept in its scratch, so that a reconciler rerun of the same adoption
+        recognizes its entry and a concurrent adopter of another copy does not.
+    :return: Whether the entry was created here, by an earlier run of this adoption, or by another one.
     """
 
     job_id = canonical_uuid(job_id, "job_id")
     entry, durable = _exchange_entry(workspace, exchange_name), workspace.durable
     staging = owner.scratch("claim")
-    nonce = f"{owner.owner_id}.{_fs.fresh_token()}".encode()
-    _fs.write_file(_fs.loc(staging / ".nonce"), nonce, durable=durable)
-    index: dict[str, object] = {"job_id": job_id, "placement": placement_text(normalize_placement(placement))}
+    publish_nonce = f"{owner.owner_id}.{_fs.fresh_token()}".encode()
+    _fs.write_file(_fs.loc(staging / ".nonce"), publish_nonce, durable=durable)
+    index: dict[str, object] = {
+        "job_id": job_id,
+        "placement": placement_text(normalize_placement(placement)),
+        "adoption_nonce": nonce,
+    }
     _fs.write_file(_fs.loc(staging / "index.json"), _encode(index), durable=durable)
     # Anchored at the staging, so a scratch a recoverer took is never recreated.
     os.close(_fs.open_dir_under(staging, "translated", create=True, mode=0o777, durable=durable))
     # publish_dir removes the staging whether it won or lost.
-    if _fs.publish_dir(_fs.loc(staging), _fs.loc(entry), nonce=nonce, durable=durable):
-        return True
-    # §13.2: an adopt reconciler rerun after its adopter died finds its own job's entry; that is not a duplicate.
-    existing = _read_json_quietly(entry / "index.json")
-    return existing is not None and {key: existing.get(key) for key in index} == index
+    if _fs.publish_dir(_fs.loc(staging), _fs.loc(entry), nonce=publish_nonce, durable=durable):
+        return ExchangeClaim.WON
+    existing = exchange_index(workspace, exchange_name)
+    return ExchangeClaim.SAME if existing == (job_id, normalize_placement(placement), nonce) else ExchangeClaim.OTHER
+
+
+def exchange_index(workspace: KernelWorkspace, exchange_name: str) -> tuple[str, PurePosixPath, str | None] | None:
+    """Read the exchange index entry of *exchange_name*.
+
+    :param workspace: The workspace.
+    :param exchange_name: The client's name for the job.
+    :return: The indexed job UUID, its placement and the adoption nonce (``None`` when the entry has none), or
+        ``None`` when there is no readable entry.
+    """
+
+    value = _read_json_quietly(_exchange_entry(workspace, exchange_name) / "index.json")
+    if value is None:
+        return None
+    try:
+        job_id = canonical_uuid(value.get("job_id"), "job_id")
+        placement = normalize_placement(str(value["placement"]))
+    except (FormatError, ValueError, KeyError):
+        return None
+    nonce = value.get("adoption_nonce")
+    return job_id, placement, nonce if isinstance(nonce, str) else None
 
 
 def record_exchange_translation(workspace: KernelWorkspace, exchange_name: str, request_id: str) -> None:

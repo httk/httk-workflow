@@ -21,7 +21,7 @@ import pytest
 from httk.core.identity import identity_public_key
 
 from httk.workflow import _daemon_service as service_module
-from httk.workflow import _txn
+from httk.workflow import _daemon_state
 from httk.workflow._daemon_activation import activation_document
 from httk.workflow._daemon_auth import sign_request, verify_response
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
@@ -1389,11 +1389,11 @@ def hook() -> Any:
         for callback in callbacks:
             callback(step)
 
-    _txn._HOOK = run
+    _daemon_state._HOOK = run
     try:
         yield callbacks
     finally:
-        _txn._HOOK = None
+        _daemon_state._HOOK = None
 
 
 def _submissions(*brokers: Broker) -> int:
@@ -1408,27 +1408,27 @@ def test_one_submission_however_two_instances_race_for_the_decision(
     stack, first, _ = _open(tmp_path, policy)
     second = _instance(first)
     start = _request(tmp_path, 1, "start_manager", profile="cpu")
-    real_link = os.link
+    real_rename = os.rename
     raced: list[None] = []
 
-    def link(src: Any, dst: Any, **options: Any) -> None:
+    def rename(src: Any, dst: Any, **options: Any) -> None:
         if not str(dst).endswith("/decision") or raced:
-            real_link(src, dst, **options)
+            real_rename(src, dst, **options)
             return
         raced.append(None)
         if race == "concurrent":
             second.process_once(threading.Event())  # the other instance decides, submits and publishes first
-            real_link(src, dst, **options)
+            real_rename(src, dst, **options)
         else:
-            real_link(src, dst, **options)
-            raise FileExistsError(errno.EEXIST, "NFS retransmission of a successful link")
+            real_rename(src, dst, **options)
+            raise FileExistsError(errno.EEXIST, "NFS retransmission of a successful rename")
 
     def late_instance(step: str) -> None:
         if step == "ledger.decided" and race == "retransmitted" and len(raced) == 1:
             raced.append(None)
             second.process_once(threading.Event())  # sees a decision it did not win: publishes nothing
 
-    monkeypatch.setattr(_txn.os, "link", link)
+    monkeypatch.setattr(os, "rename", rename)
     hook.append(late_instance)
     try:
         _publish(first, start)
@@ -1663,8 +1663,8 @@ def test_the_decision_is_durable_before_sbatch_and_the_response_before_publicati
         broker.process_once(threading.Event())
         assert _read(broker, start).outcome == "submitted"
         sbatch, publish = events.index("sbatch"), events.index("publish")
-        decision = next(i for i, event in enumerate(events) if ".decision.link-" in event)
-        response = next(i for i, event in enumerate(events) if ".response.link-" in event)
+        decision = next(i for i, event in enumerate(events) if ".decision.stage-" in event)
+        response = next(i for i, event in enumerate(events) if ".response.stage-" in event)
         assert decision < events.index(f"fsync {anchor}", decision) < sbatch
         assert sbatch < response < events.index(f"fsync {anchor}", response) < publish
     finally:

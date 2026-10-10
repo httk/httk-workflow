@@ -467,6 +467,21 @@ def _read_child(parent: Loc, name: str, limit: int) -> bytes | None:
         os.close(descriptor)
 
 
+def carries(dst: Loc, token_name: str, token: bytes) -> bool:
+    """Report whether the directory *dst* holds the regular file *token_name* with exactly *token*.
+
+    *dst* itself is opened without following a symlink, and the token is read anchored at it, bounded and
+    without blocking, so a name another party may write can never pass by pointing elsewhere.
+
+    :param dst: The directory to check.
+    :param token_name: The token file's name inside it.
+    :param token: The expected content.
+    :return: Whether *dst* carries the token.
+    """
+
+    return _read_child(dst, token_name, len(token)) == token
+
+
 def deliver(src: Loc, dst: Loc, *, token_name: str, token: bytes, durable: bool) -> Delivered:
     """Move a directory carrying a token file to a name another party may also occupy.
 
@@ -493,7 +508,7 @@ def deliver(src: Loc, dst: Loc, *, token_name: str, token: bytes, durable: bool)
         if error is not None:
             raise error
         raise MoveFailed(f"{src.path} stayed in place although the rename reported success")
-    if _read_child(dst, token_name, len(token)) == token:
+    if carries(dst, token_name, token):
         # Our token at dst: the delivery happened, even if rename() reported an error.
         if durable:
             _fsync_parents(src, dst)

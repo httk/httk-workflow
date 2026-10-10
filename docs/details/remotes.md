@@ -220,7 +220,7 @@ $ httk remote daemon start confined --configuration small --request-id REQUEST_I
 $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
 $ httk remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
-$ httk job adopt /mnt/cluster/exchange/outbox/JOB_KEY
+$ httk job adopt /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
 `job eject` exports the job by a local atomic ejection and then copies it into

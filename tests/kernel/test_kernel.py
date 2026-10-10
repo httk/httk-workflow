@@ -22,6 +22,7 @@ from httk.workflow._fs import Loc
 from httk.workflow._job import MAX_JOB_BYTES
 from httk.workflow._kernel import (
     OWNED,
+    ExchangeClaim,
     JobRef,
     ListingCache,
     OwnedJob,
@@ -33,6 +34,7 @@ from httk.workflow._kernel import (
     attest_dead,
     claim,
     claim_exchange_name,
+    exchange_index,
     exchange_translation_applied,
     format_job_name,
     list_jobs,
@@ -829,7 +831,7 @@ def test_leftover_temporaries_and_discard(ws: FakeWorkspace) -> None:
     assert [path.exists() for path in leftovers + keep] == [False, False, True, True]
     request = post_request(ws, request_doc(job.job_id))
     exchange_name = str(uuid.uuid4())
-    assert claim_exchange_name(ws, owner, exchange_name, job.job_id, job.placement())
+    assert claim_exchange_name(ws, owner, exchange_name, job.job_id, job.placement(), nonce="n") is ExchangeClaim.WON
     mapping = StateDoc.empty(job.job_id).as_mapping()
     mapping.update(origin="exchange", exchange_name=exchange_name)
     job.write_state(StateDoc.from_mapping(mapping))
@@ -1076,14 +1078,22 @@ def test_take(ws: FakeWorkspace, tmp_path: Path) -> None:
 def test_exchange_names(ws: FakeWorkspace) -> None:
     first, second = new_owner(ws), new_owner(ws)
     name, job_id, request_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
-    assert claim_exchange_name(ws, first, name, job_id, PurePosixPath("x/y"))
-    # Another job is refused the name; a rerun for the same job (an adopt reconciler whose adopter died) is not.
-    assert not claim_exchange_name(ws, second, name, str(uuid.uuid4()), PurePosixPath())
-    assert claim_exchange_name(ws, second, name, job_id, PurePosixPath("x/y"))
-    # The same job at another placement is not the same claim.
-    assert not claim_exchange_name(ws, second, name, job_id, PurePosixPath("x"))
+    assert claim_exchange_name(ws, first, name, job_id, PurePosixPath("x/y"), nonce="a") is ExchangeClaim.WON
+    # Another job is refused the name; a rerun of the same adoption (an adopt reconciler whose adopter died, with
+    # the adoption's nonce from its scratch) is not.
+    assert claim_exchange_name(ws, second, name, str(uuid.uuid4()), PurePosixPath(), nonce="a") is ExchangeClaim.OTHER
+    assert claim_exchange_name(ws, second, name, job_id, PurePosixPath("x/y"), nonce="a") is ExchangeClaim.SAME
+    # Another adoption of the same job (a copy of its bundle) is not the same claim, nor is another placement.
+    assert claim_exchange_name(ws, second, name, job_id, PurePosixPath("x/y"), nonce="b") is ExchangeClaim.OTHER
+    assert claim_exchange_name(ws, second, name, job_id, PurePosixPath("x"), nonce="a") is ExchangeClaim.OTHER
     entry = ws.control / "exchange-jobs" / name
-    assert json.loads((entry / "index.json").read_text()) == {"job_id": job_id, "placement": "x/y"}
+    assert json.loads((entry / "index.json").read_text()) == {
+        "job_id": job_id,
+        "placement": "x/y",
+        "adoption_nonce": "a",
+    }
+    assert exchange_index(ws, name) == (job_id, PurePosixPath("x/y"), "a")
+    assert exchange_index(ws, str(uuid.uuid4())) is None
     assert (entry / ".nonce").read_text().startswith(f"{first.owner_id}.")
     assert [item for item in os.listdir(ws.control / "tmp") if ".claim." in item] == []
     assert not exchange_translation_applied(ws, name, request_id)
@@ -1093,7 +1103,7 @@ def test_exchange_names(ws: FakeWorkspace) -> None:
     with pytest.raises(WorkflowError):
         record_exchange_translation(ws, str(uuid.uuid4()), request_id)
     with pytest.raises(FormatError):
-        claim_exchange_name(ws, first, "client", job_id, PurePosixPath())
+        claim_exchange_name(ws, first, "client", job_id, PurePosixPath(), nonce="a")
 
 
 # -- 12. locate ---------------------------------------------------------------------------------------------------------------

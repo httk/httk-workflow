@@ -34,6 +34,7 @@ __all__ = [
     "remove_jobs",
     "request_now",
     "serve",
+    "translation_applied",
 ]
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -165,6 +166,41 @@ def _parse(path: Path) -> _requests.Request | None:
         return None
 
 
+def _exchange_name(doc: StateDoc, request: _requests.Request) -> str | None:
+    """The exchange name an exchange-derived request of an exchange job is guarded by, else ``None``."""
+
+    if doc.origin == "exchange" and doc.exchange_name is not None and request.document["operator"] == "exchange":
+        return doc.exchange_name
+    return None
+
+
+def translation_applied(workspace: _kernel.KernelWorkspace, doc: StateDoc, request: _requests.Request) -> bool:
+    """Report whether *request* is a job action from the exchange that this exchange job applied already.
+
+    Once ``applied_requests`` no longer holds its id, the index's ``translated/`` set is what tells a lagging
+    translator's re-post apart (plan §13.4).
+
+    :param workspace: The workspace.
+    :param doc: The job's ``state.json``.
+    :param request: The request.
+    :return: Whether the request must be dropped unapplied.
+    """
+
+    name = _exchange_name(doc, request)
+    return name is not None and _kernel.exchange_translation_applied(workspace, name, request.request_id)
+
+
+def _record_translation(workspace: _kernel.KernelWorkspace, doc: StateDoc, request: _requests.Request) -> None:
+    name = _exchange_name(doc, request)
+    if name is None:
+        return
+    try:
+        _kernel.record_exchange_translation(workspace, name, request.request_id)
+    except WorkflowError:
+        # The entry is gone (the job was deleted or returned): nothing can re-post into it.
+        _LOGGER.debug("no exchange index entry %s to record request %s in", name, request.request_id)
+
+
 def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDoc:
     """Seal the owned job's payload and return the document recording it (the ``Seal`` effect)."""
 
@@ -186,7 +222,7 @@ def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDo
     return doc.updated(seal={"sha256": sha256, "signed": signed})
 
 
-def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, destination: str) -> None:
+def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _requests.Eject) -> None:
     """Eject the owned job for an ``eject`` request (the ``Eject`` effect); a refusal leaves it where it was."""
 
     workspace = cast("Workspace", owned.owner.workspace)
@@ -196,12 +232,15 @@ def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, destinati
     owned.write_state(doc)
     _fs.remove_file(_fs.loc(request.path), durable=workspace.durable)
     try:
-        report = _moving.eject(workspace, owned.owner, owned, destination=Path(destination), tree=False)
+        report = _moving.eject(workspace, owned.owner, owned, destination=Path(effect.destination), tree=effect.tree)
     except (WorkflowError, ValueError) as exc:
         if owned.owner.holds(owned.ref):
             owned.give_back()
         _LOGGER.warning("eject request %s for %s refused: %s", request.request_id, owned.job_key, exc)
         return
+    if doc.origin == "exchange" and doc.exchange_name is not None:
+        # A returned (or otherwise ejected) exchange root leaves the index; a child's entry is its root's.
+        _kernel._drop_exchange_index(owned.owner, doc.exchange_name, owned.job_id)
     _LOGGER.info(
         "ejected %s to %s (request %s)",
         owned.job_key,
@@ -260,6 +299,14 @@ def apply_requests(
     requests.sort(key=lambda request: (str(request.document["created_at"]), request.request_id))
     extra = tuple(exclude)
     for request in requests:
+        if translation_applied(workspace, doc, request):
+            # A lagging exchange translator re-posted an action this job applied already: never again.
+            _fs.remove_file(_fs.loc(request.path), durable=workspace.durable)
+            owned.append_log(
+                "request_applied",
+                detail={"request_id": request.request_id, "action": request.action, "dropped": "already applied"},
+            )
+            continue
         new, effect = _requests.apply(
             job,
             doc,
@@ -292,7 +339,7 @@ def apply_requests(
         elif isinstance(effect, _requests.Seal):
             release(owned, _seal(owned, new, request), _recording(effect.release, extra))
         elif isinstance(effect, _requests.Eject):
-            _eject(owned, new, request, effect.destination)
+            _eject(owned, new, request, effect)
         elif isinstance(effect, _requests.Unseal):
             try:
                 owned.discard_subtree(".httk-job/seal.json")
@@ -301,6 +348,9 @@ def apply_requests(
             release(owned, new, _recording(effect.release, extra))
         else:
             release(owned, new, _recording(effect, extra))
+        # Recorded after the effect: a crash in between can at worst let a lagging re-post apply once more, while
+        # recording first could lose the action altogether.
+        _record_translation(workspace, doc, request)
         return None
     return doc
 

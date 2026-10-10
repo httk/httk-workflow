@@ -17,6 +17,7 @@ from pathlib import Path
 
 from httk.core.userdirs import data_home
 
+from . import _fs
 from ._confine import confine_settings
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_cli import _anchored
@@ -616,96 +617,43 @@ def _runtime_policy_bytes(policy: Policy) -> bytes:
     return data
 
 
-def _write_exclusive(path: Path, data: bytes) -> None:
+def _write_protected(path: Path, data: bytes) -> None:
+    """Replace one protected file atomically (mode 0600), anchored at its directory opened without symlinks."""
+
     directory = _open_directory(path.parent)
-    temporary = f".{path.name}.{secrets.token_hex(16)}.tmp"
-    descriptor = -1
-    created = False
     try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory,
-        )
-        created = True
-        os.fchmod(descriptor, 0o600)
-        offset = 0
-        while offset < len(data):
-            written = os.write(descriptor, data[offset:])
-            if written <= 0:
-                raise OSError("protected write made no progress")
-            offset += written
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        os.link(
-            temporary,
-            path.name,
-            src_dir_fd=directory,
-            dst_dir_fd=directory,
-            follow_symlinks=False,
-        )
-        os.fsync(directory)
+        _fs.write_file(_fs.anchored(directory, path.name), data, durable=True, mode=0o600)
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if created:
-            try:
-                os.unlink(temporary, dir_fd=directory)
-                os.fsync(directory)
-            except FileNotFoundError:
-                pass
         os.close(directory)
+
+
+def _write_exclusive(path: Path, data: bytes) -> None:
+    """Install an immutable content-addressed snapshot; every writer of the name writes the same bytes.
+
+    :param path: The snapshot, named by its digest.
+    :param data: Its canonical content.
+    :raises ValueError: If an existing snapshot disagrees with its digest.
+    """
+
+    try:
+        existing: bytes | None = _read_bounded(path, _MAX_RUNTIME_POLICY_BYTES, protected=True)
+    except FileNotFoundError:
+        existing = None
+    if existing is None:
+        _write_protected(path, data)
+    elif existing != data:
+        raise ValueError("existing immutable daemon snapshot disagrees with its digest")
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    directory = _open_directory(path.parent)
-    temporary = f".{path.name}.{secrets.token_hex(16)}.tmp"
-    descriptor = -1
-    created = False
-    try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory,
-        )
-        created = True
-        os.fchmod(descriptor, 0o600)
-        data = data + b"\n"
-        offset = 0
-        while offset < len(data):
-            written = os.write(descriptor, data[offset:])
-            if written <= 0:
-                raise OSError("protected write made no progress")
-            offset += written
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        os.rename(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
-        created = False
-        os.fsync(directory)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if created:
-            try:
-                os.unlink(temporary, dir_fd=directory)
-            except FileNotFoundError:
-                pass
-        os.close(directory)
+    _write_protected(path, data + b"\n")
 
 
 def _publish(policy: Policy) -> Path:
     canonical = _runtime_policy_bytes(policy)
     digest = hashlib.sha256(canonical).hexdigest()
     snapshot = policy.snapshots / f"{digest}.json"
-    try:
-        _write_exclusive(snapshot, canonical)
-    except FileExistsError:
-        if _read_bounded(snapshot, _MAX_RUNTIME_POLICY_BYTES, protected=True) != canonical:
-            raise ValueError("existing immutable daemon snapshot disagrees with its digest") from None
+    _write_exclusive(snapshot, canonical)
     active = activation_document(snapshot, policy)
     _write_atomic(policy.state / "active.json", _canonical_bytes(active))
     return snapshot

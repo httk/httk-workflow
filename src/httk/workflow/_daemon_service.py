@@ -23,7 +23,7 @@ from ._daemon_auth import CLOCK_SKEW_SECONDS, check_request_time, sign_response,
 from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_SCANNED_ENTRIES, MailboxDirectory
 from ._daemon_policy import Policy, _open_directory, load_policy
-from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
+from ._daemon_protocol import JOB_OPERATIONS, Request, Response, decode_request, encode_response, request_digest
 from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger, LedgerError, refusal_response
 from ._exchange import ExchangeUnavailableError, publish_file
@@ -682,6 +682,8 @@ class Broker:
             except ValueError:
                 self._discard_invalid(publication, "invalid_document")
                 continue
+            if request.operation in JOB_OPERATIONS:
+                continue  # a job action, for the workspace's managers
             if publication != f"{request.request_id}.json":
                 self._discard_invalid(publication, "identifier_mismatch")
                 continue

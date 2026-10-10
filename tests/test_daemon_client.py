@@ -846,9 +846,11 @@ def test_take_back_survives_a_retransmitted_enoent_after_a_successful_rename(
 
 
 @pytest.mark.parametrize("probe_fails", [False, True])
-def test_take_back_keeps_the_original_when_publication_is_ambiguous(
+def test_take_back_decides_publication_by_its_private_copy_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_fails: bool
 ) -> None:
+    # The publishing rename reports an error after taking effect, and a consumer may move the published copy on
+    # (or probing it fails): the private copy is gone, so it was published, and the held original goes.
     endpoint = _endpoint(tmp_path)
     (endpoint.exchange / "inbox" / "job-1").mkdir()
     destination = tmp_path / "out"
@@ -858,7 +860,7 @@ def test_take_back_keeps_the_original_when_publication_is_ambiguous(
         real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
         if dst == destination:
             if not probe_fails:
-                real_rename(destination, tmp_path / "consumed")  # a consumer moved it before the identity probe
+                real_rename(destination, tmp_path / "consumed")  # a consumer moved it on at once
             raise OSError(5, "reported error after success")
 
     def lstat(path: object, **kwargs: object) -> os.stat_result:
@@ -869,10 +871,8 @@ def test_take_back_keeps_the_original_when_publication_is_ambiguous(
     monkeypatch.setattr(os, "rename", rename)
     monkeypatch.setattr(os, "lstat", lstat)
 
-    with pytest.raises(OSError, match="may or may not have been published"):
-        client_module.take_back(endpoint, "job-1", destination)
-
-    assert [path.name.startswith(".takeback-") for path in (endpoint.exchange / "inbox").iterdir()] == [True]
+    assert client_module.take_back(endpoint, "job-1", destination) == destination
+    assert list((endpoint.exchange / "inbox").iterdir()) == []
 
 
 def test_take_back_refuses_destinations_inside_the_exchange(tmp_path: Path) -> None:
@@ -929,7 +929,7 @@ def test_take_back_names_the_held_entry_when_restore_fails_and_warns_on_stuck_re
 
     held = next((endpoint.exchange / "inbox").iterdir())
     held.rename(held.with_name("job-2"))
-    monkeypatch.setattr(client_module.shutil, "rmtree", lambda *_a, **_k: (_ for _ in ()).throw(OSError("busy")))
+    monkeypatch.setattr(client_module._fs, "discard", lambda *_a, **_k: (_ for _ in ()).throw(OSError("busy")))
     with caplog.at_level("WARNING"):
         client_module.take_back(endpoint, "job-2", tmp_path / "out2")
     assert ".takeback-" in caplog.text

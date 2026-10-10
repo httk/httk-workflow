@@ -7,6 +7,8 @@ from pathlib import Path
 
 from httk.core.crypto import ed25519_generate_seed, ed25519_public_key
 
+from . import _fs
+
 RESPONSE_SEED_NAME = "response.seed"
 _ENCODED_SEED_BYTES = 44
 
@@ -68,27 +70,14 @@ def initialize_response_seed(directory: Path) -> Path:
     """
 
     directory_fd = _open_directory(directory)
-    descriptor = -1
     try:
-        descriptor = os.open(
-            RESPONSE_SEED_NAME,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_fd,
-        )
-        os.fchmod(descriptor, 0o600)
         data = base64.b64encode(ed25519_generate_seed()) + b"\n"
-        offset = 0
-        while offset < len(data):
-            written = os.write(descriptor, data[offset:])
-            if written <= 0:
-                raise OSError("daemon response seed write made no progress")
-            offset += written
-        os.fsync(descriptor)
-        os.fsync(directory_fd)
-    finally:
-        if descriptor >= 0:
+        descriptor = _fs.create_exclusive(_fs.anchored(directory_fd, RESPONSE_SEED_NAME), data, durable=True)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
             os.close(descriptor)
+    finally:
         os.close(directory_fd)
     return response_seed_path(directory)
 

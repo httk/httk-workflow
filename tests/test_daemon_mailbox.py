@@ -66,8 +66,7 @@ def test_remove_validates_flat_names_and_unlinks_symlink_entry(tmp_path: Path) -
         with pytest.raises(ValueError, match="name"):
             mailbox.remove("../outside.json")
         mailbox.remove(name)
-        with pytest.raises(FileNotFoundError):
-            mailbox.remove(name)
+        mailbox.remove(name)  # an absent publication counts as removed
 
     assert not (path / name).exists()
     assert target.read_bytes() == b"outside"
@@ -84,7 +83,7 @@ def test_failed_replace_before_rename_preserves_old_publication(
     def fail_rename(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected rename failure")
 
-    monkeypatch.setattr(mailbox_module.os, "rename", fail_rename)
+    monkeypatch.setattr(mailbox_module.os, "replace", fail_rename)
     with MailboxDirectory(path) as mailbox, pytest.raises(OSError):
         mailbox.replace(name, b"new")
     assert old.read_bytes() == b"old"
@@ -322,18 +321,7 @@ def test_close_error_does_not_retry_consumed_descriptor(tmp_path: Path, monkeypa
     assert not [item for item in path.iterdir() if item.name.endswith(".tmp")]
 
 
-def test_temporary_name_collision_preserves_existing_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = _mailbox(tmp_path)
-    temporary = "." + "a" * 32 + ".tmp"
-    (path / temporary).write_bytes(b"keep")
-    monkeypatch.setattr(MailboxDirectory, "_temporary_name", staticmethod(lambda: temporary))
-
-    with MailboxDirectory(path) as mailbox, pytest.raises(FileExistsError):
-        mailbox.publish(b"data")
-    assert (path / temporary).read_bytes() == b"keep"
-
-
-@pytest.mark.parametrize("failure", ["zero", "error"])
+@pytest.mark.parametrize("failure", ["error"])
 def test_write_failures_clean_up_temporary_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
     path = _mailbox(tmp_path)
 
@@ -366,7 +354,7 @@ def test_rename_failure_cleans_temporary_file(tmp_path: Path, monkeypatch: pytes
     def fail_rename(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected rename failure")
 
-    monkeypatch.setattr(mailbox_module.os, "rename", fail_rename)
+    monkeypatch.setattr(mailbox_module.os, "replace", fail_rename)
     with MailboxDirectory(path) as mailbox, pytest.raises(OSError):
         mailbox.publish(b"data")
     assert not [item for item in path.iterdir() if item.name.endswith(".tmp")]

@@ -3,9 +3,10 @@
 The ledger is a directory, ``<state>/ledger/``, that any number of daemon
 instances share without a lock. Every decision is one atomic no-replace
 operation: the rename of a prepared directory onto a name that must not
-exist, or a ``link(2)`` of an fsynced temporary (:func:`httk.workflow._txn.link_new`).
-Every other step is repeatable, and every file is validated canonically when
-it is read.
+exist (:func:`httk.workflow._fs.publish_dir`). A once-written record is such a
+directory, ``<name>/`` holding ``record`` (the content) and ``.nonce`` (its
+publisher's unique token). Every other step is repeatable, and every record is
+validated canonically when it is read.
 
 ======================================  ==========================================================
 Path                                    Content
@@ -14,11 +15,11 @@ Path                                    Content
 ``prep/<nonce>.<rand>/``                an anchor prepared before admission
 ``req/<id>/envelope``                   canonical JSON: the request, the admitting instance's nonce
                                         (``owner``) and a start's minted ``handle`` (in the prepared anchor)
-``req/<id>/decision``                   a start's ``submit <time_ns> <nonce>`` or ``refuse <reason> <nonce>``
-``req/<id>/scheduler``                  ``<job id> <cluster>``, linked by the submit winner
-``req/<id>/response``                   the canonical unsigned response
-``handles/<handle>``                    the request id of a manager start
-``slots/record.<k>``, ``slots/start.<k>``  ``<request id> <nonce>`` claiming one unit of a quota
+``req/<id>/decision/``                  a start's ``submit <time_ns> <nonce>`` or ``refuse <reason> <nonce>``
+``req/<id>/scheduler/``                 ``<job id> <cluster>``, published by the submit winner
+``req/<id>/response/``                  the canonical unsigned response
+``handles/<handle>/``                   the request id of a manager start
+``slots/record.<k>/``, ``slots/start.<k>/``  ``<request id> <nonce>`` claiming one unit of a quota
 ``observations/<handle>.json``          the last scheduler observation (last writer wins)
 ======================================  ==========================================================
 
@@ -42,21 +43,21 @@ import secrets
 import stat
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
+from . import _fs
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, encode_response
 from ._daemon_protocol import request_digest as canonical_request_digest
-from ._txn import _hook, birth, is_link_temporary, link_new, remove_tree, rename_verified
 from ._util import fsync_directory
 
 _LOGGER = logging.getLogger(__name__)
 
 _FORMAT = "httk-workspace-daemon-ledger"
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 _ROOT = "ledger"
 _SUBDIRECTORIES = ("prep", "req", "handles", "slots", "observations")
 #: The files of the SQLite ledger and its instance lock that this ledger replaced.
@@ -85,7 +86,13 @@ _MAX_LISTING = 300_000
 _MAX_RECORDS = 100_000
 #: Admission retries after losing an anchor race before the ledger is reported inconsistent.
 _ADMISSION_ATTEMPTS = 8
-#: Prepared anchors and link temporaries older than this are crash leftovers.
+#: The file of a record directory that holds its content.
+_RECORD = "record"
+#: Marks the dot-named staging directory of a record being published.
+_STAGING = ".stage-"
+#: The name prefix of the trash :func:`httk.workflow._fs.discard` uses in ``prep/``.
+_TRASH = "trash."
+#: Prepared anchors, stagings and trash older than this are crash leftovers.
 _LEFTOVER_NS = 3600 * 10**9
 _PERMITTED = {
     "health": frozenset({"ready", "refused"}),
@@ -271,33 +278,26 @@ def _envelope_bytes(request_bytes: bytes, owner: str, handle: str | None) -> byt
     return json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
-def _write_new(path: Path, data: bytes) -> None:
-    """Create one file exclusively, write it and fsync it (its directory is synchronized by the caller)."""
-
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(descriptor, view) :]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+#: The test hook: called with the name of every ledger step reached, so a test can raise (a crash) or run
+#: another instance (an interleaving) at exactly that point. ``None`` outside tests.
+_HOOK: Callable[[str], None] | None = None
 
 
-def _replace(directory: Path, name: str, data: bytes) -> None:
-    """Replace one file by an fsynced exclusive temporary and a rename, then fsync the directory."""
+def _hook(step: str) -> None:
+    """Report reaching one named ledger step to the test hook, if one is installed.
 
-    temporary = directory / f".{name}.{uuid.uuid4().hex}"
-    try:
-        _write_new(temporary, data)
-        os.rename(temporary, directory / name)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-    fsync_directory(directory)
+    :param step: The step name, such as ``"ledger.slot"``.
+    """
+
+    hook = _HOOK
+    if hook is not None:
+        hook(step)
+
+
+def _write(path: Path, data: bytes) -> None:
+    """Write one ledger file durably with mode 0600 (:func:`httk.workflow._fs.write_file`)."""
+
+    _fs.write_file(_fs.loc(path), data, durable=True, mode=0o600)
 
 
 def _probe(path: Path) -> os.stat_result | None:
@@ -307,27 +307,52 @@ def _probe(path: Path) -> os.stat_result | None:
         return None
 
 
-def _link(directory: Path, name: str, data: bytes, *, nonce: bool = False) -> bool:
-    """:func:`~httk.workflow._txn.link_new` a ledger file, retrying once when its temporary was swept away.
+def _remove(path: Path, trash: Path) -> None:
+    """Remove a ledger directory of this instance's own through a trash name in *trash* (``prep/``)."""
 
-    The leftover sweep removes link temporaries older than an hour, so a link stalled that long finds its
-    temporary gone (``ENOENT`` with nothing at *name*): the temporary is then written again, once.
+    _fs.discard(_fs.loc(path), trash_dir=trash, durable=True)
+
+
+def _publish(directory: Path, name: str, data: bytes) -> bool:
+    """Publish the record directory ``<directory>/<name>/`` holding *data*, at most once.
+
+    The record is staged in a dot-named directory beside it and renamed onto the name by
+    :func:`httk.workflow._fs.publish_dir`, whose fresh ``.nonce`` decides the win whatever the rename
+    reported. The leftover sweep removes stagings older than an hour, so a publication stalled that long
+    finds its staging gone: it is then staged again, once.
 
     :param directory: The ledger directory.
-    :param name: The new file's name.
+    :param name: The record's name.
     :param data: The exact content.
-    :param nonce: Whether *data* carries this instance's nonce.
-    :return: What :func:`~httk.workflow._txn.link_new` returns.
-    :raises FileNotFoundError: If the directory is gone, or the retry fails the same way.
+    :return: ``True`` when this call published the record, ``False`` when the name was taken already.
+    :raises FileNotFoundError: If the directory is gone.
+    :raises LedgerError: If the record could be published neither time.
     """
 
-    try:
-        return link_new(directory, name, data, nonce=nonce, mode=0o600)
-    except FileNotFoundError:
-        if _probe(directory / name) is not None or _probe(directory) is None:
-            raise
-        _LOGGER.info("daemon_ledger_link_retried path=%s: its temporary was swept", directory / name)
-        return link_new(directory, name, data, nonce=nonce, mode=0o600)
+    for _attempt in range(2):
+        staging = directory / f".{name[:64]}{_STAGING}{secrets.token_hex(16)}"
+        nonce = secrets.token_hex(16).encode("ascii")
+        try:
+            os.mkdir(staging, 0o700)
+            _write(staging / ".nonce", nonce)
+            _write(staging / _RECORD, data)
+            _hook("ledger.staged")
+            if _fs.publish_dir(_fs.loc(staging), _fs.loc(directory / name), nonce=nonce, durable=True):
+                return True
+        except (FileNotFoundError, ValueError):
+            # FileNotFoundError: the staging (or the directory) vanished; ValueError: its .nonce was swept.
+            if _probe(directory) is None:
+                raise
+        if _probe(directory / name) is not None:
+            return False
+        _LOGGER.info("daemon_ledger_publish_retried path=%s: its staging was swept", directory / name)
+    raise LedgerError(f"daemon ledger record {directory / name} could not be published")
+
+
+def _read_record(path: Path, limit: int) -> bytes | None:
+    """Read a record directory's content; ``None`` when the record does not exist."""
+
+    return _read(path / _RECORD, limit)
 
 
 class Ledger:
@@ -411,13 +436,23 @@ class Ledger:
         return f"{_FORMAT} {_FORMAT_VERSION} {self.workspace_id} {self.enrollment_id}\n".encode("ascii")
 
     def _initialize(self, directory: Path) -> None:
-        def build(staging: Path) -> None:
-            os.chmod(staging, 0o700)
+        if _probe(self._root) is not None:
+            raise FileExistsError(errno.EEXIST, "daemon ledger already exists", str(self._root))
+        # Built complete in a dot-named staging and published onto ledger/ at most once.
+        staging = directory / f".{_ROOT}{_STAGING}{secrets.token_hex(16)}"
+        nonce = secrets.token_hex(16).encode("ascii")
+        os.mkdir(staging, 0o700)
+        try:
             for name in _SUBDIRECTORIES:
                 os.mkdir(staging / name, 0o700)
-            _write_new(staging / "format", self._format_bytes())
-
-        if _probe(self._root) is not None or not birth(directory, _ROOT, build):
+            _write(staging / "format", self._format_bytes())
+            _write(staging / ".nonce", nonce)
+            published = _fs.publish_dir(_fs.loc(staging), _fs.loc(self._root), nonce=nonce, durable=True)
+        except BaseException:
+            if _probe(staging) is not None:
+                _remove(staging, directory)
+            raise
+        if not published:
             raise FileExistsError(errno.EEXIST, "daemon ledger already exists", str(self._root))
 
     def _validate_layout(self) -> None:
@@ -479,7 +514,7 @@ class Ledger:
     def _listing(self, directory: Path) -> Iterator[str]:
         """List one ledger directory within the absolute listing bound.
 
-        Link temporaries and fenced prepared anchors (``.stale.*``) are skipped.
+        Dot names (stagings, temporaries, ``.nonce`` and fenced prepared anchors) and trash names are skipped.
 
         :param directory: The ledger directory to list.
         :yields: Each remaining entry name, in directory order.
@@ -490,7 +525,7 @@ class Ledger:
             for count, entry in enumerate(entries, 1):
                 if count > _MAX_LISTING:
                     raise LedgerError(f"daemon ledger directory {directory} exceeds {_MAX_LISTING} entries")
-                if not is_link_temporary(entry.name) and not entry.name.startswith(_STALE):
+                if not entry.name.startswith((".", _TRASH)):
                     yield entry.name
 
     def _response(self, data: bytes, path: Path) -> Response:
@@ -579,9 +614,9 @@ class Ledger:
             return None
         if not stat.S_ISDIR(information.st_mode):
             raise LedgerError(f"daemon ledger anchor {anchor} is not a directory")
-        response_bytes = _read(anchor / "response", _MAX_DOCUMENT)
-        scheduler_bytes = _read(anchor / "scheduler", _MAX_LINE)
-        decision_bytes = _read(anchor / "decision", _MAX_LINE)
+        response_bytes = _read_record(anchor / "response", _MAX_DOCUMENT)
+        scheduler_bytes = _read_record(anchor / "scheduler", _MAX_LINE)
+        decision_bytes = _read_record(anchor / "decision", _MAX_LINE)
         envelope = self._envelope(anchor)
         if envelope is None:
             raise LedgerError(f"daemon ledger anchor {anchor} is incomplete")
@@ -649,7 +684,7 @@ class Ledger:
         return self._entry(request_id)
 
     def _handle_target(self, handle: str) -> str | None:
-        data = _read(self._root / "handles" / handle, _MAX_LINE)
+        data = _read_record(self._root / "handles" / handle, _MAX_LINE)
         if data is None:
             return None
         request_id = _line(data, self._root / "handles" / handle)
@@ -775,7 +810,7 @@ class Ledger:
             if _probe(slots / name) is not None:
                 continue  # taken: a name lookup, never a negative drawn from the listing
             _hook("ledger.slot")
-            if _link(slots, name, data, nonce=True):
+            if _publish(slots, name, data):
                 return name
         raise CapacityError(f"daemon {'record' if kind == 'record' else 'submission'} capacity exhausted")
 
@@ -784,13 +819,8 @@ class Ledger:
 
         slots = self._root / "slots"
         for name in names:
-            if _read(slots / name, _MAX_LINE) == data:
-                try:
-                    os.unlink(slots / name)
-                except FileNotFoundError:
-                    pass
-        if names:
-            fsync_directory(slots)
+            if _read_record(slots / name, _MAX_LINE) == data:
+                _remove(slots / name, self._root / "prep")
 
     def _prepare(self, request: Request, handle: str | None) -> Path | None:
         """Build a prepared anchor; ``None`` when the leftover sweep fenced it away meanwhile."""
@@ -805,49 +835,58 @@ class Ledger:
         else:
             raise LedgerError("no fresh name for a prepared anchor")
         try:
-            _write_new(prepared / "envelope", _envelope_bytes(encode_request(request), self.nonce, handle))
-            fsync_directory(prepared)
+            # The prepared name is unique to this anchor: it is the nonce publish_dir decides the install by.
+            _write(prepared / ".nonce", prepared.name.encode("ascii"))
+            _write(prepared / "envelope", _envelope_bytes(encode_request(request), self.nonce, handle))
         except FileNotFoundError:
             if _probe(prepared) is not None or _probe(prepared.parent) is None:
-                remove_tree(prepared)
+                self._discard_prepared(prepared)
                 raise
             _LOGGER.info("daemon_ledger_prepared_fenced path=prep/%s: preparing again", prepared.name)
             return None
         except BaseException:
-            remove_tree(prepared)
+            self._discard_prepared(prepared)
             raise
         _hook("ledger.prepared")
         return prepared
 
     def _install(self, prepared: Path, anchor: Path) -> bool:
-        """Rename the prepared anchor into place.
+        """Publish the prepared anchor onto ``req/<id>`` (:func:`httk.workflow._fs.publish_dir`).
 
         Losing (a non-empty destination, or the leftover sweep fenced the prepared anchor away) is not an
-        error.
+        error; the prepared anchor is removed either way.
 
         :param prepared: The prepared anchor in ``prep/``.
         :param anchor: The destination ``req/<id>``.
-        :return: Whether this call's rename installed the anchor.
+        :return: Whether this call installed the anchor.
         """
 
         try:
-            moved = rename_verified(prepared, anchor)
-        except OSError as exc:
-            if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                remove_tree(prepared)
-                raise
-            moved = False
-        if not moved:
-            # Only this instance's own name: after a fencing rename by the sweep it is absent here.
-            remove_tree(prepared)
-        return moved
+            return _fs.publish_dir(
+                _fs.loc(prepared), _fs.loc(anchor), nonce=prepared.name.encode("ascii"), durable=True
+            )
+        except ValueError:
+            # Fenced away by the sweep: the prepared anchor no longer holds its .nonce here.
+            return False
+
+    def _installed_by_self(self, anchor: Path) -> bool:
+        try:
+            stored = self._envelope(anchor)
+        except (LedgerError, OSError):
+            # Undecidable: keeping the slots leaks capacity at worst, freeing them could over-admit.
+            return True
+        return stored is not None and stored[1] == self.nonce
+
+    def _discard_prepared(self, prepared: Path) -> None:
+        if _probe(prepared) is not None:
+            _remove(prepared, self._root / "prep")
 
     def _link_handle(self, handle: str, request_id: str) -> None:
         handles = self._root / "handles"
         data = f"{request_id}\n".encode("ascii")
-        if _read(handles / handle, _MAX_LINE) == data:
+        if _read_record(handles / handle, _MAX_LINE) == data:
             return
-        if not _link(handles, handle, data) and _read(handles / handle, _MAX_LINE) != data:
+        if not _publish(handles, handle, data) and _read_record(handles / handle, _MAX_LINE) != data:
             raise LedgerError(f"manager handle {handle} is already bound to another request")
         _hook("ledger.handle")
 
@@ -900,11 +939,12 @@ class Ledger:
                 prepared = self._prepare(request, handle)
                 moved = prepared is not None and self._install(prepared, anchor)
             except BaseException:
-                self._release(claimed, claim)  # nothing was installed: the claim is this admission's alone
+                # An error after publish_dir's rename (a failed directory sync) leaves the anchor installed: its
+                # slots stay. Otherwise nothing was installed, and the claim is this admission's alone.
+                if not self._installed_by_self(anchor):
+                    self._release(claimed, claim)
                 raise
             # From here the anchor may be installed: an error must not free its slots.
-            if moved:
-                fsync_directory(anchor.parent)
             stored = self._envelope(anchor)
             owner = None if stored is None else stored[1]
             if moved and owner != self.nonce:
@@ -955,7 +995,7 @@ class Ledger:
             if reason is None
             else Decision("refuse", self.nonce, reason=reason)
         )
-        _link(self._anchor(request_id), "decision", decision.encode(), nonce=True)
+        _publish(self._anchor(request_id), "decision", decision.encode())
         _hook("ledger.decided")
         stored = self._start_entry(request_id)
         assert stored.decision is not None
@@ -984,7 +1024,7 @@ class Ledger:
             raise ValueError("only the submit winner records the scheduler identity")
         data = f"{job_id} {cluster}\n".encode("ascii")
         anchor = self._anchor(request_id)
-        if not _link(anchor, "scheduler", data) and _read(anchor / "scheduler", _MAX_LINE) != data:
+        if not _publish(anchor, "scheduler", data) and _read_record(anchor / "scheduler", _MAX_LINE) != data:
             raise LedgerError(f"a different scheduler identity is already stored for request {request_id}")
         _hook("ledger.scheduler")
         return self._start_entry(request_id)
@@ -1010,7 +1050,7 @@ class Ledger:
         problem = self._check_response(entry, response)
         if problem is not None:
             raise ValueError(problem)
-        _link(self._anchor(request_id), "response", encode_response(response))
+        _publish(self._anchor(request_id), "response", encode_response(response))
         _hook("ledger.response")
         stored = self.lookup_request(request_id)
         if stored is None or stored.response is None:
@@ -1022,7 +1062,7 @@ class Ledger:
     # ------------------------------------------------------------------
 
     def _sweep_leftovers(self, now_ns: int) -> None:
-        """Remove crash leftovers: prepared anchors and slot or handle link temporaries older than an hour."""
+        """Remove crash leftovers older than an hour: prepared anchors, trash, and slot or handle stagings."""
 
         if self._swept_at is not None and 0 <= now_ns - self._swept_at < _LEFTOVER_NS:
             return
@@ -1031,31 +1071,34 @@ class Ledger:
         with os.scandir(prep) as entries:
             names = [entry.name for _count, entry in zip(range(_MAX_LISTING), entries, strict=False)]
         for name in names:
-            if name.startswith(_STALE):
-                remove_tree(prep / name)  # fenced already (by this or a crashed sweep): nobody else uses it
+            if name.startswith((_STALE, _TRASH)):
+                # Fenced or trashed already (by this or a crashed instance): nobody else uses it.
+                _remove(prep / name, prep)
                 continue
             information = _probe(prep / name)
             if information is None or now_ns - information.st_mtime_ns <= _LEFTOVER_NS:
                 continue
-            # Fence first: the rename takes the directory from a slow (not dead) owner, whose own rename into
-            # req/ then finds no source and loses cleanly. Removing in place could empty its anchor instead.
+            # Fence first: the contested move takes the directory from a slow (not dead) owner, whose own publish
+            # into req/ then finds no source and loses cleanly. Removing in place could empty its anchor instead.
             fenced = prep / f"{_STALE}{secrets.token_hex(8)}"
-            if rename_verified(prep / name, fenced):
+            try:
+                won = _fs.move_once(_fs.loc(prep / name), _fs.loc(fenced), durable=True, create_parents=False)
+            except _fs.MoveFailed:
+                continue
+            if won is _fs.Moved.WON:
                 _LOGGER.info("daemon_ledger_leftover_removed path=prep/%s", name)
-                remove_tree(fenced)
+                _remove(fenced, prep)
         for directory in (self._root / "slots", self._root / "handles"):
             with os.scandir(directory) as entries:
-                for count, entry in enumerate(entries, 1):
-                    if count > _MAX_LISTING:
-                        break
-                    if not is_link_temporary(entry.name):
-                        continue
-                    information = _probe(Path(entry.path))
-                    if information is not None and now_ns - information.st_mtime_ns > _LEFTOVER_NS:
-                        try:
-                            os.unlink(entry.path)
-                        except FileNotFoundError:
-                            pass
+                stale = [
+                    Path(entry.path)
+                    for _count, entry in zip(range(_MAX_LISTING), entries, strict=False)
+                    if entry.name.startswith(".")
+                ]
+            for path in stale:
+                information = _probe(path)
+                if information is not None and now_ns - information.st_mtime_ns > _LEFTOVER_NS:
+                    _remove(path, prep)
 
     def recover(self, *, older_than: float, now_ns: int | None = None) -> list[Entry]:
         """Settle every start whose decider crashed before linking its response.
@@ -1140,7 +1183,7 @@ class Ledger:
             raise ValueError("invalid manager handle")
         if type(data) is not bytes or len(data) > _MAX_OBSERVATION:
             raise ValueError("invalid observation document")
-        _replace(self._root / "observations", f"{handle}.json", data)
+        _write(self._root / "observations" / f"{handle}.json", data)
 
 
 __all__ = ["CapacityError", "ConflictError", "Decision", "Entry", "Ledger", "LedgerError", "refusal_response"]

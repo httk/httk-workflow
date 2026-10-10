@@ -27,10 +27,9 @@ RAW_METHODS = frozenset({"unlink", "rename", "rmdir", "replace"})
 #: The kernel creates directories only through ``_fs.make_dirs``/``open_dir_under`` (durable mode, symlink checks).
 KERNEL_MKDIR = {"os": frozenset({"mkdir", "makedirs"})}
 CONTESTED = frozenset({"move_once", "publish_dir"})
-#: Never in the new modules: no hard links, no symlinks created, no file locks.
+#: Never in any module: no hard links, no symlinks created, no file locks.
 LINKS = {"os": frozenset({"link", "symlink"})}
 LOCKS = frozenset({"flock", "lockf"})
-NEW_MODULES = ("_death.py", "_fs.py", "_kernel.py", "_state.py", "_store.py")
 
 #: The runner side acts only inside its own attempt directory (P1).
 RUNNER_SIDE = frozenset(
@@ -54,14 +53,7 @@ METHOD_RAW = frozenset(
 # legacy: shrinks per phase; never add to it.
 LEGACY_RAW = frozenset(
     {
-        "_daemon_client.py",
-        "_daemon_keys.py",
-        "_daemon_mailbox.py",
-        "_daemon_setup.py",
-        "_daemon_state.py",
-        "_exchange.py",
         "_logging.py",
-        "_txn.py",
         "_util.py",
         "adapters.py",
         "compat/cwl/cwl_runner.py",
@@ -76,9 +68,11 @@ LEGACY_RAW = frozenset(
 )
 #: Who may call each contested primitive besides its definition in ``_fs.py``.
 CONTESTED_CALLERS: Mapping[str, frozenset[str]] = {
-    "move_once": frozenset({"_kernel.py"}),
-    # The daemon's own single-process ledger; it may not use publish_dir yet.
-    "publish_dir": frozenset({"_kernel.py", "_daemon_state.py"}),
+    # The daemon ledger fences a stalled instance's prepared anchor; a client's take-back races the managers'
+    # take of the same inbox entry.
+    "move_once": frozenset({"_kernel.py", "_daemon_state.py", "_daemon_client.py"}),
+    # The daemon ledger's once-only records, and the client's once-only signed request cache.
+    "publish_dir": frozenset({"_kernel.py", "_daemon_state.py", "_daemon_client.py"}),
 }
 
 
@@ -224,11 +218,11 @@ def test_only_kernel_calls_contested_primitives() -> None:
     assert offenders == {}, f"contested primitives outside the kernel: {offenders}"
 
 
-def test_new_modules_use_no_links_or_locks() -> None:
+def test_no_module_uses_links_or_locks() -> None:
     # Rule C: hard links share inodes between jobs, symlinks invite traversal, and flocks do not hold across
-    # NFS nodes; the redesign's protocol uses none of them.
+    # NFS nodes; the protocol uses none of them anywhere (ruff TID251 bans them as well).
     offenders = {}
-    for module in NEW_MODULES:
+    for module in _modules():
         tree = _tree(module)
         if used := _module_uses(tree, LINKS) | _names_used(tree, LOCKS):
             offenders[module] = sorted(used)

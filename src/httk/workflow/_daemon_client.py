@@ -21,10 +21,10 @@ from typing import Self, cast
 from httk.core.identity import identity_public_key
 from httk.core.userdirs import data_home
 
+from . import _fs
 from ._daemon_auth import sign_request, verify_request, verify_response
 from ._daemon_mailbox import MailboxDirectory
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, request_digest
-from ._txn import rename_verified
 
 _LOGGER = logging.getLogger(__name__)
 _SETTING_NAMES = frozenset({"exchange", "daemon_workspace_id", "daemon_enrollment_id", "daemon_public_key"})
@@ -38,6 +38,8 @@ _EXCHANGE_FORMAT = "httk-workspace-exchange"
 _EXCHANGE_FILE = "exchange.json"
 _MAX_DOCUMENT_BYTES = 64 * 1024
 _SUBDIRECTORIES = ("requests", "responses", "inbox", "outbox", "managers")
+#: The content file of a request cache entry, the record directory ``daemon-requests/<enrollment>/<request id>/``.
+_CACHE_RECORD = "record"
 _CONFIGURE = "httk remote daemon configure REMOTE --exchange PATH"
 _PIN_HINT = f"pin the daemon with '{_CONFIGURE}' (it reads EXCHANGE/daemon.json)"
 _POLL_INTERVAL = 0.05
@@ -463,9 +465,15 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
         try:
             if not stat.S_ISDIR(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
                 raise ValueError(f"inbox entry {name!r} is not a bundle directory")
-            hidden_now = rename_verified(name, hidden, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+            # Contested with the managers' take of the same entry: exactly one of the moves wins.
+            moved = _fs.move_once(
+                _fs.anchored(descriptor, name), _fs.anchored(descriptor, hidden), durable=True, create_parents=False
+            )
+            hidden_now = moved is _fs.Moved.WON
         except FileNotFoundError:
             hidden_now = False
+        except _fs.MoveFailed as exc:
+            raise OSError(exc.errno or errno.EIO, str(exc)) from exc
         if not hidden_now:
             raise ValueError(f"inbox entry {name!r} is gone: a manager has taken it, so cancel the job instead")
         publishing = False
@@ -475,31 +483,29 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
             shutil.copytree(source, partial, symlinks=True)
             _fsync_tree(partial)
             publishing = True
-            published = rename_verified(partial, destination)
+            _fs.move_owned(_fs.loc(partial), _fs.loc(destination), durable=True, create_parents=False)
         except BaseException as exc:
             # Restore only when the failure is positively established: before the publish rename, or with the
             # temporary copy still in place. Otherwise the copy may already be published (and consumed).
             if publishing and not _present(partial):
                 raise OSError(_ambiguous(name, held, destination)) from exc
-            shutil.rmtree(partial, ignore_errors=True)
             try:
-                os.rename(hidden, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
-            except OSError as exc:
+                _fs.discard(_fs.loc(partial), trash_dir=partial.parent, durable=False)
+            except (OSError, _fs.MoveFailed):
+                _LOGGER.debug("could not remove the partial take-back copy %s", partial, exc_info=True)
+            try:
+                _fs.move_owned(_fs.anchored(descriptor, hidden), _fs.anchored(descriptor, name), durable=True)
+            except (OSError, _fs.MoveFailed) as exc:
                 raise OSError(
                     f"take-back failed and {name!r} could not be restored: it is held as "
                     f"{held}; rename it back to {name!r} to re-offer it"
                 ) from exc
             raise
-        if not published:
-            raise OSError(_ambiguous(name, held, destination))
         try:
             _fsync_directory_path(destination.parent)  # the copy must be durable before the original goes
-            try:
-                shutil.rmtree(hidden, dir_fd=descriptor)
-            except NotImplementedError:
-                shutil.rmtree(held)
-            os.fsync(descriptor)
-        except OSError:
+            # The trash name goes to the exchange root, which no manager scans for bundles.
+            _fs.discard(_fs.anchored(descriptor, hidden), trash_dir=endpoint.exchange, durable=True)
+        except (OSError, _fs.MoveFailed):
             _LOGGER.warning(
                 "take-back copied %r but could not make it durable or remove the held inbox entry %s; "
                 "check the copy, then delete the held entry by hand",
@@ -521,24 +527,27 @@ def _cache_directory(enrollment_id: str) -> Path:
 
 
 def _write_exclusive(path: Path, data: bytes) -> None:
-    """Install exact bytes durably without replacing an existing cache entry."""
+    """Install exact bytes durably as the record directory *path* (``record``), never replacing an entry.
 
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+    :param path: The cache entry.
+    :param data: The exact content.
+    :raises FileExistsError: If another preparer installed the entry first.
+    :raises OSError: If the entry could not be published.
+    """
+
+    staging = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+    nonce = uuid.uuid4().hex.encode("ascii")
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.link(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fs.write_file(_fs.loc(staging / ".nonce"), nonce, durable=True, mode=0o600)
+        _fs.write_file(_fs.loc(staging / _CACHE_RECORD), data, durable=True, mode=0o600)
+        won = _fs.publish_dir(_fs.loc(staging), _fs.loc(path), nonce=nonce, durable=True)
     finally:
-        temporary.unlink(missing_ok=True)
+        if _fs.exists(_fs.loc(staging)):
+            _fs.discard(_fs.loc(staging), trash_dir=path.parent, durable=False)
+    if not won:
+        if not _fs.exists(_fs.loc(path)):
+            raise OSError(errno.EIO, "the daemon request cache entry could not be published", str(path))
+        raise FileExistsError(errno.EEXIST, "daemon request cache entry exists", str(path))
 
 
 def _read_cache_file(path: Path) -> bytes:
@@ -710,11 +719,11 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
     ):
         raise ValueError("request intent must be unsigned and untimestamped")
 
-    request_path = _cache_directory(enrollment_id) / f"{intent.request_id}.json"
-    # ponytail: no local lock; concurrent preparers race on os.link and the loser adopts the winner's entry
+    request_path = _cache_directory(enrollment_id) / intent.request_id
+    # ponytail: no local lock; concurrent preparers race on publish_dir and the loser adopts the winner's entry
     # (at most one signature is ever installed; a loser may have signed once more and discards it).
     try:
-        cached = _read_cache_file(request_path)
+        cached = _read_cache_file(request_path / _CACHE_RECORD)
     except FileNotFoundError:
         cached = None
     except (OSError, ValueError) as exc:
@@ -737,7 +746,7 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
         _write_exclusive(request_path, _cache_bytes(endpoint, signed))
     except FileExistsError:
         try:
-            cached = _read_cache_file(request_path)
+            cached = _read_cache_file(request_path / _CACHE_RECORD)
         except (OSError, ValueError) as exc:
             raise ValueError("cached daemon request is corrupt") from exc
         return _adopt_cached(endpoint, cached, intent)

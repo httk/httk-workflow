@@ -13,6 +13,7 @@ more than :data:`MAX_SCANNED_ENTRIES` entries with other names placed before a
 request in directory order hide it from every scan.
 """
 
+import errno
 import os
 import re
 import secrets
@@ -20,6 +21,8 @@ import stat
 from collections.abc import Collection
 from pathlib import Path
 from typing import Self
+
+from . import _fs
 
 MAX_DOCUMENT_BYTES = 16 * 1024
 #: The most publications one scan returns; the rest wait for a later scan, after these were consumed.
@@ -111,21 +114,8 @@ class MailboxDirectory:
         return self._fd
 
     @staticmethod
-    def _temporary_name() -> str:
-        return f".{secrets.token_hex(16)}.tmp"
-
-    @staticmethod
     def _publication_name() -> str:
         return f"{secrets.token_hex(16)}.json"
-
-    @staticmethod
-    def _remove_temporary(descriptor: int, name: str) -> None:
-        try:
-            os.unlink(name, dir_fd=descriptor)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
 
     def publish(self, data: bytes) -> str:
         """Publish *data* as one fresh mailbox document.
@@ -159,45 +149,9 @@ class MailboxDirectory:
             raise ValueError(f"mailbox document exceeds {MAX_DOCUMENT_BYTES} bytes")
 
     def _write_atomic(self, descriptor: int, publication: str, data: bytes) -> None:
-        """Write and atomically install bytes using a private temporary entry."""
+        """Write and atomically install bytes through an exclusive temporary (:func:`httk.workflow._fs.write_file`)."""
 
-        temporary = self._temporary_name()
-        temporary_fd = -1
-        temporary_created = False
-        renamed = False
-        try:
-            temporary_fd = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
-                0o600,
-                dir_fd=descriptor,
-            )
-            temporary_created = True
-            offset = 0
-            while offset < len(data):
-                written = os.write(temporary_fd, data[offset:])
-                if written <= 0:
-                    raise OSError("mailbox write made no progress")
-                offset += written
-            os.fsync(temporary_fd)
-            descriptor_to_close = temporary_fd
-            temporary_fd = -1
-            os.close(descriptor_to_close)
-
-            os.rename(temporary, publication, src_dir_fd=descriptor, dst_dir_fd=descriptor)
-            renamed = True
-            os.fsync(descriptor)
-        finally:
-            if temporary_fd >= 0:
-                descriptor_to_close = temporary_fd
-                temporary_fd = -1
-                try:
-                    os.close(descriptor_to_close)
-                finally:
-                    if temporary_created and not renamed:
-                        self._remove_temporary(descriptor, temporary)
-            elif temporary_created and not renamed:
-                self._remove_temporary(descriptor, temporary)
+        _fs.write_file(_fs.anchored(descriptor, publication), data, durable=True, mode=0o600)
 
     def replace(self, name: str, data: bytes) -> None:
         """Atomically replace one flat publication with bounded bytes.
@@ -215,18 +169,16 @@ class MailboxDirectory:
         self._write_atomic(descriptor, name, data)
 
     def remove(self, name: str) -> None:
-        """Remove one flat publication and sync the containing directory.
+        """Remove one flat publication and sync the containing directory; a missing one counts as removed.
 
         :param name: A 32-character lower-case hexadecimal publication name.
         :raises ValueError: If the name is invalid.
-        :raises OSError: If unlinking or syncing the directory fails. A missing
-            publication propagates ``FileNotFoundError``.
+        :raises OSError: If unlinking or syncing the directory fails (``IsADirectoryError`` for a directory).
         """
 
         descriptor = self._require_open()
         _validate_name(name)
-        os.unlink(name, dir_fd=descriptor)
-        os.fsync(descriptor)
+        _fs.remove_file(_fs.anchored(descriptor, name), durable=True)
 
     def lstat(self, name: str) -> os.stat_result | None:
         """Look up one flat publication by name, without following a symlink.
@@ -303,8 +255,12 @@ class MailboxDirectory:
         descriptor = self._require_open()
         _validate_name(name)
         aside = f".invalid-{name}-{secrets.token_hex(8)}"
-        os.rename(name, aside, src_dir_fd=descriptor, dst_dir_fd=descriptor)
-        os.fsync(descriptor)
+        if self.lstat(name) is None:
+            raise FileNotFoundError(errno.ENOENT, "no such publication", name)
+        try:
+            _fs.move_owned(_fs.anchored(descriptor, name), _fs.anchored(descriptor, aside), durable=True)
+        except _fs.MoveFailed as exc:
+            raise OSError(exc.errno or errno.EIO, str(exc)) from exc
         return aside
 
     def scan(self, skip: Collection[str] = ()) -> tuple[tuple[str, ...], bool]:

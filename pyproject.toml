@@ -175,6 +175,18 @@ extend-exclude = ["tests/_legacy"]
 # TRY004: the ValueError/TypeError choice is public API; do not churn it.
 # BLE001: broad excepts deliberately isolate plugin/loader/handler failures.
 ignore = ["TRY002", "TRY004", "BLE001"]
+# The workspace protocol uses no hard links, no symlinks it creates and no file locks: every race-sensitive rename,
+# removal and exclusive creation goes through httk.workflow._fs. Tests plant links on purpose.
+extend-select = ["TID251"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.link".msg = "no hard links in httk-workflow: use httk.workflow._fs (publish_dir, create_exclusive, write_file)"
+"os.symlink".msg = "httk-workflow creates no symlinks: use httk.workflow._fs and plain directories"
+"fcntl.flock".msg = "no file locks in httk-workflow (they do not hold across NFS nodes): use httk.workflow._fs renames"
+"fcntl.lockf".msg = "no file locks in httk-workflow (they do not hold across NFS nodes): use httk.workflow._fs renames"
 
 [tool.ruff.format]
 # preserve replaces black's skip-string-normalization: existing quote styles are kept.

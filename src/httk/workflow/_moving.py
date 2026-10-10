@@ -18,8 +18,12 @@ deduplicates against the workspace and publishes the members bottom-up.
   member still in the bundle is submitted back to its recorded state and priority (roll back). A destination
   that cannot be read keeps the scratch. Delivery is at least once: verify the destination before re-ejecting.
 - ``adopt`` and ``adopt-untrusted`` (the trust is in the scratch's purpose, so it is known from the take on):
-  ``source.json`` records where the bundle came from and where refusals go; without it (a crash right after the
-  take) a refused bundle has nowhere to go and stays in the scratch.
+  ``source.json`` records where the bundle came from, where refusals go and the adoption's nonce (kept in the
+  exchange index entry it claims, so a rerun recognizes its own claim and another adopter of a copy does not);
+  without it (a crash right after the take) the reconciler records a fresh one, and a refused bundle goes to
+  ``exchange/outbox/rejected`` when untrusted and stays in the scratch when trusted. A refusal moves the bundle
+  to a fresh ``<refused_to>/<unique>/<name>`` beside its ``reason.json``, every directory opened without
+  following a symlink.
   ``plan.json`` is the validated, deduplicated manifest: once it exists only publication remains, and a member
   directory missing from the bundle was published by the earlier run. Before it, validation, rekeying,
   deduplication and the exchange-name claim run again; each is idempotent.
@@ -48,8 +52,9 @@ from httk.workflow._bundles import (
 from httk.workflow._job import JobDefinition
 from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
+from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import normalize_placement
+from httk.workflow.models import EXCHANGE_DIRECTORY, placement_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from httk.workflow.workspace import Workspace
@@ -83,6 +88,8 @@ _PARTIAL = ".partial"
 _RESERVED = frozenset({_SOURCE, _PLAN, "rekey.json", _PARTIAL})
 _RECORD_TEMPORARY = re.compile(r"\.(source|plan|rekey)\.json\.[a-z2-7]{16}\.tmp")
 _RECORD_LIMIT = 1 << 16
+#: The format of the ``reason.json`` beside a refused bundle.
+REJECTION_FORMAT = "httk-workspace-exchange-rejection"
 
 
 class Busy(WorkflowError):
@@ -142,12 +149,13 @@ class Hold:
 # -- eject ----------------------------------------------------------------------------------------------------------
 
 
-def _tree(workspace: "Workspace", root: OwnedJob) -> list[JobRef]:
+def _tree(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: StateDoc | None) -> list[JobRef]:
     # The children a parent published are recorded in its state.json and confirmed from the child's side: its
-    # job.json names this parent and it is not detached. A recorded child that is gone is no member.
+    # job.json names this parent and it is not detached. A recorded child that is gone is no member. A member
+    # neither terminal nor paused raises Busy.
     found: list[JobRef] = []
-    queue: list[tuple[str, StateDoc | None]] = [(root.job_id, root.read_state())]
-    seen = {root.job_id}
+    queue: list[tuple[str, StateDoc | None]] = [(root_id, root_doc)]
+    seen = {root_id}
     while queue:
         parent_id, doc = queue.pop(0)
         for child in doc.children if doc is not None else ():
@@ -177,7 +185,7 @@ def _tree(workspace: "Workspace", root: OwnedJob) -> list[JobRef]:
 
 
 def _claim_tree(workspace: "Workspace", owner: Owner, root: OwnedJob) -> list[OwnedJob]:
-    refs = _tree(workspace, root)
+    refs = _tree(workspace, root.job_id, root.read_state())
     claimed: dict[str, OwnedJob] = {}
     # Sorted claims: two ejectors of overlapping trees cannot each hold a part forever.
     for ref in sorted(refs, key=lambda item: item.job_id):
@@ -236,7 +244,13 @@ def _eject(
     by_transfer_id: bool,
     locator: str | None,
 ) -> EjectReport:
-    members = _claim_tree(workspace, owner, root) if tree else []
+    if tree:
+        members = _claim_tree(workspace, owner, root)
+    else:
+        members = []
+        # Ejecting the root alone would orphan the children present here: it is refused.
+        if children := _tree(workspace, root.job_id, root.read_state()):
+            raise Busy(children[0].job_key, "it is a child of the job; eject the whole tree")
     try:
         for job in (root, *members):
             job.append_log("ejected", destination=str(destination))
@@ -268,7 +282,7 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     """Move a claimed job, and with *tree* its descendants, out of the workspace into ``<destination>/<root key>``.
 
     Tree members are the root's non-detached descendants; each must be terminal or paused, and they are claimed
-    in sorted job-UUID order. Once :func:`~httk.workflow._bundles.build_bundle` has run, the root's handle is
+    in sorted job-UUID order. Without *tree*, a root that has such descendants present is refused. Once :func:`~httk.workflow._bundles.build_bundle` has run, the root's handle is
     retired whatever happens: on an occupied destination every member, the root included, is returned to the
     state and priority it was taken from.
 
@@ -278,7 +292,8 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     :param destination: An absolute directory; created when missing.
     :param tree: Eject the root's descendants too.
     :return: Where the bundle went.
-    :raises Busy: When a member cannot be claimed; the members claimed so far are given back, *root* stays held.
+    :raises Busy: When a member cannot be claimed, or without *tree* when the root has descendants; the members
+        claimed so far are given back, *root* stays held.
     :raises ValueError: For a relative destination.
     :raises httk.workflow.errors.WorkflowError: When the destination is occupied (the jobs were returned), or
         :class:`~httk.workflow._bundles.BundleError` when the jobs cannot form a bundle (*root* stays held).
@@ -290,14 +305,6 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     return _eject(
         workspace, owner, root, destination=destination, tree=tree, by_transfer_id=False, locator=str(destination)
     )
-
-
-def _carries(path: Path, data: bytes) -> bool:
-    try:
-        # The destination may be writable by others (the exchange outbox): never block on a planted FIFO.
-        return _fs.read_bounded(_fs.loc(path), len(data), nonblock=True) == data
-    except (_fs.UnsafePath, _fs.TooLarge, NotADirectoryError):
-        return False
 
 
 def reconcile_eject(owner: Owner, scratch: Path) -> bool:
@@ -322,7 +329,8 @@ def reconcile_eject(owner: Owner, scratch: Path) -> bool:
         # An eject delivers under the root's key, a hold under the transfer id; the bytes carry the transfer id.
         candidates += [destination / name for name in (manifest.members[0].job_key, manifest.transfer_id)]
     try:
-        if any(_carries(candidate / "bundle.json", data) for candidate in candidates):
+        # The destination may be writable by others (the exchange outbox): never follow a symlink there.
+        if any(_fs.carries(_fs.loc(candidate), "bundle.json", data) for candidate in candidates):
             return True
         partials = [path.with_name(f".{path.name}.partial.{manifest.transfer_id}") for path in candidates]
         for partial in partials:
@@ -345,21 +353,61 @@ class _Record:
     source: str | None
     refused_to: str | None
     copied: bool
+    #: This adoption's own nonce, recorded in the exchange index entry it claims.
+    nonce: str
     untrusted: bool  # from the scratch's purpose, not stored
 
 
 def _write_record(scratch: Path, record: _Record, *, durable: bool) -> None:
-    data = json.dumps({"source": record.source, "refused_to": record.refused_to, "copied": record.copied}).encode()
-    _fs.write_file(_fs.loc(scratch / _SOURCE), data, durable=durable)
+    fields = {"source": record.source, "refused_to": record.refused_to, "copied": record.copied, "nonce": record.nonce}
+    _fs.write_file(_fs.loc(scratch / _SOURCE), json.dumps(fields).encode(), durable=durable)
 
 
-def _read_record(scratch: Path, *, untrusted: bool) -> _Record:
+def _rejected(workspace: _kernel.KernelWorkspace) -> Path:
+    return workspace.root / EXCHANGE_DIRECTORY / "outbox" / "rejected"
+
+
+def _read_record(workspace: _kernel.KernelWorkspace, scratch: Path, *, untrusted: bool) -> _Record:
     data = _fs.read_bounded(_fs.loc(scratch / _SOURCE), _RECORD_LIMIT)
     if data is None:
-        # Taken, then the adopter died before recording: a refused bundle has nowhere to go.
-        return _Record(None, None, False, untrusted)
+        # Taken, then the adopter died before recording, so before any claim: a fresh nonce is this adoption's.
+        # A trusted bundle refused now has nowhere to go; an exchange bundle goes to the exchange's rejections.
+        refused_to = str(_rejected(workspace)) if untrusted else None
+        record = _Record(None, refused_to, False, _fs.fresh_token(), untrusted)
+        _write_record(scratch, record, durable=workspace.durable)
+        return record
     value = json.loads(data)
-    return _Record(value["source"], value["refused_to"], bool(value["copied"]), untrusted)
+    return _Record(value["source"], value["refused_to"], bool(value["copied"]), str(value["nonce"]), untrusted)
+
+
+def _reject(workspace: _kernel.KernelWorkspace, bundle: Path, refused_to: Path, reason: str) -> Path:
+    """Move a refused bundle to a fresh ``<refused_to>/<unique>/<name>``, beside its ``reason.json``.
+
+    *refused_to* may be writable by a client (``exchange/outbox/rejected``): below the workspace root (or
+    below its parent, outside the workspace) every directory is opened without following a symlink, and the
+    files go in anchored at the fresh directory's descriptor.
+    """
+
+    durable, root = workspace.durable, workspace.root
+    if refused_to.is_relative_to(root):
+        anchor, relative = root, PurePosixPath(refused_to.relative_to(root))
+    else:
+        anchor, relative = refused_to.parent, PurePosixPath(refused_to.name)
+    unique = _fs.fresh_token()
+    directory = _fs.open_dir_under(anchor, relative / unique, create=True, mode=0o755, durable=durable)
+    try:
+        document = {
+            "format": REJECTION_FORMAT,
+            "format_version": 1,
+            "name": bundle.name,
+            "reason": reason,
+            "rejected_at": utc_now(),
+        }
+        _fs.write_file(_fs.anchored(directory, "reason.json"), json_bytes(document) + b"\n", durable=durable)
+        _fs.move_owned(_fs.loc(bundle), _fs.anchored(directory, bundle.name), durable=durable)
+    finally:
+        os.close(directory)
+    return refused_to / unique / bundle.name
 
 
 def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: str) -> str:
@@ -369,14 +417,17 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
     if record.copied:
         owner.discard_scratch(scratch)
         return f"bundle refused: {reason}; it was copied from another filesystem and its source is untouched"
-    target = None
     if record.refused_to is not None:
-        target = Path(record.refused_to) / f"{bundle.name}.{_fs.fresh_token()}"
+        try:
+            target = _reject(owner.workspace, bundle, Path(record.refused_to), reason)
+        except (_fs.UnsafePath, OSError) as exc:
+            # A client replaced the directory (a symlink): the bundle waits in the scratch for a later refusal.
+            return f"bundle refused: {reason}; it stays in {scratch}, since {record.refused_to} cannot take it: {exc}"
     elif record.source is not None and not _fs.exists(_fs.loc(Path(record.source))):
         target = Path(record.source)
-    if target is None:
+        _fs.move_owned(_fs.loc(bundle), _fs.loc(target), durable=durable)
+    else:
         return f"bundle refused: {reason}; it stays in {scratch}"
-    _fs.move_owned(_fs.loc(bundle), _fs.loc(target), durable=durable)
     owner.discard_scratch(scratch)
     return f"bundle refused: {reason}; it was moved to {target}"
 
@@ -439,19 +490,22 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
         if record.untrusted:
             root = manifest.members[0]
             name = exchange_names(scratch)[root.job_id]
-            claimed = _kernel.claim_exchange_name(workspace, owner, name, root.job_id, root.placement)
-            # A claim fails when the name is indexed at another placement: the client resubmitted its job there. Its
-            # rekeyed id derives from the name, so an indexed job that still exists is this one, already adopted.
-            indexed = root.placement if claimed else _indexed_placement(workspace, name, root.job_id)
-            if indexed is None:
-                return _refuse(owner, scratch, bundle, record, f"the exchange name {name} is already in use")
-            # The bundle's own placements were settled by _presence already.
-            if _kernel.locate_many(workspace, [root.job_id], placements=[indexed], settle=not claimed):
-                owner.discard_scratch(scratch)
-                return AdoptReport((), True, ())
-            if not claimed:
+            claim = _kernel.claim_exchange_name(workspace, owner, name, root.job_id, root.placement, nonce=record.nonce)
+            if claim is _kernel.ExchangeClaim.OTHER:
+                indexed = _kernel.exchange_index(workspace, name)
+                if indexed is None or indexed[0] != root.job_id:
+                    return _refuse(owner, scratch, bundle, record, f"the exchange name {name} is already in use")
+                # Another adoption (of a copy of this bundle, or of the client's resubmission at another placement)
+                # holds the name. The rekeyed id derives from the name: a job present there is this one.
+                if _kernel.locate_many(workspace, [root.job_id], placements=[indexed[1]], settle=True):
+                    owner.discard_scratch(scratch)
+                    return AdoptReport((), True, ())
                 return _refuse(
-                    owner, scratch, bundle, record, f"the exchange name {name} is indexed at another placement"
+                    owner,
+                    scratch,
+                    bundle,
+                    record,
+                    f"the exchange name {name} is claimed by another adoption whose job is not here",
                 )
         _fs.write_file(_fs.loc(scratch / _PLAN), manifest.to_json(), durable=durable)
     else:
@@ -466,25 +520,20 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
         workflows.add(JobDefinition.from_path(directory / "job.json").workflow_id)
         if record.untrusted:
             doc = StateDoc.empty(member.job_id).updated(origin="exchange", exchange_name=names[member.job_id])
+            # A fresh client job has no state.json of its own: its children are recorded here, so the tree is the
+            # one eject (and the exchange's return) moves, as for children spawned in the workspace.
+            children = [
+                {"job_id": child.job_id, "job_key": child.job_key, "placement": placement_text(child.placement)}
+                for child in manifest.members
+                if child.parent_job_id == member.job_id
+            ]
+            if children:
+                doc = doc.with_children(children)
             _fs.write_file(_fs.loc(directory / "state.json"), encode_state(doc), durable=durable)
         published.append(_kernel.submit(workspace, owner, directory, state=member.state, priority=member.priority))
     owner.discard_scratch(scratch)
     missing = tuple(sorted(workflow for workflow in workflows if _installed(workspace, workflow) is None))
     return AdoptReport(tuple(published), False, missing)
-
-
-def _indexed_placement(workspace: "Workspace", exchange_name: str, job_id: str) -> PurePosixPath | None:
-    """The placement the exchange index records for *exchange_name*, if the entry names *job_id*."""
-
-    path = workspace.control / "exchange-jobs" / exchange_name / "index.json"
-    try:
-        data = _fs.read_bounded(_fs.loc(path), _RECORD_LIMIT)
-        value = None if data is None else json.loads(data)
-        if not isinstance(value, dict) or value.get("job_id") != job_id:
-            return None
-        return normalize_placement(str(value["placement"]))
-    except (WorkflowError, ValueError, KeyError):
-        return None
 
 
 def _installed(workspace: "Workspace", workflow_id: str) -> object:
@@ -521,7 +570,11 @@ def adopt(
     if name in _RESERVED or _RECORD_TEMPORARY.fullmatch(name):
         raise BundleError(f"a bundle may not be named {name!r}")
     record = _Record(
-        None if src.at is not None else str(src.path), None if refused_to is None else str(refused_to), False, untrusted
+        None if src.at is not None else str(src.path),
+        None if refused_to is None else str(refused_to),
+        False,
+        _fs.fresh_token(),
+        untrusted,
     )
     try:
         scratch = _kernel.take(workspace, owner, src, _ADOPT[untrusted])
@@ -566,7 +619,8 @@ def reconcile_adopt(owner: Owner, scratch: Path) -> bool:
         return False
     workspace = cast("Workspace", owner.workspace)
     untrusted = scratch.name.split(".")[1] == _ADOPT[True]
-    result = _finish(workspace, owner, scratch, scratch / entries[0], _read_record(scratch, untrusted=untrusted))
+    record = _read_record(workspace, scratch, untrusted=untrusted)
+    result = _finish(workspace, owner, scratch, scratch / entries[0], record)
     if isinstance(result, str):
         _LOGGER.warning("while reconciling %s: %s", scratch, result)
         return not _fs.exists(_fs.loc(scratch))
