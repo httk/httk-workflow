@@ -1232,9 +1232,12 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     workspace = _modifiable(arguments, context, action="adopt jobs into it")
     entries: list[dict[str, object]] = []
+    sources = [context.cwd / Path(bundle).expanduser() for bundle in arguments.bundles]
     with _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={}) as owner:
-        for bundle in arguments.bundles:
-            entries.append(_adopt_one(workspace, owner, context.cwd / Path(bundle).expanduser(), bundle, arguments))
+        # One wait of the visibility deadline for every bundle's absent jobs, not one a bundle.
+        absent = _moving.settle_absent(workspace, sources)
+        for source, bundle in zip(sources, arguments.bundles, strict=True):
+            entries.append(_adopt_one(workspace, owner, source, bundle, arguments, absent))
     incoming = (workspace.control / "transfers" / "incoming").resolve()
     for bundle in arguments.bundles:
         parent = (context.cwd / Path(bundle).expanduser()).parent.resolve()
@@ -1249,12 +1252,17 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
 
 
 def _adopt_one(
-    workspace: Workspace, owner: _kernel.Owner, source: Path, bundle: str, arguments: argparse.Namespace
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    source: Path,
+    bundle: str,
+    arguments: argparse.Namespace,
+    absent: frozenset[str],
 ) -> dict[str, object]:
-    """Adopt one bundle of ``job adopt``, printing its human output: its ``--json`` entry."""
+    """Adopt one bundle of ``job adopt`` (*absent* settled for the batch), printing its human output: its entry."""
 
     try:
-        report = _moving.adopt(workspace, owner, source, untrusted=False)
+        report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent)
     except _ERRORS as exc:
         print(f"{bundle}: {exc}", file=sys.stderr)
         status = "refused" if isinstance(exc, BundleError) else "failed"

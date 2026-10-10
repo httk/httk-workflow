@@ -52,6 +52,7 @@ import os
 import re
 import stat
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -73,7 +74,13 @@ from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner, OwnerLost
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import EXCHANGE_DIRECTORY, WORKSPACE_DIRECTORY, canonical_uuid, placement_text
+from httk.workflow.models import (
+    EXCHANGE_DIRECTORY,
+    WORKSPACE_DIRECTORY,
+    canonical_uuid,
+    normalize_placement,
+    placement_text,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from httk.workflow.workspace import Workspace
@@ -815,14 +822,56 @@ def _redelivered(workspace: "Workspace", record: _Record) -> bool:
     )
 
 
-def _presence(workspace: "Workspace", bundle: Path, manifest: BundleManifest, *, untrusted: bool) -> str | None:
-    """``"all"`` when every member is here already, a refusal reason, or ``None`` to publish."""
+def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> frozenset[str]:
+    """Settle once which members of trusted *bundles*, and which of their roots' parents, are not in *workspace*.
+
+    One wait of the visibility deadline for a batch of adoptions, instead of one for each: :func:`adopt` given
+    the result settles none of these ids again, while a fresh listing still sees every job published since (by
+    an adoption of the batch, say). A bundle that cannot be read contributes nothing; its adoption reports it.
+
+    :param workspace: The workspace the bundles are adopted into.
+    :param bundles: The bundle directories, before any of them is adopted.
+    :return: The job UUIDs absent across the visibility deadline.
+    """
+
+    wanted: dict[str, PurePosixPath] = {}
+    for bundle in bundles:
+        try:
+            read = read_manifest(bundle / "bundle.json")
+            if read is None:
+                continue
+            manifest = read[1]
+            wanted.update((member.job_id, member.placement) for member in manifest.members)
+            parent = JobDefinition.from_path(manifest.member_dir(bundle, manifest.members[0]) / "job.json").parent
+            if parent is not None:
+                parent_id = canonical_uuid(str(parent.get("job_id")), "parent job_id")
+                wanted[parent_id] = normalize_placement(str(parent.get("placement")))
+        except (BundleError, FormatError, OSError, ValueError):
+            continue
+    found = _kernel.locate_many(workspace, list(wanted), placements=list(wanted.values()), settle=True)
+    return frozenset(wanted.keys() - found.keys())
+
+
+def _presence(
+    workspace: "Workspace",
+    bundle: Path,
+    manifest: BundleManifest,
+    *,
+    untrusted: bool,
+    absent: frozenset[str] | None = None,
+) -> str | None:
+    """``"all"`` when every member is here already, a refusal reason, or ``None`` to publish.
+
+    Ids in *absent* (from :func:`settle_absent`) are looked up afresh but not settled again.
+    """
 
     # ponytail: check-then-act; two operators adopting copies of one trusted bundle at once can duplicate it
     # (plan §13.2: fsck reports duplicate UUIDs). Exchange bundles are serialized by the exchange-name claim.
     ids = [member.job_id for member in manifest.members]
     placements = [member.placement for member in manifest.members]
-    found = _kernel.locate_many(workspace, ids, placements=placements, settle=True)
+    found = _kernel.locate_many(workspace, ids, placements=placements, settle=absent is None)
+    if absent is not None and (unsettled := [job_id for job_id in ids if job_id not in found and job_id not in absent]):
+        found |= _kernel.locate_many(workspace, unsettled, placements=placements, settle=True)
     if len(found) == len(ids):
         return "all"
     if found:
@@ -833,13 +882,22 @@ def _presence(workspace: "Workspace", bundle: Path, manifest: BundleManifest, *,
     parent = JobDefinition.from_path(manifest.member_dir(bundle, manifest.members[0]) / "job.json").parent
     if parent is not None:
         hint = PurePosixPath(str(parent.get("placement")))
-        ref = _kernel.locate(workspace, str(parent.get("job_id")), placement_hint=hint, settle=True)
+        parent_id = str(parent.get("job_id"))
+        settle = absent is None or parent_id not in absent
+        ref = _kernel.locate(workspace, parent_id, placement_hint=hint, settle=settle)
         if ref is not None:
             return f"the root's parent {ref.job_key} is in this workspace; adopt the parent's whole tree instead"
     return None
 
 
-def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, record: _Record) -> AdoptReport | str:
+def _finish(
+    workspace: "Workspace",
+    owner: Owner,
+    scratch: Path,
+    bundle: Path,
+    record: _Record,
+    absent: frozenset[str] | None = None,
+) -> AdoptReport | str:
     """Steps 2-6 of adoption on a taken bundle: the report, or the message of a refusal."""
 
     durable = workspace.durable
@@ -847,7 +905,7 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
     if read is None:
         try:
             manifest = _validated(workspace, scratch, bundle, untrusted=record.untrusted)
-            presence = _presence(workspace, bundle, manifest, untrusted=record.untrusted)
+            presence = _presence(workspace, bundle, manifest, untrusted=record.untrusted, absent=absent)
         except BundleError as exc:
             return _refuse(owner, scratch, bundle, record, str(exc))
         if presence == "all":
@@ -941,7 +999,13 @@ def _isolate(owner: Owner, scratch: Path, name: str, record: _Record) -> _Record
 
 
 def adopt(
-    workspace: "Workspace", owner: Owner, source: Path | _fs.Loc, *, untrusted: bool, refused_to: Path | None = None
+    workspace: "Workspace",
+    owner: Owner,
+    source: Path | _fs.Loc,
+    *,
+    untrusted: bool,
+    refused_to: Path | None = None,
+    absent: frozenset[str] | None = None,
 ) -> AdoptReport | None:
     """Take a bundle into the workspace: validate, rekey when untrusted, deduplicate and publish bottom-up.
 
@@ -960,6 +1024,8 @@ def adopt(
     :param source: The bundle: an absolute path, or an anchored location in a directory others write.
     :param untrusted: Apply the exchange rules.
     :param refused_to: Where refused bundles go.
+    :param absent: For a trusted bundle of a batch: :func:`settle_absent` of the batch, taken before any of it
+        was adopted, so that this adoption does not wait out the visibility deadline again.
     :return: The report; ``None`` when another actor took *source* first.
     :raises httk.workflow._bundles.BundleError: When the bundle is refused; the message says where it went.
     """
@@ -999,7 +1065,7 @@ def adopt(
             if isinstance(isolated, str):
                 raise BundleError(isolated)
             record = isolated
-    result = _finish(workspace, owner, scratch, scratch / name, record)
+    result = _finish(workspace, owner, scratch, scratch / name, record, None if untrusted else absent)
     if isinstance(result, str):
         raise BundleError(result)
     return result

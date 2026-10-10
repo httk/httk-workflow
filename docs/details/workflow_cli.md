@@ -281,7 +281,7 @@ manager's platform stays `ready` and unclaimed there.
 | `job log JOB...` | print run logs (remote: over the adapter) | `--workspace`, `--limit`, `--json` |
 | `job why JOB...` | explain why jobs are not progressing (remote: over the adapter) | `--workspace`, `--json` |
 | `job debug JOB` | drive one job to a terminal state in the foreground | `--workspace`, `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
-| `job transfer SRC DST` | move jobs between two workspaces | `--job`, `--tree`, `--resume`, `--release`, `--hold`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
+| `job transfer SRC DST` | move jobs between two workspaces | `--job`, `--kind`, `--placement`, `--tree`, `--resume`, `--release`, `--hold`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
 
 When giving more than one `JOB_ID`, name the workspace explicitly.
 
@@ -520,11 +520,28 @@ directory. Any combination of local and remote ends works, and a
 remote-to-remote transfer is relayed through the client:
 
 ```console
-httk job transfer --job JOB [--job JOB …] [--tree] SRC DST [--json] [-q]
+httk job transfer (--job JOB … | --kind STATE …) [--placement PREFIX] [--tree] SRC DST [--json] [-q]
 httk job transfer --resume [SRC] [DST]
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [WS]
 httk transfer status [WS] [--json]
 ```
+
+Jobs are selected by name with `--job` (a UUID, key, unique prefix, path or
+glob), or by state with `--kind STATE`, which takes every job of SRC in that
+state (any state of `job list --kind` except `owned`), optionally only under a
+placement prefix with `--placement PREFIX`. Both repeat and combine; a job
+selected twice moves once. `httk job transfer --kind succeeded sigma:runs
+default` brings every finished job home in one command. A tree is never
+split: `--kind` leaves out every job whose (not detached) parent is in SRC, so
+a child moves only inside its root's bundle, and a note on stderr counts the
+children that did not move that way. Without `--tree`, a selected job whose
+descendants are present is refused, so a campaign whose finished roots have
+children is fetched with `--kind succeeded --tree`; a root's tree then carries
+all of its descendants, which must be terminal or paused (a failed, cancelled
+or paused child travels with a succeeded root). A child that should move alone
+is detached first. A very large selection on a remote SRC is held in one call:
+give it time with `--adapter-timeout`. Should that call fail, the jobs it held
+are still driven by the same run or by `--resume`.
 
 A transfer is four steps. It **holds** each selected job on SRC (with `--tree`,
 its terminal or paused descendants too) in SRC's own
@@ -532,8 +549,8 @@ its terminal or paused descendants too) in SRC's own
 the jobs are in neither workspace's state trees. It **copies** the held bundle
 to DST (on one filesystem adoption simply moves it in; otherwise the adapter's
 `push` or `pull` lands it in DST), **adopts** it there into the states and
-priorities it left, and only then **releases** the hold. A remote SRC needs
-canonical job UUIDs. Adoption warns about jobs whose workflows DST has not
+priorities it left, and only then **releases** the hold. On a remote SRC,
+`--job` needs canonical job UUIDs; `--kind` is resolved there. Adoption warns about jobs whose workflows DST has not
 installed. The command prints one line per hold,
 `TRANSFER_ID<TAB>STATUS<TAB>N job(s)<TAB>DESTINATION`, and exits `0` only when
 every hold was adopted or already was. Progress, one line per step, goes to
@@ -568,7 +585,7 @@ abandoned for good is taken back into SRC with
 `httk job adopt --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs;
 `job transfer --release T` discards a hold whose jobs DST has. `job transfer
---hold --job JOB … SRC DST` only holds jobs in a local SRC, recording DST as
+--hold (--job JOB … | --kind STATE …) SRC DST` only holds jobs in a local SRC, recording DST as
 given; it is the first leg a client runs on a remote SRC.
 
 ## Running managers
@@ -930,7 +947,7 @@ and stays held, while the jobs may have arrived. Upgrade DST, check with
 `httk job transfer --release` (or re-run `--resume` after the upgrade):
 
 ```text
-httk job transfer --hold --json [--tree] [--destination-id ID] --job JOB [--job JOB …] -- WS DST
+httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [--kind STATE …] [--placement PREFIX] -- WS DST
 httk job adopt --json --by-path --workspace ROOT TRANSFER_ID [TRANSFER_ID …]   (in the batch landing)
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] WS
 httk transfer status --json WS

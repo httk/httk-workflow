@@ -44,8 +44,8 @@ from ..adapters import (
 )
 from ..errors import ResolutionMiss, WorkflowError
 from ..hygiene import describe_remote, remove_remote
-from ..introspection import resolve_job_selectors
-from ..models import WORKSPACE_DIRECTORY, canonical_uuid
+from ..introspection import iter_jobs, read_job, read_state, resolve_job_selectors
+from ..models import WORKSPACE_DIRECTORY, canonical_uuid, normalize_placement
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
 from ..seals import require_cli_modifiable
 from ..workspace import Workspace
@@ -618,6 +618,16 @@ def _holds(src: _End, context: CLIContext, arguments: argparse.Namespace) -> lis
     return [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
 
 
+def _parent_here(ref: _kernel.JobRef, present: set[str]) -> bool:
+    """Whether *ref* is a non-detached child of a job in *present*: a member of its root's tree, as ejection rules."""
+
+    job, _ = read_job(ref)
+    if job is None or job.parent is None or str(job.parent.get("job_id")) not in present:
+        return False
+    doc, _ = read_state(ref)
+    return doc is None or doc.detached is None
+
+
 def _hold_jobs(
     src: _End, dst: _End, context: CLIContext, arguments: argparse.Namespace, errors: list[str]
 ) -> list[_moving.Hold]:
@@ -628,9 +638,21 @@ def _hold_jobs(
         workspace = src.workspace
         require_cli_modifiable(workspace)
         refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+        children: list[_kernel.JobRef] = []
+        if arguments.kind:
+            seen = {ref.job_id for ref in refs}
+            # Listed in full first: holding moves jobs out of the directories the listing walks.
+            listed = list(iter_jobs(workspace, arguments.kind, placement_prefix=arguments.placement))
+            present = {ref.job_id for ref in iter_jobs(workspace)}
+            for ref in listed:
+                if ref.job_id not in seen:
+                    seen.add(ref.job_id)
+                    # A child whose parent is here moves only in its root's tree, never on its own.
+                    (children if _parent_here(ref, present) else refs).append(ref)
+        moving: set[str] = set()
         with _owner(workspace, "job transfer") as owner:
             for ref in refs:
-                if any(ref.job_key in hold.members for hold in holds):
+                if ref.job_key in moving:
                     continue  # it went with an earlier selected tree
                 try:
                     outcome = eject_once(
@@ -649,6 +671,13 @@ def _hold_jobs(
                 else:
                     assert isinstance(outcome, _moving.Hold)
                     holds.append(outcome)
+                    moving.update(outcome.members)
+        if left := sum(ref.job_key not in moving for ref in children):
+            print(
+                f"{left} selected job(s) have a parent in {src.locator} and move only with their root "
+                "(use --tree, or detach them)",
+                file=sys.stderr,
+            )
         return holds
     for selector in arguments.jobs:
         try:
@@ -657,9 +686,23 @@ def _hold_jobs(
             raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
     argv = [*REMOTE_JOB_TRANSFER_COMMAND, "--hold", "--json", *(["--tree"] if arguments.tree else [])]
     argv += [*(["--destination-id", dst.workspace_id] if dst.workspace_id is not None else [])]
-    for chunk in _chunks(arguments.jobs, flag="--job"):
+    # --kind names no ids, so it goes in one call: the last, as a --job of a later call that --kind already held
+    # would no longer resolve there.
+    kinds = [item for state in arguments.kind for item in ("--kind", state)]
+    kinds += ["--placement", arguments.placement] if arguments.placement is not None else []
+    chunks = _chunks(arguments.jobs, flag="--job") or [[]]
+    for index, chunk in enumerate(chunks):
         selected = [item for selector in chunk for item in ("--job", selector)]
-        code, out, err = _remote(src, context, arguments, [*argv, *selected, "--", src.plain, dst.locator])
+        selected += kinds if index == len(chunks) - 1 else []
+        # Holds may exist after any failure here: the pass over the source's holds, or a later --resume, drives them.
+        try:
+            code, out, err = _remote(src, context, arguments, [*argv, *selected, "--", src.plain, dst.locator])
+        except _ERRORS as exc:
+            errors.append(
+                f"job transfer --hold on {src.locator} failed: {exc}; jobs it already held are driven by this run's "
+                f"pass over {src.locator}'s holds or by `httk job transfer --resume {src.locator} {dst.locator}`"
+            )
+            continue
         try:
             document = json.loads(out)
             if not isinstance(document, dict) or not all(
@@ -668,12 +711,16 @@ def _hold_jobs(
                 raise ValueError("no hold document")
             held = [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
         except (ValueError, TypeError):
-            # Holds may exist: the pass over the source's holds, or a later --resume, drives them.
-            reason = f": {err.strip()}" if code and err.strip() else ""
-            errors.append(f"job transfer --hold on {src.locator} printed no hold document{reason}: {out[:200]!r}")
+            message = f"job transfer --hold on {src.locator} printed no hold document"
+            message += f": {err.strip()}" if code and err.strip() else ""
+            message += f": {out[:200]!r}" if out else ""
+            if "unrecognized arguments" in err:
+                message += f" ({src.locator} may run an older httk-workflow; upgrade it)"
+            errors.append(message)
             continue
         holds += held
         errors.extend(str(error) for error in document["errors"])
+        sys.stderr.write(err)  # the far side's notes, such as children left with their root
     return holds
 
 
@@ -681,11 +728,11 @@ def _hold_jobs(
 _ADOPT_STATUSES = ("adopted", "already_adopted", "refused", "taken", "failed")
 
 
-def _adopt_local(workspace: Workspace, owner: _kernel.Owner, source: Path) -> dict[str, Any]:
-    """Adopt one bundle into a local *workspace*: an entry as ``job adopt --json`` gives it."""
+def _adopt_local(workspace: Workspace, owner: _kernel.Owner, source: Path, absent: frozenset[str]) -> dict[str, Any]:
+    """Adopt one bundle of a batch (*absent* settled for it) into a local *workspace*: a ``job adopt --json`` entry."""
 
     try:
-        report = _moving.adopt(workspace, owner, source, untrusted=False)
+        report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent)
     except BundleError as exc:
         return {"status": "refused", "message": str(exc)}
     except _ERRORS as exc:
@@ -746,8 +793,9 @@ def _deliver(
                     _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
                     sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
                 _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
+                absent = _moving.settle_absent(dst.workspace, sources)
                 for transfer_id, source in zip(ids, sources, strict=True):
-                    entries[transfer_id] = _adopt_local(dst.workspace, owner, source)
+                    entries[transfer_id] = _adopt_local(dst.workspace, owner, source, absent)
             except _ERRORS as exc:
                 failure = exc
             finally:
@@ -863,7 +911,9 @@ def _drive(
     return list(outcomes.values())
 
 
-def _report(outcomes: list[dict[str, Any]], errors: list[str], *, json_output: bool) -> int:
+def _report(
+    outcomes: list[dict[str, Any]], errors: list[str], *, json_output: bool, empty: str = "no held transfers to drive"
+) -> int:
     missing = sorted({workflow for outcome in outcomes for workflow in outcome.get("missing_workflows", ())})
     if missing:
         print(f"warning: these workflows are not installed, so their jobs wait: {', '.join(missing)}", file=sys.stderr)
@@ -873,7 +923,7 @@ def _report(outcomes: list[dict[str, Any]], errors: list[str], *, json_output: b
         print(json.dumps({"transfers": outcomes, "errors": errors}, indent=2, sort_keys=True))
     else:
         if not outcomes and not errors:
-            print("no held transfers to drive")
+            print(empty)
         for outcome in outcomes:
             print(
                 f"{outcome['transfer_id']}\t{outcome['status']}\t{len(outcome['members'])} job(s)\t{outcome['destination']}"
@@ -886,7 +936,7 @@ def _report(outcomes: list[dict[str, Any]], errors: list[str], *, json_output: b
 
 
 def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
-    if arguments.destination is not None or arguments.jobs or arguments.resume or arguments.hold:
+    if arguments.destination is not None or arguments.jobs or arguments.kind or arguments.resume or arguments.hold:
         raise ValueError("--release takes transfer ids and at most the workspace holding them")
     for transfer_id in arguments.release:
         if not _TRANSFER_ID.fullmatch(transfer_id):
@@ -911,8 +961,9 @@ def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
 def _handle_hold(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Hold the selected jobs of a local SRC for a transfer to the DST locator, recorded as given."""
 
-    if arguments.resume or arguments.source is None or arguments.destination is None or not arguments.jobs:
-        raise ValueError("--hold takes --job, SRC and the destination to record")
+    selected = arguments.jobs or arguments.kind
+    if arguments.resume or arguments.source is None or arguments.destination is None or not selected:
+        raise ValueError("--hold takes --job or --kind, SRC and the destination to record")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
         raise ValueError(f"--hold holds jobs in a workspace on this machine, not in {src.locator}")
@@ -940,16 +991,22 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     :return: 0 when every transfer was adopted (or already was), else 1.
     """
 
+    if arguments.placement is not None:
+        if not arguments.kind:
+            raise ValueError("--placement narrows --kind; it needs --kind")
+        if not normalize_placement(arguments.placement).parts:
+            raise ValueError("--placement needs a placement prefix; leave it out to select under every placement")
     if arguments.release:
         return _handle_release(arguments, context)
     if arguments.hold:
         return _handle_hold(arguments, context)
     if arguments.destination_id is not None:
         raise ValueError("--destination-id is recorded by --hold; it needs --hold")
-    if not arguments.resume and (arguments.source is None or arguments.destination is None or not arguments.jobs):
-        raise ValueError("name jobs with --job, and SRC and DST; or re-drive held transfers with --resume")
-    if arguments.resume and arguments.jobs:
-        raise ValueError("--resume re-drives held transfers and takes no --job")
+    selected = arguments.jobs or arguments.kind
+    if not arguments.resume and (arguments.source is None or arguments.destination is None or not selected):
+        raise ValueError("name jobs with --job or --kind, and SRC and DST; or re-drive held transfers with --resume")
+    if arguments.resume and selected:
+        raise ValueError("--resume re-drives held transfers and takes no --job or --kind")
     src = _end(arguments.source, context, arguments)
     ends: dict[str, _End] = {}
     dst = None
@@ -959,12 +1016,14 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             raise ValueError(f"SRC and DST are the same workspace: {src.locator}")
         ends[dst.locator] = dst
     errors: list[str] = []
-    if arguments.jobs:
+    if selected:
         assert dst is not None
         if dst.workspace is not None:
             # Before anything is held: a destination that cannot take the jobs would only leave them held.
             require_cli_modifiable(dst.workspace)
-        _say(arguments, f"holding {len(arguments.jobs)} job(s) on {src.locator}")
+        what = [f"{len(arguments.jobs)} job(s)"] if arguments.jobs else []
+        what += [f"every {state} job" for state in arguments.kind]
+        _say(arguments, f"holding {', '.join(what)} on {src.locator}")
         _hold_jobs(src, dst, context, arguments, errors)
     # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold), each
     # destination's holds as one batch.
@@ -986,6 +1045,10 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     outcomes = []
     for locator, holds in batches.items():
         outcomes.extend(_drive(src, ends[locator], holds, context, arguments))
+    if arguments.kind:
+        under = f" under {arguments.placement}" if arguments.placement is not None else ""
+        empty = f"no {' or '.join(arguments.kind)} job to move in {src.locator}{under}"
+        return _report(outcomes, errors, json_output=arguments.json, empty=empty)
     return _report(outcomes, errors, json_output=arguments.json)
 
 
@@ -1023,7 +1086,13 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
 
 
 _TRANSFER_DESCRIPTION = """\
-Move jobs between two workspaces: `job transfer --job JOB [--tree] SRC DST`.
+Move jobs between two workspaces: `job transfer --job JOB [--tree] SRC DST`,
+or every job in a state: `job transfer --kind succeeded [--placement PREFIX]
+[--tree] SRC DST` (--kind and --job combine; both repeat). --kind never
+splits a tree: it leaves out jobs whose parent is in SRC, which move only in
+their root's tree. Without --tree a selected job that has children present is
+refused: --tree moves a finished campaign's roots with their children (failed,
+cancelled or paused ones too).
 
 Each of SRC and DST is tried first as a registered workspace name (REMOTE:WS
 for a workspace on a remote), then as a workspace directory; `./NAME`
@@ -1046,8 +1115,8 @@ a bundle it already has, and the hold is released. `transfer status` and
 SRC with `job adopt SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs.
 `job transfer --release T [--release T ...] [WS]` discards holds whose jobs
-DST has; `job transfer --hold --job JOB ... SRC DST` only holds, recording DST
-as given (the first leg a client runs on a remote SRC)."""
+DST has; `job transfer --hold (--job JOB | --kind STATE) ... SRC DST` only
+holds, recording DST as given (the first leg a client runs on a remote SRC)."""
 
 
 def build_transfer_parser(
@@ -1074,6 +1143,15 @@ def build_transfer_parser(
         metavar="JOB",
         help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
     )
+    transfer.add_argument(
+        "--kind",
+        action="append",
+        default=[],
+        metavar="STATE",
+        choices=_kernel.UNOWNED_STATES,
+        help="select every job of SRC in this state (repeatable; combinable with --job)",
+    )
+    transfer.add_argument("--placement", metavar="PREFIX", help="with --kind: only jobs under this placement prefix")
     transfer.add_argument("--tree", action="store_true", help="move each job's descendants with it")
     transfer.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
     transfer.add_argument(

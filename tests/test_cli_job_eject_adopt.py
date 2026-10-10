@@ -249,3 +249,25 @@ def test_adopt_reports_an_error_that_is_no_refusal_as_failed(
     assert command(["job", "adopt", "--workspace", target_name, "--json", str(bundle)], context(tmp_path)) == 1
     (entry,) = json.loads(capsys.readouterr().out)["bundles"]
     assert entry["status"] == "failed" and entry["message"] == "disk full"
+
+
+def test_adopt_settles_once_for_several_bundles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    target.set_policy({"visibility_deadline_seconds": 0.2})  # two settle steps
+    jobs = [single(source, "succeeded", 10 + index) for index in range(10)]
+    bundles = [_eject(source_name, str(mapping["id"]), tmp_path / "out", capsys) for mapping, _, _ in jobs]
+    pauses: list[float] = []
+    real = _kernel._pause
+
+    def counting(seconds: float) -> None:
+        pauses.append(seconds)
+        real(seconds)
+
+    monkeypatch.setattr(_kernel, "_pause", counting)
+    assert command(["job", "adopt", "--workspace", target_name, *map(str, bundles)], context(tmp_path)) == 0
+    assert_in(target, jobs)
+    # One settle for the whole batch, not one a bundle (which would be some 20 pauses).
+    assert len(pauses) <= 3

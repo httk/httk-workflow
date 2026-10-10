@@ -367,6 +367,12 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
         parser.parse_args(["job", "transfer", "send", "c", "J"])
     parsed = parser.parse_args(["job", "eject", "--hold", "J"])
     assert (parsed.hold, parsed.destination) == (True, None)
+    # Selection by state, as `job list --kind`, optionally under a placement prefix; owned jobs cannot be held.
+    argv = ["job", "transfer", "--kind", "succeeded", "--kind", "failed", "--placement", "c1", "a", "b"]
+    parsed = parser.parse_args(argv)
+    assert (parsed.kind, parsed.placement, parsed.jobs) == (["succeeded", "failed"], "c1", [])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["job", "transfer", "--kind", "owned", "a", "b"])
 
 
 # ---------------------------------------------------------------------------

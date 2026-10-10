@@ -150,10 +150,12 @@ remote invocation asks the owning machine to run
 `httk workflow manager run --workspace runs --detach …`. The target workspace
 then applies its own `manager.launch`, `manager.workers`, scheduler settings and
 `environment.prelude`, as if the command had been run on the login node. Fetch
-finished jobs back with the reverse transfer, naming each job by its UUID:
+finished jobs back with the reverse transfer, selecting them by state (add
+`--placement PREFIX` for one campaign, or name single jobs with
+`--job JOB_UUID`):
 
 ```console
-$ httk job transfer --job JOB_UUID kappa:runs default
+$ httk job transfer --kind succeeded kappa:runs default
 ```
 
 A transfer holds the jobs on the source, copies them, adopts them at the
@@ -188,7 +190,7 @@ first. A child that should leave alone is detached first, because a child may
 read its parent's files in place (see {doc}`composing_workflows`):
 
 ```console
-$ httk job transfer --tree --job ROOT_UUID kappa:runs default
+$ httk job transfer --kind succeeded --tree kappa:runs default
 $ httk job detach CHILD
 $ httk job transfer --job CHILD default kappa:runs
 ```
