@@ -154,6 +154,50 @@ def open_dir(path: Path) -> int:
         raise
 
 
+def open_dir_under(root: Path, relative: str | PurePosixPath, *, create: bool = False, mode: int = 0o700) -> int:
+    """Open a directory below a trusted root, never following a symlink below the root.
+
+    *root* is a trusted anchor and is followed; each component of *relative* is
+    opened ``O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`` relative to the previous one.
+
+    :param root: The trusted directory to start from.
+    :param relative: The directory below *root*; ``..``, absolute paths and empty components are refused.
+    :param create: Create a missing component with *mode*, like ``mkdir(parents=True)``.
+    :param mode: The permission bits of a created directory (before the umask).
+    :return: The descriptor of the final directory; the caller closes it.
+    :raises ValueError: For an invalid *relative*.
+    :raises UnsafePath: When a component is a symlink or not a directory.
+    :raises FileNotFoundError: When a component is missing and *create* is false.
+    """
+
+    parts = relative.parts if isinstance(relative, PurePosixPath) else tuple(relative.split("/"))
+    if not parts:
+        raise ValueError(f"not a relative directory path: {relative!r}")
+    for part in parts:
+        _check_name(part)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for name in parts:
+            if create:
+                try:
+                    os.mkdir(name, mode, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            try:
+                child = os.open(name, _DIR_FLAGS, dir_fd=descriptor)
+            except OSError as exc:
+                # Linux reports a symlink opened O_DIRECTORY|O_NOFOLLOW as ENOTDIR, not ELOOP.
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise UnsafePath(f"{root / relative}: {name} is a symlink or not a directory") from exc
+                raise
+            descriptor, previous = child, descriptor
+            os.close(previous)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 class Fault(Protocol):
     """A test hook called at the documented crash points of this module."""
 

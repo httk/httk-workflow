@@ -536,12 +536,17 @@ def _attempt(**overrides: Any) -> SimpleNamespace:
     ],
 )
 def test_admission_is_refused_for_every_attempt_that_is_not_live(
-    attempt: SimpleNamespace, draining: bool, closed: str | None, published: bool, expected: str | None
+    tmp_path: Path, attempt: SimpleNamespace, draining: bool, closed: str | None, published: bool, expected: str | None
 ) -> None:
     manager = SimpleNamespace(_draining=draining)
     state = _manager_launches.AttemptLaunches("attempts/x", None, closed=closed)
-    control = SimpleNamespace(exists_dir=lambda name: published and name == "outcome.ready")
-    refusal = _manager_launches._admission_refusal(manager, attempt, state, control)  # type: ignore[arg-type]
+    if published:
+        (tmp_path / "outcome.ready").mkdir()
+    control = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        refusal = _manager_launches._admission_refusal(manager, attempt, state, control)
+    finally:
+        os.close(control)
     if expected is None:
         assert refusal is None
     else:

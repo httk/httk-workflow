@@ -123,6 +123,36 @@ def test_open_dir_refuses_symlink_and_file(tmp_path: Path) -> None:
             open_dir(tmp_path / name)
 
 
+def test_open_dir_under(tmp_path: Path) -> None:
+    (tmp_path / "a" / "real").mkdir(parents=True)
+    (tmp_path / "a" / "link").symlink_to("real")
+    (tmp_path / "a" / "file").write_text("")
+    before = sorted(os.listdir("/proc/self/fd"))
+    descriptor = _fs.open_dir_under(tmp_path, "a/real")
+    assert os.fstat(descriptor).st_ino == os.stat(tmp_path / "a" / "real").st_ino
+    os.close(descriptor)
+    for relative in ("a/link", "a/link/x", "a/file", PurePosixPath("a/link")):
+        with pytest.raises(UnsafePath):
+            _fs.open_dir_under(tmp_path, relative, create=True)
+    for relative in ("a/../a", "/a", "", "a//real", PurePosixPath(".."), PurePosixPath("/a"), PurePosixPath(".")):
+        with pytest.raises(ValueError):
+            _fs.open_dir_under(tmp_path, relative)
+    with pytest.raises(FileNotFoundError):
+        _fs.open_dir_under(tmp_path, "a/new/deeper")
+    assert not (tmp_path / "a" / "new").exists()
+    descriptor = _fs.open_dir_under(tmp_path, PurePosixPath("a/new/deeper"), create=True, mode=0o750)
+    os.close(descriptor)
+    assert (tmp_path / "a" / "new" / "deeper").stat().st_mode & 0o777 == 0o750 & ~_umask()
+    # Every path above, raising or not, closed its intermediate descriptors.
+    assert sorted(os.listdir("/proc/self/fd")) == before
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 def test_exists_never_follows(tmp_path: Path) -> None:
     (tmp_path / "dangling").symlink_to("nowhere")
     (tmp_path / "file").write_text("")

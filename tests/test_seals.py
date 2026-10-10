@@ -442,3 +442,30 @@ def test_identity_public_key_is_a_signer(tmp_path: Path) -> None:
     verification = verify_seal(path, trusted_keys=(identity,))
     assert key_fingerprint(identity) in verification.signers
     assert verification.verdict == VALID_TRUSTED
+
+
+def test_a_special_or_oversized_job_seal_is_refused_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket
+
+    from httk.workflow import seals
+    from httk.workflow.errors import FormatError
+    from httk.workflow.seals import INVALID, is_job_sealed, job_seal_digest, verify_job_seal
+
+    state = tmp_path / "payload" / ".httk-job"
+    state.mkdir(parents=True)
+    monkeypatch.chdir(state)  # a short relative name: AF_UNIX paths are length-limited
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind("seal.json")
+        assert not is_job_sealed(state.parent)
+        with pytest.raises(FormatError):
+            job_seal_digest(state.parent)
+        assert verify_job_seal(state.parent).verdict == INVALID
+    (state / "seal.json").unlink()
+    (state / "seal.json").write_bytes(b"x" * 11)
+    monkeypatch.setattr(seals, "_SEAL_LIMIT", 10)
+    with pytest.raises(FormatError):
+        job_seal_digest(state.parent)
+    (state / "seal.json").write_bytes(b"x" * 10)
+    assert job_seal_digest(state.parent) == hashlib.sha256(b"x" * 10).hexdigest()

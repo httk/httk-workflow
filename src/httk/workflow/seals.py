@@ -18,10 +18,12 @@ questions a signature always raises separately — does the seal still describe
 this tree, and was it made by a key this project trusts — and reports both.
 """
 
+import errno
 import hashlib
 import logging
 import os
 import stat
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -48,7 +50,6 @@ from httk.core.project.sealing import (
 
 from . import _fs, _kernel
 from ._job import JobDefinition
-from ._jobdir import CONTROL_DOCUMENT_LIMIT, JobDirectory, JobDirectoryError
 from ._kernel import JobRef
 from ._util import json_bytes
 from .errors import FormatError, SealedError, SealError
@@ -96,8 +97,8 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 _SEAL_NAME = "seal.json"
-#: The job seal as a no-follow control path below the payload.
-_JOB_SEAL = PurePosixPath(JOB_STATE_DIRECTORY, _SEAL_NAME)
+#: The largest job seal read from a (job-written) payload.
+_SEAL_LIMIT = 16 * 1024 * 1024
 
 # -- locations ---------------------------------------------------------------
 
@@ -150,12 +151,16 @@ def is_job_sealed(payload: str | os.PathLike[str]) -> bool:
     """
 
     try:
-        with JobDirectory.at(payload) as job_dir:
-            information = job_dir.stat(_JOB_SEAL)
-    except (FileNotFoundError, NotADirectoryError, JobDirectoryError) as exc:
+        state = _fs.open_dir_under(Path(payload), JOB_STATE_DIRECTORY)
+    except (FileNotFoundError, NotADirectoryError, _fs.UnsafePath) as exc:
         _LOGGER.debug("no usable job seal below %s: %s", payload, exc)
         return False
-    return information is not None and stat.S_ISREG(information.st_mode)
+    try:
+        return stat.S_ISREG(os.stat(_SEAL_NAME, dir_fd=state, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(state)
 
 
 def is_workspace_sealed(workspace: Workspace) -> bool:
@@ -217,34 +222,47 @@ def tree_ledger_keys(root: str | os.PathLike[str]) -> tuple[SealKey, ...]:
         return ()
 
 
-def _job_seal_present(job_dir: JobDirectory) -> bool:
-    """Report whether a pinned payload holds a seal, refusing a non-regular one."""
+def _job_seal_bytes(payload: str | os.PathLike[str]) -> bytes | None:
+    """Read a payload's seal document without following a link or blocking.
 
-    information = job_dir.stat(_JOB_SEAL)
-    if information is None:
-        return False
-    if not stat.S_ISREG(information.st_mode):
-        raise JobDirectoryError(f"{job_dir.path / _JOB_SEAL} is not a regular file")
-    return True
-
-
-def _read_job_seal(job_dir: JobDirectory) -> Seal:
-    """Read and validate the seal of a pinned payload through a no-follow descriptor.
-
-    The seal is opened without following a link, checked to be a regular file
-    of bounded size, and parsed by :func:`read_seal` through the descriptor's
-    ``/dev/fd`` alias, so a swapped entry is never read.
+    :param payload: The job payload directory.
+    :return: The seal bytes, or ``None`` when the payload has no seal.
+    :raises httk.workflow.errors.FormatError: If ``.httk-job`` or the seal is a symlink or special file,
+        or the seal is oversized.
     """
 
-    shown = job_dir.path / _JOB_SEAL
-    descriptor = job_dir.open_read(_JOB_SEAL, limit=CONTROL_DOCUMENT_LIMIT)
-    alias = f"/dev/fd/{descriptor}"
     try:
-        seal = read_seal(alias)
-    except ValueError as exc:
-        raise ValueError(str(exc).replace(alias, str(shown))) from exc
+        state = _fs.open_dir_under(Path(payload), JOB_STATE_DIRECTORY)
+    except FileNotFoundError:
+        return None
+    except _fs.UnsafePath as exc:
+        raise FormatError(str(exc)) from exc
+    try:
+        return _fs.read_bounded(_fs.anchored(state, _SEAL_NAME), _SEAL_LIMIT, nonblock=True)
+    except _fs.UnsafePath as exc:
+        raise FormatError(str(exc)) from exc
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:  # a socket: opening one fails rather than reaching the regular-file check
+            raise FormatError(f"{job_seal_path(payload)} is not a regular file") from exc
+        raise
     finally:
-        os.close(descriptor)
+        os.close(state)
+
+
+def _parse_job_seal(data: bytes, shown: Path) -> Seal:
+    """Validate seal bytes read once with :func:`read_seal`, which only reads a path."""
+
+    # ponytail: read_seal takes only a path, so the bytes go through an anonymous temporary; a bytes parser in
+    # httk-core would drop it.
+    with tempfile.TemporaryFile() as handle:
+        handle.write(data)
+        handle.flush()
+        handle.seek(0)
+        alias = f"/dev/fd/{handle.fileno()}"
+        try:
+            seal = read_seal(alias)
+        except ValueError as exc:
+            raise ValueError(str(exc).replace(alias, str(shown))) from exc
     return replace(seal, path=shown)
 
 
@@ -256,13 +274,8 @@ def job_seal_digest(payload: str | os.PathLike[str]) -> str | None:
     :raises httk.workflow.errors.FormatError: If the seal or ``.httk-job`` is a symlink or special file.
     """
 
-    try:
-        with JobDirectory.at(payload) as job_dir:
-            if not _job_seal_present(job_dir):
-                return None
-            return hashlib.sha256(job_dir.read(_JOB_SEAL, CONTROL_DOCUMENT_LIMIT)).hexdigest()
-    except FileNotFoundError:
-        return None
+    data = _job_seal_bytes(payload)
+    return None if data is None else hashlib.sha256(data).hexdigest()
 
 
 def seal_payload(
@@ -475,14 +488,9 @@ def verify_job_seal(
 
     payload = Path(payload)
     path = job_seal_path(payload)
-    seal: Seal | None = None
     try:
-        with JobDirectory.at(payload) as job_dir:
-            if _job_seal_present(job_dir):
-                seal = _read_job_seal(job_dir)
-    except FileNotFoundError:
-        seal = None
-    except JobDirectoryError as exc:
+        data = _job_seal_bytes(payload)
+    except FormatError as exc:
         # A symlinked or special .httk-job or seal.json is never followed, and
         # is no seal (as for is_job_sealed); here it is reported, not raised.
         return SealVerification(
@@ -493,7 +501,7 @@ def verify_job_seal(
             tuple(expected_roles),
             (Discrepancy(payload.name, "invalid"),),
         )
-    if seal is None:
+    if data is None:
         return SealVerification(
             False,
             INVALID,
@@ -502,6 +510,7 @@ def verify_job_seal(
             tuple(expected_roles),
             (Discrepancy(payload.name, "missing"),),
         )
+    seal = _parse_job_seal(data, path)
     # verify_seal's signature check, on the seal read once through the descriptor.
     base = verify_signed_body(
         seal.body_bytes, seal.body_sha256, seal.signatures, trusted_keys=trusted_keys, expected_roles=expected_roles

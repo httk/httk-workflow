@@ -8,10 +8,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ._jobdir import JobDirectory
 from ._sandbox import PreparedSandbox
-from ._util import utc_now
-from .models import LOGS_DIRECTORY
 
 #: Records keep the manager's logger name: operators and tests filter on it.
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -30,50 +27,6 @@ def write_marker(descriptor: int, line: str, job_key: str) -> None:
         os.write(descriptor, ("\n" + line).encode("utf-8", errors="backslashreplace"))
     except Exception as exc:
         _LOGGER.warning("cannot append an evidence marker for %s: %s", job_key, exc)
-
-
-def append_log_line(job_dir: JobDirectory, line: str, *, job_key: str) -> None:
-    """Append one complete evidence line to the job's stdio chronicle.
-
-    The chronicle is opened through the job directory without following a
-    symlink or blocking on a FIFO the job may have planted; such a chronicle is
-    skipped with a warning, never written through.
-
-    :param job_dir: The pinned job directory.
-    :param line: The evidence line.
-    :param job_key: The job key, for warnings.
-    """
-
-    descriptor = -1
-    try:
-        with job_dir.directory(LOGS_DIRECTORY, create=True) as logs:
-            descriptor = logs.open_append("stdio.out")
-        write_marker(descriptor, line, job_key)
-    except Exception as exc:
-        _LOGGER.warning("cannot append the stdio chronicle for %s: %s", job_key, exc)
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except Exception as exc:
-                _LOGGER.warning("cannot close the stdio chronicle for %s: %s", job_key, exc)
-
-
-def write_attempt_end(job_dir: JobDirectory, attempt_id: str, return_code: int, action: str, *, job_key: str) -> None:
-    """Append the end marker of a reaped attempt to the job's stdio chronicle.
-
-    :param job_dir: The pinned job directory.
-    :param attempt_id: The attempt identifier.
-    :param return_code: The attempt process's exit status.
-    :param action: The attempt's published outcome action, or ``none``.
-    :param job_key: The job key, for warnings.
-    """
-
-    append_log_line(
-        job_dir,
-        f"=== httk attempt {attempt_id} ended {utc_now()} exit {return_code} outcome {action}\n",
-        job_key=job_key,
-    )
 
 
 def start_gated(

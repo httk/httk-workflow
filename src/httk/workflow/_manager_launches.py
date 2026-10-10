@@ -43,7 +43,6 @@ from . import _death, _fs, _kernel
 from ._allocation import RecordedAllocation
 from ._attempt_process import process_group_alive, terminate_process
 from ._confine import ConfineSettings
-from ._jobdir import JobDirectory, JobDirectoryError
 from ._launch_protocol import (
     LAUNCH_DIRECTORY,
     MAX_ERROR_BYTES,
@@ -345,21 +344,33 @@ def _escalate(manager: Any, attempt: Any, state: AttemptLaunches, launch: Confin
         )
 
 
-def _open_launch_directory(attempt: Any, state: AttemptLaunches) -> JobDirectory:
+def _open_launch_directory(attempt: Any, state: AttemptLaunches) -> int:
     # The owned job directory is this owner's; everything below it is job-written and opened without following.
-    with JobDirectory.at(attempt.owned.path) as job_dir:
-        return job_dir.directory(f"{state.control_name}/{LAUNCH_DIRECTORY}")
+    return _fs.open_dir_under(attempt.owned.path, f"{state.control_name}/{LAUNCH_DIRECTORY}")
+
+
+def _write_status_file(directory: int, status: LaunchStatus) -> None:
+    # A temporary beside the name, renamed over it within the descriptor: a planted symlink is replaced, never followed.
+    _fs.write_file(
+        _fs.anchored(directory, status_name(status.request_id)), encode_status(status), durable=False, mode=0o600
+    )
 
 
 def _client_stop_reason(attempt: Any, state: AttemptLaunches, launch: ConfinedLaunch) -> str | None:
     try:
-        with _open_launch_directory(attempt, state) as directory:
-            if directory.stat(stop_name(launch.request_id)) is not None:
-                return "the client asked to stop the launch"
-    except (FileNotFoundError, JobDirectoryError):
+        directory = _open_launch_directory(attempt, state)
+    except (FileNotFoundError, _fs.UnsafePath):
         return "the attempt's launch directory is gone or was replaced"
     except (FormatError, OSError) as exc:
         _LOGGER.debug("cannot check the stop marker of launch %s: %s", launch.request_id, exc)
+        return None
+    try:
+        if _fs.exists(_fs.anchored(directory, stop_name(launch.request_id))):
+            return "the client asked to stop the launch"
+    except OSError as exc:
+        _LOGGER.debug("cannot check the stop marker of launch %s: %s", launch.request_id, exc)
+    finally:
+        os.close(directory)
     return None
 
 
@@ -416,9 +427,12 @@ def _poll_launch(manager: Any, attempt: Any, state: AttemptLaunches, launch: Con
 
 def _write_status(manager: Any, attempt: Any, state: AttemptLaunches, status: LaunchStatus) -> bool:
     try:
-        with _open_launch_directory(attempt, state) as directory:
-            directory.write_atomic(status_name(status.request_id), encode_status(status))
-    except (FormatError, OSError, ValueError) as exc:
+        directory = _open_launch_directory(attempt, state)
+        try:
+            _write_status_file(directory, status)
+        finally:
+            os.close(directory)
+    except (FormatError, OSError, ValueError, _fs.UnsafePath) as exc:
         manager._report_anomaly(
             f"launch_status:{attempt.attempt_id}:{status.request_id}",
             f"cannot write the {status.state} status of launch {status.request_id} of {attempt.owned.job_key}: "
@@ -443,12 +457,12 @@ def _attempt_stop_reason(manager: Any, attempt: Any) -> str | None:
     return None
 
 
-def _pending_requests(manager: Any, attempt: Any, directory: JobDirectory, state: AttemptLaunches) -> list[str]:
+def _pending_requests(manager: Any, attempt: Any, directory: int, state: AttemptLaunches) -> list[str]:
     """Return the request identifiers without a status that were not started, in arrival order."""
 
     names: set[str] = set()
     requests: list[tuple[int, str]] = []
-    with os.scandir(directory.fd) as entries:
+    with os.scandir(directory) as entries:
         for count, entry in enumerate(entries):
             if count >= MAXIMUM_ENTRIES:
                 manager._report_anomaly(
@@ -479,11 +493,11 @@ def _pending_requests(manager: Any, attempt: Any, directory: JobDirectory, state
     ]
 
 
-def _refuse(manager: Any, attempt: Any, directory: JobDirectory, request_id: str, reason: str) -> None:
+def _refuse(manager: Any, attempt: Any, directory: int, request_id: str, reason: str) -> None:
     status = LaunchStatus(request_id, "refused", error=_error(reason))
     try:
-        directory.write_atomic(status_name(request_id), encode_status(status))
-    except (FormatError, OSError) as exc:
+        _write_status_file(directory, status)
+    except (FormatError, OSError, _fs.UnsafePath) as exc:
         _LOGGER.warning(
             "cannot refuse launch request %s of attempt %s: %s",
             request_id,
@@ -540,21 +554,24 @@ def write_process_record(
     _fs.write_file(_fs.loc(directory / PROCESS_FILE), json_bytes(record), durable=manager.workspace.durable)
 
 
-def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDirectory, request_id: str) -> str | None:
+def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: int, request_id: str) -> str | None:
     """Start one admitted request, returning ``None``, or why it is refused."""
 
     context = state.context
     if context is None:
         return "the attempt has no launch binding; HTTK_WORKFLOW_LAUNCH is not available to it"
     try:
-        request = decode_request(directory.read(request_name(request_id), MAX_REQUEST_BYTES))
-    except (FormatError, OSError, ValueError) as exc:
+        data = _fs.read_bounded(_fs.anchored(directory, request_name(request_id)), MAX_REQUEST_BYTES, nonblock=True)
+        if data is None:
+            return "the request is invalid: it is gone"
+        request = decode_request(data)
+    except (FormatError, OSError, ValueError, _fs.UnsafePath) as exc:
         return f"the request is invalid: {exc}"
     if request.request_id != request_id:
         return "the request names another request identifier than its file"
     if request.attempt_id != attempt.attempt_id:
         return "the request names another attempt"
-    if directory.stat(stop_name(request_id)) is not None:
+    if _fs.exists(_fs.anchored(directory, stop_name(request_id))):
         return "the client asked to stop before the launch started"
     streams: list[int] = []
     token = secrets.token_hex(16)
@@ -562,7 +579,7 @@ def _start(manager: Any, attempt: Any, state: AttemptLaunches, directory: JobDir
     try:
         try:
             for name in (stdout_name(request_id), stderr_name(request_id)):
-                streams.append(_fs.create_exclusive(_fs.anchored(directory.fd, name), durable=False))
+                streams.append(_fs.create_exclusive(_fs.anchored(directory, name), durable=False))
         except FileExistsError:
             return "the launch output files already exist; only the manager creates them"
         except OSError as exc:
@@ -690,15 +707,16 @@ def _still_live(manager: Any, attempt: Any) -> bool:
     return manager._running.get(attempt.attempt_id) is attempt
 
 
-def _admission_refusal(manager: Any, attempt: Any, state: AttemptLaunches, control: JobDirectory) -> str | None:
+def _admission_refusal(manager: Any, attempt: Any, state: AttemptLaunches, control: int) -> str | None:
     reason = _attempt_stop_reason(manager, attempt)
     if reason is not None:
         return reason
     if state.closed is not None:
         return state.closed
     try:
-        published = control.exists_dir("outcome.ready")
-    except (FormatError, OSError):
+        # Anything at the name, a real directory or tampering, counts as published.
+        published = _fs.exists(_fs.anchored(control, "outcome.ready"))
+    except OSError:
         published = True
     if published:
         return "the attempt published its outcome"
@@ -707,41 +725,42 @@ def _admission_refusal(manager: Any, attempt: Any, state: AttemptLaunches, contr
 
 def _scan(manager: Any, attempt: Any, state: AttemptLaunches) -> bool:
     changed = False
+    descriptors: list[int] = []
     try:
-        with (
-            JobDirectory.at(attempt.owned.path) as job_dir,
-            job_dir.directory(state.control_name) as control,
-        ):
-            try:
-                directory = control.directory(LAUNCH_DIRECTORY)
-            except FileNotFoundError:
-                return False
-            with directory:
-                pending = _pending_requests(manager, attempt, directory, state)
-                refusal = _admission_refusal(manager, attempt, state, control)
-                if refusal is not None:
-                    stop_all(manager, attempt, refusal)
-                for decided, request_id in enumerate(pending):
-                    if decided >= MAXIMUM_DECISIONS:
-                        break
-                    if refusal is None and any(
-                        not launch.reaped or launch.pending is not None for launch in state.launches.values()
-                    ):
-                        # One launch at a time: the rest wait in arrival order for its final status.
-                        break
-                    reason = refusal or _start(manager, attempt, state, directory, request_id)
-                    if reason is not None:
-                        _refuse(manager, attempt, directory, request_id, reason)
-                    changed = True
+        # Both walks start at the owned job directory and never follow a link below it.
+        descriptors.append(control := _fs.open_dir_under(attempt.owned.path, state.control_name))
+        try:
+            descriptors.append(directory := _open_launch_directory(attempt, state))
+        except FileNotFoundError:
+            return False
+        pending = _pending_requests(manager, attempt, directory, state)
+        refusal = _admission_refusal(manager, attempt, state, control)
+        if refusal is not None:
+            stop_all(manager, attempt, refusal)
+        for decided, request_id in enumerate(pending):
+            if decided >= MAXIMUM_DECISIONS:
+                break
+            if refusal is None and any(
+                not launch.reaped or launch.pending is not None for launch in state.launches.values()
+            ):
+                # One launch at a time: the rest wait in arrival order for its final status.
+                break
+            reason = refusal or _start(manager, attempt, state, directory, request_id)
+            if reason is not None:
+                _refuse(manager, attempt, directory, request_id, reason)
+            changed = True
     except FileNotFoundError:
         return changed
-    except (FormatError, OSError) as exc:
+    except (FormatError, OSError, _fs.UnsafePath) as exc:
         manager._report_anomaly(
             f"launch_scan:{attempt.attempt_id}",
             f"cannot read the launch requests of attempt {attempt.attempt_id} of {attempt.owned.job_key}: {exc}",
             manager._event("launch_scan_error", attempt.owned, attempt_id=attempt.attempt_id),
             level=logging.WARNING,
         )
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
     return changed
 
 
