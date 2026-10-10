@@ -648,7 +648,7 @@ class Owner:
         try:
             for job in list(self._held.values()):
                 if job._attempt is None:
-                    job._return()
+                    job.give_back()
             self.close()
         except Exception:
             _LOGGER.warning("owner %s could not return its jobs on interrupt", self.owner_id, exc_info=True)
@@ -712,6 +712,15 @@ class Owner:
 
         self._discard(self._launch_path(attempt_id, n))
 
+    def holds(self, ref: JobRef) -> bool:
+        """Whether this process holds a handle for *ref*, as opposed to a job left in ``owned/<owner-id>/``.
+
+        :param ref: A reference from :meth:`owned`.
+        :return: ``True`` while a handle from :meth:`adopt_owned` or :func:`claim` is unreleased.
+        """
+
+        return ref.path in self._held
+
     def owned(self) -> list[JobRef]:
         """List ``owned/<owner-id>/``: every job this owner holds on disk, held by this process or not.
 
@@ -751,7 +760,7 @@ class Owner:
             raise WorkflowError(f"owner {self.owner_id} still holds {len(self._held)} jobs")
         # §5.2 self-healing: jobs in owned/<self>/ this process never held go back unchanged; nothing launches.
         for ref in self.owned():
-            self.adopt_owned(ref)._return()
+            self.adopt_owned(ref).give_back()
         if self.owned():
             raise WorkflowError(f"owner {self.owner_id} still owns jobs after self-healing")
         workspace = self.workspace
@@ -1145,9 +1154,16 @@ class OwnedJob:
         self._retire()
         return JobRef.from_path(target, state=state, placement=placement)
 
-    def _return(self) -> JobRef:
-        # Back to from_state without a state write, exactly as recovery would: with_release would clear an
-        # unfinished commit intent, which the next claimant's reconcile must still see (§5.4, note §5.4).
+    def give_back(self) -> JobRef:
+        """Move the job back to where it was claimed from, unchanged, exactly as recovery would.
+
+        A pending release is applied instead. There is no state write: a release would clear an unfinished
+        commit intent, which the next claimant's reconcile must still see (§5.4).
+
+        :return: The reference after the move.
+        :raises httk.workflow.errors.WorkflowError: While an attempt runs, or if the job is no longer owned.
+        """
+
         self.require_quiescent()
         doc = self.read_state()
         if (pending := self._pending(doc)) is not None and doc is not None:

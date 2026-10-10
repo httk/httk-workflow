@@ -300,7 +300,7 @@ def quarantine_damaged(workspace: "Workspace", owner: _kernel.Owner, job_id: str
     """
 
     for ref in owner.owned():
-        if ref.job_id == job_id and ref.path not in owner._held:
+        if ref.job_id == job_id and not owner.holds(ref):
             _LOGGER.error("quarantining damaged job %s: %s", ref.job_key, reason, extra={"event": "job_damaged"})
             return quarantine(workspace, owner, ref.path, reason)
     return None
@@ -414,7 +414,7 @@ class _Collection:
             doc = None
         if doc is None or owned.pending_release() is not None or doc.commit is not None or doc.phase["kind"] != "idle":
             # Unfinished owner work is a manager's reconcile; the job goes back unchanged.
-            owned._return()
+            owned.give_back()
             return
         removed = [name for name in names if owned.discard_subtree(f"attempts/{name}")]
         tally.removed += len(removed)

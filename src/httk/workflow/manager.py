@@ -781,7 +781,7 @@ class TaskManager:
             if ref.path in running:
                 continue
             # A handle this process still holds is a commit it retries, not a claim it lost track of.
-            held = ref.path in self.owner._held
+            held = self.owner.holds(ref)
             try:
                 owned = self.owner.adopt_owned(ref)
             except (FormatError, _fs.UnsafePath) as exc:

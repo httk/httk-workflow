@@ -289,12 +289,12 @@ def serve(workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef)
         doc = owned.read_state()
     except (FormatError, _fs.UnsafePath):
         # Back unchanged, as recovery would return it; a manager fails a damaged job.
-        owned._return()
+        owned.give_back()
         raise
     if doc is None or doc.activation is None:
         doc = (doc or StateDoc.empty(owned.job_id)).next_activation(job.initial_step, "initial")
     if owned.pending_release() is not None or doc.commit is not None or doc.phase["kind"] != "idle":
-        owned._return()
+        owned.give_back()
         return True
     if apply_requests(owned, job, doc) is not None:
         release(owned, doc, Release(owned.from_state, owned.from_priority))

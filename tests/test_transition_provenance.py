@@ -137,4 +137,4 @@ def test_a_claim_loser_learns_it_lost_at_once(tmp_path: Path) -> None:
         assert _kernel.claim(slow, loser, ready) is None
         assert time.monotonic() - started < 10.0
         assert not loser.owned()
-        won._return()
+        won.give_back()
