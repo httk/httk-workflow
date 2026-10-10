@@ -12,6 +12,8 @@ from httk.core.identity import sign_document, verify_document
 from ._daemon_protocol import Request, Response, encode_request, encode_response
 
 CLOCK_SKEW_SECONDS = 7800
+#: The longest request lifetime :func:`check_request_time` accepts unless told otherwise, in seconds.
+DEFAULT_REQUEST_MAX_AGE = 3600
 
 
 def _document(data: bytes) -> dict[str, object]:
@@ -122,7 +124,7 @@ def verify_request(request: Request, authorized_keys: Collection[str]) -> None:
         raise ValueError("request operator key is not authorized")
 
 
-def check_request_time(request: Request, *, now: int | None = None, max_age: int = 3600) -> None:
+def check_request_time(request: Request, *, now: int | None = None, max_age: int = DEFAULT_REQUEST_MAX_AGE) -> None:
     """Require a bounded request lifetime containing now with allowed clock skew.
 
     :param request: Typed request carrying positive integer Unix timestamps.
@@ -180,6 +182,7 @@ def verify_response(response: Response, public_key: str) -> None:
 
 __all__ = [
     "CLOCK_SKEW_SECONDS",
+    "DEFAULT_REQUEST_MAX_AGE",
     "check_request_time",
     "sign_request",
     "sign_response",

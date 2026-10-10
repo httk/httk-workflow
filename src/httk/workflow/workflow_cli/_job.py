@@ -21,7 +21,7 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _kernel, _moving, _requests
+from .. import _fs, _kernel, _moving, _requests
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
 from .._state import TERMINAL_STATES
@@ -1142,6 +1142,11 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--timeout must not be negative")
     if arguments.destination is None and not arguments.hold:
         raise ValueError("job eject needs DEST, or --hold")
+    if arguments.destination_id is not None and not arguments.hold:
+        raise ValueError("--destination-id is recorded by a hold; it needs --hold")
+    destination_id = (
+        None if arguments.destination_id is None else canonical_uuid(arguments.destination_id, "--destination-id")
+    )
     workspace = _modifiable(arguments, context, action="eject jobs from it")
     refs = resolve_job_selectors(workspace, context.cwd, [arguments.job])
     if len(refs) != 1:
@@ -1157,7 +1162,7 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
                 print(f"{job_id}: the job was not found", file=sys.stderr)
                 return 1
             if ref.state == _kernel.OWNED:
-                outcome: _moving.EjectReport | str = f"{ref.job_key} is running or held by an owner"
+                outcome: _moving.EjectReport | _moving.Hold | str = f"{ref.job_key} is running or held by an owner"
                 if arguments.wait and not paused:
                     _requests.post(
                         workspace,
@@ -1171,33 +1176,48 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
             else:
                 try:
                     outcome = eject_once(
-                        workspace, owner, ref, destination, tree=arguments.tree, locator=arguments.destination
+                        workspace,
+                        owner,
+                        ref,
+                        destination,
+                        tree=arguments.tree,
+                        locator=arguments.destination,
+                        destination_workspace_id=destination_id,
                     )
                 except _ERRORS as exc:
                     print(f"{ref.job_key}: {exc}", file=sys.stderr)
                     return 1
-            if isinstance(outcome, _moving.EjectReport):
+            if not isinstance(outcome, str):
                 break
             remaining = deadline - time.monotonic()
             if not arguments.wait or remaining <= 0:
                 print(f"{outcome}{'; timed out waiting' if arguments.wait else ''}", file=sys.stderr)
                 return 1
             time.sleep(min(1.0, remaining))
-    members = list(outcome.members)
-    if arguments.hold and arguments.json:
-        print(json.dumps({"transfer_id": outcome.transfer_id, "path": str(outcome.destination), "members": members}))
+    if isinstance(outcome, _moving.Hold):
+        print(
+            json.dumps(outcome.as_mapping())
+            if arguments.json
+            else f"held {len(outcome.members)} job(s) in {outcome.path}"
+        )
     elif arguments.json:
-        document = {"destination": str(outcome.destination), "members": members, "transfer_id": outcome.transfer_id}
+        document = {
+            "destination": str(outcome.destination),
+            "members": list(outcome.members),
+            "transfer_id": outcome.transfer_id,
+        }
         print(json.dumps(document, indent=2))
-    elif arguments.hold:
-        print(f"held {len(members)} job(s) in {outcome.destination}")
     else:
-        print(f"ejected {len(members)} job(s) to {outcome.destination}")
+        print(f"ejected {len(outcome.members)} job(s) to {outcome.destination}")
     return 0
 
 
 def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move an ejected bundle into the workspace, publishing its jobs into the states they left."""
+    """Move an ejected bundle into the workspace, publishing its jobs into the states they left.
+
+    One filesystem moves the bundle in; across filesystems it is copied, and with ``--move`` the source is
+    removed once adopted (for a bundle that is the caller's own to remove, such as a fetched exchange return).
+    """
 
     workspace = _modifiable(arguments, context, action="adopt jobs into it")
     source = context.cwd / Path(arguments.bundle).expanduser()
@@ -1210,6 +1230,8 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
     if report is None:
         print(f"{arguments.bundle}: another actor took the bundle first", file=sys.stderr)
         return 1
+    if arguments.move and report.copied:
+        _fs.discard(_fs.loc(source), trash_dir=source.parent, durable=workspace.durable)
     if report.missing_workflows:
         print(
             f"warning: these workflows are not installed, so their jobs wait: {', '.join(report.missing_workflows)}",
@@ -1665,6 +1687,11 @@ def build_job_parser(
         "destination", metavar="DEST", nargs="?", help="the directory to put the bundle in (with --hold: recorded only)"
     )
     eject.add_argument("--hold", action="store_true", help="hold the bundle in the workspace for a transfer")
+    eject.add_argument(
+        "--destination-id",
+        metavar="WORKSPACE_ID",
+        help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
+    )
     eject.add_argument("--tree", action="store_true", help="eject the job's descendants too")
     eject.add_argument("--wait", action="store_true", help="pause a running job and wait until it can move")
     eject.add_argument(
@@ -1685,6 +1712,11 @@ def build_job_parser(
     )
     _add_workspace_option(adopt, help_text="the workspace to adopt into")
     adopt.add_argument("bundle", metavar="BUNDLE", help="an ejected job bundle directory")
+    adopt.add_argument(
+        "--move",
+        action="store_true",
+        help="remove the bundle once adopted when it had to be copied from another filesystem",
+    )
     adopt.add_argument("--json", action="store_true", help="print the result as one JSON document")
     add_durability_arguments(adopt)
 

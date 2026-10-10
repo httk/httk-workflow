@@ -263,6 +263,38 @@ def test_a_boundary_release_records_the_commits_own_cancel(ws: Workspace, instal
     assert not _pending(ws)
 
 
+def test_an_exchange_cancel_applied_by_the_commit_is_recorded_as_translated(
+    ws: Workspace, installed: _store.Installed
+) -> None:
+    # R2 item 7: the cancel that stops an attempt is applied by the commit, not by apply_requests.
+    submitted = h.submit(ws, installed, {"start": "sleep"}, placement="project/sleeper")
+    assert submitted.placement is not None
+    name = str(uuid.uuid4())
+    with h.cli_owner(ws) as owner:
+        owned = _kernel.claim(ws, owner, submitted)
+        assert owned is not None
+        exchange_job = StateDoc.empty(owned.job_id).updated(origin="exchange", exchange_name=name)
+        owned.release(exchange_job, _kernel.Release(submitted.state, submitted.priority))
+        claim = _kernel.claim_exchange_name(ws, owner, name, submitted.job_id, submitted.placement, nonce="n")
+        assert claim is _kernel.ExchangeClaim.WON
+    request_id = str(uuid.uuid4())
+    with TaskManager(ws, heartbeat_interval=0.01, cancel_grace_seconds=1.0) as task_manager:
+        _until(lambda: task_manager.tick() is not None and any((ws.jobs / "owned").glob("*/*/run/sleeping")))
+        _requests.post(
+            ws,
+            action="cancel",
+            job_id=submitted.job_id,
+            placement=submitted.placement,
+            operator="exchange",
+            reason="cancel_job signed by the client",
+            request_id=request_id,
+        )
+        _until(lambda: task_manager.tick() is not None and not task_manager.running_attempts)
+        task_manager.run_until_idle(timeout=30)
+    assert h.find(ws, submitted.job_id).state == "cancelled"
+    assert _kernel.exchange_translation_applied(ws, name, request_id)
+
+
 # -- B8: a job whose commit keeps failing is given back -----------------------------------------------------------
 
 

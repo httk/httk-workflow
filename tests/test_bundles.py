@@ -208,7 +208,7 @@ def test_build_validate_round_trip(tmp_path: Path) -> None:
     # The payloads are complete jobs from a workspace (state.json, logs/): trusted only.
     with pytest.raises(BundleError):
         validate_bundle(bundle, untrusted=True)
-    owner._discard(bundle.parent)
+    owner.discard_tree(bundle.parent)
     owner.close()
 
 
@@ -225,7 +225,7 @@ def test_build_takes_the_name_priority_and_a_subtree_root(tmp_path: Path) -> Non
     manifest = validate_bundle(bundle, untrusted=False)
     assert manifest.members[0].parent_job_id is None and manifest.members[1].parent_job_id == jobs[1]["id"]
     assert (manifest.destination_workspace_id, manifest.destination_locator) == (None, None)
-    owner._discard(bundle.parent)
+    owner.discard_tree(bundle.parent)
     owner.close()
 
 

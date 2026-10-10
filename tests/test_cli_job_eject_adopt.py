@@ -1,14 +1,16 @@
 """The ``job eject`` and ``job adopt`` verbs."""
 
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httk.core.cli import CLIContext
 
-from httk.workflow import Workspace, _kernel
+from httk.workflow import Workspace, _fs, _kernel
 from httk.workflow.registry import create_workspace
 from httk.workflow.seals import seal_workspace
 from httk.workflow.workflow_cli import command
@@ -153,3 +155,29 @@ def test_sealed_workspace_refuses(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert "sealed" in capsys.readouterr().err
     assert_in(source, [(mapping, state, priority)])
     assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("move", [False, True])
+def test_adopt_move_removes_a_bundle_copied_from_another_filesystem(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, move: bool
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    mapping, state, priority = single(source)
+    argv = ["job", "eject", "--workspace", source_name, str(mapping["id"]), str(tmp_path / "outbox"), "--json"]
+    assert command(argv, context(tmp_path)) == 0
+    bundle = Path(json.loads(capsys.readouterr().out)["destination"])
+    real = _fs.move_once
+
+    def across(src: _fs.Loc, dst: _fs.Loc, **kwargs: Any) -> _fs.Moved:
+        if src.path == bundle:
+            raise _fs.CrossDevice("simulated")
+        return real(src, dst, **kwargs)
+
+    monkeypatch.setattr(_fs, "move_once", across)
+    argv = ["job", "adopt", "--workspace", target_name, *(["--move"] if move else []), str(bundle)]
+    assert command(argv, context(tmp_path)) == 0
+    assert_in(target, [(mapping, state, priority)])
+    # A copy leaves its source; --move removes it, as the client fetching its own outbox entry wants.
+    assert bundle.exists() is not move
+    assert sorted(os.listdir(tmp_path / "outbox")) == ([] if move else [bundle.name])

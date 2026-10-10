@@ -33,9 +33,9 @@ adapter and an unconfined Slurm launcher lack these guarantees.
 - The client controls the exchange and the content of the jobs it sends,
   including everything the trusted side later moves (status documents, ejected
   bundles). Uploaded job content may be arbitrary.
-- The managers are trusted. They adopt exchange bundles with the hardened,
-  descriptor-anchored adoption walk, verify them, filter untrusted content, and
-  execute no bundle code outside an attempt sandbox.
+- The managers are trusted. They adopt exchange bundles by first copying them,
+  descriptor-anchored, into their own scratch, then verify that copy, filter
+  untrusted content, and execute no bundle code outside an attempt sandbox.
 - Each job attempt, and each rank of a parallel launch, runs confined: it can
   write only its own job directory and cannot use scheduler authority. Jobs
   cannot change `manager.confine` or any `confine.*` setting: neither job
@@ -420,10 +420,12 @@ httk job eject JOB /mnt/cluster/exchange/inbox
 
 The export is made by a local atomic ejection and then copied into the
 mount (`--resume` continues an interrupted copy). Every unrestricted confined
-manager of the workspace adopts bundles from `inbox` itself: the walk is
-anchored at directory descriptors, verifies the bundle, and filters untrusted
-content. It refuses special files, symlinks pointing outside the bundle and
-hard-linked files. A refused bundle appears in
+manager of the workspace adopts bundles from `inbox` itself: it takes the
+entry, copies it anchored at directory descriptors into its own scratch, and
+verifies, filters and publishes only that copy. It refuses special files,
+symlinks pointing outside the bundle and hard-linked files. A client that keeps
+descriptors open on its entry can change its bytes only until the copy
+completes; such a change affects only its own job. A refused bundle appears in
 `outbox/rejected/<unique>/`, as the bundle `<name>` and a `reason.json`, which
 holds the reason. Eject errors go to the manager log. With no manager running, bundles simply
 wait in `inbox`; the client can take one back before any manager does:
@@ -440,20 +442,23 @@ Adoption gives the jobs fresh UUIDs and keeps the client's job UUID as the
 job's exchange name. Once the root and every job of its tree are finished
 (`succeeded`, `failed` or `cancelled`), a manager returns the whole tree to
 `outbox/<client job UUID>/<job key>`; while an earlier copy there is not
-fetched, the return is retried. Fetch it:
+fetched, the return waits. Fetch it, removing it from the outbox:
 
 ```console
-httk job adopt /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
+httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
 Managers also handle the job actions `stop_job`, `cancel_job` and `eject_job`
 from `requests/`, signed by a key of the workspace setting
 `exchange.authorized_keys` (comma- or space-separated) and naming the job by
 its client UUID; each is applied once and answered with an unsigned
-`responses/<id>.json` (`accepted`, or `refused` with a reason). The daemon
-leaves job actions to the managers.
+`responses/<id>.json` (`accepted`, or `refused` with a reason; a request
+replayed after its job was returned is refused `request_replayed`). The daemon
+leaves job actions to the managers. Job actions are protocol-level for now:
+there is no client command that publishes them yet.
 
-`job adopt` copies the tree, verifies it and removes the source. A failed job
+`job adopt --move` copies the tree across filesystems, verifies it and then
+removes the source. A failed job
 is never retried automatically. To resume one, adopt it, fix it, and eject it
 to the `inbox` again.
 

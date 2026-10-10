@@ -787,7 +787,7 @@ and never republished. `--resume` and
 it back with `httk job adopt transfers/in-doubt/<T>/<job_key>` (the full path).
 
 `job adopt` verifies a directory, moves it in (a rename on one filesystem;
-across filesystems, a copy that is verified before the directory is removed),
+across filesystems, a copy, after which `--move` removes the directory),
 restores the job to the state it was ejected in, and installs a runner it
 carries. It prints `JOB_ID adopted STATE PAYLOAD`. A tree comes back whole, each
 member at the placement it left from, so `--placement` is refused for it, and a
@@ -850,7 +850,8 @@ transfer abandoned for good is taken back into SRC with `httk job adopt
 --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`, which is
 safe only after checking that DST does not have the jobs; `job transfer
 --release` discards a hold whose jobs DST has. A copy pushed to a remote DST
-that it refused stays in its `transfers/incoming/` until removed by hand.
+that it refused is discarded there; the hold stays held. A hold records DST's
+workspace id, and `--resume` refuses a DST whose id differs.
 
 ## Running managers
 

@@ -106,7 +106,7 @@ def test_extract_directly_below_the_scratch(ws: FakeWorkspace) -> None:
     scratch = owner.scratch("adopt")
     job.extract(scratch / "job")
     assert (scratch / "job" / "job.json").is_file()
-    owner._discard(scratch)
+    owner.discard_tree(scratch)
     owner.close()
 
 

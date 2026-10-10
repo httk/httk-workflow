@@ -10,7 +10,9 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
   cancelled job keeps the attempt its ``state.json`` names;
 - ``placement_directories``: empty placement directories of the unowned states;
 - ``requests``: request files older than a day that are malformed or whose job
-  cannot be found go to ``quarantine/``;
+  cannot be found go to ``quarantine/``, and the exchange's records of translated
+  job actions (``exchange-requests/<id>``) older than any signed request can stay
+  acceptable (:data:`EXCHANGE_TRANSLATION_SECONDS`) are removed;
 - ``manager_logs``: ``logs/managers/<owner-id>.log`` of owners that are gone,
   older than ``retention.trash_days``;
 - ``owner_tombstones``: ``dead.json`` of recovered owners older than
@@ -37,6 +39,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from . import _death, _fs, _kernel, _requests, _store
+from ._daemon_auth import CLOCK_SKEW_SECONDS, DEFAULT_REQUEST_MAX_AGE
+from ._exchange import TRANSLATIONS_DIRECTORY
 from ._kernel import Release
 from ._state import UNOWNED_STATES, StateDoc, read_state_unowned
 from ._util import json_bytes
@@ -47,6 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
 
 __all__ = [
+    "EXCHANGE_TRANSLATION_SECONDS",
     "GC_CATEGORIES",
     "GC_REPORT_FORMAT",
     "REQUEST_GRACE_SECONDS",
@@ -66,6 +71,10 @@ GC_REPORT_FORMAT = "httk-workflow-gc"
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: How long a malformed request, or one whose job cannot be found, waits before it is quarantined.
 REQUEST_GRACE_SECONDS = 24 * 60 * 60
+#: How long the record of a translated exchange job action is kept: a request is accepted at most this long after
+#: its translation (its lifetime plus the clock skew allowed on both sides), so a replay after it is refused as
+#: expired.
+EXCHANGE_TRANSLATION_SECONDS = DEFAULT_REQUEST_MAX_AGE + 2 * CLOCK_SKEW_SECONDS
 #: Every category, in the order a collection runs them.
 GC_CATEGORIES = (
     "dead_owners",
@@ -216,13 +225,6 @@ class _Tally:
         )
 
 
-def _names(directory: Path) -> list[str]:
-    try:
-        return sorted(os.listdir(directory))
-    except (FileNotFoundError, NotADirectoryError):
-        return []
-
-
 def _mtime(path: Path) -> float | None:
     try:
         return os.lstat(path).st_mtime
@@ -263,7 +265,7 @@ def _into_quarantine(workspace: _kernel.KernelWorkspace, entry: Path, reason: st
 def _finish_quarantine(owner: _kernel.Owner, scratch: Path) -> bool:
     """The scratch reconciler of an interrupted quarantine: what was taken goes on to ``quarantine/``."""
 
-    for name in _names(scratch):
+    for name in _kernel.list_names(scratch):
         _into_quarantine(owner.workspace, scratch / name, "an interrupted quarantine")
     return True
 
@@ -413,7 +415,7 @@ class _Collection:
         attempts = ref.path / "attempts"
         return [
             name
-            for name in _names(attempts)
+            for name in _kernel.list_names(attempts)
             if not name.startswith(".") and name != keep and self._aged(attempts / name, cutoff)
         ]
 
@@ -464,7 +466,7 @@ class _Collection:
         cutoff = self.now - REQUEST_GRACE_SECONDS
         problems: dict[Path, str] = {}
         wanted: dict[str, list[tuple[Path, PurePosixPath]]] = {}
-        for name in _names(directory):
+        for name in _kernel.list_names(directory):
             path = directory / name
             if name.startswith(".") or not self._aged(path, cutoff):
                 continue
@@ -486,12 +488,17 @@ class _Collection:
             tally.note(path, _bytes(path, self.sizes))
             if self.owner is not None and not self.dry_run and quarantine(self.workspace, self.owner, path, reason):
                 tally.removed += 1
+        translations = self.control / TRANSLATIONS_DIRECTORY
+        expired = self.now - EXCHANGE_TRANSLATION_SECONDS
+        for name in _kernel.list_names(translations):
+            if not name.startswith(".") and self._aged(translations / name, expired):
+                self._remove(tally, translations / name)
 
     def manager_logs(self, tally: _Tally) -> None:
         cutoff = self._cutoff(self.retention.trash_days)
         assert cutoff is not None
         logs = self.workspace.root / LOGS_DIRECTORY / "managers"
-        for name in _names(logs):
+        for name in _kernel.list_names(logs):
             owner_id = name.removesuffix(".1").removesuffix(".log")
             if not name.endswith((".log", ".log.1")) or (self.control / "owners" / owner_id / "owner.json").exists():
                 continue
@@ -506,14 +513,14 @@ class _Collection:
             # Only a recovered owner: nothing left but its tombstone (and write temporaries).
             if record.record is not None or record.tombstone is None or not self._aged(tombstone, cutoff):
                 continue
-            if any(not name.startswith(".") for name in _names(record.path) if name != "dead.json"):
+            if any(not name.startswith(".") for name in _kernel.list_names(record.path) if name != "dead.json"):
                 continue
             if (self.workspace.jobs / _kernel.OWNED / record.owner_id).exists():
                 continue
             tally.note(record.path, _bytes(record.path, self.sizes))
             if self.dry_run:
                 continue
-            for name in _names(record.path):
+            for name in _kernel.list_names(record.path):
                 _fs.remove_file(_fs.loc(record.path / name), durable=self.workspace.durable)
             if _fs.remove_empty_dir(_fs.loc(record.path)):
                 tally.removed += 1
@@ -521,12 +528,12 @@ class _Collection:
     def tmp_entries(self, tally: _Tally) -> None:
         cutoff = self.now - TMP_MAXIMUM_AGE_SECONDS
         owners = self.control / "owners"
-        for directory in [self.control / "requests", *(owners / name for name in _names(owners))]:
-            for name in _names(directory):
+        for directory in [self.control / "requests", *(owners / name for name in _kernel.list_names(owners))]:
+            for name in _kernel.list_names(directory):
                 if name.startswith(".") and name.endswith(".tmp") and self._aged(directory / name, cutoff):
                     self._remove(tally, directory / name)
         tmp = self.control / "tmp"
-        for name in _names(tmp):
+        for name in _kernel.list_names(tmp):
             # Only entries already moved for deletion carry this name; a crashed removal left them.
             if name.startswith("trash.") and len(name) == _TRASH_NAME_LENGTH and self._aged(tmp / name, cutoff):
                 self._remove(tally, tmp / name)

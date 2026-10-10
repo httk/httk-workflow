@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import _death, _kernel, _moving, _requests, _store
+from .._bundles import read_manifest
 from .._durations import format_duration
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
@@ -914,8 +915,9 @@ def explain_held(workspace: Workspace, selector: str) -> list[Diagnosis]:
 
     found = []
     for hold in _moving.held(workspace):
-        destination = hold.manifest.destination_locator or "no recorded destination"
-        for member in hold.manifest.members:
+        destination = hold.destination_locator or "no recorded destination"
+        read = read_manifest(Path(hold.path) / "bundle.json")
+        for member in read[1].members if read is not None else ():
             if not (member.job_id.startswith(selector) or member.job_key.startswith(selector)):
                 continue
             report = _Diagnosing()

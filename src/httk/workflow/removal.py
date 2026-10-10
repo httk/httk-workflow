@@ -29,6 +29,7 @@ __all__ = [
     "RemovalOutcome",
     "RemovalReport",
     "apply_requests",
+    "record_translation",
     "refusal",
     "release",
     "remove_jobs",
@@ -169,10 +170,10 @@ def _parse(path: Path) -> _requests.Request | None:
         return None
 
 
-def _exchange_name(doc: StateDoc, request: _requests.Request) -> str | None:
-    """The exchange name an exchange-derived request of an exchange job is guarded by, else ``None``."""
+def _exchange_name(doc: StateDoc, operator: object) -> str | None:
+    """The exchange name an exchange-derived request (by *operator*) of an exchange job is guarded by, else ``None``."""
 
-    if doc.origin == "exchange" and doc.exchange_name is not None and request.document["operator"] == "exchange":
+    if doc.origin == "exchange" and doc.exchange_name is not None and operator == "exchange":
         return doc.exchange_name
     return None
 
@@ -189,19 +190,30 @@ def translation_applied(workspace: _kernel.KernelWorkspace, doc: StateDoc, reque
     :return: Whether the request must be dropped unapplied.
     """
 
-    name = _exchange_name(doc, request)
+    name = _exchange_name(doc, request.document["operator"])
     return name is not None and _kernel.exchange_translation_applied(workspace, name, request.request_id)
 
 
-def _record_translation(workspace: _kernel.KernelWorkspace, doc: StateDoc, request: _requests.Request) -> None:
-    name = _exchange_name(doc, request)
+def record_translation(workspace: _kernel.KernelWorkspace, doc: StateDoc, request_id: str, operator: object) -> None:
+    """Record an applied request in the exchange index's ``translated/`` set when it is an exchange job action.
+
+    Every path that applies a request calls it after the effect: :func:`apply_requests`, and a commit that
+    applies the ``cancel`` that stopped an attempt.
+
+    :param workspace: The workspace.
+    :param doc: The job's ``state.json``.
+    :param request_id: The applied request's id.
+    :param operator: The request's ``operator``; only ``exchange`` requests of an exchange job are recorded.
+    """
+
+    name = _exchange_name(doc, operator)
     if name is None:
         return
     try:
-        _kernel.record_exchange_translation(workspace, name, request.request_id)
+        _kernel.record_exchange_translation(workspace, name, request_id)
     except WorkflowError:
         # The entry is gone (the job was deleted or returned): nothing can re-post into it.
-        _LOGGER.debug("no exchange index entry %s to record request %s in", name, request.request_id)
+        _LOGGER.debug("no exchange index entry %s to record request %s in", name, request_id)
 
 
 def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDoc:
@@ -241,9 +253,7 @@ def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _
     except Exception as exc:
         _LOGGER.warning("eject request %s for %s refused: %s", request.request_id, owned.job_key, exc)
         return
-    if doc.origin == "exchange" and doc.exchange_name is not None:
-        # A returned (or otherwise ejected) exchange root leaves the index; a child's entry is its root's.
-        _kernel.drop_exchange_index(owned.owner, doc.exchange_name, owned.job_id)
+    # A delivered exchange root left the exchange index inside _moving (also on crash recovery).
     _LOGGER.info(
         "ejected %s to %s (request %s)",
         owned.job_key,
@@ -353,7 +363,7 @@ def apply_requests(
             release(owned, new, _recording(effect, extra))
         # Recorded after the effect: a crash in between can at worst let a lagging re-post apply once more, while
         # recording first could lose the action altogether.
-        _record_translation(workspace, doc, request)
+        record_translation(workspace, doc, request.request_id, request.document["operator"])
         return None
     return doc
 

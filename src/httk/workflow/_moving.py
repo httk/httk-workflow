@@ -3,20 +3,26 @@
 Everything here composes :mod:`~httk.workflow._kernel` and :mod:`~httk.workflow._bundles`; every move and write
 goes through :mod:`~httk.workflow._fs`.
 
-**Eject** claims the tree members, builds the bundle in an ``eject`` scratch (``bundle.json`` first, recording
-each member's ``from`` state and priority) and delivers it to ``<destination>/<root key>``; across filesystems
-it copies to ``<destination>/.<name>.partial.<transfer id>`` and delivers that. An occupied destination or a
-failed delivery runs the ``eject`` reconciler's decision at once, which rolls the members back; a refusal before
-the bundle is built gives every claimed job back.
+**Eject** claims the tree members, builds the bundle in an ``eject`` scratch (a ``hold`` scratch for a hold;
+``bundle.json`` first, recording each member's ``from`` state and priority) and delivers it to
+``<destination>/<root key>`` (a hold to ``transfers/outgoing/<transfer id>``); across filesystems it copies to
+``<destination>/.<name>.partial.<transfer id>`` and delivers that. An occupied destination, a failed delivery or
+an error after some members were extracted runs the reconciler's decision at once, which rolls the members back;
+a refusal before the bundle is built gives every claimed job back. A delivered exchange root leaves the exchange
+index (decided from the bundle root's ``state.json``).
 
 **Adopt** takes a bundle into an ``adopt`` scratch, validates it (the trust boundary), rekeys an untrusted one,
 deduplicates against the workspace and publishes the members bottom-up. A bundle already adopted is discarded
-only when it is a duplicate delivery; an operator's bundle is refused back to its path.
+only when it is a duplicate delivery; an operator's bundle is refused back to its path, and a refused copy of a
+hold (in ``transfers/incoming/``) is discarded. An untrusted bundle is first *isolated*: right after the take
+it is copied, descriptor-anchored, to ``.partial/<name>`` in the scratch, and that copy replaces the taken
+original, which a client holding open descriptors could still change. Every later step works on the copy.
 
 **Crash-resume contract** of the reconcilers, registered with the kernel at import:
 
-- ``eject``: if the destination carries this bundle's exact ``bundle.json`` (under the root key, or for a hold
-  under the transfer id), the delivery happened and the scratch is discarded (roll forward). Otherwise every
+- ``eject`` and ``hold``: if the destination carries this bundle's exact ``bundle.json`` (an eject's under the
+  root key in its recorded destination, a hold's under the transfer id in ``transfers/outgoing``), the delivery
+  happened, an exchange root leaves the index, and the scratch is discarded (roll forward). Otherwise every
   member still in the bundle is submitted back to its recorded state and priority (roll back). A destination
   that cannot be read keeps the scratch. Delivery is at least once: verify the destination before re-ejecting.
 - ``adopt`` and ``adopt-untrusted`` (the trust is in the scratch's purpose, so it is known from the take on):
@@ -26,6 +32,9 @@ only when it is a duplicate delivery; an operator's bundle is refused back to it
   ``exchange/outbox/rejected`` when untrusted and stays in the scratch when trusted. A refusal moves the bundle
   to a fresh ``<refused_to>/<unique>/<name>`` beside its ``reason.json``, every directory opened without
   following a symlink.
+  Isolation of an untrusted bundle: until ``source.json`` records ``isolated``, the taken original is the bundle
+  and any ``.partial`` is an interrupted copy, discarded and made again. Once it does, ``.partial/<name>`` (if
+  present) is the complete copy: the original is discarded and the copy renamed into place.
   ``plan.json`` is the validated, deduplicated manifest: once it exists only publication remains, and a member
   directory missing from the bundle was published by the earlier run. Before it, validation, rekeying,
   deduplication and the exchange-name claim run again; each is idempotent.
@@ -37,9 +46,11 @@ import logging
 import os
 import re
 import stat
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Self, cast
 
 from httk.workflow import _fs, _kernel, _store
 from httk.workflow._bundles import (
@@ -57,7 +68,7 @@ from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import EXCHANGE_DIRECTORY, WORKSPACE_DIRECTORY, placement_text
+from httk.workflow.models import EXCHANGE_DIRECTORY, WORKSPACE_DIRECTORY, canonical_uuid, placement_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from httk.workflow.workspace import Workspace
@@ -85,6 +96,8 @@ _LOGGER = logging.getLogger(__name__)
 _MEMBER_STATES = frozenset({*TERMINAL_STATES, "paused"})
 _TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 _BUNDLE = "bundle"
+#: The scratch purpose of a hold; an eject's is ``eject``.
+_HOLD = "hold"
 #: The scratch purposes of adoption: the trust travels in the name, atomically with the take.
 _ADOPT = {False: "adopt", True: "adopt-untrusted"}
 _SOURCE = "source.json"
@@ -131,25 +144,106 @@ class AdoptReport:
     :param published: The published jobs, bottom-up.
     :param already_adopted: Every member was already in the workspace; nothing was published.
     :param missing_workflows: Workflow ids the published jobs need that are not installed (a warning only).
+    :param copied: The bundle was copied from another filesystem, so its source is untouched.
     """
 
     published: tuple[JobRef, ...]
     already_adopted: bool
     missing_workflows: tuple[str, ...]
+    copied: bool = False
 
 
 @dataclass(frozen=True)
 class Hold:
-    """A held bundle in ``transfers/outgoing/<transfer-id>/``.
+    """A held bundle, ``transfers/outgoing/<transfer-id>/``, as :func:`held` lists it or a remote reports it.
 
     :param transfer_id: The bundle's transfer id, also its directory name.
-    :param path: The bundle directory.
-    :param manifest: Its manifest.
+    :param path: The bundle directory, on the host of the workspace holding it.
+    :param members: The members' job keys, top-down; the first is the root.
+    :param destination_locator: The transfer's destination as recorded, or ``None``.
+    :param destination_workspace_id: The destination workspace's id as recorded, or ``None``.
+    :param created_at: When the bundle was built, an ISO 8601 timestamp with a time zone.
     """
 
     transfer_id: str
-    path: Path
-    manifest: BundleManifest
+    path: str
+    members: tuple[str, ...]
+    destination_locator: str | None
+    destination_workspace_id: str | None
+    created_at: str
+
+    @classmethod
+    def from_manifest(cls, path: Path, manifest: BundleManifest) -> Self:
+        """Describe the held bundle at *path* from its manifest.
+
+        :param path: The bundle directory.
+        :param manifest: Its manifest.
+        :return: The hold.
+        """
+
+        return cls(
+            manifest.transfer_id,
+            str(path),
+            tuple(member.job_key for member in manifest.members),
+            manifest.destination_locator,
+            manifest.destination_workspace_id,
+            manifest.created_at,
+        )
+
+    def as_mapping(self, now: float | None = None) -> dict[str, object]:
+        """Return the hold as ``transfer status --json`` and ``job eject --hold --json`` print it.
+
+        :param now: The time its age is measured against; the current time by default.
+        :return: A fresh mapping.
+        """
+
+        created = datetime.fromisoformat(self.created_at).timestamp()
+        return {
+            "transfer_id": self.transfer_id,
+            "path": self.path,
+            "root": self.members[0],
+            "members": list(self.members),
+            "destination": self.destination_locator,
+            "destination_workspace_id": self.destination_workspace_id,
+            "created_at": self.created_at,
+            "age_seconds": max(0, int((time.time() if now is None else now) - created)),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        """Parse a hold another workspace reported (:meth:`as_mapping`); derived members are ignored.
+
+        :param value: The decoded mapping.
+        :return: The hold.
+        :raises ValueError: For a malformed hold: a bad transfer id, a path not ending in it, no members, or a
+            malformed destination, workspace id or timestamp.
+        """
+
+        if not isinstance(value, dict):
+            raise ValueError("a hold must be a JSON object")
+        transfer_id, path, members = value.get("transfer_id"), value.get("path"), value.get("members")
+        locator, workspace_id, created_at = (
+            value.get("destination"),
+            value.get("destination_workspace_id"),
+            value.get("created_at"),
+        )
+        if (
+            not isinstance(transfer_id, str)
+            or not _TRANSFER_ID.fullmatch(transfer_id)
+            or not isinstance(path, str)
+            or PurePosixPath(path).name != transfer_id
+            or not isinstance(members, list)
+            or not members
+            or not all(isinstance(member, str) for member in members)
+            or not (locator is None or isinstance(locator, str))
+            or not isinstance(created_at, str)
+        ):
+            raise ValueError(f"a malformed hold: {value!r}")
+        if workspace_id is not None:
+            workspace_id = canonical_uuid(workspace_id, "destination_workspace_id")
+        if datetime.fromisoformat(created_at).tzinfo is None:
+            raise ValueError(f"a hold's created_at has no time zone: {created_at!r}")
+        return cls(transfer_id, path, tuple(members), locator, workspace_id, created_at)
 
 
 # -- eject ----------------------------------------------------------------------------------------------------------
@@ -270,9 +364,25 @@ def _roll_back(owner: Owner, bundle: Path, manifest: BundleManifest) -> list[Job
     return returned
 
 
+def _exchange_root(bundle: Path, manifest: BundleManifest) -> tuple[str, str] | None:
+    """The exchange name and job id of a bundle whose root is an exchange job, from the root's ``state.json``."""
+
+    root = manifest.members[0]
+    doc, _damaged = read_state_unowned(manifest.member_dir(bundle, root) / "state.json")
+    if doc is None or doc.origin != "exchange" or doc.exchange_name is None:
+        return None
+    return doc.exchange_name, root.job_id
+
+
+def _leave_index(owner: Owner, exchange: tuple[str, str] | None) -> None:
+    # A delivered exchange root (returned, ejected or held) leaves the index; a child's entry is its root's.
+    if exchange is not None:
+        _kernel.drop_exchange_index(owner, *exchange)
+
+
 def _settle(owner: Owner, scratch: Path) -> bool | None:
-    """Resolve an ``eject`` scratch: ``True`` when its bundle was delivered, ``False`` when every member still in it
-    went back (or none was taken), ``None`` when the destination cannot be read (the scratch stays)."""
+    """Resolve an ``eject`` or ``hold`` scratch: ``True`` when its bundle was delivered, ``False`` when every member
+    still in it went back (or none was taken), ``None`` when the destination cannot be read (the scratch stays)."""
 
     bundle = scratch / _BUNDLE
     read = read_manifest(bundle / "bundle.json")
@@ -280,15 +390,16 @@ def _settle(owner: Owner, scratch: Path) -> bool | None:
         # build_bundle writes bundle.json before any member moves: nothing to return.
         return False
     data, manifest = read
-    # A hold delivers to this workspace's outgoing/<transfer id> and records its transfer's destination instead.
-    candidates = [_outgoing(owner.workspace) / manifest.transfer_id]
-    if manifest.destination_locator is not None and Path(manifest.destination_locator).is_absolute():
-        destination = Path(manifest.destination_locator)
-        # An eject delivers under the root's key, a hold under the transfer id; the bytes carry the transfer id.
-        candidates += [destination / name for name in (manifest.members[0].job_key, manifest.transfer_id)]
+    if scratch.name.split(".")[1] == _HOLD:
+        candidates = [_outgoing(owner.workspace) / manifest.transfer_id]
+    else:
+        # An eject records its absolute destination (destination_problem) and delivers under the root's key.
+        locator = manifest.destination_locator
+        candidates = [] if locator is None else [Path(locator) / manifest.members[0].job_key]
     try:
         # The destination may be writable by others (the exchange outbox): never follow a symlink there.
         if any(_fs.carries(_fs.loc(candidate), "bundle.json", data) for candidate in candidates):
+            _leave_index(owner, _exchange_root(bundle, manifest))
             return True
         partials = [path.with_name(f".{path.name}.partial.{manifest.transfer_id}") for path in candidates]
         for partial in partials:
@@ -310,40 +421,50 @@ def _eject(
     *,
     destination: Path,
     tree: bool,
-    by_transfer_id: bool,
+    hold: bool,
     locator: str | None,
-) -> EjectReport:
+    destination_workspace_id: str | None = None,
+) -> tuple[EjectReport, BundleManifest]:
     members: list[OwnedJob] = []
+    scratch: Path | None = None
     try:
         if tree:
             members = _claim_tree(workspace, owner, root)
         elif children := tree_members(workspace, root.job_id, root.read_state()):
             # Ejecting the root alone would orphan the children present here: it is refused.
             raise Busy(children[0].job_key, "it is a child of the job; eject the whole tree")
+        scratch = owner.scratch(_HOLD if hold else "eject")
         bundle = build_bundle(
             owner,
             [root, *members],
             source_workspace_id=workspace.workspace_id,
+            destination_workspace_id=destination_workspace_id,
             destination_locator=locator,
             event=("ejected", {"destination": str(destination)}),
+            scratch=scratch,
         )
     except Exception:
-        # A refusal moved nothing: every job still held goes back, the root included.
+        # A refusal moved nothing: every job still held goes back, the root included. An error after some members
+        # were extracted is settled now, never left in the scratch until this owner closes.
         for job in (root, *members):
             if owner.holds(job.ref):
                 job.give_back()
+        if scratch is not None and _settle(owner, scratch) is not None:
+            owner.discard_scratch(scratch)
         raise
-    scratch = bundle.parent
     read = read_manifest(bundle / "bundle.json")
     assert read is not None
     token, manifest = read
-    target = destination / (manifest.transfer_id if by_transfer_id else root.job_key)
+    target = destination / (manifest.transfer_id if hold else root.job_key)
     report = EjectReport(target, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
+    # Read in the scratch, before the bundle reaches a destination others may write.
+    exchange = _exchange_root(bundle, manifest)
     error: Exception | None = None
     try:
         if _deliver(workspace, bundle, target, token, manifest.transfer_id):
+            _leave_index(owner, exchange)
             owner.discard_scratch(scratch)
-            return report
+            return report, manifest
         problem = f"{target} is occupied"
     except Exception as exc:
         # Never left in the scratch until this owner closes: the reconciler's decision is taken now.
@@ -353,7 +474,7 @@ def _eject(
         raise WorkflowError(f"{problem}; the bundle stays in {scratch} for the eject reconciler") from error
     owner.discard_scratch(scratch)
     if settled:
-        return report  # the delivery happened after all
+        return report, manifest  # the delivery happened after all
     raise WorkflowError(f"{problem}; the jobs were returned to the states they were taken from") from error
 
 
@@ -381,16 +502,17 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     if (problem := destination_problem(destination)) is not None:
         root.give_back()
         raise ValueError(problem)
-    return _eject(
-        workspace, owner, root, destination=destination, tree=tree, by_transfer_id=False, locator=str(destination)
+    report, _manifest = _eject(
+        workspace, owner, root, destination=destination, tree=tree, hold=False, locator=str(destination)
     )
+    return report
 
 
 def reconcile_eject(owner: Owner, scratch: Path) -> bool:
-    """The ``eject`` scratch reconciler: roll forward when the bundle was delivered, otherwise roll back.
+    """The ``eject`` and ``hold`` scratch reconciler: roll forward when the bundle was delivered, otherwise roll back.
 
     :param owner: The owner the scratch is named after.
-    :param scratch: ``tmp/<owner-id>.eject.<token>/``.
+    :param scratch: ``tmp/<owner-id>.eject.<token>/`` or ``tmp/<owner-id>.hold.<token>/``.
     :return: ``True`` when resolved (the kernel then discards the scratch); ``False`` when the destination
         cannot be read, which keeps the scratch.
     """
@@ -409,10 +531,18 @@ class _Record:
     #: This adoption's own nonce, recorded in the exchange index entry it claims.
     nonce: str
     untrusted: bool  # from the scratch's purpose, not stored
+    #: An untrusted bundle's complete copy exists: the taken original no longer counts (see the module docstring).
+    isolated: bool = False
 
 
 def _write_record(scratch: Path, record: _Record, *, durable: bool) -> None:
-    fields = {"source": record.source, "refused_to": record.refused_to, "copied": record.copied, "nonce": record.nonce}
+    fields = {
+        "source": record.source,
+        "refused_to": record.refused_to,
+        "copied": record.copied,
+        "nonce": record.nonce,
+        "isolated": record.isolated,
+    }
     _fs.write_file(_fs.loc(scratch / _SOURCE), json.dumps(fields).encode(), durable=durable)
 
 
@@ -430,7 +560,14 @@ def _read_record(workspace: _kernel.KernelWorkspace, scratch: Path, *, untrusted
         _write_record(scratch, record, durable=workspace.durable)
         return record
     value = json.loads(data)
-    return _Record(value["source"], value["refused_to"], bool(value["copied"]), str(value["nonce"]), untrusted)
+    return _Record(
+        value["source"],
+        value["refused_to"],
+        bool(value["copied"]),
+        str(value["nonce"]),
+        untrusted,
+        bool(value.get("isolated", False)),
+    )
 
 
 def _reject(workspace: _kernel.KernelWorkspace, bundle: Path, refused_to: Path, reason: str) -> Path:
@@ -473,9 +610,13 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
     if record.refused_to is not None:
         try:
             target = _reject(owner.workspace, bundle, Path(record.refused_to), reason)
-        except (_fs.UnsafePath, OSError) as exc:
+        except (_fs.UnsafePath, _fs.MoveFailed, OSError) as exc:
             # A client replaced the directory (a symlink): the bundle waits in the scratch for a later refusal.
             return f"bundle refused: {reason}; it stays in {scratch}, since {record.refused_to} cannot take it: {exc}"
+    elif record.source is not None and Path(record.source).parent == owner.workspace.control / "transfers" / "incoming":
+        # A remote transfer's landing is a copy of a hold by construction: the hold stays, the copy goes.
+        owner.discard_scratch(scratch)
+        return f"bundle refused: {reason}; it was a copy of a held bundle and was discarded (the hold stays)"
     elif record.source is not None and not _fs.exists(_fs.loc(Path(record.source))):
         _fs.move_owned(_fs.loc(bundle), _fs.loc(Path(record.source)), durable=durable)
         owner.discard_scratch(scratch)
@@ -557,7 +698,7 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
             if not _redelivered(workspace, record):
                 return _refuse(owner, scratch, bundle, record, "already adopted")
             owner.discard_scratch(scratch)
-            return AdoptReport((), True, ())
+            return AdoptReport((), True, (), record.copied)
         if presence is not None:
             return _refuse(owner, scratch, bundle, record, presence)
         if record.untrusted:
@@ -572,7 +713,7 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
                 # holds the name. The rekeyed id derives from the name: a job present there is this one.
                 if _kernel.locate_many(workspace, [root.job_id], placements=[indexed[1]], settle=True):
                     owner.discard_scratch(scratch)
-                    return AdoptReport((), True, ())
+                    return AdoptReport((), True, (), record.copied)
                 return _refuse(
                     owner,
                     scratch,
@@ -606,7 +747,7 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
         published.append(_kernel.submit(workspace, owner, directory, state=member.state, priority=member.priority))
     owner.discard_scratch(scratch)
     missing = tuple(sorted(workflow for workflow in workflows if _installed(workspace, workflow) is None))
-    return AdoptReport(tuple(published), False, missing)
+    return AdoptReport(tuple(published), False, missing, record.copied)
 
 
 def _installed(workspace: "Workspace", workflow_id: str) -> object:
@@ -615,6 +756,32 @@ def _installed(workspace: "Workspace", workflow_id: str) -> object:
     except ValueError:
         # An ambiguous name is not this id.
         return None
+
+
+def _isolate(owner: Owner, scratch: Path, name: str, record: _Record) -> _Record | str:
+    """Replace a taken untrusted bundle by the adopter's own copy: the record, or the message of a refusal.
+
+    A client may hold open descriptors into the bundle it handed in and rename or replace its entries at any
+    time; the copy, made descriptor-anchored, is out of its reach, and every later step works on it.
+    """
+
+    durable = owner.workspace.durable
+    staged = scratch / _PARTIAL
+    if not record.isolated:
+        if _fs.exists(_fs.loc(staged)):
+            owner.discard_tree(staged)  # an interrupted copy
+        try:
+            _fs.copy_tree(scratch / name, staged / name, durable=durable, limits=_fs.DEFAULT_LIMITS)
+        except (OSError, _fs.UnsafePath, _fs.UntrustedContentError) as exc:
+            return _refuse(owner, scratch, scratch / name, record, f"the bundle cannot be copied: {exc}")
+        record = dataclasses.replace(record, isolated=True)
+        _write_record(scratch, record, durable=durable)
+    if _fs.exists(_fs.loc(staged / name)):
+        if _fs.exists(_fs.loc(scratch / name)):
+            owner.discard_tree(scratch / name)  # the taken original
+        _fs.move_owned(_fs.loc(staged / name), _fs.loc(scratch / name), durable=durable)
+    _fs.remove_empty_dir(_fs.loc(staged))
+    return record
 
 
 def adopt(
@@ -627,8 +794,10 @@ def adopt(
     path) is refused and left in place. One with only some members present, or (when trusted) whose root's
     parent is here, is refused. An untrusted bundle's members get fresh ids, enter
     ``ready`` with ``origin: exchange`` and their client ids as ``exchange_name``, after the root's exchange
-    name was claimed. A refused bundle moves to a fresh name below *refused_to*, else back to *source* when that
-    is free, else it stays in the owner's scratch. Installation of the jobs' workflows is not checked.
+    name was claimed; first, right after the take, the bundle is replaced by the adopter's own copy (isolation,
+    see the module docstring). A refused bundle moves to a fresh name below *refused_to*; a copy of a hold landed
+    in ``transfers/incoming/`` is discarded; any other goes back to *source* when that is free, else it stays in
+    the owner's scratch. Installation of the jobs' workflows is not checked.
 
     :param workspace: The workspace to adopt into.
     :param owner: The adopting owner.
@@ -661,7 +830,7 @@ def adopt(
         record = dataclasses.replace(record, copied=True)
         _write_record(scratch, record, durable=durable)
         partial = scratch / _PARTIAL / name
-        _fs.copy_tree(src.path, partial, durable=durable)
+        _fs.copy_tree(src.path, partial, durable=durable, limits=_fs.DEFAULT_LIMITS if untrusted else None)
         # Complete only once renamed: the reconciler discards a scratch without the bundle.
         _fs.move_owned(_fs.loc(partial), _fs.loc(scratch / name), durable=durable)
         _LOGGER.warning("copied %s from another filesystem; the source stays in place", src.path)
@@ -669,6 +838,11 @@ def adopt(
         if scratch is None:
             return None
         _write_record(scratch, record, durable=durable)
+        if untrusted:
+            isolated = _isolate(owner, scratch, name, record)
+            if isinstance(isolated, str):
+                raise BundleError(isolated)
+            record = isolated
     result = _finish(workspace, owner, scratch, scratch / name, record)
     if isinstance(result, str):
         raise BundleError(result)
@@ -683,20 +857,34 @@ def reconcile_adopt(owner: Owner, scratch: Path) -> bool:
     :return: ``True`` when resolved; ``False`` when a refused bundle has nowhere to go and stays.
     """
 
+    workspace = cast("Workspace", owner.workspace)
+    untrusted = scratch.name.split(".")[1] == _ADOPT[True]
     entries = [
         name
-        for name in sorted(os.listdir(scratch))
+        for name in _kernel.list_names(scratch)
         if name not in RESERVED_NAMES and not _RECORD_TEMPORARY.fullmatch(name)
     ]
+    if (
+        not entries
+        and untrusted
+        and _fs.exists(_fs.loc(scratch / _SOURCE))
+        and _read_record(workspace, scratch, untrusted=True).isolated
+    ):
+        # An isolated bundle whose original was discarded before its copy was renamed into place.
+        entries = _kernel.list_names(scratch / _PARTIAL)
     if not entries:
         # An incomplete cross-filesystem copy (its source is untouched), or nothing was taken.
         return True
     if len(entries) > 1:
         _LOGGER.warning("keeping %s: it holds more than one bundle: %s", scratch, entries)
         return False
-    workspace = cast("Workspace", owner.workspace)
-    untrusted = scratch.name.split(".")[1] == _ADOPT[True]
     record = _read_record(workspace, scratch, untrusted=untrusted)
+    if untrusted and not record.copied:
+        isolated = _isolate(owner, scratch, entries[0], record)
+        if isinstance(isolated, str):
+            _LOGGER.warning("while reconciling %s: %s", scratch, isolated)
+            return not _fs.exists(_fs.loc(scratch))
+        record = isolated
     result = _finish(workspace, owner, scratch, scratch / entries[0], record)
     if isinstance(result, str):
         _LOGGER.warning("while reconciling %s: %s", scratch, result)
@@ -712,8 +900,14 @@ def _outgoing(workspace: _kernel.KernelWorkspace) -> Path:
 
 
 def hold(
-    workspace: "Workspace", owner: Owner, root: OwnedJob, *, tree: bool, destination_locator: str | None = None
-) -> EjectReport:
+    workspace: "Workspace",
+    owner: Owner,
+    root: OwnedJob,
+    *,
+    tree: bool,
+    destination_locator: str | None = None,
+    destination_workspace_id: str | None = None,
+) -> Hold:
     """Eject into this workspace's own ``transfers/outgoing/<transfer-id>/``: the held bundle of a transfer.
 
     :param workspace: The workspace.
@@ -721,33 +915,38 @@ def hold(
     :param root: The claimed, quiescent root.
     :param tree: Hold the root's descendants too.
     :param destination_locator: The transfer's destination, recorded in ``bundle.json`` for resumption.
-    :return: The report; its destination is the held bundle directory.
+    :param destination_workspace_id: The destination workspace's id, recorded in ``bundle.json``, so that a
+        resumption adopts only into that workspace.
+    :return: The hold.
     :raises Busy: As :func:`eject`, which also gives the other failures and their outcome: *root*'s handle is
         retired whatever happens.
     """
 
-    outgoing = _outgoing(workspace)
-    return _eject(
-        workspace, owner, root, destination=outgoing, tree=tree, by_transfer_id=True, locator=destination_locator
+    report, manifest = _eject(
+        workspace,
+        owner,
+        root,
+        destination=_outgoing(workspace),
+        tree=tree,
+        hold=True,
+        locator=destination_locator,
+        destination_workspace_id=destination_workspace_id,
     )
+    return Hold.from_manifest(report.destination, manifest)
 
 
 def held(workspace: "Workspace") -> list[Hold]:
-    """List the held bundles with their manifests.
+    """List the held bundles.
 
     :param workspace: The workspace.
     :return: The holds, by transfer id.
     """
 
     outgoing = _outgoing(workspace)
-    try:
-        names = sorted(os.listdir(outgoing))
-    except FileNotFoundError:
-        return []
     holds = []
-    for name in names:
+    for name in _kernel.list_names(outgoing):
         if _TRANSFER_ID.fullmatch(name) and (read := read_manifest(outgoing / name / "bundle.json")) is not None:
-            holds.append(Hold(name, outgoing / name, read[1]))
+            holds.append(Hold.from_manifest(outgoing / name, read[1]))
     return holds
 
 
@@ -771,5 +970,6 @@ def release_hold(workspace: "Workspace", owner: Owner, transfer_id: str) -> bool
 
 
 _kernel.register_reconciler("eject", reconcile_eject)
+_kernel.register_reconciler(_HOLD, reconcile_eject)
 for _purpose in _ADOPT.values():
     _kernel.register_reconciler(_purpose, reconcile_adopt)

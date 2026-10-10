@@ -7,9 +7,7 @@ import logging
 import math
 import os
 import re
-import shutil
 import stat
-import tempfile
 import time
 import uuid
 from collections.abc import Mapping
@@ -23,7 +21,7 @@ from httk.core.userdirs import data_home
 
 from . import _fs
 from ._daemon_auth import sign_request, verify_request, verify_response
-from ._daemon_mailbox import MailboxDirectory
+from ._daemon_mailbox import MailboxDirectory, read_regular
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, request_digest
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,6 +37,7 @@ _EXCHANGE_FILE = "exchange.json"
 _MAX_DOCUMENT_BYTES = 64 * 1024
 _SUBDIRECTORIES = ("requests", "responses", "inbox", "outbox", "managers")
 #: The content file of a request cache entry, the record directory ``daemon-requests/<enrollment>/<request id>/``.
+#: The content file of a cache entry: the file :func:`httk.workflow._fs.publish_record` writes.
 _CACHE_RECORD = "record"
 _CONFIGURE = "httk remote daemon configure REMOTE --exchange PATH"
 _PIN_HINT = f"pin the daemon with '{_CONFIGURE}' (it reads EXCHANGE/daemon.json)"
@@ -159,23 +158,7 @@ def _read_json_file(directory: MailboxDirectory, name: str, limit: int) -> objec
     :raises ValueError: If it is not a bounded regular strict UTF-8 JSON file.
     """
 
-    document = os.open(
-        name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory._require_open()
-    )
-    try:
-        if not stat.S_ISREG(os.fstat(document).st_mode):
-            raise ValueError(f"{name} is not a regular file")
-        data = bytearray()
-        while len(data) <= limit:
-            chunk = os.read(document, limit + 1 - len(data))
-            if not chunk:
-                break
-            data.extend(chunk)
-    finally:
-        os.close(document)
-    if len(data) > limit:
-        raise ValueError(f"{name} exceeds {limit} bytes")
-    raw = bytes(data)
+    raw = read_regular(_fs.anchored(directory._require_open(), name), limit)
     if any(raw.startswith(bom) for bom in _BOMS):
         raise ValueError(f"{name} must be UTF-8 without a BOM")
     try:
@@ -360,54 +343,13 @@ def read_manager_log(endpoint: "Endpoint", handle: str) -> bytes:
     if type(handle) is not str or _ID_PATTERN.fullmatch(handle) is None:
         raise ValueError("handle must be 32 lowercase hexadecimal digits")
     endpoint.check_exchange()
-    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     with MailboxDirectory(endpoint.exchange / "managers") as directory:
         try:
-            document = os.open(f"{handle}.log", flags | os.O_NONBLOCK, dir_fd=directory._require_open())
+            return read_regular(_fs.anchored(directory._require_open(), f"{handle}.log"), _MAX_LOG_BYTES)
         except FileNotFoundError:
             raise ValueError(
                 "no log has been published for this manager yet; it appears when the manager's Slurm job ends"
             ) from None
-        try:
-            if not stat.S_ISREG(os.fstat(document).st_mode):
-                raise ValueError("manager log is not a regular file")
-            data = bytearray()
-            while len(data) <= _MAX_LOG_BYTES:
-                chunk = os.read(document, _MAX_LOG_BYTES + 1 - len(data))
-                if not chunk:
-                    break
-                data.extend(chunk)
-        finally:
-            os.close(document)
-    if len(data) > _MAX_LOG_BYTES:
-        raise ValueError(f"manager log exceeds {_MAX_LOG_BYTES} bytes")
-    return bytes(data)
-
-
-def _fsync_directory_path(path: Path) -> None:
-    """Flush one directory's entries to stable storage."""
-
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _fsync_tree(root: Path) -> None:
-    """Flush every regular file and directory below ``root`` (symlinks are not followed) to stable storage."""
-
-    for directory, _names, files in os.walk(root):
-        for file in files:
-            path = Path(directory, file)
-            if path.is_symlink():
-                continue
-            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        _fsync_directory_path(Path(directory))
 
 
 def _present(path: Path) -> bool:
@@ -478,10 +420,8 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
             raise ValueError(f"inbox entry {name!r} is gone: a manager has taken it, so cancel the job instead")
         publishing = False
         try:
-            # ponytail: /proc is Linux-only; elsewhere the copy source is the path, which a swapped inbox could redirect
-            source = f"/proc/self/fd/{descriptor}/{hidden}" if os.path.isdir("/proc/self/fd") else held
-            shutil.copytree(source, partial, symlinks=True)
-            _fsync_tree(partial)
+            # Anchored at the inbox descriptor: a swapped inbox cannot redirect the copy.
+            _fs.copy_tree(_fs.anchored(descriptor, hidden), partial, durable=True)
             publishing = True
             _fs.move_owned(_fs.loc(partial), _fs.loc(destination), durable=True, create_parents=False)
         except BaseException as exc:
@@ -502,8 +442,8 @@ def take_back(endpoint: "Endpoint", name: str, destination: Path) -> Path:
                 ) from exc
             raise
         try:
-            _fsync_directory_path(destination.parent)  # the copy must be durable before the original goes
-            # The trash name goes to the exchange root, which no manager scans for bundles.
+            # The durable rename made the copy durable before the original goes. The trash name goes to the
+            # exchange root, which no manager scans for bundles (and whose sweep removes what a crash leaves).
             _fs.discard(_fs.anchored(descriptor, hidden), trash_dir=endpoint.exchange, durable=True)
         except (OSError, _fs.MoveFailed):
             _LOGGER.warning(
@@ -535,15 +475,7 @@ def _write_exclusive(path: Path, data: bytes) -> None:
     :raises OSError: If the entry could not be published.
     """
 
-    staging = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
-    nonce = uuid.uuid4().hex.encode("ascii")
-    try:
-        _fs.write_file(_fs.loc(staging / ".nonce"), nonce, durable=True, mode=0o600)
-        _fs.write_file(_fs.loc(staging / _CACHE_RECORD), data, durable=True, mode=0o600)
-        won = _fs.publish_dir(_fs.loc(staging), _fs.loc(path), nonce=nonce, durable=True)
-    finally:
-        if _fs.exists(_fs.loc(staging)):
-            _fs.discard(_fs.loc(staging), trash_dir=path.parent, durable=False)
+    won = _fs.publish_record(path.parent, path.name, data, nonce=uuid.uuid4().hex.encode("ascii"), durable=True)
     if not won:
         if not _fs.exists(_fs.loc(path)):
             raise OSError(errno.EIO, "the daemon request cache entry could not be published", str(path))
@@ -551,26 +483,9 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 
 
 def _read_cache_file(path: Path) -> bytes:
-    """Read one bounded regular cache file without following a symlink."""
+    """Read one bounded regular cache file without following a symlink or blocking."""
 
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        information = os.fstat(descriptor)
-        if not stat.S_ISREG(information.st_mode):
-            raise ValueError("daemon request cache entry is not a regular file")
-        if information.st_size > _MAX_CACHE_DOCUMENT_BYTES:
-            raise ValueError("daemon request cache entry is too large")
-        data = bytearray()
-        while len(data) <= _MAX_CACHE_DOCUMENT_BYTES:
-            chunk = os.read(descriptor, _MAX_CACHE_DOCUMENT_BYTES + 1 - len(data))
-            if not chunk:
-                return bytes(data)
-            data.extend(chunk)
-            if len(data) > _MAX_CACHE_DOCUMENT_BYTES:
-                raise ValueError("daemon request cache entry is too large")
-        raise ValueError("daemon request cache entry is too large")
-    finally:
-        os.close(descriptor)
+    return read_regular(_fs.loc(path), _MAX_CACHE_DOCUMENT_BYTES)
 
 
 def _binding(endpoint: "Endpoint", request: Request) -> dict[str, object]:

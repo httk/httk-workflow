@@ -1,10 +1,13 @@
 """Tests of :mod:`httk.workflow._moving`: eject, adopt, holds and their crash reconcilers, on a real filesystem."""
 
+import dataclasses
 import json
 import os
+import shutil
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
@@ -740,9 +743,9 @@ def test_cross_filesystem_eject_and_adopt_copy(tmp_path: Path, monkeypatch: pyte
     copies: list[Path] = []
     real_copy, real_deliver, real_move_once = _fs.copy_tree, _fs.deliver, _fs.move_once
 
-    def spy_copy(src: Path, dst: Path, *, durable: bool) -> None:
+    def spy_copy(src: Path, dst: Path, *, durable: bool, limits: _fs.WalkLimits | None = None) -> None:
         copies.append(dst)
-        real_copy(src, dst, durable=durable)
+        real_copy(src, dst, durable=durable, limits=limits)
 
     def once(real: Callable[..., object]) -> Callable[..., object]:
         state = {"raised": False}
@@ -792,10 +795,12 @@ def test_hold_held_release(tmp_path: Path) -> None:
     source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
     plan = tree(source)
     with cli_owner(source) as owner:
-        path = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True).destination
+        made = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True)
     (hold,) = _moving.held(source)
-    assert hold.path == path and path.parent == source.control / "transfers" / "outgoing"
-    assert hold.transfer_id == path.name == hold.manifest.transfer_id and len(hold.manifest.members) == 4
+    path = Path(hold.path)
+    assert hold == made and path.parent == source.control / "transfers" / "outgoing"
+    assert hold.transfer_id == path.name and len(hold.members) == 4
+    assert _moving.Hold.from_mapping(json.loads(json.dumps(hold.as_mapping()))) == hold
     # The transfer: copy to the destination, adopt there, then release the hold.
     landed = tmp_path / "landing" / hold.transfer_id
     _fs.copy_tree(path, landed, durable=False)
@@ -975,3 +980,265 @@ def test_a_copying_submit_refuses_a_special_file_in_the_payload(tmp_path: Path) 
     with cli_owner(ws) as owner, pytest.raises(_fs.UnsafePath, match="special file"):
         scaffold.submit_payload(ws, owner, payload, move=False)
     assert find(ws, job.id) is None and (payload / "job.json").is_file()
+
+
+# -- R2: isolation of untrusted bundles, in-tick settling, the exchange index of delivered jobs ---------------------
+
+
+def _plant(jobs: Path) -> None:
+    """Content an untrusted bundle may never carry, in every member directory below *jobs*."""
+
+    for job_json in jobs.rglob("job.json"):
+        member = job_json.parent
+        os.symlink("/etc/passwd", member / "evil-link")
+        (member / ".httk-job").mkdir()
+        (member / "seal.json").write_text("{}")
+        os.mkfifo(member / "fifo")
+
+
+@pytest.mark.parametrize("moment", ["after the take", "after validation"])
+def test_a_client_descriptor_never_steers_what_adoption_publishes(tmp_path: Path, moment: str) -> None:
+    # The client keeps a descriptor on its inbox entry and swaps jobs/ for a planted tree (probe_swap of review D).
+    ws = v3_workspace(tmp_path / "ws")
+    entry = tmp_path / "inbox" / "entry"
+    client_bundle(entry)
+    attacker = tmp_path / "attacker"
+    shutil.copytree(entry / "jobs", attacker / "jobs")
+    _plant(attacker / "jobs")
+    held = os.open(entry, os.O_RDONLY | os.O_DIRECTORY)
+    swaps: list[str] = []
+
+    def swap(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if swaps or dst is None:
+            return
+        taken = op == "rename" and phase == "after" and ".adopt-untrusted." in str(dst.path)
+        validated = op == "write" and phase == "before_replace" and dst.path.name == "rekey.json"
+        if (taken and moment == "after the take") or (validated and moment == "after validation"):
+            try:
+                os.rename("jobs", "jobs.orig", src_dir_fd=held, dst_dir_fd=held)
+                os.symlink(str(attacker / "jobs"), "jobs", dir_fd=held)
+                swaps.append("swapped")
+            except FileNotFoundError:
+                swaps.append("the original is gone")
+
+    _fs.set_fault_injector(swap)
+    try:
+        with cli_owner(ws) as owner:
+            if moment == "after the take":
+                # The copy carries the symlink, and its validation refuses the bundle.
+                with pytest.raises(BundleError, match="symlink"):
+                    _moving.adopt(ws, owner, entry, untrusted=True, refused_to=tmp_path / "rejected")
+                report = None
+            else:
+                report = _moving.adopt(ws, owner, entry, untrusted=True, refused_to=tmp_path / "rejected")
+    finally:
+        _fs.set_fault_injector(None)
+        os.close(held)
+    if moment == "after the take":
+        assert swaps == ["swapped"] and job_ids_below(ws.jobs) == []
+        (rejected,) = (tmp_path / "rejected").iterdir()
+        assert (rejected / "entry" / "jobs").is_symlink()  # the client's own copy goes back to it
+    else:
+        # By validation the descriptor's directory, the taken original, was discarded already.
+        assert swaps == ["the original is gone"]
+        assert report is not None and len(report.published) == 3
+        for ref in report.published:
+            assert not set(os.listdir(ref.path)) & {"evil-link", ".httk-job", "seal.json", "fifo"}
+            assert ref.path.resolve().is_relative_to(ws.jobs.resolve())
+    assert not list((ws.control / "tmp").iterdir())
+
+
+@pytest.mark.parametrize("state", ["original", "partial copy", "complete copy", "copy only"])
+def test_isolation_resumes_from_every_intermediate_state(tmp_path: Path, state: str) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    entry = tmp_path / "inbox" / "entry"
+    jobs = client_bundle(entry)
+    owner = cli_owner(ws)
+    scratch = _kernel.take(ws, owner, _fs.loc(entry), "adopt-untrusted")
+    assert scratch is not None
+    record = _moving._Record(None, str(tmp_path / "rejected"), False, _fs.fresh_token(), True)
+    staged = scratch / ".partial" / "entry"
+    if state == "partial copy":
+        staged.mkdir(parents=True)
+        (staged / "bundle.json").write_text("half written")
+    elif state != "original":
+        _fs.copy_tree(scratch / "entry", staged, durable=False)
+        record = dataclasses.replace(record, isolated=True)
+        if state == "copy only":
+            shutil.rmtree(scratch / "entry")
+    _moving._write_record(scratch, record, durable=False)
+    die_and_recover(ws, owner)
+    published = job_ids_below(ws.jobs)
+    assert len(set(published)) == len(published) == 3
+    names = {json.loads(path.read_bytes())["exchange_name"] for path in ws.jobs.rglob("state.json")}
+    assert names == {str(job["id"]) for job in jobs}
+    assert not job_ids_below(ws.control / "tmp") and not (tmp_path / "rejected").exists()
+
+
+def fail_at_extract(k: int) -> _fs.Fault:
+    seen = {"n": 0}
+
+    def fault(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "before" and dst is not None and ".eject." in str(dst.path):
+            seen["n"] += 1
+            if seen["n"] == k:
+                raise _fs.MoveFailed(f"extract #{k}")
+
+    return fault
+
+
+def test_an_error_after_k_of_n_extracts_is_settled_within_the_call(tmp_path: Path) -> None:
+    for k in range(1, 5):
+        ws = v3_workspace(tmp_path / f"w{k}")
+        plan = tree(ws)
+        owner = cli_owner(ws)
+        root = claim_root(ws, owner, plan[0][0]["id"])
+        _fs.set_fault_injector(fail_at_extract(k))
+        with pytest.raises(_fs.MoveFailed):
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
+        _fs.set_fault_injector(None)
+        # Every job is back before the owner closes: no eject scratch waits for close or recovery.
+        assert_in(ws, plan)
+        assert not [name for name in os.listdir(ws.control / "tmp") if ".eject." in name], k
+        owner.close()
+        assert not (tmp_path / "out").exists()
+
+
+def _exchange_tree(ws: Workspace, tmp_path: Path) -> tuple[list[dict[str, object]], _kernel.JobRef]:
+    """Adopt a client bundle and finish its jobs; return the client jobs and the indexed root."""
+
+    jobs = client_bundle(tmp_path / "inbox" / "entry")
+    with cli_owner(ws) as owner:
+        report = _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True)
+        assert report is not None
+        for ref in report.published:
+            owned = _kernel.claim(ws, owner, ref)
+            assert owned is not None
+            doc = owned.read_state()
+            assert doc is not None
+            owned.release(doc.next_activation("start", "initial"), Release("succeeded", ref.priority))
+    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert indexed is not None
+    root = find(ws, indexed[0])
+    assert root is not None
+    return jobs, root
+
+
+def test_a_held_exchange_job_leaves_the_exchange_index(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    with cli_owner(ws) as owner:
+        hold = _moving.hold(ws, owner, claim_root(ws, owner, root.job_id), tree=True)
+    assert len(hold.members) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
+
+
+def test_a_crash_before_the_index_removal_is_found_and_repaired_by_fsck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.fsck import check_workspace
+
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    owner = cli_owner(ws)
+
+    def crash(*_args: object) -> None:
+        raise Crash("delivered, not yet out of the index")
+
+    monkeypatch.setattr(_kernel, "drop_exchange_index", crash)
+    with pytest.raises(Crash):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+    monkeypatch.undo()
+    die_and_recover(ws, owner)
+    assert job_ids_below(ws.jobs) == [] and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+    report = check_workspace(ws)
+    (finding,) = [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
+    assert finding.action == "reported" and finding.job_id == root.job_id
+    repaired = check_workspace(ws, repair=True)
+    assert [finding.action for finding in repaired.findings] == ["removed"]
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None and check_workspace(ws).ok
+    # The client can send the same jobs again.
+    client_bundle(tmp_path / "inbox" / "again", jobs)
+    with cli_owner(ws) as again:
+        resent = _moving.adopt(ws, again, tmp_path / "inbox" / "again", untrusted=True)
+    assert resent is not None and len(resent.published) == 3
+
+
+def test_fsck_leaves_index_entries_of_held_and_in_flight_jobs_alone(tmp_path: Path) -> None:
+    from httk.workflow.fsck import check_workspace
+
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    assert check_workspace(ws).ok
+    # An index entry whose job sits in an eject scratch (the scratch of an owner that died mid-eject).
+    owner = cli_owner(ws)
+    _fs.set_fault_injector(crash_at_extract(3, "after"))
+    with pytest.raises(Crash):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+    _fs.set_fault_injector(None)
+    assert check_workspace(ws).ok
+    die_and_recover(ws, owner)
+    assert check_workspace(ws).ok and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+
+
+def test_a_delivered_cross_filesystem_copy_rolls_forward_and_leaves_the_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    real_deliver = _fs.deliver
+    calls = {"n": 0}
+
+    def deliver(src: _fs.Loc, dst: _fs.Loc, **kwargs: Any) -> _fs.Delivered:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _fs.CrossDevice("simulated")
+        real_deliver(src, dst, **kwargs)
+        raise Crash("the copy is delivered; the scratch is not yet discarded")
+
+    monkeypatch.setattr(_fs, "deliver", deliver)
+    owner = cli_owner(ws)
+    with pytest.raises(Crash):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+    monkeypatch.undo()
+    die_and_recover(ws, owner)
+    assert job_ids_below(ws.jobs) == [] and len(job_ids_below(tmp_path / "out")) == 3
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
+
+
+def test_a_move_failure_of_a_refusal_keeps_the_bundle_in_the_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    client_bundle(bundle)
+    (bundle / "junk").write_text("not part of the bundle")
+
+    def fail(*_args: object) -> Path:
+        raise _fs.MoveFailed("simulated")
+
+    monkeypatch.setattr(_moving, "_reject", fail)
+    owner = cli_owner(ws)
+    with pytest.raises(BundleError, match="stays in"):
+        _moving.adopt(ws, owner, bundle, untrusted=True, refused_to=tmp_path / "rejected")
+    monkeypatch.undo()
+    assert [name for name in os.listdir(ws.control / "tmp") if ".adopt-untrusted." in name]
+    die_and_recover(ws, owner)
+    (rejected,) = (tmp_path / "rejected").iterdir()
+    assert (rejected / "entry" / "junk").is_file()
+
+
+def test_a_refused_copy_of_a_hold_in_transfers_incoming_is_discarded(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    place(target, plan[3][0], "failed", 100)  # one member is in the destination already
+    incoming = target.control / "transfers" / "incoming"
+    with cli_owner(source) as owner:
+        report = _moving.eject(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), destination=tmp_path / "out", tree=True
+        )
+    landed = incoming / f"{report.transfer_id}.{_fs.fresh_token()}"
+    _fs.copy_tree(report.destination, landed, durable=False)
+    with cli_owner(target) as owner, pytest.raises(BundleError, match="discarded"):
+        _moving.adopt(target, owner, landed, untrusted=False)
+    assert list(incoming.iterdir()) == [] and len(job_ids_below(target.jobs)) == 1
+    assert (report.destination / "bundle.json").is_file()  # the original, like a hold, is untouched

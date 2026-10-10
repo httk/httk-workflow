@@ -79,6 +79,7 @@ __all__ = [
     "exchange_translation_applied",
     "format_job_name",
     "list_jobs",
+    "list_names",
     "list_owners",
     "locate",
     "locate_many",
@@ -355,7 +356,13 @@ def _pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _names(directory: Path) -> list[str]:
+def list_names(directory: Path) -> list[str]:
+    """List a directory's entry names, sorted; a missing directory (or a non-directory) has none.
+
+    :param directory: The directory.
+    :return: The names.
+    """
+
     try:
         return sorted(os.listdir(directory))
     except (FileNotFoundError, NotADirectoryError):
@@ -548,7 +555,7 @@ def list_owners(workspace: KernelWorkspace) -> list[OwnerRecord]:
             _read_json_quietly(root / name / "owner.json"),
             _read_json_quietly(root / name / "dead.json"),
         )
-        for name in _names(root)
+        for name in list_names(root)
         if _OWNER_ID.fullmatch(name)
     ]
 
@@ -742,7 +749,7 @@ class Owner:
         :param n: The launch's ``n``.
         """
 
-        self._discard(self._launch_path(attempt_id, n))
+        self.discard_tree(self._launch_path(attempt_id, n))
 
     def discard_scratch(self, path: Path) -> None:
         """Discard one of this owner's own scratch directories; an absent one is already discarded.
@@ -755,7 +762,7 @@ class Owner:
         if parts is None or parts[1] != self.owner_id or path.parent != _tmp(self.workspace):
             raise ValueError(f"{path} is not a scratch directory of owner {self.owner_id}")
         if _fs.exists(_fs.loc(path)):
-            self._discard(path)
+            self.discard_tree(path)
 
     def holds(self, ref: JobRef) -> bool:
         """Whether this process holds a handle for *ref*, as opposed to a job left in ``owned/<owner-id>/``.
@@ -817,7 +824,7 @@ class Owner:
         # The trash goes before owner.json: an owner-named scratch must never outlive its owner's record.
         if self._trash is not None:
             reconcile_scratch(self, self._trash)
-        if not kept and not _names(launches):
+        if not kept and not list_names(launches):
             _fs.remove_file(_fs.loc(self.path / "owner.json"), durable=workspace.durable)
             _fs.remove_file(_fs.loc(self.path / "heartbeat.json"), durable=workspace.durable)
             _fs.remove_empty_dir(_fs.loc(launches))
@@ -829,9 +836,16 @@ class Owner:
             raise ValueError(f"launch n must be '0' or 32 lowercase hex digits: {n!r}")
         return self.path / "launches" / f"{attempt_id}.{n}"
 
-    def _discard(self, path: Path | _fs.Loc) -> None:
-        # Directories only (single files use _fs.remove_file). A removal moves the tree into this owner's trash scratch first, so a crash mid-removal leaves an
-        # owner-named scratch that close or recovery reconciles. The trash itself goes to the tmp root.
+    def discard_tree(self, path: Path | _fs.Loc) -> None:
+        """Remove a directory tree only this owner can move, through its trash scratch.
+
+        The tree is moved into this owner's ``trash`` scratch first, so a crash mid-removal leaves an owner-named
+        scratch that close or recovery reconciles; the trash scratch itself goes through the ``tmp`` root. Single
+        files use :func:`httk.workflow._fs.remove_file`.
+
+        :param path: The tree, such as an entry inside one of this owner's scratch directories.
+        """
+
         target = path if isinstance(path, _fs.Loc) else _fs.loc(path)
         if target.at is None and target.path == self._trash:
             self._trash, trash_dir = None, target.path.parent
@@ -844,7 +858,7 @@ class Owner:
 
 def _owned_refs(directory: Path, owner_id: str) -> list[JobRef]:
     refs = []
-    for name in _names(directory):
+    for name in list_names(directory):
         try:
             refs.append(JobRef.from_path(directory / name, state=OWNED, owner_id=owner_id))
         except FormatError:
@@ -856,7 +870,7 @@ def _own_scratch(workspace: KernelWorkspace, owner_id: str, trash: Path | None) 
     tmp = _tmp(workspace)
     return [
         tmp / name
-        for name in _names(tmp)
+        for name in list_names(tmp)
         if (parts := _SCRATCH.fullmatch(name)) and parts[1] == owner_id and tmp / name != trash
     ]
 
@@ -993,7 +1007,7 @@ class OwnedJob:
             target = _fs.anchored(directory, name)
             mode = _lstat_mode(Path(name), directory)
             if mode is not None and stat.S_ISDIR(mode):
-                self.owner._discard(target)
+                self.owner.discard_tree(target)
             elif mode is not None and not stat.S_ISREG(mode):
                 _fs.remove_file(target, durable=durable)
             return _fs.open_append(target, durable=durable)
@@ -1043,7 +1057,7 @@ class OwnedJob:
         doc = self.read_state()
         applied = set(doc.applied_requests) if doc is not None else set()
         directory, pending, listed = _requests_dir(self.owner.workspace), [], set()
-        for name in _names(directory):
+        for name in list_names(directory):
             request_id = _request_id(name, self.job_id)
             if request_id is None:
                 continue
@@ -1106,10 +1120,10 @@ class OwnedJob:
             # §8.5: the index goes first; a crash before the job goes leaves the delete request pending.
             drop_exchange_index(self.owner, doc.exchange_name, self.job_id)
         self._present()
-        self.owner._discard(self.path)
+        self.owner.discard_tree(self.path)
         self._retire()
         directory = _requests_dir(self.owner.workspace)
-        for name in _names(directory):
+        for name in list_names(directory):
             if _request_id(name, self.job_id) is not None:
                 _fs.remove_file(_fs.loc(directory / name), durable=self.owner.workspace.durable)
 
@@ -1196,7 +1210,7 @@ class OwnedJob:
                 raise _fs.UnsafePath(f"{self.path.joinpath(*path.parts[:depth])} is a symlink or not a directory")
         target = self.path.joinpath(*path.parts)
         if stat.S_ISDIR(modes[-1]) or stat.S_ISREG(modes[-1]):
-            self.owner._discard(target)
+            self.owner.discard_tree(target)
         else:
             _fs.remove_file(_fs.loc(target), durable=self.owner.workspace.durable)
         return True
@@ -1206,7 +1220,7 @@ class OwnedJob:
 
         self._live()
         for directory, pattern in ((self.path, _STATE_TEMPORARY), (self.path / "logs", _LOG_TEMPORARY)):
-            for name in _names(directory):
+            for name in list_names(directory):
                 if not pattern.fullmatch(name):
                     continue
                 try:
@@ -1288,7 +1302,7 @@ def drop_exchange_index(owner: Owner, exchange_name: str, job_id: str) -> None:
     index = _read_json_quietly(entry / "index.json")
     # Never remove an entry that indexes another job.
     if index is not None and index.get("job_id") == job_id:
-        owner._discard(entry)
+        owner.discard_tree(entry)
 
 
 # -- jobs -----------------------------------------------------------------------------------------------------------
@@ -1362,7 +1376,7 @@ class ListingCache:
 
         listing = self._listings.get(directory)
         if listing is None:
-            listing = self._listings[directory] = tuple(_names(directory))
+            listing = self._listings[directory] = tuple(list_names(directory))
         return listing
 
 
@@ -1570,7 +1584,7 @@ def reconcile_scratch(owner: Owner, path: Path) -> bool:
         raise ValueError(f"{path} is not a scratch directory of owner {owner.owner_id}")
     purpose = parts[2]
     # §5.4: an empty scratch and a discardable purpose are discarded; anything else needs its reconciler.
-    if purpose not in DISCARDABLE_PURPOSES and _names(path):
+    if purpose not in DISCARDABLE_PURPOSES and list_names(path):
         reconciler = _RECONCILERS.get(purpose)
         if reconciler is None:
             _LOGGER.error(
@@ -1580,7 +1594,7 @@ def reconcile_scratch(owner: Owner, path: Path) -> bool:
         if not reconciler(owner, path):
             return False
     if _fs.exists(_fs.loc(path)):
-        owner._discard(path)
+        owner.discard_tree(path)
     return True
 
 
@@ -1613,12 +1627,12 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
     for _ in range(_ROUNDS):
         _return_jobs(workspace, owned_dir, dead_owner_id, returned, quarantined)
         _take_scratch(owner, dead_owner_id, taken, kept)
-        for name in _names(launches):
-            owner._discard(launches / name)
+        for name in list_names(launches):
+            owner.discard_tree(launches / name)
             discarded += 1
         # §5.4 step 5: settle once, re-list, and remove by rmdir only; never discard owned/<dead>/.
         _pause(workspace.visibility_deadline)
-        if _names(owned_dir) or _names(launches) or _dead_scratch(workspace, dead_owner_id):
+        if list_names(owned_dir) or list_names(launches) or _dead_scratch(workspace, dead_owner_id):
             continue
         if not _fs.remove_empty_dir(_fs.loc(owned_dir)) and _fs.exists(_fs.loc(owned_dir)):
             continue
@@ -1626,7 +1640,7 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
         _fs.remove_file(_fs.loc(dead_dir / "owner.json"), durable=workspace.durable)
         _fs.remove_file(_fs.loc(dead_dir / "heartbeat.json"), durable=workspace.durable)
         # Write temporaries of a writer that died (the owner, or a prober attesting) go too; dead.json stays.
-        for name in _names(dead_dir):
+        for name in list_names(dead_dir):
             if _OWNER_TEMPORARY.fullmatch(name):
                 _fs.remove_file(_fs.loc(dead_dir / name), durable=workspace.durable)
         return RecoveryReport(dead_owner_id, tuple(returned), tuple(quarantined), tuple(taken), tuple(kept), discarded)
@@ -1643,7 +1657,7 @@ def recoverable_owners(workspace: KernelWorkspace) -> list[str]:
     :return: Owner ids, sorted.
     """
 
-    scratch_owners = {parts[1] for name in _names(_tmp(workspace)) if (parts := _SCRATCH.fullmatch(name))}
+    scratch_owners = {parts[1] for name in list_names(_tmp(workspace)) if (parts := _SCRATCH.fullmatch(name))}
     return [
         item.owner_id
         for item in list_owners(workspace)
@@ -1651,8 +1665,8 @@ def recoverable_owners(workspace: KernelWorkspace) -> list[str]:
         or (
             _fs.exists(_fs.loc(item.path / "dead.json"))
             and (
-                _names(_owned_dir(workspace, item.owner_id))
-                or _names(item.path / "launches")
+                list_names(_owned_dir(workspace, item.owner_id))
+                or list_names(item.path / "launches")
                 or item.owner_id in scratch_owners
             )
         )
@@ -1663,7 +1677,7 @@ def _return_jobs(
     workspace: KernelWorkspace, owned_dir: Path, dead_owner_id: str, returned: list[JobRef], quarantined: list[Path]
 ) -> None:
     durable = workspace.durable
-    for name in _names(owned_dir):
+    for name in list_names(owned_dir):
         path = owned_dir / name
         try:
             ref = JobRef.from_path(path, state=OWNED, owner_id=dead_owner_id)
@@ -1693,7 +1707,9 @@ def _return_jobs(
 
 def _dead_scratch(workspace: KernelWorkspace, dead_owner_id: str) -> list[str]:
     return [
-        name for name in _names(_tmp(workspace)) if (parts := _SCRATCH.fullmatch(name)) and parts[1] == dead_owner_id
+        name
+        for name in list_names(_tmp(workspace))
+        if (parts := _SCRATCH.fullmatch(name)) and parts[1] == dead_owner_id
     ]
 
 
@@ -1894,9 +1910,9 @@ def prune_empty_placements(workspace: KernelWorkspace, *, budget: int) -> int:
 def _recorded_shm_tokens(workspace: KernelWorkspace) -> set[str] | None:
     tokens: set[str] = set()
     owners = workspace.control / "owners"
-    for owner_id in _names(owners):
+    for owner_id in list_names(owners):
         launches = owners / owner_id / "launches"
-        for name in _names(launches):
+        for name in list_names(launches):
             try:
                 record = _read_json(launches / name / "launch.json", _RECORD_LIMIT)
             except (WorkflowError, OSError):

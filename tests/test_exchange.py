@@ -4,7 +4,9 @@ import base64
 import errno
 import json
 import os
+import shutil
 import threading
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -328,7 +330,7 @@ def test_a_finished_exchange_tree_returns_to_the_outbox_and_leaves_the_index(
     assert _pass(ws) is False
 
 
-def test_an_occupied_outbox_name_is_retried_later(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_occupied_outbox_name_is_not_requested_until_fetched(tmp_path: Path) -> None:
     ws = _server(tmp_path / "ws")
     jobs = _send(ws)
     _pass(ws)
@@ -339,18 +341,58 @@ def test_an_occupied_outbox_name_is_retried_later(tmp_path: Path, monkeypatch: p
     (occupant / "earlier").write_text("not fetched yet")
     with cli_owner(ws) as owner:
         service = ExchangeService(ws, owner)
-        assert service.run() is True
-        _apply(ws, root)  # the eject rolls back: the jobs stay where they were
-        assert len(_all_jobs(ws)) == 3 and _indexed(ws, jobs[0]["id"]).state == "succeeded"
-        service.invalidate()
-        assert service.run() is False  # throttled per job
+        # Not fetched yet: nothing is requested, so nothing is claimed and rolled back.
+        assert service.run() is False
+        assert not list((ws.control / "requests").glob("*.json"))
         (occupant / "earlier").unlink()
         occupant.rmdir()
-        monkeypatch.setattr(_exchange, "STEP_INTERVAL", 0.0)
         service.invalidate()
-        assert service.run() is True  # a fresh request: the rolled-back eject changed the root's state
+        assert service.run() is True
     _apply(ws, root)
     assert (occupant / "bundle.json").is_file() and _all_jobs(ws) == []
+
+
+def test_a_return_that_rolled_back_waits_out_a_doubling_backoff(tmp_path: Path) -> None:
+    ws = _server(tmp_path / "ws")
+    jobs = _send(ws)
+    _pass(ws)
+    root = _indexed(ws, jobs[0]["id"])
+    _finish(ws)
+    occupant = exchange_directory(ws) / "outbox" / str(jobs[0]["id"]) / root.job_key
+    requests = ws.control / "requests"
+
+    def rolled_back() -> None:
+        occupant.mkdir(parents=True)  # the outbox fills between the request and its application
+        (occupant / "earlier").write_text("not fetched yet")
+        _apply(ws, root)
+        (occupant / "earlier").unlink()
+        occupant.rmdir()
+        assert _indexed(ws, jobs[0]["id"]).state == "succeeded"
+
+    with cli_owner(ws) as owner:
+        service = ExchangeService(ws, owner)
+
+        def run_after(seconds: float) -> bool:
+            posted, wait = service._backoff[root.job_id]
+            service._backoff[root.job_id] = (posted - seconds, wait)
+            service.invalidate()
+            return service.run()
+
+        assert service.run() is True
+        rolled_back()
+        assert service._backoff[root.job_id][1] == _exchange.STEP_INTERVAL
+        # Within the backoff, no request: no second claim and rollback.
+        assert run_after(_exchange.STEP_INTERVAL / 2) is False and not list(requests.glob("*.json"))
+        assert run_after(_exchange.STEP_INTERVAL / 2) is True
+        assert service._backoff[root.job_id][1] == 2 * _exchange.STEP_INTERVAL
+        rolled_back()
+        assert run_after(1.5 * _exchange.STEP_INTERVAL) is False and not list(requests.glob("*.json"))
+        assert run_after(_exchange.STEP_INTERVAL) is True
+        _apply(ws, root)
+        assert (occupant / "bundle.json").is_file() and _all_jobs(ws) == []
+        # Returned: the job's backoff is over.
+        service.invalidate()
+        assert service.run() is False and service._backoff == {}
 
 
 # -- job control -------------------------------------------------------------------------------------------------------
@@ -507,6 +549,141 @@ def test_a_client_eject_job_returns_the_tree(control: tuple[Workspace, list[dict
     bundle = exchange_directory(ws) / "outbox" / str(jobs[0]["id"]) / root.job_key
     assert len(BundleManifest.from_json((bundle / "bundle.json").read_bytes()).members) == 3
     assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
+
+
+def test_a_replayed_job_action_is_refused_after_the_client_resubmits(
+    control: tuple[Workspace, list[dict[str, object]], Path],
+) -> None:
+    # probe_replay of review D: a captured signed request, replayed once the tree came back and was sent again.
+    ws, jobs, seed = control
+    root = _indexed(ws, jobs[0]["id"])
+    request = _job_action(ws, "cancel_job", jobs[0]["id"], seed)
+    published = exchange_directory(ws) / "requests" / f"{request.request_id}.json"
+    captured = published.read_bytes()
+    assert _pass(ws) is True and _response(ws, request) == ("accepted", None)
+    _apply(ws, root)
+    assert _indexed(ws, jobs[0]["id"]).state == "cancelled"
+    _finish(ws, "succeeded")
+    assert _pass(ws) is True  # the return request
+    _apply(ws, _indexed(ws, jobs[0]["id"]))
+    outbox = exchange_directory(ws) / "outbox" / str(jobs[0]["id"])
+    assert _all_jobs(ws) == [] and _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
+    # The client fetches the return and sends the same jobs again: the rekeyed ids are the same.
+    shutil.rmtree(outbox)
+    write_bundle(exchange_directory(ws) / "inbox" / "again", jobs)
+    assert _pass(ws) is True
+    again = _indexed(ws, jobs[0]["id"])
+    assert again.job_id == root.job_id and again.state == "ready"
+    # Anyone who can write the exchange re-plants the captured request and removes its old response.
+    (exchange_directory(ws) / "responses" / f"{request.request_id}.json").unlink()
+    published.write_bytes(captured)
+    assert _pass(ws) is True
+    assert _response(ws, request) == ("refused", "request_replayed")
+    assert not published.exists() and not list((ws.control / "requests").glob("*.json"))
+    assert _indexed(ws, jobs[0]["id"]).state == "ready"
+
+
+def test_a_translator_that_died_after_its_record_posts_on_the_rerun(
+    control: tuple[Workspace, list[dict[str, object]], Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, jobs, seed = control
+    root = _indexed(ws, jobs[0]["id"])
+    request = _job_action(ws, "stop_job", jobs[0]["id"], seed)
+
+    def died(*_args: object, **_kwargs: object) -> Path:
+        raise OSError("the translator died before posting")
+
+    monkeypatch.setattr(_requests, "post", died)
+    assert _pass(ws) is False
+    record = ws.control / _exchange.TRANSLATIONS_DIRECTORY / request.request_id
+    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert indexed is not None
+    assert json.loads(record.read_bytes()) == {
+        "exchange_name": str(jobs[0]["id"]),
+        "job_id": indexed[0],
+        "adoption_nonce": indexed[2],
+    }
+    assert (exchange_directory(ws) / "requests" / f"{request.request_id}.json").exists()
+    assert not (exchange_directory(ws) / "responses" / f"{request.request_id}.json").exists()
+    monkeypatch.undo()
+    assert _pass(ws) is True and _response(ws, request) == ("accepted", None)
+    _apply(ws, root)
+    assert _indexed(ws, jobs[0]["id"]).state == "paused"
+
+
+def test_old_translation_records_are_collected(control: tuple[Workspace, list[dict[str, object]], Path]) -> None:
+    from httk.workflow.gc import EXCHANGE_TRANSLATION_SECONDS, collect_garbage
+
+    ws, jobs, seed = control
+    request = _job_action(ws, "stop_job", jobs[0]["id"], seed)
+    assert _pass(ws) is True
+    record = ws.control / _exchange.TRANSLATIONS_DIRECTORY / request.request_id
+    now = record.stat().st_mtime
+    collect_garbage(ws, categories=["requests"], now=now + EXCHANGE_TRANSLATION_SECONDS - 60)
+    assert record.exists()
+    report = collect_garbage(ws, categories=["requests"], now=now + EXCHANGE_TRANSLATION_SECONDS + 60)
+    assert not record.exists() and report.category("requests").removed == 1
+
+
+def test_job_control_handles_each_request_on_its_own_in_bounded_passes(
+    control: tuple[Workspace, list[dict[str, object]], Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, jobs, seed = control
+    responses = exchange_directory(ws) / "responses"
+    requests = exchange_directory(ws) / "requests"
+    actions = {digit: _job_action(ws, "stop_job", jobs[0]["id"], seed, request_id=digit * 32) for digit in "12345"}
+    (responses / f"{'1' * 32}.json").write_bytes(b"answered before a crash")
+    (responses / f"{'2' * 32}.json").mkdir()  # planted where the answer goes
+    real = ExchangeService._translate
+
+    def failing(service: ExchangeService, request: Request, keys: frozenset[str]) -> Any:
+        if request.request_id == "3" * 32:
+            raise OSError("this one fails")
+        return real(service, request, keys)
+
+    monkeypatch.setattr(ExchangeService, "_translate", failing)
+    monkeypatch.setattr(_exchange, "_ACTIONS_PER_PASS", 4)
+    with cli_owner(ws) as owner:
+        service = ExchangeService(ws, owner)
+        assert service.run() is True
+        pending = sorted(path.name[0] for path in requests.iterdir())
+        # 1 and 2 were answered already: only deleted. 3 failed alone. 4 was translated. 5 waits for the bound.
+        assert pending == ["3", "5"]
+        assert (responses / f"{'1' * 32}.json").read_bytes() == b"answered before a crash"
+        assert _response(ws, actions["4"]) == ("accepted", None)
+        assert service.run() is True
+        assert sorted(path.name[0] for path in requests.iterdir()) == ["3"]
+        assert _response(ws, actions["5"]) == ("accepted", None)
+        monkeypatch.setattr(ExchangeService, "_translate", real)
+        assert service.run() is True and list(requests.iterdir()) == []
+
+
+def test_the_pass_sweeps_old_write_temporaries_and_trash(tmp_path: Path) -> None:
+    ws = _server(tmp_path / "ws")
+    exchange = exchange_directory(ws)
+    old = time.time() - 2 * _exchange.SWEEP_INTERVAL
+    stale = [
+        exchange / ".status.json.abcdefghijklmnop.tmp",
+        exchange / "responses" / f".{'a' * 32}.json.abcdefghijklmnop.tmp",
+    ]
+    kept = [exchange / ".status.json.qrstuvwxyz234567.tmp", exchange / "inbox" / ".entry.abcdefghijklmnop.tmp"]
+    for path in [*stale, *kept]:
+        path.write_text("x")
+    trash = exchange / "trash.abcdefghijklmnop"
+    (trash / "bundle").mkdir(parents=True)
+    (trash / "bundle" / "file").write_text("x")
+    for path in [*stale, kept[1], trash]:
+        os.utime(path, (old, old))
+    with cli_owner(ws) as owner:
+        service = ExchangeService(ws, owner)
+        service.run()
+        assert not any(path.exists() for path in stale) and all(path.exists() for path in kept)
+        assert not [name for name in os.listdir(exchange) if name.startswith("trash.")]
+        # At most once per interval.
+        stale[0].write_text("x")
+        os.utime(stale[0], (old, old))
+        service.run()
+        assert stale[0].exists()
 
 
 # -- status ------------------------------------------------------------------------------------------------------------

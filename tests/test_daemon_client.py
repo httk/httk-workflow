@@ -6,11 +6,13 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httk.core.identity import identity_public_key
 
 import httk.workflow._daemon_client as client_module
+from httk.workflow import _fs
 from httk.workflow._daemon_auth import sign_request, sign_response
 from httk.workflow._daemon_client import Endpoint, decode_matching_response, exchange
 from httk.workflow._daemon_mailbox import MAX_DOCUMENT_BYTES, MailboxDirectory
@@ -789,25 +791,24 @@ def test_take_back_reports_a_taken_entry_and_restores_on_copy_failure(tmp_path: 
             client_module.take_back(endpoint, bad, tmp_path / "out")
 
 
-def test_take_back_falls_back_to_paths_without_proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_take_back_copies_through_the_inbox_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     endpoint = _endpoint(tmp_path)
-    (endpoint.exchange / "inbox" / "job-1").mkdir()
-    (endpoint.exchange / "inbox" / "job-1" / "f").write_text("x")
-    real = os.path.isdir
-    monkeypatch.setattr(client_module.os.path, "isdir", lambda p: False if p == "/proc/self/fd" else real(p))
-    real_rmtree = client_module.shutil.rmtree
+    inbox = endpoint.exchange / "inbox"
+    (inbox / "job-1").mkdir()
+    (inbox / "job-1" / "f").write_text("x")
+    real_copy = client_module._fs.copy_tree
 
-    def rmtree(path: str, **kwargs: object) -> None:
-        if kwargs:
-            raise NotImplementedError
-        real_rmtree(path)
+    def swap_the_inbox(src: _fs.Loc, dst: Path, **kwargs: Any) -> None:
+        # Someone replaces the inbox by another directory holding a decoy under the held name.
+        inbox.rename(endpoint.exchange / "inbox.moved")
+        (inbox / src.name()).mkdir(parents=True)
+        (inbox / src.name() / "f").write_text("decoy")
+        real_copy(src, dst, **kwargs)
 
-    monkeypatch.setattr(client_module.shutil, "rmtree", rmtree)
-
+    monkeypatch.setattr(client_module._fs, "copy_tree", swap_the_inbox)
     client_module.take_back(endpoint, "job-1", tmp_path / "out")
-
     assert (tmp_path / "out" / "f").read_text() == "x"
-    assert not list((endpoint.exchange / "inbox").iterdir())
+    assert not list((endpoint.exchange / "inbox.moved").iterdir())
 
 
 def test_check_refuses_a_v2_shaped_exchange_with_the_teaching_message(tmp_path: Path) -> None:
@@ -895,11 +896,11 @@ def test_take_back_mid_copy_failure_restores_and_leaves_no_partial(
     endpoint = _endpoint(tmp_path)
     (endpoint.exchange / "inbox" / "job-1").mkdir()
 
-    def broken(source: str, target: Path, **_kwargs: object) -> None:
+    def broken(source: object, target: Path, **_kwargs: object) -> None:
         Path(target).mkdir()
         raise OSError("disk full")
 
-    monkeypatch.setattr(client_module.shutil, "copytree", broken)
+    monkeypatch.setattr(client_module._fs, "copy_tree", broken)
     with pytest.raises(OSError, match="disk full"):
         client_module.take_back(endpoint, "job-1", tmp_path / "out")
     assert [path.name for path in (endpoint.exchange / "inbox").iterdir()] == ["job-1"]
@@ -921,7 +922,7 @@ def test_take_back_names_the_held_entry_when_restore_fails_and_warns_on_stuck_re
             raise OSError("no restore")
         real_rename(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(client_module.shutil, "copytree", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(client_module._fs, "copy_tree", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom")))
     monkeypatch.setattr(client_module.os, "rename", flaky)
     with pytest.raises(OSError, match=r"held as .*\.takeback-"):
         client_module.take_back(endpoint, "job-1", tmp_path / "out")

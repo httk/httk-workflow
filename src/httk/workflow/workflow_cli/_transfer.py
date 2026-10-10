@@ -12,14 +12,13 @@ import re
 import sys
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from httk.core.cli import CLIContext
 
@@ -387,7 +386,10 @@ def build_remote_parser(
         group,
         "remove",
         summary="remove one remote bundle",
-        description="Remove one remote bundle",
+        description=(
+            "Remove one remote bundle; refused while a workspace registered on this machine holds a transfer "
+            "bound for a workspace on it (holds in other workspaces are not checked)"
+        ),
         handler=handle_remote_remove,
     )
     remove.add_argument("name", metavar="NAME", nargs="+", help="the remote to remove")
@@ -454,6 +456,7 @@ class _End:
     workspace: Workspace | None = None
     binding: WorkspaceBinding | None = None
     root: str | None = None
+    workspace_id: str | None = None
 
     @property
     def plain(self) -> str:
@@ -462,7 +465,7 @@ class _End:
 
 
 def _end(value: str | None, context: CLIContext, arguments: argparse.Namespace, *, probe: bool = False) -> _End:
-    """Resolve one end; *value* ``None`` is the enclosing or default workspace. *probe* learns a remote's root."""
+    """Resolve one end; *value* ``None`` is the enclosing or default workspace. *probe* learns a remote's root and id."""
 
     reference: Path | WorkspaceBinding
     if value is not None:
@@ -475,12 +478,14 @@ def _end(value: str | None, context: CLIContext, arguments: argparse.Namespace, 
         reference = Path(str(binding.path)) if local else binding
     if isinstance(reference, Path):
         workspace = Workspace(reference, durable=_durable(arguments))
-        return _End(str(workspace.root), workspace=workspace)
-    root = None
+        return _End(str(workspace.root), workspace=workspace, workspace_id=workspace.workspace_id)
+    root = workspace_id = None
     if probe:
         target = resolve_remote(reference.remote, project=context.cwd)
-        _, root = probe_remote_workspace(target, reference.name.split(":", 1)[1], timeout=arguments.adapter_timeout)
-    return _End(reference.name, binding=reference, root=root)
+        workspace_id, root = probe_remote_workspace(
+            target, reference.name.split(":", 1)[1], timeout=arguments.adapter_timeout
+        )
+    return _End(reference.name, binding=reference, root=root, workspace_id=workspace_id)
 
 
 def _remote(end: _End, context: CLIContext, arguments: argparse.Namespace, argv: Sequence[str]) -> tuple[int, str, str]:
@@ -513,7 +518,8 @@ def eject_once(
     *,
     tree: bool,
     locator: str | None = None,
-) -> _moving.EjectReport | str:
+    destination_workspace_id: str | None = None,
+) -> _moving.EjectReport | _moving.Hold | str:
     """Claim and eject one job, or hold it when *destination* is ``None``: the report, or why it cannot move now.
 
     :param workspace: The workspace.
@@ -522,7 +528,9 @@ def eject_once(
     :param destination: Where the bundle goes; ``None`` holds it in ``transfers/outgoing/``.
     :param tree: Move the job's descendants too.
     :param locator: The transfer destination a hold records.
-    :return: The report, or the reason; a job that cannot move stays where it is (as after any raised error).
+    :param destination_workspace_id: The destination workspace's id a hold records.
+    :return: The report (the hold, when held), or the reason; a job that cannot move stays where it is (as after
+        any raised error).
     """
 
     root = _kernel.claim(workspace, owner, ref)
@@ -531,7 +539,14 @@ def eject_once(
     try:
         if destination is not None:
             return _moving.eject(workspace, owner, root, destination=destination, tree=tree)
-        return _moving.hold(workspace, owner, root, tree=tree, destination_locator=locator)
+        return _moving.hold(
+            workspace,
+            owner,
+            root,
+            tree=tree,
+            destination_locator=locator,
+            destination_workspace_id=destination_workspace_id,
+        )
     except _moving.Busy as exc:
         return str(exc)
 
@@ -550,81 +565,51 @@ def adopt_document(report: _moving.AdoptReport) -> dict[str, object]:
     }
 
 
-def _hold_record(hold: _moving.Hold, now: float) -> dict[str, object]:
-    manifest = hold.manifest
-    return {
-        "transfer_id": hold.transfer_id,
-        "path": str(hold.path),
-        "root": manifest.members[0].job_key,
-        "members": [member.job_key for member in manifest.members],
-        "destination": manifest.destination_locator,
-        "created_at": manifest.created_at,
-        "age_seconds": max(0, int(now - datetime.fromisoformat(manifest.created_at).timestamp())),
-    }
-
-
-def _checked_hold(value: object) -> dict[str, Any]:
-    """Validate one hold a remote reported: its transfer id, a path ending in it, and its members."""
-
-    if not isinstance(value, dict):
-        raise ValueError("the remote reported a malformed hold")
-    transfer_id, path, members = value.get("transfer_id"), value.get("path"), value.get("members")
-    if (
-        not isinstance(transfer_id, str)
-        or not _TRANSFER_ID.fullmatch(transfer_id)
-        or not isinstance(path, str)
-        or PurePosixPath(path).name != transfer_id
-        or not isinstance(members, list)
-        or not all(isinstance(member, str) for member in members)
-    ):
-        raise ValueError(f"the remote reported a malformed hold: {value!r}")
-    destination = value.get("destination")
-    return {**value, "destination": destination if isinstance(destination, str) else None}
-
-
-def _holds(src: _End, context: CLIContext, arguments: argparse.Namespace) -> list[dict[str, Any]]:
-    """The holds of *src*, as ``transfer status --json`` lists them."""
+def _holds(src: _End, context: CLIContext, arguments: argparse.Namespace) -> list[_moving.Hold]:
+    """The holds of *src*."""
 
     if src.workspace is not None:
-        now = time.time()
-        return [_hold_record(hold, now) for hold in _moving.held(src.workspace)]
+        return _moving.held(src.workspace)
     code, out, err = _remote(src, context, arguments, [*REMOTE_TRANSFER_STATUS_COMMAND, "--json", src.plain])
     if code:
         raise RuntimeError(f"transfer status failed on {src.locator}: {err.strip()}")
     document = json.loads(out)
     if not isinstance(document, dict) or not isinstance(document.get("holds"), list):
         raise ValueError(f"{src.locator} returned an invalid transfer status")
-    return [_checked_hold(hold) for hold in document["holds"]]
+    return [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
 
 
 def _hold_jobs(
     src: _End, dst: _End, context: CLIContext, arguments: argparse.Namespace, errors: list[str]
-) -> list[dict[str, Any]]:
-    """Step 1: hold every selected job on *src*, recording *dst*; a job that cannot move is an error."""
+) -> list[_moving.Hold]:
+    """Step 1: hold every selected job on *src*, recording *dst* and its id; a job that cannot move is an error."""
 
-    holds: list[dict[str, Any]] = []
+    holds: list[_moving.Hold] = []
     if src.workspace is not None:
         workspace = src.workspace
         require_cli_modifiable(workspace)
         refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
         with _owner(workspace, "job transfer") as owner:
             for ref in refs:
-                if any(ref.job_key in hold["members"] for hold in holds):
+                if any(ref.job_key in hold.members for hold in holds):
                     continue  # it went with an earlier selected tree
                 try:
-                    outcome = eject_once(workspace, owner, ref, None, tree=arguments.tree, locator=dst.locator)
+                    outcome = eject_once(
+                        workspace,
+                        owner,
+                        ref,
+                        None,
+                        tree=arguments.tree,
+                        locator=dst.locator,
+                        destination_workspace_id=dst.workspace_id,
+                    )
                 except _ERRORS as exc:
                     outcome = f"{ref.job_key}: {exc}"
                 if isinstance(outcome, str):
                     errors.append(outcome)
                 else:
-                    holds.append(
-                        {
-                            "transfer_id": outcome.transfer_id,
-                            "path": str(outcome.destination),
-                            "members": list(outcome.members),
-                        }
-                    )
+                    assert isinstance(outcome, _moving.Hold)
+                    holds.append(outcome)
         return holds
     for selector in arguments.jobs:
         try:
@@ -633,13 +618,15 @@ def _hold_jobs(
             raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
     for selector in arguments.jobs:
         argv = [*REMOTE_JOB_EJECT_COMMAND, "--hold", "--json", "--workspace", src.plain]
-        argv += [*(["--tree"] if arguments.tree else []), "--", selector, dst.locator]
+        argv += [*(["--tree"] if arguments.tree else [])]
+        argv += [*(["--destination-id", dst.workspace_id] if dst.workspace_id is not None else [])]
+        argv += ["--", selector, dst.locator]
         code, out, err = _remote(src, context, arguments, argv)
         if code:
             errors.append(f"{selector}: {err.strip() or f'job eject failed on {src.locator}'}")
             continue
         try:
-            holds.append(_checked_hold(json.loads(out)))
+            holds.append(_moving.Hold.from_mapping(json.loads(out)))
         except ValueError:
             # The hold may exist: the pass over the source's holds, or a later --resume, drives it.
             errors.append(f"{selector}: job eject --hold on {src.locator} printed no hold document: {out[:200]!r}")
@@ -654,13 +641,13 @@ def _adopt_into(
     src: _End,
     workspace: Workspace,
     owner: _kernel.Owner,
-    hold: Mapping[str, Any],
+    hold: _moving.Hold,
     context: CLIContext,
     arguments: argparse.Namespace,
 ) -> dict[str, Any] | None | Exception:
     """Adopt a hold into a local *workspace*; an error is returned, so that the owner closes cleanly."""
 
-    transfer_id, path = str(hold["transfer_id"]), str(hold["path"])
+    transfer_id, path = hold.transfer_id, hold.path
     landing = None
     try:
         if src.workspace is not None:
@@ -682,11 +669,11 @@ def _adopt_into(
 
 
 def _deliver(
-    src: _End, dst: _End, hold: Mapping[str, Any], context: CLIContext, arguments: argparse.Namespace
+    src: _End, dst: _End, hold: _moving.Hold, context: CLIContext, arguments: argparse.Namespace
 ) -> dict[str, Any] | None:
     """Steps 2 and 3: copy the held bundle to *dst* and adopt it there; ``None`` when another actor took it."""
 
-    transfer_id, path = str(hold["transfer_id"]), str(hold["path"])
+    transfer_id, path = hold.transfer_id, hold.path
     if dst.workspace is not None:
         require_cli_modifiable(dst.workspace)
         with _owner(dst.workspace, "job transfer") as owner:
@@ -708,7 +695,8 @@ def _deliver(
         dst, context, arguments, [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--workspace", dst.plain, str(incoming)]
     )
     if code:
-        raise _Refused(f"{err.strip()} (the refused copy stays at {incoming} on {dst.locator})")
+        # The refused copy in transfers/incoming/ was discarded there: the hold stays the only bundle.
+        raise _Refused(err.strip() or f"job adopt failed on {dst.locator}")
     document = json.loads(out)
     if not isinstance(document, dict) or not isinstance(document.get("already_adopted"), bool):
         raise ValueError(f"{dst.locator} returned an invalid adoption report")
@@ -728,12 +716,18 @@ def _release(src: _End, transfer_id: str, context: CLIContext, arguments: argpar
 
 
 def _drive(
-    src: _End, dst: _End, hold: Mapping[str, Any], context: CLIContext, arguments: argparse.Namespace
+    src: _End, dst: _End, hold: _moving.Hold, context: CLIContext, arguments: argparse.Namespace
 ) -> dict[str, Any]:
     """Copy, adopt and release one hold: the outcome. A hold that was not adopted stays held on *src*."""
 
-    transfer_id = str(hold["transfer_id"])
-    outcome: dict[str, Any] = {"transfer_id": transfer_id, "members": hold["members"], "destination": dst.locator}
+    transfer_id = hold.transfer_id
+    outcome: dict[str, Any] = {"transfer_id": transfer_id, "members": list(hold.members), "destination": dst.locator}
+    if hold.destination_workspace_id is not None and dst.workspace_id != hold.destination_workspace_id:
+        message = (
+            f"the hold's destination is not this workspace: {dst.locator} is {dst.workspace_id}, the hold is bound "
+            f"for {hold.destination_workspace_id}; it stays held on {src.locator}"
+        )
+        return {**outcome, "status": "refused", "message": message}
     try:
         document = _deliver(src, dst, hold, context, arguments)
     except _Refused as exc:
@@ -822,21 +816,24 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     errors: list[str] = []
     if arguments.jobs:
         assert dst is not None
+        if dst.workspace is not None:
+            # Before anything is held: a destination that cannot take the jobs would only leave them held.
+            require_cli_modifiable(dst.workspace)
         _hold_jobs(src, dst, context, arguments, errors)
     outcomes = []
     # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold).
     for hold in _holds(src, context, arguments):
-        locator = hold["destination"]
+        locator = hold.destination_locator
         if arguments.destination is not None and locator not in ends:
             continue
         if locator is None:
-            errors.append(f"{hold['transfer_id']}: the hold records no destination; adopt or release it by hand")
+            errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
             continue
         if locator not in ends:
             try:
                 ends[locator] = _end(locator, context, arguments, probe=True)
             except _ERRORS as exc:
-                errors.append(f"{hold['transfer_id']}: cannot reach its destination {locator}: {exc}")
+                errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
                 continue
         outcomes.append(_drive(src, ends[locator], hold, context, arguments))
     return _report(outcomes, errors, json_output=arguments.json)
@@ -857,17 +854,21 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
         return _run_remote_workspace(
             src.binding, context, [*REMOTE_TRANSFER_STATUS_COMMAND, *tail, src.plain], timeout=arguments.adapter_timeout
         )
+    now = time.time()
     holds = _holds(src, context, arguments)
     if arguments.json:
-        document = {"format": TRANSFER_STATUS_FORMAT, "format_version": 1, "workspace": src.locator, "holds": holds}
+        listed = [hold.as_mapping(now) for hold in holds]
+        document = {"format": TRANSFER_STATUS_FORMAT, "format_version": 1, "workspace": src.locator, "holds": listed}
         print(json.dumps(document, indent=2, sort_keys=True))
         return 0
     if not holds:
         print(f"no held transfers in {src.locator}")
     for hold in holds:
-        age = hold["age_seconds"] // 3600
-        destination = hold["destination"] or "-"
-        print(f"{hold['transfer_id']}\t{hold['root']}\t{len(hold['members'])} job(s)\tto {destination}\t{age}h old")
+        age = cast(int, hold.as_mapping(now)["age_seconds"]) // 3600
+        destination = hold.destination_locator or "-"
+        if hold.destination_workspace_id is not None:
+            destination = f"{destination} ({hold.destination_workspace_id})"
+        print(f"{hold.transfer_id}\t{hold.members[0]}\t{len(hold.members)} job(s)\tto {destination}\t{age}h old")
     return 0
 
 

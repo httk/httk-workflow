@@ -416,12 +416,13 @@ def build_bundle(
     destination_workspace_id: str | None = None,
     destination_locator: str | None = None,
     event: tuple[str, Mapping[str, object]] | None = None,
+    scratch: Path | None = None,
 ) -> Path:
-    """Build a bundle of quiescent owned jobs in a fresh ``eject`` scratch of *owner*.
+    """Build a bundle of quiescent owned jobs in an empty scratch of *owner* (a fresh ``eject`` one by default).
 
     ``bundle.json`` is written first, recording each member's ``from`` state and
-    priority, and then each member is extracted out of ``owned/``. A crash leaves an
-    ``eject`` scratch for its reconciler.
+    priority, and then each member is extracted out of ``owned/``. A crash, or an
+    error after k of n extractions, leaves the scratch for its reconciler.
 
     :param owner: The owner holding every member.
     :param members: The jobs, top-down: the root first, every parent before its children.
@@ -430,7 +431,9 @@ def build_bundle(
     :param destination_locator: The intended destination path or address, or ``None``.
     :param event: A run-log event and its members, appended to each member once every check passed, right
         before its extraction: a refusal leaves no such line, and the line travels in the bundle.
-    :return: The bundle directory, ``tmp/<owner-id>.eject.<token>/bundle``.
+    :param scratch: The owner's empty scratch to build in, created by the caller (whose purpose names the
+        reconciler); ``None`` creates an ``eject`` scratch once every check passed.
+    :return: The bundle directory, ``<scratch>/bundle``.
     :raises ValueError: For no members, a member held by another owner or listed out of order.
     :raises httk.workflow.errors.FormatError: For a malformed id or locator, or a ``job.json`` that is
         unreadable or disagrees with its handle (:class:`BundleError` for all but an unreadable one).
@@ -471,8 +474,7 @@ def build_bundle(
     for index, definition in enumerate(definitions):
         _check_job(manifest, index, definition, by_id, untrusted=False)
     durable = owner.workspace.durable
-    scratch = owner.scratch("eject")
-    bundle = scratch / "bundle"
+    bundle = (owner.scratch("eject") if scratch is None else scratch) / "bundle"
     _fs.make_dirs(bundle, durable=durable)
     _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), manifest.to_json(), durable=durable)
     for job, member in zip(members, manifest.members, strict=True):

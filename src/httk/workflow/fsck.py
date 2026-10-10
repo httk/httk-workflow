@@ -10,12 +10,16 @@ The check walks ``jobs/`` and reports:
 - ``tombstoned_owner_with_jobs``: a recovered owner (only ``dead.json`` left) that holds jobs, launches or
   scratch again; the ``dead_owners`` category of ``httk workspace gc`` recovers it;
 - ``unreadable_state``: a ``state.json`` that exists but cannot be decoded;
-- ``foreign_owner``: a job directory another user owns.
+- ``foreign_owner``: a job directory another user owns;
+- ``stale_exchange_index``: an exchange index entry (``exchange-jobs/<name>/``) whose job is not in the
+  workspace (after a settled lookup), in a hold, or in an owner's scratch: a crash between an exchange job's
+  delivery and its index removal left it, and it blocks the client's resubmission of that name.
 
-Nothing is repaired: with ``repair`` the unparsable entries are moved to
-``quarantine/``, and every other finding is left to the operator.
+With ``repair`` the unparsable entries are moved to ``quarantine/`` and stale exchange index entries are
+removed; every other finding is left to the operator.
 """
 
+import json
 import os
 import stat
 from collections.abc import Iterator
@@ -23,11 +27,13 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from . import _kernel
+from . import _fs, _kernel, _moving
+from ._bundles import BundleError, read_manifest
 from ._kernel import JobRef
 from ._state import UNOWNED_STATES, read_state_unowned
 from .errors import FormatError
 from .gc import quarantine
+from .models import parse_job_key
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
@@ -44,9 +50,9 @@ class FsckFinding:
 
     :param entry: The path.
     :param problem: ``unparsable_name``, ``duplicate_job``, ``orphan_owned``, ``tombstoned_owner_with_jobs``,
-        ``unreadable_state`` or ``foreign_owner``.
+        ``unreadable_state``, ``foreign_owner`` or ``stale_exchange_index``.
     :param detail: A human-readable explanation.
-    :param action: ``reported`` or ``quarantined``.
+    :param action: ``reported``, ``quarantined`` or ``removed``.
     :param job_key: The job key, when the name parses.
     :param job_id: The job UUID, when the name parses.
     """
@@ -100,7 +106,7 @@ class FsckReport:
 
     @property
     def unresolved(self) -> int:
-        """The number of findings left for the operator (everything not quarantined)."""
+        """The number of findings left for the operator (everything not quarantined or removed)."""
 
         return sum(1 for finding in self.findings if finding.action == "reported")
 
@@ -172,7 +178,7 @@ def check_workspace(
     """Check the workspace's job tree.
 
     :param workspace: The workspace.
-    :param repair: Quarantine the unparsable entries (the only repair there is).
+    :param repair: Quarantine the unparsable entries and remove stale exchange index entries.
     :param quarantine_unrepairable: The same as *repair*.
     :return: The report.
     """
@@ -221,6 +227,7 @@ def check_workspace(
         for item in _kernel.list_owners(workspace)
         if item.record is None and item.owner_id in recoverable
     )
+    findings += _stale_exchange_index(workspace, removing=repair or quarantine_unrepairable)
     counts: dict[str, int] = {}
     for finding in findings:
         counts[finding.problem] = counts.get(finding.problem, 0) + 1
@@ -248,3 +255,54 @@ def _mode(path: Path) -> int:
         return os.lstat(path).st_mode
     except FileNotFoundError:
         return 0
+
+
+def _in_flight(workspace: "Workspace") -> tuple[set[str], set[str]]:
+    """The job ids in holds and in owners' eject or hold scratch, and the adoption nonces of adopt scratch."""
+
+    ids = {parse_job_key(key)[1] for hold in _moving.held(workspace) for key in hold.members}
+    nonces: set[str] = set()
+    tmp = workspace.control / "tmp"
+    for name in _kernel.list_names(tmp):
+        try:
+            read = read_manifest(tmp / name / "bundle" / "bundle.json")
+            source = _fs.read_bounded(_fs.loc(tmp / name / "source.json"), 1 << 16)
+            record = None if source is None else json.loads(source)
+        except (BundleError, ValueError, _fs.UnsafePath, OSError):
+            continue
+        if read is not None:
+            ids.update(member.job_id for member in read[1].members)
+        if isinstance(record, dict) and isinstance(record.get("nonce"), str):
+            nonces.add(record["nonce"])
+    return ids, nonces
+
+
+def _stale_exchange_index(workspace: "Workspace", *, removing: bool) -> list[FsckFinding]:
+    directory = workspace.control / "exchange-jobs"
+    names = _kernel.list_names(directory)
+    if not names:
+        return []
+    ids, nonces = _in_flight(workspace)
+    stale: list[tuple[str, str]] = []
+    for name in names:
+        try:
+            indexed = _kernel.exchange_index(workspace, name)
+        except FormatError:
+            continue  # not an exchange name: a leftover the kernel never writes
+        if indexed is None:
+            continue
+        job_id, placement, nonce = indexed
+        if job_id in ids or nonce in nonces:
+            continue
+        if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is None:
+            stale.append((name, job_id))
+    detail = "its job is not in the workspace, a hold or a scratch"
+    if not removing or not stale:
+        return [FsckFinding(directory / name, "stale_exchange_index", detail, job_id=job_id) for name, job_id in stale]
+    with _kernel.register_owner(workspace, kind="cli", label="workspace fsck", allocation=None, advertised={}) as owner:
+        for name, job_id in stale:
+            _kernel.drop_exchange_index(owner, name, job_id)
+    return [
+        FsckFinding(directory / name, "stale_exchange_index", f"{detail}; removed", "removed", job_id=job_id)
+        for name, job_id in stale
+    ]

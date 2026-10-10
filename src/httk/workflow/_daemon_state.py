@@ -45,7 +45,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Self
 
@@ -88,8 +88,8 @@ _MAX_RECORDS = 100_000
 _ADMISSION_ATTEMPTS = 8
 #: The file of a record directory that holds its content.
 _RECORD = "record"
-#: Marks the dot-named staging directory of a record being published.
-_STAGING = ".stage-"
+#: Marks the dot-named staging directory of a record being published (and of the ledger itself).
+_STAGING = _fs.STAGING_MARK
 #: The name prefix of the trash :func:`httk.workflow._fs.discard` uses in ``prep/``.
 _TRASH = "trash."
 #: Prepared anchors, stagings and trash older than this are crash leftovers.
@@ -230,27 +230,14 @@ def _legacy_message(path: Path) -> str:
 
 
 def _read(path: Path, limit: int) -> bytes | None:
-    """Read one regular file without following a symlink; ``None`` when it is absent."""
+    """Read one bounded regular file without following a symlink or blocking; ``None`` when it is absent."""
 
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    except (FileNotFoundError, NotADirectoryError):
+        return _fs.read_bounded(_fs.loc(path), limit, nonblock=True)
+    except NotADirectoryError:
         return None
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise LedgerError(f"daemon ledger entry {path} is a symlink") from exc
-        raise
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise LedgerError(f"daemon ledger entry {path} is not a regular file")
-        data = bytearray()
-        while chunk := os.read(descriptor, limit + 1 - len(data)):
-            data.extend(chunk)
-            if len(data) > limit:
-                raise LedgerError(f"daemon ledger entry {path} exceeds {limit} bytes")
-        return bytes(data)
-    finally:
-        os.close(descriptor)
+    except (_fs.UnsafePath, _fs.TooLarge) as exc:
+        raise LedgerError(f"daemon ledger entry {path}: {exc}") from exc
 
 
 def _line(data: bytes, path: Path) -> str:
@@ -300,13 +287,6 @@ def _write(path: Path, data: bytes) -> None:
     _fs.write_file(_fs.loc(path), data, durable=True, mode=0o600)
 
 
-def _probe(path: Path) -> os.stat_result | None:
-    try:
-        return os.lstat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return None
-
-
 def _remove(path: Path, trash: Path) -> None:
     """Remove a ledger directory of this instance's own through a trash name in *trash* (``prep/``)."""
 
@@ -316,10 +296,9 @@ def _remove(path: Path, trash: Path) -> None:
 def _publish(directory: Path, name: str, data: bytes) -> bool:
     """Publish the record directory ``<directory>/<name>/`` holding *data*, at most once.
 
-    The record is staged in a dot-named directory beside it and renamed onto the name by
-    :func:`httk.workflow._fs.publish_dir`, whose fresh ``.nonce`` decides the win whatever the rename
-    reported. The leftover sweep removes stagings older than an hour, so a publication stalled that long
-    finds its staging gone: it is then staged again, once.
+    :func:`httk.workflow._fs.publish_record` stages it in a dot-named directory beside it, whose fresh ``.nonce``
+    decides the win whatever the rename reported. The leftover sweep removes stagings older than an hour, so a
+    publication stalled that long finds its staging gone: it is then staged again, once.
 
     :param directory: The ledger directory.
     :param name: The record's name.
@@ -330,20 +309,15 @@ def _publish(directory: Path, name: str, data: bytes) -> bool:
     """
 
     for _attempt in range(2):
-        staging = directory / f".{name[:64]}{_STAGING}{secrets.token_hex(16)}"
         nonce = secrets.token_hex(16).encode("ascii")
         try:
-            os.mkdir(staging, 0o700)
-            _write(staging / ".nonce", nonce)
-            _write(staging / _RECORD, data)
-            _hook("ledger.staged")
-            if _fs.publish_dir(_fs.loc(staging), _fs.loc(directory / name), nonce=nonce, durable=True):
+            if _fs.publish_record(directory, name, data, nonce=nonce, durable=True):
                 return True
         except (FileNotFoundError, ValueError):
             # FileNotFoundError: the staging (or the directory) vanished; ValueError: its .nonce was swept.
-            if _probe(directory) is None:
+            if not _fs.exists(_fs.loc(directory)):
                 raise
-        if _probe(directory / name) is not None:
+        if _fs.exists(_fs.loc(directory / name)):
             return False
         _LOGGER.info("daemon_ledger_publish_retried path=%s: its staging was swept", directory / name)
     raise LedgerError(f"daemon ledger record {directory / name} could not be published")
@@ -411,7 +385,7 @@ class Ledger:
         self._settled: dict[str, Entry] = {}
         self._open_state(directory)
         for name in _LEGACY:
-            if _probe(directory / name) is not None:
+            if _fs.exists(_fs.loc(directory / name)):
                 raise LedgerError(_legacy_message(directory / name))
         if initialize:
             self._initialize(directory)
@@ -419,24 +393,18 @@ class Ledger:
 
     @staticmethod
     def _open_state(path: Path) -> None:
-        """Require the state directory to be reachable without following any symlink."""
+        """Require the state directory to be reachable from ``/`` without following any symlink."""
 
-        descriptor = os.open(path.anchor or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
-            for component in path.parts[1:]:
-                next_descriptor = os.open(
-                    component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=descriptor
-                )
-                os.close(descriptor)
-                descriptor = next_descriptor
-        finally:
-            os.close(descriptor)
+            os.close(_fs.open_dir_under(Path("/"), PurePosixPath(path.relative_to("/"))))
+        except _fs.UnsafePath as exc:
+            raise OSError(errno.ELOOP, str(exc)) from exc
 
     def _format_bytes(self) -> bytes:
         return f"{_FORMAT} {_FORMAT_VERSION} {self.workspace_id} {self.enrollment_id}\n".encode("ascii")
 
     def _initialize(self, directory: Path) -> None:
-        if _probe(self._root) is not None:
+        if _fs.exists(_fs.loc(self._root)):
             raise FileExistsError(errno.EEXIST, "daemon ledger already exists", str(self._root))
         # Built complete in a dot-named staging and published onto ledger/ at most once.
         staging = directory / f".{_ROOT}{_STAGING}{secrets.token_hex(16)}"
@@ -449,14 +417,14 @@ class Ledger:
             _write(staging / ".nonce", nonce)
             published = _fs.publish_dir(_fs.loc(staging), _fs.loc(self._root), nonce=nonce, durable=True)
         except BaseException:
-            if _probe(staging) is not None:
+            if _fs.exists(_fs.loc(staging)):
                 _remove(staging, directory)
             raise
         if not published:
             raise FileExistsError(errno.EEXIST, "daemon ledger already exists", str(self._root))
 
     def _validate_layout(self) -> None:
-        information = _probe(self._root)
+        information = _fs.lstat(_fs.loc(self._root))
         if information is None:
             raise LedgerError(
                 f"daemon ledger {self._root} is missing; preserve this state and initialize a new enrollment"
@@ -475,7 +443,7 @@ class Ledger:
                 "and initialize a new enrollment"
             )
         for name in _SUBDIRECTORIES:
-            child = _probe(self._root / name)
+            child = _fs.lstat(_fs.loc(self._root / name))
             if child is None or not stat.S_ISDIR(child.st_mode):
                 raise LedgerError(f"daemon ledger directory {self._root / name} is missing or not a directory")
 
@@ -609,7 +577,7 @@ class Ledger:
         """
 
         anchor = self._anchor(request_id)
-        information = _probe(anchor)
+        information = _fs.lstat(_fs.loc(anchor))
         if information is None:
             return None
         if not stat.S_ISDIR(information.st_mode):
@@ -734,7 +702,7 @@ class Ledger:
                 if settled.handle == handle and not unanswered:
                     yield settled
                 continue
-            if unanswered and _probe(self._anchor(request_id) / "response") is not None:
+            if unanswered and _fs.exists(_fs.loc(self._anchor(request_id) / "response")):
                 continue
             entry = self._entry(request_id)
             if entry is None or entry.handle != handle:
@@ -807,7 +775,7 @@ class Ledger:
         hint = min(sum(1 for name in self._listing(slots) if name.startswith(prefix)), limit)
         for k in itertools.chain(range(hint, limit), range(hint)):
             name = f"{prefix}{k}"
-            if _probe(slots / name) is not None:
+            if _fs.exists(_fs.loc(slots / name)):
                 continue  # taken: a name lookup, never a negative drawn from the listing
             _hook("ledger.slot")
             if _publish(slots, name, data):
@@ -839,7 +807,7 @@ class Ledger:
             _write(prepared / ".nonce", prepared.name.encode("ascii"))
             _write(prepared / "envelope", _envelope_bytes(encode_request(request), self.nonce, handle))
         except FileNotFoundError:
-            if _probe(prepared) is not None or _probe(prepared.parent) is None:
+            if _fs.exists(_fs.loc(prepared)) or not _fs.exists(_fs.loc(prepared.parent)):
                 self._discard_prepared(prepared)
                 raise
             _LOGGER.info("daemon_ledger_prepared_fenced path=prep/%s: preparing again", prepared.name)
@@ -878,7 +846,7 @@ class Ledger:
         return stored is not None and stored[1] == self.nonce
 
     def _discard_prepared(self, prepared: Path) -> None:
-        if _probe(prepared) is not None:
+        if _fs.exists(_fs.loc(prepared)):
             _remove(prepared, self._root / "prep")
 
     def _link_handle(self, handle: str, request_id: str) -> None:
@@ -1062,7 +1030,11 @@ class Ledger:
     # ------------------------------------------------------------------
 
     def _sweep_leftovers(self, now_ns: int) -> None:
-        """Remove crash leftovers older than an hour: prepared anchors, trash, and slot or handle stagings."""
+        """Remove crash leftovers older than an hour: prepared anchors, trash, and record stagings.
+
+        Record stagings are swept in ``slots/``, ``handles/`` and each ``req/<id>/`` (only names with the staging
+        mark there: an installed anchor keeps its ``.nonce``), and a staging of the ledger itself beside it.
+        """
 
         if self._swept_at is not None and 0 <= now_ns - self._swept_at < _LEFTOVER_NS:
             return
@@ -1075,7 +1047,7 @@ class Ledger:
                 # Fenced or trashed already (by this or a crashed instance): nobody else uses it.
                 _remove(prep / name, prep)
                 continue
-            information = _probe(prep / name)
+            information = _fs.lstat(_fs.loc(prep / name))
             if information is None or now_ns - information.st_mtime_ns <= _LEFTOVER_NS:
                 continue
             # Fence first: the contested move takes the directory from a slow (not dead) owner, whose own publish
@@ -1088,17 +1060,28 @@ class Ledger:
             if won is _fs.Moved.WON:
                 _LOGGER.info("daemon_ledger_leftover_removed path=prep/%s", name)
                 _remove(fenced, prep)
-        for directory in (self._root / "slots", self._root / "handles"):
-            with os.scandir(directory) as entries:
-                stale = [
-                    Path(entry.path)
-                    for _count, entry in zip(range(_MAX_LISTING), entries, strict=False)
-                    if entry.name.startswith(".")
-                ]
-            for path in stale:
-                information = _probe(path)
-                if information is not None and now_ns - information.st_mtime_ns > _LEFTOVER_NS:
-                    _remove(path, prep)
+        with os.scandir(self._root / "req") as entries:
+            anchors = [entry.path for _count, entry in zip(range(_MAX_LISTING), entries, strict=False)]
+        # Per directory, the names to sweep: any dot name in slots/ and handles/; only stagings in an anchor (its
+        # .nonce stays); only the ledger's own staging beside it.
+        places: list[tuple[str | Path, Callable[[str], bool]]] = [
+            (self._root / "slots", lambda name: name.startswith(".")),
+            (self._root / "handles", lambda name: name.startswith(".")),
+            *((anchor, lambda name: name.startswith(".") and _STAGING in name) for anchor in anchors),
+            (self._root.parent, lambda name: name.startswith(f".{_ROOT}{_STAGING}")),
+        ]
+        stale: list[Path] = []
+        for directory, swept in places:
+            try:
+                with os.scandir(directory) as entries:
+                    listed = [entry.name for _count, entry in zip(range(_MAX_LISTING), entries, strict=False)]
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            stale += [Path(directory, name) for name in listed if swept(name)]
+        for path in stale:
+            information = _fs.lstat(_fs.loc(path))
+            if information is not None and now_ns - information.st_mtime_ns > _LEFTOVER_NS:
+                _remove(path, prep)
 
     def recover(self, *, older_than: float, now_ns: int | None = None) -> list[Entry]:
         """Settle every start whose decider crashed before linking its response.

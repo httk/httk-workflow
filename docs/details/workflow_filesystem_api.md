@@ -85,7 +85,7 @@ WORKSPACE/
 │   ├── tmp/push.<hex>/                     a remote install's pushed package
 │   ├── quarantine/<epoch>-<token>/         {entry, reason.json}
 │   ├── exchange-jobs/<exchange-name>/      the exchange index
-│   ├── exchange-requests/<id>              translated exchange requests
+│   ├── exchange-requests/<id>              translation records of exchange requests (replay guard)
 │   ├── transfers/outgoing/<transfer-id>/   held bundles
 │   ├── transfers/incoming/<transfer-id>.<token>/   pushed bundles awaiting adoption
 │   └── seal.json                           the workspace seal, when sealed
@@ -98,7 +98,6 @@ WORKSPACE/
 ├── postprocess/                            default postprocess output root
 └── exchange/                               the exchange extension, when enabled
 ```
-<!-- tree entry exchange-requests/: R2 -->
 
 Initialization creates the control directories `owners`, `requests`, `tmp`,
 `quarantine` and `exchange-jobs`, the seven state directories and `workflows/`;
@@ -1197,7 +1196,7 @@ other member's parent is listed before it, ids and (placement, key) pairs are
 unique, and `state`/`priority` are where each member was taken from and where
 adoption publishes it. A member's `job.json` MUST agree with its entry (id,
 key, placement, parent). Seals travel inside the payloads. A hold records the
-destination workspace in `destination.workspace_id`. <!-- R2 -->
+destination workspace in `destination.workspace_id`.
 
 ### Eject
 
@@ -1240,8 +1239,9 @@ that left the workspace has its index entry removed.
    exchange), anchored when the source directory is client-writable. Across
    filesystems it is copied into `<scratch>/.partial/<name>` and renamed to
    `<scratch>/<name>` only when complete; the source is untouched.
-   `job adopt --move` selects taking an operator's bundle by rename; without
-   it the source stays in place and the adopter works on a copy. <!-- R2 -->
+   On one filesystem `job adopt` takes the bundle by rename. Across
+   filesystems the source stays in place unless `job adopt --move` is given,
+   which discards it after a successful publication.
    The scratch records `source.json`: `{source, refused_to, copied, nonce}`.
 2. **Validate** (the trust boundary): the bundle structure is exactly
    `bundle.json`, `jobs/`, the listed placement and member directories and the
@@ -1377,7 +1377,6 @@ Eligible names match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and are not reserved.
 Several managers race for an entry with `move_once`; the loser moves on. The
 taken entry is copied, through anchored descriptors, into a manager-owned
 directory, and validation, rekeying and publication work on that copy only.
-<!-- R2 -->
 
 ### Returns
 
@@ -1388,7 +1387,9 @@ request id `uuid5(5d0c8f2e-8f5e-4a43-9a51-7f2b0c3e9b61, "<job-id>/<sha256 of
 state.json>")`, so every manager seeing one state posts the same request. The
 owner applies it with `deliver`, so a client-planted entry at that name only
 makes the eject roll back, and the changed state yields a fresh request id for
-the retry. Repeated returns of one job back off. <!-- R2 -->
+the retry. A manager posts no return while `outbox/<exchange-name>/<root-key>`
+exists (the client has not fetched the previous copy), and repeated returns of
+one job back off: 10 s, doubling, capped at one hour.
 
 ### Job control
 
@@ -1409,9 +1410,13 @@ once. A manager:
    (the exchange request id as a UUID), `created_at` from the signed request
    and operator `exchange`: `pause` for a stop, `cancel`, or `eject` of the
    tree to `outbox/<exchange-name>/`;
-4. records the translated exchange request id in
-   `.httk-workspace/exchange-requests/<id>`, so a replayed request is answered
-   again but never translated again; <!-- R2 -->
+4. before posting, creates the translation record
+   `.httk-workspace/exchange-requests/<id>` holding `{exchange_name, job_id,
+   adoption_nonce}`. A record whose nonce matches the current index entry is a
+   crash rerun, and posting continues; a different nonce or a missing index
+   entry is a replay, refused with `request_replayed`. gc prunes records once
+   the request could no longer verify (the maximum request lifetime plus twice
+   the clock skew);
 5. writes the unsigned `responses/<id>.json` (`accepted`, or `refused` with
    `request_unauthorized`, `request_expired`, `wrong_workspace` or
    `unknown_job`), the same bytes from every manager;
@@ -1455,7 +1460,7 @@ adoption validates and publishes a manager-owned copy, a descriptor the client
 kept can change only the taken original, which is discarded, never the adopted
 jobs. A client that writes through such a descriptor while the copy is made can
 make the copy differ from what it meant to submit; that affects only its own
-confined job. <!-- R2 -->
+confined job.
 
 ## Seals
 
@@ -1566,7 +1571,7 @@ Quarantine is removed only by hand.
   again.
 - **No all-or-none visibility** of transactions between attempt boundaries.
 - **The exchange client** must be the workspace owner's account; what it
-  writes through descriptors it kept affects only its own job. <!-- R2 -->
+  writes through descriptors it kept affects only its own job.
 - **A launch client killed with `SIGKILL`** leaves its launch running until the
   attempt ends.
 - **The join grace and stale-request quarantine use clocks.** They fail a job

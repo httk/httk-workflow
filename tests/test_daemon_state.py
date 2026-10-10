@@ -87,7 +87,10 @@ def _open(state: Path, *, initialize: bool = False, max_records: int = 4096, max
 
 @pytest.fixture
 def hook() -> Iterator[list[Callable[[str], None]]]:
-    """Install a list of step callbacks as the ledger's step hook."""
+    """Install a list of step callbacks as the ledger's step hook.
+
+    The step ``ledger.staged`` is reported from ``_fs``: right before a record's staging is renamed into place.
+    """
 
     callbacks: list[Callable[[str], None]] = []
 
@@ -95,11 +98,17 @@ def hook() -> Iterator[list[Callable[[str], None]]]:
         for callback in callbacks:
             callback(step)
 
+    def staged(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "before" and src is not None and _fs.STAGING_MARK in src.name():
+            run("ledger.staged")
+
     state_module._HOOK = run
+    _fs.set_fault_injector(staged)
     try:
         yield callbacks
     finally:
         state_module._HOOK = None
+        _fs.set_fault_injector(None)
 
 
 def _plant(record: Path, data: bytes) -> None:
@@ -711,6 +720,27 @@ def test_crash_leftovers_are_swept_after_an_hour(state: Path, hook: list[Callabl
         # An admission failing in-process releases its own slots (only a process death leaks one).
         assert _slots(state) == {}
         assert ledger.verify() == 0
+
+
+def test_record_and_ledger_stagings_a_crash_left_are_swept_after_an_hour(state: Path) -> None:
+    with _open(state) as ledger:
+        request = _start(1)
+        ledger.admit(request)
+    anchor = state / "ledger" / "req" / request.request_id
+    leftovers = [anchor / ".decision.stage-abcd", anchor / ".response.stage-ef01", state / ".ledger.stage-2345"]
+    for leftover in leftovers:
+        leftover.mkdir()
+        (leftover / "record").write_bytes(b"x")
+    kept = [anchor / ".nonce", anchor / "envelope"]
+    assert all(path.exists() for path in kept)
+    with _open(state) as ledger:
+        newest = max(path.stat().st_mtime_ns for path in leftovers)
+        ledger.recover(older_than=95.0, now_ns=newest + 60 * 10**9)
+        assert all(path.exists() for path in leftovers)
+    with _open(state) as later:
+        later.recover(older_than=95.0, now_ns=newest + 3601 * 10**9)
+        assert not any(path.exists() for path in leftovers) and all(path.exists() for path in kept)
+        assert later.verify() == 1
 
 
 def test_observations_are_per_handle_and_the_last_writer_wins(state: Path) -> None:

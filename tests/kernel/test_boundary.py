@@ -29,6 +29,8 @@ KERNEL_MKDIR = {"os": frozenset({"mkdir", "makedirs"})}
 CONTESTED = frozenset({"move_once", "publish_dir"})
 #: Never in any module: no hard links, no symlinks created, no file locks.
 LINKS = {"os": frozenset({"link", "symlink"})}
+#: The one exception: ``_fs.copy_tree`` recreates a symlink it copies as a symlink.
+LINKS_ALLOWED = {"_fs.py": {"os.symlink"}}
 LOCKS = frozenset({"flock", "lockf"})
 
 #: The runner side acts only inside its own attempt directory (P1).
@@ -71,8 +73,9 @@ CONTESTED_CALLERS: Mapping[str, frozenset[str]] = {
     # The daemon ledger fences a stalled instance's prepared anchor; a client's take-back races the managers'
     # take of the same inbox entry.
     "move_once": frozenset({"_kernel.py", "_daemon_state.py", "_daemon_client.py"}),
-    # The daemon ledger's once-only records, and the client's once-only signed request cache.
-    "publish_dir": frozenset({"_kernel.py", "_daemon_state.py", "_daemon_client.py"}),
+    # The daemon ledger's prepared anchors and the ledger itself; its records, like the client's signed request
+    # cache, go through _fs.publish_record.
+    "publish_dir": frozenset({"_kernel.py", "_daemon_state.py"}),
 }
 
 
@@ -224,7 +227,7 @@ def test_no_module_uses_links_or_locks() -> None:
     offenders = {}
     for module in _modules():
         tree = _tree(module)
-        if used := _module_uses(tree, LINKS) | _names_used(tree, LOCKS):
+        if used := (_module_uses(tree, LINKS) | _names_used(tree, LOCKS)) - LINKS_ALLOWED.get(module, set()):
             offenders[module] = sorted(used)
     assert offenders == {}, f"links or locks in the new modules: {offenders}"
 

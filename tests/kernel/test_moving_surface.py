@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,3 +99,67 @@ def test_remove_write_temporaries(tmp_path: Path) -> None:
         ".job.json.qrstuvwxyz234567.tmp",
         ".other.json.abcdefghijklmnop.tmp",
     ]
+
+
+def test_copy_tree_keeps_modes_and_times_and_reads_anchored(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    (source / "bin").mkdir(parents=True)
+    (source / "bin" / "run").write_bytes(b"#!/bin/sh\n")
+    (source / "bin" / "run").chmod(0o750)
+    os.utime(source / "bin" / "run", ns=(1_000_000_000, 2_000_000_000))
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _fs.copy_tree(_fs.anchored(descriptor, "src"), tmp_path / "copy", durable=False)
+    finally:
+        os.close(descriptor)
+    copied = (tmp_path / "copy" / "bin" / "run").stat()
+    assert stat.S_IMODE(copied.st_mode) == 0o750 and copied.st_mtime_ns == 2_000_000_000
+    (tmp_path / "link").symlink_to(source, target_is_directory=True)
+    with pytest.raises(_fs.UnsafePath):
+        _fs.copy_tree(tmp_path / "link", tmp_path / "via-link", durable=False)
+
+
+def test_copy_tree_with_limits_applies_the_untrusted_walk_rules(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    (source / "a" / "b").mkdir(parents=True)
+    (source / "a" / "f").write_bytes(b"x")
+    limits = _fs.WalkLimits(entries=3, depth=2)
+    _fs.copy_tree(source, tmp_path / "ok", durable=False, limits=limits)
+    with pytest.raises(_fs.UntrustedContentError, match="deeper"):
+        _fs.copy_tree(source, tmp_path / "deep", durable=False, limits=_fs.WalkLimits(depth=1))
+    with pytest.raises(_fs.UntrustedContentError, match="entries"):
+        _fs.copy_tree(source, tmp_path / "many", durable=False, limits=_fs.WalkLimits(entries=2))
+    os.link(source / "a" / "f", source / "hard")
+    with pytest.raises(_fs.UntrustedContentError, match="hard-linked"):
+        _fs.copy_tree(source, tmp_path / "linked", durable=False, limits=_fs.DEFAULT_LIMITS)
+    _fs.copy_tree(source, tmp_path / "trusted", durable=False)  # a trusted copy breaks the link instead
+    assert (tmp_path / "trusted" / "hard").stat().st_nlink == 1
+
+
+def test_publish_record_creates_a_record_at_most_once(tmp_path: Path) -> None:
+    assert _fs.publish_record(tmp_path, "r", b"first", nonce=b"one", durable=True)
+    assert not _fs.publish_record(tmp_path, "r", b"second", nonce=b"two", durable=False)
+    assert (tmp_path / "r" / "record").read_bytes() == b"first"
+    assert sorted(os.listdir(tmp_path)) == ["r"]  # no staging left by the loser
+    with pytest.raises(FileNotFoundError):
+        _fs.publish_record(tmp_path / "missing", "r", b"x", nonce=b"three", durable=False)
+    with pytest.raises(ValueError):
+        _fs.publish_record(tmp_path, "../r", b"x", nonce=b"four", durable=False)
+
+
+def test_open_dir_under_an_open_descriptor_and_lstat(tmp_path: Path) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "a")
+    root = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.close(_fs.open_dir_under(root, "a/b"))
+        os.close(_fs.open_dir_under(root, "a/c", create=True))
+        with pytest.raises(_fs.UnsafePath):
+            _fs.open_dir_under(root, "link/b")
+        os.fstat(root)  # the root descriptor stays open
+    finally:
+        os.close(root)
+    assert (tmp_path / "a" / "c").is_dir()
+    assert _fs.lstat(_fs.loc(tmp_path / "missing")) is None
+    info = _fs.lstat(_fs.loc(tmp_path / "link"))
+    assert info is not None and stat.S_ISLNK(info.st_mode)

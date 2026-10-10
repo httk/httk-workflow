@@ -156,7 +156,8 @@ def test_a_refused_bundle_stays_held_and_can_be_taken_back(tmp_path: Path, capsy
     (outcome,) = document["transfers"]
     assert outcome["status"] == "refused" and "already in this workspace" in outcome["message"]
     (held,) = _moving.held(source)
-    assert held.transfer_id == outcome["transfer_id"] and held.manifest.destination_locator == str(target.root)
+    assert held.transfer_id == outcome["transfer_id"] and held.destination_locator == str(target.root)
+    assert held.destination_workspace_id == target.workspace_id
     assert find(source, mapping["id"]) is None and find(target, mapping["id"]) is None
     assert (find(target, present["id"]).state, find(target, present["id"]).priority) == ("failed", 100)  # type: ignore[union-attr]
 
@@ -166,7 +167,7 @@ def test_a_refused_bundle_stays_held_and_can_be_taken_back(tmp_path: Path, capsy
     status = json.loads(capsys.readouterr().out)
     (listed,) = status["holds"]
     assert listed["transfer_id"] == held.transfer_id and listed["destination"] == str(target.root)
-    assert listed["members"] == [member.job_key for member in held.manifest.members] and listed["age_seconds"] >= 0
+    assert listed["members"] == list(held.members) and listed["age_seconds"] >= 0
     assert transfer_command(["status", source_name], context) == 0
     assert held.transfer_id in capsys.readouterr().out
     assert command(["job", "why", "--workspace", source_name, str(mapping["id"])[:8]], context) == 0
@@ -245,13 +246,85 @@ def test_release_discards_one_hold(tmp_path: Path, capsys: pytest.CaptureFixture
     held = json.loads(capsys.readouterr().out)
     assert Path(held["path"]).name == held["transfer_id"] and len(held["members"]) == 1
     (hold,) = _moving.held(source)
-    assert hold.manifest.destination_locator is None
+    assert hold.destination_locator is None
     # A hold that records no destination is not driven anywhere.
     assert run(tmp_path, "--resume", source_name) == 1
     assert "records no destination" in capsys.readouterr().err
     assert run(tmp_path, "--release", held["transfer_id"], source_name) == 0
     assert outgoing(source) == [] and find(source, mapping["id"]) is None
     assert run(tmp_path, "--release", held["transfer_id"], source_name) == 1
+
+
+def test_a_hold_adopts_only_into_the_workspace_it_records(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    mapping, state, priority = single(source)
+    elsewhere = str(uuid.uuid4())
+    context = CLIContext("httk", tmp_path)
+    argv = ["job", "eject", "--no-durable", "--workspace", source_name, "--hold", "--json"]
+    argv += ["--destination-id", elsewhere, str(mapping["id"]), str(target.root)]
+    assert command(argv, context) == 0
+    held = json.loads(capsys.readouterr().out)
+    assert held["destination_workspace_id"] == elsewhere and held["destination"] == str(target.root)
+    assert transfer_command(["status", source_name], context) == 0
+    assert f"({elsewhere})" in capsys.readouterr().out
+    # The path now holds another workspace than the one the hold was made for: --resume refuses it.
+    assert run(tmp_path, "--json", "--resume", source_name) == 1
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert outcome["status"] == "refused" and "not this workspace" in outcome["message"]
+    assert outgoing(source) == [held["transfer_id"]] and find(target, mapping["id"]) is None
+    assert run(tmp_path, "--release", held["transfer_id"], source_name) == 0
+    capsys.readouterr()
+    # A transfer records the destination's own id, and its holds go there.
+    second = place(source, {**mapping, "id": str(uuid.uuid4())}, state, priority)
+    with pytest.MonkeyPatch.context() as patch, pytest.raises(Crash):
+        patch.setattr(transfer_cli, "_deliver", lambda *_arguments: (_ for _ in ()).throw(Crash()))
+        run(tmp_path, "--job", second.job_id, source_name, target_name)
+    (hold,) = _moving.held(source)
+    assert hold.destination_workspace_id == target.workspace_id
+    assert run(tmp_path, "--json", "--resume", source_name) == 0
+    assert outcomes(capsys)["transfers"][0]["status"] == "adopted"
+    assert find(target, second.job_id) is not None
+
+
+def test_a_sealed_destination_is_refused_before_anything_is_held(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from conftest import configure_identity
+    from httk.workflow.seals import seal_workspace
+
+    configure_identity()
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    mapping, _, _ = single(source)
+    seal_workspace(target)
+    assert run(tmp_path, "--job", str(mapping["id"]), source_name, target_name) != 0
+    assert "sealed" in capsys.readouterr().err
+    assert outgoing(source) == [] and find(source, mapping["id"]) is not None
+
+
+def test_remove_remote_checks_the_holds_of_registered_workspaces_only(tmp_path: Path, project: Path) -> None:
+    from v3_helpers import cli_owner
+
+    source, _ = registered(tmp_path, "a")
+    unregistered = Workspace.initialize(tmp_path / "unregistered", durable=False)
+    for workspace in (source, unregistered):
+        mapping, _, _ = single(workspace)
+        with cli_owner(workspace) as owner:
+            root = _moving._kernel.claim(workspace, owner, find(workspace, mapping["id"]))  # type: ignore[arg-type]
+            assert root is not None
+            _moving.hold(
+                workspace,
+                owner,
+                root,
+                tree=False,
+                destination_locator=f"{'cluster' if workspace is source else 'other'}:far",
+            )
+    # A registered workspace's hold bound for cluster refuses its removal, and says what was checked.
+    with pytest.raises(ValueError, match="registered on this machine"):
+        hygiene.remove_remote("cluster", project=project)
+    # An unregistered workspace's hold bound for other is not seen.
+    assert hygiene.remove_remote("other", project=project)["removed"] is True
 
 
 def test_job_eject_needs_a_destination_or_hold(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -274,7 +347,7 @@ def test_stale_holds_are_reported_and_never_touched(tmp_path: Path, project: Pat
     with cli_owner(source) as owner:
         root = _moving._kernel.claim(source, owner, find(source, mapping["id"]))  # type: ignore[arg-type]
         assert root is not None
-        path = _moving.hold(source, owner, root, tree=False, destination_locator="cluster:far").destination
+        path = Path(_moving.hold(source, owner, root, tree=False, destination_locator="cluster:far").path)
     finding = hygiene._check_transfers(source.root, days=0)
     assert finding.status == "warning" and finding.details["stale_holds"] == [str(path)]
     assert finding.details["stale_incoming"] == [str(source.control / "transfers" / "incoming" / "leftover")]
@@ -316,6 +389,24 @@ def test_local_to_remote_and_back(project: Path, tmp_path: Path, capsys: pytest.
     assert_in(near, plan)
     assert outgoing(far) == [] and find(far, root_id) is None
     assert not list((near.control / "tmp").iterdir())
+
+
+def test_a_refused_push_leaves_no_copy_at_the_remote_destination(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    plan = tree(near)
+    place(far, plan[1][0], "succeeded")
+    argv = ["--json", "--tree", "--job", str(plan[0][0]["id"]), near_name, f"cluster:{far_name}"]
+    assert run(project, *argv) == 1
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert outcome["status"] == "refused" and "discarded" in outcome["message"]
+    (hold,) = _moving.held(near)
+    assert hold.destination_workspace_id == far.workspace_id  # learnt by probing the remote
+    for _ in range(2):  # each --resume pushes a copy again, and each refused copy goes
+        assert run(project, "--resume", near_name, f"cluster:{far_name}") == 1
+        assert list((far.control / "transfers" / "incoming").iterdir()) == []
+    assert outgoing(near) == [hold.transfer_id]
 
 
 def test_remote_to_remote_is_relayed(project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -374,6 +465,8 @@ def test_remote_status_and_refusal_keep_the_remote_hold(
     status = json.loads(capsys.readouterr().out)
     assert [hold["transfer_id"] for hold in status["holds"]] == [held]
     assert status["holds"][0]["destination"] == str(far.root)
+    # The remote source recorded the id the client learnt from the destination.
+    assert status["holds"][0]["destination_workspace_id"] == far.workspace_id
     assert not list((far.control / "tmp").iterdir())
     # The remote hold is released through the adapter.
     assert run(project, "--release", held, f"cluster:{near_name}") == 0

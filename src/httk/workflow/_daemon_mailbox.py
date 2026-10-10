@@ -17,9 +17,8 @@ import errno
 import os
 import re
 import secrets
-import stat
 from collections.abc import Collection
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Self
 
 from . import _fs
@@ -30,14 +29,46 @@ MAX_DIRECTORY_ENTRIES = 4096
 #: The most directory entries one scan examines, whatever their names.
 MAX_SCANNED_ENTRIES = 1_000_000
 _NAME_PATTERN = re.compile(r"[0-9a-f]{32}\.json\Z")
-_O_DIRECTORY = os.O_DIRECTORY
-_O_CLOEXEC = os.O_CLOEXEC
-_O_NOFOLLOW = os.O_NOFOLLOW
-_O_NONBLOCK = os.O_NONBLOCK
 
 
-def _directory_flags() -> int:
-    return os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC | _O_NOFOLLOW
+def _open(root: Path | int, relative: str | PurePosixPath) -> int:
+    """Open a directory below *root* (followed) without following a symlink (:func:`httk.workflow._fs.open_dir_under`).
+
+    :param root: The trusted directory, or an open directory descriptor.
+    :param relative: The directory below it.
+    :return: The directory's descriptor.
+    :raises OSError: ``ELOOP`` for a symlink or a non-directory, ``ENOENT`` for a missing component.
+    """
+
+    try:
+        return _fs.open_dir_under(root, relative)
+    except _fs.UnsafePath as exc:
+        raise OSError(errno.ELOOP, str(exc)) from exc
+
+
+def read_regular(target: _fs.Loc, limit: int) -> bytes:
+    """Read one bounded regular file without following a symlink or blocking (:func:`httk.workflow._fs.read_bounded`).
+
+    :param target: The file, usually anchored at an open directory.
+    :param limit: The largest accepted size in bytes.
+    :return: The content.
+    :raises FileNotFoundError: If it is absent.
+    :raises OSError: ``ELOOP`` if it is a symlink.
+    :raises ValueError: If it is not a regular file, or larger than *limit*.
+    """
+
+    try:
+        data = _fs.read_bounded(target, limit, nonblock=True)
+    except _fs.UnsafePath as exc:
+        # read_bounded chains the ELOOP its O_NOFOLLOW open raised for a symlink.
+        if isinstance(exc.__cause__, OSError):
+            raise OSError(errno.ELOOP, f"{target.path} is a symlink") from exc
+        raise ValueError(f"{target.path} is not a regular file") from exc
+    except _fs.TooLarge as exc:
+        raise ValueError(f"{target.path} exceeds {limit} bytes") from exc
+    if data is None:
+        raise FileNotFoundError(errno.ENOENT, "no such file", str(target.path))
+    return data
 
 
 def _publication_name(name: str) -> bool:
@@ -52,8 +83,8 @@ def _validate_name(name: str) -> None:
 class MailboxDirectory:
     """Operate on one pre-existing mailbox directory through a pinned fd.
 
-    :param path: An absolute path to an existing directory.  Every component is
-        opened with ``O_NOFOLLOW``; no component or parent directory is created.
+    :param path: An absolute path to an existing directory.  Every component below
+        ``/`` is opened with ``O_NOFOLLOW``; no component or parent directory is created.
     :raises ValueError: If *path* is relative, contains ``..`` components, or
         the mailbox has already been closed.
     :raises OSError: If the path cannot be opened as a directory.
@@ -63,22 +94,7 @@ class MailboxDirectory:
         candidate = Path(path)
         if not candidate.is_absolute():
             raise ValueError("mailbox path must be absolute")
-
-        descriptor = -1
-        try:
-            descriptor = os.open(candidate.anchor or "/", _directory_flags())
-            for component in candidate.parts[1:]:
-                if component == "..":
-                    raise ValueError("mailbox path must not contain .. components")
-                next_descriptor = os.open(component, _directory_flags(), dir_fd=descriptor)
-                previous_descriptor = descriptor
-                descriptor = next_descriptor
-                os.close(previous_descriptor)
-        except BaseException:
-            if descriptor >= 0:
-                os.close(descriptor)
-            raise
-        self._fd = descriptor
+        self._fd = _open(Path("/"), PurePosixPath(candidate.relative_to("/")))
 
     @classmethod
     def child(cls, parent_fd: int, name: str) -> Self:
@@ -94,7 +110,7 @@ class MailboxDirectory:
         if not name or name in {".", ".."} or "/" in name or "\0" in name:
             raise ValueError("mailbox name must be one path component")
         mailbox = cls.__new__(cls)
-        mailbox._fd = os.open(name, _directory_flags(), dir_fd=parent_fd)
+        mailbox._fd = _open(parent_fd, name)
         return mailbox
 
     def __enter__(self) -> Self:
@@ -203,36 +219,11 @@ class MailboxDirectory:
         :return: The bytes observed while reading the file.
         :raises ValueError: If *name* is malformed, the entry is not regular,
             or the document exceeds 16 KiB.
-        :raises OSError: If the entry cannot be opened or read.
+        :raises OSError: If the entry cannot be opened or read (``ELOOP`` for a symlink).
         """
 
-        descriptor = self._require_open()
         _validate_name(name)
-        file_descriptor = -1
-        try:
-            file_descriptor = os.open(
-                name,
-                os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC,
-                dir_fd=descriptor,
-            )
-            information = os.fstat(file_descriptor)
-            if not stat.S_ISREG(information.st_mode):
-                raise ValueError(f"mailbox entry is not a regular file: {name}")
-            if information.st_size > MAX_DOCUMENT_BYTES:
-                raise ValueError(f"mailbox document exceeds {MAX_DOCUMENT_BYTES} bytes")
-
-            result = bytearray()
-            while len(result) <= MAX_DOCUMENT_BYTES:
-                chunk = os.read(file_descriptor, MAX_DOCUMENT_BYTES + 1 - len(result))
-                if not chunk:
-                    return bytes(result)
-                result.extend(chunk)
-                if len(result) > MAX_DOCUMENT_BYTES:
-                    raise ValueError(f"mailbox document exceeds {MAX_DOCUMENT_BYTES} bytes")
-            raise ValueError(f"mailbox document exceeds {MAX_DOCUMENT_BYTES} bytes")
-        finally:
-            if file_descriptor >= 0:
-                os.close(file_descriptor)
+        return read_regular(_fs.anchored(self._require_open(), name), MAX_DOCUMENT_BYTES)
 
     def identity(self) -> tuple[int, int]:
         """Return the ``(st_dev, st_ino)`` of the open directory, comparable within this process only.

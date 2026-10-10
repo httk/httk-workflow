@@ -29,26 +29,35 @@ Every unrestricted manager serving the exchange runs :class:`ExchangeService` in
 - **Job control.** A ``stop_job``, ``cancel_job`` or ``eject_job`` request signed by a key of the workspace
   setting ``exchange.authorized_keys`` and inside its time window is translated into the workspace request
   ``requests/<job-uuid>.<request-uuid>.json`` (``pause``, ``cancel``, or ``eject`` of the tree to the outbox),
-  answered with an unsigned ``responses/<id>.json`` and deleted. Every step is idempotent, so several managers
-  may handle one request; the owner applies a translated request at most once (the index's ``translated/``
-  set, see :func:`httk.workflow.removal.apply_requests`). Daemon actions are left to the daemon.
+  answered with an unsigned ``responses/<id>.json`` and deleted. Before the first translation, the translator
+  records ``.httk-workspace/exchange-requests/<id>`` (the exchange name, job and adoption nonce it is for): a
+  request whose record names another adoption than the current index entry, or whose job left the index, is a
+  replay and is refused ``request_replayed``. Every step is idempotent, so several managers may handle one
+  request (an answered request is only deleted); the owner applies a translated request at most once (the
+  index's ``translated/`` set, see :func:`httk.workflow.removal.apply_requests`). Each request is handled on its
+  own, a bounded number per pass, in name order. Daemon actions are left to the daemon. Job actions are
+  protocol-level for now: there is no client command that publishes them yet.
 - **Returns.** A finished exchange tree (the indexed root and every member terminal) gets an ``eject`` request
-  of the whole tree to ``outbox/<exchange-name>/``; its owner applies it. An outbox name the client has not
-  emptied yet makes the eject roll back, and a later pass retries.
+  of the whole tree to ``outbox/<exchange-name>/``; its owner applies it. While the client has not fetched an
+  earlier return there, nothing is requested; a request whose eject rolled back anyway is retried after a
+  per-job backoff that doubles from :data:`STEP_INTERVAL` up to an hour.
 - **Status.** At most every :data:`STEP_INTERVAL` (and not when another manager wrote it just before),
   ``status.json`` lists every indexed exchange job with its state and a sanitized excerpt of the
   ``progress.json`` a job may keep in its payload, read live without following a symlink or blocking.
+- **Sweep.** At most every :data:`SWEEP_INTERVAL`, write temporaries and ``trash.<token>`` directories older than
+  an hour, which crashed writers left in the exchange root and ``responses/``, are removed.
 
 The writer of ``exchange/`` is whoever can write it, which the workspace cannot
 verify, so the trusted side treats it as hostile territory: every access is
 anchored at directory descriptors opened ``O_NOFOLLOW``, reads are bounded and
 nonblocking, and a file goes in only by an exclusive temporary and a rename.
-The client's open descriptors are not revoked: a client can still change the
-bytes of a bundle it handed in after the adoption, which affects only its own
-confined job.
+The client's open descriptors are not revoked, but adoption works on its own
+descriptor-anchored copy of the bundle, made right after the take, which the
+client cannot reach. What remains is that a client can change the bytes of its
+bundle until that copy completes: the copy is what is validated, so a change
+affects only the client's own job.
 """
 
-import errno
 import hashlib
 import json
 import logging
@@ -67,7 +76,7 @@ from pathlib import Path, PurePosixPath
 from . import _fs, _kernel, _moving, _requests
 from ._bundles import BundleError
 from ._daemon_auth import check_request_time, verify_request
-from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_DOCUMENT_BYTES
+from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_DOCUMENT_BYTES, MAX_SCANNED_ENTRIES
 from ._daemon_protocol import (
     JOB_OPERATIONS,
     Request,
@@ -96,6 +105,8 @@ __all__ = [
     "STATUS_FORMAT",
     "STATUS_LIMIT",
     "STEP_INTERVAL",
+    "SWEEP_INTERVAL",
+    "TRANSLATIONS_DIRECTORY",
     "ExchangeService",
     "ExchangeUnavailableError",
     "enable_exchange",
@@ -118,12 +129,15 @@ STATUS_LIMIT = 1024 * 1024
 #: The least time between two scans for finished exchange trees (unless the manager's own work changed something),
 #: two ``status.json`` installs, and two return requests for one job.
 STEP_INTERVAL = 10.0
+#: The least time between two sweeps of crash leftovers, which also is the age that makes a leftover one.
+SWEEP_INTERVAL = 3600.0
+#: The directory below ``.httk-workspace`` recording each translated job action, ``<directory>/<request-id>``.
+TRANSLATIONS_DIRECTORY = "exchange-requests"
 #: The workspace setting holding the public keys whose signed job actions the managers accept.
 AUTHORIZED_KEYS_SETTING = "exchange.authorized_keys"
 #: The progress file a job may keep in its payload; its excerpt goes into ``status.json``.
 PROGRESS_DOCUMENT = "progress.json"
 
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _PUBLICATION = re.compile(r"[0-9a-f]{32}\.json")
 #: A job bundle name in the exchange; the reserved names are the exchange's own entries.
 _BUNDLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -147,6 +161,14 @@ _PROGRESS_TEXT = 256
 _ACTIONS = {"stop_job": "pause", "cancel_job": "cancel", "eject_job": "eject"}
 #: The namespace of return request ids: uuid5(namespace, "<job-id>/<state digest>").
 _RETURN_NAMESPACE = uuid.UUID("5d0c8f2e-8f5e-4a43-9a51-7f2b0c3e9b61")
+#: The longest a job's return is held back after earlier requests that did not return it.
+_RETURN_BACKOFF_LIMIT = 3600.0
+#: The most job actions one pass handles; the rest wait for the next pass.
+_ACTIONS_PER_PASS = 256
+_TRANSLATION_LIMIT = 4096
+#: What a crashed writer leaves: :func:`httk.workflow._fs.write_file` temporaries and discard trash.
+_TEMPORARY = re.compile(r"\..+\.[a-z2-7]{16}\.tmp")
+_TRASH = re.compile(r"trash\.[a-z2-7]{16}")
 
 
 def exchange_directory(workspace: Workspace) -> Path:
@@ -159,61 +181,29 @@ def exchange_directory(workspace: Workspace) -> Path:
     return workspace.root / EXCHANGE_DIRECTORY
 
 
-def _lexists(name: str | Path, dir_fd: int | None = None) -> bool:
-    try:
-        os.lstat(name, dir_fd=dir_fd)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return True
-
-
 class ExchangeUnavailableError(WorkflowError):
     """An exchange directory is not a real directory (a symlink, a file, missing), so it is not served."""
 
 
-def _open_directory(name: str, dir_fd: int, *, label: str) -> int:
-    """Open one exchange directory relative to its parent's descriptor, never following a symlink.
+def _open(root: Path | int, relative: str, *, create: bool = False) -> int:
+    """Open a directory below the workspace root (or the exchange's descriptor), never following a symlink below it.
 
-    :param name: The directory's name in its parent.
-    :param dir_fd: The parent directory's descriptor.
-    :param label: The directory as reported (``exchange/inbox``).
+    The root itself is a trusted anchor and is followed (:func:`httk.workflow._fs.open_dir_under`).
+
+    :param root: The workspace root, or the exchange directory's descriptor.
+    :param relative: The directory below it, such as ``exchange/outbox/rejected``.
+    :param create: Create a missing component (by descriptor; a client may remove an exchange directory).
     :return: The directory's descriptor.
-    :raises ExchangeUnavailableError: If it is absent, a symlink or not a directory.
+    :raises ExchangeUnavailableError: If a component is missing (without *create*), a symlink or another file.
     """
 
+    label = relative if isinstance(root, Path) else f"{EXCHANGE_DIRECTORY}/{relative}"
     try:
-        return os.open(name, _DIRECTORY_FLAGS, dir_fd=dir_fd)
+        return _fs.open_dir_under(root, relative, create=create, mode=0o755)
     except FileNotFoundError:
         raise ExchangeUnavailableError(f"{label} is missing") from None
-    except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.EMLINK}:
-            raise ExchangeUnavailableError(f"{label} is not a real directory (a symlink or another file)") from None
-        raise
-
-
-def _open_relative(exchange_fd: int, relative: str) -> int:
-    """Open ``exchange/<relative>`` component by component, never following a symlink.
-
-    :param exchange_fd: The exchange directory's descriptor.
-    :param relative: A ``/``-separated path below it (``outbox/rejected``).
-    :return: The directory's descriptor.
-    :raises ExchangeUnavailableError: If a component is absent, a symlink or not a directory.
-    """
-
-    descriptor = exchange_fd
-    walked = EXCHANGE_DIRECTORY
-    try:
-        for part in relative.split("/"):
-            walked = f"{walked}/{part}"
-            inner = _open_directory(part, descriptor, label=walked)
-            if descriptor != exchange_fd:
-                os.close(descriptor)
-            descriptor = inner
-    except BaseException:
-        if descriptor != exchange_fd:
-            os.close(descriptor)
-        raise
-    return descriptor
+    except _fs.UnsafePath:
+        raise ExchangeUnavailableError(f"{label} is not a real directory (a symlink or another file)") from None
 
 
 # ---------------------------------------------------------------------------
@@ -225,50 +215,35 @@ def _exchange_document(workspace: Workspace) -> bytes:
     return json_bytes({"format": EXCHANGE_FORMAT, "format_version": 1, "workspace_id": workspace.workspace_id}) + b"\n"
 
 
-def _complete_layout(workspace: Workspace, exchange_fd: int) -> None:
-    """Create every missing exchange subdirectory and ``exchange.json``, by descriptor, never following a link."""
+#: The exchange and its directories, below the workspace root, parents first.
+_LAYOUT = (EXCHANGE_DIRECTORY, *(f"{EXCHANGE_DIRECTORY}/{relative}" for relative in EXCHANGE_SUBDIRECTORIES))
 
-    for relative in EXCHANGE_SUBDIRECTORIES:
-        parent_name, _, name = relative.rpartition("/")
-        parent = exchange_fd if not parent_name else _open_relative(exchange_fd, parent_name)
-        try:
-            try:
-                os.mkdir(name, 0o755, dir_fd=parent)
-            except FileExistsError:
-                pass
-            os.close(_open_directory(name, parent, label=f"{EXCHANGE_DIRECTORY}/{relative}"))
-        finally:
-            if parent != exchange_fd:
-                os.close(parent)
-    if not _lexists(EXCHANGE_DOCUMENT, exchange_fd):
-        # Every writer writes the same document.
-        _fs.write_file(
-            _fs.anchored(exchange_fd, EXCHANGE_DOCUMENT), _exchange_document(workspace), durable=workspace.durable
-        )
+
+def _complete_layout(workspace: Workspace) -> None:
+    """Create every missing exchange directory and ``exchange.json``, by descriptor, never following a link."""
+
+    for relative in _LAYOUT:
+        os.close(_open(workspace.root, relative, create=True))
+    exchange = _open(workspace.root, EXCHANGE_DIRECTORY)
+    try:
+        if not _fs.exists(_fs.anchored(exchange, EXCHANGE_DOCUMENT)):
+            # Every writer writes the same document.
+            _fs.write_file(
+                _fs.anchored(exchange, EXCHANGE_DOCUMENT), _exchange_document(workspace), durable=workspace.durable
+            )
+    finally:
+        os.close(exchange)
 
 
 def _layout_complete(workspace: Workspace) -> bool:
     """Report whether the exchange directory and all its entries exist as real directories (read only)."""
 
     try:
-        root = os.open(workspace.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    except OSError:
-        return False
-    try:
-        exchange = _open_directory(EXCHANGE_DIRECTORY, root, label=EXCHANGE_DIRECTORY)
+        for relative in _LAYOUT:
+            os.close(_open(workspace.root, relative))
     except (ExchangeUnavailableError, OSError):
         return False
-    finally:
-        os.close(root)
-    try:
-        for relative in EXCHANGE_SUBDIRECTORIES:
-            try:
-                os.close(_open_relative(exchange, relative))
-            except (ExchangeUnavailableError, OSError):
-                return False
-        return _lexists(EXCHANGE_DOCUMENT, exchange)
-    finally:
-        os.close(exchange)
+    return _fs.exists(_fs.loc(exchange_directory(workspace) / EXCHANGE_DOCUMENT))
 
 
 def _rename_probe(workspace: Workspace) -> None:
@@ -317,19 +292,7 @@ def enable_exchange(workspace: Workspace) -> bool:
     if EXCHANGE_EXTENSION in workspace.extensions and _layout_complete(workspace):
         return False
     directory = exchange_directory(workspace)
-    try:
-        os.mkdir(directory, 0o755)
-    except FileExistsError:
-        pass
-    root = os.open(workspace.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        exchange = _open_directory(EXCHANGE_DIRECTORY, root, label=str(directory))
-    finally:
-        os.close(root)
-    try:
-        _complete_layout(workspace, exchange)
-    finally:
-        os.close(exchange)
+    _complete_layout(workspace)
     _rename_probe(workspace)
     if EXCHANGE_EXTENSION not in workspace.extensions:
         path = workspace.control / "format.json"
@@ -357,21 +320,6 @@ def enable_exchange(workspace: Workspace) -> bool:
 # ---------------------------------------------------------------------------
 # Installing files
 # ---------------------------------------------------------------------------
-
-
-def _open_child(parent_fd: int, name: str, *, label: str) -> int:
-    """Open one exchange subdirectory, recreating it (by descriptor) when a client removed it."""
-
-    try:
-        return _open_directory(name, parent_fd, label=label)
-    except ExchangeUnavailableError:
-        if _lexists(name, parent_fd):
-            raise
-    try:
-        os.mkdir(name, 0o755, dir_fd=parent_fd)
-    except FileExistsError:
-        pass
-    return _open_directory(name, parent_fd, label=label)
 
 
 def _install(directory_fd: int, name: str, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
@@ -403,7 +351,7 @@ def publish_file(exchange_fd: int, name: str, data: bytes, *, directory: str | N
     if directory is None:
         _install(exchange_fd, name, data, durable=True)
         return
-    target = _open_child(exchange_fd, directory, label=f"{EXCHANGE_DIRECTORY}/{directory}")
+    target = _open(exchange_fd, directory, create=True)
     try:
         _install(target, name, data, durable=True)
     finally:
@@ -413,10 +361,11 @@ def publish_file(exchange_fd: int, name: str, data: bytes, *, directory: str | N
 def install_document(workspace_root: Path, name: str, data: bytes) -> None:
     """Install one document at the exchange root of the workspace at *workspace_root*.
 
-    The exchange is opened from a workspace-root descriptor without following any
-    symlink, and the document goes in through :func:`_install` (an exclusive
-    temporary and a rename relative to the exchange descriptor), so whatever a
-    client left at *name* is replaced, never followed. Used for ``daemon.json``.
+    The exchange is opened below the workspace root (a trusted anchor, followed)
+    without following a symlink, and the document goes in through :func:`_install`
+    (an exclusive temporary and a rename relative to the exchange descriptor), so
+    whatever a client left at *name* is replaced, never followed. Used for
+    ``daemon.json``.
 
     :param workspace_root: The workspace root directory.
     :param name: The document's name in the exchange root.
@@ -425,11 +374,7 @@ def install_document(workspace_root: Path, name: str, data: bytes) -> None:
     :raises OSError: If the document cannot be written.
     """
 
-    root = os.open(workspace_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    try:
-        exchange = _open_directory(EXCHANGE_DIRECTORY, root, label=str(workspace_root / EXCHANGE_DIRECTORY))
-    finally:
-        os.close(root)
+    exchange = _open(workspace_root, EXCHANGE_DIRECTORY)
     try:
         _install(exchange, name, data, durable=True)
     finally:
@@ -453,15 +398,10 @@ class _Directories:
 
 @contextmanager
 def _opened(workspace: Workspace) -> Iterator[_Directories]:
-    root = os.open(workspace.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        exchange = _open_directory(EXCHANGE_DIRECTORY, root, label=str(exchange_directory(workspace)))
-    finally:
-        os.close(root)
-    opened = [exchange]
+    opened = [_open(workspace.root, EXCHANGE_DIRECTORY)]
     try:
         for name in ("inbox", "requests", "responses"):
-            opened.append(_open_child(exchange, name, label=f"{EXCHANGE_DIRECTORY}/{name}"))
+            opened.append(_open(opened[0], name, create=True))
         yield _Directories(*opened)
     finally:
         for descriptor in opened:
@@ -473,6 +413,31 @@ def _listing(directory_fd: int) -> list[str]:
 
     with os.scandir(directory_fd) as entries:
         return sorted(entry.name for _count, entry in zip(range(MAX_DIRECTORY_ENTRIES), entries, strict=False))
+
+
+def _publications(directory_fd: int) -> list[str]:
+    """Return every publication name of a mailbox directory, sorted; at most ``MAX_SCANNED_ENTRIES`` are examined."""
+
+    with os.scandir(directory_fd) as entries:
+        listed = zip(range(MAX_SCANNED_ENTRIES), entries, strict=False)
+        return sorted(entry.name for _count, entry in listed if _PUBLICATION.fullmatch(entry.name))
+
+
+def _translation_document(exchange_name: str, indexed: tuple[str, PurePosixPath, str | None]) -> dict[str, object]:
+    """The record of a translated job action: the exchange name, job and adoption it was translated for."""
+
+    return {"exchange_name": exchange_name, "job_id": indexed[0], "adoption_nonce": indexed[2]}
+
+
+def _read_translation(path: _fs.Loc) -> dict[str, object] | None:
+    """Read a translation record; ``None`` when absent, an empty mapping when damaged."""
+
+    try:
+        data = _fs.read_bounded(path, _TRANSLATION_LIMIT)
+        value = None if data is None else json.loads(data)
+    except (ValueError, _fs.UnsafePath):
+        return {}
+    return value if value is None or isinstance(value, dict) else {}
 
 
 def _eligible(name: str) -> bool:
@@ -538,8 +503,8 @@ class ExchangeService:
         self.owner = owner
         self._last: dict[str, float] = {}
         self._dirty = True
-        # The monotonic time of the last return request posted per job.
-        self._posted: dict[str, float] = {}
+        # Per job: the monotonic time of the last return request posted, and the wait before the next one.
+        self._backoff: dict[str, tuple[float, float]] = {}
         # Request names found to be daemon actions, which managers leave alone.
         self._ignored: set[str] = set()
         # The last problem reported per subject, so a persisting one is logged once.
@@ -556,15 +521,15 @@ class ExchangeService:
         self._reported[subject] = message
         _LOGGER.log(level, "%s", message, extra={"event": event, "workspace_id": self.workspace.workspace_id})
 
-    def _due(self, step: str, now: float) -> bool:
+    def _due(self, step: str, now: float, interval: float = STEP_INTERVAL) -> bool:
         last = self._last.get(step)
-        if last is not None and 0.0 <= now - last < STEP_INTERVAL:
+        if last is not None and 0.0 <= now - last < interval:
             return False
         self._last[step] = now
         return True
 
     def run(self) -> bool:
-        """Run one pass: adopt one inbox entry, translate job actions, return finished trees, write the status.
+        """Run one pass: adopt one inbox entry, translate job actions, return finished trees, write the status, sweep.
 
         :return: Whether the pass changed workflow state (adopted, refused, translated or requested a return).
         :raises httk.workflow._kernel.OwnerLost: When this manager's owner was recovered (fail-stop).
@@ -578,6 +543,7 @@ class ExchangeService:
                     ("adoption", self._adopt),
                     ("job control", self._job_control),
                     ("return", self._returns),
+                    ("sweep", self._sweep),
                 ):
                     try:
                         changed |= step(directories)
@@ -641,43 +607,105 @@ class ExchangeService:
     # -- job control ------------------------------------------------------------------------------------------------
 
     def _job_control(self, directories: _Directories) -> bool:
-        """Translate, answer and delete every pending job action of the request mailbox."""
+        """Translate, answer and delete pending job actions of the request mailbox, in name order, a bounded number.
 
-        durable = self.workspace.durable
-        keys: frozenset[str] | None = None
-        changed = False
-        names = [name for name in _listing(directories.requests) if _PUBLICATION.fullmatch(name)]
+        Each request is handled on its own: a failure is reported and the pass goes on with the next one.
+        """
+
+        names = _publications(directories.requests)
         self._ignored &= set(names)
+        keys: frozenset[str] | None = None
+        changed, handled = False, 0
         for name in names:
-            if name in self._ignored or _fs.exists(_fs.anchored(directories.responses, name)):
+            if handled >= _ACTIONS_PER_PASS:
+                break
+            if name in self._ignored:
                 continue
             try:
-                data = _fs.read_bounded(_fs.anchored(directories.requests, name), MAX_DOCUMENT_BYTES, nonblock=True)
-                request = None if data is None else decode_request(data)
-            except (_fs.UnsafePath, _fs.TooLarge, ValueError):
-                request = None  # not a valid publication: the daemon discards it
-            if request is None:
-                continue
-            if request.operation not in JOB_OPERATIONS or name != f"{request.request_id}.json":
-                self._ignored.add(name)
-                continue
-            if keys is None:
-                keys = _authorized_keys(self.workspace)
-            response = self._translate(request, keys)
-            # Unsigned, and the same bytes from every manager; then the request goes.
-            _fs.write_file(_fs.anchored(directories.responses, name), encode_response(response), durable=durable)
-            _fs.remove_file(_fs.anchored(directories.requests, name), durable=durable)
-            _LOGGER.info(
-                "exchange job action %s %s for %s: %s%s",
-                request.request_id,
-                request.operation,
-                request.job,
-                response.outcome,
-                "" if response.reason is None else f" ({response.reason})",
-                extra={"event": "exchange_job_action", "request_id": request.request_id},
-            )
-            changed = True
+                request = self._job_action(directories, name)
+                if request is None:
+                    continue
+                handled += 1
+                if keys is None:
+                    keys = _authorized_keys(self.workspace)
+                changed |= self._answer(directories, name, request, keys)
+            except _kernel.OwnerLost:
+                raise
+            except Exception as exc:
+                _LOGGER.debug("exchange job action %s failed", name, exc_info=True)
+                self._report(
+                    f"request:{name}",
+                    f"exchange job action {name} failed: {type(exc).__name__}: {exc}",
+                    event="exchange_job_action_failed",
+                )
         return changed
+
+    def _job_action(self, directories: _Directories, name: str) -> Request | None:
+        """Read one publication: the job action, or ``None`` (not a valid publication, or a daemon action)."""
+
+        try:
+            data = _fs.read_bounded(_fs.anchored(directories.requests, name), MAX_DOCUMENT_BYTES, nonblock=True)
+            request = None if data is None else decode_request(data)
+        except (_fs.UnsafePath, _fs.TooLarge, ValueError):
+            return None  # not a valid publication: the daemon discards it
+        if request is not None and (request.operation not in JOB_OPERATIONS or name != f"{request.request_id}.json"):
+            self._ignored.add(name)
+            return None
+        return request
+
+    def _answer(self, directories: _Directories, name: str, request: Request, keys: frozenset[str]) -> bool:
+        """Translate one job action, answer it and delete it; whether a translation ran."""
+
+        durable = self.workspace.durable
+        if _fs.exists(_fs.anchored(directories.responses, name)):
+            # Answered already (by another manager, or before a crash): only the request is left to delete.
+            _fs.remove_file(_fs.anchored(directories.requests, name), durable=durable)
+            return False
+        response = self._translate(request, keys)
+        # Unsigned, and the same bytes from every manager; then the request goes.
+        _fs.write_file(_fs.anchored(directories.responses, name), encode_response(response), durable=durable)
+        _fs.remove_file(_fs.anchored(directories.requests, name), durable=durable)
+        _LOGGER.info(
+            "exchange job action %s %s for %s: %s%s",
+            request.request_id,
+            request.operation,
+            request.job,
+            response.outcome,
+            "" if response.reason is None else f" ({response.reason})",
+            extra={"event": "exchange_job_action", "request_id": request.request_id},
+        )
+        return True
+
+    def _translation(
+        self, request: Request
+    ) -> tuple[dict[str, object] | None, tuple[str, PurePosixPath, str | None] | None]:
+        """Return the record of the job action's translation, written now before the first, and the index entry.
+
+        The index entry is read again once the record exists, so a translator that stalled while the job was
+        returned (and perhaps resubmitted) compares the record with the current entry.
+        """
+
+        assert request.job is not None
+        durable = self.workspace.durable
+        directory = self.workspace.control / TRANSLATIONS_DIRECTORY
+        path = _fs.loc(directory / request.request_id)
+        recorded = _read_translation(path)
+        if not recorded:
+            indexed = _kernel.exchange_index(self.workspace, request.job)
+            if indexed is None:
+                return None, None
+            data = json_bytes(_translation_document(request.job, indexed)) + b"\n"
+            _fs.make_dirs(directory, durable=durable)
+            if recorded is None:
+                try:
+                    os.close(_fs.create_exclusive(path, data, durable=durable, mode=0o644))
+                except FileExistsError:
+                    pass  # another translator recorded it first
+            else:
+                # A damaged record: a translator died while creating it, for this same entry.
+                _fs.write_file(path, data, durable=durable)
+            recorded = _read_translation(path)
+        return recorded, _kernel.exchange_index(self.workspace, request.job)
 
     def _translate(self, request: Request, keys: frozenset[str]) -> Response:
         """Post the workspace request of one job action, or say why it is refused."""
@@ -703,9 +731,12 @@ class ExchangeService:
         if request.workspace_id != self.workspace.workspace_id:
             return answer("refused", "wrong_workspace")
         assert request.job is not None
-        indexed = _kernel.exchange_index(self.workspace, request.job)
-        if indexed is None:
+        recorded, indexed = self._translation(request)
+        if recorded is None:
             return answer("refused", "unknown_job")
+        if indexed is None or recorded != _translation_document(request.job, indexed):
+            # Translated before for an adoption that is gone: the job was returned (and perhaps sent again).
+            return answer("refused", "request_replayed")
         job_id, placement, _nonce = indexed
         action = _ACTIONS[request.operation]
         eject = action == "eject"
@@ -757,6 +788,9 @@ class ExchangeService:
             return False
         self._dirty = False
         jobs = self._scan()
+        # A job no longer indexed here was returned (or removed): its backoff is over.
+        present = {job.job_id for job in jobs if job.ref is not None}
+        self._backoff = {job_id: entry for job_id, entry in self._backoff.items() if job_id in present}
         changed = False
         if returns:
             for job in jobs:
@@ -774,9 +808,9 @@ class ExchangeService:
         ref = job.ref
         if ref is None or ref.state not in TERMINAL_STATES:
             return False
-        last = self._posted.get(job.job_id)
-        if last is not None and 0.0 <= now - last < STEP_INTERVAL:
-            return False  # an earlier request may still be applied, or its eject rolled back (occupied outbox)
+        backoff = self._backoff.get(job.job_id)
+        if backoff is not None and 0.0 <= now - backoff[0] < backoff[1]:
+            return False  # an earlier request may still be applied, or its eject rolled back
         doc, damaged = read_state_unowned(ref.path / "state.json")
         if damaged or doc is None or doc.origin != "exchange":
             return False
@@ -786,6 +820,9 @@ class ExchangeService:
             return False
         if any(member.state not in TERMINAL_STATES for member in members):
             return False
+        outbox = exchange_directory(self.workspace) / "outbox" / job.exchange_name
+        if _fs.exists(_fs.loc(outbox / ref.job_key)):
+            return False  # the client has not fetched an earlier return: an eject now would only roll back
         # One id per state of the root: every manager that sees this state posts the same request, and a rolled
         # back eject (which records the applied request) changes the state, so the retry is a fresh request.
         digest = hashlib.sha256(encode_state(doc)).hexdigest()
@@ -796,11 +833,13 @@ class ExchangeService:
             placement=job.placement,
             operator="exchange-return",
             reason="return the finished exchange tree to the client",
-            destination=str(exchange_directory(self.workspace) / "outbox" / job.exchange_name),
+            destination=str(outbox),
             tree=True,
             request_id=str(uuid.uuid5(_RETURN_NAMESPACE, f"{job.job_id}/{digest}")),
         )
-        self._posted[job.job_id] = now
+        # Doubling while the job stays here (its returns roll back), from STEP_INTERVAL up to the limit.
+        wait = STEP_INTERVAL if backoff is None else min(2 * backoff[1], _RETURN_BACKOFF_LIMIT)
+        self._backoff[job.job_id] = (now, wait)
         _LOGGER.info(
             "requested the return of finished exchange job %s (%s)",
             ref.job_key,
@@ -808,6 +847,39 @@ class ExchangeService:
             extra={"event": "exchange_return_requested", "job_key": ref.job_key},
         )
         return True
+
+    def _sweep(self, directories: _Directories) -> bool:
+        """Remove crash leftovers older than :data:`SWEEP_INTERVAL`: write temporaries and trash directories.
+
+        Temporaries of :func:`httk.workflow._fs.write_file` are removed from the exchange root (``status.json``)
+        and ``responses/``; ``trash.<token>`` directories (an interrupted take-back) from the exchange root.
+        """
+
+        if not self._due("sweep", time.monotonic(), SWEEP_INTERVAL):
+            return False
+        cutoff, durable = time.time() - SWEEP_INTERVAL, self.workspace.durable
+        for directory in (directories.exchange, directories.responses):
+            with os.scandir(directory) as entries:
+                listed = [entry.name for _count, entry in zip(range(MAX_SCANNED_ENTRIES), entries, strict=False)]
+            for name in listed:
+                temporary, trash = (
+                    _TEMPORARY.fullmatch(name),
+                    directory == directories.exchange and _TRASH.fullmatch(name),
+                )
+                info = _fs.lstat(_fs.anchored(directory, name)) if temporary or trash else None
+                if info is None or info.st_mtime >= cutoff:
+                    continue
+                try:
+                    if temporary and stat.S_ISREG(info.st_mode):
+                        _fs.remove_file(_fs.anchored(directory, name), durable=durable)
+                    elif trash and stat.S_ISDIR(info.st_mode):
+                        # Through a fresh trash name in the exchange root: what cannot be removed stays there.
+                        _fs.discard(
+                            _fs.anchored(directory, name), trash_dir=exchange_directory(self.workspace), durable=durable
+                        )
+                except (OSError, _fs.MoveFailed) as exc:
+                    _LOGGER.debug("cannot sweep the exchange leftover %s: %s", name, exc)
+        return False
 
     def _status_fresh(self, directories: _Directories) -> bool:
         """Report whether ``status.json`` was installed (by any manager) less than :data:`STEP_INTERVAL` ago."""

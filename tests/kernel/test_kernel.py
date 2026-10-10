@@ -580,7 +580,7 @@ def test_close_keeps_owner_when_scratch_or_launch_remains(ws: FakeWorkspace) -> 
     owner.close()
     # Without a registered reconciler the eject scratch is kept as well: it may hold the only copy of a job.
     assert kept.exists() and launch.exists() and (owner.path / "owner.json").exists()
-    owner._discard(kept)
+    owner.discard_tree(kept)
     owner.close()
     assert launch.exists() and (owner.path / "owner.json").exists()
     attempt = launch.name.split(".")[0]
