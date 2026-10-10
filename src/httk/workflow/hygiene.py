@@ -13,10 +13,11 @@ import shutil
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import _death, _kernel, gc
+from . import _death, _kernel, _moving, gc
 from ._state import UNOWNED_STATES
 from ._util import read_json
 from .adapters import (
@@ -37,7 +38,7 @@ from .projects import (
     read_project,
     read_project_section,
 )
-from .registry import resolve_workspace
+from .registry import list_workspaces, resolve_workspace, split_workspace_binding
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -226,21 +227,52 @@ def describe_remote(
     }
 
 
+def _remote_of(locator: str | None) -> str | None:
+    try:
+        binding = None if locator is None or Path(locator).is_absolute() else split_workspace_binding(locator)
+    except (WorkflowError, ValueError):
+        return None
+    return None if binding is None else binding[0]
+
+
+def _holds_for_remote(remote: str) -> list[str]:
+    """Return the registered local workspaces holding transfers bound for a workspace on *remote*."""
+
+    names: list[str] = []
+    for binding in list_workspaces():
+        assert binding.path is not None
+        try:
+            holds = _moving.held(Workspace(binding.path))
+        except (WorkflowError, OSError, ValueError):
+            continue
+        if any(_remote_of(hold.manifest.destination_locator) == remote for hold in holds):
+            names.append(binding.name)
+    return names
+
+
 def remove_remote(
     name: str,
     *,
     project: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
-    """Remove one remote bundle.
+    """Remove one remote bundle, refusing while a held transfer still needs it.
+
+    A held transfer bound for a workspace on the remote is finished (``httk job transfer --resume``) or
+    released through that remote's adapter; removing it would leave the hold with no way there.
 
     :param name: Remote bundle name.
     :param project: Project directory used for project-local lookup.
     :return: JSON-compatible removal result.
-    :raises ValueError: If the remote is invalid or unknown.
+    :raises ValueError: If the remote is invalid or unknown, or held transfers are bound for it.
     """
 
-    # ponytail: no in-flight transfer guard while transfers are unavailable; phase D restores it with _moving.py.
     bundle, scope = _remote_bundle(name, project=project)
+    pending = _holds_for_remote(name)
+    if pending:
+        raise ValueError(
+            f"remote {name!r} still has held transfers from workspace {', '.join(pending)}; "
+            "finish them with `httk job transfer --resume` (see `httk transfer status`) first"
+        )
     shutil.rmtree(bundle)
     _LOGGER.info(
         "removed the %s remote %s at %s",
@@ -378,3 +410,38 @@ def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
         finding.repaired = True
         finding.status = "ok"
     return finding
+
+
+#: How old a held transfer or an incoming copy gets before :func:`_check_transfers` reports it.
+STALE_TRANSFER_DAYS = 7
+
+
+def _check_transfers(workspace_root: Path, days: float = STALE_TRANSFER_DAYS) -> Finding:
+    """Held transfers and incoming copies older than *days*; this check reports and never acts.
+
+    A stale hold is driven on with ``httk job transfer --resume``, or, once its destination is checked not to have
+    the jobs, taken back with ``httk job adopt`` of its path. An ``incoming`` entry is a refused or interrupted copy.
+    """
+
+    workspace = _workspace_at(workspace_root)
+    if workspace is None:
+        return Finding("transfers", "ok", "there is no workspace to hold transfers")
+    old = time.time() - days * 86400
+    try:
+        holds = _moving.held(workspace)
+    except (WorkflowError, OSError, ValueError) as exc:
+        return Finding("transfers", "warning", f"the held transfers cannot be read: {exc}")
+    stale = [str(hold.path) for hold in holds if datetime.fromisoformat(hold.manifest.created_at).timestamp() < old]
+    incoming = workspace.control / "transfers" / "incoming"
+    leftovers = [str(incoming / name) for name in _names(incoming) if not _newer(incoming / name, old)]
+    details: dict[str, object] = {"stale_holds": stale, "stale_incoming": leftovers}
+    if not stale and not leftovers:
+        return Finding("transfers", "ok", f"no transfer is older than {days:g} days", details=details)
+    return Finding(
+        "transfers",
+        "warning",
+        f"{len(stale)} held transfer(s) and {len(leftovers)} incoming cop(ies) older than {days:g} days: drive holds "
+        "on with `httk job transfer --resume`, or after checking the destination, `httk job adopt` the held path "
+        "back; remove incoming copies by hand",
+        details=details,
+    )

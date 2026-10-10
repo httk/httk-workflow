@@ -31,18 +31,19 @@ __all__ = [
     "CREDENTIALS_FILE",
     "METADATA_FILE",
     "PERSISTABLE_REMOTE_SETTINGS",
+    "REMOTE_JOB_ADOPT_COMMAND",
     "REMOTE_JOB_DELETE_COMMAND",
+    "REMOTE_JOB_EJECT_COMMAND",
     "REMOTE_JOB_LIST_COMMAND",
     "REMOTE_JOB_LOG_COMMAND",
     "REMOTE_JOB_PUBLISH_REQUESTS_COMMAND",
     "REMOTE_JOB_REQUEST_ENVELOPES_COMMAND",
     "REMOTE_JOB_SHOW_COMMAND",
+    "REMOTE_JOB_TRANSFER_COMMAND",
     "REMOTE_JOB_WHY_COMMAND",
     "REMOTE_MANAGER_COMMAND",
-    "REMOTE_OFFER_COMMAND",
-    "REMOTE_RECEIVE_COMMAND",
-    "REMOTE_RETIRE_COMMAND",
     "REMOTE_STATUS_COMMAND",
+    "REMOTE_TRANSFER_STATUS_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
     "REMOTE_WORKSPACE_FSCK_COMMAND",
     "REMOTE_WORKSPACE_GC_COMMAND",
@@ -148,9 +149,10 @@ REMOTE_WORKSPACE_FSCK_COMMAND = ("httk", "workspace", "fsck")
 REMOTE_WORKSPACE_GC_COMMAND = ("httk", "workspace", "gc")
 REMOTE_WORKSPACE_LIST_COMMAND = ("httk", "workspace", "list")
 REMOTE_WORKSPACE_MOVE_COMMAND = ("httk", "workspace", "move")
-REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "transfer", "receive")
-REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
-REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
+REMOTE_JOB_EJECT_COMMAND = ("httk", "job", "eject")
+REMOTE_JOB_ADOPT_COMMAND = ("httk", "job", "adopt")
+REMOTE_JOB_TRANSFER_COMMAND = ("httk", "job", "transfer")
+REMOTE_TRANSFER_STATUS_COMMAND = ("httk", "transfer", "status")
 REMOTE_STATUS_COMMAND = ("httk", "workspace", "status")
 REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workspace", "settings")
 REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workspace", "workflow-prelude")

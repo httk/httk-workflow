@@ -126,25 +126,21 @@ probe can prove dead. {doc}`details/taskmanager` explains each of them.
 
 ## Moving jobs between machines
 
-`httk job transfer` is being rebuilt in this development version and refuses with
-exit status 2 until it returns; the rest of this section describes it as it will be.
-
 Jobs are created locally and moved to the workspace that will run them; when
-they have stopped, the reverse transfer brings them home:
+they have stopped, the reverse transfer (naming each job by its UUID) brings them home:
 
 ```console
 httk job transfer --job silicon default kappa:runs
 httk workflow run --workspace kappa:runs --count 4
-httk job transfer kappa:runs default
+httk job transfer --job JOB-UUID kappa:runs default
 ```
 
-A transfer moves the job's sealed bundle, imports it on the other side, and
-retires the source only after the destination has acknowledged it, so an
-interrupted transfer is resumed rather than duplicated. A job that spawned
-children moves together with its whole tree. {doc}`details/remotes` covers
-job trees, the mount-based remotes and their restrictions;
-{doc}`details/transfer_reclamation` describes what is left on disk by
-completed and interrupted transfers.
+A transfer holds the jobs on the source, copies them to the destination,
+adopts them there and only then releases the hold; an interrupted transfer is
+finished by running it again or with `httk job transfer --resume`. With
+`--tree` a job moves together with its descendants. {doc}`details/remotes`
+covers the mount-based remotes and their restrictions, and
+{doc}`details/workflow_cli` the transfer's recovery.
 
 ## Collecting results
 

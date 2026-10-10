@@ -227,14 +227,24 @@ def _roll_back(owner: Owner, bundle: Path, manifest: BundleManifest) -> list[Job
 
 
 def _eject(
-    workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: Path, tree: bool, by_transfer_id: bool
+    workspace: "Workspace",
+    owner: Owner,
+    root: OwnedJob,
+    *,
+    destination: Path,
+    tree: bool,
+    by_transfer_id: bool,
+    locator: str | None,
 ) -> EjectReport:
     members = _claim_tree(workspace, owner, root) if tree else []
     try:
         for job in (root, *members):
             job.append_log("ejected", destination=str(destination))
         bundle = build_bundle(
-            owner, [root, *members], source_workspace_id=workspace.workspace_id, destination_locator=str(destination)
+            owner,
+            [root, *members],
+            source_workspace_id=workspace.workspace_id,
+            destination_locator=locator,
         )
     except Exception:
         # A refusal moved nothing; the members go back, the root stays with the caller.
@@ -277,7 +287,9 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     destination = Path(destination)
     if not destination.is_absolute():
         raise ValueError(f"the eject destination must be absolute: {destination}")
-    return _eject(workspace, owner, root, destination=destination, tree=tree, by_transfer_id=False)
+    return _eject(
+        workspace, owner, root, destination=destination, tree=tree, by_transfer_id=False, locator=str(destination)
+    )
 
 
 def _carries(path: Path, data: bytes) -> bool:
@@ -303,11 +315,12 @@ def reconcile_eject(owner: Owner, scratch: Path) -> bool:
         # build_bundle writes bundle.json before any member moves: nothing to return.
         return True
     data, manifest = read
-    candidates = []
-    if manifest.destination_locator is not None:
+    # A hold delivers to this workspace's outgoing/<transfer id> and records its transfer's destination instead.
+    candidates = [_outgoing(owner.workspace) / manifest.transfer_id]
+    if manifest.destination_locator is not None and Path(manifest.destination_locator).is_absolute():
         destination = Path(manifest.destination_locator)
         # An eject delivers under the root's key, a hold under the transfer id; the bytes carry the transfer id.
-        candidates = [destination / name for name in (manifest.members[0].job_key, manifest.transfer_id)]
+        candidates += [destination / name for name in (manifest.members[0].job_key, manifest.transfer_id)]
     try:
         if any(_carries(candidate / "bundle.json", data) for candidate in candidates):
             return True
@@ -567,20 +580,26 @@ def _outgoing(workspace: _kernel.KernelWorkspace) -> Path:
     return workspace.control / "transfers" / "outgoing"
 
 
-def hold(workspace: "Workspace", owner: Owner, root: OwnedJob, *, tree: bool) -> Path:
+def hold(
+    workspace: "Workspace", owner: Owner, root: OwnedJob, *, tree: bool, destination_locator: str | None = None
+) -> Path:
     """Eject into this workspace's own ``transfers/outgoing/<transfer-id>/``: the held bundle of a transfer.
 
     :param workspace: The workspace.
     :param owner: The owner holding *root*.
     :param root: The claimed, quiescent root.
     :param tree: Hold the root's descendants too.
+    :param destination_locator: The transfer's destination, recorded in ``bundle.json`` for resumption.
     :return: The held bundle directory.
     :raises Busy: As :func:`eject`.
     """
 
     outgoing = _outgoing(workspace)
     _fs.make_dirs(outgoing, durable=workspace.durable)
-    return _eject(workspace, owner, root, destination=outgoing, tree=tree, by_transfer_id=True).destination
+    report = _eject(
+        workspace, owner, root, destination=outgoing, tree=tree, by_transfer_id=True, locator=destination_locator
+    )
+    return report.destination
 
 
 def held(workspace: "Workspace") -> list[Hold]:

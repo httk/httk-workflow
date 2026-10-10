@@ -42,12 +42,6 @@ _LOGGER = logging.getLogger(__name__)
 # RuntimeError subclasses, so a sealed-tree refusal renders as a clean CLI error here.
 _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 
-#: The hidden protocol subcommands the ``transfer`` verb dispatches by name: the
-#: far-side halves one machine invokes on another. A workspace name can never be
-#: one of these, so the verb never mistakes ``transfer offer`` for a move.
-#: ``retire`` and ``reclaim`` are also the operator verbs ``transfer retire|reclaim JOB_ID``.
-_TRANSFER_PROTOCOL = ("receive", "offer", "retire", "reclaim", "status")
-
 Handler = Callable[[argparse.Namespace, CLIContext], int]
 
 

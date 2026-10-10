@@ -17,11 +17,11 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
+import v3_helpers as v3
 from conftest import FAKE_HOST, Remote, fake_remote, register_ws
-from httk.workflow import Workspace, adapter_runtime, launchers
+from httk.workflow import Workspace, _kernel, adapter_runtime, launchers
 from httk.workflow.adapters import RemoteTarget, add_remote, probe_remote_workspace, run_adapter
 from httk.workflow.launchers import add_launcher
-from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _manager, command
 
@@ -70,37 +70,6 @@ def _tree(root: Path) -> Path:
     (root / "files" / "data with spaces.txt").write_text("payload\n", encoding="utf-8")
     (root / "link").symlink_to("files/runner")
     return root
-
-
-def _payload(root: Path) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / "payload"
-    (payload / "files").mkdir(parents=True)
-    runner = payload / "files" / "runner"
-    runner.write_text(_RUNNER, encoding="utf-8")
-    runner.chmod(0o755)
-    (payload / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": job_id,
-                "tag": "test",
-                "name": "test",
-                "workflow": "tests",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "start",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    return payload, job_id
 
 
 def test_ssh_push_and_pull_round_trip_a_real_tree(tmp_path: Path, remote: Remote) -> None:
@@ -534,8 +503,6 @@ def test_remote_manager_forwards_execution_options(
                 "cuda",
                 "--placement-prefix",
                 "volume/a",
-                "--lease-seconds",
-                "12",
                 "--heartbeat-interval",
                 "3",
                 "--poll-interval",
@@ -573,8 +540,6 @@ def test_remote_manager_forwards_execution_options(
         "cuda",
         "--placement-prefix",
         "volume/a",
-        "--lease-seconds",
-        "12.0",
         "--heartbeat-interval",
         "3.0",
         "--poll-interval",
@@ -596,7 +561,6 @@ def test_remote_manager_forwards_execution_options(
         "--pool cpu",
         "--capability cuda",
         "--placement-prefix volume/a",
-        "--lease-seconds 12.0",
         "--heartbeat-interval 3.0",
         "--poll-interval 4.0",
         "--idle-timeout 9.0",
@@ -607,12 +571,6 @@ def test_remote_manager_forwards_execution_options(
         "--launcher process",
     ):
         assert option in command_line
-
-    assert (
-        command(["manager", "run", "--workspace", "cluster:options", "--runner-search-path", "/tmp/runners"], context)
-        == 0
-    )
-    assert "--runner-search-path /tmp/runners" in remote.commands()[-1]
 
 
 def test_local_transfers_stay_in_this_filesystem(tmp_path: Path, remote: Remote) -> None:
@@ -729,28 +687,26 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
 def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="end-to-end")
-    home = Workspace.initialize(source_root / "workspace")
-    destination = Workspace.initialize(remote.root / "runs" / "workspace")
+    home = v3.workspace(source_root / "workspace")
+    destination = v3.workspace(remote.root / "runs" / "workspace")
     fake_remote(source_root, workspace=str(destination.root))
-    payload, job_id = _payload(tmp_path / "incoming")
-    home.submit(payload, "jobs")
+    workflow = v3.install(home, tmp_path / "package-home")
+    v3.install(destination, tmp_path / "package-remote")
+    job_id = v3.submit(home, workflow, {"start": "succeed"}).job_id
     context = CLIContext("httk", source_root)
     register_ws(context, home.root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
-    assert home.find_marker_by_id(job_id) is None
-    marker = destination.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "submitted"
-    with TaskManager(destination, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    finished = destination.find_marker_by_id(job_id)
-    assert finished is not None and finished.kind == "succeeded"
+    assert _kernel.locate(home, job_id, placement_hint=None, exhaustive=True) is None
+    assert v3.find(destination, job_id).state == "ready"
+    v3.run(destination)
+    assert v3.find(destination, job_id).state == "succeeded"
     # Every step of the flow really crossed the stand-in transport.
-    commands = [json.loads(line)["command"] for line in remote.log.read_text(encoding="utf-8").splitlines()]
+    commands = remote.commands()
     assert any("workspace status --json station" in item for item in commands)
-    assert any("transfer receive --workspace station --bundle" in item for item in commands)
+    assert any("job adopt --json --workspace station" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
 

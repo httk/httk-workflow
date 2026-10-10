@@ -7,13 +7,14 @@ other machines depend on are stable.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext, main
 
 import v3_helpers as v3
-from httk.workflow import Workspace, workflow_cli
+from httk.workflow import Workspace, adapters, workflow_cli
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _campaign, command
 
@@ -158,8 +159,7 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
         assert group not in printed
 
     # transfer is a verb, not a group: its help shows the SRC/DST usage rather
-    # than a subcommand listing (receive/offer/retire are hidden protocol,
-    # and stay under ``workflow`` rather than ``job``).
+    # than a subcommand listing.
     assert command(["job", "transfer", "--help"], _context(tmp_path)) == 0
     assert "SRC DST" in capsys.readouterr().out
 
@@ -356,11 +356,17 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
     """`job transfer SRC DST` replaced the old send/fetch manager-submission subcommands."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    parsed = parser.parse_args(["job", "transfer", "--job", "J", "a", "b"])
+    parsed = parser.parse_args(["job", "transfer", "--job", "J", "--tree", "a", "b"])
     assert parsed.handler is workflow_cli.handle_transfer
-    assert (parsed.source, parsed.destination, parsed.jobs) == ("a", "b", ["J"])
+    assert (parsed.source, parsed.destination, parsed.jobs, parsed.tree) == ("a", "b", ["J"], True)
+    parsed = parser.parse_args(["job", "transfer", "--resume"])
+    assert (parsed.resume, parsed.source, parsed.destination) == (True, None, None)
+    parsed = parser.parse_args(["job", "transfer", "--release", "T", "a"])
+    assert (parsed.release, parsed.source) == ("T", "a")
     with pytest.raises(SystemExit):
         parser.parse_args(["job", "transfer", "send", "c", "J"])
+    parsed = parser.parse_args(["job", "eject", "--hold", "J"])
+    assert (parsed.hold, parsed.destination) == (True, None)
 
 
 # ---------------------------------------------------------------------------
@@ -369,10 +375,15 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
 
 
 def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
-    """The private cross-machine protocol retains its declared command vectors."""
+    """Transfers reach other machines through the ordinary verbs; the legacy protocol spellings are gone."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    assert callable(workflow_cli.handle_transfer_receive)
+    assert adapters.REMOTE_JOB_EJECT_COMMAND == ("httk", "job", "eject")
+    assert adapters.REMOTE_JOB_ADOPT_COMMAND == ("httk", "job", "adopt")
+    assert adapters.REMOTE_JOB_TRANSFER_COMMAND == ("httk", "job", "transfer")
+    assert adapters.REMOTE_TRANSFER_STATUS_COMMAND == ("httk", "transfer", "status")
+    for name in ("handle_transfer_receive", "handle_transfer_offer", "handle_transfer_retire"):
+        assert not hasattr(workflow_cli, name)
     with pytest.raises(SystemExit):
         parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
     with pytest.raises(SystemExit):
@@ -388,9 +399,8 @@ def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, 
     assert f"usage: httk {group}" in capsys.readouterr().out
     assert main([group, "frobnicate"]) == 2
     assert f"httk {group}" in capsys.readouterr().err
-    if group != "transfer":
-        assert main(["workflow", group, "--help"]) == 2
-        assert "invalid choice" in capsys.readouterr().err
+    assert main(["workflow", group, "--help"]) == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_public_workflow_help_only_names_workflow_operations(capsys):
@@ -411,8 +421,11 @@ def test_operator_transfer_help_and_status(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     initialize_project(tmp_path, name="transfer-help")
     _init_workspace(tmp_path)
-    # The operator verbs keep their tree and refuse until moving returns (phase D).
-    assert main(["transfer", "status", "--json"]) == 2
-    assert "transfer status is unavailable in this development version" in capsys.readouterr().err
-    assert main(["transfer", "receive", "--help"]) == 2
-    assert "invalid choice" in capsys.readouterr().err
+    # status is the only transfer subcommand; the legacy operator and protocol verbs are refused.
+    assert main(["transfer", "status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["holds"] == []
+    for verb in ("retire", "reclaim", "receive", "offer"):
+        assert main(["transfer", verb, "--help"]) == 2
+        assert "invalid choice" in capsys.readouterr().err
+    assert main(["workflow", "transfer", "receive", "--workspace", "/w", "--bundle", "/b"]) == 2
+    capsys.readouterr()

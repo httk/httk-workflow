@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import _death, _kernel, _requests, _store
+from .. import _death, _kernel, _moving, _requests, _store
 from .._durations import format_duration
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
@@ -902,3 +902,33 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
         checks=tuple(report.checks),
         hints=tuple(report.hints),
     )
+
+
+def explain_held(workspace: Workspace, selector: str) -> list[Diagnosis]:
+    """Explain the held jobs *selector* names: jobs in neither state tree, held for a transfer (§9.3).
+
+    :param workspace: The workspace whose ``transfers/outgoing/`` to search.
+    :param selector: A job UUID, job key, or a prefix of either.
+    :return: One diagnosis per held job it matches; empty when none does.
+    """
+
+    found = []
+    for hold in _moving.held(workspace):
+        destination = hold.manifest.destination_locator or "no recorded destination"
+        for member in hold.manifest.members:
+            if not (member.job_id.startswith(selector) or member.job_key.startswith(selector)):
+                continue
+            report = _Diagnosing()
+            report.check("held bundle", False, f"{hold.path} (transfer {hold.transfer_id}, to {destination})")
+            report.check("returns to", None, f"{member.state} at priority {member.priority}")
+            report.hint("finish the transfer with `httk job transfer --resume`")
+            report.hint(
+                f"after checking that {destination} does not have it, take it back with `httk job adopt {hold.path}`"
+            )
+            summary = f"this job is held for a transfer to {destination}; it is in neither workspace's state trees"
+            found.append(
+                Diagnosis(
+                    member.job_id, member.job_key, "held", summary, True, tuple(report.checks), tuple(report.hints)
+                )
+            )
+    return found

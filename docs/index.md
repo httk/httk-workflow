@@ -101,7 +101,6 @@ details/launchers
 details/launcher_authoring
 details/remotes
 details/adapter_authoring
-details/transfer_reclamation
 details/workspace_daemon
 details/sealing
 details/monitor

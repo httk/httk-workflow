@@ -47,6 +47,7 @@ from ..introspection import (
     count_jobs,
     debug_job,
     describe_job,
+    explain_held,
     explain_job,
     job_events,
     job_placement,
@@ -92,7 +93,7 @@ from ._common import (
     confirm,
     remote_workspace_output,
 )
-from ._transfer import _protocol_workspace, build_transfer_parser
+from ._transfer import _protocol_workspace, adopt_document, build_transfer_parser, eject_once
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
 #: The option each action requires (and that no other action takes).
@@ -1130,37 +1131,23 @@ def handle_job_detach(arguments: argparse.Namespace, context: CLIContext) -> int
     return _request_now(arguments, context, "detach", "detached")
 
 
-def _eject_once(
-    workspace: Workspace, owner: _kernel.Owner, ref: JobRef, destination: Path, *, tree: bool
-) -> _moving.EjectReport | str:
-    """Claim and eject one job: the report, or why it cannot move now (it stays where it is)."""
-
-    root = _kernel.claim(workspace, owner, ref)
-    if root is None:
-        return f"{ref.job_key} moved before it could be claimed"
-    try:
-        return _moving.eject(workspace, owner, root, destination=destination, tree=tree)
-    except _moving.Busy as exc:
-        root.give_back()
-        return str(exc)
-    except Exception:
-        # A refusal before the bundle was built leaves the root with us: it goes back unchanged.
-        if owner.holds(root.ref):
-            root.give_back()
-        raise
-
-
 def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move a quiescent job (with ``--tree``, its terminal or paused descendants too) out into a bundle."""
+    """Move a quiescent job (with ``--tree``, its terminal or paused descendants too) out into a bundle.
+
+    With ``--hold`` the bundle goes to the workspace's own ``transfers/outgoing/<transfer id>`` (the first leg of
+    ``job transfer``), and DEST, when given, is only recorded as the transfer's destination.
+    """
 
     if arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
+    if arguments.destination is None and not arguments.hold:
+        raise ValueError("job eject needs DEST, or --hold")
     workspace = _modifiable(arguments, context, action="eject jobs from it")
     refs = resolve_job_selectors(workspace, context.cwd, [arguments.job])
     if len(refs) != 1:
         raise ValueError(f"{arguments.job} names {len(refs)} jobs; eject one root at a time")
     job_id, placement = refs[0].job_id, _ref_placement(refs[0])
-    destination = (context.cwd / Path(arguments.destination).expanduser()).resolve()
+    destination = None if arguments.hold else (context.cwd / Path(str(arguments.destination)).expanduser()).resolve()
     deadline = time.monotonic() + arguments.timeout
     paused = False
     with _kernel.register_owner(workspace, kind="cli", label="job eject", allocation=None, advertised={}) as owner:
@@ -1183,7 +1170,9 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
                     paused = True
             else:
                 try:
-                    outcome = _eject_once(workspace, owner, ref, destination, tree=arguments.tree)
+                    outcome = eject_once(
+                        workspace, owner, ref, destination, tree=arguments.tree, locator=arguments.destination
+                    )
                 except _ERRORS as exc:
                     print(f"{ref.job_key}: {exc}", file=sys.stderr)
                     return 1
@@ -1194,15 +1183,16 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
                 print(f"{outcome}{'; timed out waiting' if arguments.wait else ''}", file=sys.stderr)
                 return 1
             time.sleep(min(1.0, remaining))
-    if arguments.json:
-        document = {
-            "destination": str(outcome.destination),
-            "members": list(outcome.members),
-            "transfer_id": outcome.transfer_id,
-        }
+    members = list(outcome.members)
+    if arguments.hold and arguments.json:
+        print(json.dumps({"transfer_id": outcome.transfer_id, "path": str(outcome.destination), "members": members}))
+    elif arguments.json:
+        document = {"destination": str(outcome.destination), "members": members, "transfer_id": outcome.transfer_id}
         print(json.dumps(document, indent=2))
+    elif arguments.hold:
+        print(f"held {len(members)} job(s) in {outcome.destination}")
     else:
-        print(f"ejected {len(outcome.members)} job(s) to {outcome.destination}")
+        print(f"ejected {len(members)} job(s) to {outcome.destination}")
     return 0
 
 
@@ -1226,14 +1216,7 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
             file=sys.stderr,
         )
     if arguments.json:
-        document = {
-            "already_adopted": report.already_adopted,
-            "published": [
-                {"job_key": ref.job_key, "state": ref.state, "path": str(ref.path)} for ref in report.published
-            ],
-            "missing_workflows": list(report.missing_workflows),
-        }
-        print(json.dumps(document, indent=2))
+        print(json.dumps(adopt_document(report), indent=2))
     elif report.already_adopted:
         print(f"{arguments.bundle}: already adopted")
     else:
@@ -1269,8 +1252,12 @@ def _for_each_job(
     context: CLIContext,
     action: str,
     report: Callable[[Workspace, JobRef], tuple[dict[str, object], str]],
+    missing: Callable[[Workspace, str], list[tuple[dict[str, object], str]]] | None = None,
 ) -> int:
-    """Run *report* for every job each selector names; print JSON or the text it returns, per job."""
+    """Run *report* for every job each selector names; print JSON or the text it returns, per job.
+
+    A selector naming no job falls back to *missing*, when given and it finds something.
+    """
 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
@@ -1281,9 +1268,17 @@ def _for_each_job(
     documents: list[dict[str, object]] = []
     failed = False
     for selector in arguments.jobs:
+        refs: list[JobRef] | None = None
+        held: list[tuple[dict[str, object], str]] = []
         try:
-            for ref in resolver.resolve_one(selector):
-                document, text = report(workspace, ref)
+            try:
+                refs = resolver.resolve_one(selector)
+            except ValueError:
+                held = [] if missing is None else missing(workspace, selector)
+                if not held:
+                    raise
+            results = held if refs is None else (report(workspace, ref) for ref in refs)
+            for document, text in results:
                 documents.append(document)
                 if not arguments.json:
                     print(f"{selector}:")
@@ -1347,7 +1342,11 @@ def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
         diagnosis = explain_job(workspace, ref)
         return diagnosis.as_mapping(), diagnosis.render()
 
-    return _for_each_job(arguments, context, "why", report)
+    def held(workspace: Workspace, selector: str) -> list[tuple[dict[str, object], str]]:
+        # A held job is in neither state tree: look for it in the held bundles.
+        return [(diagnosis.as_mapping(), diagnosis.render()) for diagnosis in explain_held(workspace, selector)]
+
+    return _for_each_job(arguments, context, "why", report, held)
 
 
 def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -1654,13 +1653,18 @@ def build_job_parser(
         summary="move a job (and with --tree its descendants) out of a workspace",
         description=(
             "Move a quiescent job out of the workspace into DEST/<job key>, a bundle that job adopt takes in; "
-            "with --tree its terminal or paused descendants go along"
+            "with --tree its terminal or paused descendants go along. With --hold the bundle is held in the "
+            "workspace's own .httk-workspace/transfers/outgoing/<transfer id> (the first leg of job transfer) and "
+            "DEST, when given, is only recorded as the transfer's destination"
         ),
         handler=handle_job_eject,
     )
     _add_workspace_option(eject, help_text="the workspace holding the job")
     eject.add_argument("job", metavar="JOB", help="job UUID, job key, unique prefix, or a path inside the workspace")
-    eject.add_argument("destination", metavar="DEST", help="the directory to put the bundle in")
+    eject.add_argument(
+        "destination", metavar="DEST", nargs="?", help="the directory to put the bundle in (with --hold: recorded only)"
+    )
+    eject.add_argument("--hold", action="store_true", help="hold the bundle in the workspace for a transfer")
     eject.add_argument("--tree", action="store_true", help="eject the job's descendants too")
     eject.add_argument("--wait", action="store_true", help="pause a running job and wait until it can move")
     eject.add_argument(

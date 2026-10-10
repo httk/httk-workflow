@@ -53,5 +53,5 @@ register_cli_command(
 register_cli_command(
     "transfer",
     "httk.workflow.workflow_cli:transfer_command",
-    "inspect and resolve workspace transfers (unavailable in this version)",
+    "inspect held workspace transfers",
 )

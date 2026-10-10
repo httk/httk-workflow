@@ -12,17 +12,16 @@ import json
 import os
 import stat
 import sys
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
 
+import v3_helpers as v3
 from conftest import fake_remote, install_httk_toolchain, register_ws
-from httk.workflow import Workspace
+from httk.workflow import Workspace, _kernel
 from httk.workflow.adapters import add_remote, run_adapter
-from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
 
@@ -127,37 +126,6 @@ def _tree(root: Path) -> Path:
     (root / "files" / "data with spaces.txt").write_text("payload\n", encoding="utf-8")
     (root / "link").symlink_to("files/runner")
     return root
-
-
-def _payload(root: Path) -> tuple[Path, str]:
-    job_id = str(uuid.uuid4())
-    payload = root / "payload"
-    (payload / "files").mkdir(parents=True)
-    runner = payload / "files" / "runner"
-    runner.write_text(_RUNNER, encoding="utf-8")
-    runner.chmod(0o755)
-    (payload / "job.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-job",
-                "format_version": 2,
-                "id": job_id,
-                "tag": "test",
-                "name": "test",
-                "workflow": "tests",
-                "runner": {"path": "files/runner", "arguments": []},
-                "workdir": {"mode": "persistent", "path": "run"},
-                "data": {"mode": "none"},
-                "initial_step": "start",
-                "priority": 500,
-                "claim": {"pool": "default", "required_capabilities": []},
-                "retry_policy": {"retry_on": []},
-                "resources": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    return payload, job_id
 
 
 # 1. remote add / configure ----------------------------------------------------
@@ -517,29 +485,27 @@ def test_check_reports_a_missing_remote_httk_with_the_remedy(tmp_path: Path, mou
 def test_a_job_reaches_a_mount_workspace_and_runs_there(tmp_path: Path, mount: Mount) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="mount-end-to-end")
-    home = Workspace.initialize(source_root / "workspace")
-    destination = Workspace.initialize(mount.remote_root / "runs" / "workspace")
+    home = v3.workspace(source_root / "workspace")
+    destination = v3.workspace(mount.remote_root / "runs" / "workspace")
     _mount_remote(source_root, mount)
-    payload, job_id = _payload(tmp_path / "incoming")
-    home.submit(payload, "jobs")
+    workflow = v3.install(home, tmp_path / "package-home")
+    v3.install(destination, tmp_path / "package-remote")
+    job_id = v3.submit(home, workflow, {"start": "succeed"}).job_id
     context = CLIContext("httk", source_root)
     register_ws(context, home.root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
-    assert home.find_marker_by_id(job_id) is None
-    marker = destination.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "submitted"
-    with TaskManager(destination, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    finished = destination.find_marker_by_id(job_id)
-    assert finished is not None and finished.kind == "succeeded"
-    # The workspace status and the remote receive really crossed the executor,
+    assert _kernel.locate(home, job_id, placement_hint=None, exhaustive=True) is None
+    assert v3.find(destination, job_id).state == "ready"
+    v3.run(destination)
+    assert v3.find(destination, job_id).state == "succeeded"
+    # The workspace status and the remote adoption really crossed the executor,
     # while the bundle bytes moved through the mount rather than the executor.
     commands = mount.commands()
     assert any("workspace status --json station" in item for item in commands)
-    assert any("transfer receive --workspace station --bundle" in item for item in commands)
+    assert any("job adopt --json --workspace station" in item for item in commands)
     assert not any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
 

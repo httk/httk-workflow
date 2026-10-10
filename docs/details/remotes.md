@@ -63,10 +63,6 @@ prelude prepares the shell so `httk` can run at all; the manager applies
 
 ## Working with remote workspaces
 
-Moving jobs between workspaces (`httk job transfer` and the job-moving examples
-below) is being rebuilt in this development version and refuses with exit
-status 2 until it returns.
-
 Initialize a named workspace on the remote by putting the remote name before
 the path:
 
@@ -366,5 +362,5 @@ exits, and malformed or unsuccessful result documents.
 
 The complete bundle layout, operation request and result documents, settings
 and credential handling, and refusal rules are in {doc}`adapter_authoring`. For
-the transfer completion protocol, crash recovery and metadata bounds on
-quota-limited filesystems, see {doc}`transfer_reclamation`.
+the transfer steps and their crash recovery, see the `job transfer` section of
+{doc}`workflow_cli`.

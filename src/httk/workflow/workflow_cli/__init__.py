@@ -14,9 +14,6 @@ from httk.core.cli import CLIContext
 
 from ..adapters import (
     REMOTE_MANAGER_COMMAND,
-    REMOTE_OFFER_COMMAND,
-    REMOTE_RECEIVE_COMMAND,
-    REMOTE_RETIRE_COMMAND,
     REMOTE_STATUS_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
     REMOTE_WORKSPACE_FSCK_COMMAND,
@@ -39,7 +36,6 @@ from ._campaign import (
 from ._collect import build_collect_parser
 from ._common import (
     _ERRORS,
-    _TRANSFER_PROTOCOL,
     remote_workspace_output,
 )
 from ._common import (
@@ -109,7 +105,6 @@ from ._project import (
 )
 from ._seal import build_seal_parser, handle_seal_verify
 from ._transfer import (
-    _dispatch_transfer_protocol,
     build_remote_parser,
     build_transfer_operator_parser,
     build_transfer_parser,
@@ -120,10 +115,6 @@ from ._transfer import (
     handle_remote_remove,
     handle_remote_show,
     handle_transfer,
-    handle_transfer_offer,
-    handle_transfer_receive,
-    handle_transfer_retire,
-    run_transfer_verb_result,
 )
 from ._workspace import (
     add_workspace_init_arguments,
@@ -148,9 +139,6 @@ from ._workspace import (
 
 __all__ = [
     "REMOTE_MANAGER_COMMAND",
-    "REMOTE_OFFER_COMMAND",
-    "REMOTE_RECEIVE_COMMAND",
-    "REMOTE_RETIRE_COMMAND",
     "REMOTE_STATUS_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
     "REMOTE_WORKSPACE_FSCK_COMMAND",
@@ -230,9 +218,6 @@ __all__ = [
     "handle_remote_show",
     "handle_seal_verify",
     "handle_transfer",
-    "handle_transfer_offer",
-    "handle_transfer_receive",
-    "handle_transfer_retire",
     "handle_v1_collect",
     "handle_workflow_describe",
     "handle_workflow_install",
@@ -261,7 +246,6 @@ __all__ = [
     "remote_command",
     "remote_workspace_output",
     "request_remote_job_result",
-    "run_transfer_verb_result",
     "seal_command",
     "submit_remote_manager_result",
     "transfer_command",
@@ -326,17 +310,6 @@ def dispatch(
     prog = prog or parser.prog
 
     raw_argv = list(argv)
-    if (
-        prog != f"{context.program} transfer"
-        and len(raw_argv) > 1
-        and raw_argv[0] == "transfer"
-        and raw_argv[1] in _TRANSFER_PROTOCOL
-    ):
-        try:
-            return _dispatch_transfer_protocol(raw_argv[1:], context)
-        except _ERRORS as exc:
-            print(f"{prog}: {exc}", file=sys.stderr)
-            return 2
     # ``argparse`` does not intermingle an optional workspace positional with
     # the protocol's ``<path> --by-path KEY [VALUE]`` tail. Keep the frozen
     # remote vector and move only this hidden switch for the local parse.
@@ -442,7 +415,7 @@ def v1_command(argv: Sequence[str], context: CLIContext) -> int:
 
 
 def transfer_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle operator transfer inspection, retirement and reclamation."""
+    """Handle the registered top-level ``transfer`` command: inspecting held transfers."""
 
     parser = argparse.ArgumentParser(prog=context.program)
     parser.set_defaults(handler=None, help_parser=parser)

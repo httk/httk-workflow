@@ -173,13 +173,11 @@ def test_neither_removed_alias_is_advertised_or_parses(tmp_path: Path, capsys) -
             parser.parse_args([group, "--help"])
 
 
-def test_the_protocol_vectors_send_the_frozen_transfer_spellings() -> None:
-    """The frozen protocol spelling is the ``transfer`` group from now on."""
+def test_the_legacy_transfer_protocol_vectors_are_gone() -> None:
+    """Transfers use the ordinary verbs remotely; receive/offer/retire are gone with receipts and acknowledgements."""
 
-    assert cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "transfer", "receive")
-    assert cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
-    assert cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
-    assert callable(cli.handle_transfer_receive)
+    for name in ("REMOTE_RECEIVE_COMMAND", "REMOTE_OFFER_COMMAND", "REMOTE_RETIRE_COMMAND", "handle_transfer_receive"):
+        assert not hasattr(cli, name)
 
 
 # ---------------------------------------------------------------------------
