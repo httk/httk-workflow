@@ -183,7 +183,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
                 f"{binding.remote!r}; fetch it home with `httk job transfer` before collecting the campaign"
             )
         assert binding.path is not None
-        return Workspace(binding.path, mutable=False)
+        return Workspace(binding.path)
 
     if arguments.raw:
         collected = 0

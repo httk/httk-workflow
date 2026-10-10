@@ -419,7 +419,7 @@ def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int
             return _remote_relay(binding, context, arguments, "describe", *format_flags, *arguments.targets)
         if arguments.format is not None:
             raise ValueError("--format describes a bare document on this machine; an installation names its format")
-        workspace = Workspace(root, mutable=False)
+        workspace = Workspace(root)
     descriptions: list[dict[str, object]] = []
     failed = False
     for target in arguments.targets:
@@ -461,7 +461,7 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
     if root is None:
         assert binding is not None
         return _remote_relay(binding, context, arguments, "list")
-    rows = [_installed_row(installed) for installed in _store.list_installed(Workspace(root, mutable=False))]
+    rows = [_installed_row(installed) for installed in _store.list_installed(Workspace(root))]
     if not rows and not arguments.json:
         print(f"no workflows installed in {root}")
     _print_rows(rows, arguments, lambda row: f"{row['id']}\t{row['name']}\t{row['source']}")

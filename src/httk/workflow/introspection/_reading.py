@@ -2,16 +2,17 @@
 
 import glob
 import json
+import os
+import stat
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .. import _kernel
+from .. import _fs, _kernel
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef
 from .._state import UNOWNED_STATES, StateDoc, read_state_unowned
-from .._util import read_json
 from ..errors import FormatError, WorkflowError
 from ..models import ATTEMPTS_DIRECTORY, JOB_STATE_DIRECTORY, normalize_placement, parse_job_key, placement_text
 from ..workspace import Workspace
@@ -23,6 +24,10 @@ JOB_STATES = (*UNOWNED_STATES, OWNED)
 #: How much of a run log's tail to read when surfacing its last headline. A
 #: run log can grow without bound, so the report reads only the final slice.
 _RUNLOG_TAIL_BYTES = 65536
+#: The largest run log a reader accepts.
+LOG_LIMIT = 16 << 20
+#: The largest JSON document of a job a reader accepts.
+JSON_LIMIT = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -174,19 +179,77 @@ def read_state(ref: JobRef) -> tuple[StateDoc | None, str | None]:
     return doc, None
 
 
-def _jsonl(path: Path, *, tail: int | None = None) -> list[dict[str, Any]]:
-    """Read a JSON-lines log, skipping a torn last line; an unreadable earlier line becomes an ``error`` entry."""
+def read_job_file(job: Path, relative: str | PurePosixPath, limit: int) -> bytes | None:
+    """Read one file below a job directory the way job-writable content must be read.
 
-    start = 0
+    No symlink below *job* is followed, a FIFO or other special file is
+    refused without blocking, and the content is bounded.
+
+    :param job: The job directory (a trusted anchor).
+    :param relative: The file below it, such as ``.httk-job/runlog.jsonl``.
+    :param limit: The largest accepted size in bytes.
+    :return: The content, or ``None`` when the file or a directory on its way is absent.
+    :raises httk.workflow._fs.UnsafePath: If a component is a symlink, or the file is not a regular file.
+    :raises httk.workflow._fs.TooLarge: If the file is larger than *limit*.
+    """
+
+    path = PurePosixPath(relative)
     try:
-        with path.open("rb") as handle:
-            if tail is not None:
-                start = max(0, handle.seek(0, 2) - tail)
-                handle.seek(start)
-            data = handle.read()
-    except OSError:
-        return []
-    lines = data.split(b"\n")
+        directory = _fs.open_dir_under(job, path.parent) if path.parent.parts else _fs.open_dir(job)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    try:
+        return _fs.read_bounded(_fs.anchored(directory, path.name), limit, nonblock=True)
+    finally:
+        os.close(directory)
+
+
+def read_job_tail(job: Path, relative: str, size: int, offset: int | None = None) -> tuple[bytes, int]:
+    """Read a slice of a growing file below a job directory, as :func:`read_job_file` reads (unbounded files).
+
+    :param job: The job directory (a trusted anchor).
+    :param relative: The file below it, such as ``logs/stdio.out``.
+    :param size: The most bytes to read.
+    :param offset: Where to start; ``None`` reads the last *size* bytes, and an offset past the end restarts at 0.
+    :return: The bytes and the offset after them; no bytes and *offset* (or 0) when the file is absent.
+    :raises httk.workflow._fs.UnsafePath: If the file is not a regular file, or a directory on its way is a symlink.
+    :raises OSError: If the file is a symlink (``ELOOP``) or cannot be read.
+    """
+
+    path = PurePosixPath(relative)
+    try:
+        directory = _fs.open_dir_under(job, path.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        return b"", offset or 0
+    try:
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError:
+        return b"", offset or 0
+    finally:
+        os.close(directory)
+    try:
+        length = os.fstat(descriptor)
+        if not stat.S_ISREG(length.st_mode):
+            raise _fs.UnsafePath(f"{job / relative} is not a regular file")
+        if offset is None:
+            start = max(0, length.st_size - size)
+        else:
+            start = offset if offset <= length.st_size else 0
+        data = os.pread(descriptor, size, start)
+    finally:
+        os.close(descriptor)
+    return data, start + len(data)
+
+
+def _jsonl(job: Path, relative: str, *, tail: int | None = None) -> list[dict[str, Any]]:
+    """Read a JSON-lines log of a job, skipping a torn last line; an unreadable line becomes an ``error`` entry."""
+
+    try:
+        data = read_job_file(job, relative, LOG_LIMIT) or b""
+    except (WorkflowError, OSError) as exc:
+        return [{"error": f"{job / relative}: {exc}"}]
+    start = 0 if tail is None else max(0, len(data) - tail)
+    lines = data[start:].split(b"\n")
     # A file that does not end in a newline ends in a line still being written.
     lines.pop()
     if start and lines:
@@ -199,7 +262,9 @@ def _jsonl(path: Path, *, tail: int | None = None) -> list[dict[str, Any]]:
             event = json.loads(raw)
         except ValueError:
             event = None
-        events.append(event if isinstance(event, dict) else {"error": f"{path}: line {number} is not a JSON object"})
+        events.append(
+            event if isinstance(event, dict) else {"error": f"{job / relative}: line {number} is not a JSON object"}
+        )
     return events
 
 
@@ -216,7 +281,7 @@ def job_events(ref: JobRef, *, limit: int | None = None) -> list[dict[str, Any]]
     :return: The events.
     """
 
-    events = _jsonl(ref.path / "logs" / "runlog.jsonl")
+    events = _jsonl(ref.path, "logs/runlog.jsonl")
     return events if limit is None else events[-limit:]
 
 
@@ -232,7 +297,7 @@ def read_last_headline(payload: str | Path | None) -> str | None:
     if payload is None:
         return None
     headline: str | None = None
-    for event in _jsonl(Path(payload) / JOB_STATE_DIRECTORY / "runlog.jsonl", tail=_RUNLOG_TAIL_BYTES):
+    for event in _jsonl(Path(payload), f"{JOB_STATE_DIRECTORY}/runlog.jsonl", tail=_RUNLOG_TAIL_BYTES):
         if event.get("kind") == "headline" and isinstance(event.get("message"), str):
             headline = event["message"]
     return headline
@@ -253,16 +318,19 @@ def attempt_control(ref: JobRef, doc: StateDoc | None) -> Path | None:
 def read_error_breadcrumb(control: Path | None) -> dict[str, Any] | None:
     """Return the ``error.json`` breadcrumb of one attempt, when it left one.
 
-    :param control: The attempt directory.
-    :return: The breadcrumb, or ``None``.
+    :param control: The attempt directory, ``<job>/attempts/<attempt-id>``.
+    :return: The breadcrumb, or ``None`` when it is absent, unsafe or unreadable.
     """
 
     if control is None:
         return None
     try:
-        return read_json(control / "error.json")
-    except WorkflowError:
+        # Anchored at the job, so a symlinked attempts/<attempt-id> is refused rather than followed.
+        data = read_job_file(control.parent.parent, f"{control.parent.name}/{control.name}/error.json", JSON_LIMIT)
+        value = None if data is None else json.loads(data)
+    except (WorkflowError, OSError, ValueError, RecursionError):
         return None
+    return value if isinstance(value, dict) else None
 
 
 def _matches(ref: JobRef, selector: str) -> bool:

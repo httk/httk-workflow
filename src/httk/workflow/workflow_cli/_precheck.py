@@ -50,7 +50,7 @@ def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
 def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Report pending-job environment and runner readiness without mutation."""
 
-    workspace = Workspace(_local_root(arguments, context, action="run a precheck"), mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="run a precheck"))
     findings = list(precheck_jobs(workspace, placement=arguments.placement))
     summary = _summary(findings)
     notice = manager_availability_notice(workspace)

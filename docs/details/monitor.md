@@ -33,7 +33,6 @@ and worker errors appear in the status line.
 | `t` | follow `logs/stdio.out` |
 | `c`, `P`, `C` | request cancel, pause, and continue |
 | `m` | start managers |
-| `x` | transfer selected jobs |
 | `D` | remove removable jobs after confirmation |
 | `r` | refresh |
 | `?` | show help |
@@ -65,7 +64,7 @@ history, and diagnosis requests are separate bounded adapter calls: a page
 refresh combines the page and filtered counts in one adapter invocation, and
 show, why, and log are separate one-invocation reads when explicitly requested.
 Detail and other actions require canonical job IDs. Actions are dispatched
-through the existing request, manager, and transfer command implementations.
+through the existing request and manager command implementations.
 
 Some features are unavailable remotely:
 

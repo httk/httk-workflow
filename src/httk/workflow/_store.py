@@ -16,8 +16,10 @@ Install, uninstall and build provide **no concurrency protection**, by
 decision: users do not change workflows that jobs are using, and two
 operators installing the same id concurrently is not handled. Every tree is
 assembled in an owner scratch and moved into place with
-:func:`httk.workflow._fs.move_owned`; a replaced or removed installation is
-discarded through :func:`httk.workflow._fs.discard`.
+:func:`httk.workflow._fs.move_owned`. A replaced installation is first moved
+aside to ``<slug>--<h16>.old.<token>/``, so a crash leaves one version or the
+other (``httk workspace gc`` removes a stale one); a replaced or removed
+installation is discarded from the owner's scratch.
 """
 
 import hashlib
@@ -61,6 +63,7 @@ __all__ = [
     "list_installed",
     "lookup",
     "platform_tag",
+    "stale_replacements",
     "uninstall",
 ]
 
@@ -74,6 +77,8 @@ _LANGUAGES_DIR = {"HTTK_WORKFLOW_LANGUAGES_DIR": str(Path(__file__).with_name("l
 _PLATFORM_PROBE_TIMEOUT = 30.0
 _PROBE_STDERR_TAIL = 1024
 _PLATFORM_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
+_INSTALLATION = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}")
+_REPLACED = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}\.old\.[a-z2-7]{16}")
 
 
 @dataclass(frozen=True)
@@ -175,6 +180,33 @@ def _subdirectories(path: Path) -> list[Path]:
         return []
 
 
+def _installations(workspace: KernelWorkspace) -> list[Path]:
+    # Only <slug>--<h16> names: a replaced tree moved aside as <slug>--<h16>.old.<token> is not installed.
+    return [path for path in _subdirectories(_workflows(workspace)) if _INSTALLATION.fullmatch(path.name)]
+
+
+def stale_replacements(workspace: KernelWorkspace, cutoff: float, *, writable: bool) -> list[Path]:
+    """Return the installations a crashed reinstall left moved aside, ``workflows/<slug>--<h16>.old.<token>/``.
+
+    :param workspace: The workspace.
+    :param cutoff: Only entries moved aside (their ``ctime``) before this epoch time.
+    :param writable: Make each one's directories writable, so a removal that does not chmod succeeds.
+    :return: The entries.
+    """
+
+    stale = []
+    for path in _subdirectories(_workflows(workspace)):
+        try:
+            moved = os.lstat(path).st_ctime
+        except FileNotFoundError:
+            continue
+        if _REPLACED.fullmatch(path.name) and moved < cutoff:
+            if writable:
+                _writable(path)
+            stale.append(path)
+    return stale
+
+
 def list_installed(workspace: KernelWorkspace) -> list[Installed]:
     """List the installed workflows, skipping directories without a readable ``install.json``.
 
@@ -182,7 +214,7 @@ def list_installed(workspace: KernelWorkspace) -> list[Installed]:
     :return: The installations, in directory-name order.
     """
 
-    return [found for directory in _subdirectories(_workflows(workspace)) if (found := _read(directory)) is not None]
+    return [found for directory in _installations(workspace) if (found := _read(directory)) is not None]
 
 
 def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
@@ -197,7 +229,7 @@ def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
     # The slug of a git id's short name is not derivable from the id, so the
     # listing is scanned for the h16 suffix; only matching install.json files are read.
     suffix = f"--{_h16(id_or_name)}"
-    for directory in _subdirectories(_workflows(workspace)):
+    for directory in _installations(workspace):
         if directory.name.endswith(suffix) and (found := _read(directory)) is not None and found.id == id_or_name:
             return found
     named = [found for found in list_installed(workspace) if found.name == id_or_name]
@@ -538,8 +570,8 @@ def install(
     URI); a bare document of a workflow format, or a runner file (an ad hoc
     package, id ``adhoc:<name>@<sha12>``); or a
     workflow name known on this machine with a package directory. A
-    reinstall moves the old installation into the scratch, moves the new one
-    into place and only then removes the old tree.
+    reinstall moves the old installation aside to ``<slug>--<h16>.old.<token>/``,
+    moves the new one into place and only then removes the old tree.
 
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch assembles the installation.
@@ -610,11 +642,15 @@ def _install(
             stamp = {"id": workflow_id, "tree_sha256": tree_sha256}
             _build_into(tree / "package", provider.build, tree / "builds", work, stamp, durable=workspace.durable)
         target = _workflows(workspace) / _dirname(workflow_id, name)
-        # The old installation is moved aside, not removed, so a crash leaves no gap longer than two renames;
-        # the scratch cleanup removes it.
-        if _fs.exists(_fs.loc(target)):
-            _fs.move_owned(_fs.loc(target), _fs.loc(work / "old"), durable=workspace.durable)
+        # A replaced installation is moved aside beside it, outside the scratch, so a crash between the two
+        # renames leaves it as <target>.old.<token> (which lookups ignore and gc sweeps), never neither version.
+        old = target.with_name(f"{target.name}.old.{_fs.fresh_token()}")
+        replacing = _fs.exists(_fs.loc(target))
+        if replacing:
+            _fs.move_owned(_fs.loc(target), _fs.loc(old), durable=workspace.durable)
         _fs.move_owned(_fs.loc(tree), _fs.loc(target), durable=workspace.durable)
+        if replacing:
+            _fs.move_owned(_fs.loc(old), _fs.loc(work / "old"), durable=workspace.durable)
     _LOGGER.info("installed workflow %s in %s", workflow_id, target)
     return Installed(workflow_id, name, target, record)
 
@@ -633,8 +669,8 @@ def uninstall(workspace: KernelWorkspace, owner: Owner, id_or_name: str) -> Inst
     if found is None:
         raise ValueError(f"workflow {id_or_name!r} is not installed")
     with _scratch(owner) as work:
-        _writable(found.directory)
-        _fs.discard(_fs.loc(found.directory), trash_dir=work, durable=workspace.durable)
+        # Moved into the scratch first: the scratch cleanup makes it writable and discards it there.
+        _fs.move_owned(_fs.loc(found.directory), _fs.loc(work / "old"), durable=workspace.durable)
     return found
 
 

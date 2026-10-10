@@ -69,7 +69,7 @@ def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
             unwrap_json_array=False,
         )
     if arguments.list:
-        workspace = Workspace(root, mutable=False)
+        workspace = Workspace(root)
         rows = [
             _row(installed.id, build.parent)
             for installed in _store.list_installed(workspace)

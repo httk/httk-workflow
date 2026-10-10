@@ -10,6 +10,7 @@ surface through core's ``httk project repair``; each repair is explicit.
 import logging
 import os
 import shutil
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,7 +78,7 @@ def _workspace_at(root: Path | None) -> Workspace | None:
     if root is None:
         return None
     try:
-        return Workspace(root, mutable=False)
+        return Workspace(root)
     except (WorkflowError, OSError, ValueError):
         return None
 
@@ -120,6 +121,13 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
         }
     )
     return summary
+
+
+def _newer(path: Path, moment: float) -> bool:
+    try:
+        return os.lstat(path).st_mtime >= moment
+    except FileNotFoundError:
+        return False
 
 
 def _names(directory: Path) -> list[str]:
@@ -303,8 +311,15 @@ def _check_owners(workspace_root: Path, repair: bool) -> Finding:
         is _death.Liveness.DEAD
     ]
     known = {record.owner_id for record in records}
+    tmp = workspace.control / "tmp"
+    young = time.time() - gc.TMP_MAXIMUM_AGE_SECONDS
     # tmp/<owner-id>.<purpose>.<token>: recovery takes a dead owner's scratch; an unknown owner's is left over.
-    orphaned = [name for name in _names(workspace.control / "tmp") if name.split(".")[0] not in known | {"trash"}]
+    # A remote install's tmp/push.<hex>/ copy is in use for a day.
+    orphaned = [
+        name
+        for name in _names(tmp)
+        if name.split(".")[0] not in known | {"trash"} and not (name.startswith("push.") and _newer(tmp / name, young))
+    ]
     details: dict[str, object] = {"dead_owners": dead, "orphaned_scratch": orphaned}
     if not dead and not orphaned:
         return Finding("owners", "ok", "every owner is alive or recovered", details=details)
@@ -341,7 +356,7 @@ def _check_workspace_default(project: Path) -> Finding | None:
 
 
 def _check_tmp_leftovers(workspace_root: Path, repair: bool) -> Finding:
-    """Write temporaries and ``tmp/trash.<token>`` entries older than a day: the ``tmp_entries`` gc category."""
+    """Leftovers older than a day (write temporaries, trash, moved-aside installations): gc's ``tmp_entries``."""
 
     workspace = _workspace_at(workspace_root)
     if workspace is None:

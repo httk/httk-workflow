@@ -335,7 +335,7 @@ def campaign_collect(
                 "fetch it home with `httk job transfer` before collecting the campaign"
             )
         assert binding.path is not None
-        yield from job_records(Workspace(binding.path, mutable=False), states=states, placement=placement)
+        yield from job_records(Workspace(binding.path), states=states, placement=placement)
 
 
 def campaign_managers(

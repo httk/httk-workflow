@@ -124,7 +124,7 @@ remote workspace for execution.
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |
 | `workspace move [--no-durable] NAME DEST_DIR` | move a local workspace and update its registry path | |
-| `workspace forget [--force] NAME...` | deregister names, leaving workspaces on disk | |
+| `workspace forget NAME...` | deregister names, leaving workspaces on disk | |
 | `workspace delete --force NAME...` | destroy workspaces and deregister them | |
 | `workspace status [--json] [NAME...]` | summarize job counts by state, the seal, and the owners with their liveness (remote: over the adapter) | |
 | `workspace owners [--kind KIND] [--json] [NAME...]` | list the owners (managers, CLI processes, daemons) with their liveness; `managers` is an alias | |
@@ -172,9 +172,8 @@ manually, forget the old name, and re-register it with
 `workspace init --name NAME <newpath>`.
 
 `workspace delete` destroys the workspace, locally or on its remote over the
-adapter, and is refused without `--force`. `workspace forget` only removes the
-name, and only when there are no unretired outbound transfers. Fetch or retire
-those first, or pass `workspace forget --force` to deregister the name anyway.
+adapter, and is refused without `--force` and while any of its owners is not
+proven dead. `workspace forget` only removes the name.
 
 ### Sealing a workspace
 

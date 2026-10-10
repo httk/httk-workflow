@@ -14,6 +14,7 @@ from ..adapters import (
     REMOTE_JOB_SHOW_COMMAND,
     REMOTE_JOB_WHY_COMMAND,
 )
+from ..errors import WorkflowError
 from ..introspection import (
     JOB_STATES,
     JobListPage,
@@ -24,6 +25,7 @@ from ..introspection import (
     list_jobs,
     read_managers,
 )
+from ..introspection._reading import read_job_tail
 from ..models import normalize_placement
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from ..workspace import Workspace
@@ -91,7 +93,7 @@ class WorkspaceView:
             self.workspace = (
                 None
                 if self.binding.remote != LOCAL_REMOTE or self.binding.path is None
-                else Workspace(self.binding.path, mutable=False)
+                else Workspace(self.binding.path)
             )
         self.context = context
         self.refresh_interval = max(0.0, float(refresh_interval))
@@ -280,21 +282,12 @@ class WorkspaceView:
     def _read_stdio(self, ref: JobRef, *, follow: bool = False, size: int = 8192) -> str:
         """Read a bounded tail of a local job's stdio log."""
 
-        path = ref.path / "logs" / "stdio.out"
+        offset = self._tail_offsets.get(ref.job_id, 0) if follow else None
         try:
-            with path.open("rb") as handle:
-                if follow:
-                    offset = self._tail_offsets.get(ref.job_id, 0)
-                    length = path.stat().st_size
-                    if offset > length:
-                        offset = 0
-                    handle.seek(offset)
-                else:
-                    handle.seek(0, 2)
-                    handle.seek(max(0, handle.tell() - size))
-                data = handle.read(min(size, 256 * 1024))
-                self._tail_offsets[ref.job_id] = handle.tell()
-        except OSError:
+            data, self._tail_offsets[ref.job_id] = read_job_tail(
+                ref.path, "logs/stdio.out", min(size, 256 * 1024), offset
+            )
+        except (WorkflowError, OSError):
             return ""
         return data.decode("utf-8", "replace")
 

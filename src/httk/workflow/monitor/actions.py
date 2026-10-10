@@ -10,7 +10,6 @@ from ..workflow_cli import (
     launch_workspace_managers,
     publish_job_requests,
     request_remote_job_result,
-    run_transfer_verb_result,
     submit_remote_manager_result,
 )
 from ..workflow_cli._job import _resolve_request_identity
@@ -113,30 +112,6 @@ def start_managers(view: WorkspaceView, count: int, launcher: str | None = None)
     return f"started {count} manager(s)"
 
 
-def transfer(view: WorkspaceView, job_ids: Sequence[str], destination: str) -> str:
-    """Transfer selected jobs through the existing transfer verb."""
-
-    if not job_ids:
-        raise ValueError("select at least one job")
-    if not destination:
-        raise ValueError("destination workspace cannot be empty")
-    if view.context is None:
-        raise ValueError("a CLI context is required for monitor actions")
-    arguments = Namespace(
-        source=view.name,
-        destination=destination,
-        jobs=list(job_ids),
-        state=None,
-        placement=None,
-        destination_placement=None,
-        adapter_timeout=view.adapter_timeout,
-        strict_environment=False,
-        json=True,
-    )
-    run_transfer_verb_result(arguments, view.context, True)
-    return f"transferred {len(job_ids)} job(s) to {destination}"
-
-
 def remove(view: WorkspaceView, job_ids: Sequence[str]) -> str:
     """Remove selected removable jobs."""
 
@@ -145,7 +120,7 @@ def remove(view: WorkspaceView, job_ids: Sequence[str]) -> str:
     if not job_ids:
         raise ValueError("select at least one job")
     workspace = _mutable_workspace(view)
-    report = remove_jobs(workspace, [view.ref_for(job_id) for job_id in job_ids], force=False)
+    report = remove_jobs(workspace, [view.ref_for(job_id) for job_id in job_ids])
     if report.refused:
         reason = report.refused[0].reason or "removal refused"
         raise ValueError(f"removed {report.removed_count} of {len(report.outcomes)} job(s); {reason}")
@@ -168,15 +143,10 @@ class Actions:
 
         return start_managers(self.view, count, launcher)
 
-    def transfer(self, job_ids: Sequence[str], destination: str) -> str:
-        """Transfer selected jobs."""
-
-        return transfer(self.view, job_ids, destination)
-
     def remove(self, job_ids: Sequence[str]) -> str:
         """Remove selected removable jobs."""
 
         return remove(self.view, job_ids)
 
 
-__all__ = ["Actions", "remove", "request", "start_managers", "transfer"]
+__all__ = ["Actions", "remove", "request", "start_managers"]

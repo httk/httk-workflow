@@ -155,7 +155,7 @@ def add_durability_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-durable",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="do not fsync protocol publications; a crashed node may then strand markers",
+        help="do not fsync protocol publications; a node crash may then lose the latest ones",
     )
 
 
@@ -174,8 +174,8 @@ def add_workspace_argument(parser: argparse.ArgumentParser, *, help_text: str) -
 def _durable(arguments: argparse.Namespace) -> bool:
     """Report whether this invocation asked for durable publication.
 
-    Durability is the default: a manager that survives a node crash must not be
-    left holding markers that reference journal frames the page cache lost.
+    Durability is the default: without it, a node crash can lose the latest
+    renames and writes from the page cache and roll jobs back to an earlier state.
     """
 
     return not getattr(arguments, "no_durable", False)

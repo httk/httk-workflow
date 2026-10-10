@@ -547,7 +547,7 @@ def collect_tree(
             if outcome.directory in parent.outcome.consumes:
                 parent.reached[outcome.directory] = outcome
         if outcome.kind == "workspace":
-            yield from collect(Workspace(directory, mutable=False), fail_fast=fail_fast, on_skipped=on_skipped)
+            yield from collect(Workspace(directory), fail_fast=fail_fast, on_skipped=on_skipped)
             continue
         if outcome.kind == "unclaimed":
             _LOGGER.warning(

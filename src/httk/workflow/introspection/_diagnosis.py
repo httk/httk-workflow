@@ -892,7 +892,7 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
     elif state == "cancelled":
         summary = "this job was cancelled by an operator request and is terminal; resubmit it to run it again"
     if state in {"ready", "waiting", "paused"}:
-        report.hint("drive it in the foreground with 'httk job debug WORKSPACE JOB'")
+        report.hint("drive it in the foreground with 'httk job debug [--workspace WS] JOB'")
     return Diagnosis(
         job_id=ref.job_id,
         job_key=ref.job_key,

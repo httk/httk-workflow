@@ -4,7 +4,6 @@ import argparse
 import json
 import re
 import shlex
-import shutil
 import sys
 import tempfile
 import time
@@ -22,8 +21,7 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _fs, _kernel, _moving, _requests
-from .._job import JobDefinition
+from .. import _kernel, _moving, _requests
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
 from .._state import TERMINAL_STATES
@@ -76,6 +74,7 @@ from ..scaffold import (
     new_jobs,
     payload_relative,
     registered_workflow_labels,
+    submit_payload,
 )
 from ..workspace import Workspace
 from ._common import (
@@ -446,7 +445,7 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
     with _kernel.register_owner(workspace, kind="cli", label="job submit", allocation=None, advertised={}) as owner:
         for source in arguments.sources:
             try:
-                ref = _submit_payload(workspace, owner, Path(source).expanduser(), move=arguments.move)
+                ref = submit_payload(workspace, owner, Path(source).expanduser(), move=arguments.move)
             except _ERRORS as exc:
                 failed = True
                 print(f"{source}: {exc}", file=sys.stderr)
@@ -457,29 +456,6 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
     if arguments.json:
         print(json.dumps(submitted, indent=2))
     return 1 if failed else 0
-
-
-def _submit_payload(workspace: Workspace, owner: _kernel.Owner, source: Path, *, move: bool) -> JobRef:
-    """Copy (or move) one payload into the owner's scratch and submit it; a failed move is moved back."""
-
-    JobDefinition.from_path(source / "job.json")
-    for trusted in ("state.json", "logs"):
-        if (source / trusted).exists() or (source / trusted).is_symlink():
-            raise ValueError(f"a prepared payload may not carry {trusted}; only a job's owner writes it")
-    staging = owner.scratch("submit") / "job"
-    if not move:
-        shutil.copytree(source, staging, symlinks=True)
-        ref = _kernel.submit(workspace, owner, staging)
-    else:
-        _fs.move_owned(_fs.loc(source.resolve()), _fs.loc(staging), durable=workspace.durable)
-        try:
-            ref = _kernel.submit(workspace, owner, staging)
-        except BaseException:
-            # The operator's only copy is in the scratch, which closing the owner would discard.
-            _fs.move_owned(_fs.loc(staging), _fs.loc(source.resolve()), durable=workspace.durable)
-            raise
-    _fs.remove_empty_dir(_fs.loc(staging.parent))
-    return ref
 
 
 # ---------------------------------------------------------------------------
@@ -996,7 +972,7 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
             tail=tail,
             unwrap_json_array=False,
         )
-    workspace = Workspace(root, mutable=False)
+    workspace = Workspace(root)
     page = list_jobs(
         workspace,
         kinds=arguments.kind,
@@ -1022,16 +998,27 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     return 0
 
 
-def _print_removal_report(report: RemovalReport) -> int:
-    """Print job removal outcomes and return their aggregate exit status."""
+def _queued(workspace: Workspace, ref: JobRef) -> bool:
+    """Whether a request that did not take effect waits for the owner now holding the job (``queued``)."""
 
-    for outcome in report.outcomes:
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=None)
+    return current is not None and current.state == _kernel.OWNED
+
+
+def _print_removal_report(workspace: Workspace, refs: Sequence[JobRef], report: RemovalReport) -> int:
+    """Print job removal outcomes and return 1 when one was refused (a queued delete is not refused)."""
+
+    refused = False
+    for ref, outcome in zip(refs, report.outcomes, strict=True):
         if outcome.removed:
             print(f"{outcome.job_key}\t{outcome.kind}\tremoved")
+        elif _queued(workspace, ref):
+            print(f"{outcome.job_key}\t{outcome.kind}\tqueued\t{outcome.reason}")
         else:
+            refused = True
             print(f"{outcome.job_key}\t{outcome.kind}\trefused\t{outcome.reason}")
     print(f"removed {report.removed_count} of {len(report.outcomes)} job(s)")
-    return 1 if report.refused else 0
+    return 1 if refused else 0
 
 
 def _confirm_job_delete(rows: Sequence[tuple[str, str]]) -> bool:
@@ -1097,11 +1084,15 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
     if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
-    return _print_removal_report(remove_jobs(workspace, refs))
+    return _print_removal_report(workspace, refs, remove_jobs(workspace, refs))
 
 
 def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str, done: str) -> int:
-    """Post one *action* request per selected job and apply it now where the job is unowned."""
+    """Post one *action* request per selected job and apply it now where the job is unowned.
+
+    A request for a job an owner holds is ``queued`` for that owner (exit status 0, as ``job request``);
+    one that did not take effect otherwise is ``refused`` (exit status 1).
+    """
 
     workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
     refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
@@ -1110,9 +1101,14 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     failed = False
     with _kernel.register_owner(workspace, kind="cli", label=f"job {action}", allocation=None, advertised={}) as owner:
         for ref in refs:
-            refused = request_now(workspace, owner, ref, action, f"job {action}")
-            failed |= refused is not None
-            print(f"{ref.job_id}\t{done if refused is None else refused}")
+            reason = request_now(workspace, owner, ref, action, f"job {action}")
+            if reason is None:
+                print(f"{ref.job_id}\t{done}")
+            elif _queued(workspace, ref):
+                print(f"{ref.job_id}\tqueued\t{reason}")
+            else:
+                failed = True
+                print(f"{ref.job_id}\trefused\t{reason}")
     return 1 if failed else 0
 
 
@@ -1280,7 +1276,7 @@ def _for_each_job(
     if root is None:
         assert binding is not None
         return _remote_detail(arguments, context, binding, action)
-    workspace = Workspace(root, mutable=False)
+    workspace = Workspace(root)
     resolver = JobSelectorResolver(workspace, context.cwd)
     documents: list[dict[str, object]] = []
     failed = False
@@ -1325,7 +1321,7 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     def report(_workspace: Workspace, ref: JobRef) -> tuple[dict[str, object], str]:
         events = job_events(ref, limit=arguments.limit)
-        annotations = _jsonl(ref.path / JOB_STATE_DIRECTORY / "runlog.jsonl")
+        annotations = _jsonl(ref.path, f"{JOB_STATE_DIRECTORY}/runlog.jsonl")
         if arguments.limit is not None:
             annotations = annotations[-arguments.limit :]
         document: dict[str, object] = {

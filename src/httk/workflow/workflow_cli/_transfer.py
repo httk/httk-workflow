@@ -435,16 +435,11 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     return _refuse("job transfer")
 
 
-def run_transfer_verb_result(
-    arguments: argparse.Namespace,
-    context: CLIContext,
-    quiet: bool = False,
-) -> Mapping[str, object]:
+def run_transfer_verb_result(arguments: argparse.Namespace, context: CLIContext) -> Mapping[str, object]:
     """Refuse a parsed transfer: moving jobs is unavailable in this development version.
 
     :param arguments: The parsed transfer arguments.
     :param context: The CLI invocation.
-    :param quiet: Unused; kept for the monitor's call.
     :return: Never returns.
     :raises httk.workflow.errors.WorkflowError: Always.
     """
@@ -566,9 +561,11 @@ def build_transfer_parser(
     transfer = _leaf(
         subparsers,
         "transfer",
-        summary="move jobs between two registered workspace names or workspace directories",
+        summary="move jobs between two registered workspace names or workspace directories (unavailable in this version)",
         description=(
-            "Move jobs between two workspaces: `transfer [OPTIONS] SRC DST`. Each of SRC and DST is tried "
+            "Unavailable in this version: moving jobs between workspaces is being rebuilt, and the verb "
+            "refuses with exit status 2. Move jobs between two workspaces: `transfer [OPTIONS] SRC DST`. "
+            "Each of SRC and DST is tried "
             "first as a registered workspace name, and then as a workspace directory (one containing "
             ".httk-workspace/); a registered name always wins over a same-named directory, so `./NAME` "
             "addresses the directory unambiguously. It works whichever way the workspaces point — local to "
@@ -626,15 +623,21 @@ def build_transfer_operator_parser(
     _, group = _group(
         subparsers,
         "transfer",
-        summary="inspect and resolve workspace transfers",
-        description="Inspect transfers requiring attention and explicitly retire or reclaim them",
+        summary="inspect and resolve workspace transfers (unavailable in this version)",
+        description="Inspect transfers requiring attention and explicitly retire or reclaim them (unavailable in this version)",
     )
     for name, summary, handler in (
         ("status", "report transfers requiring attention", handle_transfer_status),
         ("retire", "retire acknowledged transfers", handle_transfer_retire),
         ("reclaim", "reclaim in-doubt transfers after the safety deadline", handle_transfer_reclaim),
     ):
-        parser = _leaf(group, name, summary=summary, description=summary.capitalize(), handler=handler)
+        parser = _leaf(
+            group,
+            name,
+            summary=f"{summary} (unavailable in this version)",
+            description=f"{summary.capitalize()} (unavailable in this version)",
+            handler=handler,
+        )
         parser.add_argument(
             "--workspace",
             dest="operator_workspace",

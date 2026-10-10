@@ -177,10 +177,9 @@ def test_unknown_extensions_cannot_be_enabled_or_attached(tmp_path: Path) -> Non
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     stored["extensions"] = ["unknown-feature"]
     (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
-    for mutable in (True, False):
-        with pytest.raises(UnsupportedExtensionError) as attaching:
-            Workspace(workspace.root, mutable=mutable)
-        assert "unknown-feature" in str(attaching.value)
+    with pytest.raises(UnsupportedExtensionError) as attaching:
+        Workspace(workspace.root)
+    assert "unknown-feature" in str(attaching.value)
 
 
 def test_a_ready_job_carries_its_exact_priority_in_its_name(ws: Workspace, installed: _store.Installed) -> None:

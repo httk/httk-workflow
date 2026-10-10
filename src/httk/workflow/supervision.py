@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from ._util import utc_now, write_json_atomic
+from . import _fs
+from ._util import json_bytes, utc_now
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -282,7 +283,8 @@ class ProcessReport:
         :return: The report path.
         """
         destination = Path(path)
-        write_json_atomic(destination, self.as_mapping())
+        _fs.make_dirs(destination.absolute().parent, durable=False)
+        _fs.write_file(_fs.loc(destination.absolute()), json_bytes(self.as_mapping()) + b"\n", durable=False)
         return destination
 
 

@@ -251,6 +251,25 @@ def test_move_updates_the_registry_and_refuses_while_an_owner_is_not_proven_dead
     assert (tmp_path / "newer" / ".httk-workspace" / "format.json").is_file()
 
 
+def test_delete_refuses_while_an_owner_is_not_proven_dead_also_by_path(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    assert command(["workspace", "init", "doomed"], context) == 0
+    capsys.readouterr()
+    owner = _kernel.register_owner(
+        Workspace(tmp_path / "doomed"), kind="cli", label="test", allocation=None, advertised={}
+    )
+    for argv in (["doomed"], ["--by-path", str(tmp_path / "doomed")]):
+        assert command(["workspace", "delete", "--force", *argv], context) == 1
+        assert f"in use: manifest requires a quiescent workspace; owners not proven dead: {owner.owner_id}" in (
+            capsys.readouterr().err
+        )
+        assert (tmp_path / "doomed" / ".httk-workspace" / "format.json").is_file()
+    owner.close()
+    assert command(["workspace", "delete", "--force", "doomed"], context) == 0
+    capsys.readouterr()
+    assert not (tmp_path / "doomed").exists()
+
+
 def test_move_refuses_cross_filesystem_without_copying(tmp_path: Path, monkeypatch, capsys) -> None:
     context = _context(tmp_path)
     assert command(["workspace", "init", "old"], context) == 0

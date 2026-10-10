@@ -1,14 +1,15 @@
 """The workspace maintenance verbs on the filesystem kernel: status, owners, attest-dead, gc and fsck."""
 
-import dataclasses
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
-import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, _death, _kernel
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.workflow_cli import command
 from v3_helpers import cli_owner, install, only, submit, workspace
 
@@ -23,13 +24,6 @@ def _named(tmp_path: Path) -> tuple[Workspace, CLIContext, str]:
     ws = workspace(tmp_path / "ws")
     context = _context(tmp_path)
     return ws, context, register_ws(context, ws.root)
-
-
-def _not_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every later identity check see another process, as if the owners registered so far had crashed."""
-
-    real = _death.process_identity()
-    monkeypatch.setattr(_death, "process_identity", lambda pid=None: dataclasses.replace(real, pid=real.pid + 1))
 
 
 # -- status and owners ----------------------------------------------------------------------------------------
@@ -87,25 +81,57 @@ def test_workflows_lists_the_installed_workflows(tmp_path: Path, capsys) -> None
 # -- attest-dead and recovery ---------------------------------------------------------------------------------
 
 
-def test_attest_dead_writes_an_operator_tombstone_and_gc_recovers_the_owned_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
+_OWNER = """
+import os, sys, time
+from pathlib import Path
+from httk.workflow import Workspace, _kernel
+ws = Workspace(Path(sys.argv[1]))
+owner = _kernel.register_owner(ws, kind="cli", label="other", allocation=None, advertised={})
+for ref in _kernel.list_jobs(ws, "ready"):
+    assert _kernel.claim(ws, owner, ref) is not None
+print(owner.owner_id, flush=True)
+if sys.argv[2] == "live":
+    time.sleep(120)
+os._exit(0)
+"""
+
+
+def _foreign_owner(ws: Workspace, mode: str) -> tuple[str, subprocess.Popen[str]]:
+    """Register an owner in another process that claims every ready job, then exits (or, ``live``, sleeps)."""
+
+    source = Path(__file__).resolve().parents[1] / "src"
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join([str(source), os.environ.get("PYTHONPATH", "")])}
+    process = subprocess.Popen(
+        [sys.executable, "-c", _OWNER, str(ws.root), mode], stdout=subprocess.PIPE, text=True, env=environment
+    )
+    assert process.stdout is not None
+    owner_id = process.stdout.readline().strip()
+    if mode != "live":
+        process.wait(timeout=60)
+    return owner_id, process
+
+
+def test_attest_dead_needs_force_without_proof_and_gc_then_recovers_the_owned_job(tmp_path: Path, capsys) -> None:
     ws, context, name = _named(tmp_path)
     ref = submit(ws, _WORKFLOW, {"start": "succeed"})
-    owner = cli_owner(ws)
-    assert _kernel.claim(ws, owner, ref) is not None
-    _not_this_process(monkeypatch)
+    owner_id, _process = _foreign_owner(ws, "exited")
+    # The owner ran on another host: its death cannot be proven from here.
+    record_path = ws.control / "owners" / owner_id / "owner.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record_path.write_text(json.dumps({**record, "hostname": "elsewhere.invalid"}), encoding="utf-8")
 
-    argv = ["workspace", "attest-dead", owner.owner_id, name, "--reason", "node rebooted", "--operator", "alice"]
-    assert command(argv, context) == 0
+    argv = ["workspace", "attest-dead", owner_id, name, "--reason", "node rebooted", "--operator", "alice"]
+    assert command(argv, context) == 2
+    assert "cannot be proven" in capsys.readouterr().err
+    assert not (ws.control / "owners" / owner_id / "dead.json").exists()
+    assert command([*argv, "--force"], context) == 0
     captured = capsys.readouterr()
-    assert f"{owner.owner_id}\tattested dead" in captured.out and "workspace gc" in captured.err
-    tombstone = json.loads((owner.path / "dead.json").read_text(encoding="utf-8"))
+    assert f"{owner_id}\tattested dead" in captured.out and "workspace gc" in captured.err
+    assert "without proof" in captured.err and "apply a request twice" in captured.err
+    tombstone = json.loads((ws.control / "owners" / owner_id / "dead.json").read_text(encoding="utf-8"))
     assert tombstone["by"] == "operator" and tombstone["operator"] == "alice"
     assert tombstone["reason"] == "node rebooted"
-    assert tombstone["evidence"] == [
-        {"subject": f"owner {owner.owner_id}", "rule": "operator", "detail": "node rebooted"}
-    ]
+    assert tombstone["evidence"] == [{"subject": f"owner {owner_id}", "rule": "operator", "detail": "node rebooted"}]
     assert command(["workspace", "owners", name], context) == 0
     assert "dead (tombstone by operator)" in capsys.readouterr().out
 
@@ -116,12 +142,20 @@ def test_attest_dead_writes_an_operator_tombstone_and_gc_recovers_the_owned_job(
     assert "dead (tombstone by operator)" in capsys.readouterr().out
 
 
-def test_attest_dead_refuses_this_process_and_an_unknown_owner(tmp_path: Path, capsys) -> None:
+def test_attest_dead_refuses_a_live_owner_and_an_unknown_one(tmp_path: Path, capsys) -> None:
     ws, context, name = _named(tmp_path)
+    owner_id, process = _foreign_owner(ws, "live")
+    try:
+        for argv in (["--reason", "x"], ["--reason", "x", "--force"]):
+            assert command(["workspace", "attest-dead", owner_id, name, *argv], context) == 2
+            assert f"owner {owner_id} is alive" in capsys.readouterr().err
+            assert not (ws.control / "owners" / owner_id / "dead.json").exists()
+    finally:
+        process.kill()
+        process.wait()
     with cli_owner(ws) as owner:
         assert command(["workspace", "attest-dead", owner.owner_id, name, "--reason", "x"], context) == 2
-        assert "this very process" in capsys.readouterr().err
-        assert not (owner.path / "dead.json").exists()
+        assert "is alive" in capsys.readouterr().err
     assert command(["workspace", "attest-dead", "0" * 32, name, "--reason", "x"], context) == 2
     assert "no owner" in capsys.readouterr().err
     assert command(["workspace", "attest-dead", "0" * 32, name], context) == 2

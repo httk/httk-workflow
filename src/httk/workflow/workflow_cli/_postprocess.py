@@ -72,7 +72,7 @@ def _error_mapping(record: Any, script: str, error: str) -> dict[str, object]:
 def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
     """Run one curated script for each selected collected job."""
 
-    workspace = Workspace(_local_root(arguments, context, action="postprocess"), mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="postprocess"))
     resolved = None
     if arguments.workflow_dir is not None:
         resolved = load_workflow_package(arguments.workflow_dir, register=False)

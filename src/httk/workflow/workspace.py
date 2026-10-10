@@ -8,9 +8,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
+from . import _fs
 from ._kernel import OWNED
 from ._state import UNOWNED_STATES
-from ._util import read_json, utc_now, write_json_atomic
+from ._util import json_bytes, read_json, utc_now
 from .errors import FormatError, SealedError, UnsupportedExtensionError
 from .models import (
     CORE_PROFILE,
@@ -138,7 +139,6 @@ class Workspace:
     """Attach to one self-contained httk workflow filesystem workspace.
 
     :param root: Locate the workspace root.
-    :param mutable: Preserve the attachment mutability option accepted by callers.
     :param durable: Enable storage-crash durability for filesystem publications.
     :raises httk.workflow.errors.FormatError: If the workspace format or identity is invalid.
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace uses unsupported extensions or a profile.
@@ -148,7 +148,6 @@ class Workspace:
         self,
         root: str | os.PathLike[str],
         *,
-        mutable: bool = True,
         durable: bool = True,
     ) -> None:
         self.root = Path(root).resolve()
@@ -245,24 +244,21 @@ class Workspace:
         for state in (*UNOWNED_STATES, OWNED):
             (root_path / JOBS_DIRECTORY / state).mkdir(parents=True, exist_ok=True)
         (root_path / WORKFLOWS_DIRECTORY).mkdir(exist_ok=True)
-        write_json_atomic(
-            control / "format.json",
-            {
-                "format": "httk-workflow-filesystem",
-                "format_version": 3,
-                "layout": LAYOUT,
-                "core_profile": CORE_PROFILE,
-                # The exchange extension is recorded by enabling it below, once its directory exists.
-                "extensions": sorted(extension_set - {EXCHANGE_EXTENSION}),
-                "record_ref_encoding": "hwref-v2",
-                "workspace_id": str(uuid.uuid4()),
-                "created_at": utc_now(),
-                "policy": initial_policy.as_mapping(),
-                "settings": {},
-                "workflow_preludes": {},
-            },
-            durable=durable,
-        )
+        document = {
+            "format": "httk-workflow-filesystem",
+            "format_version": 3,
+            "layout": LAYOUT,
+            "core_profile": CORE_PROFILE,
+            # The exchange extension is recorded by enabling it below, once its directory exists.
+            "extensions": sorted(extension_set - {EXCHANGE_EXTENSION}),
+            "record_ref_encoding": "hwref-v2",
+            "workspace_id": str(uuid.uuid4()),
+            "created_at": utc_now(),
+            "policy": initial_policy.as_mapping(),
+            "settings": {},
+            "workflow_preludes": {},
+        }
+        _fs.write_file(_fs.loc(control / "format.json"), json_bytes(document) + b"\n", durable=durable)
         # A workspace inside a project is a project member: core's project verbs
         # (seal, manifest, repair, verify) discover it through members.json.
         if project is not None:
@@ -340,24 +336,8 @@ class Workspace:
 
         return self._policy.visibility_deadline_seconds
 
-    def _require_unsealed(self) -> None:
-        """Refuse a mutation when the workspace, its project, or a job is sealed.
-
-        Seals are enforced at the write funnels rather than at attach, so a
-        sealed tree stays fully readable and every maintenance operation keeps
-        working; only the operations that would change sealed bytes are refused.
-
-        :raises httk.workflow.errors.SealedError: If a covering level is sealed.
-        """
-
-        from .projects import discover_project
-        from .seals import is_project_sealed, is_workspace_sealed
-
-        if is_workspace_sealed(self):
-            raise SealedError(f"workspace {self.workspace_id} is sealed; unseal it first")
-        project = discover_project(self.root)
-        if project is not None and is_project_sealed(project):
-            raise SealedError(f"project at {project} is sealed; unseal it first")
+    def _write_format(self, stored: Mapping[str, object]) -> None:
+        _fs.write_file(_fs.loc(self.control / "format.json"), json_bytes(stored) + b"\n", durable=self.durable)
 
     def set_policy(self, changes: Mapping[str, object]) -> WorkspacePolicy:
         """Validate *changes*, merge them into the stored policy, and publish it.
@@ -372,11 +352,13 @@ class Workspace:
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
-        self._require_unsealed()
+        from .seals import require_cli_modifiable
+
+        require_cli_modifiable(self)
         stored = read_json(self.control / "format.json")
         merged = WorkspacePolicy.from_mapping(_section(stored, "policy")).updated(changes)
         stored["policy"] = merged.as_mapping()
-        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self._write_format(stored)
         self.format = stored
         self._policy = merged
         _LOGGER.info(
@@ -486,7 +468,9 @@ class Workspace:
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
-        self._require_unsealed()
+        from .seals import require_cli_modifiable
+
+        require_cli_modifiable(self)
         stored = read_json(self.control / "format.json")
         settings = _validate_settings(_section(stored, "settings"))
         for key in unset:
@@ -499,7 +483,7 @@ class Workspace:
             self._check_setting_collision(key, settings)
             settings[key] = value
         stored["settings"] = settings
-        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self._write_format(stored)
         self.format = stored
         return dict(settings)
 
@@ -527,7 +511,7 @@ class Workspace:
                 continue
             current.setdefault(key, value)
         stored["settings"] = current
-        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self._write_format(stored)
         self.format = stored
         return dict(current)
 
@@ -557,14 +541,16 @@ class Workspace:
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
-        self._require_unsealed()
+        from .seals import require_cli_modifiable
+
+        require_cli_modifiable(self)
         _validate_workflow_prelude_id(workflow_id)
         _validate_workflow_prelude_value(workflow_id, value)
         stored = read_json(self.control / "format.json")
         preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         preludes[workflow_id] = value
         stored["workflow_preludes"] = preludes
-        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self._write_format(stored)
         self.format = stored
         return dict(preludes)
 
@@ -577,33 +563,29 @@ class Workspace:
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
-        self._require_unsealed()
+        from .seals import require_cli_modifiable
+
+        require_cli_modifiable(self)
         stored = read_json(self.control / "format.json")
         preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         if workflow_id not in preludes:
             raise ValueError(f"workflow prelude is not set: {workflow_id}")
         del preludes[workflow_id]
         stored["workflow_preludes"] = preludes
-        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self._write_format(stored)
         self.format = stored
         return dict(preludes)
 
-    def check(
-        self,
-        *,
-        repair: bool = False,
-        quarantine_unrepairable: bool = False,
-    ) -> "FsckReport":
+    def check(self, *, repair: bool = False) -> "FsckReport":
         """Check the workspace's job tree (:func:`httk.workflow.fsck.check_workspace`).
 
         :param repair: Quarantine the unparsable entries.
-        :param quarantine_unrepairable: Quarantine entries that cannot be repaired.
         :return: The workspace check report.
         """
 
         from .fsck import check_workspace
 
-        return check_workspace(self, repair=repair, quarantine_unrepairable=quarantine_unrepairable)
+        return check_workspace(self, repair=repair)
 
     def collect_garbage(
         self,

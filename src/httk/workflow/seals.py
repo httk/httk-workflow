@@ -303,7 +303,7 @@ def seal_payload(
         if not stat.S_ISDIR(os.lstat(state).st_mode):
             raise FormatError(f"{state} is a symlink or not a directory")
     except FileNotFoundError:
-        os.mkdir(state)
+        _fs.make_dirs(state.absolute(), durable=durable)
     # Only the job's own identity: a seal names no workspace or placement, so it stays true wherever the job moves.
     body = build_seal_body("job", {"job_id": job_id, "job_key": job_key}, records)
     body_sha256, signatures = sign_seal_body(body, keys)

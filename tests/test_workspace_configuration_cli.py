@@ -42,11 +42,11 @@ def test_policy_unset_restores_defaults_and_rejects_unknown_keys(tmp_path: Path,
     create_workspace("ws", tmp_path / "ws")
     context = CLIContext("httk", tmp_path)
     workspace = Workspace(tmp_path / "ws")
-    workspace.set_policy({"lease_seconds": 72, "retention": {"owner_tombstone_days": 7, "trash_days": 9}})
-    for key in ("lease_seconds", "retention.owner_tombstone_days"):
+    workspace.set_policy({"visibility_deadline_seconds": 72, "retention": {"owner_tombstone_days": 7, "trash_days": 9}})
+    for key in ("visibility_deadline_seconds", "retention.owner_tombstone_days"):
         assert command(["workspace", "policy", "unset", "ws", "--key", key], context) == 0
     policy = Workspace(workspace.root).policy
-    assert policy.lease_seconds == WorkspacePolicy().lease_seconds
+    assert policy.visibility_deadline_seconds == WorkspacePolicy().visibility_deadline_seconds
     assert policy.retention.owner_tombstone_days == WorkspacePolicy().retention.owner_tombstone_days
     assert policy.retention.trash_days == 9
     for key in ("retention.typo", "typo"):

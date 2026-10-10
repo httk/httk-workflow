@@ -58,14 +58,15 @@ from httk.core.datastream.compression import known_compressions, split_compressi
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.storage import content_id
 
-from . import _kernel, _store, compat
+from . import _fs, _kernel, _store, compat
 from ._job import JobDefinition
 from ._kernel import JobRef
 from ._state import TERMINAL_STATES, UNOWNED_STATES, StateDoc, _thaw
-from ._util import read_json, require_mapping, require_string
-from .errors import FormatError
+from ._util import require_mapping, require_string
+from .errors import FormatError, WorkflowError
 from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
 from .introspection import job_events, read_job, read_state
+from .introspection._reading import JSON_LIMIT, read_job_file
 from .models import (
     JOB_STATE_DIRECTORY,
     Failure,
@@ -669,23 +670,33 @@ def declarations_of(
         for name, document in sorted(job.declarations.items())
     }
     damaged = False
-    directory = payload / JOB_STATE_DIRECTORY / "declarations"
+    relative = f"{JOB_STATE_DIRECTORY}/declarations"
     try:
-        stored = sorted(item for item in directory.glob("*.json") if item.is_file())
-    except OSError as exc:
+        directory = _fs.open_dir_under(payload, relative)
+    except (FileNotFoundError, NotADirectoryError):
+        return result, False
+    except (OSError, WorkflowError) as exc:
         _LOGGER.warning("cannot list the observed declarations of %s: %s", job.job_key, exc)
         return result, True
-    for path in stored:
+    try:
+        stored = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+    finally:
+        os.close(directory)
+    for file_name in stored:
         try:
-            name = validate_declaration_name(path.name.removesuffix(".json"), "declaration name")
+            name = validate_declaration_name(file_name.removesuffix(".json"), "declaration name")
         except FormatError as exc:
-            _LOGGER.warning("ignoring the observed declaration %s of %s: %s", path.name, job.job_key, exc)
+            _LOGGER.warning("ignoring the observed declaration %s of %s: %s", file_name, job.job_key, exc)
             damaged = True
             continue
         entry = result.setdefault(name, {"declared": None, "observed": None})
         try:
-            entry["observed"] = read_json(path)
-        except FormatError as exc:
+            data = read_job_file(payload, f"{relative}/{file_name}", JSON_LIMIT)
+            value = None if data is None else json.loads(data)
+            if not isinstance(value, dict):
+                raise FormatError("not a JSON object")
+            entry["observed"] = value
+        except (WorkflowError, OSError, ValueError, RecursionError) as exc:
             _LOGGER.warning("cannot read the observed declaration %s of %s: %s", name, job.job_key, exc)
             damaged = True
     return result, damaged
@@ -789,8 +800,7 @@ def job_records(
     directories. Nothing is materialized, and building a record reads only that
     job's own ``job.json``, ``state.json`` and run log, so collecting is a single
     pass over a workspace of any size. A job that moves between listing and
-    reading is skipped like an unreadable one. Attach read-only —
-    ``Workspace(root, mutable=False)`` — when nothing else in the process needs to write.
+    reading is skipped like an unreadable one.
 
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.

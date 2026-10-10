@@ -232,7 +232,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             return tree_ledger_keys(root)
 
     else:
-        workspace = Workspace(root, mutable=False)
+        workspace = Workspace(root)
         if arguments.raw:
             records = job_records(
                 workspace,

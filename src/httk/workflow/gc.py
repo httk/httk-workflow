@@ -7,7 +7,7 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
   provable only on its host, so ``httk workspace gc`` there recovers it;
 - ``attempt_control``: ``attempts/<A>/`` of unowned jobs older than
   ``retention.attempt_control_days`` (claim, remove, release back); a failed or
-  cancelled job keeps its newest attempt;
+  cancelled job keeps the attempt its ``state.json`` names;
 - ``placement_directories``: empty placement directories of the unowned states;
 - ``requests``: request files older than a day that are malformed or whose job
   cannot be found go to ``quarantine/``;
@@ -16,7 +16,8 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
 - ``owner_tombstones``: ``dead.json`` of recovered owners older than
   ``retention.owner_tombstone_days``;
 - ``tmp_entries``: write temporaries older than a day in ``requests/`` and
-  ``owners/*/``, and ``tmp/trash.<token>`` entries a crashed removal left.
+  ``owners/*/``, ``tmp/trash.<token>`` entries a crashed removal left, and
+  ``workflows/<slug>--<h16>.old.<token>/`` trees a crashed reinstall left.
 
 A retention value of ``None`` (``null`` or ``"keep"``) skips its category.
 Every removal goes through :mod:`httk.workflow._fs` or the kernel, so a
@@ -33,9 +34,9 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from . import _death, _fs, _kernel, _requests
+from . import _death, _fs, _kernel, _requests, _store
 from ._kernel import Release
-from ._state import UNOWNED_STATES
+from ._state import UNOWNED_STATES, StateDoc, read_state_unowned
 from ._util import json_bytes
 from .errors import FormatError, WorkflowError
 from .models import LOGS_DIRECTORY
@@ -59,7 +60,7 @@ __all__ = [
 _LOGGER = logging.getLogger(__name__)
 
 GC_REPORT_FORMAT = "httk-workflow-gc"
-#: How old a write temporary or a ``tmp/trash.<token>`` entry must be before it is garbage.
+#: How old a write temporary, a ``tmp/trash.<token>`` entry or a moved-aside installation must be to be garbage.
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: How long a malformed request, or one whose job cannot be found, waits before it is quarantined.
 REQUEST_GRACE_SECONDS = 24 * 60 * 60
@@ -289,6 +290,15 @@ def quarantine(workspace: "Workspace", owner: _kernel.Owner, path: Path, reason:
     return moved
 
 
+def _kept_attempt(state: str, doc: StateDoc | None) -> str | None:
+    """The attempt a failed or cancelled job keeps: the one its ``state.json`` names, which explains the outcome."""
+
+    if state not in ("failed", "cancelled") or doc is None or doc.attempt is None:
+        return None
+    attempt_id = doc.attempt.get("id")
+    return attempt_id if isinstance(attempt_id, str) else None
+
+
 def quarantine_damaged(workspace: "Workspace", owner: _kernel.Owner, job_id: str, reason: str) -> Path | None:
     """Quarantine a job this owner won but holds no handle of (its ``job.json`` was unreadable at the claim).
 
@@ -384,20 +394,22 @@ class _Collection:
         assert cutoff is not None
         for state in UNOWNED_STATES:
             for ref in _kernel.list_jobs(self.workspace, state):
-                attempts = ref.path / "attempts"
-                names = [name for name in _names(attempts) if not name.startswith(".")]
-                if state in ("failed", "cancelled") and names:
-                    # The newest attempt explains the outcome: it stays.
-                    newest = max(names, key=lambda name: _mtime(attempts / name) or 0.0)
-                    names.remove(newest)
-                aged = [name for name in names if self._aged(attempts / name, cutoff)]
-                if aged:
-                    self._collect_attempts(tally, ref, aged)
+                if self._aged_attempts(ref, cutoff, keep=None):
+                    self._collect_attempts(tally, ref, cutoff)
 
-    def _collect_attempts(self, tally: _Tally, ref: _kernel.JobRef, names: list[str]) -> None:
-        for name in names:
-            tally.note(ref.path / "attempts" / name, _bytes(ref.path / "attempts" / name, self.sizes))
+    def _aged_attempts(self, ref: _kernel.JobRef, cutoff: float, keep: str | None) -> list[str]:
+        attempts = ref.path / "attempts"
+        return [
+            name
+            for name in _names(attempts)
+            if not name.startswith(".") and name != keep and self._aged(attempts / name, cutoff)
+        ]
+
+    def _collect_attempts(self, tally: _Tally, ref: _kernel.JobRef, cutoff: float) -> None:
         if self.dry_run or self.owner is None:
+            doc, _damaged = read_state_unowned(ref.path / "state.json")
+            for name in self._aged_attempts(ref, cutoff, _kept_attempt(ref.state, doc)):
+                tally.note(ref.path / "attempts" / name, _bytes(ref.path / "attempts" / name, self.sizes))
             return
         from .removal import release
 
@@ -416,6 +428,13 @@ class _Collection:
             # Unfinished owner work is a manager's reconcile; the job goes back unchanged.
             owned.give_back()
             return
+        # Listed again now that the job is ours: the attempt state.json names is the one a failure is explained by.
+        names = self._aged_attempts(owned.ref, cutoff, _kept_attempt(owned.from_state, doc))
+        if not names:
+            owned.give_back()
+            return
+        for name in names:
+            tally.note(owned.path / "attempts" / name, _bytes(owned.path / "attempts" / name, self.sizes))
         removed = [name for name in names if owned.discard_subtree(f"attempts/{name}")]
         tally.removed += len(removed)
         owned.append_log("collected", detail={"attempts": removed})
@@ -499,6 +518,8 @@ class _Collection:
             # Only entries already moved for deletion carry this name; a crashed removal left them.
             if name.startswith("trash.") and len(name) == _TRASH_NAME_LENGTH and self._aged(tmp / name, cutoff):
                 self._remove(tally, tmp / name)
+        for path in _store.stale_replacements(self.workspace, cutoff, writable=not self.dry_run):
+            self._remove(tally, path)
 
     # -- the pass ---------------------------------------------------------------------------------------------
 
@@ -535,7 +556,6 @@ def collect_garbage(
     now: float | None = None,
     categories: Sequence[str] | None = None,
     sizes: bool = True,
-    journal_writer: object = None,
 ) -> GcReport:
     """Collect what the workspace's retention policy permits.
 
@@ -546,12 +566,10 @@ def collect_garbage(
     :param now: The moment ages are measured against (tests age a workspace with it).
     :param categories: Run only these categories of :data:`GC_CATEGORIES`.
     :param sizes: Estimate the bytes of each candidate.
-    :param journal_writer: Ignored: workspaces have no journal any more.
     :return: The report.
     :raises ValueError: For an unknown category.
     """
 
-    del journal_writer
     selected = GC_CATEGORIES if categories is None else tuple(categories)
     unknown = sorted(set(selected) - set(GC_CATEGORIES))
     if unknown:

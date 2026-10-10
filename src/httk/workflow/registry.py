@@ -17,7 +17,7 @@ from httk.core.project.members import ProjectMember
 from ._util import write_json_atomic
 from .adapters import resolve_remote, valid_remote_name
 from .configuration import config_home, data_home, machine_names
-from .errors import ResolutionMiss
+from .errors import ResolutionMiss, WorkflowError
 from .models import WORKSPACE_DIRECTORY
 from .projects import discover_project, read_project_section
 from .workspace import Workspace
@@ -270,28 +270,16 @@ def _update_workspace_path(name: str, path: Path, *, durable: bool = True) -> Wo
     return WorkspaceBinding(name, LOCAL_REMOTE, location)
 
 
-def forget_workspace(name: str, *, durable: bool = True, force: bool = False) -> WorkspaceBinding:
+def forget_workspace(name: str, *, durable: bool = True) -> WorkspaceBinding:
     """Forget one registered workspace without removing its files.
 
     :param name: Identify the registered workspace.
     :param durable: Flush the registry update durably when true.
-    :param force: Permit forgetting a workspace with outbound transfers pending.
     :return: The forgotten binding.
-    :raises ValueError: If pending transfers block the operation.
     """
     binding = _local_binding(name)
     assert binding.path is not None
     _unregister_project_member(Path(binding.path), allow_sealed=True)
-    if not force:
-        # A sealed addressed bundle waits in transfers/outgoing/<T> until its
-        # destination acknowledges it.
-        outgoing = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers" / "outgoing"
-        pending = sorted(os.listdir(outgoing)) if outgoing.is_dir() else []
-        if pending:
-            raise ValueError(
-                f"workspace {name!r} has unretired outbound transfers; fetch or retire them first, "
-                "or use `workspace forget --force` to deregister the name anyway"
-            )
     workspaces = _read_global()
     del workspaces[name]
     _write_global(workspaces, durable=durable)
@@ -581,17 +569,28 @@ def delete_workspace(name: str, *, force: bool = False) -> WorkspaceBinding:
     binding = _local_binding(name)
     assert binding.path is not None
     remove_local_workspace(Path(binding.path))
-    return forget_workspace(name, force=True)
+    return forget_workspace(name)
 
 
 def remove_local_workspace(path: Path) -> None:
-    """Remove one local execution workspace directory.
+    """Remove one local execution workspace directory, refused while any of its owners is not proven dead.
 
     :param path: Locate the workspace directory to remove.
-    :raises ValueError: If the path is not an execution workspace.
+    :raises ValueError: If the path is not an execution workspace, or an owner may still be running.
     """
+    from .manifests import require_quiescent_workspace
+
     resolved = path.expanduser().resolve()
     if not (resolved / WORKSPACE_DIRECTORY / "format.json").is_file():
         raise ValueError(f"not an httk execution workspace: {resolved}")
+    try:
+        workspace = Workspace(resolved)
+    except WorkflowError:
+        workspace = None  # no owner of this version runs a workspace it cannot attach
+    try:
+        if workspace is not None:
+            require_quiescent_workspace(workspace)
+    except ValueError as exc:
+        raise ValueError(f"cannot delete the workspace while it is in use: {exc}") from exc
     _unregister_project_member(resolved)
     shutil.rmtree(resolved)

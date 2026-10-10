@@ -224,7 +224,7 @@ def test_monitor_page_does_not_select_the_counts_filter(tmp_path: Path, monkeypa
 
 
 def test_monitor_actions_delegate_to_cli_implementations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Request, manager, and transfer actions use the existing command code."""
+    """Request and manager actions use the existing command code."""
 
     workspace = Workspace.initialize(tmp_path / "actions")
     context = CLIContext("httk", tmp_path)
@@ -250,17 +250,11 @@ def test_monitor_actions_delegate_to_cli_implementations(tmp_path: Path, monkeyp
         calls.append("manager")
         return "process", 0
 
-    def fake_transfer(*_args: object) -> int:
-        calls.append("transfer")
-        return 0
-
     monkeypatch.setattr(monitor_actions, "launch_workspace_managers", fake_manager)
-    monkeypatch.setattr(monitor_actions, "run_transfer_verb_result", fake_transfer)
 
     assert monitor_actions.request(view, "cancel", ["id"], "because") == "requested cancel for 1 job(s)"
     assert monitor_actions.start_managers(view, 1) == "started 1 manager(s)"
-    assert monitor_actions.transfer(view, ["id"], "destination") == "transferred 1 job(s) to destination"
-    assert calls == ["publish", "manager", "transfer"]
+    assert calls == ["publish", "manager"]
 
 
 def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,14 +287,7 @@ def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(monitor_actions, "launch_workspace_managers", fake_manager)
     monitor_actions.start_managers(view, 1)
-
-    def fake_transfer(arguments: Any, _context: object, *_args: object) -> dict[str, object]:
-        seen["transfer"] = arguments.adapter_timeout
-        return {}
-
-    monkeypatch.setattr(monitor_actions, "run_transfer_verb_result", fake_transfer)
-    monitor_actions.transfer(view, ["id"], "destination")
-    assert seen == {"request": 12.5, "manager": 12.5, "transfer": 12.5}
+    assert seen == {"request": 12.5, "manager": 12.5}
 
 
 def test_monitor_renderers_and_key_state_machine(tmp_path: Path) -> None:

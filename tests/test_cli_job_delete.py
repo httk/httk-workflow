@@ -118,10 +118,19 @@ def test_cli_delete_of_a_held_job_leaves_the_request_to_its_owner(tmp_path: Path
     with cli_owner(workspace) as owner:
         owned = _kernel.claim(workspace, owner, failed)
         assert owned is not None
-        assert command(["job", "delete", "--force", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
-        assert "a manager holds the job; the request applies at its next boundary" in capsys.readouterr().out
+        assert command(["job", "delete", "--force", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
+        assert (
+            f"{failed.job_key}\towned\tqueued\ta manager holds the job; the request applies at its next boundary"
+            in capsys.readouterr().out
+        )
         assert owned.path.is_dir()
+        # The other request-now verbs report a held job the same way: queued, exit status 0.
+        assert command(["job", "seal", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
+        assert f"{failed.job_id}\tqueued\ta manager holds the job" in capsys.readouterr().out
         owned.release(owned.read_state() or StateDoc.empty(owned.job_id), Release("failed", 500))
+    # Unowned, the seal request is applied now and refused for a failed job: exit status 1.
+    assert command(["job", "seal", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
+    assert f"{failed.job_id}\trefused\t" in capsys.readouterr().out
 
 
 def test_delete_prompt_decline_and_non_tty_refusal_leave_job(

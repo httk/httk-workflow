@@ -236,7 +236,9 @@ def enable_exchange(workspace: Workspace) -> bool:
     :raises httk.workflow.errors.WorkflowError: If ``format.json`` does not keep the extension.
     """
 
-    workspace._require_unsealed()
+    from .seals import require_cli_modifiable
+
+    require_cli_modifiable(workspace)
     workspace.refresh_format()
     if EXCHANGE_EXTENSION in workspace.extensions and _layout_complete(workspace):
         return False

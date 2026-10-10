@@ -44,15 +44,12 @@ WORKSPACE_DIRECTORY = ".httk-workspace"
 # Workspace policy: the tunables the specification calls "configured", stored
 # once in format.json so that two implementations attaching the same workspace
 # cannot disagree about them.
-POLICY_KEYS = frozenset({"visibility_deadline_seconds", "lease_seconds", "retention"})
+POLICY_KEYS = frozenset({"visibility_deadline_seconds", "retention"})
 RETENTION_KEYS = frozenset({"attempt_control_days", "trash_days", "owner_tombstone_days"})
 #: Members older workspaces still store; reading ignores them and the next policy write drops them.
-_RETIRED_POLICY_KEYS = frozenset({"journal_segment_bytes"})
+_RETIRED_POLICY_KEYS = frozenset({"journal_segment_bytes", "lease_seconds"})
 _RETIRED_RETENTION_KEYS = frozenset({"journal_days"})
-DEFAULT_LEASE_SECONDS = 900.0
-# A lease shorter than a second cannot be heartbeated honestly, and a deadline
-# longer than a day is a hang rather than a filesystem waiting to settle.
-MINIMUM_LEASE_SECONDS = 1.0
+# A deadline longer than a day is a hang rather than a filesystem waiting to settle.
 MAXIMUM_VISIBILITY_DEADLINE_SECONDS = 86400.0
 
 # The serialized budget of the optional application-defined ``parameters`` object.
@@ -777,18 +774,16 @@ class RetentionPolicy:
 class WorkspacePolicy:
     """The tunables every implementation attaching to one workspace shares.
 
-    These are workspace properties rather than per-process options: two
-    managers on different hosts must agree on how long a marker may take to
-    become visible and on how long an unheartbeaten lease means anything. They
-    live in ``format.json`` beside the format and profile declarations.
+    These are workspace properties rather than per-process options: two owners
+    on different hosts must agree on how long another host's renames and writes
+    may take to become visible. They live in ``format.json`` beside the format
+    and profile declarations.
 
-    :param visibility_deadline_seconds: The marker visibility deadline.
-    :param lease_seconds: The manager claim lease duration.
+    :param visibility_deadline_seconds: The visibility deadline of another host's writes.
     :param retention: The workspace retention policy.
     """
 
     visibility_deadline_seconds: float = DEFAULT_VISIBILITY_DEADLINE_SECONDS
-    lease_seconds: float = DEFAULT_LEASE_SECONDS
     retention: RetentionPolicy = RetentionPolicy()
 
     @classmethod
@@ -810,7 +805,6 @@ class WorkspacePolicy:
             )
         defaults = cls()
         deadline = mapping.get("visibility_deadline_seconds")
-        lease = mapping.get("lease_seconds")
         retention = mapping.get("retention")
         return cls(
             visibility_deadline_seconds=(
@@ -822,11 +816,6 @@ class WorkspacePolicy:
                     minimum=0.0,
                     maximum=MAXIMUM_VISIBILITY_DEADLINE_SECONDS,
                 )
-            ),
-            lease_seconds=(
-                defaults.lease_seconds
-                if lease is None
-                else require_number(lease, f"{name}.lease_seconds", minimum=MINIMUM_LEASE_SECONDS)
             ),
             retention=(
                 defaults.retention
@@ -843,7 +832,6 @@ class WorkspacePolicy:
 
         return {
             "visibility_deadline_seconds": self.visibility_deadline_seconds,
-            "lease_seconds": self.lease_seconds,
             "retention": self.retention.as_mapping(),
         }
 

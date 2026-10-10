@@ -30,7 +30,6 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     assert stored["policy"] == {
         "visibility_deadline_seconds": 5.0,
-        "lease_seconds": 900.0,
         "retention": {"trash_days": 1.0, "owner_tombstone_days": 30.0},
     }
     assert workspace.policy == WorkspacePolicy()
@@ -40,11 +39,10 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
     assert updated.visibility_deadline_seconds == 90.0
     # Another implementation attaching the same workspace sees the same policy,
     # and the unrelated members of format.json survived the read-modify-write.
-    attached = Workspace(tmp_path / "workspace", mutable=False)
+    attached = Workspace(tmp_path / "workspace")
     assert attached.policy == updated
     assert attached.visibility_deadline == 90.0
     assert attached.policy.retention.trash_days == 30.0
-    assert attached.policy.lease_seconds == 900.0
     assert attached.workspace_id == workspace.workspace_id
     assert attached.format["core_profile"] == "core-v3"
 
@@ -84,8 +82,7 @@ def test_a_workspace_missing_a_format_section_is_refused(tmp_path: Path, section
         {"visibility_deadline_seconds": "soon"},
         {"visibility_deadline_seconds": -1.0},
         {"visibility_deadline_seconds": 999999.0},
-        {"lease_seconds": 0.0},
-        {"lease_seconds": True},
+        {"lease_seconds": 60.0},
         {"journal_segment_bytes": 65536},
         {"retention": 30},
         {"retention": {"journal_hours": 4}},
@@ -98,7 +95,7 @@ def test_policy_refuses_unknown_keys_and_impossible_values(tmp_path: Path, chang
     with pytest.raises(FormatError):
         workspace.set_policy(changes)
     # A refused change never reaches the workspace.
-    assert Workspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
+    assert Workspace(tmp_path / "workspace").policy == WorkspacePolicy()
 
 
 def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
@@ -116,22 +113,26 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     )
     assert command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "14", ws], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "policy", "set", "--key", "lease_seconds", "--value", "0", ws], context) == 1
+    assert command(["workspace", "policy", "set", "--key", "lease_seconds", "--value", "60", ws], context) == 1
     assert command(["workspace", "policy", "set", "--key", "no_such_key", "--value", "1", ws], context) == 1
-    assert command(["workspace", "policy", "set", "--key", "lease_seconds", "--value", "not-json", ws], context) == 1
-    policy = Workspace(root, mutable=False).policy
+    assert (
+        command(
+            ["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "not-json", ws], context
+        )
+        == 1
+    )
+    policy = Workspace(root).policy
     assert policy.visibility_deadline_seconds == 60.0
     assert policy.retention.trash_days == 14.0
-    assert policy.lease_seconds == 900.0
     assert command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "null", ws], context) == 0
-    assert Workspace(root, mutable=False).policy.retention.trash_days is None
+    assert Workspace(root).policy.retention.trash_days is None
     assert (
         command(
             ["workspace", "policy", "set", "--key", "retention.owner_tombstone_days", "--value", "keep", ws], context
         )
         == 0
     )
-    assert Workspace(root, mutable=False).policy.retention.owner_tombstone_days is None
+    assert Workspace(root).policy.retention.owner_tombstone_days is None
     # The retired journal retention is refused on write.
     assert command(["workspace", "policy", "set", "--key", "retention.journal_days", "--value", "1", ws], context) == 1
     assert command(["workspace", "policy", "show", ws], context) == 0
@@ -146,23 +147,27 @@ def test_retention_keep_is_persisted_and_disables_collection(tmp_path: Path) -> 
     assert updated.retention.trash_days is None
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     assert stored["policy"]["retention"] == {"trash_days": None, "owner_tombstone_days": None}
-    attached = Workspace(workspace.root, mutable=False)
+    attached = Workspace(workspace.root)
     assert attached.policy.retention.owner_tombstone_days is None
     assert attached.policy.retention.trash_days is None
 
 
-def test_a_policy_with_retired_journal_members_still_attaches(tmp_path: Path) -> None:
-    # Older jobs-v3 workspaces store journal_segment_bytes and retention.journal_days; reading ignores them.
+def test_a_policy_with_retired_members_still_attaches(tmp_path: Path) -> None:
+    # Older jobs-v3 workspaces store journal_segment_bytes, lease_seconds and retention.journal_days; reading
+    # ignores them, setting one is refused, and the next write drops them.
     workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
     path = workspace.control / "format.json"
     stored = json.loads(path.read_text(encoding="utf-8"))
-    stored["policy"]["journal_segment_bytes"] = 65536
+    stored["policy"].update(journal_segment_bytes=65536, lease_seconds=900.0)
     stored["policy"]["retention"]["journal_days"] = 1.0
     path.write_text(json.dumps(stored), encoding="utf-8")
     assert Workspace(workspace.root).policy == WorkspacePolicy()
-    Workspace(workspace.root).set_policy({"lease_seconds": 60})
+    with pytest.raises(FormatError, match="unsupported members: lease_seconds"):
+        Workspace(workspace.root).set_policy({"lease_seconds": 60})
+    Workspace(workspace.root).set_policy({"visibility_deadline_seconds": 60})
     rewritten = json.loads(path.read_text(encoding="utf-8"))["policy"]
-    assert "journal_segment_bytes" not in rewritten and "journal_days" not in rewritten["retention"]
+    assert not {"journal_segment_bytes", "lease_seconds"} & set(rewritten)
+    assert "journal_days" not in rewritten["retention"]
 
 
 def test_public_retention_none_round_trips_as_keep() -> None:

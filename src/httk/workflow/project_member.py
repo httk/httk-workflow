@@ -8,8 +8,6 @@ manifest, verify it, and check its health, all through
 :func:`handler`.
 """
 
-from __future__ import annotations
-
 import hashlib
 import os
 from collections.abc import Sequence
@@ -23,7 +21,7 @@ if TYPE_CHECKING:
 __all__ = ["handler"]
 
 
-def handler() -> WorkspaceMemberHandler:
+def handler() -> "WorkspaceMemberHandler":
     """Return the workspace project-member handler.
 
     Core resolves the registered ``"module:callable"`` reference and calls it
@@ -36,7 +34,7 @@ def handler() -> WorkspaceMemberHandler:
     return WorkspaceMemberHandler()
 
 
-def _entry(level: str, subject: str, verification: SealVerification) -> dict[str, object]:
+def _entry(level: str, subject: str, verification: "SealVerification") -> dict[str, object]:
     """Render one workflow seal verdict as a core whole-tree report entry."""
 
     return {

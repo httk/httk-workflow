@@ -2,15 +2,20 @@
 
 import dataclasses
 import json
+import os
+import signal
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from httk.core.cli import CLIContext
 
 import v3_helpers as v3
-from httk.workflow import TaskManager, Workspace, _kernel
+from conftest import register_ws
+from httk.workflow import TaskManager, Workspace, _kernel, job_records
 from httk.workflow._job import JobDefinition
 from httk.workflow._logging import reset_logging
 from httk.workflow.introspection import (
@@ -29,6 +34,7 @@ from httk.workflow.introspection import (
     resolve_job_selector,
     resolve_job_selectors,
 )
+from httk.workflow.workflow_cli import command
 
 #: Three activations, each advancing to the next step, then success.
 _THREE_STEPS = {"start": "advance:finish", "finish": "advance:gather", "gather": "succeed"}
@@ -618,3 +624,59 @@ def test_debug_follows_children_only_when_asked(ws: Workspace, installed: Any) -
     assert "[debug child:only] only--" in text
     assert "runner is working on gather" in text
     assert resolve_job(ws, submitted.job_id).state == "succeeded"
+
+
+@contextmanager
+def _deadline(seconds: int) -> Iterator[None]:
+    """Fail instead of hanging: a read that blocks (on a FIFO) is interrupted after *seconds*."""
+
+    def expire(_signum: int, _frame: object) -> None:
+        raise TimeoutError("a read blocked")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_readers_neither_block_on_a_fifo_nor_follow_a_symlink_a_job_planted(
+    ws: Workspace, installed: Any, tmp_path: Path, capsys
+) -> None:
+    submitted = _submit(ws, installed, {"start": "exit"})
+    v3.run(ws)
+    ref = resolve_job(ws, submitted.job_id)
+    attempt = v3.state_of(ref).attempt
+    assert attempt is not None
+    control = ref.path / "attempts" / str(attempt["id"])
+    (ref.path / ".httk-job").mkdir(exist_ok=True)
+    os.mkfifo(ref.path / ".httk-job" / "runlog.jsonl")
+    os.mkfifo(control / "error.json")
+    declarations = ref.path / ".httk-job" / "declarations"
+    declarations.mkdir()
+    os.mkfifo(declarations / "blocked.json")
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(_BREADCRUMB["start"]), encoding="utf-8")
+    (declarations / "followed.json").symlink_to(outside)
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, ws.root)
+    with _deadline(20):
+        for verb in ("show", "log", "why"):
+            assert command(["job", verb, "--workspace", name, ref.job_id], context) == 0
+        capsys.readouterr()
+        assert command(["job", "log", "--json", "--workspace", name, ref.job_id], context) == 0
+        (document,) = json.loads(capsys.readouterr().out)
+        assert "is not a regular file" in document["annotations"][0]["error"]
+        assert describe_job(ws, ref)["error_breadcrumb"] is None
+        (record,) = job_records(ws, states=("failed",))
+    assert record.provenance["gaps"] is True
+    assert {name: entry["observed"] for name, entry in record.declarations.items()} == {
+        "blocked": None,
+        "followed": None,
+    }
+    # A symlinked error.json is refused, not followed to a readable breadcrumb outside the job.
+    (control / "error.json").unlink()
+    (control / "error.json").symlink_to(outside)
+    assert describe_job(ws, ref)["error_breadcrumb"] is None

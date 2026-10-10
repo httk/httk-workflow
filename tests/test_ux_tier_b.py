@@ -8,6 +8,9 @@ with the runner's own annotations.
 """
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +19,7 @@ from httk.core.cli import CLIContext
 import v3_helpers as v3
 from conftest import configure_identity, register_ws
 from httk.workflow import TaskManager, Workspace, _kernel, _store
+from httk.workflow.gc import collect_garbage
 from httk.workflow.workflow_cli import command
 
 
@@ -126,13 +130,56 @@ def test_job_submit_refuses_owner_files_and_keeps_a_moved_payload_on_failure(
     assert command(["job", "submit", "--workspace", name, str(forged)], context) == 1
     assert "may not carry state.json" in capsys.readouterr().err
 
-    # A placement directory that is a symlink makes the submit fail after the move: the payload comes back.
+    # A placement directory that is a symlink is refused before the payload moves.
     moved = _payload(tmp_path, installed, "moved")
     (workspace.jobs / "ready").mkdir(parents=True, exist_ok=True)
     (workspace.jobs / "ready" / "prepared").symlink_to(tmp_path)
     assert command(["job", "submit", "--workspace", name, "--move", str(moved)], context) == 1
     assert (moved / "job.json").is_file()
     assert not list(_kernel.list_jobs(workspace, "ready"))
+
+
+_CRASH_BEFORE_SUBMIT = """
+import os, sys
+from pathlib import Path
+from httk.workflow import Workspace, _fs, _kernel, scaffold
+
+def crash(op, phase, src, dst):
+    # Die with the payload in the submit scratch, just before submit publishes it into jobs/ready/.
+    if op == "rename" and phase == "before" and dst is not None and "/jobs/ready/" in str(dst.path):
+        os._exit(0)
+
+ws = Workspace(Path(sys.argv[1]))
+owner = _kernel.register_owner(ws, kind="cli", label="job submit", allocation=None, advertised={})
+print(owner.owner_id, flush=True)
+_fs.set_fault_injector(crash)
+scaffold.submit_payload(ws, owner, Path(sys.argv[2]), move=True)
+"""
+
+
+def test_a_moved_payload_is_submitted_by_recovery_when_its_owner_dies_first(
+    tmp_path: Path, context: CLIContext
+) -> None:
+    workspace, installed, _name = _setup(tmp_path, context, "crash-ws")
+    moved = _payload(tmp_path, installed, "crashed")
+    source = Path(__file__).resolve().parents[1] / "src"
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join([str(source), os.environ.get("PYTHONPATH", "")])}
+    result = subprocess.run(
+        [sys.executable, "-c", _CRASH_BEFORE_SUBMIT, str(workspace.root), str(moved)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=environment,
+    )
+    dead = result.stdout.strip()
+    # The operator's only copy now sits in the dead owner's submit scratch.
+    assert not moved.exists() and not list(_kernel.list_jobs(workspace, "ready"))
+    assert [name for name in os.listdir(workspace.control / "tmp") if name.startswith(f"{dead}.submit.")]
+    assert collect_garbage(workspace, categories=("dead_owners",)).category("dead_owners").removed == 1
+    ready = v3.only(workspace, "ready")
+    assert ready.job_key.startswith("crashed--")
+    assert (ready.path / "input.txt").read_text(encoding="utf-8") == "crashed"
+    assert not [name for name in os.listdir(workspace.control / "tmp") if ".submit." in name]
 
 
 def test_job_log_shows_owner_events_and_runner_annotations(tmp_path: Path, context: CLIContext, capsys) -> None:

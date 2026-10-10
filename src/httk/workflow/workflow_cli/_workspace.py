@@ -33,7 +33,7 @@ from ..adapters import (
 from ..configuration import machine_names
 from ..fsck import check_workspace
 from ..gc import GC_CATEGORIES, collect_garbage, iter_report_rows
-from ..introspection import JOB_STATES, count_jobs
+from ..introspection import JOB_STATES, count_jobs, probe_liveness
 from ..manifests import require_quiescent_workspace
 from ..models import (
     POLICY_KEYS,
@@ -310,7 +310,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     if root is None:
         assert binding is not None
         return _remote_workspace_read(binding, context, REMOTE_STATUS_COMMAND, arguments, flags=("--json",))
-    workspace = Workspace(root, mutable=False, durable=_durable(arguments))
+    workspace = Workspace(root, durable=_durable(arguments))
     counts = {state: count for state in JOB_STATES if (count := count_jobs(workspace, state))}
     owners = _owner_rows(workspace, kind=None, tombstoning=True)
     sealed = is_workspace_sealed(workspace)
@@ -353,7 +353,7 @@ def handle_workspace_owners(arguments: argparse.Namespace, context: CLIContext) 
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_owners)
-    workspace = Workspace(_local_root(arguments, context, action="list its owners"), mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="list its owners"))
     rows = _owner_rows(workspace, kind=arguments.kind, tombstoning=False)
     if arguments.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
@@ -375,24 +375,28 @@ def handle_workspace_attest_dead(arguments: argparse.Namespace, context: CLICont
     """Attest, as the operator, that an owner and every launch it started have ended.
 
     This writes the owner's ``dead.json`` tombstone (``by: operator``); the owner's
-    jobs are recovered at the next manager tick or ``httk workspace gc``. An
-    owner whose ``owner.json`` names this very process is refused.
+    jobs are recovered at the next manager tick or ``httk workspace gc``. The
+    read-only death proof runs first: an owner it finds alive (this very process
+    included) is refused, and one whose death it cannot decide is refused
+    unless ``--force`` is given.
     """
 
     workspace = Workspace(_local_root(arguments, context, action="attest an owner dead"))
     owner_id = arguments.owner
-    owners = {owner.owner_id: owner for owner in _kernel.list_owners(workspace)}
+    owners = {owner.owner_id for owner in _kernel.list_owners(workspace)}
     if owner_id not in owners and not (workspace.jobs / _kernel.OWNED / owner_id).is_dir():
         raise ValueError(f"no owner {owner_id!r} is registered in this workspace, and no job is owned by it")
-    record = owners[owner_id].record if owner_id in owners else None
-    here = _death.process_identity()
-    if record is not None and (
-        record.get("hostname"),
-        record.get("boot_id"),
-        record.get("pid"),
-        record.get("process_start_ticks"),
-    ) == (here.hostname, here.boot_id, here.pid, here.start_ticks):
-        raise ValueError(f"owner {owner_id} is this very process; it cannot be attested dead")
+    verdict, evidence = probe_liveness(workspace, owner_id)
+    detail = "; ".join(item.detail for item in evidence) or "no evidence"
+    if verdict is _death.Liveness.ALIVE:
+        raise ValueError(f"owner {owner_id} is alive ({detail}); it cannot be attested dead")
+    if verdict is _death.Liveness.UNKNOWN:
+        if not arguments.force:
+            raise ValueError(
+                f"the death of owner {owner_id} cannot be proven ({detail}); pass --force to attest it anyway. "
+                f"{_ATTEST_LIMITATION}"
+            )
+        print(f"warning: attesting owner {owner_id} without proof ({detail}). {_ATTEST_LIMITATION}", file=sys.stderr)
     operator = arguments.operator
     if operator is None:
         identity = configured_operator_identity()
@@ -420,7 +424,7 @@ def handle_workspace_workflows(arguments: argparse.Namespace, context: CLIContex
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_workflows)
-    workspace = Workspace(_local_root(arguments, context, action="list its workflows"), mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="list its workflows"))
     rows: list[dict[str, object]] = []
     for installed in _store.list_installed(workspace):
         row: dict[str, object] = {
@@ -474,7 +478,7 @@ def handle_workspace_verify(arguments: argparse.Namespace, context: CLIContext) 
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_verify)
-    workspace = Workspace(_local_root(arguments, context, action="verify its seal"), mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="verify its seal"))
     trusted = _default_trusted_keys(workspace.root, list(arguments.trusted_key))
     verification = verify_workspace_seal(workspace, trusted_keys=trusted)
     if arguments.json:
@@ -531,7 +535,7 @@ def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLICont
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_policy_show)
     root = _local_root(arguments, context, action="show its policy")
-    return _print_policy(Workspace(root, mutable=False).policy, as_json=arguments.json)
+    return _print_policy(Workspace(root).policy, as_json=arguments.json)
 
 
 def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -576,7 +580,7 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
     """Check a workspace's job tree; ``--repair`` quarantines the unparsable entries, the only repair there is."""
 
     if isinstance(arguments.workspace, list):
-        if (arguments.repair or arguments.quarantine_unrepairable) and not arguments.workspace:
+        if arguments.repair and not arguments.workspace:
             raise ValueError("workspace fsck repair requires at least one WORKSPACE")
         return _workspace_batch(arguments, context, handle_workspace_fsck)
     binding, root = _resolve_binding(arguments, context)
@@ -587,10 +591,9 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
             context,
             REMOTE_WORKSPACE_FSCK_COMMAND,
             arguments,
-            flags=("--repair", "--quarantine-unrepairable", "--json"),
+            flags=("--repair", "--json"),
         )
-    repair = arguments.repair or arguments.quarantine_unrepairable
-    report = check_workspace(Workspace(root, mutable=repair), repair=repair)
+    report = check_workspace(Workspace(root), repair=arguments.repair)
     if arguments.json:
         print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
     else:
@@ -618,7 +621,7 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
             flags=("--dry-run", "--json"),
             tail=[item for category in arguments.category or () for item in ("--category", category)],
         )
-    workspace = Workspace(root, mutable=not arguments.dry_run)
+    workspace = Workspace(root)
     report = collect_garbage(workspace, dry_run=arguments.dry_run, categories=arguments.category or None)
     if arguments.json:
         print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
@@ -705,7 +708,7 @@ def handle_workspace_forget(arguments: argparse.Namespace, context: CLIContext) 
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_forget)
-    binding = forget_workspace(arguments.workspace, force=arguments.force)
+    binding = forget_workspace(arguments.workspace)
     print(f"forgot {binding.name}")
     return 0
 
@@ -789,15 +792,19 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
         return 0
     assert binding.path is not None
     destination = (Path(context.cwd) / arguments.destination).resolve()
-    if destination.exists():
+    if os.path.lexists(destination):
         raise ValueError(f"workspace move destination already exists: {destination}")
     try:
-        require_quiescent_workspace(Workspace(binding.path, mutable=False))
+        require_quiescent_workspace(Workspace(binding.path))
     except ValueError as exc:
         raise ValueError(f"cannot move the workspace while it is in use: {exc}") from exc
     try:
+        # ponytail: check-then-rename; an empty directory created at the destination in between is replaced
+        # (rename(2) replaces only an empty one), anything else that appeared refuses the move below.
         os.rename(binding.path, destination)
     except OSError as exc:
+        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR):
+            raise ValueError(f"workspace move destination appeared during the move: {destination}") from exc
         if exc.errno != errno.EXDEV:
             raise
         raise ValueError(
@@ -826,7 +833,7 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
             flags=("--json",),
             tail=() if arguments.key is None else ("--key", arguments.key),
         )
-    workspace = Workspace(root, mutable=False)
+    workspace = Workspace(root)
     settings = workspace.settings
     if arguments.key is not None:
         if arguments.key not in settings:
@@ -967,7 +974,7 @@ def handle_workspace_workflow_prelude_show(arguments: argparse.Namespace, contex
             flags=("--json",),
             tail=() if arguments.workflow is None else ("--workflow", arguments.workflow),
         )
-    workspace = Workspace(root, mutable=False)
+    workspace = Workspace(root)
     preludes = workspace.read_workflow_preludes()
     if arguments.workflow is not None:
         if arguments.workflow not in preludes:
@@ -1158,7 +1165,8 @@ def build_workspace_parser(
         summary="attest that an owner and its launches have ended",
         description=(
             "Write the dead.json tombstone of OWNER as the operator, so the next manager tick or workspace gc "
-            f"recovers its jobs. {_ATTEST_LIMITATION}"
+            "recovers its jobs. The death proof runs first: an owner proven alive is refused, and one whose "
+            f"death cannot be decided needs --force. {_ATTEST_LIMITATION}"
         ),
         handler=handle_workspace_attest_dead,
     )
@@ -1167,6 +1175,11 @@ def build_workspace_parser(
     attest.add_argument("--reason", required=True, metavar="TEXT", help="why the owner is known dead, recorded")
     attest.add_argument(
         "--operator", metavar="NAME", help="who attests, recorded (default: the configured operator identity)"
+    )
+    attest.add_argument(
+        "--force",
+        action="store_true",
+        help="attest an owner whose death the proof cannot decide (an owner proven alive is always refused)",
     )
 
     workflows = _leaf(
@@ -1269,9 +1282,6 @@ def build_workspace_parser(
         handler=handle_workspace_forget,
     )
     forget.add_argument("workspace", metavar="NAME", nargs="+", help="the registered workspace name to forget")
-    forget.add_argument(
-        "--force", action="store_true", help="deregister the name even when unretired outbound transfers remain"
-    )
 
     delete = _leaf(
         group,
@@ -1437,11 +1447,6 @@ def build_workspace_parser(
         "--repair",
         action="store_true",
         help="move the unparsable entries into the quarantine; every other finding is left to the operator",
-    )
-    fsck.add_argument(
-        "--quarantine-unrepairable",
-        action="store_true",
-        help="the same as --repair",
     )
     fsck.add_argument("--json", action="store_true", help="print the findings as one JSON report")
     _add_by_path_argument(fsck)

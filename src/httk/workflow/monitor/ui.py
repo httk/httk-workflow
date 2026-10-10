@@ -215,15 +215,13 @@ def handle_key(state: MonitorState, key: str) -> MonitorState:
         state.status = "filter prompt: kind, placement prefix, tag substring"
     elif key == "m":
         state.status = "manager prompt: count and launcher"
-    elif key == "x":
-        state.status = "transfer prompt: destination workspace"
     elif key == "D":
         state.confirmation = "remove"
         state.status = "remove prompt: confirm job removal"
     elif key == "KEY_RESIZE":
         state.status = "resized"
     elif key == "?":
-        state.status = "j/k arrows move | n/p pages | Tab panes | f filters | Enter detail | t tail | c/P/C requests | m managers | x transfer | D remove | r refresh | q quit"
+        state.status = "j/k arrows move | n/p pages | Tab panes | f filters | Enter detail | t tail | c/P/C requests | m managers | D remove | r refresh | q quit"
     if state.selected != old_selected:
         state.detail = None
         state.detail_job = None
@@ -579,10 +577,6 @@ class MonitorApp:
                         self._dispatch_action(Actions(self.state.view).start_managers, int(count), launcher)
                     except ValueError as exc:
                         self.state.status = str(exc)
-                elif normalized == "x":
-                    destination = self._prompt("destination workspace: ")
-                    if destination:
-                        self._dispatch_action(Actions(self.state.view).transfer, self._selected_ids(), destination)
                 elif normalized == "D":
                     row = self.state.selected_row
                     if self.state.view.remote:

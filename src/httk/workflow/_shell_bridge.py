@@ -46,10 +46,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import cast
 
+from . import _fs
 from ._data import Transaction
 from ._durations import TIME_RESOURCES
 from ._state import _thaw
-from ._util import read_json, write_json_atomic
+from ._util import json_bytes, read_json
 from .codes import BRIDGE_ABSENT, installed_codes
 from .errors import FormatError
 from .models import normalize_resources, placement_text
@@ -604,18 +605,16 @@ def _abort(arguments: argparse.Namespace) -> None:
         path = Path(arguments.traceback_file)
         if path.is_file():
             trace = path.read_text(encoding="utf-8", errors="replace")
-    write_json_atomic(
-        attempt.control / "error.json",
-        {
-            "format": RUNNER_ERROR_FORMAT,
-            "format_version": 2,
-            "step": attempt.step,
-            "exception": arguments.exception,
-            "message": arguments.message,
-            "traceback": trace or f"{arguments.exception}: {arguments.message}\n",
-        },
-        durable=attempt.context.durable,
-    )
+    error = {
+        "format": RUNNER_ERROR_FORMAT,
+        "format_version": 2,
+        "step": attempt.step,
+        "exception": arguments.exception,
+        "message": arguments.message,
+        "traceback": trace or f"{arguments.exception}: {arguments.message}\n",
+    }
+    target = _fs.loc((attempt.control / "error.json").absolute())
+    _fs.write_file(target, json_bytes(error) + b"\n", durable=attempt.context.durable)
 
 
 def _job_prepare(arguments: argparse.Namespace) -> None:

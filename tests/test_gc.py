@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _kernel, _requests
+from httk.workflow import TaskManager, Workspace, _fs, _kernel, _requests, _store
 from httk.workflow._state import Release, StateDoc
 from httk.workflow.gc import GC_CATEGORIES, collect_garbage, iter_report_rows
-from v3_helpers import cli_owner, find, state_of, submit
+from v3_helpers import cli_owner, find, install, state_of, submit
 
 _DAY = 86400.0
 _WORKFLOW = ("demo--0123456789abcdef", "demo")
@@ -36,18 +36,23 @@ def _age(path: Path, days: float = 3.0) -> Path:
     return path
 
 
-def _job(ws: Workspace, state: str, attempts: dict[str, float], placement: str = "p/0") -> _kernel.JobRef:
-    """A job in *state* holding ``attempts/<name>/`` aged by the given days."""
+def _job(
+    ws: Workspace, state: str, attempts: dict[str, float], placement: str = "p/0", current: str | None = None
+) -> _kernel.JobRef:
+    """A job in *state* holding ``attempts/<name>/`` aged by the given days; *current* is the one state.json names."""
 
     ref = submit(ws, _WORKFLOW, {"start": "succeed"}, placement=placement)
     with cli_owner(ws) as owner:
         owned = _kernel.claim(ws, owner, ref)
         assert owned is not None
-        for name, days in attempts.items():
-            (owned.path / "attempts" / name).mkdir(parents=True)
-            (owned.path / "attempts" / name / "outcome.json").write_text("{}", encoding="utf-8")
-            _age(owned.path / "attempts" / name, days)
         doc = StateDoc.empty(owned.job_id).next_activation("start", "initial")
+        if current is not None:
+            doc = doc.next_attempt("launch", unclean=False)
+        for name, days in attempts.items():
+            directory = owned.path / "attempts" / (str(doc.attempt["id"]) if doc.attempt and name == current else name)
+            directory.mkdir(parents=True)
+            (directory / "outcome.json").write_text("{}", encoding="utf-8")
+            _age(directory, days)
         return owned.release(doc, Release(state, 500))
 
 
@@ -148,15 +153,20 @@ def test_each_category_collects_only_the_aged_entries(tmp_path: Path) -> None:
     assert collect_garbage(ws).removed == 0
 
 
-def test_failed_and_cancelled_jobs_keep_their_newest_attempt(tmp_path: Path) -> None:
+def test_failed_and_cancelled_jobs_keep_the_attempt_their_state_names(tmp_path: Path) -> None:
     ws = _workspace(tmp_path / "ws")
-    failed = _job(ws, "failed", {"first": 5.0, "second": 4.0}, placement="p/f")
-    cancelled = _job(ws, "cancelled", {"only": 5.0}, placement="p/c")
-    ready = _job(ws, "ready", {"first": 5.0, "second": 4.0}, placement="p/r")
+    # The attempt state.json names is kept even when another attempt directory is newer.
+    failed = _job(ws, "failed", {"current": 5.0, "newer": 4.0}, placement="p/f", current="current")
+    cancelled = _job(ws, "cancelled", {"current": 5.0}, placement="p/c", current="current")
+    ready = _job(ws, "ready", {"current": 5.0, "newer": 4.0}, placement="p/r", current="current")
+    unnamed = _job(ws, "failed", {"first": 5.0}, placement="p/u")
+    assert collect_garbage(ws, dry_run=True, categories=("attempt_control",)).candidates == 4
     collect_garbage(ws, categories=("attempt_control",))
-    assert _attempts(ws, failed) == ["second"]
-    assert _attempts(ws, cancelled) == ["only"]
+    for ref in (failed, cancelled):
+        attempt = state_of(find(ws, ref.job_id)).attempt
+        assert attempt is not None and _attempts(ws, ref) == [attempt["id"]]
     assert _attempts(ws, ready) == []
+    assert _attempts(ws, unnamed) == []
 
 
 def test_keep_disables_a_retention_category(tmp_path: Path) -> None:
@@ -254,3 +264,51 @@ def test_a_manager_collects_in_the_background_every_gc_interval(tmp_path: Path) 
     with TaskManager(ws, heartbeat_interval=0.01) as manager:
         manager.tick()
     assert entries["temporary"].exists()  # no gc_interval, no background collection
+
+
+def test_a_reinstall_interrupted_between_its_renames_keeps_the_old_tree_until_gc(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path / "ws")
+    installed = install(ws, tmp_path / "package")
+    (tmp_path / "package" / "notes.txt").write_text("v2", encoding="utf-8")
+
+    def interrupt(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "before" and dst is not None and dst.path == installed.directory:
+            raise KeyboardInterrupt  # the new tree never lands
+
+    _fs.set_fault_injector(interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt), cli_owner(ws) as owner:
+            _store.install(ws, owner, tmp_path / "package")
+    finally:
+        _fs.set_fault_injector(None)
+    (old,) = (path for path in (ws.root / "workflows").iterdir() if ".old." in path.name)
+    assert (old / "install.json").is_file() and not installed.directory.exists()
+    assert _store.lookup(ws, installed.id) is None and _store.list_installed(ws) == []
+    assert collect_garbage(ws, dry_run=True, categories=("tmp_entries",)).candidates == 0  # moved aside just now
+    later = time.time() + 2 * _DAY
+    assert collect_garbage(ws, now=later, categories=("tmp_entries",)).removed == 1
+    assert not old.exists()
+
+
+def test_a_reinstall_replaces_the_tree_and_leaves_nothing_aside(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path / "ws")
+    installed = install(ws, tmp_path / "package")
+    (tmp_path / "package" / "notes.txt").write_text("v2", encoding="utf-8")
+    with cli_owner(ws) as owner:
+        _store.install(ws, owner, tmp_path / "package")
+    assert (installed.package / "notes.txt").read_text(encoding="utf-8") == "v2"
+    assert [path.name for path in (ws.root / "workflows").iterdir()] == [installed.directory.name]
+    with cli_owner(ws) as owner:
+        _store.uninstall(ws, owner, installed.id)
+    assert list((ws.root / "workflows").iterdir()) == []
+
+
+def test_hygiene_counts_an_old_push_copy_as_orphaned_scratch_but_not_a_fresh_one(tmp_path: Path) -> None:
+    from httk.workflow.hygiene import _check_owners
+
+    ws = _workspace(tmp_path / "ws")
+    push = ws.control / "tmp" / f"push.{uuid.uuid4().hex}"
+    (push / "package").mkdir(parents=True)
+    assert _check_owners(ws.root, repair=False).details["orphaned_scratch"] == []
+    _age(push)
+    assert _check_owners(ws.root, repair=False).details["orphaned_scratch"] == [push.name]

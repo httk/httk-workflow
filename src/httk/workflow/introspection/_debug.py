@@ -1,7 +1,6 @@
 """Foreground debugging of one job: a private manager claims exactly that job and drives it."""
 
 import math
-import shutil
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -12,15 +11,18 @@ from .._durations import TIME_RESOURCES
 from .._job import JobDefinition
 from .._kernel import JobRef
 from .._state import TERMINAL_STATES, StateDoc
+from ..errors import WorkflowError
 from ..manager import TaskManager
 from ..models import LOGS_DIRECTORY, normalize_placement, placement_text, validate_step
+from ..scaffold import submit_payload
 from ..workspace import Workspace
 from ._diagnosis import observe_join
-from ._reading import read_job, read_state, resolve_job, resolve_job_selectors
+from ._reading import read_job, read_job_tail, read_state, resolve_job, resolve_job_selectors
 
 DEBUG_EXIT_SUCCEEDED = 0
 DEBUG_EXIT_FAILED = 3
 DEBUG_EXIT_UNFINISHED = 4
+_TAIL_CHUNK = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -56,10 +58,10 @@ def _exit_code(state: str) -> int:
 
 
 class _Tail:
-    """A console tail of one growing attempt log."""
+    """A console tail of one growing attempt log, ``logs/stdio.out`` of *job*."""
 
-    def __init__(self, path: Path, write: Callable[[str], None]) -> None:
-        self.path = path
+    def __init__(self, job: Path, write: Callable[[str], None]) -> None:
+        self.job = job
         self._write = write
         self._offset = 0
         self._partial = ""
@@ -67,18 +69,17 @@ class _Tail:
     def pump(self, *, final: bool = False) -> None:
         """Print every complete line that appeared since the last pump."""
 
-        try:
-            with self.path.open("rb") as handle:
-                handle.seek(self._offset)
-                data = handle.read()
-                self._offset = handle.tell()
-        except OSError:
-            return
-        if data:
+        while True:
+            try:
+                data, self._offset = read_job_tail(self.job, f"{LOGS_DIRECTORY}/stdio.out", _TAIL_CHUNK, self._offset)
+            except (WorkflowError, OSError):
+                return
             lines = (self._partial + data.decode("utf-8", "replace")).split("\n")
             self._partial = lines.pop()
             for line in lines:
                 self._write(line)
+            if len(data) < _TAIL_CHUNK:
+                break
         if final and self._partial:
             self._write(self._partial)
             self._partial = ""
@@ -87,15 +88,11 @@ class _Tail:
 def _submit_payload(workspace: Workspace, source: Path, placement: str, step: str | None) -> JobRef:
     """Submit a copy of a prepared payload at *placement* (and *step*) from a CLI owner's scratch."""
 
-    job = JobDefinition.from_path(source / "job.json")
     changes: dict[str, object] = {"placement": placement_text(normalize_placement(placement))}
     if step is not None:
         changes["initial_step"] = validate_step(step, "step")
     with _kernel.register_owner(workspace, kind="cli", label="job debug", allocation=None, advertised={}) as owner:
-        staging = owner.scratch("submit") / "job"
-        shutil.copytree(source, staging, symlinks=True)
-        (staging / "job.json").write_bytes(JobDefinition.from_mapping({**job.as_mapping(), **changes}).encode())
-        return _kernel.submit(workspace, owner, staging)
+        return submit_payload(workspace, owner, source, move=False, changes=changes)
 
 
 def debug_job(
@@ -210,7 +207,7 @@ def _drive(
     if job is None:
         raise ValueError(f"cannot debug {ref.job_key}: {job_error}")
     write(f"[{meta}] {ref.job_key} at {placement_text(job.placement)} is {ref.state} (workflow {job.workflow_id})")
-    tail = _Tail(ref.path / LOGS_DIRECTORY / "stdio.out", write)
+    tail = _Tail(ref.path, write)
     deadline = time.monotonic() + timeout
     seen: tuple[str, str] | None = None
     driven_children = False
@@ -229,8 +226,7 @@ def _drive(
             if current is None:
                 raise ValueError(f"job {ref.job_key} disappeared while being debugged")
             doc, _ = read_state(current)
-            if current.path != ref.path:
-                tail.path = current.path / LOGS_DIRECTORY / "stdio.out"
+            tail.job = current.path
             tail.pump()
             if (current.state, current.token) != seen:
                 seen = (current.state, current.token)

@@ -70,7 +70,7 @@ from ._durations import cap_maxtime
 from ._job import JobDefinition
 from ._util import interpreter_first_path, validate_inputs
 from .codes import code_environment
-from .errors import FormatError
+from .errors import FormatError, WorkflowError
 from .models import (
     ATTEMPTS_DIRECTORY,
     JOB_STATE_DIRECTORY,
@@ -117,6 +117,7 @@ __all__ = [
     "scaffold_job",
     "structure_files",
     "structure_tag",
+    "submit_payload",
     "workflow_provider",
 ]
 
@@ -130,6 +131,8 @@ FILES_DIRECTORY = "files"
 #: The file names legacy callers may recognize as structures in a directory.
 STRUCTURE_PATTERNS = ("POSCAR*", "*.vasp")
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
+#: The scratch purpose of a payload on its way to ``jobs/ready/``; its reconciler publishes a staged ``job/``.
+_SUBMIT = "submit"
 _DESCRIBE_TIMEOUT = 120.0
 _INSTANTIATE_TIMEOUT = 3600.0
 _TAG_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -1467,8 +1470,8 @@ def new_jobs(
         installed = _installed(workspace, workflow, owner=owner, install=install, step=step, language=format)
         prepared = _prepare(installed, step=step)
         for item in items:
-            scratch = owner.scratch("submit")
-            staging = scratch / "job"
+            scratch = owner.scratch(_SUBMIT)
+            staging = scratch / "build"
             staging.mkdir()
             job = _build_payload(
                 workspace,
@@ -1484,8 +1487,7 @@ def new_jobs(
                 name=item.get("name", name),
                 provenance=item.get("provenance", provenance),
             )
-            ref = _kernel.submit(workspace, owner, staging)
-            _fs.remove_empty_dir(_fs.loc(scratch))
+            ref = _submit_staged(workspace, owner, scratch, staging)
             yield ScaffoldedJob(
                 job_id=job.id,
                 job_key=job.job_key,
@@ -1499,8 +1501,94 @@ def new_jobs(
                 warnings=prepared.warnings,
             )
     finally:
-        # Discards the scratch of a job whose building failed, then the owner record.
+        # Discards the scratch of a job whose building failed (never named job/), then the owner record.
         owner.close()
+
+
+def submit_payload(
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    source: Path,
+    *,
+    move: bool,
+    changes: Mapping[str, object] | None = None,
+) -> _kernel.JobRef:
+    """Submit a prepared payload directory (a ``job.json`` version 3 and its files) into ``jobs/ready/``.
+
+    Everything :func:`httk.workflow._kernel.submit` checks is checked before
+    *source* moves. The payload then reaches the owner's ``submit`` scratch as
+    ``job/`` complete, so the scratch reconciler publishes it if the owner dies
+    before the submission: a moved payload, the operator's only copy, is never
+    discarded. A refused submission moves it back.
+
+    :param workspace: The workspace.
+    :param owner: The registered owner whose scratch stages the payload.
+    :param source: The payload directory.
+    :param move: Move *source* instead of copying it.
+    :param changes: ``job.json`` members to replace in the copy; only without *move*.
+    :return: The published reference.
+    :raises httk.workflow.errors.FormatError: If ``job.json`` is missing or invalid.
+    :raises httk.workflow._fs.UnsafePath: If the placement below ``jobs/ready/`` is a symlink or not a directory.
+    :raises ValueError: If the payload carries ``state.json`` or ``logs``, or *changes* come with *move*.
+    """
+
+    if move and changes:
+        raise ValueError("a moved payload cannot be changed; copy it instead")
+    job = JobDefinition.from_path(source / "job.json")
+    if changes:
+        job = JobDefinition.from_mapping({**job.as_mapping(), **changes})
+    for trusted in ("state.json", LOGS_DIRECTORY):
+        if os.path.lexists(source / trusted):
+            raise ValueError(f"a prepared payload may not carry {trusted}; only a job's owner writes it")
+    _kernel._check_placement(workspace, "ready", job.placement)
+    scratch = owner.scratch(_SUBMIT)
+    if move:
+        return _submit_staged(workspace, owner, scratch, source.resolve())
+    copied = scratch / "copy"
+    shutil.copytree(source, copied, symlinks=True)
+    if changes:
+        _fs.write_file(_fs.loc(copied / "job.json"), job.encode(), durable=workspace.durable)
+    return _submit_staged(workspace, owner, scratch, copied)
+
+
+def _submit_staged(workspace: Workspace, owner: _kernel.Owner, scratch: Path, payload: Path) -> _kernel.JobRef:
+    """Rename a complete *payload* to ``scratch/job`` and submit it; a refused one goes back to *payload*."""
+
+    staging = scratch / "job"
+    _fs.move_owned(_fs.loc(payload), _fs.loc(staging), durable=workspace.durable)
+    try:
+        ref = _kernel.submit(workspace, owner, staging)
+    except BaseException:
+        if _fs.exists(_fs.loc(staging)):
+            _fs.move_owned(_fs.loc(staging), _fs.loc(payload), durable=workspace.durable)
+        raise
+    _fs.remove_empty_dir(_fs.loc(scratch))
+    return ref
+
+
+def _finish_submit(owner: _kernel.Owner, scratch: Path) -> bool:
+    """The ``submit`` scratch reconciler: publish the staged ``job/``, or keep it when that fails.
+
+    Only a complete payload is ever named ``job/`` (moved there in one rename,
+    or copied or built beside it and renamed), so publishing it after a crash is
+    what the dead owner was doing; the fresh name makes a repeat harmless. A
+    scratch without ``job/`` held an unfinished copy (its source is intact) or
+    build (rerun by resubmitting), and is discarded.
+    """
+
+    staging = scratch / "job"
+    if not _fs.exists(_fs.loc(staging)):
+        return True
+    try:
+        ref = _kernel.submit(owner.workspace, owner, staging)
+    except (WorkflowError, OSError) as exc:
+        _LOGGER.warning("kept the staged payload %s: %s", staging, exc)
+        return False
+    _LOGGER.warning("submitted the payload a dead owner staged: %s", ref.path)
+    return True
+
+
+_kernel.register_reconciler(_SUBMIT, _finish_submit)
 
 
 def _installed(
@@ -2179,7 +2267,7 @@ def _save_executable_input(payload: Path, name: str, value: object) -> dict[str,
             httk.core.save(value, destination)
         except Exception as exc:
             last_error = exc
-            destination.unlink(missing_ok=True)
+            _fs.remove_file(_fs.loc(destination.absolute()), durable=False)
             continue
         # ponytail: core has no object-to-writer query; sorted-first-success is
         # deterministic until core exposes explicit writer selection.
