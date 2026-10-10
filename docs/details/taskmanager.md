@@ -890,14 +890,25 @@ httk workspace fsck --json WORKSPACE
 httk workspace fsck --repair WORKSPACE
 ```
 
+Like `fsck` for a filesystem, run it only while no other actor uses the
+workspace: no managers, CLI operations, daemon or transfers. Findings from a
+busy workspace may be transient. `--repair` is refused unless the workspace is
+quiescent: every owner must be proven dead, and every dead owner recovered, so
+no owned jobs or dead-owner scratch remain. Stop the managers, run
+`httk workspace gc` (which recovers dead owners), then rerun. `--repair` also
+asks "Make sure no other operations are ongoing in this workspace. Continue?";
+`--yes` answers it, and without a terminal `--repair` needs `--yes`.
+
 | Finding | Meaning and remedy |
 | --- | --- |
-| `unparsable_name` | an entry that is neither a placement directory nor a job name of its position; `--repair` moves it to quarantine, the only repair |
+| `unparsable_name` | an entry that is neither a placement directory nor a job name of its position; `--repair` moves it to quarantine |
 | `duplicate_job` | one job UUID in two places, after a cross-filesystem crash, a duplicate delivery or two concurrent adoptions; inspect both and delete one |
 | `orphan_owned` | `jobs/owned/<id>/` without its owner's directory; resolve it with `workspace attest-dead` |
 | `tombstoned_owner_with_jobs` | a recovered owner holds jobs, launches or scratch again; `workspace gc` recovers it |
 | `unreadable_state` | a `state.json` that exists but does not decode; the next claimant fails the job with `protocol_error` |
 | `foreign_owner` | a job directory another account owns, which managers skip |
+| `stale_exchange_index` | an exchange index entry whose job is not in the workspace (a job removed by hand), which blocks the client's resubmission of that name; `--repair` removes it |
+| `unindexed_exchange_job` | an exchange root without its exchange index entry; `--repair` recreates the entry |
 
 Without `--repair` nothing is written. The command exits `0` when nothing is
 left for an operator and `1` otherwise. `httk project repair` adds the

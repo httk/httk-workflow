@@ -144,7 +144,8 @@ the owners and their liveness, and when no probe can decide (a host that is
 gone), `workspace attest-dead OWNER --reason TEXT` declares the death; it
 refuses a provably live owner and needs `--force` for an undecidable one, and
 attesting a still-running owner can run work twice. `workspace status`
-summarizes the workspace, `workspace fsck` checks the job tree, and
+summarizes the workspace, `workspace fsck` checks the job tree (only while
+nothing else uses the workspace, like `fsck` for a filesystem), and
 `workspace gc` frees what the retention policy allows.
 {doc}`details/taskmanager` explains each of them.
 

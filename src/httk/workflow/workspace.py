@@ -639,10 +639,11 @@ class Workspace:
         return self._update_format(unset_prelude)
 
     def check(self, *, repair: bool = False) -> "FsckReport":
-        """Check the workspace's job tree (:func:`httk.workflow.fsck.check_workspace`).
+        """Check the workspace's job tree (:func:`httk.workflow.fsck.check_workspace`) while nothing else uses it.
 
-        :param repair: Quarantine the unparsable entries.
+        :param repair: Repair what the check can (refused unless the workspace is quiescent).
         :return: The workspace check report.
+        :raises httk.workflow.errors.WorkflowError: With *repair*, unless the workspace is quiescent.
         """
 
         from .fsck import check_workspace

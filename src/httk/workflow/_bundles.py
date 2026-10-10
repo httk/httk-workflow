@@ -650,7 +650,14 @@ def _validate(path: Path, *, untrusted: bool, limits: _fs.WalkLimits) -> BundleM
 # -- rekeying -------------------------------------------------------------------------------------------------------
 
 
-def _rekeyed_id(workspace_id: str, job_id: str) -> str:
+def rekeyed_id(workspace_id: str, job_id: str) -> str:
+    """The job UUID an untrusted bundle member with client id *job_id* gets in workspace *workspace_id*.
+
+    :param workspace_id: The adopting workspace's id.
+    :param job_id: The client's job UUID (kept as the job's ``exchange_name``).
+    :return: The rekeyed job UUID, deterministic per workspace and client id.
+    """
+
     return canonical_uuid(str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{workspace_id}/{job_id}")))
 
 
@@ -715,7 +722,7 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
     workspace_id = _uuid(workspace_id, "workspace_id")
     loaded = _load_rekey(scratch)
     if loaded is None:
-        forward = {member.job_id: _rekeyed_id(workspace_id, member.job_id) for member in manifest.members}
+        forward = {member.job_id: rekeyed_id(workspace_id, member.job_id) for member in manifest.members}
         if collisions := sorted(forward.keys() & set(forward.values())):
             # A client may pick ids that a rekey would produce; renaming one member onto another must not happen.
             raise BundleError(f"client job id {collisions[0]} collides with a rekeyed id")
@@ -725,7 +732,7 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
     else:
         rekeyed, names = loaded
         forward = {old: new for new, old in names.items()}
-        if any(_rekeyed_id(workspace_id, old) != new for old, new in forward.items()):
+        if any(rekeyed_id(workspace_id, old) != new for old, new in forward.items()):
             raise BundleError(f"rekey.json was derived for another workspace than {workspace_id}")
     original = _rekey(rekeyed, names)
     if manifest not in (original, rekeyed):

@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
@@ -188,11 +189,56 @@ def test_fsck_exits_one_while_findings_remain_and_repair_quarantines_unparsable_
     assert command(["workspace", "fsck", name], context) == 1
     out = capsys.readouterr().out
     assert f"reported\tunparsable_name\t-\t{junk}\t" in out and "checked 0 jobs, 1 findings" in out
-    assert command(["workspace", "fsck", "--repair", name], context) == 0
+    assert command(["workspace", "fsck", "--repair", "--yes", name], context) == 0
     assert "quarantined\tunparsable_name" in capsys.readouterr().out
     assert not junk.exists()
     assert command(["workspace", "fsck", name], context) == 0
     capsys.readouterr()
+
+
+def test_fsck_repair_asks_first_and_refuses_without_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    ws, context, name = _named(tmp_path)
+    junk = ws.jobs / "ready" / "not-a-job"
+    junk.write_text("junk", encoding="utf-8")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert command(["workspace", "fsck", "--repair", name], context) == 1
+    assert "without a terminal requires --yes" in capsys.readouterr().err and junk.exists()
+    prompts: list[str] = []
+
+    def decline(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", decline)
+    assert command(["workspace", "fsck", "--repair", name], context) == 1
+    assert "not repaired" in capsys.readouterr().out and junk.exists()
+    assert prompts == ["Make sure no other operations are ongoing in this workspace. Continue? [y/N] "]
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    assert command(["workspace", "fsck", "--repair", name], context) == 0
+    assert "quarantined\tunparsable_name" in capsys.readouterr().out and not junk.exists()
+
+
+def test_fsck_repair_is_refused_until_gc_recovers_the_owners(tmp_path: Path, capsys) -> None:
+    ws, context, name = _named(tmp_path)
+    ref = submit(ws, _WORKFLOW, {"start": "succeed"})
+    repair = ["workspace", "fsck", "--repair", "--yes", name]
+    owner_id, process = _foreign_owner(ws, "live")
+    try:
+        assert command(repair, context) == 1
+        assert f"not proven dead: {owner_id}; stop its managers, run `httk workspace gc`" in capsys.readouterr().err
+    finally:
+        process.kill()
+        process.wait()
+    # Dead now, but its claimed job is still in owned/ until a recovery returns it.
+    assert command(repair, context) == 1
+    assert f"dead owners not recovered: {owner_id}" in capsys.readouterr().err
+    assert command(["workspace", "gc", "--category", "dead_owners", name], context) == 0
+    assert only(ws, "ready").job_id == ref.job_id
+    assert command(repair, context) == 0
+    assert "checked 1 jobs, 0 findings" in capsys.readouterr().out
 
 
 def test_unlock_is_gone(tmp_path: Path, capsys) -> None:

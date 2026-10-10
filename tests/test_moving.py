@@ -1208,53 +1208,48 @@ def test_an_index_entry_whose_removal_never_ran_is_found_and_repaired_by_fsck(
     assert resent is not None and len(resent.published) == 3
 
 
-def test_fsck_leaves_index_entries_of_held_and_in_flight_jobs_alone(tmp_path: Path) -> None:
+def test_fsck_repair_is_refused_until_gc_recovers_every_owner(tmp_path: Path) -> None:
     from httk.workflow.fsck import check_workspace
 
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
     assert check_workspace(ws).ok
-    # An index entry whose job sits in an eject scratch (the scratch of an owner that died mid-eject).
+    # An owner that crashed mid-eject: its scratch holds the indexed job.
     owner = cli_owner(ws)
     _fs.set_fault_injector(crash_at_extract(3, "after"))
     with pytest.raises(Crash):
         _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
     _fs.set_fault_injector(None)
-    assert check_workspace(ws).ok
-    die_and_recover(ws, owner)
-    assert check_workspace(ws).ok and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+    with pytest.raises(WorkflowError, match=f"not proven dead: {owner.owner_id}.*workspace gc"):
+        check_workspace(ws, repair=True)
+    _kernel.attest_dead(ws, owner.owner_id, by="operator", evidence=[], reason="test")
+    with pytest.raises(WorkflowError, match=f"dead owners not recovered: {owner.owner_id}.*workspace gc"):
+        check_workspace(ws, repair=True)
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+    # What `workspace gc` does (it never probes an owner of its own process): the eject rolls back.
+    with cli_owner(ws) as rescuer:
+        _kernel.recover(ws, rescuer, owner.owner_id)
+    assert check_workspace(ws, repair=True).ok
+    assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
 
 
-def test_fsck_repair_keeps_the_index_of_a_job_an_eject_extracts_meanwhile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The in-flight check runs after the settled locate: an eject that extracts the job while fsck looks is seen.
-    from httk.workflow import fsck
+def test_fsck_finds_and_reindexes_an_exchange_root_without_its_index_entry(tmp_path: Path) -> None:
+    from httk.workflow.fsck import check_workspace
 
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
-    owner = cli_owner(ws)
-    real_locate = _kernel.locate
-    ejected: list[bool] = []
-
-    def locate_then_eject(*args: Any, **kwargs: Any) -> _kernel.JobRef | None:
-        found = real_locate(*args, **kwargs)
-        if not ejected:
-            ejected.append(True)
-            _fs.set_fault_injector(crash_at_extract(3, "after"))
-            with pytest.raises(Crash):
-                _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
-            _fs.set_fault_injector(None)
-            return None  # the job was not found: it is in the eject scratch now
-        return found
-
-    monkeypatch.setattr(fsck._kernel, "locate", locate_then_eject)
-    report = fsck.check_workspace(ws, repair=True)
-    monkeypatch.undo()
-    assert ejected and not [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
-    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
-    die_and_recover(ws, owner)  # the eject rolls back: the jobs come home, still indexed
-    assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+    name = str(jobs[0]["id"])
+    old = _kernel.exchange_index(ws, name)
+    assert old is not None
+    shutil.rmtree(ws.control / "exchange-jobs" / name)
+    # Only the root is flagged: the children carry their own client ids, but are not indexed.
+    (finding,) = check_workspace(ws).findings
+    assert (finding.problem, finding.action, finding.job_id) == ("unindexed_exchange_job", "reported", root.job_id)
+    (repaired,) = check_workspace(ws, repair=True).findings
+    assert (repaired.problem, repaired.action) == ("unindexed_exchange_job", "indexed")
+    new = _kernel.exchange_index(ws, name)
+    assert new is not None and new[:2] == old[:2] and new[2] != old[2]
+    assert check_workspace(ws).ok
 
 
 def _crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
@@ -1265,7 +1260,6 @@ def _crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc
 def test_recovery_after_a_resubmission_keeps_the_new_adoptions_index_entry(tmp_path: Path) -> None:
     # A resubmission rekeys to the same job id under a new adoption nonce: the dead ejector's roll-forward must
     # not remove the new adoption's entry.
-    from httk.workflow.fsck import check_workspace
 
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
@@ -1282,11 +1276,7 @@ def test_recovery_after_a_resubmission_keeps_the_new_adoptions_index_entry(tmp_p
     assert os.listdir(ws.control / "tmp" / scratch) == ["eject.json"]
     old = _kernel.exchange_index(ws, name)
     assert old is not None and old[0] == root.job_id
-    # fsck counts the job recorded in eject.json as in flight.
-    report = check_workspace(ws, repair=True)
-    assert not [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
-    assert _kernel.exchange_index(ws, name) == old
-    # The entry goes anyway (by hand, say); the client fetches its return and sends the same jobs again.
+    # The entry goes by hand; the client fetches its return and sends the same jobs again.
     shutil.rmtree(ws.control / "exchange-jobs" / name)
     shutil.rmtree(destination)
     client_bundle(tmp_path / "inbox" / "again", jobs)
@@ -1298,38 +1288,6 @@ def test_recovery_after_a_resubmission_keeps_the_new_adoptions_index_entry(tmp_p
     # The dead ejector's eject rolls forward, under the nonce it recorded: the new entry stays.
     die_and_recover(ws, owner)
     assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, name) == new
-
-
-@pytest.mark.parametrize("where", ["scratch", "hold"])
-def test_fsck_repair_removes_nothing_while_a_scratch_or_hold_cannot_be_read(tmp_path: Path, where: str) -> None:
-    from httk.workflow.fsck import check_workspace
-
-    if os.geteuid() == 0:
-        pytest.skip("root reads a mode-000 directory")
-    ws = v3_workspace(tmp_path / "ws")
-    jobs, root = _exchange_tree(ws, tmp_path)
-    name = str(jobs[0]["id"])
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(_kernel, "drop_exchange_index", lambda *_args: None)
-        with cli_owner(ws) as owner:
-            _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
-    # Another uid's scratch or hold: fsck cannot know what it holds.
-    if where == "scratch":
-        unreadable = ws.control / "tmp" / f"{'0' * 32}.eject.{_fs.fresh_token()}"
-    else:
-        unreadable = ws.control / "transfers" / "outgoing" / uuid.uuid4().hex
-    unreadable.mkdir(parents=True)
-    os.chmod(unreadable, 0)
-    try:
-        report = check_workspace(ws, repair=True)
-    finally:
-        os.chmod(unreadable, 0o700)
-    (finding,) = [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
-    assert finding.action == "reported" and "not removed" in finding.detail
-    assert _kernel.exchange_index(ws, name) is not None
-    unreadable.rmdir()
-    repaired = check_workspace(ws, repair=True)
-    assert [finding.action for finding in repaired.findings] == ["removed"]
 
 
 def test_settle_does_not_mistake_a_taken_scratch_for_a_delivery(

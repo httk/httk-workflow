@@ -27,7 +27,7 @@ Timestamps are UTC ISO 8601, except epoch seconds in signed exchange requests.
 | Actor | Trust | Writes |
 | --- | --- | --- |
 | Manager (`TaskManager`, owner kind `manager`) | trusted | everything below the workspace, but inside a job only while it owns it |
-| CLI owner (owner kind `cli`) | trusted | as a manager; `job new`, `job submit`, `job delete`, `job seal`, `job unseal`, `job eject`, `job adopt`, `job debug`, `workflow install`, `workflow build`, `workflow uninstall`, `workspace gc` and `workspace fsck` register one for their duration |
+| CLI owner (owner kind `cli`) | trusted | as a manager; `job new`, `job submit`, `job delete`, `job seal`, `job unseal`, `job eject`, `job adopt`, `job debug`, `workflow install`, `workflow build`, `workflow uninstall`, `workspace gc` and `workspace fsck --repair` register one for their duration |
 | Operator | trusted | request files, tombstones by attestation, the workflow store |
 | Workspace daemon | trusted | its private state outside the workspace, and its own documents in `exchange/`; owner kind `daemon` is reserved for it |
 | Attempt and its launch ranks | **untrusted**, confined when `manager.confine=bwrap` | its own job directory, minus the trusted entries |
@@ -1555,20 +1555,30 @@ There is no age-based collection of scratch, held bundles or quarantine.
 
 ### Workspace check
 
-`httk workspace fsck` walks `jobs/` and reports:
+`httk workspace fsck` MUST run only while no other actor uses the workspace: no
+manager, CLI operation, daemon or transfer. It is the one maintenance operation
+that relies on this, like `fsck` for a filesystem; `gc`, recovery and the
+managers stay safe concurrently. Findings from a busy workspace may be
+transient. `--repair` is refused unless the workspace is quiescent: every owner
+other than fsck's own proven dead (as `workspace delete` requires) and
+`recoverable_owners` empty, so no owned jobs and no dead-owner scratch remain;
+`gc` recovers dead owners. The CLI asks for confirmation before repairing
+(`--yes` skips it; without a terminal it is required). The repair registers a
+CLI owner of its own. The check walks `jobs/` and reports:
 
 | Finding | Meaning |
 | --- | --- |
-| `unparsable_name` | An entry that is neither a placement directory nor a job name of its position. With `--repair` it is quarantined, the only repair. |
+| `unparsable_name` | An entry that is neither a placement directory nor a job name of its position. With `--repair` it is quarantined. |
 | `duplicate_job` | One job UUID in two places (a cross-filesystem crash, a duplicate delivery or two concurrent trusted adoptions). |
 | `orphan_owned` | `jobs/owned/<id>/` without `owners/<id>/`; resolved by `attest-dead`. |
 | `tombstoned_owner_with_jobs` | A recovered owner that holds jobs, launches or scratch again; `gc` recovers it. |
 | `unreadable_state` | A `state.json` that exists but does not decode. |
 | `foreign_owner` | A job directory another uid owns. |
-| `stale_exchange_index` | An exchange index entry whose job is not here (a settled lookup), nor in a hold or an eject or adopt scratch, in its bundle or recorded in its `eject.json` (checked after the lookup, so an eject extracting the job meanwhile is seen), nor here at a second settled lookup (a job gone home from a scratch meanwhile). With `--repair` it is removed under the nonce it was read with; when a hold or scratch cannot be read (another uid's), the finding is reported and nothing is removed. |
+| `stale_exchange_index` | An exchange index entry whose job one settled lookup does not find (the settle covers the visibility of writes that finished before fsck started). A held job is not looked for: a delivered hold has left the index already. With `--repair` it is removed under the nonce it was read with. |
+| `unindexed_exchange_job` | An unowned job with `origin: exchange`, no parent, and the job id this workspace rekeys its `exchange_name` to (an exchange root), without `exchange-jobs/<exchange_name>/`. Children, whose `exchange_name` is their own client id or their root's, and exchange jobs adopted from another workspace are not roots here. With `--repair` the entry is recreated by `claim_exchange_name` under a fresh adoption nonce. |
 
-Everything but unparsable entries and stale exchange index entries is left to
-the operator.
+Everything but unparsable entries and stale or missing exchange index entries
+is left to the operator.
 
 
 ### Hygiene and inspection

@@ -119,7 +119,7 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace settings show\|set\|unset` | print, store or remove one application setting | `--key KEY`, `--value VALUE` |
 | `workspace workflow-prelude show\|set\|unset` | print, store or remove one workflow's prelude | `--workflow WORKFLOW`, `--value VALUE` (`@FILE` reads a file) |
 | `workspace policy show\|set\|unset` | print, store or reset a policy member | `--key KEY`, `--value JSON`, `--json` |
-| `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve | `--repair`, `--json` |
+| `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve; only while nothing else uses the workspace | `--repair` (quiescent workspace only, asks first), `--yes`, `--json` |
 | `workspace gc [NAME...]` | collect what the retention policy allows and recover dead owners (remote: over the adapter) | `--dry-run`, `--category CATEGORY` (repeatable), `--json` |
 | `workspace seal [NAME...]` | record every job's seal digest under one signed workspace seal, listing the unsealed jobs | `--keys REFS` |
 | `workspace unseal [NAME...]` | remove a workspace's seal, refused while its project is sealed | `--force` skips the confirmation |
@@ -197,7 +197,12 @@ decide needs `--force`. Attesting an owner that is still running can apply a
 request twice and run work twice, so attest only after confirming that the owner
 process and every launch it started are gone; see
 [owners, death and recovery](taskmanager.md#owners-death-and-recovery).
-`workspace fsck` and `workspace gc` are described in
+`workspace fsck` must run only while no manager, CLI operation, daemon or
+transfer uses the workspace; its findings from a busy workspace may be
+transient, and `--repair` is refused until every owner is proven dead and
+recovered by `workspace gc`. `--repair` asks for confirmation first; `--yes`
+answers it, and is required without a terminal. `workspace fsck` and
+`workspace gc` are described in
 [checking a workspace](taskmanager.md#checking-a-workspace) and
 [freeing disk](taskmanager.md#freeing-disk).
 
@@ -922,7 +927,7 @@ leases, receipts and the maintenance lock. These spellings no longer parse:
 | `httk workflow transfer offer\|receive\|retire\|reclaim` | `job transfer`, `job eject --hold`, `job adopt`, `job transfer --release` |
 | `workspace unlock` | nothing to unlock: there is no maintenance lock |
 | `workspace forget --force` | `workspace forget` |
-| `workspace fsck --quarantine-unrepairable` | `workspace fsck --repair` (unparsable entries only) |
+| `workspace fsck --quarantine-unrepairable` | `workspace fsck --repair` |
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
 | `transfer send`, `transfer fetch`, `transfer status REMOTE` | `job transfer --job JOB … SRC DST`, `workspace status REMOTE` |

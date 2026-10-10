@@ -577,12 +577,17 @@ def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLICon
 
 
 def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Check a workspace's job tree; ``--repair`` quarantines the unparsable entries, the only repair there is."""
+    """Check a workspace's job tree, which no other actor may use meanwhile; ``--repair`` asks first."""
 
     if isinstance(arguments.workspace, list):
         if arguments.repair and not arguments.workspace:
             raise ValueError("workspace fsck repair requires at least one WORKSPACE")
         return _workspace_batch(arguments, context, handle_workspace_fsck)
+    if arguments.repair:
+        prompt = "Make sure no other operations are ongoing in this workspace. Continue?"
+        if not confirm(prompt, force=arguments.yes, flag="--yes", declined="not repaired"):
+            return 1
+        arguments.yes = True  # answered here: a remote repair runs without asking again
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -591,7 +596,7 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
             context,
             REMOTE_WORKSPACE_FSCK_COMMAND,
             arguments,
-            flags=("--repair", "--json"),
+            flags=("--repair", "--yes", "--json"),
         )
     report = check_workspace(Workspace(root), repair=arguments.repair)
     if arguments.json:
@@ -1438,7 +1443,10 @@ def build_workspace_parser(
         summary="check the job tree for what the kernel cannot read",
         description=(
             "Check a workspace's job tree: unparsable names, a job in two places, owned jobs without their owner, "
-            "unreadable state.json, and jobs another user owns; only unparsable entries can be quarantined"
+            "unreadable state.json, jobs another user owns, and stale or missing exchange index entries. Run it "
+            "only while no other actor (manager, CLI operation, daemon or transfer) uses the workspace: findings "
+            "from a busy workspace may be transient, and --repair is refused unless every owner is proven dead "
+            "and recovered"
         ),
         handler=handle_workspace_fsck,
     )
@@ -1446,8 +1454,12 @@ def build_workspace_parser(
     fsck.add_argument(
         "--repair",
         action="store_true",
-        help="move the unparsable entries into the quarantine; every other finding is left to the operator",
+        help=(
+            "quarantine unparsable entries, remove stale exchange index entries and recreate missing ones, after "
+            "confirmation; every other finding is left to the operator"
+        ),
     )
+    fsck.add_argument("--yes", action="store_true", help="repair without asking for confirmation")
     fsck.add_argument("--json", action="store_true", help="print the findings as one JSON report")
     _add_by_path_argument(fsck)
 
