@@ -147,6 +147,7 @@ _INTERNAL_MODULES = (
     "_children",
     "_joins",
     "_store",
+    "_bundles",
     "runtime_builders",
     "workspace",
     "manager",

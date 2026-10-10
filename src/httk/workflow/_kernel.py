@@ -685,8 +685,10 @@ class Owner:
         if not _PURPOSE.fullmatch(purpose):
             raise ValueError(f"not a scratch purpose: {purpose!r}")
         path = _tmp(self.workspace) / f"{self.owner_id}.{purpose}.{_fs.fresh_token()}"
-        os.makedirs(path.parent, exist_ok=True)
-        os.mkdir(path, 0o700)
+        durable = self.workspace.durable
+        _fs.make_dirs(path.parent, durable=durable)
+        # The token is fresh, so this creates the leaf; a recovering owner must find it after a crash.
+        _fs.make_dirs(path, durable=durable, mode=0o700)
         return path
 
     def launch_dir(self, attempt_id: str, n: str) -> Path:
@@ -1068,6 +1070,46 @@ class OwnedJob:
         for name in _names(directory):
             if _request_id(name, self.job_id) is not None:
                 _fs.remove_file(_fs.loc(directory / name), durable=self.owner.workspace.durable)
+
+    def extract(self, destination: Path) -> None:
+        """Move the quiescent job into a bundle being built in this owner's scratch, and retire the handle.
+
+        Besides release, discard and recovery, this is the only way an owned job leaves ``owned/``. Nothing is
+        written to the job: the bundle's ``bundle.json`` already records its ``from`` state and priority.
+
+        :param destination: A fresh path strictly below one of this owner's scratch directories,
+            ``tmp/<owner-id>.<purpose>.<token>/``, whose parent exists.
+        :raises httk.workflow.errors.WorkflowError: While an attempt runs, or after the handle was released.
+        :raises ValueError: When *destination* is not below this owner's scratch, exists, or has no parent.
+        :raises OwnerLost: When the job directory is gone.
+        """
+
+        self._live()
+        self.require_quiescent()
+        destination = Path(destination)
+        tmp = _tmp(self.owner.workspace)
+        # Lexical: the scratch is owner-private, so a path below its name cannot lead anywhere else.
+        relative = destination.relative_to(tmp) if destination.is_relative_to(tmp) else None
+        if (
+            relative is None
+            or len(relative.parts) < 2
+            or ".." in relative.parts
+            or (scratch := _SCRATCH.fullmatch(relative.parts[0])) is None
+            or scratch[1] != self.owner.owner_id
+        ):
+            raise ValueError(f"{destination} is not below a scratch directory of owner {self.owner.owner_id}")
+        if _fs.exists(_fs.loc(destination)):
+            raise ValueError(f"{destination} already exists")
+        try:
+            parent_is_dir = stat.S_ISDIR(os.lstat(destination.parent).st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            parent_is_dir = False
+        if not parent_is_dir:
+            raise ValueError(f"the parent of {destination} is not a directory")
+        # move_owned decides by the source alone, so a vanished source must be caught first.
+        self._present()
+        _fs.move_owned(_fs.loc(self.path), _fs.loc(destination), durable=self.owner.workspace.durable)
+        self._retire()
 
     def discard_subtree(self, relative: str | PurePosixPath) -> bool:
         """Remove one entry below the job directory; a symlink is removed, never followed.

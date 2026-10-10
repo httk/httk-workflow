@@ -225,7 +225,8 @@ class JobDefinition:
             raise FormatError(f"job.json is larger than {MAX_JOB_BYTES} bytes")
         try:
             value = json.loads(data.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
+        except (ValueError, RecursionError) as exc:
+            # ValueError covers undecodable bytes, malformed JSON and over-long integers; deep nesting recurses.
             raise FormatError(f"job.json is not JSON: {exc}") from exc
         if not isinstance(value, Mapping):
             raise FormatError("job.json must be an object")

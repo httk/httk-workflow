@@ -283,15 +283,23 @@ def _fsync_parents(src: Loc, dst: Loc) -> None:
     _fsync_parent(dst)
 
 
-def _ensure_parent(dst: Loc, *, durable: bool) -> None:
-    # An anchored destination's parent is its descriptor, which exists.
-    if dst.at is not None:
-        return
-    parent = dst.path.parent
+def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
+    """Create *path* and its missing ancestors as real directories.
+
+    A concurrent creation of the same directory is success. An ancestor removed
+    concurrently (by a pruner) makes the walk start again.
+
+    :param path: The absolute directory path.
+    :param durable: fsync the parent of every directory created.
+    :param mode: The permission bits of the created directories (before the umask).
+    :raises UnsafePath: When a component is a symlink or not a directory.
+    :raises MoveFailed: When concurrent removals defeat every attempt.
+    """
+
     for _ in range(_ATTEMPTS):
         # Walk up to the deepest existing ancestor; each component examined must be a real directory.
         missing: list[Path] = []
-        current = parent
+        current = path
         while (info := _lstat(Loc(current))) is None:
             missing.append(current)
             current = current.parent
@@ -300,7 +308,7 @@ def _ensure_parent(dst: Loc, *, durable: bool) -> None:
         try:
             for directory in reversed(missing):
                 try:
-                    os.mkdir(directory)
+                    os.mkdir(directory, mode)
                 except FileExistsError:
                     # A concurrent mkdir is success, provided it made a directory and not a symlink.
                     created = _lstat(Loc(directory))
@@ -313,7 +321,13 @@ def _ensure_parent(dst: Loc, *, durable: bool) -> None:
             # A pruner removed an ancestor between our mkdirs: walk again.
             continue
         return
-    raise MoveFailed(f"could not create the parent of {dst.path} in {_ATTEMPTS} rounds", errno.ENOENT)
+    raise MoveFailed(f"could not create {path} in {_ATTEMPTS} rounds", errno.ENOENT)
+
+
+def _ensure_parent(dst: Loc, *, durable: bool) -> None:
+    # An anchored destination's parent is its descriptor, which exists.
+    if dst.at is None:
+        make_dirs(dst.path.parent, durable=durable)
 
 
 def _rename(src: Loc, dst: Loc) -> OSError | None:

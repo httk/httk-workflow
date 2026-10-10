@@ -147,6 +147,21 @@ def test_open_dir_under(tmp_path: Path) -> None:
     assert sorted(os.listdir("/proc/self/fd")) == before
 
 
+@pytest.mark.parametrize("durable", [False, True])
+def test_make_dirs(tmp_path: Path, durable: bool) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to("real")
+    (tmp_path / "file").write_text("")
+    _fs.make_dirs(tmp_path / "real" / "a" / "b", durable=durable, mode=0o750)
+    assert (tmp_path / "real" / "a" / "b").stat().st_mode & 0o777 == 0o750 & ~_umask()
+    # An existing directory is success.
+    _fs.make_dirs(tmp_path / "real" / "a", durable=durable)
+    for path in (tmp_path / "link" / "x", tmp_path / "file" / "x", tmp_path / "link"):
+        with pytest.raises(UnsafePath):
+            _fs.make_dirs(path, durable=durable)
+    assert not (tmp_path / "real" / "x").exists()
+
+
 def _umask() -> int:
     mask = os.umask(0)
     os.umask(mask)
