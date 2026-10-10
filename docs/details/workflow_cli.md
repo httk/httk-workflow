@@ -189,7 +189,7 @@ who holds jobs, with the liveness the read-only death proof gives from this
 host. An owner whose death no probe can prove is declared dead by the operator:
 
 ```console
-httk workspace attest-dead OWNER WORKSPACE --reason "node rebooted"
+httk workspace attest-dead OWNER WORKSPACE --force --reason "node rebooted"
 ```
 
 The death proof runs first: an owner proven alive is refused, and one it cannot
@@ -930,7 +930,7 @@ leases, receipts and the maintenance lock. These spellings no longer parse:
 | `workspace fsck --quarantine-unrepairable` | `workspace fsck --repair` |
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
-| `transfer send`, `transfer fetch`, `transfer status REMOTE` | `job transfer --job JOB … SRC DST`, `workspace status REMOTE` |
+| `transfer send`, `transfer fetch`, `transfer status REMOTE` (by remote) | `job transfer --job JOB … SRC DST`; `transfer status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
 
 Workspaces and bundles of the earlier layout are refused with a message that
 there is no migration: re-create the workspace with `httk workspace init` and

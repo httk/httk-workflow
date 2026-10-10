@@ -78,8 +78,10 @@ httk workspace policy unset --key retention.trash_days WORKSPACE
 | `retention.owner_tombstone_days` | `30.0` | Age after which `gc` removes the tombstone of a recovered owner. |
 
 Values are JSON, validated on write; `null` or `"keep"` keeps a retention
-category forever, and an unknown key is refused. Concurrent policy writes are
-atomic but not serialized: the last writer wins. Managers read the policy when
+category forever, and an unknown key is refused. A policy write is a
+read-modify-write of `format.json`, verified by re-reading it and redone when
+a concurrent writer replaced it in between; writers are not serialized, so the
+last writer of a key wins. Managers read the policy when
 they attach, so restart long-running managers after a change.
 
 ### Application settings
@@ -374,7 +376,7 @@ asked about), the operator attests the death:
 
 ```console
 httk workspace owners WORKSPACE
-httk workspace attest-dead OWNER WORKSPACE --reason "node17 rebooted"
+httk workspace attest-dead OWNER WORKSPACE --force --reason "node17 rebooted"
 ```
 
 `attest-dead` runs the death proof first: an owner proven alive is refused, and

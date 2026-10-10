@@ -1434,9 +1434,9 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
     workflow_group.add_argument(
         "--workflow",
         metavar="WORKFLOW",
-        help="an installed workflow id or short name, a registered or packaged workflow name ("
-        + ", ".join(registered_workflow_labels())
-        + ") or a git URI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
+        help="an installed workflow id or short name, a registered or packaged workflow name"
+        + (f" ({', '.join(labels)})" if (labels := registered_workflow_labels()) else "")
+        + " or a git URI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
     )
     workflow_group.add_argument(
         "--workflow-dir", metavar="PATH", help="a workflow package directory containing httk_workflow.toml"
