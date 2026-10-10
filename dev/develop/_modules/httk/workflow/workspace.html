@@ -1,0 +1,1044 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.workspace - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workspace_daemon.html">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.workflow.workspace</h1><div class="highlight"><pre>
+<span></span><span class="sd">"""Execution workspace creation, attachment, format, policy and application settings."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Iterable</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Sequence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TYPE_CHECKING</span><span class="p">,</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Self</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">_fs</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">._kernel</span><span class="w"> </span><span class="kn">import</span> <span class="n">OWNED</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">._state</span><span class="w"> </span><span class="kn">import</span> <span class="n">UNOWNED_STATES</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">._util</span><span class="w"> </span><span class="kn">import</span> <span class="n">json_bytes</span><span class="p">,</span> <span class="n">utc_now</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.errors</span><span class="w"> </span><span class="kn">import</span> <span class="n">FormatError</span><span class="p">,</span> <span class="n">SealedError</span><span class="p">,</span> <span class="n">UnsupportedExtensionError</span><span class="p">,</span> <span class="n">WorkflowError</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.models</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">CORE_PROFILE</span><span class="p">,</span>
+    <span class="n">EXCHANGE_EXTENSION</span><span class="p">,</span>
+    <span class="n">JOBS_DIRECTORY</span><span class="p">,</span>
+    <span class="n">SUPPORTED_EXTENSIONS</span><span class="p">,</span>
+    <span class="n">WORKSPACE_DIRECTORY</span><span class="p">,</span>
+    <span class="n">WorkspacePolicy</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="k">if</span> <span class="n">TYPE_CHECKING</span><span class="p">:</span>  <span class="c1"># pragma: no cover - imported for typing only</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">.fsck</span><span class="w"> </span><span class="kn">import</span> <span class="n">FsckReport</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">.gc</span><span class="w"> </span><span class="kn">import</span> <span class="n">GcReport</span>
+
+<span class="n">_LOGGER</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="c1">#: The ``format.json`` ``layout`` of a workspace with ``jobs/&lt;state&gt;/`` job directories and owners (plan §3).</span>
+<span class="n">LAYOUT</span> <span class="o">=</span> <span class="s2">"jobs-v3"</span>
+<span class="n">WORKFLOWS_DIRECTORY</span> <span class="o">=</span> <span class="s2">"workflows"</span>
+
+
+<span class="c1">#: The largest accepted ``format.json``.</span>
+<span class="n">_FORMAT_LIMIT</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="mi">20</span>
+<span class="c1">#: How many times a ``format.json`` read-modify-write is redone when a concurrent writer replaced it.</span>
+<span class="n">_FORMAT_ATTEMPTS</span> <span class="o">=</span> <span class="mi">5</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_read_format</span><span class="p">(</span><span class="n">control</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Read ``&lt;control&gt;/format.json``, bounded and without following a symlink."""</span>
+
+    <span class="n">path</span> <span class="o">=</span> <span class="n">control</span> <span class="o">/</span> <span class="s2">"format.json"</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">_fs</span><span class="o">.</span><span class="n">read_bounded</span><span class="p">(</span><span class="n">_fs</span><span class="o">.</span><span class="n">loc</span><span class="p">(</span><span class="n">path</span><span class="p">),</span> <span class="n">_FORMAT_LIMIT</span><span class="p">)</span>
+        <span class="n">value</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">data</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">OSError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">,</span> <span class="n">_fs</span><span class="o">.</span><span class="n">UnsafePath</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"cannot read JSON object </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="n">data</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"cannot read JSON object </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: it does not exist"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"expected JSON object in </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">value</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_setting_key</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return one application-setting key, refusing an ill-formed one.</span>
+
+<span class="sd">    Application settings are a flat, dotted-name map (``vasp.command``,</span>
+<span class="sd">    ``vasp.pseudo_library``) of small values a runner resolves at execution</span>
+<span class="sd">    time — never nested objects, which belong in a job's ``parameters`` instead.</span>
+<span class="sd">    """</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="n">re</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="sa">r</span><span class="s2">"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"application setting name must be a nonempty dotted identifier: </span><span class="si">{</span><span class="n">key</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">key</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_setting_value</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">object</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return one application-setting value, refusing a non-scalar.</span>
+
+<span class="sd">    Boolean values are refused even though ``bool`` is a subclass of ``int``;</span>
+<span class="sd">    application settings are textual or numeric configuration values.</span>
+<span class="sd">    """</span>
+
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">"</span><span class="se">\0</span><span class="s2">"</span> <span class="ow">in</span> <span class="n">value</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"application setting </span><span class="si">{</span><span class="n">key</span><span class="si">!r}</span><span class="s2"> must not contain NUL characters"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">))</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)):</span>
+        <span class="k">return</span> <span class="n">value</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"application setting </span><span class="si">{</span><span class="n">key</span><span class="si">!r}</span><span class="s2"> must be a JSON scalar, not </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_setting_variable_name</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="k">return</span> <span class="s2">"HTTK_"</span> <span class="o">+</span> <span class="n">key</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"."</span><span class="p">,</span> <span class="s2">"_"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_section</span><span class="p">(</span><span class="n">document</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">],</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">object</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return a required ``format.json`` section, refusing a document without it."""</span>
+
+    <span class="k">if</span> <span class="n">name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">document</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"workspace format.json has no </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2"> section"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">document</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_refuse_format</span><span class="p">(</span><span class="n">root</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">version</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">profile</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">FormatError</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">FormatError</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">"workspace at </span><span class="si">{</span><span class="n">root</span><span class="si">}</span><span class="s2"> uses httk-workflow-filesystem format version </span><span class="si">{</span><span class="n">version</span><span class="si">}</span><span class="s2"> (profile </span><span class="si">{</span><span class="n">profile</span><span class="si">!r}</span><span class="s2">); "</span>
+        <span class="sa">f</span><span class="s2">"this version of httk-workflow reads only format 3 (</span><span class="si">{</span><span class="n">CORE_PROFILE</span><span class="si">}</span><span class="s2">). "</span>
+        <span class="s2">"There is no migration: remove old per-user state with `httk system reset` "</span>
+        <span class="s2">"and recreate the workspace with `httk workspace init`."</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_extensions</span><span class="p">(</span><span class="n">document</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return the enabled extensions of a ``format.json`` document, refusing unsupported ones."""</span>
+
+    <span class="n">raw</span> <span class="o">=</span> <span class="n">document</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extensions"</span><span class="p">,</span> <span class="p">[])</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">raw</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"workspace extensions must be an array of strings"</span><span class="p">)</span>
+    <span class="n">extensions</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+    <span class="n">unsupported</span> <span class="o">=</span> <span class="n">extensions</span> <span class="o">-</span> <span class="n">SUPPORTED_EXTENSIONS</span>
+    <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">UnsupportedExtensionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unsupported enabled extensions: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">unsupported</span><span class="p">))</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">extensions</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_settings</span><span class="p">(</span><span class="n">raw</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return a validated flat map of application settings."""</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"workspace settings must be a JSON object"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="n">_validate_setting_key</span><span class="p">(</span><span class="n">key</span><span class="p">):</span> <span class="n">_validate_setting_value</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">key</span><span class="p">),</span> <span class="n">value</span><span class="p">)</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">raw</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_workflow_prelude_id</span><span class="p">(</span><span class="n">workflow_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return one workflow-prelude key, refusing an ill-formed one.</span>
+
+<span class="sd">    The key mirrors a ``[workflow].name``: a nonempty string with no whitespace,</span>
+<span class="sd">    because a prelude map is keyed by the workflow it initializes the</span>
+<span class="sd">    environment for.</span>
+<span class="sd">    """</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">workflow_id</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">workflow_id</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">character</span><span class="o">.</span><span class="n">isspace</span><span class="p">()</span> <span class="k">for</span> <span class="n">character</span> <span class="ow">in</span> <span class="n">workflow_id</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"workflow prelude id must be a nonempty whitespace-free string: </span><span class="si">{</span><span class="n">workflow_id</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">workflow_id</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_workflow_prelude_value</span><span class="p">(</span><span class="n">workflow_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return one workflow-prelude value, refusing a non-string or NUL."""</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"workflow prelude </span><span class="si">{</span><span class="n">workflow_id</span><span class="si">!r}</span><span class="s2"> must be a string, not </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s2">"</span><span class="se">\0</span><span class="s2">"</span> <span class="ow">in</span> <span class="n">value</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"workflow prelude </span><span class="si">{</span><span class="n">workflow_id</span><span class="si">!r}</span><span class="s2"> must not contain NUL characters"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">value</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_workflow_preludes</span><span class="p">(</span><span class="n">raw</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return a validated map of workflow id to shell prelude text."""</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"workspace workflow_preludes must be a JSON object"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="n">_validate_workflow_prelude_id</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">key</span><span class="p">)):</span> <span class="n">_validate_workflow_prelude_value</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">key</span><span class="p">),</span> <span class="n">value</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">raw</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+    <span class="p">}</span>
+
+
+<div class="viewcode-block" id="Workspace">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Workspace</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Attach to one self-contained httk workflow filesystem workspace.</span>
+
+<span class="sd">    :param root: Locate the workspace root.</span>
+<span class="sd">    :param durable: Enable storage-crash durability for filesystem publications.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the workspace format or identity is invalid.</span>
+<span class="sd">    :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace uses unsupported extensions or a profile.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">durable</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">root</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">jobs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">/</span> <span class="n">JOBS_DIRECTORY</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">control</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">/</span> <span class="n">WORKSPACE_DIRECTORY</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">durable</span> <span class="o">=</span> <span class="n">durable</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">format</span> <span class="o">=</span> <span class="n">_read_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format"</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"httk-workflow-filesystem"</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">_refuse_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">core_profile</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">core_profile</span> <span class="o">!=</span> <span class="n">CORE_PROFILE</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">_refuse_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">))</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"layout"</span><span class="p">)</span> <span class="o">!=</span> <span class="n">LAYOUT</span><span class="p">:</span>
+            <span class="c1"># Plan P8: the jobs-v3 layout replaces the unreleased one under the same format number, without migration.</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"workspace at </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="si">}</span><span class="s2"> uses an older job layout (format.json has no </span><span class="se">\"</span><span class="s2">layout</span><span class="se">\"</span><span class="s2">: </span><span class="se">\"</span><span class="si">{</span><span class="n">LAYOUT</span><span class="si">}</span><span class="se">\"</span><span class="s2">); "</span>
+                <span class="s2">"there is no migration: re-create the workspace with `httk workspace init` and submit its jobs again"</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_policy</span> <span class="o">=</span> <span class="n">WorkspacePolicy</span><span class="o">.</span><span class="n">from_mapping</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="p">,</span> <span class="s2">"policy"</span><span class="p">))</span>
+        <span class="n">_validate_settings</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="p">,</span> <span class="s2">"settings"</span><span class="p">))</span>
+        <span class="n">_validate_workflow_preludes</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="p">,</span> <span class="s2">"workflow_preludes"</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">extensions</span> <span class="o">=</span> <span class="n">_extensions</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"record_ref_encoding"</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"hwref-v2"</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">UnsupportedExtensionError</span><span class="p">(</span><span class="s2">"unsupported record reference encoding"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"workspace_id"</span><span class="p">))</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">if</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">UUID</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="p">))</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span>
+        <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"workspace_id must be a canonical UUID"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">"Workspace(root=</span><span class="si">{</span><span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="p">)</span><span class="si">!r}</span><span class="s2">, workspace_id=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="si">!r}</span><span class="s2">)"</span>
+
+<div class="viewcode-block" id="Workspace.initialize">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.initialize">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span>
+        <span class="bp">cls</span><span class="p">,</span>
+        <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">extensions</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+        <span class="n">durable</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="n">policy</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"Workspace"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Create and return a new workspace.</span>
+
+<span class="sd">        :param root: Locate the new workspace root.</span>
+<span class="sd">        :param extensions: Enable optional workspace extensions.</span>
+<span class="sd">        :param durable: Enable storage-crash durability for filesystem publications.</span>
+<span class="sd">        :param policy: Override the default workspace policy values.</span>
+<span class="sd">        :return: The initialized workspace.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the filesystem cannot satisfy the workspace profile or</span>
+<span class="sd">            ``root`` exists and is not an empty directory.</span>
+<span class="sd">        :raises httk.workflow.errors.UnsupportedExtensionError: If an extension is not supported.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the enclosing project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.projects</span><span class="w"> </span><span class="kn">import</span> <span class="n">discover_project</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.seals</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_project_sealed</span>
+
+        <span class="n">initial_policy</span> <span class="o">=</span> <span class="n">WorkspacePolicy</span><span class="o">.</span><span class="n">from_mapping</span><span class="p">({}</span> <span class="k">if</span> <span class="n">policy</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">policy</span><span class="p">)</span>
+        <span class="n">root_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">root</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+        <span class="n">project</span> <span class="o">=</span> <span class="n">discover_project</span><span class="p">(</span><span class="n">root_path</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">project</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">is_project_sealed</span><span class="p">(</span><span class="n">project</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">SealedError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"project at </span><span class="si">{</span><span class="n">project</span><span class="si">}</span><span class="s2"> is sealed; cannot initialize a workspace under it"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="n">root_path</span><span class="o">.</span><span class="n">exists</span><span class="p">()</span>
+            <span class="ow">and</span> <span class="ow">not</span> <span class="p">(</span>
+                <span class="n">root_path</span> <span class="o">/</span> <span class="n">WORKSPACE_DIRECTORY</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">exists</span><span class="p">()</span>  <span class="c1"># a half-made workspace keeps the FileExistsError race path</span>
+            <span class="ow">and</span> <span class="p">(</span><span class="ow">not</span> <span class="n">root_path</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">root_path</span><span class="o">.</span><span class="n">iterdir</span><span class="p">()))</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">root_path</span><span class="si">}</span><span class="s2"> is not empty: a workspace is a directory of its own; initialize it in a new or "</span>
+                <span class="s2">"empty directory, e.g. `httk workspace init --name default workspace`"</span>
+            <span class="p">)</span>
+        <span class="n">root_path</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">extension_set</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span><span class="n">extensions</span><span class="p">)</span>
+        <span class="n">unsupported</span> <span class="o">=</span> <span class="n">extension_set</span> <span class="o">-</span> <span class="n">SUPPORTED_EXTENSIONS</span>
+        <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">UnsupportedExtensionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unsupported extensions: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">unsupported</span><span class="p">))</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">name_max</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">pathconf</span><span class="p">(</span><span class="n">root_path</span><span class="p">,</span> <span class="s2">"PC_NAME_MAX"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">name_max</span> <span class="o">&lt;</span> <span class="mi">213</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"filesystem NAME_MAX </span><span class="si">{</span><span class="n">name_max</span><span class="si">}</span><span class="s2"> is below the </span><span class="si">{</span><span class="n">CORE_PROFILE</span><span class="si">}</span><span class="s2"> requirement of 213"</span><span class="p">)</span>
+        <span class="n">control</span> <span class="o">=</span> <span class="n">root_path</span> <span class="o">/</span> <span class="n">WORKSPACE_DIRECTORY</span>
+        <span class="n">control</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">exist_ok</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">relative</span> <span class="ow">in</span> <span class="p">(</span>
+            <span class="s2">"owners"</span><span class="p">,</span>
+            <span class="s2">"requests"</span><span class="p">,</span>
+            <span class="s2">"tmp"</span><span class="p">,</span>
+            <span class="s2">"quarantine"</span><span class="p">,</span>
+            <span class="s2">"exchange-jobs"</span><span class="p">,</span>
+        <span class="p">):</span>
+            <span class="p">(</span><span class="n">control</span> <span class="o">/</span> <span class="n">relative</span><span class="p">)</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">state</span> <span class="ow">in</span> <span class="p">(</span><span class="o">*</span><span class="n">UNOWNED_STATES</span><span class="p">,</span> <span class="n">OWNED</span><span class="p">):</span>
+            <span class="p">(</span><span class="n">root_path</span> <span class="o">/</span> <span class="n">JOBS_DIRECTORY</span> <span class="o">/</span> <span class="n">state</span><span class="p">)</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="p">(</span><span class="n">root_path</span> <span class="o">/</span> <span class="n">WORKFLOWS_DIRECTORY</span><span class="p">)</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">document</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"format"</span><span class="p">:</span> <span class="s2">"httk-workflow-filesystem"</span><span class="p">,</span>
+            <span class="s2">"format_version"</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+            <span class="s2">"layout"</span><span class="p">:</span> <span class="n">LAYOUT</span><span class="p">,</span>
+            <span class="s2">"core_profile"</span><span class="p">:</span> <span class="n">CORE_PROFILE</span><span class="p">,</span>
+            <span class="c1"># The exchange extension is recorded by enabling it below, once its directory exists.</span>
+            <span class="s2">"extensions"</span><span class="p">:</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">extension_set</span> <span class="o">-</span> <span class="p">{</span><span class="n">EXCHANGE_EXTENSION</span><span class="p">}),</span>
+            <span class="s2">"record_ref_encoding"</span><span class="p">:</span> <span class="s2">"hwref-v2"</span><span class="p">,</span>
+            <span class="s2">"workspace_id"</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()),</span>
+            <span class="s2">"created_at"</span><span class="p">:</span> <span class="n">utc_now</span><span class="p">(),</span>
+            <span class="s2">"policy"</span><span class="p">:</span> <span class="n">initial_policy</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">(),</span>
+            <span class="s2">"settings"</span><span class="p">:</span> <span class="p">{},</span>
+            <span class="s2">"workflow_preludes"</span><span class="p">:</span> <span class="p">{},</span>
+        <span class="p">}</span>
+        <span class="n">_fs</span><span class="o">.</span><span class="n">write_file</span><span class="p">(</span><span class="n">_fs</span><span class="o">.</span><span class="n">loc</span><span class="p">(</span><span class="n">control</span> <span class="o">/</span> <span class="s2">"format.json"</span><span class="p">),</span> <span class="n">json_bytes</span><span class="p">(</span><span class="n">document</span><span class="p">)</span> <span class="o">+</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="n">durable</span><span class="p">)</span>
+        <span class="c1"># A workspace inside a project is a project member: core's project verbs</span>
+        <span class="c1"># (seal, manifest, repair, verify) discover it through members.json.</span>
+        <span class="k">if</span> <span class="n">project</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">httk.core.project.members</span><span class="w"> </span><span class="kn">import</span> <span class="n">register_project_member</span>
+
+            <span class="n">register_project_member</span><span class="p">(</span><span class="n">project</span><span class="p">,</span> <span class="n">root_path</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">)</span>
+        <span class="n">workspace</span> <span class="o">=</span> <span class="bp">cls</span><span class="p">(</span><span class="n">root_path</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="n">durable</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">EXCHANGE_EXTENSION</span> <span class="ow">in</span> <span class="n">extension_set</span><span class="p">:</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">._exchange</span><span class="w"> </span><span class="kn">import</span> <span class="n">enable_exchange</span>
+
+            <span class="n">enable_exchange</span><span class="p">(</span><span class="n">workspace</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">workspace</span></div>
+
+
+<div class="viewcode-block" id="Workspace.discover">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.discover">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">discover</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">start</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Find the nearest workspace root at or above *start*.</span>
+
+<span class="sd">        Discovery walks from *start* and its parents, treating a file start as</span>
+<span class="sd">        its containing directory.</span>
+
+<span class="sd">        :param start: Directory or file from which to begin the upward search, or None for the current directory.</span>
+<span class="sd">        :return: Nearest workspace root, or None when no workspace marker is found.</span>
+<span class="sd">        """</span>
+
+        <span class="n">path</span> <span class="o">=</span> <span class="n">Path</span><span class="o">.</span><span class="n">cwd</span><span class="p">()</span> <span class="k">if</span> <span class="n">start</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">Path</span><span class="p">(</span><span class="n">start</span><span class="p">)</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">path</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="n">path</span> <span class="o">=</span> <span class="n">path</span><span class="o">.</span><span class="n">parent</span>
+        <span class="k">for</span> <span class="n">candidate</span> <span class="ow">in</span> <span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="o">*</span><span class="n">path</span><span class="o">.</span><span class="n">parents</span><span class="p">):</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">candidate</span> <span class="o">/</span> <span class="n">WORKSPACE_DIRECTORY</span> <span class="o">/</span> <span class="s2">"format.json"</span><span class="p">)</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+                <span class="k">return</span> <span class="n">candidate</span>
+        <span class="k">return</span> <span class="kc">None</span></div>
+
+
+<div class="viewcode-block" id="Workspace.default">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.default">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">default</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Resolve the enclosing, project, or per-user default workspace, creating it if needed.</span>
+
+<span class="sd">        :return: The default workspace.</span>
+<span class="sd">        """</span>
+
+        <span class="n">discovered</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">discover</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">discovered</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">discovered</span><span class="p">)</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">registry</span>
+
+        <span class="n">binding</span> <span class="o">=</span> <span class="n">registry</span><span class="o">.</span><span class="n">default_workspace</span><span class="p">()</span>
+        <span class="k">assert</span> <span class="n">binding</span><span class="o">.</span><span class="n">path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">binding</span><span class="o">.</span><span class="n">path</span><span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">policy</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WorkspacePolicy</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the tunables this workspace publishes to every attacher.</span>
+
+<span class="sd">        :return: The current workspace policy.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_policy</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">workflows</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the store of installed workflows, ``&lt;root&gt;/workflows``.</span>
+
+<span class="sd">        :return: The store directory.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">/</span> <span class="n">WORKFLOWS_DIRECTORY</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">visibility_deadline</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return how long a metadata visibility retry may keep probing.</span>
+
+<span class="sd">        :return: The workspace metadata visibility deadline.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_policy</span><span class="o">.</span><span class="n">visibility_deadline_seconds</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_update_format</span><span class="p">[</span><span class="n">T</span><span class="p">](</span><span class="bp">self</span><span class="p">,</span> <span class="n">mutate</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]],</span> <span class="n">T</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">T</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Read-modify-write ``format.json``: apply *mutate* to a fresh read, write it with ``write_file`` and</span>
+<span class="sd">        verify by re-reading it, redoing all three when a concurrent writer replaced it in between.</span>
+
+<span class="sd">        Writers are not serialized (there is no lock): one that read before this write may still replace it later.</span>
+
+<span class="sd">        :param mutate: Changes the document in place; what it returns is returned.</span>
+<span class="sd">        :return: What *mutate* returned for the document that was verified.</span>
+<span class="sd">        :raises httk.workflow.errors.WorkflowError: When concurrent writers replaced every attempt.</span>
+<span class="sd">        """</span>
+
+        <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">_FORMAT_ATTEMPTS</span><span class="p">):</span>
+            <span class="n">stored</span> <span class="o">=</span> <span class="n">_read_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="p">)</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">mutate</span><span class="p">(</span><span class="n">stored</span><span class="p">)</span>
+            <span class="n">written</span> <span class="o">=</span> <span class="n">json_bytes</span><span class="p">(</span><span class="n">stored</span><span class="p">)</span>
+            <span class="n">_fs</span><span class="o">.</span><span class="n">write_file</span><span class="p">(</span><span class="n">_fs</span><span class="o">.</span><span class="n">loc</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span> <span class="o">/</span> <span class="s2">"format.json"</span><span class="p">),</span> <span class="n">written</span> <span class="o">+</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">json_bytes</span><span class="p">(</span><span class="n">_read_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="p">))</span> <span class="o">==</span> <span class="n">written</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">format</span> <span class="o">=</span> <span class="n">stored</span>
+                <span class="k">return</span> <span class="n">result</span>
+        <span class="k">raise</span> <span class="n">WorkflowError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"concurrent writers kept replacing </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="s1">'format.json'</span><span class="si">}</span><span class="s2">; run the command again"</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_add_extension</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Record *name* in ``format.json`` ``extensions`` (a verified read-modify-write) and re-read the extensions."""</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">add</span><span class="p">(</span><span class="n">stored</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">extensions</span> <span class="o">=</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extensions"</span><span class="p">,</span> <span class="p">[])</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">extensions</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"workspace extensions must be an array of strings"</span><span class="p">)</span>
+            <span class="n">stored</span><span class="p">[</span><span class="s2">"extensions"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">({</span><span class="o">*</span><span class="n">extensions</span><span class="p">,</span> <span class="n">name</span><span class="p">})</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_update_format</span><span class="p">(</span><span class="n">add</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">refresh_format</span><span class="p">()</span>
+
+<div class="viewcode-block" id="Workspace.set_policy">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.set_policy">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_policy</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">changes</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">WorkspacePolicy</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Validate *changes*, merge them into the stored policy, and publish it.</span>
+
+<span class="sd">        The write is a read-modify-write of ``format.json`` through an</span>
+<span class="sd">        exclusively created temporary file and a rename, so a reader never sees</span>
+<span class="sd">        a torn object, verified by re-reading it and redone when a concurrent</span>
+<span class="sd">        writer replaced it. It is deliberately not serialized against another</span>
+<span class="sd">        writer: policy is administrative, changes are rare, and last writer wins.</span>
+
+<span class="sd">        :param changes: Supply policy values to validate and merge.</span>
+<span class="sd">        :return: The resulting workspace policy.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.seals</span><span class="w"> </span><span class="kn">import</span> <span class="n">require_cli_modifiable</span>
+
+        <span class="n">require_cli_modifiable</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">merge</span><span class="p">(</span><span class="n">stored</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">WorkspacePolicy</span><span class="p">:</span>
+            <span class="n">merged</span> <span class="o">=</span> <span class="n">WorkspacePolicy</span><span class="o">.</span><span class="n">from_mapping</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="n">stored</span><span class="p">,</span> <span class="s2">"policy"</span><span class="p">))</span><span class="o">.</span><span class="n">updated</span><span class="p">(</span><span class="n">changes</span><span class="p">)</span>
+            <span class="n">stored</span><span class="p">[</span><span class="s2">"policy"</span><span class="p">]</span> <span class="o">=</span> <span class="n">merged</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">merged</span>
+
+        <span class="n">merged</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_update_format</span><span class="p">(</span><span class="n">merge</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_policy</span> <span class="o">=</span> <span class="n">merged</span>
+        <span class="n">_LOGGER</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+            <span class="s2">"workspace </span><span class="si">%s</span><span class="s2"> policy updated: </span><span class="si">%s</span><span class="s2">"</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="p">,</span>
+            <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">=</span><span class="si">{</span><span class="n">value</span><span class="si">!r}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">changes</span><span class="o">.</span><span class="n">items</span><span class="p">())),</span>
+            <span class="n">extra</span><span class="o">=</span><span class="p">{</span><span class="s2">"event"</span><span class="p">:</span> <span class="s2">"policy_updated"</span><span class="p">,</span> <span class="s2">"workspace_id"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="p">},</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">merged</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">settings</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return this workspace's application settings, a flat dotted map.</span>
+
+<span class="sd">        Application settings are distinct from :attr:`policy`, which tunes the</span>
+<span class="sd">        engine. These are the values an application step resolves at run time —</span>
+<span class="sd">        the VASP command, a pseudopotential library — one layer of the</span>
+<span class="sd">        job-parameters → environment → workspace → default resolution a runner reads</span>
+<span class="sd">        through :meth:`~httk.workflow.sdk.Attempt.setting`.</span>
+
+<span class="sd">        :return: The workspace's application settings.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="n">_validate_settings</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">format</span><span class="p">,</span> <span class="s2">"settings"</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Workspace.refresh_format">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.refresh_format">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh_format</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.</span>
+
+<span class="sd">        Extensions can be enabled while processes are attached (``httk</span>
+<span class="sd">        workspace exchange enable``), so a long-running reader re-reads them</span>
+<span class="sd">        rather than trusting what it saw at attach. The format, profile and</span>
+<span class="sd">        workspace identity must still be the attached ones; the policy keeps the</span>
+<span class="sd">        value read at attach.</span>
+
+<span class="sd">        :return: The re-read ``format.json`` document.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If ``format.json`` cannot be read, is not</span>
+<span class="sd">            this workspace's format 3 document, or its extensions are malformed.</span>
+<span class="sd">        :raises httk.workflow.errors.UnsupportedExtensionError: If it enables an unsupported extension.</span>
+<span class="sd">        """</span>
+
+        <span class="n">stored</span> <span class="o">=</span> <span class="n">_read_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format"</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"httk-workflow-filesystem"</span> <span class="ow">or</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">_refuse_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="p">,</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">),</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">)</span> <span class="o">!=</span> <span class="n">CORE_PROFILE</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">_refuse_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="p">,</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">),</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"workspace_id"</span><span class="p">)</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"workspace format.json at </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="si">}</span><span class="s2"> now names workspace </span><span class="si">{</span><span class="n">stored</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'workspace_id'</span><span class="p">)</span><span class="si">!r}</span><span class="s2">, "</span>
+                <span class="sa">f</span><span class="s2">"not the attached </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">workspace_id</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">extensions</span> <span class="o">=</span> <span class="n">_extensions</span><span class="p">(</span><span class="n">stored</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">format</span> <span class="o">=</span> <span class="n">stored</span>
+        <span class="k">return</span> <span class="n">stored</span></div>
+
+
+<div class="viewcode-block" id="Workspace.read_settings">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.read_settings">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">read_settings</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Read and validate the current settings from disk, refreshing the enabled extensions too.</span>
+
+<span class="sd">        :return: The current application settings.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If ``format.json`` or the stored settings are not valid.</span>
+<span class="sd">        :raises httk.workflow.errors.UnsupportedExtensionError: If ``format.json`` now enables an</span>
+<span class="sd">            unsupported extension.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="n">_validate_settings</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">refresh_format</span><span class="p">(),</span> <span class="s2">"settings"</span><span class="p">))</span></div>
+
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_check_setting_collision</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">settings</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">variable</span> <span class="o">=</span> <span class="n">_setting_variable_name</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">existing</span> <span class="ow">in</span> <span class="n">settings</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">existing</span> <span class="o">!=</span> <span class="n">key</span> <span class="ow">and</span> <span class="n">_setting_variable_name</span><span class="p">(</span><span class="n">existing</span><span class="p">)</span> <span class="o">==</span> <span class="n">variable</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"application settings </span><span class="si">{</span><span class="n">existing</span><span class="si">!r}</span><span class="s2"> and </span><span class="si">{</span><span class="n">key</span><span class="si">!r}</span><span class="s2"> derive the same variable </span><span class="si">{</span><span class="n">variable</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Workspace.set_setting">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.set_setting">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_setting</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Store one application setting and return the resulting map.</span>
+
+<span class="sd">        The write is the same read-modify-write of ``format.json`` that</span>
+<span class="sd">        :meth:`set_policy` uses: an exclusively created temporary and a rename,</span>
+<span class="sd">        so a reader never sees a torn object, verified by re-reading, and last</span>
+<span class="sd">        writer wins.</span>
+
+<span class="sd">        :param key: Name the application setting to store.</span>
+<span class="sd">        :param value: Supply the setting value.</span>
+<span class="sd">        :return: The resulting application settings.</span>
+<span class="sd">        :raises ValueError: If the setting name or value is invalid, or its environment name collides.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">configure_settings</span><span class="p">({</span><span class="n">key</span><span class="p">:</span> <span class="n">value</span><span class="p">})</span></div>
+
+
+<div class="viewcode-block" id="Workspace.unset_setting">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.unset_setting">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">unset_setting</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Remove one application setting, refusing one that is not set.</span>
+
+<span class="sd">        :param key: Name the application setting to remove.</span>
+<span class="sd">        :return: The resulting application settings.</span>
+<span class="sd">        :raises ValueError: If the setting is not set.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">configure_settings</span><span class="p">({},</span> <span class="n">unset</span><span class="o">=</span><span class="p">(</span><span class="n">key</span><span class="p">,))</span></div>
+
+
+<div class="viewcode-block" id="Workspace.configure_settings">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.configure_settings">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">configure_settings</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">changes</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">],</span> <span class="o">*</span><span class="p">,</span> <span class="n">unset</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">())</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Remove named settings, then merge changes after validating the complete candidate.</span>
+
+<span class="sd">        :param changes: Application setting values to store.</span>
+<span class="sd">        :param unset: Existing setting names to remove before applying changes.</span>
+<span class="sd">        :return: The resulting application settings.</span>
+<span class="sd">        :raises ValueError: If a name or value is invalid, a setting is absent, or environment names collide.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.seals</span><span class="w"> </span><span class="kn">import</span> <span class="n">require_cli_modifiable</span>
+
+        <span class="n">require_cli_modifiable</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">configure</span><span class="p">(</span><span class="n">stored</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+            <span class="n">settings</span> <span class="o">=</span> <span class="n">_validate_settings</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="n">stored</span><span class="p">,</span> <span class="s2">"settings"</span><span class="p">))</span>
+            <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">unset</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">settings</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"application setting is not set: </span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+                <span class="k">del</span> <span class="n">settings</span><span class="p">[</span><span class="n">key</span><span class="p">]</span>
+            <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">changes</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="n">_validate_setting_key</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+                <span class="n">_validate_setting_value</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_check_setting_collision</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">settings</span><span class="p">)</span>
+                <span class="n">settings</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+            <span class="n">stored</span><span class="p">[</span><span class="s2">"settings"</span><span class="p">]</span> <span class="o">=</span> <span class="n">settings</span>
+            <span class="k">return</span> <span class="nb">dict</span><span class="p">(</span><span class="n">settings</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_update_format</span><span class="p">(</span><span class="n">configure</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Workspace.seed_settings">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.seed_settings">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">seed_settings</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">seeds</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Merge *seeds* into the settings, keeping any value already set.</span>
+
+<span class="sd">        Seeding happens once, when a workspace bound to a remote is created: the</span>
+<span class="sd">        remote definition's whitelisted settings become the workspace's</span>
+<span class="sd">        starting application settings. An explicit setting already present is</span>
+<span class="sd">        never overwritten, so a value the operator chose outlives a reseed.</span>
+
+<span class="sd">        :param seeds: Supply initial application settings to merge.</span>
+<span class="sd">        :return: The resulting application settings.</span>
+<span class="sd">        :raises ValueError: If a supplied setting is invalid.</span>
+<span class="sd">        """</span>
+
+        <span class="n">merged</span> <span class="o">=</span> <span class="n">_validate_settings</span><span class="p">(</span><span class="n">seeds</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">seed</span><span class="p">(</span><span class="n">stored</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+            <span class="n">current</span> <span class="o">=</span> <span class="n">_validate_settings</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="n">stored</span><span class="p">,</span> <span class="s2">"settings"</span><span class="p">))</span>
+            <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">merged</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="k">if</span> <span class="nb">any</span><span class="p">(</span>
+                    <span class="n">existing</span> <span class="o">!=</span> <span class="n">key</span> <span class="ow">and</span> <span class="n">_setting_variable_name</span><span class="p">(</span><span class="n">existing</span><span class="p">)</span> <span class="o">==</span> <span class="n">_setting_variable_name</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+                    <span class="k">for</span> <span class="n">existing</span> <span class="ow">in</span> <span class="n">current</span>
+                <span class="p">):</span>
+                    <span class="k">continue</span>
+                <span class="n">current</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+            <span class="n">stored</span><span class="p">[</span><span class="s2">"settings"</span><span class="p">]</span> <span class="o">=</span> <span class="n">current</span>
+            <span class="k">return</span> <span class="nb">dict</span><span class="p">(</span><span class="n">current</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_update_format</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Workspace.read_workflow_preludes">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.read_workflow_preludes">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">read_workflow_preludes</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Read and validate the workflow-in-workspace preludes from disk.</span>
+
+<span class="sd">        A workflow prelude is shell text run to initialize the environment</span>
+<span class="sd">        before each launch of a runner for that workflow.</span>
+
+<span class="sd">        :return: The current map of workflow id to prelude text.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the stored preludes are not valid.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="n">_validate_workflow_preludes</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="n">_read_format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="p">),</span> <span class="s2">"workflow_preludes"</span><span class="p">))</span></div>
+
+
+<div class="viewcode-block" id="Workspace.set_workflow_prelude">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.set_workflow_prelude">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_workflow_prelude</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">workflow_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Store one workflow prelude and return the resulting map.</span>
+
+<span class="sd">        The write is the same read-modify-write of ``format.json`` that</span>
+<span class="sd">        :meth:`set_setting` uses: an exclusively created temporary and a rename,</span>
+<span class="sd">        so a reader never sees a torn object, verified by re-reading, and last</span>
+<span class="sd">        writer wins.</span>
+
+<span class="sd">        :param workflow_id: Name the workflow whose prelude to store.</span>
+<span class="sd">        :param value: Supply the shell prelude text.</span>
+<span class="sd">        :return: The resulting map of workflow id to prelude text.</span>
+<span class="sd">        :raises ValueError: If the workflow id or prelude value is invalid.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.seals</span><span class="w"> </span><span class="kn">import</span> <span class="n">require_cli_modifiable</span>
+
+        <span class="n">require_cli_modifiable</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="n">_validate_workflow_prelude_id</span><span class="p">(</span><span class="n">workflow_id</span><span class="p">)</span>
+        <span class="n">_validate_workflow_prelude_value</span><span class="p">(</span><span class="n">workflow_id</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">set_prelude</span><span class="p">(</span><span class="n">stored</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+            <span class="n">preludes</span> <span class="o">=</span> <span class="n">_validate_workflow_preludes</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="n">stored</span><span class="p">,</span> <span class="s2">"workflow_preludes"</span><span class="p">))</span>
+            <span class="n">preludes</span><span class="p">[</span><span class="n">workflow_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+            <span class="n">stored</span><span class="p">[</span><span class="s2">"workflow_preludes"</span><span class="p">]</span> <span class="o">=</span> <span class="n">preludes</span>
+            <span class="k">return</span> <span class="nb">dict</span><span class="p">(</span><span class="n">preludes</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_update_format</span><span class="p">(</span><span class="n">set_prelude</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Workspace.unset_workflow_prelude">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.unset_workflow_prelude">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">unset_workflow_prelude</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">workflow_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Remove one workflow prelude, refusing one that is not set.</span>
+
+<span class="sd">        :param workflow_id: Name the workflow whose prelude to remove.</span>
+<span class="sd">        :return: The resulting map of workflow id to prelude text.</span>
+<span class="sd">        :raises ValueError: If the prelude is not set.</span>
+<span class="sd">        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.seals</span><span class="w"> </span><span class="kn">import</span> <span class="n">require_cli_modifiable</span>
+
+        <span class="n">require_cli_modifiable</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">unset_prelude</span><span class="p">(</span><span class="n">stored</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+            <span class="n">preludes</span> <span class="o">=</span> <span class="n">_validate_workflow_preludes</span><span class="p">(</span><span class="n">_section</span><span class="p">(</span><span class="n">stored</span><span class="p">,</span> <span class="s2">"workflow_preludes"</span><span class="p">))</span>
+            <span class="k">if</span> <span class="n">workflow_id</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">preludes</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"workflow prelude is not set: </span><span class="si">{</span><span class="n">workflow_id</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+            <span class="k">del</span> <span class="n">preludes</span><span class="p">[</span><span class="n">workflow_id</span><span class="p">]</span>
+            <span class="n">stored</span><span class="p">[</span><span class="s2">"workflow_preludes"</span><span class="p">]</span> <span class="o">=</span> <span class="n">preludes</span>
+            <span class="k">return</span> <span class="nb">dict</span><span class="p">(</span><span class="n">preludes</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_update_format</span><span class="p">(</span><span class="n">unset_prelude</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Workspace.check">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.check">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">repair</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"FsckReport"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Check the workspace's job tree (:func:`httk.workflow.fsck.check_workspace`) while nothing else uses it.</span>
+
+<span class="sd">        :param repair: Repair what the check can (refused unless the workspace is quiescent).</span>
+<span class="sd">        :return: The workspace check report.</span>
+<span class="sd">        :raises httk.workflow.errors.WorkflowError: With *repair*, unless the workspace is quiescent.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.fsck</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_workspace</span>
+
+        <span class="k">return</span> <span class="n">check_workspace</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">repair</span><span class="o">=</span><span class="n">repair</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Workspace.collect_garbage">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.Workspace.collect_garbage">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">collect_garbage</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">dry_run</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">now</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">categories</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">sizes</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"GcReport"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Collect the disk this workspace's retention policy permits freeing.</span>
+
+<span class="sd">        :param dry_run: Report eligible removals without changing the workspace.</span>
+<span class="sd">        :param now: Use this timestamp when evaluating retention deadlines.</span>
+<span class="sd">        :param categories: Restrict collection to these categories.</span>
+<span class="sd">        :param sizes: Whether to calculate byte estimates.</span>
+<span class="sd">        :return: The garbage-collection report.</span>
+<span class="sd">        """</span>
+
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.gc</span><span class="w"> </span><span class="kn">import</span> <span class="n">collect_garbage</span>
+
+        <span class="k">return</span> <span class="n">collect_garbage</span><span class="p">(</span>
+            <span class="bp">self</span><span class="p">,</span>
+            <span class="n">dry_run</span><span class="o">=</span><span class="n">dry_run</span><span class="p">,</span>
+            <span class="n">now</span><span class="o">=</span><span class="n">now</span><span class="p">,</span>
+            <span class="n">categories</span><span class="o">=</span><span class="n">categories</span><span class="p">,</span>
+            <span class="n">sizes</span><span class="o">=</span><span class="n">sizes</span><span class="p">,</span>
+        <span class="p">)</span></div>
+</div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

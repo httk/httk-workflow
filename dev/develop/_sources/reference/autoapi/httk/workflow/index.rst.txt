@@ -1,0 +1,2473 @@
+httk.workflow
+=============
+
+.. py:module:: httk.workflow
+
+.. autoapi-nested-parse::
+
+   Expose filesystem-native workflow execution for httk₂.
+
+   The package presents three layers, each with its own import home:
+
+   * **Filesystem protocol** — the language-neutral on-disk contract lives in
+     :mod:`httk.workflow.protocol`. Independent tools read and verify a workspace
+     through it and the specification alone.
+   * **Execution / authoring** — the surface a runner author uses. :class:`Runner`,
+     :class:`Attempt`, and the small set of job and result types below are exported
+     here; the lower-level runtime helpers live in :mod:`httk.workflow.runtime` and
+     :mod:`httk.workflow.runtime_utils`, and job scaffolding in
+     :mod:`httk.workflow.scaffold`. Python, the host language, has its SDK in
+     :mod:`httk.workflow.sdk`; the runner SDKs for the other programming languages
+     (Ada, Bash, C, C++, Fortran, Java, Perl, Rust) ship as data files in the
+     installed ``httk/workflow/languages`` directory, which the manager exports as
+     ``HTTK_WORKFLOW_LANGUAGES_DIR``.
+   * **Orchestration and management** — :class:`Workspace`, :class:`TaskManager`,
+     and :func:`job_records` drive and inspect a running workspace. The management
+     operations that surround them (manifests, hygiene, configuration,
+     adapters, supervision, the :mod:`httk.workflow.codes` toolkit for
+     simulation-code support packages, and the :mod:`httk.workflow.compat`
+     consumers of other workflow systems) live in their own named submodules
+     rather than in this root.
+
+   The normal lifecycle is instantiate a job, run it, then collect its outputs.
+   Only the deliberate top-level surface is re-exported here; everything else is
+   reached through its submodule.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/workflow/adapter_protocol/index
+   /reference/autoapi/httk/workflow/adapters/index
+   /reference/autoapi/httk/workflow/calculations/index
+   /reference/autoapi/httk/workflow/codes/index
+   /reference/autoapi/httk/workflow/collecting/index
+   /reference/autoapi/httk/workflow/compat/index
+   /reference/autoapi/httk/workflow/configuration/index
+   /reference/autoapi/httk/workflow/errors/index
+   /reference/autoapi/httk/workflow/git_workflows/index
+   /reference/autoapi/httk/workflow/hookapi/index
+   /reference/autoapi/httk/workflow/hygiene/index
+   /reference/autoapi/httk/workflow/manifests/index
+   /reference/autoapi/httk/workflow/projects/index
+   /reference/autoapi/httk/workflow/protocol/index
+   /reference/autoapi/httk/workflow/provenance/index
+   /reference/autoapi/httk/workflow/runtime/index
+   /reference/autoapi/httk/workflow/runtime_utils/index
+   /reference/autoapi/httk/workflow/scaffold/index
+   /reference/autoapi/httk/workflow/sdk/index
+   /reference/autoapi/httk/workflow/shell_bridge/index
+   /reference/autoapi/httk/workflow/storing/index
+   /reference/autoapi/httk/workflow/supervision/index
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.InstantiateHandler
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.AmbiguousClaimError
+   httk.workflow.IdentityCollisionError
+   httk.workflow.FormatError
+   httk.workflow.RunnerResolutionError
+   httk.workflow.TransactionError
+   httk.workflow.TransitionLostError
+   httk.workflow.UnsupportedExtensionError
+   httk.workflow.WorkflowError
+   httk.workflow.WorkspaceCorruptionError
+   httk.workflow.WorkspaceUnavailableError
+   httk.workflow.UnstableIdentityError
+   httk.workflow.NotIdleError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.DirectoryClaim
+   httk.workflow.CollectedJob
+   httk.workflow.JobRecord
+   httk.workflow.Claim
+   httk.workflow.Unclaimed
+   httk.workflow.TaskManager
+   httk.workflow.WorkCensus
+   httk.workflow.JobState
+   httk.workflow.ScaffoldedJob
+   httk.workflow.Attempt
+   httk.workflow.ChildrenView
+   httk.workflow.ChildResult
+   httk.workflow.ChildSpec
+   httk.workflow.ParentJob
+   httk.workflow.Runner
+   httk.workflow.Workspace
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.claims
+   httk.workflow.collect_tree
+   httk.workflow.collect
+   httk.workflow.job_records
+   httk.workflow.ledger_key
+   httk.workflow.new_job
+   httk.workflow.new_jobs
+   httk.workflow.scaffold_job
+   httk.workflow.store_collected
+
+
+Package Contents
+----------------
+
+.. py:exception:: AmbiguousClaimError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Several collectors claimed one directory at the same, highest priority.
+
+
+.. py:class:: DirectoryClaim
+
+   One directory's recognition outcome, as reported by :func:`claims`.
+
+   :param directory: The directory, relative to the swept root (POSIX).
+   :param kind: ``"claimed"``, ``"unclaimed"`` or ``"workspace"``.
+   :param collector: The winning collector's name (``claimed``), the declining
+       collector's name (``unclaimed``), or ``None`` (``workspace``).
+   :param priority: The winning collector's priority, or ``None``.
+   :param identity: The claimed identity, or ``None``.
+   :param reason: The ``Unclaimed`` reason, or ``None``.
+   :param also_matched: Names of lower-priority collectors that also claimed the directory.
+   :param duplicate_of: For a claimed copy of an earlier directory of this sweep
+       (same collector, identity and marker content), that directory; it is not
+       collected again.
+   :param consumes: The subdirectories the claim names as part of its
+       calculation, relative to the swept root (POSIX).
+
+
+   .. py:attribute:: directory
+      :type:  str
+
+
+   .. py:attribute:: kind
+      :type:  Literal['claimed', 'unclaimed', 'workspace']
+
+
+   .. py:attribute:: collector
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: priority
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: identity
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: also_matched
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+   .. py:attribute:: duplicate_of
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: consumes
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+.. py:exception:: IdentityCollisionError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Two directories with different content claimed the same identity in one sweep.
+
+
+.. py:function:: claims(root, *, collectors = (), prefer = (), exclude = ())
+
+   Report how :func:`collect_tree` would treat each directory, without collecting.
+
+   Ordinary directories that no collector's markers and hook recognize are not
+   reported. Parameters and errors are those of :func:`collect_tree`.
+
+   :param root: The tree to sweep.
+   :param collectors: Extra collector package directories; see :func:`collect_tree`.
+   :param prefer: Collector names that win priority ties, in order.
+   :param exclude: Root-relative POSIX glob patterns of directories to skip.
+   :yields: One outcome per claimed, declined or workspace directory, in walk order.
+
+
+.. py:function:: collect_tree(root, *, collectors = (), prefer = (), exclude = (), fail_fast = False, on_unclaimed = None, on_skipped = None)
+
+   Collect every recognized calculation below *root*.
+
+   The collector set is every registered collector
+   (``httk.core.register.codes.register_collector``) plus the package
+   directories in *collectors*. A local package named like a registered one
+   replaces it, which is how a shipped collector is overridden. A registered
+   collector whose package cannot be loaded is logged and skipped.
+
+   The walk starts at *root* itself and descends in sorted name order. It does
+   not follow symlinked directories and skips names starting with ``.``. A
+   directory holding ``.httk-workspace/format.json`` is collected as a
+   workspace (:func:`~httk.workflow.collecting.collect`) and not descended.
+   In any other directory, each collector whose ``requires`` markers all match
+   the directory's file names (case-insensitively, compression suffixes
+   stripped) has its recognize hook called; the highest-priority claim wins.
+   A hook that raises declines the directory, except that an ``ImportError``
+   (a missing dependency) propagates. Directories below a claimed one
+   are still visited.
+
+   A claimed directory is read through a stand-in job record whose workdir is
+   the directory. Its collect hook returns declared input roles, which become
+   the run's input edges and the ``inputs`` of
+   :class:`~httk.workflow.collecting.CollectedJob`, and output roles.
+   The run's ``source_id`` is ``<collector name>:<identity>``. A collect-hook
+   failure yields a degraded item.
+
+   A claim that consumes subdirectories (the ``consumes`` of
+   :class:`~httk.workflow.hookapi.Claim`) is a
+   multi-directory calculation. Its subdirectories are walked and collected by
+   their own collectors as usual, and the claiming item is held back until the
+   walk leaves its subtree. It is then yielded, after those children, with
+   one ``(relative path, child source id)`` pair per consumed directory in
+   ``child_runs``, so :func:`~httk.workflow.storing.store_collected` links its
+   run to theirs. A consumed directory that was a deduplicated copy links to the
+   earlier copy's run, which has the same source id. One that is missing, not
+   visited, a workspace, or not claimed, or whose own item degraded ("consumed
+   calculation ... failed: ..."), degrades the claiming item, which then names
+   only the children that were collected. The degraded child is still yielded.
+   Items are otherwise yielded in walk order. A directory a collector declines with
+   :class:`~httk.workflow.hookapi.Unclaimed` is logged as a warning and passed
+   to *on_unclaimed*.
+
+   :param root: The tree to sweep.
+   :param collectors: Extra collector package directories, loaded alongside the registered ones.
+   :param prefer: Collector names that win a tie at the highest priority, first named first.
+   :param exclude: Root-relative POSIX glob patterns (:func:`fnmatch.fnmatchcase`) of
+       directories that are neither visited nor descended.
+   :param fail_fast: Raise the first degraded item instead of yielding it.
+   :param on_unclaimed: Receive the outcome of every declined directory.
+   :param on_skipped: Receive the job key of every nested workspace job dropped for
+       an unreadable ``job.json``.
+   :yields: One collected job per recognized calculation and per workspace job, in walk order.
+   :raises ValueError: If *root* is not a directory, a *collectors* package is not a
+       loadable recognize package, or *fail_fast* observes a degraded item.
+   :raises AmbiguousClaimError: If collectors tie at the highest priority and none is preferred.
+   :raises IdentityCollisionError: If two directories claim one identity with different marker content.
+
+
+.. py:class:: CollectedJob
+
+   Represent one job after collecting and provenance assembly.
+
+   Edge ids of not-yet-stored outputs are content ids; ``--into`` rewrites
+   them to the store-minted ids.
+
+   :param workflow_id: Identify the workflow that produced the job.
+   :param outputs: Map declared output roles to collector results.
+   :param unfulfilled: Name declared output roles that carry no output. After a
+       collector ran this is the roles it omitted; a degraded job (see
+       ``missing_collector``) lists every declared output role, because none of
+       them was produced.
+   :param run: Carry the framework-assembled run provenance.
+   :param products: Carry the framework-assembled product links.
+   :param record: Preserve the mechanical job readout behind the collection.
+   :param missing_collector: Explain why collecting was unavailable,
+       or leave it unset when collection completed.
+   :param products_unlinked: Name the declared ``product_of`` links skipped
+       because the observed provenance held no matching input or output edge.
+   :param collector_exit_status: Report a nonzero executable-collector exit
+       status observed after complete responses, or leave it unset.
+   :param identity_stable: Report whether the job's identity survives moving
+       its files: ``True`` for a recognized calculation (its identity is derived
+       from content), ``False`` for a v1 task harvested without a manifest,
+       and unset for live collection.
+   :param run_only: Report that the job's workflow has nothing to collect (no
+       collector and no declared outputs): the collection is complete and its
+       only product is the job's run.
+   :param child_runs: Name the child jobs this job spawned, as ``(label,
+       run source id)`` pairs read from its spawn records, so a store can link
+       this job's run to theirs.
+   :param inputs: Map declared input roles to entries a recognized-calculation
+       collector read from its directory; empty for workspace jobs, whose
+       inputs are staged entries named by their run.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: unfulfilled
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: run
+      :type:  httk.core.Run
+
+
+   .. py:attribute:: products
+      :type:  tuple[httk.core.ProductLink, ...]
+
+
+   .. py:attribute:: record
+      :type:  JobRecord
+
+
+   .. py:attribute:: missing_collector
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: products_unlinked
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+   .. py:attribute:: collector_exit_status
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: identity_stable
+      :type:  bool | None
+      :value: None
+
+
+
+   .. py:attribute:: run_only
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: child_runs
+      :type:  tuple[tuple[str, str], ...]
+      :value: ()
+
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, object]
+
+
+.. py:class:: JobRecord
+
+   Everything a data layer needs about one job that stopped.
+
+   Paths appear twice on purpose. The members ``payload_path``,
+   ``workdir_path``, and ``data_path`` are workspace relative, which is what a
+   stored record must hold so it survives moving the workspace; the properties
+   :attr:`payload`, :attr:`workdir`, and :attr:`data` resolve them against the
+   workspace this record was collected from, which is what code reading result
+   files wants. A job directory moves with every state change, so these paths
+   say where the job was when it was read; the job's identity is
+   ``workspace_id`` and ``job_id``, never a path.
+
+   :param workspace_root: Identify the absolute workspace root.
+   :param workspace_id: Identify the workspace.
+   :param job_id: Identify the job.
+   :param job_key: Preserve the complete job key.
+   :param job: Preserve the validated immutable job definition.
+   :param runner_provenance: Preserve the installed workflow the job ran
+       (``{"id", "tree_sha256"}``), when known.
+   :param state: Record the state in which the job stopped.
+   :param failure: Record the terminal failure, when one exists.
+   :param placement: Locate the job within the workspace hierarchy.
+   :param payload_path: Locate the workspace-relative job directory as it was read.
+   :param workdir_path: Locate the workspace-relative workdir, when known.
+   :param data_path: Locate the job's committed data, when it has any.
+   :param provenance: Preserve the run-log timeline and damage flag.
+   :param runner_steps: Preserve the runner steps, when recorded.
+   :param children: Preserve labeled child references.
+   :param declarations: Preserve declared and observed workflow documents.
+   :param runner_description: Preserve the reserved runner description, when
+       available.
+
+
+   .. py:attribute:: workspace_root
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workspace_id
+      :type:  str
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: job
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner_provenance
+      :type:  collections.abc.Mapping[str, object] | None
+
+
+   .. py:attribute:: state
+      :type:  str
+
+
+   .. py:attribute:: failure
+      :type:  httk.workflow.models.Failure | None
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload_path
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: workdir_path
+      :type:  pathlib.PurePosixPath | None
+
+
+   .. py:attribute:: data_path
+      :type:  pathlib.PurePosixPath | None
+
+
+   .. py:attribute:: provenance
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner_steps
+      :type:  tuple[str, ...] | None
+
+
+   .. py:attribute:: children
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: declarations
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, collections.abc.Mapping[str, object] | None]]
+
+
+   .. py:attribute:: runner_description
+      :type:  collections.abc.Mapping[str, object] | None
+      :value: None
+
+
+
+   .. py:property:: payload
+      :type: pathlib.Path
+
+
+      The absolute payload directory of this job.
+
+
+   .. py:property:: workdir
+      :type: pathlib.Path | None
+
+
+      The absolute workdir of this job's last attempt, when one is known.
+
+
+   .. py:property:: data
+      :type: pathlib.Path | None
+
+
+      The absolute data directory, for a job that committed data.
+
+
+   .. py:property:: gaps
+      :type: bool
+
+
+      Whether part of this job's recorded history could not be read.
+
+
+   .. py:method:: parameter(name, default = _MISSING)
+
+      Return one member of the job's ``parameters`` object.
+
+      The collect-side counterpart of :meth:`httk.workflow.sdk.Attempt.parameter`:
+      without a *default*, a missing parameter is a :exc:`KeyError`.
+
+      :param name: The parameter name to look up.
+      :param default: The value to return when the parameter is absent.
+      :return: The parameter value or the supplied default.
+      :raises KeyError: If the parameter is absent and no default was supplied.
+
+
+
+   .. py:method:: result_file(name, *, data_prefix = '', published = None)
+
+      Locate one result file of this job.
+
+      A job with committed data is read from that data, at ``published``
+      (default ``name``) below ``data_prefix``, and never falls back to
+      unpublished workdir files; any other job is read from its workdir, at
+      ``name``.
+      When the exact file is absent, a compressed copy (``name`` plus a
+      registered compression suffix, tried in registry order) is returned.
+
+      :param name: The file's path relative to the workdir.
+      :param data_prefix: The directory below the job's data the runner published under.
+      :param published: The file's path below ``data_prefix``, when the runner
+          published it under another name than it has in the workdir.
+      :return: The absolute path of the existing file.
+      :raises ValueError: If the job has no such file.
+
+
+
+   .. py:method:: as_mapping()
+
+      Return the JSON representation of this record.
+
+
+
+   .. py:method:: from_mapping(value)
+      :classmethod:
+
+
+      Rebuild one record from a serialized record mapping.
+
+      :param value: Supply the mapping produced by :meth:`as_mapping`.
+      :return: The reconstructed job record.
+      :raises httk.workflow.errors.FormatError: If the mapping has the wrong format or invalid
+          record members.
+
+
+
+.. py:function:: collect(workspace, *, states = DEFAULT_COLLECT_STATES, placement = None, allow_job_collector = False, on_skipped = None, fail_fast = False, batch_size = 64)
+
+   Collect records through registered or explicitly allowed job collectors.
+
+   Edge ids of not-yet-stored outputs are content ids; ``--into`` rewrites
+   them to the store-minted ids.
+
+   The fallback reads the collector from the job's installed workflow package
+   in the workspace store, verified against the tree digest the job ran with. Per-job collector, load, and assembly failures degrade that job
+   and do not stop the sweep unless *fail_fast* is set. Records are consumed in
+   bounded windows; executable collectors run once per matching collector in
+   each window, and yielded results retain scan order.
+
+   :param workspace: Read jobs from this workspace.
+   :param states: Select the stopped state kinds to report.
+   :param placement: Restrict results to this placement and its descendants.
+   :param allow_job_collector: Permit digest-verified collectors from the
+       job's installed workflow package in the workspace store.
+   :param on_skipped: Receive the job key of every selected job dropped for an
+       unreadable ``job.json``, forwarded to :func:`job_records`.
+   :param fail_fast: Use single-job windows and raise the first per-job
+       collection failure instead of yielding its degraded result.
+   :param batch_size: Limit records retained and executable requests grouped at
+       once; must be a positive integer.
+   :yields: Framework-assembled collected jobs, including degraded jobs.
+   :raises ValueError: If ``batch_size`` is invalid, or *fail_fast* observes a
+       per-job collection failure.
+
+
+.. py:function:: job_records(workspace, *, states = DEFAULT_COLLECT_STATES, placement = None, on_skipped = None)
+
+   Yield one :class:`~httk.workflow.collecting.JobRecord` per finished job of *workspace*.
+
+   *states* selects which stopped jobs are reported and defaults to the
+   successful ones; every requested kind is validated against
+   ``COLLECTABLE_KINDS`` before anything is read. *placement* restricts the
+   job_records to the jobs at or below one placement, exactly as
+   ``httk job list --placement`` does.
+
+   The result is a lazy iterator over one listing of the requested state
+   directories. Nothing is materialized, and building a record reads only that
+   job's own ``job.json``, ``state.json`` and run log, so collecting is a single
+   pass over a workspace of any size. A job that moves between listing and
+   reading is skipped like an unreadable one.
+
+   :param workspace: Read jobs from this workspace.
+   :param states: Select the stopped state kinds to report.
+   :param placement: Restrict results to this placement and its descendants.
+   :param on_skipped: Receive the job key of every selected job dropped for an
+       unreadable ``job.json``, so a caller can count skips it never sees.
+   :yields: Mechanical job records, one for each readable selected job.
+   :raises ValueError: If ``states`` contains no collectable state.
+
+
+.. py:exception:: FormatError
+
+   Bases: :py:obj:`WorkflowError`, :py:obj:`ValueError`
+
+
+   A workspace, job, journal frame, outcome, or request is malformed.
+
+
+.. py:exception:: RunnerResolutionError(code, message)
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   A shared runner cannot be resolved or verified.
+
+   The failure carries the exact protocol failure ``code`` the manager records,
+   so an unresolvable runner (``runner_unavailable``), a runner whose bytes
+   disagree with the digest the job pinned (``runner_mismatch``), a
+   missing registration (``runner_not_built``), and a failed foreground build
+   (``runner_build_failed``) stay distinguishable to an operator.
+
+   :param code: Protocol failure code recorded by the manager.
+   :param message: Human-readable failure description.
+
+
+   .. py:attribute:: code
+
+
+.. py:exception:: TransactionError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   A transactional-data manifest cannot be safely replayed.
+
+
+.. py:exception:: TransitionLostError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   Another actor committed a transition from the expected marker.
+
+
+.. py:exception:: UnsupportedExtensionError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   A workspace requires an extension this implementation does not support.
+
+
+.. py:exception:: WorkflowError
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   Base class for workflow protocol failures.
+
+
+.. py:exception:: WorkspaceCorruptionError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   The authoritative filesystem state is internally inconsistent.
+
+
+.. py:exception:: WorkspaceUnavailableError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   The workspace cannot currently provide a coherent protocol view.
+
+
+.. py:class:: Claim
+
+   A recognize hook's claim on a calculation directory.
+
+   :param identity: The collector-chosen identity of the calculation: a non-empty
+       URL-safe string without ``:`` (for example a SHA-256 hex digest), stable
+       for the same calculation wherever its directory is.
+   :param consumes: Name the subdirectories that belong to this calculation, as
+       POSIX paths relative to the claimed directory (for example the
+       displacement runs of a phonon calculation). They are still collected by
+       their own collectors, and this calculation's run links to theirs as child
+       runs; one that is not collected degrades this calculation.
+   :raises ValueError: If *identity* is empty or not URL-safe, or a *consumes*
+       entry is empty, absolute, has an empty or ``..`` segment, or repeats.
+
+
+   .. py:attribute:: identity
+      :type:  str
+
+
+   .. py:attribute:: consumes
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+.. py:class:: Unclaimed
+
+   A recognize hook's refusal of a directory that belongs to its code but cannot be collected.
+
+   :param reason: Why, shown to the user (for example ``"several pw.x outputs"``).
+
+
+   .. py:attribute:: reason
+      :type:  str
+
+
+.. py:exception:: UnstableIdentityError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A ledger key was refused because the job's identity is not stable.
+
+   Raised by :func:`ledger_key` for a collected job whose ``identity_stable``
+   is ``False`` — a v1-harvested job with no manifest, whose only identity is
+   its absolute path. A key built from it would go stale the moment the tree
+   moved, so it is refused unless ``force=True`` is passed.
+
+
+.. py:function:: ledger_key(item, role = None, path = None, *, force = False)
+
+   Build the native ledger source key for a collected job coordinate.
+
+   The key is ``<workspace_id>:<job_id>``, extended with ``:<role>`` when a
+   declared output role is named and with ``:file:<relpath>`` when a file is
+   named, so the four shapes are the job, one of its outputs, one of its files,
+   and one file of one output.
+
+   :param item: The collected job (or its record) the key anchors on.
+   :param role: The declared output role to pin, if any.
+   :param path: The output-relative file path to pin, if any; its POSIX form
+       is used verbatim.
+   :param force: Build the key even when the job's identity is not stable.
+   :return: The ledger source key.
+   :raises UnstableIdentityError: If the job's identity is not stable and
+       ``force`` is not set.
+
+
+.. py:exception:: NotIdleError(census)
+
+   Bases: :py:obj:`TimeoutError`
+
+
+   A manager did not become idle within its timeout.
+
+   It carries the :class:`~httk.workflow.manager.WorkCensus` of the final scan,
+   so a caller can name the actual mismatches. It subclasses :class:`TimeoutError`.
+
+   :param census: The work census of the manager's last scan.
+
+
+   .. py:attribute:: census
+
+
+.. py:class:: TaskManager(workspace, *, pools = ('default', ), capabilities = (), resources = None, maximum_workers = 1, heartbeat_interval = 30.0, accept_any_pool = False, join_grace_seconds = 3600.0, cancel_grace_seconds = DEFAULT_CANCEL_GRACE_SECONDS, discovery_budget = DEFAULT_DISCOVERY_BUDGET, placement_prefixes = (), gc_interval = None, on_attached = None, end_time = None, deadline_margin = 120.0, allocation = None, setting_overrides = None)
+
+   Execute and recover jobs in one workflow workspace as one registered owner.
+
+   :param workspace: The workspace.
+   :param pools: Accept jobs assigned to these pools.
+   :param capabilities: Advertise these execution capabilities.
+   :param resources: Advertise these integer resource capacities.
+   :param maximum_workers: Limit the number of local attempts.
+   :param heartbeat_interval: Seconds between informational heartbeats.
+   :param accept_any_pool: Accept jobs without requiring a configured pool match.
+   :param join_grace_seconds: Wait this long for unresolved join children.
+   :param cancel_grace_seconds: Wait this long after ``SIGTERM`` before killing a stopped attempt.
+   :param discovery_budget: Read at most this many ready jobs per claim pass.
+   :param placement_prefixes: Restrict scheduling to these placement subtrees.
+   :param gc_interval: Run :func:`httk.workflow.gc.collect_garbage` (all but ``dead_owners``, which every tick
+       probes) at most this often, in seconds; ``None`` never.
+   :param on_attached: Called with the owner id once the owner is registered.
+   :param end_time: The epoch second this manager's allocation ends, or ``None`` when unknown.
+   :param deadline_margin: Stop claiming work this many seconds before *end_time*.
+   :param allocation: The probed allocation this manager runs inside, or ``None``; recorded in ``owner.json``.
+   :param setting_overrides: Pinned ``manager.confine``, ``manager.confine.block_mpi_spawn``,
+       ``manager.launch_template``, ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings
+       that win over the workspace settings for this manager's lifetime.
+   :raises ValueError: If a manager limit, a pinned setting or the effective confinement settings are invalid.
+   :raises httk.workflow.errors.ConfinementUnavailableError: If the effective ``manager.confine`` is ``bwrap``
+       and Bubblewrap cannot build the attempt sandbox here, or the workspace has the exchange extension and
+       attempts are not confined.
+
+
+   .. py:attribute:: workspace
+
+
+   .. py:attribute:: setting_overrides
+      :type:  dict[str, str]
+
+
+   .. py:attribute:: uid
+
+
+   .. py:attribute:: hostname
+
+
+   .. py:attribute:: pools
+
+
+   .. py:attribute:: capabilities
+
+
+   .. py:attribute:: resources
+
+
+   .. py:attribute:: maximum_workers
+      :value: 1
+
+
+
+   .. py:attribute:: end_time
+      :value: None
+
+
+
+   .. py:attribute:: allocation
+      :value: None
+
+
+
+   .. py:attribute:: drain_start
+      :value: None
+
+
+
+   .. py:attribute:: heartbeat_interval
+      :value: 30.0
+
+
+
+   .. py:attribute:: join_grace_seconds
+      :value: 3600.0
+
+
+
+   .. py:attribute:: cancel_grace_seconds
+      :value: 10.0
+
+
+
+   .. py:attribute:: discovery_budget
+      :value: 4096
+
+
+
+   .. py:attribute:: placement_prefixes
+      :type:  tuple[pathlib.PurePosixPath, ...]
+
+
+   .. py:attribute:: accept_any_pool
+      :value: False
+
+
+
+   .. py:attribute:: gc_interval
+      :value: None
+
+
+
+   .. py:attribute:: owner
+
+
+   .. py:attribute:: manager_id
+
+
+   .. py:property:: manager_directory
+      :type: pathlib.Path
+
+
+      This manager's owner directory, ``.httk-workspace/owners/<owner-id>``.
+
+
+   .. py:property:: running_attempts
+      :type: int
+
+
+      The number of local attempts this manager still tracks.
+
+
+   .. py:property:: drained
+      :type: str | None
+
+
+      Why the last manager loop drained (``"signal"`` or ``"deadline"``), or ``None``.
+
+
+   .. py:method:: close()
+
+      Stop and reap the local attempts, commit what they left, and close the owner.
+
+      After a fail-stop nothing is touched: the jobs wait for recovery. A job
+      or launch that cannot be finished here keeps the owner record, so a
+      later probe and recovery handle it.
+
+
+
+   .. py:method:: heartbeat(*, force = False)
+
+      Write the informational ``heartbeat.json`` when the interval has elapsed.
+
+      :param force: Write immediately instead of honoring the interval.
+
+
+
+   .. py:method:: tick()
+
+      Perform one nonblocking pass: fail-stop check, self-healing, recovery, supervision, claims.
+
+      :return: Whether the pass changed workflow state.
+      :raises httk.workflow.errors.WorkflowError: When this owner was declared dead or recovered (fail-stop:
+          every attempt it started has been killed and no job was touched), or the manager is closed.
+
+
+
+   .. py:method:: serve(*, poll_interval = 1.0, drain_timeout = 30.0, drain_grace_seconds = 10.0)
+
+      Run until interrupted, draining running attempts on a stop signal.
+
+      A first ``SIGTERM`` or ``SIGINT`` stops claiming new work, terminates the
+      local attempts and keeps ticking so their outcomes are committed. A second
+      signal exits at once.
+
+      :param poll_interval: Wait this long between scheduling passes.
+      :param drain_timeout: Stop draining after this much time.
+      :param drain_grace_seconds: Kill attempts after this much drain grace.
+
+
+
+   .. py:method:: run_until_idle(*, timeout = 60.0, poll_interval = 0.02, drain_timeout = 30.0, drain_grace_seconds = 10.0)
+
+      Run until no local attempt or claimable job remains, and report the census.
+
+      A job this manager cannot progress (another pool, capability or
+      workflow, waiting on children or paused) does not keep it awake: it is
+      counted in the returned census. A ``SIGTERM`` or the allocation's drain
+      start drains the manager as :meth:`serve` does and then returns.
+
+      :param timeout: Stop waiting after this many seconds (extended by running attempts when the
+          allocation end is known).
+      :param poll_interval: Wait this long between scheduling passes.
+      :param drain_timeout: Stop draining after this much time.
+      :param drain_grace_seconds: Kill attempts after this much drain grace.
+      :return: The work census of the settled workspace.
+      :raises httk.workflow.manager.NotIdleError: If the manager does not become idle before the timeout.
+
+
+
+.. py:class:: WorkCensus
+
+   What one manager's scan found, tagged by why each job is or is not its work.
+
+   ``ready_blocked`` groups the ready jobs this manager cannot claim by the
+   requirement it lacks — ``pool``, ``capability``, ``calls`` (the workflow or
+   a workflow it calls is not installed or not built here), ``requirements``
+   (an unmet ``requires`` of the installed workflow, checked in this manager's
+   environment), ``resources``, ``time`` (a ``mintime`` beyond the time left
+   before this manager's drain start, or ``drain_point`` once it has passed),
+   or ``confinement`` — mapping each requirement to the count of jobs it turns
+   away. Every such job is attributed to exactly one requirement.
+
+   :param succeeded: Terminal jobs that succeeded.
+   :param failed: Terminal jobs that failed.
+   :param ready_claimable: Ready jobs this manager could claim right now.
+   :param ready_blocked: Requirement kind to requirement to blocked job count.
+   :param waiting: Jobs waiting on their join children.
+   :param paused: Jobs paused for an operator.
+   :param actionable_count: Jobs this manager can still make progress on.
+
+
+   .. py:attribute:: succeeded
+      :type:  int
+
+
+   .. py:attribute:: failed
+      :type:  int
+
+
+   .. py:attribute:: ready_claimable
+      :type:  int
+
+
+   .. py:attribute:: ready_blocked
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, int]]
+
+
+   .. py:attribute:: waiting
+      :type:  int
+
+
+   .. py:attribute:: paused
+      :type:  int
+
+
+   .. py:attribute:: actionable_count
+      :type:  int
+
+
+   .. py:property:: actionable
+      :type: bool
+
+
+      Whether this manager still has work it can make progress on.
+
+
+   .. py:property:: ready_blocked_total
+      :type: int
+
+
+      The number of jobs no requirement of this manager can claim here.
+
+
+   .. py:method:: summary_line()
+
+      Render the one-line idle summary an operator reads on exit.
+
+      :return: The idle summary line.
+
+
+
+   .. py:method:: time_advice()
+
+      Explain the ready jobs held back by this manager's allocation end.
+
+      :return: The advice, or ``None`` when no job is held back for time.
+
+
+
+   .. py:method:: mismatch_advice()
+
+      Name the requirements blocked jobs need that this manager lacks.
+
+      :return: The mismatch advice, or ``None`` when nothing is blocked.
+
+
+
+   .. py:method:: timeout_message(seconds)
+
+      Render the not-idle advice, naming mismatches when there are any.
+
+      :param seconds: The idle timeout that elapsed.
+      :return: The not-idle advice line.
+
+
+
+.. py:class:: JobState(payload, *, durable = False)
+
+   Bases: :py:obj:`collections.abc.MutableMapping`\ [\ :py:obj:`str`\ , :py:obj:`object`\ ]
+
+
+   Atomic JSON application state that belongs to one job.
+
+   The state lives at ``.httk-job/state.json`` inside the job payload, so it
+   survives every step advance, every retry, and every isolated workdir of the
+   job, and it travels with the payload when the job is transferred. It is
+   runner-private: the directory is excluded from every payload digest, so
+   writing state never disturbs the immutability checks of the payload.
+
+   Keys are nonempty strings and values must be JSON. Each mutation rewrites the
+   whole document through an atomic replace, so a crash leaves either the
+   previous state or the new one.
+
+   :param payload: Locate the job payload containing the state directory.
+   :param durable: Synchronize each atomic state replacement.
+
+
+   .. py:attribute:: path
+
+
+   .. py:attribute:: durable
+      :value: False
+
+
+
+   .. py:method:: read()
+
+      Return the whole state document.
+
+      :return: The current JSON state mapping.
+
+
+
+   .. py:method:: merge(values)
+
+      Write several keys in one atomic replace.
+
+      :param values: Supply the keys and values to merge.
+      :raises ValueError: If a key or value is not valid JSON state.
+
+
+
+   .. py:method:: set(name, value)
+
+      Store one value, an alias of ``state[name] = value``.
+
+      :param name: Name the state key.
+      :param value: Supply the JSON-compatible value.
+      :raises ValueError: If the key or value is invalid JSON state.
+
+
+
+   .. py:method:: delete(name)
+
+      Remove one key, reporting whether it was present.
+
+      :param name: Name the state key.
+      :return: Whether the key was present.
+
+
+
+.. py:class:: ScaffoldedJob
+
+   Describe one job this module submitted.
+
+   :param job_id: Identify the submitted job.
+   :param job_key: Identify the job directory.
+   :param tag: Preserve the optional job tag.
+   :param placement: Locate the job within each state directory.
+   :param payload: Locate the job directory as submitted, in ``jobs/ready/``.
+   :param ref: The kernel reference of the submitted job directory.
+   :param workflow: Name the installed workflow's id.
+   :param workflow_name: Name the installed workflow's short name.
+   :param initial_step: Name the step the job starts at.
+   :param warnings: Preserve the preparation warnings raised for this workflow.
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: ref
+      :type:  httk.workflow._kernel.JobRef
+
+
+   .. py:attribute:: workflow
+      :type:  str
+
+
+   .. py:attribute:: workflow_name
+      :type:  str
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: warnings
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+   .. py:method:: as_mapping()
+
+      Return the machine-readable report of this job.
+
+      :return: The serialized job report.
+
+
+
+.. py:function:: new_job(workspace, workflow, *, inputs = None, files = None, parameters = None, environment = None, tag = None, placement = DEFAULT_PLACEMENT, priority = None, step = None, format = None, name = None, provenance = None, install = False)
+
+   Scaffold, submit, and describe one job of an installed *workflow*.
+
+   *workflow* is the id or short name of a workflow installed in *workspace*
+   (``httk workflow install``), a registered or alias name, git URI or package
+   directory whose installation is looked up, or the path of a runner file of
+   your own or of a bare workflow document (a CWL or PWD file), which is
+   installed as an ``adhoc:`` workflow. *files* maps payload
+   names to the files to stage there: a bare name lands in the payload's
+   :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is where a packaged
+   runner reads its inputs, and a name with a directory in it is used
+   verbatim. *inputs* stages the workflow's declared objects into the payload;
+   *parameters* is the job's opaque implementation mapping.
+
+   The payload is built in the scratch of a CLI owner registered for the call
+   and submitted to ``jobs/ready/<placement>/``.
+
+   :func:`scaffold_job` is the same operation stopped one step short of
+   submission: it builds the payload into a directory you name and returns its
+   ``job.json`` definition, which is how :meth:`httk.workflow.Attempt.call`
+   builds a child job from inside a running step.
+
+   :param workspace: Provide the workspace receiving the job.
+   :param workflow: Select the installed workflow, or a runner file to install.
+   :param inputs: Supply declared workflow inputs.
+   :param files: Map payload names to files to stage.
+   :param parameters: Supply opaque job parameters.
+   :param environment: Supply overrides for declared workflow environment values.
+   :param tag: Set the job tag.
+   :param placement: Place the job within the workspace.
+   :param priority: Set the scheduling priority.
+   :param step: Override the workflow's initial step.
+   :param format: Force a workflow format for a bare document or directory, which is then installed ad hoc.
+   :param name: Set the job's display name.
+   :param provenance: Merge one declared-side ``provenance`` document (see
+       :mod:`httk.workflow.provenance`) into the job's declarations. When the
+       workflow declares no ``provenance`` of its own, *provenance* is used as
+       that declaration outright; otherwise each of its ``inputs``/``artifacts``/
+       ``outputs`` sections is concatenated label by label with the workflow's,
+       and a label declared by both raises ``ValueError``. Its primary use is a
+       birth-time claim that this job is for a database entity: an ``inputs``
+       edge labelled ``entity`` naming the entity by its stable ledger key, e.g.
+       ``{"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}}``.
+   :param install: Install *workflow* into the workspace first when it is not installed.
+   :return: The submitted job description.
+   :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
+       inputs, placement, or job settings are invalid.
+
+
+.. py:function:: new_jobs(workspace, workflow, items, *, inputs = None, files = None, parameters = None, environment = None, tag = None, placement = DEFAULT_PLACEMENT, priority = None, step = None, format = None, name = None, provenance = None, install = False)
+
+   Scaffold and submit one job per member of *items*, lazily.
+
+   Every keyword is the shared value of the whole campaign, and every member of
+   one :class:`~httk.workflow.scaffold.JobItem` is what that job varies: ``inputs`` and ``files`` are
+   merged over the shared mappings, and ``tag``, ``name``, ``placement``, and
+   ``priority`` replace the shared value.
+
+   This is the pattern for a campaign of any size. The workflow is resolved (and,
+   when asked, installed) once, however many jobs follow, so every job costs
+   exactly one payload directory; *items* is consumed as an iterator and the
+   results are yielded as they are submitted, so a structure generator can be
+   turned into jobs without either side of the loop ever being materialized.
+   Nothing happens until the first job is requested, and the CLI owner the jobs
+   are built by is closed when the iterator is exhausted or closed.
+
+   :param workspace: Provide the workspace receiving the jobs.
+   :param workflow: Select the installed workflow, or a runner file to install.
+   :param items: Yield per-job overrides.
+   :param inputs: Supply shared declared workflow inputs.
+   :param files: Supply shared payload files.
+   :param parameters: Supply shared opaque job parameters.
+   :param environment: Supply shared declared environment overrides.
+   :param tag: Set the shared job tag.
+   :param placement: Set the shared workspace placement.
+   :param priority: Set the shared scheduling priority.
+   :param step: Override the workflow's initial step.
+   :param format: Force a workflow format for a bare document or directory, which is then installed ad hoc.
+   :param name: Set the shared display name.
+   :param provenance: Set the shared ``provenance`` document; a per-item
+       ``provenance`` in :class:`~httk.workflow.scaffold.JobItem` replaces it entirely rather than
+       merging with it. See :func:`new_job` for the merge rule against a
+       workflow-declared ``provenance`` and the entity-claim convention.
+   :param install: Install *workflow* into the workspace first when it is not installed.
+   :return: An iterator yielding each submitted job description.
+   :yield: Each submitted job description.
+   :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
+       inputs, placement, or job settings are invalid.
+
+   .. code-block:: python
+
+       def structures():
+           for path in sorted(Path("structures").glob("POSCAR.*")):
+               yield {"files": {"POSCAR": path}, "tag": structure_tag(path)}
+
+       for job in new_jobs(workspace, "some-workflow", structures(), parameters={"kpoint_density": 30.0}):
+           print(job.job_key)
+
+
+.. py:function:: scaffold_job(workspace, workflow, destination, *, inputs = None, files = None, parameters = None, environment = None, tag = None, priority = None, step = None, name = None, maxtime_cap = None)
+
+   Build one job payload of an installed *workflow* into *destination*, without submitting it.
+
+   This is :func:`new_job` stopped one step short of submission: it looks the
+   workflow up in the workspace (it never installs), stages *files* and
+   *inputs*, validates *parameters* and *environment*, runs any instantiate
+   hook, and writes ``job.json`` — but into *destination* rather than into the
+   workspace. *destination* must already exist and be an empty directory. The
+   result is a prepared payload directory, which is exactly what
+   :meth:`httk.workflow.Attempt.spawn` accepts, so a running step can build a
+   child job of an installed workflow and spawn it; :meth:`httk.workflow.Attempt.call`
+   does exactly that.
+
+   Every argument other than *destination* means what it does for
+   :func:`new_job`, minus *placement*: the payload's ``job.json`` carries the
+   root placement until something spawns it at its own.
+
+   :param workspace: Provide the workspace the workflow is installed in.
+   :param workflow: Select the installed workflow by id or name.
+   :param destination: Locate the empty directory to build the payload into.
+   :param inputs: Supply declared workflow inputs.
+   :param files: Map payload names to files to stage.
+   :param parameters: Supply opaque job parameters.
+   :param environment: Supply overrides for declared workflow environment values.
+   :param tag: Set the job tag.
+   :param priority: Set the scheduling priority.
+   :param step: Override the workflow's initial step.
+   :param name: Set the job's display name.
+   :param maxtime_cap: Cap every ``maxtime`` of the job at these seconds, setting the job-level one
+       when the workflow declares none; :meth:`httk.workflow.Attempt.call` passes its own ``maxtime``.
+   :return: The written job definition.
+   :raises ValueError: If the destination is not an empty directory, the workflow is not installed,
+       or workflow, inputs, or job settings are invalid.
+
+
+.. py:class:: Attempt(context, *, control, payload, workdir, workspace, data = None, step = None, runner = None)
+
+   Everything one attempt of one step may read, do, and publish.
+
+   An attempt owns exactly one implicit outcome draft. The draft is created by
+   the first :meth:`spawn`, :meth:`call` or :meth:`put`, and it is published by
+   exactly one of :meth:`advance`, :meth:`gather`, :meth:`succeed`,
+   :meth:`retry`, :meth:`pause`, or :meth:`fail`. Publication is the single
+   atomic rename the manager observes, so nothing a step did takes effect until
+   the step says how it ended; only a :meth:`transaction` committed earlier is
+   applied at the next attempt boundary whatever the outcome.
+
+   :param context: The manager-written identity and restart context.
+   :param control: The attempt control directory.
+   :param payload: The immutable job payload directory.
+   :param workdir: The directory in which the step works.
+   :param workspace: The workspace root containing the job.
+   :param data: The job's data directory, ``data/`` of the payload when omitted.
+   :param step: The step this attempt runs, or the context step when omitted.
+   :param runner: The runner dispatching this attempt, when available.
+
+
+   .. py:attribute:: context
+
+
+   .. py:attribute:: control
+
+
+   .. py:attribute:: payload
+
+
+   .. py:attribute:: workdir
+
+
+   .. py:attribute:: workspace
+
+
+   .. py:attribute:: data
+
+
+   .. py:attribute:: step
+
+
+   .. py:attribute:: state
+
+
+   .. py:attribute:: log
+
+
+   .. py:method:: initialize(environment = None, *, runner = None)
+      :classmethod:
+
+
+      Bind this process to its attempt and recover an interrupted one.
+
+      Recovery replays every workdir batch an earlier attempt sealed but did not
+      get to apply, so a handler always starts from a workdir whose sealed
+      changes are complete. This is the only constructor a runner needs.
+
+      :param environment: The process environment, or the current environment when omitted.
+      :param runner: The runner dispatching this attempt, when called by :meth:`Runner.main`.
+      :return: The initialized attempt.
+      :raises ValueError: If the manager-written attempt environment or context is invalid.
+
+
+
+   .. py:property:: job
+      :type: httk.workflow._job.JobDefinition
+
+
+      The immutable definition of the job this attempt belongs to.
+
+
+   .. py:property:: deadline
+      :type: int | None
+
+
+      Return the epoch second at which the manager stops this attempt, or None when it has no time limit.
+
+
+   .. py:property:: binding
+      :type: collections.abc.Mapping[str, Any] | None
+
+
+      Return the nodes, slots, and launch prefix this attempt was given, or None without a node inventory.
+
+
+   .. py:property:: parameters
+      :type: collections.abc.Mapping[str, object]
+
+
+      The application-defined ``parameters`` object of this job.
+
+
+   .. py:property:: children
+      :type: ChildrenView
+
+
+      The children observed by the join that started this activation.
+
+
+   .. py:property:: parent
+      :type: ParentJob | None
+
+
+      The job that spawned this one, when it is reachable in this workspace.
+
+      ``None`` when this job has no parent or was detached from it with
+      ``httk job detach``, or when the parent is not found at its recorded
+      placement in this workspace: a child transferred away from its parent, or
+      a parent transferred or removed. A parent and child transferred together
+      still find each other when both keep their placements. Reading it lists
+      the parent's placement once (read-only) and reads its ``job.json``.
+
+      :raises httk.workflow.errors.FormatError: If this job's ``parent`` member or
+          the parent's ``job.json`` is malformed.
+
+
+   .. py:property:: published
+      :type: bool
+
+
+      Report whether this attempt already published its outcome.
+
+
+   .. py:method:: parameter(name, default = _MISSING)
+
+      Return one member of the job's ``parameters`` object.
+
+      Without a *default*, a missing parameter is a :exc:`KeyError`: a step that
+      needs a parameter cannot run without it, and saying so immediately is better
+      than failing later on a value that was never there.
+
+      :param name: The parameter name to look up.
+      :param default: The value to return when the parameter is absent.
+      :return: The parameter value or the supplied default.
+      :raises KeyError: If the parameter is absent and no default was supplied.
+
+
+
+   .. py:method:: stage_input(name, destination, default = _MISSING)
+
+      Copy one payload input file, named by a job parameter, into the workdir.
+
+      The parameter holds a payload-relative path, such as ``files/POSCAR``. Only
+      the bytes are copied; an existing destination is overwritten and mode bits
+      are not preserved. The value is joined to the payload as given, without
+      validation, so an absolute path is used as is.
+
+      :param name: The parameter that names the payload-relative source path.
+      :param destination: The target path, relative to the workdir unless absolute.
+      :param default: The payload-relative path to use when the parameter is absent.
+      :return: The copied file's path, or ``None`` when the payload has no such file.
+      :raises KeyError: If the parameter is absent and no default was supplied.
+      :raises ValueError: If the parameter value is not a string.
+      :raises OSError: If the file cannot be copied.
+
+
+
+   .. py:method:: setting(name, default = None)
+
+      Resolve one application setting through its layers.
+
+      The layers are consulted most-specific first, and the first that has the
+      name wins: this job's ``parameters`` object, then the environment variable
+      ``HTTK_`` + the name upper-cased with dots as underscores (so
+      ``vasp.command`` reads ``HTTK_VASP_COMMAND``), then the workspace's
+      application settings, then *default*. This is how a step reads the VASP
+      command a workspace was configured with without the operator exporting it
+      for every job, while still letting one job or one shell override it.
+
+      :param name: The dotted application setting name to resolve.
+      :param default: The value to return when no layer defines the setting.
+      :return: The first value found in the resolution layers, or the default.
+
+
+
+   .. py:method:: environment(name, default = _MISSING)
+
+      Resolve one declared workflow environment value through its layers.
+
+      Once the runner's start gate has run, this attempt reads the immutable
+      snapshot resolved there. Before that gate, overrides, the declared setting's
+      environment variable, workspace settings, the declaration default, and
+      *default* are consulted in that order.
+
+      :param name: The declared environment name to look up.
+      :param default: The value to return when no declared value exists.
+      :return: The resolved environment value.
+      :raises KeyError: If the name is undeclared or unresolved without a default.
+
+
+
+   .. py:method:: declare(name, document)
+
+      Record the observed workflow declaration *name* of this job.
+
+      The static declarations of a job are the ones ``job.json`` carried at
+      submission, and they cannot change. A dynamic campaign nevertheless only
+      learns at run time what it actually consumed and produced, so a step
+      writes the refined document here and it is stored beside the job state as
+      ``.httk-job/declarations/<name>.json``, atomically. The bytes are carried
+      verbatim: nothing here interprets the document, whose own members say
+      which vocabulary and version it follows.
+
+      The write is runner-private, so it never disturbs the payload digest, and
+      repeating it overwrites: what a job observed is whatever its last word on
+      the subject was. A collect reports the observed document beside the
+      declared one and never merges the two.
+
+      :param name: The declaration name to record.
+      :param document: The declaration document to store verbatim.
+      :return: The path of the stored observed declaration.
+      :raises httk.workflow.errors.FormatError: If the declaration name or document is invalid.
+
+
+
+   .. py:method:: declaration(name)
+
+      Return the workflow declaration *name*, observed first.
+
+      The document this job observed is returned when one was written,
+      otherwise the one ``job.json`` declared, otherwise ``None``.
+
+      :param name: The declaration name to read.
+      :return: The observed or declared document, or ``None`` when absent.
+      :raises httk.workflow.errors.FormatError: If the declaration name is invalid or its document is malformed.
+
+
+
+   .. py:method:: run(argv, *, timeout = None, cwd = None, environment = None, termination_grace = 10.0)
+
+      Run an argv array in the workdir and reap its process group.
+
+      :param argv: The command and its arguments.
+      :param timeout: The maximum runtime before terminating the process group.
+      :param cwd: The working directory, or this attempt's workdir when omitted.
+      :param environment: The complete child environment, or the process environment when omitted.
+      :param termination_grace: The grace period after a timeout before forceful termination.
+      :return: The completed command result.
+
+
+
+   .. py:method:: workdir_batch()
+
+      Start a replayable group of workdir changes.
+
+      :return: A batch that seals changes for replay after interruption.
+
+
+
+   .. py:method:: transaction()
+
+      Begin a transaction of this attempt, for a commit point in the middle of a step.
+
+      Stage files with :meth:`~httk.workflow._data.Transaction.put` (destinations
+      are relative to the job directory, so ``data/result`` lands in the data
+      directory), then :meth:`~httk.workflow._data.Transaction.commit`. The
+      manager applies every committed transaction at the next attempt boundary,
+      whatever the outcome, and before any later attempt starts; an
+      uncommitted one is discarded.
+
+      :return: The new transaction.
+
+
+
+   .. py:method:: put(source, destination)
+
+      Stage a copy of one file or directory for ``data/<destination>`` of this job.
+
+      The copy is staged now into the attempt's implicit transaction, which
+      commits together with the outcome; the manager applies it when it
+      commits the outcome, exactly once. A file replaces what is there, and a
+      directory is merged into what is there.
+
+      :param source: The file or directory to stage.
+      :param destination: The destination path below the job's data directory.
+      :return: The payload-relative destination, ``data/<destination>``.
+      :raises ValueError: If the destination is absolute, empty or escapes the data directory.
+
+
+
+   .. py:method:: spawn(child, *, label, placement = None)
+
+      Register one child job under *label*, to be created on publication.
+
+      *child* is either a :class:`ChildSpec`, which needs no payload at all, or
+      the path of a prepared payload directory. The label is mandatory and must
+      be unique within one attempt: it is how :meth:`gather` and
+      :attr:`children` name this child later.
+
+      A :class:`ChildSpec` child never inherits ``mintime``, and its ``maxtime``
+      requirements are capped at this attempt's effective ``maxtime``. A
+      prepared payload directory is registered exactly as written, uncapped.
+
+      :param child: The child specification or prepared payload directory.
+      :param label: The unique label used to observe the child later.
+      :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+      :return: The reference to the registered child.
+      :raises ValueError: If the child or label is invalid, or the label is reused.
+
+
+
+   .. py:method:: call(workflow, *, label, inputs = None, files = None, parameters = None, environment = None, tag = None, placement = None, priority = None, step = None, name = None)
+
+      Spawn a job of another installed workflow as a child under *label*.
+
+      This is :func:`~httk.workflow.scaffold.new_job` from inside a running
+      step. *workflow* is an alias of the ``[workflow.calls]`` this job's
+      installed workflow declares, or the installed id an alias names, and the
+      called workflow must be installed in the workspace too. A complete child
+      payload is built from the installed package (its *files* and *inputs*
+      staged, its instantiate hook run, its ``job.json`` written) and
+      registered as a child of this attempt's outcome. Wait for it with
+      :meth:`gather`, which resumes this job when the child is terminal, and
+      read it back through :attr:`children`.
+
+      The child takes the called workflow's resources, with every ``maxtime``
+      capped at this attempt's effective ``maxtime``.
+
+      :param workflow: The declared alias, or installed id, of the workflow to call.
+      :param label: The unique label used to gather and observe the child later.
+      :param inputs: Supply the called workflow's declared inputs.
+      :param files: Map payload names to files to stage for the child.
+      :param parameters: Supply opaque parameters for the child job.
+      :param environment: Supply overrides for the child's declared environment values.
+      :param tag: Set the child job tag, defaulting to *label* when omitted.
+      :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+      :param priority: Set the child scheduling priority.
+      :param step: Override the called workflow's initial step.
+      :param name: Set the child job's display name.
+      :return: The reference to the registered child.
+      :raises ValueError: If the workflow is undeclared or not installed, or the label, inputs, or job
+          settings are invalid.
+
+
+
+   .. py:method:: advance(step, *, state = None, priority = None, resources = None)
+
+      Publish a new activation of this job at *step*.
+
+      *state* is written to :attr:`state` before the outcome is published, so
+      the step that runs next always finds the state that decided to run it.
+
+      :param step: The next registered step.
+      :param state: State members to merge before publication.
+      :param priority: The priority of the new activation, when changed.
+      :param resources: The requirement of the new activation, when changed; ``maxtime`` and
+          ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
+      :return: The path of the published outcome.
+      :raises RuntimeError: If this attempt already published an outcome.
+
+
+
+   .. py:method:: gather(step, *, when = 'all_succeeded', count = None, on_impossible = None, rejoin = (), priority = None, resources = None)
+
+      Wait for this attempt's and optionally earlier children, then run *step*.
+
+      The join names children :meth:`spawn` registered on this attempt and
+      labels from earlier join activations named by *rejoin*. *when* is one of
+      ``all_succeeded``, ``all_terminal``, ``any_succeeded``, ``any_terminal``,
+      or ``at_least`` with *count*. When the condition can no longer be met,
+      the job advances to *on_impossible* if one is named and fails with
+      ``dependency_failure`` otherwise.
+
+      :param step: The step to run when the join condition is met.
+      :param when: The child completion condition.
+      :param count: The required count when ``when`` is ``at_least``.
+      :param on_impossible: The step to run when the condition cannot be met.
+      :param rejoin: Labels of children observed by an earlier join activation.
+      :param priority: The priority of the join activation, when changed.
+      :param resources: The requirement of the join activation, when changed; ``maxtime`` and
+          ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
+      :return: The path of the published wait outcome.
+      :raises ValueError: If no children were spawned or rejoined, a rejoined label is unknown, or a named step is invalid.
+
+
+
+   .. py:method:: succeed()
+
+      Publish the successful completion of this job.
+
+      :return: The path of the published outcome.
+
+
+
+   .. py:method:: retry(reason)
+
+      Ask for another attempt of this same activation.
+
+      :param reason: The reason recorded with the retry request.
+      :return: The path of the published outcome.
+
+
+
+   .. py:method:: pause(reason)
+
+      Pause this job until an operator resumes it.
+
+      :param reason: The reason recorded with the pause request.
+      :return: The path of the published outcome.
+
+
+
+   .. py:method:: fail(code, message, *, details = None, retryable = False, priority = None)
+
+      Publish a structured terminal failure.
+
+      ``code`` is the token a job lists in ``retry_on``. ``retryable`` declares
+      that repeating this attempt could help, which the manager honours within
+      the attempt budgets of the job.
+
+      :param code: The stable failure code.
+      :param message: The human-readable failure message.
+      :param details: Optional structured failure details.
+      :param retryable: Whether repeating this attempt could help.
+      :param priority: The terminal priority, when changed.
+      :return: The path of the published outcome.
+
+
+
+.. py:class:: ChildrenView
+
+   The children observed by the join that started this activation.
+
+   The view is empty for an activation that follows no join, so a step can read
+   it unconditionally.
+
+
+   .. py:attribute:: all
+      :type:  tuple[ChildResult, ...]
+      :value: ()
+
+
+
+   .. py:property:: succeeded
+      :type: tuple[ChildResult, ...]
+
+
+      The children that ended successfully, in spawn order.
+
+
+   .. py:property:: failed
+      :type: tuple[ChildResult, ...]
+
+
+      The children that ended badly, in spawn order.
+
+
+   .. py:property:: labels
+      :type: tuple[str, ...]
+
+
+      The labels of every observed child, in spawn order.
+
+
+   .. py:method:: get(label, default = None)
+
+      Return the child spawned under *label*, or *default*.
+
+      :param label: The unique spawn label to find.
+      :param default: The value to return when no child has that label.
+      :return: The matching child, or the default value.
+
+
+
+.. py:class:: ChildResult
+
+   What one gathering step may know about one child it spawned.
+
+   Every member is derived from authoritative state by the manager before the
+   gathering activation starts: it located each child when it launched this
+   attempt, so reading a child is a pure read of the attempt context and never
+   a scan of the workspace. Paths are absolute, and ``None`` when the manager
+   could not find the child. A child's directory moves when it is claimed, so
+   a path read here is valid while the child stays terminal.
+
+
+   .. py:attribute:: label
+      :type:  str | None
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: kind
+      :type:  str
+
+
+   .. py:attribute:: failure
+      :type:  httk.workflow.models.Failure | None
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: workdir
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: data
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: raw
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:property:: succeeded
+      :type: bool
+
+
+      Report whether this child ended successfully.
+
+
+   .. py:property:: failed
+      :type: bool
+
+
+      Report whether this child ended badly.
+
+
+   .. py:method:: from_mapping(raw, workspace)
+      :classmethod:
+
+
+
+.. py:class:: ChildSpec
+
+   A complete child job described by the step and parameters it starts with.
+
+   A child of a :class:`ChildSpec` runs the spawning job's installed workflow
+   (another workflow is started with :meth:`Attempt.call`). Everything not given
+   follows the spawning job: its claim pool, its priority, its resources and
+   its sealing. The child therefore differs from its parent in exactly what the
+   campaign varies, which is normally only *step* and *parameters*.
+
+   :param step: The first step the child runs.
+   :param parameters: The opaque implementation knobs given to the child.
+   :param declarations: The workflow declarations carried by the child.
+   :param name: The child job name, or a generated name when omitted.
+   :param tag: The child's optional job tag, or the spawn label when omitted.
+   :param priority: The child's priority, or the parent's when omitted.
+   :param claim_pool: The child's claim pool, or the parent's when omitted.
+   :param required_capabilities: Capabilities required by the child.
+   :param resources: Resources requested by the child, or the parent's without ``mintime`` when
+       omitted; ``maxtime`` and ``mintime`` are Slurm duration strings.
+   :param step_resources: Per-step resources requested by the child, or the parent's without
+       ``mintime`` when omitted; time labels are spelled as in *resources*.
+   :param maximum_attempts_per_activation: The child's per-activation attempt budget.
+   :param maximum_total_attempts: The child's total attempt budget.
+   :param maximum_activations: The child's activation budget.
+   :param retry_on: Failure codes eligible for manager-detected retry.
+
+
+   .. py:attribute:: step
+      :type:  str
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: declarations
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: name
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: priority
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: claim_pool
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: required_capabilities
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+   .. py:attribute:: resources
+      :type:  collections.abc.Mapping[str, int | str] | None
+      :value: None
+
+
+
+   .. py:attribute:: step_resources
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, int | str]] | None
+      :value: None
+
+
+
+   .. py:attribute:: maximum_attempts_per_activation
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: maximum_total_attempts
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: maximum_activations
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: retry_on
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+.. py:type:: InstantiateHandler
+   :canonical: Callable[[Any], object]
+
+
+.. py:class:: ParentJob
+
+   Where the job that spawned this one lives, for reading its files in place.
+
+   The parent is found from the immutable ``parent`` member every spawned
+   child's ``job.json`` carries: a read-only lookup at its placement in this
+   workspace. Nothing is copied or frozen: the parent's workdir is ordinary
+   storage its own steps may still change, so a parent that shares files this
+   way writes them before it publishes the spawning outcome and leaves them
+   alone until every child that reads them is terminal. The parent's
+   directory moves while a manager holds it, so the paths are those of the
+   moment of the lookup. Paths are absolute.
+
+   :param job_id: The parent job UUID.
+   :param job_key: The parent job key.
+   :param placement: The parent's workspace placement.
+   :param payload: The parent's job directory.
+   :param workdir: The parent's persistent workdir, ``run/`` of its job directory.
+   :param raw: The ``parent`` member of this job's ``job.json``, verbatim.
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workdir
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: raw
+      :type:  collections.abc.Mapping[str, object]
+
+
+.. py:class:: Runner(workflow, *, inputs = None)
+
+   The registered steps of one workflow and the dispatch into them.
+
+   A runner is created once at module level, its steps are registered with
+   :meth:`step` before any work happens, and :meth:`main` is what the manager
+   invokes. Registration is therefore complete before the first step runs, which
+   is what lets every step name in a published outcome be checked against the
+   steps that really exist.
+
+   :param workflow: The workflow identifier and registry key implemented by this runner.
+   :param inputs: The immutable creation-time staged-input declarations.
+
+
+   .. py:attribute:: workflow
+
+
+   .. py:property:: inputs
+      :type: collections.abc.Mapping[str, str | None]
+
+
+      The immutable declared-input staging map.
+
+
+   .. py:property:: steps
+      :type: frozenset[str]
+
+
+      The names of every registered step.
+
+
+   .. py:property:: has_instantiate
+      :type: bool
+
+
+      Whether this runner has a creation-time instantiate hook.
+
+
+   .. py:method:: step(function: StepHandler) -> StepHandler
+                  step(*, name: str | None = None) -> collections.abc.Callable[[StepHandler], StepHandler]
+
+      Register one step handler, named after the function unless *name* is given.
+
+      :param function: The step handler, or ``None`` when used as a decorator factory.
+      :param name: The registered step name, or the handler name when omitted.
+      :return: The handler or a decorator that registers it.
+      :raises ValueError: If the step name is invalid or already registered.
+
+
+
+   .. py:method:: instantiate(function)
+
+      Register the hook receiving ``httk.workflow.scaffold.InstantiateContext``.
+
+      :param function: The creation-time instantiate handler.
+      :return: The handler, unchanged.
+      :raises ValueError: If an instantiate handler is already registered.
+
+
+
+   .. py:method:: description()
+
+      Return the machine-readable description of this runner.
+
+      :return: The runner description document.
+
+
+
+   .. py:method:: main(argv = None)
+
+      Run the step this process was launched for and publish its outcome.
+
+      Asked to describe itself — through ``HTTK_WORKFLOW_DESCRIBE=1`` or
+      ``--describe`` — the runner prints its description and exits without
+      touching anything, so a tool can enumerate the steps of a runner it is
+      not running.
+
+      Every ending is an outcome: a step that publishes none is reported as
+      ``no_outcome``, an unimplemented step as ``unknown_step``, and a step that
+      raises leaves an ``error.json`` breadcrumb and lets the exception reach the
+      manager, whose retry policy owns what happens next.
+
+      :param argv: Command-line arguments, or the process arguments when omitted.
+      :return: Zero after dispatching or describing the runner.
+
+
+
+.. py:function:: store_collected(items, path, *, id_base, id_series = '1', ledger_path = None, ledger_keys = (), bare_runs = True, upgrade = False)
+
+   Save one bounded collected sweep into a file-backed SQLite store.
+
+   Every job's run is stored, including the run of a job whose workflow has
+   nothing to collect (a *bare* run) unless *bare_runs* is off, so parent and
+   child jobs alike leave provenance naming their workflow declarations. A
+   parent's run gains one ``has_artifact`` edge to the run of each child it
+   spawned that is stored in this sweep or already in the store; children are
+   stored first so their run ids exist when the parent's run is written.
+
+   The entries a recognized calculation read (the ``inputs`` of
+   :class:`~httk.workflow.collecting.CollectedJob`) are stored like its
+   outputs, and the run's input edges name their stored ids.
+   Collector outputs arrive carrying content ids; every edge, product link and
+   ``product_of`` reference is rewritten to the id the store stored it under.
+
+   With an id ledger, each record and run is keyed by its job coordinate and
+   role (:func:`~httk.workflow.ledger_key`), so a store rebuilt from the
+   same jobs keeps its ids. A job collected again with changed content is a
+   revision: the record or run keeps its id and the store appends a new
+   revision to its lineage. Views that cannot carry an explicit id, such as
+   structures, are store-minted and deduplicated by content.
+
+   A generic ``DataRecord`` whose property definition a typed record of the
+   ``records`` family carries (``TotalEnergyRecord`` for the core total energy)
+   is stored as that typed record, so its value is served and filterable; any
+   other definition stays a generic record, stored but not served as a value.
+   A dataclass entry that is not a registered record of its family is a
+   storage error rather than a row in an unserved table.
+
+   Each report is the job's collected summary plus ``"stored"`` (the stored
+   entry ids and run id, or ``None`` when nothing was stored, with
+   ``"skipped"`` saying why), ``"storage_error"`` when the job could not be
+   stored, and ``"revised"``, which is true when this call replaced an
+   existing entry of the job (its run, or one of its records) with a new
+   revision.
+
+   :param items: The collected jobs to store.
+   :param path: The SQLite store file path.
+   :param id_base: The entry-id namespace base.
+   :param id_series: The entry-id campaign series.
+   :param ledger_path: An id-ledger database to allocate stable ids
+       through, or ``None`` to let the store mint ids directly.
+   :param ledger_keys: The signing keys each appended segment is signed with.
+   :param bare_runs: Store the runs of jobs whose workflows have nothing to collect.
+   :param upgrade: Apply an additive layout upgrade the store needs (new record
+       kinds or families, for example a typed record a newer *httk* ships)
+       instead of refusing. Keep a backup of the store first.
+   :return: One report mapping per collected job.
+   :raises ValueError: If *httk-store* is unavailable, or the store at *path*
+       was created for a different set of entry types, predates typed records, or
+       needs an additive upgrade and *upgrade* is false.
+
+
+.. py:class:: Workspace(root, *, durable = True)
+
+   Attach to one self-contained httk workflow filesystem workspace.
+
+   :param root: Locate the workspace root.
+   :param durable: Enable storage-crash durability for filesystem publications.
+   :raises httk.workflow.errors.FormatError: If the workspace format or identity is invalid.
+   :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace uses unsupported extensions or a profile.
+
+
+   .. py:attribute:: root
+
+
+   .. py:attribute:: jobs
+
+
+   .. py:attribute:: control
+
+
+   .. py:attribute:: durable
+      :value: True
+
+
+
+   .. py:attribute:: format
+      :value: None
+
+
+
+   .. py:attribute:: core_profile
+
+
+   .. py:attribute:: extensions
+
+
+   .. py:attribute:: workspace_id
+      :value: ''
+
+
+
+   .. py:method:: initialize(root, *, extensions = (), durable = True, policy = None)
+      :classmethod:
+
+
+      Create and return a new workspace.
+
+      :param root: Locate the new workspace root.
+      :param extensions: Enable optional workspace extensions.
+      :param durable: Enable storage-crash durability for filesystem publications.
+      :param policy: Override the default workspace policy values.
+      :return: The initialized workspace.
+      :raises httk.workflow.errors.FormatError: If the filesystem cannot satisfy the workspace profile or
+          ``root`` exists and is not an empty directory.
+      :raises httk.workflow.errors.UnsupportedExtensionError: If an extension is not supported.
+      :raises httk.workflow.errors.SealedError: If the enclosing project is sealed.
+
+
+
+   .. py:method:: discover(start = None)
+      :classmethod:
+
+
+      Find the nearest workspace root at or above *start*.
+
+      Discovery walks from *start* and its parents, treating a file start as
+      its containing directory.
+
+      :param start: Directory or file from which to begin the upward search, or None for the current directory.
+      :return: Nearest workspace root, or None when no workspace marker is found.
+
+
+
+   .. py:method:: default()
+      :classmethod:
+
+
+      Resolve the enclosing, project, or per-user default workspace, creating it if needed.
+
+      :return: The default workspace.
+
+
+
+   .. py:property:: policy
+      :type: httk.workflow.models.WorkspacePolicy
+
+
+      Return the tunables this workspace publishes to every attacher.
+
+      :return: The current workspace policy.
+
+
+   .. py:property:: workflows
+      :type: pathlib.Path
+
+
+      Return the store of installed workflows, ``<root>/workflows``.
+
+      :return: The store directory.
+
+
+   .. py:property:: visibility_deadline
+      :type: float
+
+
+      Return how long a metadata visibility retry may keep probing.
+
+      :return: The workspace metadata visibility deadline.
+
+
+   .. py:method:: set_policy(changes)
+
+      Validate *changes*, merge them into the stored policy, and publish it.
+
+      The write is a read-modify-write of ``format.json`` through an
+      exclusively created temporary file and a rename, so a reader never sees
+      a torn object, verified by re-reading it and redone when a concurrent
+      writer replaced it. It is deliberately not serialized against another
+      writer: policy is administrative, changes are rare, and last writer wins.
+
+      :param changes: Supply policy values to validate and merge.
+      :return: The resulting workspace policy.
+      :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+
+
+
+   .. py:property:: settings
+      :type: dict[str, object]
+
+
+      Return this workspace's application settings, a flat dotted map.
+
+      Application settings are distinct from :attr:`policy`, which tunes the
+      engine. These are the values an application step resolves at run time —
+      the VASP command, a pseudopotential library — one layer of the
+      job-parameters → environment → workspace → default resolution a runner reads
+      through :meth:`~httk.workflow.sdk.Attempt.setting`.
+
+      :return: The workspace's application settings.
+
+
+   .. py:method:: refresh_format()
+
+      Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.
+
+      Extensions can be enabled while processes are attached (``httk
+      workspace exchange enable``), so a long-running reader re-reads them
+      rather than trusting what it saw at attach. The format, profile and
+      workspace identity must still be the attached ones; the policy keeps the
+      value read at attach.
+
+      :return: The re-read ``format.json`` document.
+      :raises httk.workflow.errors.FormatError: If ``format.json`` cannot be read, is not
+          this workspace's format 3 document, or its extensions are malformed.
+      :raises httk.workflow.errors.UnsupportedExtensionError: If it enables an unsupported extension.
+
+
+
+   .. py:method:: read_settings()
+
+      Read and validate the current settings from disk, refreshing the enabled extensions too.
+
+      :return: The current application settings.
+      :raises httk.workflow.errors.FormatError: If ``format.json`` or the stored settings are not valid.
+      :raises httk.workflow.errors.UnsupportedExtensionError: If ``format.json`` now enables an
+          unsupported extension.
+
+
+
+   .. py:method:: set_setting(key, value)
+
+      Store one application setting and return the resulting map.
+
+      The write is the same read-modify-write of ``format.json`` that
+      :meth:`set_policy` uses: an exclusively created temporary and a rename,
+      so a reader never sees a torn object, verified by re-reading, and last
+      writer wins.
+
+      :param key: Name the application setting to store.
+      :param value: Supply the setting value.
+      :return: The resulting application settings.
+      :raises ValueError: If the setting name or value is invalid, or its environment name collides.
+      :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+
+
+
+   .. py:method:: unset_setting(key)
+
+      Remove one application setting, refusing one that is not set.
+
+      :param key: Name the application setting to remove.
+      :return: The resulting application settings.
+      :raises ValueError: If the setting is not set.
+      :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+
+
+
+   .. py:method:: configure_settings(changes, *, unset = ())
+
+      Remove named settings, then merge changes after validating the complete candidate.
+
+      :param changes: Application setting values to store.
+      :param unset: Existing setting names to remove before applying changes.
+      :return: The resulting application settings.
+      :raises ValueError: If a name or value is invalid, a setting is absent, or environment names collide.
+      :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+
+
+
+   .. py:method:: seed_settings(seeds)
+
+      Merge *seeds* into the settings, keeping any value already set.
+
+      Seeding happens once, when a workspace bound to a remote is created: the
+      remote definition's whitelisted settings become the workspace's
+      starting application settings. An explicit setting already present is
+      never overwritten, so a value the operator chose outlives a reseed.
+
+      :param seeds: Supply initial application settings to merge.
+      :return: The resulting application settings.
+      :raises ValueError: If a supplied setting is invalid.
+
+
+
+   .. py:method:: read_workflow_preludes()
+
+      Read and validate the workflow-in-workspace preludes from disk.
+
+      A workflow prelude is shell text run to initialize the environment
+      before each launch of a runner for that workflow.
+
+      :return: The current map of workflow id to prelude text.
+      :raises httk.workflow.errors.FormatError: If the stored preludes are not valid.
+
+
+
+   .. py:method:: set_workflow_prelude(workflow_id, value)
+
+      Store one workflow prelude and return the resulting map.
+
+      The write is the same read-modify-write of ``format.json`` that
+      :meth:`set_setting` uses: an exclusively created temporary and a rename,
+      so a reader never sees a torn object, verified by re-reading, and last
+      writer wins.
+
+      :param workflow_id: Name the workflow whose prelude to store.
+      :param value: Supply the shell prelude text.
+      :return: The resulting map of workflow id to prelude text.
+      :raises ValueError: If the workflow id or prelude value is invalid.
+      :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+
+
+
+   .. py:method:: unset_workflow_prelude(workflow_id)
+
+      Remove one workflow prelude, refusing one that is not set.
+
+      :param workflow_id: Name the workflow whose prelude to remove.
+      :return: The resulting map of workflow id to prelude text.
+      :raises ValueError: If the prelude is not set.
+      :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+
+
+
+   .. py:method:: check(*, repair = False)
+
+      Check the workspace's job tree (:func:`httk.workflow.fsck.check_workspace`) while nothing else uses it.
+
+      :param repair: Repair what the check can (refused unless the workspace is quiescent).
+      :return: The workspace check report.
+      :raises httk.workflow.errors.WorkflowError: With *repair*, unless the workspace is quiescent.
+
+
+
+   .. py:method:: collect_garbage(*, dry_run = False, now = None, categories = None, sizes = True)
+
+      Collect the disk this workspace's retention policy permits freeing.
+
+      :param dry_run: Report eligible removals without changing the workspace.
+      :param now: Use this timestamp when evaluating retention deadlines.
+      :param categories: Restrict collection to these categories.
+      :param sizes: Whether to calculate byte estimates.
+      :return: The garbage-collection report.
+
+
+

@@ -1,0 +1,932 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.calculations - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workspace_daemon.html">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.workflow.calculations</h1><div class="highlight"><pre>
+<span></span><span class="sd">"""Collect finished calculations found anywhere in a directory tree.</span>
+
+<span class="sd">A *recognized-calculation collector* is a workflow package with a</span>
+<span class="sd">``[workflow.recognize]`` table and no runner: it is collected, never run.</span>
+<span class="sd">:func:`collect_tree` walks a tree and asks every collector whether a directory</span>
+<span class="sd">is one of its calculations. The cheap ``requires`` markers are checked first;</span>
+<span class="sd">only when every marker matches is the package's ``recognize(directory)`` hook</span>
+<span class="sd">called. The winning collector's ``collect`` hook then reads the directory</span>
+<span class="sd">through a stand-in :class:`~httk.workflow.collecting.JobRecord`, and the result</span>
+<span class="sd">is assembled into a :class:`~httk.workflow.collecting.CollectedJob` exactly as</span>
+<span class="sd">for a workspace job. :func:`claims` reports the same decisions without</span>
+<span class="sd">collecting, for a dry run.</span>
+
+<span class="sd">A claimed calculation is identified by ``&lt;collector name&gt;:&lt;identity&gt;``, where</span>
+<span class="sd">the collector derives the identity from the calculation's content (see</span>
+<span class="sd">:func:`content_digest`), so moving a directory keeps its identity. Within one</span>
+<span class="sd">sweep, two directories claiming the same identity with identical marker files</span>
+<span class="sd">are copies and the second is skipped; with different marker files they are an</span>
+<span class="sd">:class:`IdentityCollisionError`.</span>
+<span class="sd">"""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">fnmatch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Iterable</span><span class="p">,</span> <span class="n">Iterator</span><span class="p">,</span> <span class="n">Mapping</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">replace</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span><span class="p">,</span> <span class="n">PurePosixPath</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">IO</span><span class="p">,</span> <span class="n">Literal</span><span class="p">,</span> <span class="n">cast</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.core</span><span class="w"> </span><span class="kn">import</span> <span class="n">Run</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.core.datastream.compression</span><span class="w"> </span><span class="kn">import</span> <span class="n">open_compressed</span><span class="p">,</span> <span class="n">split_compression_suffix</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.core.register.codes</span><span class="w"> </span><span class="kn">import</span> <span class="n">collector_support</span><span class="p">,</span> <span class="n">known_collectors</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.collecting</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">CollectedJob</span><span class="p">,</span>
+    <span class="n">JobRecord</span><span class="p">,</span>
+    <span class="n">_assemble_collected</span><span class="p">,</span>
+    <span class="n">_CollectEnvironmentError</span><span class="p">,</span>
+    <span class="n">_degraded_job</span><span class="p">,</span>
+    <span class="n">_input_roles</span><span class="p">,</span>
+    <span class="n">_job_workflow_document</span><span class="p">,</span>
+    <span class="n">collect</span><span class="p">,</span>
+    <span class="n">existing_file</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.hookapi</span><span class="w"> </span><span class="kn">import</span> <span class="n">Claim</span><span class="p">,</span> <span class="n">Unclaimed</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">WORKSPACE_DIRECTORY</span><span class="p">,</span> <span class="n">make_job_key</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.packages</span><span class="w"> </span><span class="kn">import</span> <span class="n">_source_hook</span><span class="p">,</span> <span class="n">load_workflow_package</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.scaffold</span><span class="w"> </span><span class="kn">import</span> <span class="n">RecognizeSpec</span><span class="p">,</span> <span class="n">WorkflowProvider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.workspace</span><span class="w"> </span><span class="kn">import</span> <span class="n">Workspace</span>
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">"AmbiguousClaimError"</span><span class="p">,</span>
+    <span class="s2">"DirectoryClaim"</span><span class="p">,</span>
+    <span class="s2">"IdentityCollisionError"</span><span class="p">,</span>
+    <span class="s2">"claims"</span><span class="p">,</span>
+    <span class="s2">"collect_tree"</span><span class="p">,</span>
+    <span class="s2">"content_digest"</span><span class="p">,</span>
+<span class="p">]</span>
+
+<span class="n">_LOGGER</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">_CONTEXT</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"context"</span><span class="p">:</span> <span class="s2">"workflow"</span><span class="p">}</span>
+<span class="n">_CHUNK</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="mi">20</span>
+
+
+<div class="viewcode-block" id="AmbiguousClaimError">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.calculations.AmbiguousClaimError">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">AmbiguousClaimError</span><span class="p">(</span><span class="ne">ValueError</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Several collectors claimed one directory at the same, highest priority."""</span></div>
+
+
+
+<div class="viewcode-block" id="IdentityCollisionError">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.calculations.IdentityCollisionError">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">IdentityCollisionError</span><span class="p">(</span><span class="ne">ValueError</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Two directories with different content claimed the same identity in one sweep."""</span></div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="DirectoryClaim">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.calculations.DirectoryClaim">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">DirectoryClaim</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""One directory's recognition outcome, as reported by :func:`claims`.</span>
+
+<span class="sd">    :param directory: The directory, relative to the swept root (POSIX).</span>
+<span class="sd">    :param kind: ``"claimed"``, ``"unclaimed"`` or ``"workspace"``.</span>
+<span class="sd">    :param collector: The winning collector's name (``claimed``), the declining</span>
+<span class="sd">        collector's name (``unclaimed``), or ``None`` (``workspace``).</span>
+<span class="sd">    :param priority: The winning collector's priority, or ``None``.</span>
+<span class="sd">    :param identity: The claimed identity, or ``None``.</span>
+<span class="sd">    :param reason: The ``Unclaimed`` reason, or ``None``.</span>
+<span class="sd">    :param also_matched: Names of lower-priority collectors that also claimed the directory.</span>
+<span class="sd">    :param duplicate_of: For a claimed copy of an earlier directory of this sweep</span>
+<span class="sd">        (same collector, identity and marker content), that directory; it is not</span>
+<span class="sd">        collected again.</span>
+<span class="sd">    :param consumes: The subdirectories the claim names as part of its</span>
+<span class="sd">        calculation, relative to the swept root (POSIX).</span>
+<span class="sd">    """</span>
+
+<div class="viewcode-block" id="DirectoryClaim.directory">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.directory">[docs]</a>
+    <span class="n">directory</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.kind">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.kind">[docs]</a>
+    <span class="n">kind</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"claimed"</span><span class="p">,</span> <span class="s2">"unclaimed"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">]</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.collector">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.collector">[docs]</a>
+    <span class="n">collector</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.priority">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.priority">[docs]</a>
+    <span class="n">priority</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.identity">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.identity">[docs]</a>
+    <span class="n">identity</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.reason">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.reason">[docs]</a>
+    <span class="n">reason</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.also_matched">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.also_matched">[docs]</a>
+    <span class="n">also_matched</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.duplicate_of">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.duplicate_of">[docs]</a>
+    <span class="n">duplicate_of</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="DirectoryClaim.consumes">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.DirectoryClaim.consumes">[docs]</a>
+    <span class="n">consumes</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span></div>
+</div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">_Collector</span><span class="p">:</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">provider</span><span class="p">:</span> <span class="n">WorkflowProvider</span>
+    <span class="n">spec</span><span class="p">:</span> <span class="n">RecognizeSpec</span>
+    <span class="n">recognize</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">Path</span><span class="p">],</span> <span class="nb">object</span><span class="p">]</span>
+    <span class="n">collect</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">JobRecord</span><span class="p">],</span> <span class="nb">object</span><span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_chunks</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="nb">bytes</span><span class="p">]:</span>
+    <span class="k">with</span> <span class="n">path</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="s2">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">raw</span><span class="p">,</span> <span class="n">open_compressed</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="n">compression</span><span class="o">=</span><span class="s2">"extension"</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">)</span> <span class="k">as</span> <span class="n">stream</span><span class="p">:</span>
+        <span class="n">reader</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">IO</span><span class="p">[</span><span class="nb">bytes</span><span class="p">],</span> <span class="n">stream</span><span class="p">)</span>
+        <span class="k">while</span> <span class="n">chunk</span> <span class="o">:=</span> <span class="n">reader</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="n">_CHUNK</span><span class="p">):</span>
+            <span class="k">yield</span> <span class="n">chunk</span>
+
+
+<div class="viewcode-block" id="content_digest">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/calculations/index.html#httk.workflow.calculations.content_digest">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">content_digest</span><span class="p">(</span><span class="n">directory</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">names</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return the SHA-256 hex digest of the named files of a directory, decompressed.</span>
+
+<span class="sd">    Each distinct name is framed, in sorted order, as ``name NUL length NUL</span>
+<span class="sd">    content``, where ``length`` is the decimal byte count of the decompressed</span>
+<span class="sd">    content. A name absent from the directory is framed as ``name NUL - NUL``,</span>
+<span class="sd">    so an absent file differs from an empty one. A name is found as itself or,</span>
+<span class="sd">    when that is absent, as its compressed copy (``INCAR.gz`` for ``INCAR``), so</span>
+<span class="sd">    compressing a file does not change the digest. Collectors use this to</span>
+<span class="sd">    derive a claim's identity from a calculation's input files.</span>
+
+<span class="sd">    :param directory: The directory holding the files.</span>
+<span class="sd">    :param names: The uncompressed basenames to digest; order and repetition do not matter.</span>
+<span class="sd">    :return: The hex digest.</span>
+<span class="sd">    """</span>
+
+    <span class="n">base</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span>
+    <span class="n">digest</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">names</span><span class="p">)):</span>
+        <span class="n">digest</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">name</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\0</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">existing_file</span><span class="p">(</span><span class="n">base</span> <span class="o">/</span> <span class="n">name</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">path</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">digest</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="sa">b</span><span class="s2">"-</span><span class="se">\0</span><span class="s2">"</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">split_compression_suffix</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">length</span> <span class="o">=</span> <span class="n">path</span><span class="o">.</span><span class="n">stat</span><span class="p">()</span><span class="o">.</span><span class="n">st_size</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">length</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span> <span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">_chunks</span><span class="p">(</span><span class="n">path</span><span class="p">))</span>
+        <span class="n">digest</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">length</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\0</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">_chunks</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+            <span class="n">digest</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">digest</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_loaded</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">_Collector</span><span class="p">:</span>
+    <span class="n">provider</span> <span class="o">=</span> <span class="n">load_workflow_package</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">register</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">spec</span> <span class="o">=</span> <span class="n">provider</span><span class="o">.</span><span class="n">recognize</span>
+    <span class="k">if</span> <span class="n">spec</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">provider</span><span class="o">.</span><span class="n">directory</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: not a recognized-calculation collector package (no [workflow.recognize])"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">callable</span><span class="p">(</span><span class="n">provider</span><span class="o">.</span><span class="n">collector</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: a recognized-calculation collector needs a Python collect hook"</span><span class="p">)</span>
+    <span class="n">recognize</span> <span class="o">=</span> <span class="n">_source_hook</span><span class="p">(</span><span class="n">provider</span><span class="o">.</span><span class="n">directory</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">file</span><span class="p">,</span> <span class="s2">"recognize"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">_Collector</span><span class="p">(</span><span class="n">provider</span><span class="o">.</span><span class="n">workflow_id</span><span class="p">,</span> <span class="n">provider</span><span class="p">,</span> <span class="n">spec</span><span class="p">,</span> <span class="n">recognize</span><span class="p">,</span> <span class="n">provider</span><span class="o">.</span><span class="n">collector</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_collector_set</span><span class="p">(</span><span class="n">collectors</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Collector</span><span class="p">]:</span>
+    <span class="n">loaded</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">_Collector</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">known_collectors</span><span class="p">():</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">collector</span> <span class="o">=</span> <span class="n">_loaded</span><span class="p">(</span><span class="n">collector_support</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="o">.</span><span class="n">path</span><span class="p">())</span>
+            <span class="k">if</span> <span class="n">collector</span><span class="o">.</span><span class="n">name</span> <span class="o">!=</span> <span class="n">name</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"its package is named </span><span class="si">{</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">except</span> <span class="p">(</span><span class="ne">OSError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">"skipping registered collector </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">"</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">exc</span><span class="p">,</span> <span class="n">extra</span><span class="o">=</span><span class="n">_CONTEXT</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">loaded</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">collector</span>
+    <span class="n">local</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="n">collectors</span><span class="p">:</span>
+        <span class="n">collector</span> <span class="o">=</span> <span class="n">_loaded</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">())</span>
+        <span class="k">if</span> <span class="n">collector</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="n">local</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"two collector packages are named </span><span class="si">{</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">local</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+        <span class="n">loaded</span><span class="p">[</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">collector</span>
+    <span class="k">return</span> <span class="p">[</span><span class="n">loaded</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">loaded</span><span class="p">)]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_directories</span><span class="p">(</span><span class="n">root</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">exclude</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Path</span><span class="p">,</span> <span class="n">PurePosixPath</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="nb">bool</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">"""Yield ``(directory, relative, file names, is workspace)`` top-down in sorted order."""</span>
+
+    <span class="n">stack</span> <span class="o">=</span> <span class="p">[(</span><span class="n">root</span><span class="p">,</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="s2">"."</span><span class="p">))]</span>
+    <span class="k">while</span> <span class="n">stack</span><span class="p">:</span>
+        <span class="n">directory</span><span class="p">,</span> <span class="n">relative</span> <span class="o">=</span> <span class="n">stack</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">directory</span> <span class="o">/</span> <span class="n">WORKSPACE_DIRECTORY</span> <span class="o">/</span> <span class="s2">"format.json"</span><span class="p">)</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="k">yield</span> <span class="n">directory</span><span class="p">,</span> <span class="n">relative</span><span class="p">,</span> <span class="p">(),</span> <span class="kc">True</span>
+            <span class="k">continue</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">with</span> <span class="n">os</span><span class="o">.</span><span class="n">scandir</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span> <span class="k">as</span> <span class="n">iterator</span><span class="p">:</span>
+                <span class="n">entries</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">iterator</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">entry</span><span class="p">:</span> <span class="n">entry</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">"skipping unreadable directory </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">"</span><span class="p">,</span> <span class="n">directory</span><span class="p">,</span> <span class="n">exc</span><span class="p">,</span> <span class="n">extra</span><span class="o">=</span><span class="n">_CONTEXT</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">files</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">subdirectories</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Path</span><span class="p">,</span> <span class="n">PurePosixPath</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">entries</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">is_dir</span><span class="p">(</span><span class="n">follow_symlinks</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+                <span class="n">child</span> <span class="o">=</span> <span class="n">relative</span> <span class="o">/</span> <span class="n">entry</span><span class="o">.</span><span class="n">name</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">entry</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"."</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">any</span><span class="p">(</span>
+                    <span class="n">fnmatch</span><span class="o">.</span><span class="n">fnmatchcase</span><span class="p">(</span><span class="n">child</span><span class="o">.</span><span class="n">as_posix</span><span class="p">(),</span> <span class="n">pattern</span><span class="p">)</span> <span class="k">for</span> <span class="n">pattern</span> <span class="ow">in</span> <span class="n">exclude</span>
+                <span class="p">):</span>
+                    <span class="n">subdirectories</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">Path</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">path</span><span class="p">),</span> <span class="n">child</span><span class="p">))</span>
+            <span class="k">elif</span> <span class="n">entry</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+                <span class="n">files</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+        <span class="k">yield</span> <span class="n">directory</span><span class="p">,</span> <span class="n">relative</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">files</span><span class="p">),</span> <span class="kc">False</span>
+        <span class="n">stack</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="nb">reversed</span><span class="p">(</span><span class="n">subdirectories</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_marker_files</span><span class="p">(</span><span class="n">marker</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">stripped</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return the compression-stripped file names a marker matches."""</span>
+
+    <span class="n">lowered</span> <span class="o">=</span> <span class="n">marker</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">lowered</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"*."</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">name</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">names</span> <span class="ow">in</span> <span class="n">stripped</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">key</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="n">lowered</span><span class="p">[</span><span class="mi">1</span><span class="p">:])</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">names</span><span class="p">]</span>
+    <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="n">stripped</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">lowered</span><span class="p">,</span> <span class="p">()))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_recognize</span><span class="p">(</span><span class="n">collector</span><span class="p">:</span> <span class="n">_Collector</span><span class="p">,</span> <span class="n">directory</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Claim</span> <span class="o">|</span> <span class="n">Unclaimed</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">recognize</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">result</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Claim</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">Claim</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">identity</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">consumes</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Unclaimed</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">result</span>
+        <span class="k">return</span> <span class="n">Unclaimed</span><span class="p">(</span><span class="sa">f</span><span class="s2">"recognize returned </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">result</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">ImportError</span><span class="p">,</span> <span class="n">_CollectEnvironmentError</span><span class="p">):</span>
+        <span class="c1"># A missing host dependency is the operator's problem, not a verdict on the directory.</span>
+        <span class="k">raise</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="n">_LOGGER</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+            <span class="s2">"collector </span><span class="si">%s</span><span class="s2"> failed to recognize </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">"</span><span class="p">,</span> <span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">directory</span><span class="p">,</span> <span class="n">exc</span><span class="p">,</span> <span class="n">exc_info</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">extra</span><span class="o">=</span><span class="n">_CONTEXT</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">Unclaimed</span><span class="p">(</span><span class="sa">f</span><span class="s2">"recognize failed: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_sweep</span><span class="p">(</span>
+    <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="n">collectors</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]],</span>
+    <span class="n">prefer</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="n">exclude</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">DirectoryClaim</span><span class="p">,</span> <span class="n">Path</span><span class="p">,</span> <span class="n">_Collector</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]]:</span>
+    <span class="n">base</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">root</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">base</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"not a directory: </span><span class="si">{</span><span class="n">root</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">loaded</span> <span class="o">=</span> <span class="n">_collector_set</span><span class="p">(</span><span class="n">collectors</span><span class="p">)</span>
+    <span class="n">preferred</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">prefer</span><span class="p">)</span>
+    <span class="n">seen</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">],</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">directory</span><span class="p">,</span> <span class="n">relative</span><span class="p">,</span> <span class="n">files</span><span class="p">,</span> <span class="n">workspace</span> <span class="ow">in</span> <span class="n">_directories</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">exclude</span><span class="p">)):</span>
+        <span class="n">where</span> <span class="o">=</span> <span class="n">relative</span><span class="o">.</span><span class="n">as_posix</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">workspace</span><span class="p">:</span>
+            <span class="k">yield</span> <span class="n">DirectoryClaim</span><span class="p">(</span><span class="n">where</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">),</span> <span class="n">directory</span><span class="p">,</span> <span class="kc">None</span>
+            <span class="k">continue</span>
+        <span class="n">stripped</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">files</span><span class="p">:</span>
+            <span class="n">inner</span> <span class="o">=</span> <span class="n">split_compression_suffix</span><span class="p">(</span><span class="n">name</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">stripped</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">inner</span><span class="o">.</span><span class="n">lower</span><span class="p">(),</span> <span class="p">[])</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">inner</span><span class="p">)</span>
+        <span class="n">found</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">_Collector</span><span class="p">,</span> <span class="n">Claim</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">declined</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">_Collector</span><span class="p">,</span> <span class="n">Unclaimed</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">collector</span> <span class="ow">in</span> <span class="n">loaded</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="n">_marker_files</span><span class="p">(</span><span class="n">marker</span><span class="p">,</span> <span class="n">stripped</span><span class="p">)</span> <span class="k">for</span> <span class="n">marker</span> <span class="ow">in</span> <span class="n">collector</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">requires</span><span class="p">):</span>
+                <span class="k">continue</span>
+            <span class="n">outcome</span> <span class="o">=</span> <span class="n">_recognize</span><span class="p">(</span><span class="n">collector</span><span class="p">,</span> <span class="n">directory</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">outcome</span><span class="p">,</span> <span class="n">Claim</span><span class="p">):</span>
+                <span class="n">found</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">collector</span><span class="p">,</span> <span class="n">outcome</span><span class="p">))</span>
+            <span class="k">elif</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">outcome</span><span class="p">,</span> <span class="n">Unclaimed</span><span class="p">):</span>
+                <span class="n">declined</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">collector</span><span class="p">,</span> <span class="n">outcome</span><span class="p">))</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">found</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">declined</span><span class="p">:</span>
+                <span class="n">collector</span><span class="p">,</span> <span class="n">unclaimed</span> <span class="o">=</span> <span class="n">declined</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+                <span class="k">yield</span> <span class="n">DirectoryClaim</span><span class="p">(</span><span class="n">where</span><span class="p">,</span> <span class="s2">"unclaimed"</span><span class="p">,</span> <span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">reason</span><span class="o">=</span><span class="n">unclaimed</span><span class="o">.</span><span class="n">reason</span><span class="p">),</span> <span class="n">directory</span><span class="p">,</span> <span class="kc">None</span>
+            <span class="k">continue</span>
+        <span class="n">found</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">item</span><span class="p">:</span> <span class="o">-</span><span class="n">item</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">priority</span><span class="p">)</span>
+        <span class="n">top</span> <span class="o">=</span> <span class="p">[</span><span class="n">item</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">found</span> <span class="k">if</span> <span class="n">item</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">priority</span> <span class="o">==</span> <span class="n">found</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">priority</span><span class="p">]</span>
+        <span class="n">winner</span> <span class="o">=</span> <span class="n">top</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">top</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">names</span> <span class="o">=</span> <span class="p">[</span><span class="n">item</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">top</span><span class="p">]</span>
+            <span class="n">choice</span> <span class="o">=</span> <span class="nb">next</span><span class="p">((</span><span class="n">name</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">preferred</span> <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">names</span><span class="p">),</span> <span class="kc">None</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">choice</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">AmbiguousClaimError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">where</span><span class="si">}</span><span class="s2">: collectors </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">names</span><span class="p">)</span><span class="si">}</span><span class="s2"> all claim it at priority </span><span class="si">{</span><span class="n">top</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">priority</span><span class="si">}</span><span class="s2">; "</span>
+                    <span class="sa">f</span><span class="s2">"choose one with prefer=(NAME,) (--prefer NAME)"</span>
+                <span class="p">)</span>
+            <span class="n">winner</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">item</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">top</span> <span class="k">if</span> <span class="n">item</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="n">choice</span><span class="p">)</span>
+        <span class="n">collector</span><span class="p">,</span> <span class="n">claim</span> <span class="o">=</span> <span class="n">winner</span>
+        <span class="n">also</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">found</span> <span class="k">if</span> <span class="n">item</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">winner</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">also</span><span class="p">:</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                <span class="s2">"claimed </span><span class="si">%s</span><span class="s2"> by </span><span class="si">%s</span><span class="s2"> (priority </span><span class="si">%d</span><span class="s2">; also matched: </span><span class="si">%s</span><span class="s2">)"</span><span class="p">,</span>
+                <span class="n">where</span><span class="p">,</span>
+                <span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                <span class="n">collector</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">priority</span><span class="p">,</span>
+                <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">also</span><span class="p">),</span>
+                <span class="n">extra</span><span class="o">=</span><span class="n">_CONTEXT</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="n">markers</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span> <span class="k">for</span> <span class="n">marker</span> <span class="ow">in</span> <span class="n">collector</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">requires</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">_marker_files</span><span class="p">(</span><span class="n">marker</span><span class="p">,</span> <span class="n">stripped</span><span class="p">)}</span>
+        <span class="n">fingerprint</span> <span class="o">=</span> <span class="n">content_digest</span><span class="p">(</span><span class="n">directory</span><span class="p">,</span> <span class="n">markers</span><span class="p">)</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">claim</span><span class="o">.</span><span class="n">identity</span><span class="p">)</span>
+        <span class="n">first</span> <span class="o">=</span> <span class="n">seen</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="p">(</span><span class="n">where</span><span class="p">,</span> <span class="n">fingerprint</span><span class="p">))</span>
+        <span class="n">duplicate_of</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">first</span> <span class="o">!=</span> <span class="p">(</span><span class="n">where</span><span class="p">,</span> <span class="n">fingerprint</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">first</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">!=</span> <span class="n">fingerprint</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">IdentityCollisionError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">first</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2"> and </span><span class="si">{</span><span class="n">where</span><span class="si">}</span><span class="s2"> both claim </span><span class="si">{</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">claim</span><span class="o">.</span><span class="n">identity</span><span class="si">}</span><span class="s2"> with different content; "</span>
+                    <span class="sa">f</span><span class="s2">"skip one with exclude=(PATTERN,) (--exclude PATTERN)"</span>
+                <span class="p">)</span>
+            <span class="n">duplicate_of</span> <span class="o">=</span> <span class="n">first</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">"skipping </span><span class="si">%s</span><span class="s2">: same calculation as </span><span class="si">%s</span><span class="s2">"</span><span class="p">,</span> <span class="n">where</span><span class="p">,</span> <span class="n">first</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">extra</span><span class="o">=</span><span class="n">_CONTEXT</span><span class="p">)</span>
+        <span class="k">yield</span> <span class="p">(</span>
+            <span class="n">DirectoryClaim</span><span class="p">(</span>
+                <span class="n">where</span><span class="p">,</span>
+                <span class="s2">"claimed"</span><span class="p">,</span>
+                <span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                <span class="n">collector</span><span class="o">.</span><span class="n">spec</span><span class="o">.</span><span class="n">priority</span><span class="p">,</span>
+                <span class="n">claim</span><span class="o">.</span><span class="n">identity</span><span class="p">,</span>
+                <span class="n">also_matched</span><span class="o">=</span><span class="n">also</span><span class="p">,</span>
+                <span class="n">duplicate_of</span><span class="o">=</span><span class="n">duplicate_of</span><span class="p">,</span>
+                <span class="n">consumes</span><span class="o">=</span><span class="nb">tuple</span><span class="p">((</span><span class="n">relative</span> <span class="o">/</span> <span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">as_posix</span><span class="p">()</span> <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="n">claim</span><span class="o">.</span><span class="n">consumes</span><span class="p">),</span>
+            <span class="p">),</span>
+            <span class="n">directory</span><span class="p">,</span>
+            <span class="n">collector</span><span class="p">,</span>
+        <span class="p">)</span>
+
+
+<div class="viewcode-block" id="claims">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.calculations.claims">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">claims</span><span class="p">(</span>
+    <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">collectors</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">(),</span>
+    <span class="n">prefer</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+    <span class="n">exclude</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">DirectoryClaim</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Report how :func:`collect_tree` would treat each directory, without collecting.</span>
+
+<span class="sd">    Ordinary directories that no collector's markers and hook recognize are not</span>
+<span class="sd">    reported. Parameters and errors are those of :func:`collect_tree`.</span>
+
+<span class="sd">    :param root: The tree to sweep.</span>
+<span class="sd">    :param collectors: Extra collector package directories; see :func:`collect_tree`.</span>
+<span class="sd">    :param prefer: Collector names that win priority ties, in order.</span>
+<span class="sd">    :param exclude: Root-relative POSIX glob patterns of directories to skip.</span>
+<span class="sd">    :yields: One outcome per claimed, declined or workspace directory, in walk order.</span>
+<span class="sd">    """</span>
+
+    <span class="k">for</span> <span class="n">outcome</span><span class="p">,</span> <span class="n">_directory</span><span class="p">,</span> <span class="n">_collector</span> <span class="ow">in</span> <span class="n">_sweep</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="n">collectors</span><span class="p">,</span> <span class="n">prefer</span><span class="p">,</span> <span class="n">exclude</span><span class="p">):</span>
+        <span class="k">yield</span> <span class="n">outcome</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_record</span><span class="p">(</span><span class="n">root</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">relative</span><span class="p">:</span> <span class="n">PurePosixPath</span><span class="p">,</span> <span class="n">collector</span><span class="p">:</span> <span class="n">_Collector</span><span class="p">,</span> <span class="n">identity</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">JobRecord</span><span class="p">:</span>
+    <span class="n">declaration</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">provider</span><span class="o">.</span><span class="n">declarations</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"workflow"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">JobRecord</span><span class="p">(</span>
+        <span class="n">workspace_root</span><span class="o">=</span><span class="n">root</span><span class="p">,</span>
+        <span class="n">workspace_id</span><span class="o">=</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="n">job_id</span><span class="o">=</span><span class="n">identity</span><span class="p">,</span>
+        <span class="n">job_key</span><span class="o">=</span><span class="n">make_job_key</span><span class="p">(</span><span class="n">identity</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span>
+        <span class="n">job</span><span class="o">=</span><span class="p">{</span><span class="s2">"workflow"</span><span class="p">:</span> <span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">"parameters"</span><span class="p">:</span> <span class="p">{}},</span>
+        <span class="n">runner_provenance</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">state</span><span class="o">=</span><span class="s2">"succeeded"</span><span class="p">,</span>
+        <span class="n">failure</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">placement</span><span class="o">=</span><span class="n">relative</span><span class="o">.</span><span class="n">parent</span><span class="p">,</span>
+        <span class="n">payload_path</span><span class="o">=</span><span class="n">relative</span><span class="p">,</span>
+        <span class="n">workdir_path</span><span class="o">=</span><span class="n">relative</span><span class="p">,</span>
+        <span class="n">data_path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">provenance</span><span class="o">=</span><span class="p">{</span><span class="s2">"activations"</span><span class="p">:</span> <span class="p">[],</span> <span class="s2">"gaps"</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+        <span class="n">runner_steps</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">children</span><span class="o">=</span><span class="p">{},</span>
+        <span class="n">declarations</span><span class="o">=</span><span class="p">{</span><span class="s2">"workflow"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"declared"</span><span class="p">:</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">declaration</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">dict</span><span class="p">(</span><span class="n">declaration</span><span class="p">),</span> <span class="s2">"observed"</span><span class="p">:</span> <span class="kc">None</span><span class="p">}},</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_collect_directory</span><span class="p">(</span><span class="n">root</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">outcome</span><span class="p">:</span> <span class="n">DirectoryClaim</span><span class="p">,</span> <span class="n">collector</span><span class="p">:</span> <span class="n">_Collector</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">CollectedJob</span><span class="p">:</span>
+    <span class="n">identity</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">outcome</span><span class="o">.</span><span class="n">identity</span><span class="p">)</span>
+    <span class="n">relative</span> <span class="o">=</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="p">)</span>
+    <span class="n">record</span> <span class="o">=</span> <span class="n">_record</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="n">relative</span><span class="p">,</span> <span class="n">collector</span><span class="p">,</span> <span class="n">identity</span><span class="p">)</span>
+    <span class="n">source_id</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">collector</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">identity</span><span class="si">}</span><span class="s2">"</span>
+    <span class="n">run</span> <span class="o">=</span> <span class="n">Run</span><span class="p">(</span>
+        <span class="n">workflow_declaration_uri</span><span class="o">=</span><span class="n">collector</span><span class="o">.</span><span class="n">provider</span><span class="o">.</span><span class="n">declaration_uri</span><span class="p">,</span>
+        <span class="n">workflow_definition_uri</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="o">=</span><span class="p">(),</span>
+        <span class="n">artifacts</span><span class="o">=</span><span class="p">(),</span>
+        <span class="n">outputs</span><span class="o">=</span><span class="p">(),</span>
+        <span class="n">source_id</span><span class="o">=</span><span class="n">source_id</span><span class="p">,</span>
+        <span class="n">last_modified</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">raw</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">collect</span><span class="p">(</span><span class="n">record</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"collector must return a mapping of roles"</span><span class="p">)</span>
+        <span class="n">input_roles</span> <span class="o">=</span> <span class="n">_input_roles</span><span class="p">(</span><span class="n">_job_workflow_document</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="n">collector</span><span class="o">.</span><span class="n">provider</span><span class="p">))</span>
+        <span class="n">inputs</span> <span class="o">=</span> <span class="p">{</span><span class="n">role</span><span class="p">:</span> <span class="n">value</span> <span class="k">for</span> <span class="n">role</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">raw</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">role</span> <span class="ow">in</span> <span class="n">input_roles</span><span class="p">}</span>
+        <span class="n">outputs</span> <span class="o">=</span> <span class="p">{</span><span class="n">role</span><span class="p">:</span> <span class="n">value</span> <span class="k">for</span> <span class="n">role</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">raw</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">role</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">input_roles</span><span class="p">}</span>
+        <span class="n">collected</span> <span class="o">=</span> <span class="n">_assemble_collected</span><span class="p">(</span><span class="n">source_id</span><span class="p">,</span> <span class="n">record</span><span class="p">,</span> <span class="n">collector</span><span class="o">.</span><span class="n">provider</span><span class="p">,</span> <span class="n">run</span><span class="p">,</span> <span class="n">outputs</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">)</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">ImportError</span><span class="p">,</span> <span class="n">_CollectEnvironmentError</span><span class="p">):</span>
+        <span class="k">raise</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="n">collected</span> <span class="o">=</span> <span class="n">_degraded_job</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="n">collector</span><span class="o">.</span><span class="n">provider</span><span class="p">,</span> <span class="n">run</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">replace</span><span class="p">(</span><span class="n">collected</span><span class="p">,</span> <span class="n">identity_stable</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">_Parent</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""A collected calculation held back until its consumed subdirectories were walked."""</span>
+
+    <span class="n">outcome</span><span class="p">:</span> <span class="n">DirectoryClaim</span>
+    <span class="n">collector</span><span class="p">:</span> <span class="n">_Collector</span>
+    <span class="n">item</span><span class="p">:</span> <span class="n">CollectedJob</span>
+    <span class="n">reached</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">DirectoryClaim</span><span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_within</span><span class="p">(</span><span class="n">directory</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">ancestor</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">ancestor</span> <span class="o">==</span> <span class="s2">"."</span> <span class="ow">or</span> <span class="n">directory</span> <span class="o">==</span> <span class="n">ancestor</span> <span class="ow">or</span> <span class="n">directory</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">ancestor</span> <span class="o">+</span> <span class="s2">"/"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_linked</span><span class="p">(</span><span class="n">base</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">_Parent</span><span class="p">,</span> <span class="n">failed</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">CollectedJob</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Give a held-back calculation its child runs, or degrade it for a consumed directory not collected.</span>
+
+<span class="sd">    *failed* maps the source id of every degraded item of the sweep to its reason.</span>
+<span class="sd">    """</span>
+
+    <span class="n">links</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">missing</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">prefix</span> <span class="o">=</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">consumed</span> <span class="ow">in</span> <span class="n">parent</span><span class="o">.</span><span class="n">outcome</span><span class="o">.</span><span class="n">consumes</span><span class="p">:</span>
+        <span class="n">label</span> <span class="o">=</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="n">consumed</span><span class="p">)</span><span class="o">.</span><span class="n">relative_to</span><span class="p">(</span><span class="n">prefix</span><span class="p">)</span><span class="o">.</span><span class="n">as_posix</span><span class="p">()</span>
+        <span class="n">reached</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">reached</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">consumed</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">reached</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">path</span> <span class="o">=</span> <span class="n">base</span><span class="o">.</span><span class="n">joinpath</span><span class="p">(</span><span class="o">*</span><span class="n">PurePosixPath</span><span class="p">(</span><span class="n">consumed</span><span class="p">)</span><span class="o">.</span><span class="n">parts</span><span class="p">)</span>
+            <span class="n">missing</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">consumed</span><span class="si">}</span><span class="s2"> does not exist"</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">()</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">path</span><span class="o">.</span><span class="n">is_symlink</span><span class="p">()</span>
+                <span class="k">else</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">consumed</span><span class="si">}</span><span class="s2"> was not collected (excluded, a symlink or dot directory, or recognized by no collector)"</span>
+            <span class="p">)</span>
+        <span class="k">elif</span> <span class="n">reached</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">"claimed"</span><span class="p">:</span>
+            <span class="c1"># A copy deduplicated onto an earlier directory has that directory's</span>
+            <span class="c1"># source id (same collector and identity), so the link names its run.</span>
+            <span class="n">source_id</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">reached</span><span class="o">.</span><span class="n">collector</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">reached</span><span class="o">.</span><span class="n">identity</span><span class="si">}</span><span class="s2">"</span>
+            <span class="k">if</span> <span class="n">source_id</span> <span class="ow">in</span> <span class="n">failed</span><span class="p">:</span>
+                <span class="c1"># A failed part leaves the calculation incomplete, and its run is not stored.</span>
+                <span class="n">missing</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"consumed calculation </span><span class="si">{</span><span class="n">consumed</span><span class="si">}</span><span class="s2"> failed: </span><span class="si">{</span><span class="n">failed</span><span class="p">[</span><span class="n">source_id</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">links</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">label</span><span class="p">,</span> <span class="n">source_id</span><span class="p">))</span>
+        <span class="k">elif</span> <span class="n">reached</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">"unclaimed"</span><span class="p">:</span>
+            <span class="n">missing</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">consumed</span><span class="si">}</span><span class="s2"> was declined by </span><span class="si">{</span><span class="n">reached</span><span class="o">.</span><span class="n">collector</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">reached</span><span class="o">.</span><span class="n">reason</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">missing</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">consumed</span><span class="si">}</span><span class="s2"> is a workspace, not a calculation"</span><span class="p">)</span>
+    <span class="n">item</span> <span class="o">=</span> <span class="n">replace</span><span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">item</span><span class="p">,</span> <span class="n">child_runs</span><span class="o">=</span><span class="p">(</span><span class="o">*</span><span class="n">parent</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">child_runs</span><span class="p">,</span> <span class="o">*</span><span class="n">links</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">missing</span> <span class="ow">and</span> <span class="n">item</span><span class="o">.</span><span class="n">missing_collector</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">reason</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">parent</span><span class="o">.</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="si">}</span><span class="s2">: consumed directories not collected: "</span> <span class="o">+</span> <span class="s2">"; "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">missing</span><span class="p">)</span>
+        <span class="n">degraded</span> <span class="o">=</span> <span class="n">_degraded_job</span><span class="p">(</span><span class="n">item</span><span class="o">.</span><span class="n">record</span><span class="p">,</span> <span class="n">parent</span><span class="o">.</span><span class="n">collector</span><span class="o">.</span><span class="n">provider</span><span class="p">,</span> <span class="n">item</span><span class="o">.</span><span class="n">run</span><span class="p">,</span> <span class="n">reason</span><span class="p">)</span>
+        <span class="n">item</span> <span class="o">=</span> <span class="n">replace</span><span class="p">(</span><span class="n">degraded</span><span class="p">,</span> <span class="n">identity_stable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">child_runs</span><span class="o">=</span><span class="n">item</span><span class="o">.</span><span class="n">child_runs</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">item</span>
+
+
+<div class="viewcode-block" id="collect_tree">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/index.html#httk.workflow.calculations.collect_tree">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">collect_tree</span><span class="p">(</span>
+    <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">collectors</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">(),</span>
+    <span class="n">prefer</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+    <span class="n">exclude</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+    <span class="n">fail_fast</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">on_unclaimed</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">DirectoryClaim</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">on_skipped</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">str</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">CollectedJob</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Collect every recognized calculation below *root*.</span>
+
+<span class="sd">    The collector set is every registered collector</span>
+<span class="sd">    (``httk.core.register.codes.register_collector``) plus the package</span>
+<span class="sd">    directories in *collectors*. A local package named like a registered one</span>
+<span class="sd">    replaces it, which is how a shipped collector is overridden. A registered</span>
+<span class="sd">    collector whose package cannot be loaded is logged and skipped.</span>
+
+<span class="sd">    The walk starts at *root* itself and descends in sorted name order. It does</span>
+<span class="sd">    not follow symlinked directories and skips names starting with ``.``. A</span>
+<span class="sd">    directory holding ``.httk-workspace/format.json`` is collected as a</span>
+<span class="sd">    workspace (:func:`~httk.workflow.collecting.collect`) and not descended.</span>
+<span class="sd">    In any other directory, each collector whose ``requires`` markers all match</span>
+<span class="sd">    the directory's file names (case-insensitively, compression suffixes</span>
+<span class="sd">    stripped) has its recognize hook called; the highest-priority claim wins.</span>
+<span class="sd">    A hook that raises declines the directory, except that an ``ImportError``</span>
+<span class="sd">    (a missing dependency) propagates. Directories below a claimed one</span>
+<span class="sd">    are still visited.</span>
+
+<span class="sd">    A claimed directory is read through a stand-in job record whose workdir is</span>
+<span class="sd">    the directory. Its collect hook returns declared input roles, which become</span>
+<span class="sd">    the run's input edges and the ``inputs`` of</span>
+<span class="sd">    :class:`~httk.workflow.collecting.CollectedJob`, and output roles.</span>
+<span class="sd">    The run's ``source_id`` is ``&lt;collector name&gt;:&lt;identity&gt;``. A collect-hook</span>
+<span class="sd">    failure yields a degraded item.</span>
+
+<span class="sd">    A claim that consumes subdirectories (the ``consumes`` of</span>
+<span class="sd">    :class:`~httk.workflow.hookapi.Claim`) is a</span>
+<span class="sd">    multi-directory calculation. Its subdirectories are walked and collected by</span>
+<span class="sd">    their own collectors as usual, and the claiming item is held back until the</span>
+<span class="sd">    walk leaves its subtree. It is then yielded, after those children, with</span>
+<span class="sd">    one ``(relative path, child source id)`` pair per consumed directory in</span>
+<span class="sd">    ``child_runs``, so :func:`~httk.workflow.storing.store_collected` links its</span>
+<span class="sd">    run to theirs. A consumed directory that was a deduplicated copy links to the</span>
+<span class="sd">    earlier copy's run, which has the same source id. One that is missing, not</span>
+<span class="sd">    visited, a workspace, or not claimed, or whose own item degraded ("consumed</span>
+<span class="sd">    calculation ... failed: ..."), degrades the claiming item, which then names</span>
+<span class="sd">    only the children that were collected. The degraded child is still yielded.</span>
+<span class="sd">    Items are otherwise yielded in walk order. A directory a collector declines with</span>
+<span class="sd">    :class:`~httk.workflow.hookapi.Unclaimed` is logged as a warning and passed</span>
+<span class="sd">    to *on_unclaimed*.</span>
+
+<span class="sd">    :param root: The tree to sweep.</span>
+<span class="sd">    :param collectors: Extra collector package directories, loaded alongside the registered ones.</span>
+<span class="sd">    :param prefer: Collector names that win a tie at the highest priority, first named first.</span>
+<span class="sd">    :param exclude: Root-relative POSIX glob patterns (:func:`fnmatch.fnmatchcase`) of</span>
+<span class="sd">        directories that are neither visited nor descended.</span>
+<span class="sd">    :param fail_fast: Raise the first degraded item instead of yielding it.</span>
+<span class="sd">    :param on_unclaimed: Receive the outcome of every declined directory.</span>
+<span class="sd">    :param on_skipped: Receive the job key of every nested workspace job dropped for</span>
+<span class="sd">        an unreadable ``job.json``.</span>
+<span class="sd">    :yields: One collected job per recognized calculation and per workspace job, in walk order.</span>
+<span class="sd">    :raises ValueError: If *root* is not a directory, a *collectors* package is not a</span>
+<span class="sd">        loadable recognize package, or *fail_fast* observes a degraded item.</span>
+<span class="sd">    :raises AmbiguousClaimError: If collectors tie at the highest priority and none is preferred.</span>
+<span class="sd">    :raises IdentityCollisionError: If two directories claim one identity with different marker content.</span>
+<span class="sd">    """</span>
+
+    <span class="n">failed</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">emitted</span><span class="p">(</span><span class="n">item</span><span class="p">:</span> <span class="n">CollectedJob</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">CollectedJob</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">item</span><span class="o">.</span><span class="n">missing_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">item</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">source_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">failed</span><span class="p">[</span><span class="n">item</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">source_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">item</span><span class="o">.</span><span class="n">missing_collector</span>
+        <span class="k">if</span> <span class="n">fail_fast</span> <span class="ow">and</span> <span class="n">item</span><span class="o">.</span><span class="n">missing_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="n">item</span><span class="o">.</span><span class="n">missing_collector</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">item</span>
+
+    <span class="n">base</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">root</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="c1"># Calculations that consume subdirectories, innermost last. The walk is a</span>
+    <span class="c1"># depth-first preorder, so a parent's subtree is complete as soon as the walk</span>
+    <span class="c1"># reaches a directory outside it; only then is the parent linked and yielded.</span>
+    <span class="n">held</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Parent</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">outcome</span><span class="p">,</span> <span class="n">directory</span><span class="p">,</span> <span class="n">collector</span> <span class="ow">in</span> <span class="n">_sweep</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="n">collectors</span><span class="p">,</span> <span class="n">prefer</span><span class="p">,</span> <span class="n">exclude</span><span class="p">):</span>
+        <span class="k">while</span> <span class="n">held</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_within</span><span class="p">(</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="p">,</span> <span class="n">held</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="p">):</span>
+            <span class="k">yield</span> <span class="n">emitted</span><span class="p">(</span><span class="n">_linked</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="n">held</span><span class="o">.</span><span class="n">pop</span><span class="p">(),</span> <span class="n">failed</span><span class="p">))</span>
+        <span class="k">for</span> <span class="n">parent</span> <span class="ow">in</span> <span class="n">held</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">outcome</span><span class="o">.</span><span class="n">directory</span> <span class="ow">in</span> <span class="n">parent</span><span class="o">.</span><span class="n">outcome</span><span class="o">.</span><span class="n">consumes</span><span class="p">:</span>
+                <span class="n">parent</span><span class="o">.</span><span class="n">reached</span><span class="p">[</span><span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="p">]</span> <span class="o">=</span> <span class="n">outcome</span>
+        <span class="k">if</span> <span class="n">outcome</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">"workspace"</span><span class="p">:</span>
+            <span class="k">yield from</span> <span class="n">collect</span><span class="p">(</span><span class="n">Workspace</span><span class="p">(</span><span class="n">directory</span><span class="p">),</span> <span class="n">fail_fast</span><span class="o">=</span><span class="n">fail_fast</span><span class="p">,</span> <span class="n">on_skipped</span><span class="o">=</span><span class="n">on_skipped</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">outcome</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">"unclaimed"</span><span class="p">:</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="s2">"</span><span class="si">%s</span><span class="s2">: not collected by </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">"</span><span class="p">,</span> <span class="n">outcome</span><span class="o">.</span><span class="n">directory</span><span class="p">,</span> <span class="n">outcome</span><span class="o">.</span><span class="n">collector</span><span class="p">,</span> <span class="n">outcome</span><span class="o">.</span><span class="n">reason</span><span class="p">,</span> <span class="n">extra</span><span class="o">=</span><span class="n">_CONTEXT</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">on_unclaimed</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">on_unclaimed</span><span class="p">(</span><span class="n">outcome</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">collector</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">outcome</span><span class="o">.</span><span class="n">duplicate_of</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="n">collected</span> <span class="o">=</span> <span class="n">_collect_directory</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="n">outcome</span><span class="p">,</span> <span class="n">collector</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">collected</span><span class="o">.</span><span class="n">missing_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">collected</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">source_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">failed</span><span class="p">[</span><span class="n">collected</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">source_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">collected</span><span class="o">.</span><span class="n">missing_collector</span>
+        <span class="k">if</span> <span class="n">outcome</span><span class="o">.</span><span class="n">consumes</span><span class="p">:</span>
+            <span class="n">held</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">_Parent</span><span class="p">(</span><span class="n">outcome</span><span class="p">,</span> <span class="n">collector</span><span class="p">,</span> <span class="n">collected</span><span class="p">,</span> <span class="p">{}))</span>
+            <span class="k">continue</span>
+        <span class="k">yield</span> <span class="n">emitted</span><span class="p">(</span><span class="n">collected</span><span class="p">)</span>
+    <span class="k">while</span> <span class="n">held</span><span class="p">:</span>
+        <span class="k">yield</span> <span class="n">emitted</span><span class="p">(</span><span class="n">_linked</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="n">held</span><span class="o">.</span><span class="n">pop</span><span class="p">(),</span> <span class="n">failed</span><span class="p">))</span></div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

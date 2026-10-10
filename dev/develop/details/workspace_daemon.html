@@ -1,0 +1,1301 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Sealing jobs, workspaces, and projects" href="sealing.html"><link rel="prev" title="Writing a remote adapter in detail" href="adapter_authoring.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Confined workspace daemon - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/details/workspace_daemon.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="confined-workspace-daemon">
+<h1>Confined workspace daemon<a class="headerlink" href="#confined-workspace-daemon" title="Link to this heading">¶</a></h1>
+<p>A workspace on an HPC system can serve a client that only has file access. The
+workspace carries the <strong>exchange</strong> extension, the one directory
+<code class="docutils literal notranslate"><span class="pre">WORKSPACE/exchange/</span></code> that the client mounts (never the workspace). Through it
+the client sends jobs, collects finished jobs and reads passive status. The
+exchange is served by the workspace’s own managers, not by the daemon.</p>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">daemon</span></code> is the small, opt-in, foreground Slurm broker next to
+it. It starts, queries and cancels managers on signed requests: from
+operator-approved launchers, by opaque manager handle, with no commands, shell
+fragments, environment variables, paths or Slurm arguments from the client.
+Requests need an authorized <em>httk</em> identity signature. Jobs keep running, and
+the exchange keeps being served by running managers, whether or not a daemon
+exists. The <code class="docutils literal notranslate"><span class="pre">mount-daemon</span></code> adapter supplies the typed client controls; see
+<a class="reference internal" href="remotes.html"><span class="doc">Remotes</span></a>.</p>
+<p>The daemon approves ordinary global <code class="docutils literal notranslate"><span class="pre">slurm</span></code> launchers that set
+<code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code>. Each signed start submits one manager from such a
+launcher. The manager is trusted and runs unconfined in its batch job, and it
+starts every job attempt inside its own Bubblewrap sandbox, which can write only
+that job’s directory. Parallel programs start through the same launch prefix as
+anywhere else; see <a class="reference internal" href="#parallel-launches">Parallel launches</a>. The existing mount
+adapter and an unconfined Slurm launcher lack these guarantees.</p>
+<section id="trust-and-execution-model">
+<h2>Trust and execution model<a class="headerlink" href="#trust-and-execution-model" title="Link to this heading">¶</a></h2>
+<section id="trust-model">
+<h3>Trust model<a class="headerlink" href="#trust-model" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>The remote host, its Slurm, the installed Python and <em>httk</em>, the operator’s
+global launchers and the workspace settings are trusted operator
+configuration.</p></li>
+<li><p>The client controls the exchange and the content of the jobs it sends,
+including everything the trusted side later moves (status documents, ejected
+bundles). Uploaded job content may be arbitrary.</p></li>
+<li><p>The managers are trusted. They adopt exchange bundles by first copying them,
+descriptor-anchored, into their own scratch, then verify that copy, filter
+untrusted content, and execute no bundle code outside an attempt sandbox.</p></li>
+<li><p>Each job attempt, and each rank of a parallel launch, runs confined: it can
+write only its own job directory and cannot use scheduler authority. Jobs
+cannot change <code class="docutils literal notranslate"><span class="pre">manager.confine</span></code> or any <code class="docutils literal notranslate"><span class="pre">confine.*</span></code> setting: neither job
+parameters nor declared environment values reach those keys.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">status.json</span></code>, <code class="docutils literal notranslate"><span class="pre">managers.json</span></code> and the manager logs are informational: the
+client parses them strictly and never acts on them.</p></li>
+</ul>
+</section>
+<section id="deployment-boundary">
+<h3>Deployment boundary<a class="headerlink" href="#deployment-boundary" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Component</p></th>
+<th class="head"><p>Runs</p></th>
+<th class="head"><p>Can write</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>broker (<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">daemon</span></code>)</p></td>
+<td><p>in its own Bubblewrap sandbox on the login or service node, with the host filesystem read-only</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">WORKSPACE/exchange</span></code> and its private state</p></td>
+</tr>
+<tr class="row-odd"><td><p>manager</p></td>
+<td><p>unconfined, as you, in the Slurm batch job: <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">manager</span> <span class="pre">run</span> <span class="pre">--idle</span></code></p></td>
+<td><p>the workspace</p></td>
+</tr>
+<tr class="row-even"><td><p>job attempt</p></td>
+<td><p>in a Bubblewrap sandbox the manager builds, on the manager’s node</p></td>
+<td><p>its own job directory</p></td>
+</tr>
+<tr class="row-odd"><td><p>rank of a confined launch</p></td>
+<td><p>in a Bubblewrap sandbox the trusted rank helper builds, on every node of the launch</p></td>
+<td><p>its own job directory, the launch’s shared-memory directory</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The manager runs only trusted code: the installation, the frozen launcher
+settings and the workspace settings. What it does not do on the trusted side:</p>
+<ul class="simple">
+<li><p>it never runs a job’s postprocess scripts; <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">postprocess</span></code> and
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">collect</span></code> are client-side verbs that you run on adopted jobs, unconfined
+wherever you run them;</p></li>
+<li><p>it runs only workflows an operator installed in the workspace
+(<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">install</span></code>); workflows never arrive in bundles, so a client’s
+job whose workflow is not installed waits. Installing and building a
+workflow (<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">install</span></code>, <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">build</span></code>) is an operator
+action and runs unconfined, so review what you install.</p></li>
+</ul>
+<p>Every unrestricted manager of the workspace serves the exchange once the
+extension is enabled (<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">exchange</span> <span class="pre">enable</span></code>, which <code class="docutils literal notranslate"><span class="pre">daemon</span> <span class="pre">init</span></code> also
+does). On a workspace with the exchange extension enabled, every manager must
+confine its attempts (<code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code>); otherwise it refuses to start,
+and a running one stops claiming work when the extension appears (the
+extension and settings are re-read at every claim pass). This applies to
+<code class="docutils literal notranslate"><span class="pre">--inline</span></code>, process-launched and manually started managers as well, so run them
+with <code class="docutils literal notranslate"><span class="pre">--setting</span> <span class="pre">manager.confine=bwrap</span></code> or set <code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code> as a
+workspace setting.</p>
+</section>
+<section id="host-requirements">
+<h3>Host requirements<a class="headerlink" href="#host-requirements" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Linux with a Bubblewrap that supports <code class="docutils literal notranslate"><span class="pre">--bind-fd</span></code>, <code class="docutils literal notranslate"><span class="pre">--ro-bind-fd</span></code>,
+<code class="docutils literal notranslate"><span class="pre">--ro-bind-data</span></code>, <code class="docutils literal notranslate"><span class="pre">--new-session</span></code> and <code class="docutils literal notranslate"><span class="pre">--clearenv</span></code>, on the broker host and
+on every compute node. With Bubblewrap 0.8.0 or later the sandboxes also
+block nested user namespaces (<code class="docutils literal notranslate"><span class="pre">--disable-userns</span></code>); where that option is
+absent or refused, the broker’s startup and the manager log a warning and
+run without that block. It reduces kernel attack surface; confinement does
+not depend on it.</p></li>
+<li><p>Permitted unprivileged user namespaces, and a PID namespace with its own
+<code class="docutils literal notranslate"><span class="pre">/proc</span></code>, on the compute nodes. A manager probes this once when it starts and
+refuses to start without it.</p></li>
+<li><p>Slurm 23.11.6 or later.</p></li>
+<li><p>For parallel launches, a tmpfs at <code class="docutils literal notranslate"><span class="pre">confine.shm_root</span></code> (default <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>)
+on the nodes, which is checked: the ranks’ per-launch shared-memory
+directories live there. Nothing takes a lock, so the workspace filesystem
+needs no lock support.</p></li>
+</ul>
+<p>The daemon’s ledger needs no local filesystem and no locking: any filesystem
+with POSIX rename semantics works (no hard links). Startup refuses missing
+requirements; there is no unsandboxed fallback. The Python installation, its
+packages, the global launchers and the initial operator environment must be
+trusted: use a protected installation, not editable packages in uploaded
+content.</p>
+</section>
+<section id="layout">
+<h3>Layout<a class="headerlink" href="#layout" title="Link to this heading">¶</a></h3>
+<p>The exchange is a directory of the workspace, <code class="docutils literal notranslate"><span class="pre">WORKSPACE/exchange/</span></code>. There is
+nothing else to provision around it:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>WORKSPACE/
+  exchange/              the only client-mounted directory
+    exchange.json        workspace identity, written when the extension is enabled
+    daemon.json          the daemon's public menu, written by the daemon
+    status.json          exchange jobs, states and progress, written by the managers
+    managers.json        manager rows, written by the daemon
+    managers/&lt;handle&gt;.log   published manager logs, written by the daemon
+    inbox/               the client drops job bundles here
+    outbox/              returned trees in outbox/&lt;client job UUID&gt;/;
+                         outbox/rejected/&lt;unique&gt;/{&lt;name&gt;, reason.json}
+    requests/ responses/ signed daemon actions and job actions
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>The broker’s sandbox binds only <code class="docutils literal notranslate"><span class="pre">WORKSPACE/exchange</span></code> (and its private state)
+read-write, each opened from a descriptor without following symlinks; the
+rest of the workspace is read-only to it.</p></li>
+<li><p>State and snapshot directories must lie outside the workspace, so that the
+client cannot reach the ledger or the configuration; the <em>httk</em> data
+directory and the runtime paths must be disjoint from the workspace too.</p></li>
+<li><p>Entries whose names start with <code class="docutils literal notranslate"><span class="pre">.</span></code> or that are not plain file names
+(<code class="docutils literal notranslate"><span class="pre">[A-Za-z0-9][A-Za-z0-9._-]{0,127}</span></code>) are ignored by the trusted side.</p></li>
+</ul>
+</section>
+<section id="transport-account">
+<h3>Transport account<a class="headerlink" href="#transport-account" title="Link to this heading">¶</a></h3>
+<p>The exchange writer must be the workspace owner’s own account. A separate
+transport UID is unsupported: a renamed bundle keeps its owner, which fails the
+manager’s ownership checks. An SSHFS mount of the exchange alone does not
+confine that account to the directory, and restricting the owner account’s
+SFTP or SSH access is a site matter that local file-mode checks cannot verify.
+Mount without <code class="docutils literal notranslate"><span class="pre">follow_symlinks</span></code>, and put the client mount point outside any
+local workspace.</p>
+</section>
+<section id="broker-sandbox">
+<h3>Broker sandbox<a class="headerlink" href="#broker-sandbox" title="Link to this heading">¶</a></h3>
+<p>The broker enters Bubblewrap before it listens for command requests. It runs
+only <em>httk</em> code and the fixed Slurm clients, never client code, so it sees the
+whole host filesystem read-only: Slurm clients and site wrappers, <code class="docutils literal notranslate"><span class="pre">slurm.conf</span></code>,
+munge, the user database (<code class="docutils literal notranslate"><span class="pre">/etc/passwd</span></code>, SSSD) and DNS work without
+configuration. It can write only <code class="docutils literal notranslate"><span class="pre">WORKSPACE/exchange</span></code> and its private state,
+and has the host network that Slurm needs. It publishes <code class="docutils literal notranslate"><span class="pre">daemon.json</span></code>,
+<code class="docutils literal notranslate"><span class="pre">managers.json</span></code> and manager logs there and never reads job content.
+The broker and its Slurm clients inherit the environment the daemon was
+started in, so site wrappers find their module and site variables; only
+<code class="docutils literal notranslate"><span class="pre">SBATCH_*</span></code>, <code class="docutils literal notranslate"><span class="pre">SALLOC_*</span></code>, <code class="docutils literal notranslate"><span class="pre">SRUN_*</span></code> and <code class="docutils literal notranslate"><span class="pre">SLURM_*</span></code> (except <code class="docutils literal notranslate"><span class="pre">SLURM_CONF</span></code>),
+<code class="docutils literal notranslate"><span class="pre">PYTHON*</span></code>, <code class="docutils literal notranslate"><span class="pre">BASH_ENV</span></code>, <code class="docutils literal notranslate"><span class="pre">ENV</span></code>, <code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> and <code class="docutils literal notranslate"><span class="pre">LD_LIBRARY_PATH</span></code> are dropped.
+<code class="docutils literal notranslate"><span class="pre">HOME</span></code> and <code class="docutils literal notranslate"><span class="pre">XDG_CACHE_HOME</span></code> point at a writable private <code class="docutils literal notranslate"><span class="pre">/tmp/home</span></code>, and the
+clients whose output the broker parses run in the C locale.</p>
+</section>
+<section id="confined-attempts">
+<h3>Confined attempts<a class="headerlink" href="#confined-attempts" title="Link to this heading">¶</a></h3>
+<p>A manager with <code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code> runs each attempt in a Bubblewrap
+sandbox with:</p>
+<ul class="simple">
+<li><p>the whole workspace <strong>read-only</strong> at its real path, so parent outputs,
+<code class="docutils literal notranslate"><span class="pre">stage_input</span></code>, <code class="docutils literal notranslate"><span class="pre">Attempt.parent</span></code> and other cross-job reads keep working;</p></li>
+<li><p>the attempt’s <strong>job directory writable</strong> at its real path, so every
+<code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_*_DIR</span></code> path is valid unchanged;</p></li>
+<li><p>the paths of <code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code> read-only, a private <code class="docutils literal notranslate"><span class="pre">/tmp</span></code> with
+<code class="docutils literal notranslate"><span class="pre">HOME=/tmp/home</span></code> and <code class="docutils literal notranslate"><span class="pre">TMPDIR=/tmp</span></code>, its own <code class="docutils literal notranslate"><span class="pre">/proc</span></code>, a minimal <code class="docutils literal notranslate"><span class="pre">/dev</span></code> with
+a private <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>, and the devices of <code class="docutils literal notranslate"><span class="pre">confine.devices</span></code>;</p></li>
+<li><p>private user, PID, IPC and UTS namespaces, a private network namespace
+unless <code class="docutils literal notranslate"><span class="pre">confine.isolate_network</span></code> is <code class="docutils literal notranslate"><span class="pre">false</span></code>, no capabilities, and nested
+user namespaces blocked when Bubblewrap supports it;</p></li>
+<li><p>standard input from <code class="docutils literal notranslate"><span class="pre">/dev/null</span></code> and an environment without the <code class="docutils literal notranslate"><span class="pre">SLURM_*</span></code>,
+<code class="docutils literal notranslate"><span class="pre">SRUN_*</span></code>, <code class="docutils literal notranslate"><span class="pre">SBATCH_*</span></code>, <code class="docutils literal notranslate"><span class="pre">SALLOC_*</span></code>, <code class="docutils literal notranslate"><span class="pre">PMI_*</span></code> and <code class="docutils literal notranslate"><span class="pre">PMIX_*</span></code> variables, with
+<code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_CONFINED=1</span></code>.</p></li>
+</ul>
+<p>The attempt cannot write the workspace root, <code class="docutils literal notranslate"><span class="pre">.httk-workspace/</span></code>, or any other
+job. The workflow prelude runs inside the sandbox; the launcher’s
+<code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code> runs before the manager, and its environment reaches the
+attempt through the filter above. Anything a prelude or a code needs at run
+time, such as a module tree, a conda or virtual-environment prefix or code
+binaries, must therefore be listed in
+<code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code>. The default covers <code class="docutils literal notranslate"><span class="pre">/usr</span></code> (with the <code class="docutils literal notranslate"><span class="pre">/bin</span></code>, <code class="docutils literal notranslate"><span class="pre">/lib</span></code>,
+<code class="docutils literal notranslate"><span class="pre">/lib64</span></code> and <code class="docutils literal notranslate"><span class="pre">/sbin</span></code> links of merged-<code class="docutils literal notranslate"><span class="pre">/usr</span></code> systems), <code class="docutils literal notranslate"><span class="pre">/etc</span></code>, the manager’s
+Python installation and the directories <em>httk</em> itself is imported from.</p>
+<p>Mount only trusted runtime directories. Do not expose home directories,
+credentials, arbitrary Unix sockets or broad configuration trees beyond what
+jobs need. Read-only mounts can still contain sockets that grant host
+services; file permissions do not disable them. Confinement also depends on a
+correctly maintained host kernel and Bubblewrap. Resource and disk exhaustion
+are separate operational concerns.</p>
+<p>Where compute nodes disable network namespaces (<code class="docutils literal notranslate"><span class="pre">user.max_net_namespaces=0</span></code>,
+on which Bubblewrap fails with “Creating new namespace failed”), set
+<code class="docutils literal notranslate"><span class="pre">confine.isolate_network=false</span></code>: attempts then share the host network but keep
+every other restriction above. Ranks of a confined launch always use the host
+network.</p>
+<p>Job directories never nest and are never symlinks; placement directories may
+be operator symlinks, but a job reached through a placement symlink pointing
+outside the workspace cannot be confined, and its attempt fails. See
+<a class="reference internal" href="taskmanager.html"><span class="doc">Task-manager usage in detail</span></a> for the general confinement settings.</p>
+</section>
+</section>
+<section id="setup-and-startup">
+<h2>Setup and startup<a class="headerlink" href="#setup-and-startup" title="Link to this heading">¶</a></h2>
+<section id="approving-launchers">
+<h3>Approving launchers<a class="headerlink" href="#approving-launchers" title="Link to this heading">¶</a></h3>
+<p>Approved manager configurations are global <code class="docutils literal notranslate"><span class="pre">slurm</span></code> launchers that set
+<code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code>. Create several to offer different resources or worker
+counts (see <a class="reference internal" href="launchers.html"><span class="doc">Launchers</span></a>):</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk launcher add --template slurm --global small \</span>
+<span class="go">  --set manager.confine=bwrap --set slurm.cpus_per_task=2 --set slurm.mem=4G \</span>
+<span class="go">  --set slurm.time_limit=01:00:00 --set manager.workers=2</span>
+<span class="go">httk launcher configure --add-path confine.readonly_paths=/software small</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--add-path</span></code> extends a colon-separated <code class="docutils literal notranslate"><span class="pre">confine.*</span></code> path list without restating
+its computed default. List the launchers in the daemon configuration (see
+<a class="reference internal" href="#daemon-configuration">Daemon configuration</a>). The daemon reads the bundles
+without executing them and refuses one that:</p>
+<ul class="simple">
+<li><p>is not a global launcher, or whose name does not match
+<code class="docutils literal notranslate"><span class="pre">[a-z][a-z0-9_-]{0,63}</span></code>;</p></li>
+<li><p>is not of kind <code class="docutils literal notranslate"><span class="pre">slurm</span></code>;</p></li>
+<li><p>does not set <code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code>, or has a malformed or unknown
+<code class="docutils literal notranslate"><span class="pre">confine.*</span></code> setting;</p></li>
+<li><p>asks for resources above the sanity limits (see <a class="reference internal" href="#resources">Resources</a>)
+unless the configuration sets <code class="docutils literal notranslate"><span class="pre">force=true</span></code>;</p></li>
+<li><p>lies inside the workspace, state or snapshot directories, or is
+world-writable.</p></li>
+</ul>
+<p>Every start of the daemon (<code class="docutils literal notranslate"><span class="pre">check</span></code> and <code class="docutils literal notranslate"><span class="pre">run</span></code>) reads the listed bundles again
+and freezes their settings, with the digest of their <code class="docutils literal notranslate"><span class="pre">launcher.json</span></code>, into the
+runtime snapshot it serves. The broker submits through the installed <em>httk</em>
+and never runs a bundle’s <code class="docutils literal notranslate"><span class="pre">launcher</span></code> executable. Each frozen launcher setting <code class="docutils literal notranslate"><span class="pre">manager.confine</span></code>,
+<code class="docutils literal notranslate"><span class="pre">manager.launch_template</span></code>, <code class="docutils literal notranslate"><span class="pre">manager.launch_mpi</span></code>, <code class="docutils literal notranslate"><span class="pre">manager.bind_cpus</span></code>, <code class="docutils literal notranslate"><span class="pre">manager.confine.block_mpi_spawn</span></code> and <code class="docutils literal notranslate"><span class="pre">confine.*</span></code> is pinned on the
+managers it starts and cannot be changed by workspace settings; every other
+workspace setting still applies live inside the manager, as for any manager.</p>
+</section>
+<section id="daemon-configuration">
+<h3>Daemon configuration<a class="headerlink" href="#daemon-configuration" title="Link to this heading">¶</a></h3>
+<p>The daemon configuration is saved in the private state directory
+(<code class="docutils literal notranslate"><span class="pre">&lt;state&gt;/configuration.json</span></code>). <code class="docutils literal notranslate"><span class="pre">init</span></code> and <code class="docutils literal notranslate"><span class="pre">configure</span></code> take <code class="docutils literal notranslate"><span class="pre">--set</span> <span class="pre">KEY=VALUE</span></code>
+for any key; <code class="docutils literal notranslate"><span class="pre">--add</span> <span class="pre">KEY=VALUE</span></code> (and, in <code class="docutils literal notranslate"><span class="pre">configure</span></code>, <code class="docutils literal notranslate"><span class="pre">--remove</span> <span class="pre">KEY=VALUE</span></code>)
+changes one item of a list, while <code class="docutils literal notranslate"><span class="pre">--set</span></code> replaces a whole list with a
+comma-separated value. <code class="docutils literal notranslate"><span class="pre">init</span></code> discovers what is not given:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Key</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Default at <code class="docutils literal notranslate"><span class="pre">init</span></code></p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">launchers</span></code></p></td>
+<td><p>approved global <code class="docutils literal notranslate"><span class="pre">slurm</span></code> launchers, the configurations clients can start</p></td>
+<td><p>none; at least one is required</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">authorized_keys</span></code></p></td>
+<td><p>Ed25519 public keys allowed to sign requests</p></td>
+<td><p>none; at least one is required</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">bwrap</span></code></p></td>
+<td><p>the Bubblewrap of the broker sandbox</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bwrap</span></code> on <code class="docutils literal notranslate"><span class="pre">PATH</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python</span></code></p></td>
+<td><p>runs the broker, and the submitted managers of launchers without <code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code></p></td>
+<td><p>the running interpreter</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">sbatch</span></code>, <code class="docutils literal notranslate"><span class="pre">squeue</span></code>, <code class="docutils literal notranslate"><span class="pre">scancel</span></code></p></td>
+<td><p>the Slurm clients</p></td>
+<td><p>on <code class="docutils literal notranslate"><span class="pre">PATH</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">sacct</span></code></p></td>
+<td><p>optional, used only to report how managers ended</p></td>
+<td><p>on <code class="docutils literal notranslate"><span class="pre">PATH</span></code> when present</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">slurm_conf</span></code></p></td>
+<td><p>optional fixed Slurm configuration file</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">SLURM_CONF</span></code> when it names a file, else <code class="docutils literal notranslate"><span class="pre">/etc/slurm/slurm.conf</span></code> when present</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">max_submissions</span></code></p></td>
+<td><p>lifetime quota of manager starts (see <a class="reference internal" href="#quotas">Quotas</a>)</p></td>
+<td><p>128</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">force</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code> approves CPU, memory and time above the sanity limits</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cluster</span></code> (<code class="docutils literal notranslate"><span class="pre">init</span></code> only)</p></td>
+<td><p>the fixed Slurm cluster name</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">SLURM_CLUSTER_NAME</span></code>, the <code class="docutils literal notranslate"><span class="pre">ClusterName</span></code> of the Slurm configuration, or a bounded <code class="docutils literal notranslate"><span class="pre">scontrol</span> <span class="pre">show</span> <span class="pre">config</span></code> call</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">scontrol</span></code> (<code class="docutils literal notranslate"><span class="pre">init</span></code> only)</p></td>
+<td><p>used only to discover the cluster name</p></td>
+<td><p>on <code class="docutils literal notranslate"><span class="pre">PATH</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Executables are resolved when set, and relative paths are taken from the
+current directory. An empty value (<code class="docutils literal notranslate"><span class="pre">--set</span> <span class="pre">sacct=</span></code>) unsets <code class="docutils literal notranslate"><span class="pre">sacct</span></code> or
+<code class="docutils literal notranslate"><span class="pre">slurm_conf</span></code>. The cluster belongs to the fixed enrollment, together with the
+workspace, state and snapshot directories: <code class="docutils literal notranslate"><span class="pre">configure</span></code> refuses
+<code class="docutils literal notranslate"><span class="pre">cluster</span></code> and <code class="docutils literal notranslate"><span class="pre">scontrol</span></code>, and a new <code class="docutils literal notranslate"><span class="pre">slurm_conf</span></code> keeps the enrolled cluster.
+The initial operator environment and <code class="docutils literal notranslate"><span class="pre">PATH</span></code> are trusted. Other broker tunables
+(record limit, polling, command timeout, request lifetime of 3600 seconds) are
+fixed.</p>
+</section>
+<section id="client-identities">
+<h3>Client identities<a class="headerlink" href="#client-identities" title="Link to this heading">¶</a></h3>
+<p>On each client, initialize or select an <em>httk</em> identity and give its public
+key to the destination operator; the private key stays on the client:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk init --name "Your Name" --email you@example.org</span>
+<span class="go">python -c 'from httk.core.identity import identity_public_key; print(identity_public_key())'</span>
+</pre></div>
+</div>
+</section>
+<section id="initializing-and-running">
+<h3>Initializing and running<a class="headerlink" href="#initializing-and-running" title="Link to this heading">¶</a></h3>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace daemon init /proj/campaign/workspace \</span>
+<span class="go">  --add launchers=small \</span>
+<span class="go">  --add authorized_keys=ed25519:REPLACE_WITH_CLIENT_PUBLIC_KEY</span>
+<span class="go">httk workspace daemon check /proj/campaign/workspace</span>
+<span class="go">httk workspace daemon run /proj/campaign/workspace</span>
+</pre></div>
+</div>
+<p>Repeat <code class="docutils literal notranslate"><span class="pre">--add</span></code> once per item. <code class="docutils literal notranslate"><span class="pre">init</span></code> and <code class="docutils literal notranslate"><span class="pre">configure</span></code> print the enrollment and
+the configuration, as <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">daemon</span> <span class="pre">show</span> <span class="pre">WORKSPACE</span></code> does (<code class="docutils literal notranslate"><span class="pre">--json</span></code>
+for one JSON document). Relative paths are taken from the current directory.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">init</span></code> enables the exchange extension of the workspace when it is not yet
+enabled (<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">exchange</span> <span class="pre">enable</span></code> does the same alone; the exchange is
+always <code class="docutils literal notranslate"><span class="pre">WORKSPACE/exchange</span></code>, there is no <code class="docutils literal notranslate"><span class="pre">--exchange</span></code> option). It creates the
+state and snapshot directories, the ledger, the private response key and a
+fresh enrollment, saves the configuration, publishes the runtime snapshot and
+writes <code class="docutils literal notranslate"><span class="pre">exchange/daemon.json</span></code>. It then runs the same check as <code class="docutils literal notranslate"><span class="pre">check</span></code>; if
+that fails, the enrollment is kept and printed guidance says to fix the
+launchers or the configuration and run <code class="docutils literal notranslate"><span class="pre">check</span></code> again. State left by an
+earlier enrollment, including one made with the earlier SQLite ledger, is
+refused: remove it or give a different <code class="docutils literal notranslate"><span class="pre">--state</span></code>, and initialize again.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">check</span></code> and <code class="docutils literal notranslate"><span class="pre">run</span></code> first activate the configuration (see
+<a class="reference internal" href="#configuration-changes">Configuration changes</a>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">check</span></code> enters the real broker sandbox and checks the scheduler clients,
+without submitting work or validating compute-node execution.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">run</span> <span class="pre">--once</span></code> processes one bounded scan. <code class="docutils literal notranslate"><span class="pre">run</span></code> polls until SIGINT or
+SIGTERM; a site service supervisor can restart the foreground daemon.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--state</span> <span class="pre">DIR</span></code> (default: <code class="docutils literal notranslate"><span class="pre">workspace-daemons/&lt;workspace-path-hash&gt;</span></code> below the
+<em>httk</em> data directory) must be repeated on later invocations when not the
+default; <code class="docutils literal notranslate"><span class="pre">--snapshots</span> <span class="pre">DIR</span></code> (default: <code class="docutils literal notranslate"><span class="pre">&lt;state&gt;.snapshots</span></code>) is remembered by
+the enrollment and only checked when given again. Slurm writes each manager’s
+output to <code class="docutils literal notranslate"><span class="pre">&lt;snapshots&gt;/jobs/</span></code>, so that directory must be reachable at the
+same path from the batch nodes.</p></li>
+</ul>
+<p>State, snapshots and trusted code must stay outside the workspace and outside
+writable exports, be owned by you or root, and not be world-writable, nor may
+the directories leading to them. Group write permission is accepted, so anyone
+in a file’s group is trusted like you; on a host with shared project groups,
+remove group write with <code class="docutils literal notranslate"><span class="pre">chmod</span> <span class="pre">g-w</span></code>.</p>
+<p>The ledger is a directory of small records under <code class="docutils literal notranslate"><span class="pre">&lt;state&gt;/ledger/</span></code>, written
+with POSIX renames, no hard links and no file locks, so it works on any
+filesystem with those semantics. Any number of daemon instances may run against one
+enrollment, for example a supervised standby; they share the ledger. An
+interrupted initialization keeps its partial artifacts and refuses automatic
+replacement. Keep the ledger and keys when diagnosing failures, and do not
+remove them to clear an uncertain submission.</p>
+</section>
+<section id="resources">
+<h3>Resources<a class="headerlink" href="#resources" title="Link to this heading">¶</a></h3>
+<p>Optionally set CPU count, memory and time in a launcher as
+<code class="docutils literal notranslate"><span class="pre">slurm.cpus_per_task</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.mem</span></code> and <code class="docutils literal notranslate"><span class="pre">slurm.time_limit</span></code>, and the geometry as
+<code class="docutils literal notranslate"><span class="pre">slurm.nodes</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.ntasks</span></code> and <code class="docutils literal notranslate"><span class="pre">slurm.ntasks_per_node</span></code>, exactly as for any
+<code class="docutils literal notranslate"><span class="pre">slurm</span></code> launcher. A setting left unset adds no corresponding <code class="docutils literal notranslate"><span class="pre">sbatch</span></code> flag, so
+Slurm’s partition and site defaults apply:</p>
+<ul class="simple">
+<li><p>Memory accepts positive integer MiB or K/M/G/T suffixes; KiB rounds up to
+MiB.</p></li>
+<li><p>Time accepts the standard
+<a class="reference external" href="https://slurm.schedmd.com/sbatch.html">Slurm time forms</a>; seconds round up
+to minutes.</p></li>
+<li><p>Zero or unlimited requests are rejected.</p></li>
+<li><p>Values above 1024 CPUs per task, 1,048,576 MiB per node or 10,080 minutes
+are refused unless the daemon configuration sets <code class="docutils literal notranslate"><span class="pre">force=true</span></code>.</p></li>
+</ul>
+<p>Each signed start submits exactly one manager, with the launcher’s batch
+directives plus <code class="docutils literal notranslate"><span class="pre">--parsable</span></code>, <code class="docutils literal notranslate"><span class="pre">--export=&lt;mode&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">--no-requeue</span></code>,
+<code class="docutils literal notranslate"><span class="pre">--input=/dev/null</span></code>, <code class="docutils literal notranslate"><span class="pre">--clusters</span></code>, the job name <code class="docutils literal notranslate"><span class="pre">httk-&lt;handle&gt;</span></code> and its output
+file. The export mode is the launcher setting <code class="docutils literal notranslate"><span class="pre">slurm.export</span></code>, either <code class="docutils literal notranslate"><span class="pre">NONE</span></code>
+(the default when unset) or <code class="docutils literal notranslate"><span class="pre">NIL</span></code>; see the site’s <code class="docutils literal notranslate"><span class="pre">sbatch</span></code> manual for what each
+means on that cluster. The batch script, piped to <code class="docutils literal notranslate"><span class="pre">sbatch</span></code>, writes nothing into
+the workspace. It runs the frozen <code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code> under <code class="docutils literal notranslate"><span class="pre">set</span> <span class="pre">-e</span></code> in a
+login shell, then the manager: <code class="docutils literal notranslate"><span class="pre">manager.command</span></code> (default <code class="docutils literal notranslate"><span class="pre">httk</span></code>) on the
+resulting <code class="docutils literal notranslate"><span class="pre">PATH</span></code> when a prelude is set, otherwise the configured <code class="docutils literal notranslate"><span class="pre">python</span></code>.
+With a prelude, the approved launcher’s content, not <code class="docutils literal notranslate"><span class="pre">python</span></code>, therefore
+decides which interpreter runs the manager; the configuration digest covers that
+content. With the default <code class="docutils literal notranslate"><span class="pre">--export=NONE</span></code>, the manager’s environment comes from
+the login shell and the prelude, not from the daemon; <code class="docutils literal notranslate"><span class="pre">NIL</span></code> was observed to
+break the login-shell Lmod environment on one site, so <code class="docutils literal notranslate"><span class="pre">NONE</span></code> is the default.
+The workspace’s own <code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code> does not apply to daemon submissions.</p>
+<p>The manager is <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">manager</span> <span class="pre">run</span> <span class="pre">--by-path</span> <span class="pre">--workspace</span> <span class="pre">WORKSPACE</span> <span class="pre">--idle</span></code> with the launcher’s <code class="docutils literal notranslate"><span class="pre">--workers</span></code> (from <code class="docutils literal notranslate"><span class="pre">manager.workers</span></code>),
+<code class="docutils literal notranslate"><span class="pre">--allocation</span></code> (from <code class="docutils literal notranslate"><span class="pre">manager.allocation</span></code>, default <code class="docutils literal notranslate"><span class="pre">slurm</span></code>) and its pinned
+<code class="docutils literal notranslate"><span class="pre">--setting</span></code> values. Like every unrestricted confined manager it serves the
+exchange. It probes its Slurm allocation like any manager the
+<code class="docutils literal notranslate"><span class="pre">slurm</span></code> launcher starts, places attempts on the allocation’s nodes and serves
+until Slurm’s time limit drains it; see <a class="reference internal" href="taskmanager.html"><span class="doc">Task-manager usage in detail</span></a>.</p>
+</section>
+<section id="configuration-changes">
+<h3>Configuration changes<a class="headerlink" href="#configuration-changes" title="Link to this heading">¶</a></h3>
+<p>Edit a launcher bundle with <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">launcher</span> <span class="pre">configure</span></code>, or the daemon
+configuration with <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">daemon</span> <span class="pre">configure</span></code>, then restart the daemon:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace daemon configure /proj/campaign/workspace --add launchers=large \</span>
+<span class="go">  --remove authorized_keys=ed25519:REPLACE_WITH_REVOKED_KEY</span>
+<span class="go">httk workspace daemon run /proj/campaign/workspace</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">configure</span></code> approves the result exactly as a start would and saves it only
+when it is accepted; it publishes nothing and works while a daemon runs. Every
+<code class="docutils literal notranslate"><span class="pre">check</span></code> and <code class="docutils literal notranslate"><span class="pre">run</span></code> compiles the saved configuration with the current launcher
+bundles. When the result differs from the active runtime snapshot, it publishes
+a new snapshot, rewrites <code class="docutils literal notranslate"><span class="pre">daemon.json</span></code> and prints the launchers whose approval
+changed; otherwise it publishes nothing. Activation is not refused while a
+daemon runs: running instances notice the new configuration at their next
+admission or decision and exit, so a supervisor restarts them on it. Clients
+read configuration digests live from <code class="docutils literal notranslate"><span class="pre">daemon.json</span></code> and need no reconfiguration.</p>
+<p>Queued and running managers keep the settings they were submitted with. New
+starts must name a currently approved launcher and its exact digest; a
+retained old snapshot does not authorize them. Activation preserves the
+enrollment, ledger, response key and old snapshots. Installed binaries and
+site configuration file contents remain operator-maintained external
+dependencies.</p>
+</section>
+<section id="upgrading">
+<h3>Upgrading<a class="headerlink" href="#upgrading" title="Link to this heading">¶</a></h3>
+<p>After updating <em>httk-workflow</em> on the remote host, restart the daemon. An
+enrollment made by an earlier development version, with a different snapshot
+format, protocol or SQLite ledger, is refused; see
+<a class="reference internal" href="#earlier-enrollments">Earlier enrollments</a>. Update the client before or
+together with the remote host: the current client reads <code class="docutils literal notranslate"><span class="pre">exchange.json</span></code>,
+<code class="docutils literal notranslate"><span class="pre">daemon.json</span></code> and version 3 of <code class="docutils literal notranslate"><span class="pre">managers.json</span></code>.</p>
+</section>
+</section>
+<section id="job-flow">
+<h2>Job flow<a class="headerlink" href="#job-flow" title="Link to this heading">¶</a></h2>
+<p>Send a job from the client with the ordinary eject verb:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job eject JOB /mnt/cluster/exchange/inbox</span>
+</pre></div>
+</div>
+<p>The bundle is copied into the mount under a hidden partial name and renamed
+into <code class="docutils literal notranslate"><span class="pre">inbox/</span></code> when complete; a failed delivery returns the job to the state it
+left. Every unrestricted confined manager of the workspace adopts bundles from
+<code class="docutils literal notranslate"><span class="pre">inbox</span></code> itself: it takes the entry, copies it anchored at directory descriptors
+into its own scratch, and validates, rekeys and publishes only that copy. An
+inbox bundle is untrusted input: it must hold only fresh jobs (never run, no
+<code class="docutils literal notranslate"><span class="pre">state.json</span></code>, logs, attempts or seal) in state <code class="docutils literal notranslate"><span class="pre">ready</span></code>, with no symlink, special
+file or hard-linked file, and a root without a parent. The job’s workflow must
+be installed in the workspace (an operator task); until then the adopted job
+waits, and <code class="docutils literal notranslate"><span class="pre">status.json</span></code> shows it <code class="docutils literal notranslate"><span class="pre">ready</span></code>. A client that keeps
+descriptors open on its entry can change its bytes only until the copy
+completes; such a change affects only its own job. A refused bundle appears in
+<code class="docutils literal notranslate"><span class="pre">outbox/rejected/&lt;unique&gt;/</span></code>, as the bundle <code class="docutils literal notranslate"><span class="pre">&lt;name&gt;</span></code> and a <code class="docutils literal notranslate"><span class="pre">reason.json</span></code>, which
+holds the reason. Eject errors go to the manager log. With no manager running, bundles simply
+wait in <code class="docutils literal notranslate"><span class="pre">inbox</span></code>; the client can take one back before any manager does:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk remote daemon take-back REMOTE NAME [DESTINATION]</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">take-back</span></code> renames the entry to a dot name (managers ignore those), copies it
+to <code class="docutils literal notranslate"><span class="pre">DESTINATION</span></code> (default <code class="docutils literal notranslate"><span class="pre">./NAME</span></code>) and removes it. If the name is gone, a
+manager took it: cancel the job instead.</p>
+<p>Adoption gives the jobs fresh UUIDs and keeps the client’s job UUID as the
+job’s exchange name. Once the root and every job of its tree are finished
+(<code class="docutils literal notranslate"><span class="pre">succeeded</span></code>, <code class="docutils literal notranslate"><span class="pre">failed</span></code> or <code class="docutils literal notranslate"><span class="pre">cancelled</span></code>), a manager returns the whole tree to
+<code class="docutils literal notranslate"><span class="pre">outbox/&lt;client</span> <span class="pre">job</span> <span class="pre">UUID&gt;/&lt;job</span> <span class="pre">key&gt;</span></code>; while an earlier copy there is not
+fetched, the return waits. Fetch it, removing it from the outbox:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY</span>
+</pre></div>
+</div>
+<p>Managers also handle signed job control: the actions <code class="docutils literal notranslate"><span class="pre">stop_job</span></code> (a pause),
+<code class="docutils literal notranslate"><span class="pre">cancel_job</span></code> and <code class="docutils literal notranslate"><span class="pre">eject_job</span></code> (an early return of the tree to the outbox) in
+<code class="docutils literal notranslate"><span class="pre">requests/</span></code>, signed by a key of the workspace setting
+<code class="docutils literal notranslate"><span class="pre">exchange.authorized_keys</span></code> (comma- or space-separated) and naming the job by
+its client UUID. Each is translated into an ordinary workspace request, applied
+once by the job’s owner, and answered with an unsigned <code class="docutils literal notranslate"><span class="pre">responses/&lt;id&gt;.json</span></code>
+(<code class="docutils literal notranslate"><span class="pre">accepted</span></code>, or <code class="docutils literal notranslate"><span class="pre">refused</span></code> with <code class="docutils literal notranslate"><span class="pre">request_unauthorized</span></code>, <code class="docutils literal notranslate"><span class="pre">request_expired</span></code>,
+<code class="docutils literal notranslate"><span class="pre">wrong_workspace</span></code>, <code class="docutils literal notranslate"><span class="pre">unknown_job</span></code> or <code class="docutils literal notranslate"><span class="pre">request_replayed</span></code> for a request replayed
+after its job was returned). The daemon leaves job actions to the managers.
+Signed job control is protocol-level for now: there is no client command that
+publishes it yet; the document format is in
+<a class="reference internal" href="workflow_filesystem_api.html#job-control"><span class="std std-ref">the filesystem protocol</span></a>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">adopt</span> <span class="pre">--move</span></code> copies the tree across filesystems, verifies it and then
+removes the source; without <code class="docutils literal notranslate"><span class="pre">--move</span></code> the copy in the outbox stays, and the next
+return of that job waits until it is gone. A failed job
+is never retried automatically. To resume one, adopt it, fix it, and eject it
+to the <code class="docutils literal notranslate"><span class="pre">inbox</span></code> again.</p>
+<p><code class="docutils literal notranslate"><span class="pre">status.json</span></code> at the exchange root lists the exchange jobs
+(<code class="docutils literal notranslate"><span class="pre">jobs[{exchange_name,</span> <span class="pre">job_id,</span> <span class="pre">job_key,</span> <span class="pre">state,</span> <span class="pre">progress}]</span></code>, <code class="docutils literal notranslate"><span class="pre">updated_at</span></code>,
+<code class="docutils literal notranslate"><span class="pre">truncated</span></code>), where <code class="docutils literal notranslate"><span class="pre">progress</span></code> is a bounded excerpt of the scalar members of a
+<code class="docutils literal notranslate"><span class="pre">progress.json</span></code> the job keeps in its payload; the managers write it. <code class="docutils literal notranslate"><span class="pre">managers.json</span></code> (format version 3) lists the
+daemon’s manager starts with their ledger state, Slurm job ID, scheduler state,
+exit code and start and end times. Unknown values are <code class="docutils literal notranslate"><span class="pre">null</span></code>. Both files are
+informational: <code class="docutils literal notranslate"><span class="pre">status.json</span></code> is rewritten at most every 10 seconds while a
+manager runs, and <code class="docutils literal notranslate"><span class="pre">managers.json</span></code> when its rows change. Read them with
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">remote</span> <span class="pre">daemon</span> <span class="pre">status</span> <span class="pre">REMOTE</span></code>; add <code class="docutils literal notranslate"><span class="pre">--handle</span></code> for the scheduler
+state of one manager through a signed request.</p>
+<p>The daemon checks each submitted manager about once a minute: with <code class="docutils literal notranslate"><span class="pre">squeue</span></code>
+while Slurm lists it, then with <code class="docutils literal notranslate"><span class="pre">sacct</span></code> for its final state and exit code. A
+manager is final in <code class="docutils literal notranslate"><span class="pre">COMPLETED</span></code>, <code class="docutils literal notranslate"><span class="pre">FAILED</span></code>, <code class="docutils literal notranslate"><span class="pre">CANCELLED</span></code>, <code class="docutils literal notranslate"><span class="pre">TIMEOUT</span></code>,
+<code class="docutils literal notranslate"><span class="pre">OUT_OF_MEMORY</span></code>, <code class="docutils literal notranslate"><span class="pre">NODE_FAIL</span></code>, <code class="docutils literal notranslate"><span class="pre">PREEMPTED</span></code>, <code class="docutils literal notranslate"><span class="pre">BOOT_FAIL</span></code> or <code class="docutils literal notranslate"><span class="pre">DEADLINE</span></code>. With
+<code class="docutils literal notranslate"><span class="pre">sacct</span></code> configured, a final state seen only by <code class="docutils literal notranslate"><span class="pre">squeue</span></code> waits up to 30 minutes
+for accounting to add the exit code, and is then kept without one. A manager
+that neither client knows for 30 minutes, which is always the case without
+<code class="docutils literal notranslate"><span class="pre">sacct</span></code> or while accounting fails, becomes <code class="docutils literal notranslate"><span class="pre">GONE</span></code>. Once a manager is final, the
+last 1 MiB of its Slurm output is copied to <code class="docutils literal notranslate"><span class="pre">managers/&lt;handle&gt;.log</span></code> in the
+exchange, and its row’s <code class="docutils literal notranslate"><span class="pre">log</span></code> names that file. This also covers a manager that
+failed on its node before it ever adopted a job.</p>
+</section>
+<section id="file-command-protocol">
+<h2>File command protocol<a class="headerlink" href="#file-command-protocol" title="Link to this heading">¶</a></h2>
+<section id="request-signatures">
+<h3>Request signatures<a class="headerlink" href="#request-signatures" title="Link to this heading">¶</a></h3>
+<p>The internal version-4 format requires identity signatures. The maintained
+client builds and signs documents with its configured <em>httk</em> operator
+identity; an unsigned request is never executed. The configured
+<code class="docutils literal notranslate"><span class="pre">authorized_keys</span></code> are the allowed Ed25519 public keys, and removing a key
+also stops it from replaying old results. This authorization rule is separate
+from the ordinary, optional attribution meaning of <em>httk</em> identity signatures.</p>
+<p>Each signature covers the format and version, the request, workspace and
+enrollment IDs, the operation and its fields, <code class="docutils literal notranslate"><span class="pre">created_at</span></code>, <code class="docutils literal notranslate"><span class="pre">expires_at</span></code> and
+<code class="docutils literal notranslate"><span class="pre">operator_key</span></code>.</p>
+</section>
+<section id="time-window">
+<h3>Time window<a class="headerlink" href="#time-window" title="Link to this heading">¶</a></h3>
+<p>Times are integer Unix seconds. The default lifetime and the maximum request
+lifetime are 3600 seconds. The clock-skew allowance is 7800 seconds
+(130 minutes) in both directions, so first execution requires
+<code class="docutils literal notranslate"><span class="pre">created_at</span> <span class="pre">-</span> <span class="pre">7800</span> <span class="pre">&lt;=</span> <span class="pre">now</span> <span class="pre">&lt;=</span> <span class="pre">expires_at</span> <span class="pre">+</span> <span class="pre">7800</span></code>, with equality accepted. With a
+one-hour lifetime the acceptance interval spans 5 hours 20 minutes in total.
+The expiry limits admission and execution of the request; a Slurm job already
+submitted can stay queued past that deadline.</p>
+</section>
+<section id="ledger-and-replay">
+<h3>Ledger and replay<a class="headerlink" href="#ledger-and-replay" title="Link to this heading">¶</a></h3>
+<p>The protected ledger keeps the exact signed requests. A duplicate never
+submits again, even after a restart. A currently authorized key can still
+retrieve recorded results after expiry. A stale request that has not acted
+is durably refused, subject to ledger capacity. A request recovered before
+submission must still meet the time window before it can act.</p>
+</section>
+<section id="response-signatures">
+<h3>Response signatures<a class="headerlink" href="#response-signatures" title="Link to this heading">¶</a></h3>
+<p>Responses are signed by a separate daemon key held in private broker state.
+Clients configure its public key through a trusted operator handoff and never
+learn a trust anchor from a mailbox response. Signed responses bind the exact
+signed request digest and all destination and request identities. Signatures
+provide integrity and authorization, not encryption or protection against
+mailbox deletion. Slurm keeps using the site’s own authentication, such as its
+MUNGE socket. Cluster secrets and daemon private keys are never exposed to
+jobs.</p>
+</section>
+<section id="earlier-enrollments">
+<h3>Earlier enrollments<a class="headerlink" href="#earlier-enrollments" title="Link to this heading">¶</a></h3>
+<p>Enrollments that use an earlier protocol, snapshot format or ledger layout, or
+an SQLite ledger, are refused. Preserve their state and reconcile outstanding
+work with the earlier software before initializing a new enrollment. There is
+no automatic migration or ledger reset.</p>
+</section>
+<section id="publishing-requests">
+<h3>Publishing requests<a class="headerlink" href="#publishing-requests" title="Link to this heading">¶</a></h3>
+<p>Publish complete UTF-8 JSON by writing a temporary file and atomically
+renaming it to <code class="docutils literal notranslate"><span class="pre">&lt;request_id&gt;.json</span></code> in <code class="docutils literal notranslate"><span class="pre">exchange/requests/</span></code>. Use a fresh random
+32-character lowercase hexadecimal request ID for each new operation.
+Documents are limited to 16 KiB. Unknown keys, duplicate keys and extra
+operation fields are rejected. The operations are <code class="docutils literal notranslate"><span class="pre">health</span></code>, and:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Additional fields</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">start_manager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">configuration</span></code> and <code class="docutils literal notranslate"><span class="pre">configuration_digest</span></code>: the approved launcher name and its SHA256 digest</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">manager_status</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">handle</span></code>: the returned manager handle</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cancel_manager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">handle</span></code>: the returned manager handle</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>There is no operation that moves bundles: the daemon never touches <code class="docutils literal notranslate"><span class="pre">inbox</span></code> or
+<code class="docutils literal notranslate"><span class="pre">outbox</span></code>.</p>
+</section>
+<section id="responses">
+<h3>Responses<a class="headerlink" href="#responses" title="Link to this heading">¶</a></h3>
+<p>Responses appear under the same filename in <code class="docutils literal notranslate"><span class="pre">exchange/responses/</span></code>, with the
+request identities, the canonical request digest and the outcome. Scheduler
+IDs and raw scheduler output are not exposed. Verify the identities and digest
+when consuming a response: the uploader can interfere with mailbox contents,
+and the protected ledger is authoritative.</p>
+<p>The response to an admitted request is committed to the ledger before
+publication, and requests are removed only after their response is published.
+The refusals decided before admission (<code class="docutils literal notranslate"><span class="pre">wrong_workspace</span></code>, <code class="docutils literal notranslate"><span class="pre">wrong_enrollment</span></code>,
+<code class="docutils literal notranslate"><span class="pre">request_conflict</span></code>) and <code class="docutils literal notranslate"><span class="pre">busy</span></code> are published without a ledger record, so a
+retry is decided afresh. Malformed or unauthorized requests are
+discarded with a bounded diagnostic and no response; one that cannot be
+removed is renamed to a <code class="docutils literal notranslate"><span class="pre">.invalid-…</span></code> dot name that later polls skip. The
+maintained client removes a response once it has verified it, and the daemon
+removes any response older than the request lifetime plus the clock-skew
+allowance. The filesystem rules of the mailbox are specified in
+<a class="reference internal" href="workflow_filesystem_api.html#daemon-mailbox"><span class="std std-ref">the filesystem protocol</span></a>.</p>
+</section>
+<section id="request-ids">
+<h3>Request IDs<a class="headerlink" href="#request-ids" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Use one active caller per request ID.</p></li>
+<li><p>Do not replace a request while the broker may still be consuming it, since
+responses are published before request removal. The maintained client waits
+for removal and checks again for a response before republishing.</p></li>
+<li><p>A repeated request ID with unchanged content replays its recorded response.
+Changed content under the same ID is refused.</p></li>
+<li><p>Use a new request ID for each status refresh.</p></li>
+</ul>
+</section>
+<section id="outcomes">
+<h3>Outcomes<a class="headerlink" href="#outcomes" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">submitted</span></code> returns an opaque handle.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">uncertain</span></code> means submission may have happened. The daemon will not retry
+it, including after restart; an operator must reconcile it with Slurm.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">UNKNOWN</span></code> status does not mean a job finished; <code class="docutils literal notranslate"><span class="pre">managers.json</span></code> reports the
+final state once accounting knows it.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">cancel_requested</span></code> means the filtered cancellation call succeeded, not that
+termination is confirmed. Cancellation filters on controller-side job name
+and user to avoid acting on a reused numeric scheduler ID.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">uncertain</span></code>, <code class="docutils literal notranslate"><span class="pre">refused</span></code> and <code class="docutils literal notranslate"><span class="pre">busy</span></code> responses may carry a signed <code class="docutils literal notranslate"><span class="pre">detail</span></code>
+string with the scheduler’s own error, for example
+<code class="docutils literal notranslate"><span class="pre">sbatch</span> <span class="pre">exited</span> <span class="pre">1:</span> <span class="pre">sbatch:</span> <span class="pre">error:</span> <span class="pre">Batch</span> <span class="pre">job</span> <span class="pre">submission</span> <span class="pre">failed:</span> <span class="pre">Invalid</span> <span class="pre">account</span> <span class="pre">…</span></code>.</p></li>
+</ul>
+<p>The foreground daemon logs to stdout: one line per request (operation, request
+ID, outcome), each submitted Slurm job ID, every manager state change and
+published manager log, every failed Slurm client call with its exit code and
+error output, and startup and check results.</p>
+<p>While a submitted job runs, Slurm writes its output, with stderr merged in, to
+<code class="docutils literal notranslate"><span class="pre">&lt;snapshots&gt;/jobs/httk-&lt;jobid&gt;.out</span></code>, outside the workspace; the
+<code class="docutils literal notranslate"><span class="pre">daemon_submitted</span></code> log line names this path. When the manager is final, the
+last 1 MiB is published to <code class="docutils literal notranslate"><span class="pre">managers/&lt;handle&gt;.log</span></code> in the exchange (see
+<a class="reference internal" href="#job-flow">Job flow</a>). The original stays in the <code class="docutils literal notranslate"><span class="pre">jobs</span></code> directory for the
+operator to inspect and clean up. The manager’s own log is
+<code class="docutils literal notranslate"><span class="pre">logs/managers/&lt;manager-id&gt;.log</span></code> in the workspace, as for every manager.</p>
+</section>
+<section id="quotas">
+<h3>Quotas<a class="headerlink" href="#quotas" title="Link to this heading">¶</a></h3>
+<p>The record limit (4096) limits all durable request records. <code class="docutils literal notranslate"><span class="pre">max_submissions</span></code>
+limits manager starts admitted over the enrollment’s lifetime, including
+refused or uncertain starts. Both are cumulative quotas, not active-job counts.
+Exhaustion returns a nonpersisted <code class="docutils literal notranslate"><span class="pre">busy</span></code> response, retryable with the same
+request ID and identical fields. Freeing capacity may need operator action;
+there is no automatic history pruning or quota reset. Intentional
+re-enrollment requires preserving and reconciling outstanding work, a new
+enrollment ID and a new private ledger.</p>
+</section>
+</section>
+<section id="parallel-launches">
+<h2>Parallel launches<a class="headerlink" href="#parallel-launches" title="Link to this heading">¶</a></h2>
+<section id="the-launch-prefix-under-confinement">
+<h3>The launch prefix under confinement<a class="headerlink" href="#the-launch-prefix-under-confinement" title="Link to this heading">¶</a></h3>
+<p>Code commands name only the program (<code class="docutils literal notranslate"><span class="pre">vasp.command</span> <span class="pre">=</span> <span class="pre">&quot;vasp_std&quot;</span></code>); the parallel
+start is the attempt’s launch prefix, <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_LAUNCH</span></code>, rendered from
+<code class="docutils literal notranslate"><span class="pre">manager.launch_template</span></code> or the built-in Slurm prefix (see
+<a class="reference internal" href="taskmanager.html"><span class="doc">Task-manager usage in detail</span></a>). In a confined attempt the rendered prefix cannot run,
+because the sandbox has no scheduler access, so <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_LAUNCH</span></code> is a
+launch client instead. Use it exactly as an unconfined prefix:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$</span>HTTK_WORKFLOW_LAUNCH<span class="w"> </span>./program<span class="w"> </span>input.dat
+</pre></div>
+</div>
+<p>The client asks the trusted manager to start the launch, and the manager runs
+<code class="docutils literal notranslate"><span class="pre">&lt;rendered</span> <span class="pre">launch</span> <span class="pre">template&gt;</span> <span class="pre">&lt;rank</span> <span class="pre">helper&gt;</span></code>: the template is rendered from the
+placement held in the manager’s memory, with a manager-owned nodefile for
+<code class="docutils literal notranslate"><span class="pre">{nodefile}</span></code> and <code class="docutils literal notranslate"><span class="pre">SLURM_HOSTFILE</span></code> in the trusted launch record
+<code class="docutils literal notranslate"><span class="pre">.httk-workspace/owners/&lt;owner-id&gt;/launches/&lt;attempt_id&gt;.&lt;request_id&gt;/</span></code>,
+which jobs can only read and which the manager writes before the launch
+starts. The manager never interprets the program
+and arguments. The request, status and trusted launch files are specified in
+<a class="reference internal" href="workflow_filesystem_api.html#confined-launches"><span class="std std-ref">the filesystem protocol</span></a>. The code run helpers prepend the prefix themselves, so code
+command settings and workflow packages are the same confined and unconfined.</p>
+<ul class="simple">
+<li><p>The client must run from a working directory inside the job directory (the
+attempt’s workdir is).</p></li>
+<li><p>One launch runs at a time per attempt; further requests wait in arrival
+order.</p></li>
+<li><p>The ranks’ standard output and standard error stay separate: the client
+reproduces them on its own and exits with the launch’s exit status (<code class="docutils literal notranslate"><span class="pre">2</span></code> when
+the launch is refused, <code class="docutils literal notranslate"><span class="pre">143</span></code> when it was stopped without one). Rank
+standard input is <code class="docutils literal notranslate"><span class="pre">/dev/null</span></code>.</p></li>
+<li><p>A launch is refused or stopped once the attempt is cancelled, times out, is
+drained, publishes its outcome or exits. Stopping sends <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> to the
+launch’s process group and <code class="docutils literal notranslate"><span class="pre">SIGKILL</span></code> after the manager’s cancellation grace.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> or <code class="docutils literal notranslate"><span class="pre">SIGINT</span></code> to the client (for example from a code helper’s
+timeout) does not end it: it asks the manager to stop the launch and returns
+only after the ranks are gone. A killed client stops the launch too.
+Accepted limitation: a code helper escalates to <code class="docutils literal notranslate"><span class="pre">SIGKILL</span></code> of the client
+after its own termination grace (10 s by default), and the manager
+escalates the ranks after its cancellation grace, so with ranks that ignore
+<code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> the helper can return about a second before the manager has
+reaped them. Ranks that honour <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> are gone before the helper returns.</p></li>
+<li><p>A launch’s <code class="docutils literal notranslate"><span class="pre">exited</span></code> or <code class="docutils literal notranslate"><span class="pre">stopped</span></code> status, and therefore the attempt’s
+commit, follows the launcher’s local process group (for example <code class="docutils literal notranslate"><span class="pre">srun</span></code>).
+When a killed <code class="docutils literal notranslate"><span class="pre">srun</span></code> leaves remote tasks, they end when Slurm cleans up the
+step, possibly a few seconds later.</p></li>
+<li><p>The attempt keeps its placement and is not committed, sealed or ejected
+by its manager until every launch it made has been reaped. If the manager
+dies, its jobs are recovered only once the death proof shows that every
+launch it recorded has ended: its process group is gone on the prober’s
+host, or Slurm or the site allocation probe confirms the allocation ended
+(see <a class="reference internal" href="workflow_filesystem_api.html#launch-end-evidence"><span class="std std-ref">launch end evidence</span></a>).
+No clock rule applies; an allocation nobody can ask about needs
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">attest-dead</span></code>. A launch whose processes outlive <code class="docutils literal notranslate"><span class="pre">SIGKILL</span></code> is
+reported as uncertain, and that attempt can start no further launches.</p></li>
+<li><p>Commands run without the prefix run inside the attempt sandbox on the
+manager’s node, as unconfined commands run on that node.</p></li>
+</ul>
+<p>The ORCA run helper starts no prefix by default, since ORCA starts its own
+MPI; under confinement only single-node ORCA is supported, and a multi-node
+binding is refused. The generic <code class="docutils literal notranslate"><span class="pre">run</span></code> verb, <code class="docutils literal notranslate"><span class="pre">Attempt.run</span></code> and
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code> never prepend the prefix.</p>
+</section>
+<section id="rank-sandboxes">
+<h3>Rank sandboxes<a class="headerlink" href="#rank-sandboxes" title="Link to this heading">¶</a></h3>
+<p>On every rank the trusted rank helper opens the workspace and the job
+directory without following symlinks, refusing the workspace root,
+<code class="docutils literal notranslate"><span class="pre">.httk-workspace</span></code> and nested placements, and only then enters Bubblewrap with:</p>
+<ul class="simple">
+<li><p>the workspace read-only and the job directory writable at their real paths,
+and the paths of <code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code>;</p></li>
+<li><p>the launch’s shared-memory directory at <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>, the Slurm step’s PMIx
+directory (only when it lies below <code class="docutils literal notranslate"><span class="pre">confine.pmix_roots</span></code>), and the devices of
+<code class="docutils literal notranslate"><span class="pre">confine.devices</span></code>;</p></li>
+<li><p>private user, PID, IPC and UTS namespaces, the <strong>host network</strong>, no
+capabilities, and nested user namespaces blocked when Bubblewrap supports
+it;</p></li>
+<li><p>the rank’s process-manager variables (<code class="docutils literal notranslate"><span class="pre">PMI_*</span></code>, <code class="docutils literal notranslate"><span class="pre">PMIX_*</span></code>, <code class="docutils literal notranslate"><span class="pre">OMPI_*</span></code>, <code class="docutils literal notranslate"><span class="pre">OPAL_*</span></code>
+and the Slurm step identity), then <code class="docutils literal notranslate"><span class="pre">confine.environment.&lt;NAME&gt;</span></code> values, and
+<code class="docutils literal notranslate"><span class="pre">HOME=/tmp/home</span></code>, <code class="docutils literal notranslate"><span class="pre">TMPDIR=/tmp</span></code>.</p></li>
+</ul>
+<p>Inside the sandbox it reads the request, changes to the client’s working
+directory and adds the attempt’s environment, without names starting with
+<code class="docutils literal notranslate"><span class="pre">PMI_</span></code>, <code class="docutils literal notranslate"><span class="pre">PMIX_</span></code>, <code class="docutils literal notranslate"><span class="pre">OMPI_</span></code>, <code class="docutils literal notranslate"><span class="pre">OPAL_</span></code>, <code class="docutils literal notranslate"><span class="pre">SLURM_</span></code>, <code class="docutils literal notranslate"><span class="pre">SLURMD_</span></code>, <code class="docutils literal notranslate"><span class="pre">SRUN_</span></code>, <code class="docutils literal notranslate"><span class="pre">SBATCH_</span></code>,
+<code class="docutils literal notranslate"><span class="pre">SALLOC_</span></code> or <code class="docutils literal notranslate"><span class="pre">HTTK_</span></code>, and without names that are not portable identifiers,
+such as exported Bash functions. Module-derived variables such as <code class="docutils literal notranslate"><span class="pre">PATH</span></code> and
+<code class="docutils literal notranslate"><span class="pre">LD_LIBRARY_PATH</span></code> therefore reach the ranks, but MPI tuning variables set in
+the attempt do not: set them as <code class="docutils literal notranslate"><span class="pre">confine.environment.&lt;NAME&gt;</span></code>.</p>
+</section>
+<section id="shared-memory">
+<h3>Shared memory<a class="headerlink" href="#shared-memory" title="Link to this heading">¶</a></h3>
+<p>The ranks of one launch on a node share a private directory
+<code class="docutils literal notranslate"><span class="pre">&lt;confine.shm_root&gt;/httk-&lt;token&gt;</span></code> (default root <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>, mode 0700,
+owner checked; the token is a random name the manager chose for the launch),
+mounted at <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>. This supports POSIX shared-memory files without exposing
+unrelated host shared-memory objects. The manager removes the directory on its
+own node once the launch is reaped, and every rank helper first removes the
+directories on its node that no launch record names any more, judged from two
+listings one visibility deadline apart. A node that runs no later launch keeps
+a stale directory after a failure; removing it is a site cleanup item. Do not
+use age-only deletion, which can remove a live launch’s storage.</p>
+<p>Each rank has its own PID namespace, which defeats single-copy transports such
+as CMA and XPMEM, and private IPC namespaces prevent cross-rank SysV IPC. Sites
+may need to select another mechanism, for example
+<code class="docutils literal notranslate"><span class="pre">confine.environment.OMPI_MCA_btl_vader_single_copy_mechanism=none</span></code> for Open
+MPI. Validate the transport your MPI installation actually uses: a shared-file
+test alone does not prove that MPI selected its shared-memory transport.</p>
+</section>
+<section id="pmix-and-devices">
+<h3>PMIx and devices<a class="headerlink" href="#pmix-and-devices" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">confine.pmix_roots</span></code> bounds the Slurm-supplied <code class="docutils literal notranslate"><span class="pre">PMIX_SERVER_TMPDIR</span></code>. Only the
+verified per-step directory is exposed, at its original path, and no broad
+authentication or socket directory is mounted as a fallback. The site’s PMIx
+layout must fit this contract.</p>
+<p><code class="docutils literal notranslate"><span class="pre">confine.devices</span></code> exposes individually approved device nodes, such as RDMA or
+GPU devices, to attempts and ranks; it does not establish tested RDMA or GPU
+support. Host networking and the PMIx endpoint are service authorities: the
+site must verify that they do not let ranks launch unconfined processes or
+reach other protected services.</p>
+</section>
+<section id="pmi-2-launches-intel-mpi">
+<h3>PMI-2 launches (Intel MPI)<a class="headerlink" href="#pmi-2-launches-intel-mpi" title="Link to this heading">¶</a></h3>
+<p>Intel MPI under Slurm needs <code class="docutils literal notranslate"><span class="pre">srun</span> <span class="pre">--mpi=pmi2</span></code>. Set it on the daemon’s approved
+launcher, then restart the daemon so <code class="docutils literal notranslate"><span class="pre">run</span></code> picks up the changed launcher:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>httk<span class="w"> </span>launcher<span class="w"> </span>configure<span class="w"> </span>--set<span class="w"> </span>manager.launch_mpi<span class="o">=</span>pmi2<span class="w"> </span>small
+</pre></div>
+</div>
+<p>The setting is pinned on the managers the daemon starts, and the built-in
+step becomes <code class="docutils literal notranslate"><span class="pre">srun</span> <span class="pre">--mpi=pmi2</span> <span class="pre">...</span></code>. A <code class="docutils literal notranslate"><span class="pre">manager.launch_template</span></code> owns its argv
+and must contain <code class="docutils literal notranslate"><span class="pre">--mpi=pmi2</span></code> itself.</p>
+<p>With spawn blocking (the default), Slurm’s <code class="docutils literal notranslate"><span class="pre">PMI_FD</span></code> socket stays in the rank helper; the rank gets a private
+socket as its <code class="docutils literal notranslate"><span class="pre">PMI_FD</span></code>. The helper relays the PMI-1 simple protocol, which
+Intel MPI speaks over <code class="docutils literal notranslate"><span class="pre">srun</span> <span class="pre">--mpi=pmi2</span></code>, one request at a time and only for
+Slurm’s PMI-1 commands. <code class="docutils literal notranslate"><span class="pre">MPI_Comm_spawn</span></code> (any <code class="docutils literal notranslate"><span class="pre">mcmd=</span></code> block or <code class="docutils literal notranslate"><span class="pre">cmd=mcmd</span></code>) is
+answered with <code class="docutils literal notranslate"><span class="pre">cmd=spawn_result</span> <span class="pre">rc=-1</span></code> and never reaches Slurm, so the
+application sees a spawn error and the rank’s launch stderr gets
+<code class="docutils literal notranslate"><span class="pre">httk-workflow</span> <span class="pre">rank:</span> <span class="pre">PMI</span> <span class="pre">refused</span> <span class="pre">MPI_Comm_spawn</span></code>.</p>
+<p>The relay fails closed. A PMI-2 wire client (for example an application linked
+against Slurm’s <code class="docutils literal notranslate"><span class="pre">libpmi2</span></code>), a request over 1024 bytes, any other command, or
+a request containing <code class="docutils literal notranslate"><span class="pre">mcmd</span></code> anywhere (even in a key, value or service name)
+ends the rank’s PMI channel with an <code class="docutils literal notranslate"><span class="pre">httk-workflow</span> <span class="pre">rank:</span> <span class="pre">PMI</span> <span class="pre">refused:</span> <span class="pre">...</span></code>
+line, and MPI initialization then fails. A <code class="docutils literal notranslate"><span class="pre">PMI_FD</span></code> that is not a socket
+refuses the launch.</p>
+<p>Spawn blocking is the pinned launcher setting <code class="docutils literal notranslate"><span class="pre">manager.confine.block_mpi_spawn</span></code>,
+read only under <code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code> and ignored without confinement:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">on</span></code> (default): the relay above. <code class="docutils literal notranslate"><span class="pre">PMI_PORT</span></code> is also dropped from the rank
+environment, and a rank whose relay cannot start is killed and refused.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">auto</span></code>: <code class="docutils literal notranslate"><span class="pre">on</span></code> when Slurm sets <code class="docutils literal notranslate"><span class="pre">PMI_FD</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">off</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">off</span></code>: the rank gets Slurm’s own <code class="docutils literal notranslate"><span class="pre">PMI_FD</span></code> and <code class="docutils literal notranslate"><span class="pre">PMI_PORT</span></code>, so
+<code class="docutils literal notranslate"><span class="pre">MPI_Comm_spawn</span></code> starts processes outside the sandbox.</p></li>
+</ul>
+<p>The setting does not cover a non-Slurm PMIx server, such as the one of an
+Open MPI <code class="docutils literal notranslate"><span class="pre">mpirun</span></code> launch template. Slurm’s PMIx plugin does not implement
+spawn, so <code class="docutils literal notranslate"><span class="pre">--mpi=pmix</span></code> needs no filter.</p>
+<p>For site acceptance, run the spawn probe (see <a class="reference internal" href="#launch-acceptance">Launch
+acceptance</a>) and a multi-node Intel MPI job, and confirm
+that the sandbox cannot reach the munge socket: keep <code class="docutils literal notranslate"><span class="pre">/run/munge</span></code> and <code class="docutils literal notranslate"><span class="pre">/run</span></code>
+out of <code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code>. A rank that can create munge credentials
+could contact <code class="docutils literal notranslate"><span class="pre">srun</span></code>’s PMI-2 port or <code class="docutils literal notranslate"><span class="pre">slurmctld</span></code> directly.</p>
+</section>
+<section id="launch-acceptance">
+<h3>Launch acceptance<a class="headerlink" href="#launch-acceptance" title="Link to this heading">¶</a></h3>
+<p>Each launch style needs its own site acceptance; none is claimed here:</p>
+<ul class="simple">
+<li><p>the built-in <code class="docutils literal notranslate"><span class="pre">srun</span></code> prefix with <code class="docutils literal notranslate"><span class="pre">manager.launch_mpi=pmi2</span></code> for Intel MPI (the rank helper filters PMI-1
+spawn requests; see <a class="reference internal" href="#pmi-2-launches-intel-mpi">PMI-2 launches</a>) or on a site whose default MPI plugin is PMIx (<code class="docutils literal notranslate"><span class="pre">confine.pmix_roots</span></code>
+set to the <code class="docutils literal notranslate"><span class="pre">slurmd</span></code> spool parent of the step directories);</p></li>
+<li><p>Open MPI <code class="docutils literal notranslate"><span class="pre">mpirun</span></code>, for example through
+<code class="docutils literal notranslate"><span class="pre">manager.launch_template=mpirun</span> <span class="pre">-np</span> <span class="pre">{procs}</span> <span class="pre">--hostfile</span> <span class="pre">{nodefile}</span></code>;</p></li>
+<li><p>NSC <code class="docutils literal notranslate"><span class="pre">mpprun</span></code>;</p></li>
+<li><p>Intel MPI hydra.</p></li>
+</ul>
+<p>Before production use, test this exact mount and environment configuration
+for positive multi-node communication and the shared-memory transport on
+nodes with several ranks; an allocation-shared <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code> object and an
+unrelated host shared-memory canary that stays invisible to ranks; host
+filesystem and process canaries, dynamic MPI spawn, nested scheduler commands
+and exposed authentication or socket routes; and rank startup failure, client
+timeout, cancellation, manager death, and shared-memory cleanup after
+completion and after node failure.</p>
+<p>The <a class="reference download internal" download="" href="../_downloads/d3e34adaec81e7fc32402bb5ad976e0a/probe_daemon_mpi.c"><code class="xref download docutils literal notranslate"><span class="pre">MPI</span> <span class="pre">site</span> <span class="pre">probe</span></code></a> (also at
+<code class="docutils literal notranslate"><span class="pre">tools/probe_daemon_mpi.c</span></code> in a source checkout) provides the communication
+and spawn checks. Build it on the cluster with
+<code class="docutils literal notranslate"><span class="pre">mpicc</span> <span class="pre">-O2</span> <span class="pre">-Wall</span> <span class="pre">-Wextra</span> <span class="pre">-o</span> <span class="pre">probe</span> <span class="pre">probe_daemon_mpi.c</span> <span class="pre">-lrt</span></code>, place the
+executable in the job’s payload and run it from a confined attempt with
+<code class="docutils literal notranslate"><span class="pre">$HTTK_WORKFLOW_LAUNCH</span> <span class="pre">./probe</span> <span class="pre">FRESHALPHANUMERICTOKEN</span></code>.</p>
+<ul class="simple">
+<li><p>At least two ranks must share a node.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">--spawn</span></code> only for the separate spawn check, with independently
+established spare capacity.</p></li>
+<li><p>Exit 77 means inconclusive. Spawn success is a failure.</p></li>
+<li><p>The probe creates only a named object in the exposed <code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code> and never
+writes an escape proof into the host home directory.</p></li>
+</ul>
+<p>Inspect MPI transport diagnostics separately. The probe is a site test, not a
+replacement for the filesystem, process, scheduler and lifecycle checks above.</p>
+</section>
+</section>
+<section id="site-acceptance">
+<h2>Site acceptance<a class="headerlink" href="#site-acceptance" title="Link to this heading">¶</a></h2>
+<p>The repository has executable scheduler stand-in tests and a required real
+Bubblewrap CI gate. Neither replaces site acceptance of SSHFS access controls,
+Slurm authentication, compute-node mounts and <code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code>,
+attempt confinement, cancellation, restart recovery or the actual simulation
+executable. Local protocol tests and scheduler stand-ins do not establish real
+cluster containment, and real Slurm, PMIx and multi-node acceptance remain a
+deployment check. Run those checks before relying on this daemon for
+production jobs.</p>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="sealing.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Sealing jobs, workspaces, and projects</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="adapter_authoring.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Writing a remote adapter in detail</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Confined workspace daemon</a><ul>
+<li><a class="reference internal" href="#trust-and-execution-model">Trust and execution model</a><ul>
+<li><a class="reference internal" href="#trust-model">Trust model</a></li>
+<li><a class="reference internal" href="#deployment-boundary">Deployment boundary</a></li>
+<li><a class="reference internal" href="#host-requirements">Host requirements</a></li>
+<li><a class="reference internal" href="#layout">Layout</a></li>
+<li><a class="reference internal" href="#transport-account">Transport account</a></li>
+<li><a class="reference internal" href="#broker-sandbox">Broker sandbox</a></li>
+<li><a class="reference internal" href="#confined-attempts">Confined attempts</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#setup-and-startup">Setup and startup</a><ul>
+<li><a class="reference internal" href="#approving-launchers">Approving launchers</a></li>
+<li><a class="reference internal" href="#daemon-configuration">Daemon configuration</a></li>
+<li><a class="reference internal" href="#client-identities">Client identities</a></li>
+<li><a class="reference internal" href="#initializing-and-running">Initializing and running</a></li>
+<li><a class="reference internal" href="#resources">Resources</a></li>
+<li><a class="reference internal" href="#configuration-changes">Configuration changes</a></li>
+<li><a class="reference internal" href="#upgrading">Upgrading</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#job-flow">Job flow</a></li>
+<li><a class="reference internal" href="#file-command-protocol">File command protocol</a><ul>
+<li><a class="reference internal" href="#request-signatures">Request signatures</a></li>
+<li><a class="reference internal" href="#time-window">Time window</a></li>
+<li><a class="reference internal" href="#ledger-and-replay">Ledger and replay</a></li>
+<li><a class="reference internal" href="#response-signatures">Response signatures</a></li>
+<li><a class="reference internal" href="#earlier-enrollments">Earlier enrollments</a></li>
+<li><a class="reference internal" href="#publishing-requests">Publishing requests</a></li>
+<li><a class="reference internal" href="#responses">Responses</a></li>
+<li><a class="reference internal" href="#request-ids">Request IDs</a></li>
+<li><a class="reference internal" href="#outcomes">Outcomes</a></li>
+<li><a class="reference internal" href="#quotas">Quotas</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#parallel-launches">Parallel launches</a><ul>
+<li><a class="reference internal" href="#the-launch-prefix-under-confinement">The launch prefix under confinement</a></li>
+<li><a class="reference internal" href="#rank-sandboxes">Rank sandboxes</a></li>
+<li><a class="reference internal" href="#shared-memory">Shared memory</a></li>
+<li><a class="reference internal" href="#pmix-and-devices">PMIx and devices</a></li>
+<li><a class="reference internal" href="#pmi-2-launches-intel-mpi">PMI-2 launches (Intel MPI)</a></li>
+<li><a class="reference internal" href="#launch-acceptance">Launch acceptance</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#site-acceptance">Site acceptance</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

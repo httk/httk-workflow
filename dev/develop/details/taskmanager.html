@@ -1,0 +1,1489 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Project and workflow command line in detail" href="workflow_cli.html"><link rel="prev" title="Examples" href="../notebooks/examples.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Task-manager usage in detail - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul class="current">
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workspace_daemon.html">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/details/taskmanager.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="task-manager-usage-in-detail">
+<h1>Task-manager usage in detail<a class="headerlink" href="#task-manager-usage-in-detail" title="Link to this heading">¶</a></h1>
+<p>This guide covers setting up workspaces, installing workflows, submitting jobs,
+running managers, and inspecting, controlling and maintaining workspaces. See
+<a class="reference internal" href="workflow_cli.html"><span class="std std-doc">the project and workflow command line</span></a> for the complete
+command tree and <a class="reference internal" href="workflow_filesystem_api.html"><span class="doc">Workflow filesystem API in detail</span></a> for the on-disk protocol.</p>
+<section id="setting-up-a-workspace">
+<h2>Setting up a workspace<a class="headerlink" href="#setting-up-a-workspace" title="Link to this heading">¶</a></h2>
+<section id="initializing">
+<h3>Initializing<a class="headerlink" href="#initializing" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">WORKSPACE</span></code> is optional. Without it, a command uses the closest enclosing
+workspace, then the project’s recorded default, the registry default, and
+finally the per-user default workspace. A project does not contain workspaces;
+record its routing explicitly with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">default</span> <span class="pre">NAME</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">PATH</span></code> creates a named local workspace in a directory of its
+own, which must be new or empty (it is never a project root), or adopts and
+registers an existing workspace. The first local workspace initialized inside a
+project becomes the project’s default. <em>httk-workflow</em> owns the workspace top
+level: <code class="docutils literal notranslate"><span class="pre">.httk-workspace/</span></code>, <code class="docutils literal notranslate"><span class="pre">jobs/</span></code>, <code class="docutils literal notranslate"><span class="pre">workflows/</span></code>, <code class="docutils literal notranslate"><span class="pre">logs/</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess/</span></code> and,
+once enabled, <code class="docutils literal notranslate"><span class="pre">exchange/</span></code>. <code class="docutils literal notranslate"><span class="pre">REMOTE:PATH</span></code> initializes and names a workspace on
+that remote.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace init --name WORKSPACE runs/WORKSPACE</span>
+</pre></div>
+</div>
+<p>Library callers construct <code class="docutils literal notranslate"><span class="pre">Workspace(path)</span></code> directly; the registry is the
+command-line contract. See <a class="reference internal" href="workflow_cli.html"><span class="doc">Project and workflow command line in detail</span></a> for the whole <code class="docutils literal notranslate"><span class="pre">workspace</span></code> group
+and <a class="reference internal" href="../campaigns.html"><span class="doc">Campaigns</span></a> for spreading a very large run across many workspaces.</p>
+</section>
+<section id="durability">
+<h3>Durability<a class="headerlink" href="#durability" title="Link to this heading">¶</a></h3>
+<p>Protocol publications are synchronized to storage by default. <code class="docutils literal notranslate"><span class="pre">--no-durable</span></code>
+skips the <code class="docutils literal notranslate"><span class="pre">fsync</span></code> calls for throwaway workspaces: submission and transitions get
+faster, but a node crash may lose the latest publications. <code class="docutils literal notranslate"><span class="pre">--durable</span></code> is still
+accepted and has no effect, since it is the default.</p>
+</section>
+<section id="workspaces-on-a-cluster">
+<h3>Workspaces on a cluster<a class="headerlink" href="#workspaces-on-a-cluster" title="Link to this heading">¶</a></h3>
+<p>Manager launch is a property of the workspace. On the cluster, install the
+packaged Slurm launcher and configure the workspace it owns:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk launcher add --template slurm --global cluster</span>
+<span class="go">httk workspace init --name runs /scratch/rar/httk/runs</span>
+<span class="go">httk workspace settings set --key manager.launch --value cluster runs</span>
+<span class="go">httk workspace settings set --key slurm.partition --value batch runs</span>
+<span class="go">httk workspace settings set --key vasp.command --value vasp_std runs</span>
+<span class="go">httk workflow run --workspace runs --count 4</span>
+</pre></div>
+</div>
+<p>From a desk, the same operations reach that workspace through a remote as
+<code class="docutils literal notranslate"><span class="pre">kappa:runs</span></code>; <code class="docutils literal notranslate"><span class="pre">run</span> <span class="pre">--workspace</span> <span class="pre">kappa:runs</span></code> invokes
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">manager</span> <span class="pre">run</span> <span class="pre">--workspace</span> <span class="pre">runs</span> <span class="pre">--count</span> <span class="pre">4</span> <span class="pre">--detach</span></code> on kappa, which
+uses the owning workspace’s launcher. Move jobs there and back with
+<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">transfer</span></code> (<a class="reference internal" href="remotes.html"><span class="doc">Remotes</span></a>).</p>
+</section>
+<section id="workspace-policy">
+<h3>Workspace policy<a class="headerlink" href="#workspace-policy" title="Link to this heading">¶</a></h3>
+<p>Policy tunables belong to the workspace rather than to a process, so every
+manager, CLI and independent implementation attaching it agrees on them. They
+live in <code class="docutils literal notranslate"><span class="pre">.httk-workspace/format.json</span></code>:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace policy show WORKSPACE</span>
+<span class="go">httk workspace policy set --key visibility_deadline_seconds --value 30 WORKSPACE</span>
+<span class="go">httk workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE</span>
+<span class="go">httk workspace policy unset --key retention.trash_days WORKSPACE</span>
+</pre></div>
+</div>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Key</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">visibility_deadline_seconds</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">5.0</span></code></p></td>
+<td><p>How long another node’s change may take to become visible; see <a class="reference internal" href="#the-visibility-deadline">the visibility deadline</a>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">retention.attempt_control_days</span></code></p></td>
+<td><p>absent (keep)</p></td>
+<td><p>Age after which <code class="docutils literal notranslate"><span class="pre">gc</span></code> removes old attempt directories.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">retention.trash_days</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1.0</span></code></p></td>
+<td><p>Age after which <code class="docutils literal notranslate"><span class="pre">gc</span></code> removes the logs of departed managers.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">retention.owner_tombstone_days</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">30.0</span></code></p></td>
+<td><p>Age after which <code class="docutils literal notranslate"><span class="pre">gc</span></code> removes the tombstone of a recovered owner.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Values are JSON, validated on write; <code class="docutils literal notranslate"><span class="pre">null</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;keep&quot;</span></code> keeps a retention
+category forever, and an unknown key is refused. A policy write is a
+read-modify-write of <code class="docutils literal notranslate"><span class="pre">format.json</span></code>, verified by re-reading it and redone when
+a concurrent writer replaced it in between; writers are not serialized, so the
+last writer of a key wins. Managers read the policy when
+they attach, so restart long-running managers after a change.</p>
+</section>
+<section id="application-settings">
+<h3>Application settings<a class="headerlink" href="#application-settings" title="Link to this heading">¶</a></h3>
+<p>A workspace also holds <em>application settings</em>: a flat map of dotted names to
+small values that a runner resolves at run time, such as the VASP command or a
+pseudopotential library. The manager launch profile is also a workspace
+setting, so each workspace carries its own scheduler requirements.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace settings set --key vasp.command --value vasp_std WORKSPACE</span>
+<span class="go">httk workspace settings show WORKSPACE</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">slurm.*</span></code> settings become batch directives of the workspace’s Slurm
+launcher (<a class="reference internal" href="launchers.html"><span class="doc">Launchers</span></a>). A runner reads a setting with
+<code class="docutils literal notranslate"><span class="pre">a.setting(&quot;vasp.command&quot;)</span></code>, resolved in layers: the job’s inputs, a real
+<code class="docutils literal notranslate"><span class="pre">HTTK_VASP_COMMAND</span></code> deployment override, the workspace setting, then the
+runner’s default. The manager exports scalar settings into each attempt’s
+environment and snapshots them into <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_CONTEXT</span></code>, so settings are
+non-secret configuration: do not store credentials there.</p>
+</section>
+</section>
+<section id="shared-filesystems">
+<h2>Shared filesystems<a class="headerlink" href="#shared-filesystems" title="Link to this heading">¶</a></h2>
+<p>Several nodes under the same account may attach one workspace, so metadata
+visibility is part of the filesystem configuration. The protocol uses no file
+locks and no hard links; all coordination is atomic renames of directories
+whose names are fresh tokens.</p>
+<section id="mount-options">
+<h3>Mount options<a class="headerlink" href="#mount-options" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>NFS: use a <strong>hard</strong> mount; a soft mount can apply a rename after reporting a
+failure. Bound attribute caching, starting with <code class="docutils literal notranslate"><span class="pre">actimeo=5</span></code> (or
+<code class="docutils literal notranslate"><span class="pre">acdirmin=1,acdirmax=5</span></code>) and <code class="docutils literal notranslate"><span class="pre">lookupcache=positive</span></code>. With the default
+<code class="docutils literal notranslate"><span class="pre">acdirmax=60</span></code>, another node may legally serve a stale directory listing for
+up to a minute. <code class="docutils literal notranslate"><span class="pre">noac</span></code> is correct but usually far too slow for a workspace
+with many jobs. <code class="docutils literal notranslate"><span class="pre">nolock</span></code> is fine. Use NFSv4.1 or newer where available.</p></li>
+<li><p>Lustre and GPFS: no special options.</p></li>
+<li><p>Mounts backed by an object store, and FUSE caches without rename atomicity,
+are not supported. The protocol requires <code class="docutils literal notranslate"><span class="pre">rename(2)</span></code> to be atomic and a
+rename onto a non-empty directory to fail.</p></li>
+</ul>
+</section>
+<section id="the-visibility-deadline">
+<h3>The visibility deadline<a class="headerlink" href="#the-visibility-deadline" title="Link to this heading">¶</a></h3>
+<p>A decision that rests on something being absent (another owner’s job gone, a
+join child vanished, a request’s job not found) is only taken after the
+observation has been repeated across <code class="docutils literal notranslate"><span class="pre">visibility_deadline_seconds</span></code>. Set it
+comfortably above the mount’s worst-case staleness window:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Filesystem</p></th>
+<th class="head"><p>Recommended <code class="docutils literal notranslate"><span class="pre">visibility_deadline_seconds</span></code></p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Local disk, tmpfs, single node</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">5</span></code> (the default)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Lustre, GPFS, BeeGFS</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">10</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>NFS with <code class="docutils literal notranslate"><span class="pre">actimeo=5</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">30</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>NFS with default caching (<code class="docutils literal notranslate"><span class="pre">acdirmax=60</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">120</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The deadline costs nothing in the common case: it delays only destructive
+decisions and recovery of dead owners.</p>
+</section>
+<section id="clocks">
+<h3>Clocks<a class="headerlink" href="#clocks" title="Link to this heading">¶</a></h3>
+<p>No decision that hands over a job or removes data depends on a clock. Clocks
+pace retries, schedule deadlines and drains, date records and drive retention.
+Two policies use them to fail or set aside, never to let a second writer in: the
+join grace and the quarantine of stale request files. Heartbeats are
+informational only.</p>
+</section>
+</section>
+<section id="installing-workflows">
+<h2>Installing workflows<a class="headerlink" href="#installing-workflows" title="Link to this heading">¶</a></h2>
+<p>A job runs only a workflow installed in its workspace, together with every
+workflow it calls. Install once, then create jobs by id or short name:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'</span>
+<span class="go">httk workflow install --workspace WORKSPACE ./my-workflow</span>
+<span class="go">httk workspace workflows WORKSPACE</span>
+<span class="go">httk job new --workspace WORKSPACE --workflow vasp.relax --input structure=POSCAR</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--install</span></code> installs a missing workflow first, and a runner file,
+command template or bare workflow document given to <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> is always
+installed ad hoc. Installation copies the package into
+<code class="docutils literal notranslate"><span class="pre">workflows/&lt;slug&gt;--&lt;h16&gt;/</span></code>, installs its declared calls (unless <code class="docutils literal notranslate"><span class="pre">--no-calls</span></code>)
+and builds a <code class="docutils literal notranslate"><span class="pre">[workflow.build]</span></code> package for this platform (unless
+<code class="docutils literal notranslate"><span class="pre">--no-build</span></code>). <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">build</span></code> builds an installed workflow for another
+platform, and <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">uninstall</span> <span class="pre">--workspace</span> <span class="pre">WORKSPACE</span> <span class="pre">SELECTOR</span></code> removes
+one; <code class="docutils literal notranslate"><span class="pre">--check</span></code> warns about unfinished jobs that still use it.</p>
+<p>Workflows never travel with jobs. A job transferred, ejected or adopted into a
+workspace that lacks its workflow stays <code class="docutils literal notranslate"><span class="pre">ready</span></code> and unclaimed until the workflow
+is installed there; <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">adopt</span></code> and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">transfer</span></code> warn about it, and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code>
+and <code class="docutils literal notranslate"><span class="pre">workflow</span> <span class="pre">precheck</span></code> name it. Do not reinstall a workflow that running jobs
+use: the installed digest is recorded at launch (<code class="docutils literal notranslate"><span class="pre">workflow_pin</span></code>), not enforced.</p>
+</section>
+<section id="submitting-jobs">
+<h2>Submitting jobs<a class="headerlink" href="#submitting-jobs" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> scaffolds and submits jobs; see <a class="reference internal" href="workflow_cli.html"><span class="doc">Project and workflow command line in detail</span></a>. A payload
+prepared some other way, a directory with an immutable <code class="docutils literal notranslate"><span class="pre">job.json</span></code> naming an
+installed workflow, is submitted as it is:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job submit --workspace WORKSPACE PAYLOAD</span>
+</pre></div>
+</div>
+<p>The placement comes from the payload’s <code class="docutils literal notranslate"><span class="pre">job.json</span></code>. Submission copies by
+default; <code class="docutils literal notranslate"><span class="pre">--move</span></code> does a same-filesystem rename and consumes the source
+directory. Job directories never nest: no placement component may itself parse
+as a job key (<code class="docutils literal notranslate"><span class="pre">&lt;tag&gt;--&lt;uuid&gt;</span></code>). Submission, adoption and spawned children all
+refuse such a placement; a spawn that names one fails the parent attempt with
+<code class="docutils literal notranslate"><span class="pre">protocol_error</span></code>.</p>
+</section>
+<section id="checking-readiness">
+<h2>Checking readiness<a class="headerlink" href="#checking-readiness" title="Link to this heading">¶</a></h2>
+<section id="the-precheck">
+<h3>The precheck<a class="headerlink" href="#the-precheck" title="Link to this heading">¶</a></h3>
+<p>Run the read-only precheck before starting managers:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow precheck --workspace WORKSPACE</span>
+<span class="go">httk workflow precheck --workspace WORKSPACE --json</span>
+</pre></div>
+</div>
+<p>For <code class="docutils literal notranslate"><span class="pre">ready</span></code>, <code class="docutils literal notranslate"><span class="pre">waiting</span></code> and <code class="docutils literal notranslate"><span class="pre">paused</span></code> jobs it reports environment entries and
+how they resolve, whether the job’s workflow and its calls are installed and
+built here, jobs <strong>no live manager can claim</strong> (naming the closest manager’s
+unmet requirements), jobs of a built-in format (CWL, PWD, jobflow, httk v1)
+whose engine modules are absent (with the pip extra to install;
+<code class="docutils literal notranslate"><span class="pre">indeterminate</span></code> while a live manager may have them), and declared <strong>required
+inputs</strong> missing from the payload. Any problem gives exit status <code class="docutils literal notranslate"><span class="pre">1</span></code>. The
+report is advisory; the authoritative checks run at claim and at attempt start.</p>
+</section>
+<section id="which-owners-serve-a-workspace">
+<h3>Which owners serve a workspace<a class="headerlink" href="#which-owners-serve-a-workspace" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">owners</span> <span class="pre">WORKSPACE</span></code> (alias <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">managers</span></code>) lists every
+registered owner (managers, CLI processes, daemons) with its kind, host,
+process, allocation end and its liveness from the read-only death proof. It
+answers what serves the workspace without a <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> on an arbitrary job.
+<code class="docutils literal notranslate"><span class="pre">--kind</span> <span class="pre">manager</span></code> narrows it.</p>
+</section>
+</section>
+<section id="running-managers">
+<h2>Running managers<a class="headerlink" href="#running-managers" title="Link to this heading">¶</a></h2>
+<section id="starting-a-manager">
+<h3>Starting a manager<a class="headerlink" href="#starting-a-manager" title="Link to this heading">¶</a></h3>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk manager run --workspace WORKSPACE --workers 8</span>
+<span class="go">httk manager run --workspace WORKSPACE --pool vasp --capability gpu --workers 4</span>
+</pre></div>
+</div>
+<p>Without pool configuration, a manager advertises the reserved <code class="docutils literal notranslate"><span class="pre">default</span></code> pool.
+By default it runs until idle, which suits batch invocations and tests; pass
+<code class="docutils literal notranslate"><span class="pre">--idle</span></code> to keep serving.</p>
+<p>A manager registers as an owner in <code class="docutils literal notranslate"><span class="pre">.httk-workspace/owners/&lt;owner-id&gt;/</span></code>, claims
+a job by renaming its directory into <code class="docutils literal notranslate"><span class="pre">jobs/owned/&lt;owner-id&gt;/</span></code>, and is from then
+on the only writer of that job. It acts only on jobs whose directory and
+<code class="docutils literal notranslate"><span class="pre">job.json</span></code> its own account owns. A job directory is written by the job it
+holds, so the manager treats what a job wrote as hostile: it reads outcomes,
+transactions, children and the payload it seals only once the attempt and
+every launch it made have been reaped, and never follows a symlink there.</p>
+</section>
+<section id="launching-managers">
+<h3>Launching managers<a class="headerlink" href="#launching-managers" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">run</span></code> and <code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span></code> launch managers through the launcher bundle that the
+workspace’s <code class="docutils literal notranslate"><span class="pre">manager.launch</span></code> setting selects: the built-in <code class="docutils literal notranslate"><span class="pre">process</span></code> launcher
+starts detached local processes, and a named bundle, such as the Slurm launcher
+<code class="docutils literal notranslate"><span class="pre">cluster</span></code> above, starts them as it defines. <code class="docutils literal notranslate"><span class="pre">manager.count</span></code>, <code class="docutils literal notranslate"><span class="pre">manager.workers</span></code>,
+<code class="docutils literal notranslate"><span class="pre">manager.command</span></code>, <code class="docutils literal notranslate"><span class="pre">manager.allocation</span></code> and the launch-prefix and confinement
+settings shape the launch; <a class="reference internal" href="launchers.html"><span class="doc">Launchers</span></a> lists them all, and which of them a
+<code class="docutils literal notranslate"><span class="pre">slurm</span></code> launcher pins on its managers
+(<a class="reference internal" href="launchers.html#pinned-settings"><span class="std std-ref">pinned settings</span></a>).</p>
+<p><code class="docutils literal notranslate"><span class="pre">--inline</span></code> runs one manager in the current process, ignoring the workspace
+launcher, and combines only with <code class="docutils literal notranslate"><span class="pre">--count</span> <span class="pre">1</span></code>. <code class="docutils literal notranslate"><span class="pre">--detach</span></code> starts the managers
+and returns immediately. A remote workspace always uses this detached
+invocation once the remote adapter has reached its owning machine.</p>
+<p>The packaged Slurm launcher writes one mode-0700 batch script below
+<code class="docutils literal notranslate"><span class="pre">logs/batch/</span></code>, submits it once per manager, and returns the Slurm job ids. If
+submission fails after one or more jobs were accepted, the command refuses with
+text containing <code class="docutils literal notranslate"><span class="pre">submitted:</span> <span class="pre">N</span></code> and <code class="docutils literal notranslate"><span class="pre">job_ids:</span> <span class="pre">[...]</span></code>; cancel those jobs before
+retrying.</p>
+</section>
+<section id="confining-attempts">
+<h3>Confining attempts<a class="headerlink" href="#confining-attempts" title="Link to this heading">¶</a></h3>
+<p>With <code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code> the manager, which stays trusted and unconfined,
+starts each attempt inside a Bubblewrap sandbox:</p>
+<ul class="simple">
+<li><p>the workspace is visible read-only at its real path, so cross-job reads,
+<code class="docutils literal notranslate"><span class="pre">stage_input</span></code> and <code class="docutils literal notranslate"><span class="pre">Attempt.parent</span></code> keep working, and the attempt’s own job
+directory is writable at its real path; the job’s trusted entries
+(<code class="docutils literal notranslate"><span class="pre">job.json</span></code>, <code class="docutils literal notranslate"><span class="pre">state.json</span></code>, <code class="docutils literal notranslate"><span class="pre">.httk-job/seal.json</span></code>, <code class="docutils literal notranslate"><span class="pre">logs/</span></code>) are read-only
+overlays, and the attempt cannot write the workspace root,
+<code class="docutils literal notranslate"><span class="pre">.httk-workspace/</span></code> or another job;</p></li>
+<li><p>the paths of <code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code> are read-only, and <code class="docutils literal notranslate"><span class="pre">/tmp</span></code>, <code class="docutils literal notranslate"><span class="pre">/proc</span></code>,
+<code class="docutils literal notranslate"><span class="pre">/dev/shm</span></code>, the user, PID, IPC and UTS namespaces and (unless
+<code class="docutils literal notranslate"><span class="pre">confine.isolate_network=false</span></code>) the network are private.</p></li>
+</ul>
+<p>The full sandbox is described in
+<a class="reference internal" href="workspace_daemon.html#confined-attempts"><span class="std std-ref">confined attempts</span></a>. Whatever a prelude
+or code needs at run time (module trees, conda or virtual-environment prefixes,
+code binaries) must be listed in <code class="docutils literal notranslate"><span class="pre">confine.readonly_paths</span></code>. The PID namespace is
+also what makes an attempt’s end provable: an unconfined attempt can leave
+processes behind. The keys and their defaults are in <a class="reference internal" href="launchers.html"><span class="doc">Launchers</span></a>.</p>
+<p>A manager probes Bubblewrap when it starts and refuses to start if it cannot
+build the sandbox or a confinement setting is malformed. If confinement becomes
+unavailable after it started, it stops claiming work, logs the reason and
+reports the ready jobs under <code class="docutils literal notranslate"><span class="pre">ready_blocked[&quot;confinement&quot;]</span></code> until confinement is
+available again. A workspace with the exchange extension requires
+<code class="docutils literal notranslate"><span class="pre">manager.confine=bwrap</span></code> of every manager.</p>
+</section>
+<section id="startup-banner-and-idle-summary">
+<h3>Startup banner and idle summary<a class="headerlink" href="#startup-banner-and-idle-summary" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">run</span></code> and <code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span></code> print one startup line (manager id, workspace, log
+file, pools, capabilities, resources) and, on exiting idle, one summary line:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>idle: 3 succeeded, 1 failed, 2 not claimable here (capability=gpu: 2), 0 waiting on children, 0 paused
+</pre></div>
+</div>
+<p><em>Not claimable here</em> breaks ready jobs down by what this manager lacks: a pool,
+a capability, an unmet <code class="docutils literal notranslate"><span class="pre">requires</span></code> of the installed workflow, a workflow or call
+that is not installed or not built here, a resource beyond its capacity, a
+<code class="docutils literal notranslate"><span class="pre">mintime</span></code> beyond the time it has left, or unavailable confinement. If the
+manager reaches <code class="docutils literal notranslate"><span class="pre">--idle-timeout</span></code>, the advice names the mismatches and the flags
+that would clear them rather than just suggesting a longer timeout.</p>
+</section>
+<section id="logging">
+<h3>Logging<a class="headerlink" href="#logging" title="Link to this heading">¶</a></h3>
+<p>The console shows warnings and errors; the complete info-level record goes to
+the manager’s own file <code class="docutils literal notranslate"><span class="pre">logs/managers/&lt;owner-id&gt;.log</span></code>. <code class="docutils literal notranslate"><span class="pre">--log-level</span></code> raises or
+lowers both, <code class="docutils literal notranslate"><span class="pre">--json-logs</span></code> writes one JSON object per line, and <code class="docutils literal notranslate"><span class="pre">--log-file</span> <span class="pre">PATH</span></code> names a fixed file for one in-process manager. A manager rotates its log
+at start and past 16 MiB, keeping one backup; <code class="docutils literal notranslate"><span class="pre">gc</span></code> (category <code class="docutils literal notranslate"><span class="pre">manager_logs</span></code>)
+removes the logs of departed managers after <code class="docutils literal notranslate"><span class="pre">trash_days</span></code>. <code class="docutils literal notranslate"><span class="pre">logs/batch/</span></code> is
+never collected.</p>
+<p>Each job also keeps its own timeline, <code class="docutils literal notranslate"><span class="pre">logs/runlog.jsonl</span></code>, appended only by its
+owner, and the attempt output <code class="docutils literal notranslate"><span class="pre">logs/stdio.out</span></code>; <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">log</span></code> prints them.</p>
+</section>
+<section id="draining">
+<h3>Draining<a class="headerlink" href="#draining" title="Link to this heading">¶</a></h3>
+<p>A draining manager stops claiming, sends <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> to its running attempts,
+keeps committing their outcomes for up to <code class="docutils literal notranslate"><span class="pre">--drain-timeout</span></code> seconds (sending
+<code class="docutils literal notranslate"><span class="pre">SIGKILL</span></code> to any attempt still running 10 s into the drain), gives back the
+jobs it still holds, and exits successfully. Three things start a drain:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> or <code class="docutils literal notranslate"><span class="pre">SIGINT</span></code>, which batch systems send at walltime, for an <code class="docutils literal notranslate"><span class="pre">--idle</span></code>
+manager;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> (not <code class="docutils literal notranslate"><span class="pre">SIGINT</span></code>, which still stops at once) for a manager running
+until idle;</p></li>
+<li><p>reaching the drain point of a known allocation end (see
+<a class="reference internal" href="#time-requirements">Time requirements</a>), in either mode.</p></li>
+</ul>
+<p>A signal during a drain the deadline started, or a second signal during a
+signal drain, kills the attempts and exits immediately; the jobs it still holds
+are recovered once its death is proven. An attempt the drain stopped that
+published no outcome fails with <code class="docutils literal notranslate"><span class="pre">owner_lost</span></code> (an unclean restart, retried only
+if <code class="docutils literal notranslate"><span class="pre">retry_policy.retry_on</span></code> lists it), unless it had already exceeded its
+<code class="docutils literal notranslate"><span class="pre">maxtime</span></code>, which stays <code class="docutils literal notranslate"><span class="pre">timeout</span></code>; an outcome the runner publishes on <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code>
+wins as usual. After a drain the manager prints
+<code class="docutils literal notranslate"><span class="pre">drained</span> <span class="pre">(&lt;reason&gt;):</span> <span class="pre">N</span> <span class="pre">attempt(s)</span> <span class="pre">left</span> <span class="pre">for</span> <span class="pre">recovery</span></code> instead of the idle
+summary.</p>
+</section>
+<section id="owners-death-and-recovery">
+<h3>Owners, death and recovery<a class="headerlink" href="#owners-death-and-recovery" title="Link to this heading">¶</a></h3>
+<p>A job changes hands only when its owner is <strong>proven dead</strong> or an operator
+<strong>attests</strong> that it is. There is no lease and no time-based takeover: a manager
+that stops heartbeating, freezes, or loses its node keeps its jobs until one of
+those happens.</p>
+<p>Every tick, a manager probes a few other registered owners and recovers those
+proven dead. The proof comes from the process table of the host it runs on or
+from the batch scheduler: the owner’s process is gone on its recorded host
+(boot id, pid and start ticks), or, observed from another host, its recorded
+allocation has provably ended; and every launch it recorded under
+<code class="docutils literal notranslate"><span class="pre">owners/&lt;id&gt;/launches/</span></code> has ended too. A probe that cannot decide says
+<code class="docutils literal notranslate"><span class="pre">unknown</span></code> and changes nothing. <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">status</span></code> writes the tombstone of an
+owner it proves dead, and <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code> (category <code class="docutils literal notranslate"><span class="pre">dead_owners</span></code>) recovers
+every recoverable owner; a CLI owner killed by a signal is provable only on
+its own host, so run <code class="docutils literal notranslate"><span class="pre">gc</span></code> there.</p>
+<p>Recovery never continues another owner’s work. It returns each job, unchanged,
+to the state it was claimed from, and the next claimant reconciles it from its
+<code class="docutils literal notranslate"><span class="pre">state.json</span></code>: a decided commit is finished, a pending release applied, an
+attempt that never started is launched again, and an attempt that was running
+without a published outcome fails with <code class="docutils literal notranslate"><span class="pre">owner_lost</span></code> under the retry policy. A
+published outcome is committed, not rerun.</p>
+<p>When no probe can decide (a host that is gone, an allocation nobody can be
+asked about), the operator attests the death:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace owners WORKSPACE</span>
+<span class="go">httk workspace attest-dead OWNER WORKSPACE --force --reason "node17 rebooted"</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">attest-dead</span></code> runs the death proof first: an owner proven alive is refused, and
+one the proof cannot decide needs <code class="docutils literal notranslate"><span class="pre">--force</span></code>. The next manager tick or
+<code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code> then recovers its jobs. Attesting an owner that is still running
+can apply a request twice and run work twice until that owner notices its
+tombstone and stops (fail-stop: it kills every attempt it started and touches no
+job). Even for a dead owner a narrow window remains in which a request can apply
+twice; see <a class="reference internal" href="workflow_filesystem_api.html"><span class="doc">Workflow filesystem API in detail</span></a> under accepted limitations. Attest
+only after confirming that the owner process and every launch it started are
+gone.</p>
+<p>Managers that share one allocation cannot recover each other’s jobs before that
+allocation (or the sibling’s processes, on this host) ends.</p>
+</section>
+<section id="unresolvable-join-children">
+<h3>Unresolvable join children<a class="headerlink" href="#unresolvable-join-children" title="Link to this heading">¶</a></h3>
+<p>A job <code class="docutils literal notranslate"><span class="pre">waiting</span></code> on a child that cannot be found in this workspace fails with
+<code class="docutils literal notranslate"><span class="pre">dependency_failure</span></code> after <code class="docutils literal notranslate"><span class="pre">--join-grace-seconds</span></code> (default <code class="docutils literal notranslate"><span class="pre">3600</span></code>) instead of
+waiting forever. <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> on the waiting job shows each child and what blocks
+it.</p>
+</section>
+</section>
+<section id="resources">
+<h2>Resources<a class="headerlink" href="#resources" title="Link to this heading">¶</a></h2>
+<section id="advertising-capacities">
+<h3>Advertising capacities<a class="headerlink" href="#advertising-capacities" title="Link to this heading">¶</a></h3>
+<p>Managers may advertise integer resource capacities, such as
+<code class="docutils literal notranslate"><span class="pre">resources={&quot;procs&quot;:</span> <span class="pre">8,</span> <span class="pre">&quot;mem&quot;:</span> <span class="pre">32768}</span></code>. On the command line, repeat
+<code class="docutils literal notranslate"><span class="pre">--worker-resource</span></code> once per resource; for example, four workers sharing 32
+CPUs and 128000 MB:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk manager run --workspace WORKSPACE --workers 4 \</span>
+<span class="go">  --worker-resource procs 32 --worker-resource mem 128000</span>
+</pre></div>
+</div>
+<p>Command-line capacities must be non-negative integers and override any
+same-named capacity detected from the allocation. Labels other than <code class="docutils literal notranslate"><span class="pre">procs</span></code> and
+<code class="docutils literal notranslate"><span class="pre">mem</span></code> are opaque to the manager. <code class="docutils literal notranslate"><span class="pre">manager.workers</span></code> remains the concurrency
+limit, and there is no <code class="docutils literal notranslate"><span class="pre">manager.resources</span></code> workspace setting.</p>
+</section>
+<section id="how-jobs-are-packed">
+<h3>How jobs are packed<a class="headerlink" href="#how-jobs-are-packed" title="Link to this heading">¶</a></h3>
+<p>A manager skips a ready job when one of its declared resources is missing,
+zero-capacity, or larger than the manager’s capacity. Such a job is never
+claimed by that manager and is reported in the idle summary under
+<code class="docutils literal notranslate"><span class="pre">ready_blocked[&quot;resources&quot;]</span></code>. Jobs that fit are packed against the reservations
+of running attempts.</p>
+<p><code class="docutils literal notranslate"><span class="pre">procs</span></code> and <code class="docutils literal notranslate"><span class="pre">mem</span></code> are special: a job that omits one gets the manager’s fair
+share (<code class="docutils literal notranslate"><span class="pre">capacity</span> <span class="pre">//</span> <span class="pre">workers</span></code>, or the whole capacity when that quotient is zero),
+so undeclared jobs still occupy one worker’s share. Only jobs declaring both can
+pack more densely than one per worker.</p>
+<p>A dynamic requirement published by an <code class="docutils literal notranslate"><span class="pre">advance</span></code> or <code class="docutils literal notranslate"><span class="pre">wait</span></code> outcome applies to the
+next activation and is kept across retries. From the SDK:
+<code class="docutils literal notranslate"><span class="pre">a.advance(&quot;analyse&quot;,</span> <span class="pre">resources={&quot;procs&quot;:</span> <span class="pre">1,</span> <span class="pre">&quot;mem&quot;:</span> <span class="pre">2000,</span> <span class="pre">&quot;matlab_license_slots&quot;:</span> <span class="pre">1})</span></code>.
+The Bash bridge equivalent is
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_advance</span> <span class="pre">analyse</span> <span class="pre">--resource</span> <span class="pre">procs=1</span> <span class="pre">--resource</span> <span class="pre">mem=2000</span> <span class="pre">--resource</span> <span class="pre">matlab_license_slots=1</span></code>.</p>
+</section>
+<section id="example">
+<h3>Example<a class="headerlink" href="#example" title="Link to this heading">¶</a></h3>
+<p>A workflow mixing a wide relaxation with dense analysis steps declares:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow.resources]</span>
+<span class="n">procs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span>
+<span class="n">mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">16000</span><span class="w">            </span><span class="c1"># MB</span>
+
+<span class="k">[workflow.steps.relax]</span>
+<span class="n">resources</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">procs</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span><span class="w"> </span><span class="n">mem</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">120000</span><span class="w"> </span><span class="p">}</span>
+
+<span class="k">[workflow.steps.analyse]</span>
+<span class="n">resources</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">procs</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">mem</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">2000</span><span class="p">,</span><span class="w"> </span><span class="n">matlab_license_slots</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>and is served by:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow run --workers 4 \</span>
+<span class="go">  --worker-resource procs 32 --worker-resource mem 128000 \</span>
+<span class="go">  --worker-resource matlab_license_slots 2</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">relax</span></code> then runs alone, while one-proc <code class="docutils literal notranslate"><span class="pre">analyse</span></code> steps run together, at most
+two at a time because of the two <code class="docutils literal notranslate"><span class="pre">matlab_license_slots</span></code>.</p>
+</section>
+<section id="time-requirements">
+<h3>Time requirements<a class="headerlink" href="#time-requirements" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">maxtime</span></code> (the time limit of one attempt) and <code class="docutils literal notranslate"><span class="pre">mintime</span></code> (the least remaining
+allocation time needed to start one) are reserved labels. Jobs declare them as
+Slurm <code class="docutils literal notranslate"><span class="pre">--time</span></code> strings, such as <code class="docutils literal notranslate"><span class="pre">maxtime</span> <span class="pre">=</span> <span class="pre">&quot;24:00:00&quot;</span></code> in a manifest,
+<code class="docutils literal notranslate"><span class="pre">resources={&quot;maxtime&quot;:</span> <span class="pre">&quot;2:00:00&quot;}</span></code> from the SDK, or <code class="docutils literal notranslate"><span class="pre">--resource</span> <span class="pre">maxtime=2:00:00</span></code>
+from the Bash bridge; <code class="docutils literal notranslate"><span class="pre">job.json</span></code> and the attempt context hold seconds. They are
+job requirements, never capacities: <code class="docutils literal notranslate"><span class="pre">--worker-resource</span></code>,
+<code class="docutils literal notranslate"><span class="pre">TaskManager(resources=...)</span></code> and campaign manager resources refuse them.</p>
+<p>Each time label resolves on its own (dynamic requirement, then step, then
+job). A manager enforces <code class="docutils literal notranslate"><span class="pre">maxtime</span></code>: an attempt still running <code class="docutils literal notranslate"><span class="pre">maxtime</span></code> seconds
+after its launch gets <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code>, then <code class="docutils literal notranslate"><span class="pre">SIGKILL</span></code> after the cancellation grace
+(10 s), and fails with the reserved code <code class="docutils literal notranslate"><span class="pre">timeout</span></code> unless it published an
+outcome meanwhile; <code class="docutils literal notranslate"><span class="pre">retry_policy.retry_on</span></code> can list <code class="docutils literal notranslate"><span class="pre">timeout</span></code>. The attempt is
+told when the <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> comes: the context member <code class="docutils literal notranslate"><span class="pre">deadline</span></code>,
+<code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_DEADLINE</span></code> and <code class="docutils literal notranslate"><span class="pre">Attempt.deadline</span></code>. A spawned child never inherits
+<code class="docutils literal notranslate"><span class="pre">mintime</span></code>, and its <code class="docutils literal notranslate"><span class="pre">maxtime</span></code> is capped at the spawning attempt’s.</p>
+<p>A manager may also know when its own allocation ends: <code class="docutils literal notranslate"><span class="pre">--time-limit</span> <span class="pre">DURATION</span></code>
+(a Slurm <code class="docutils literal notranslate"><span class="pre">--time</span></code> string, counted from the manager’s start), its
+<a class="reference internal" href="#allocations">allocation probe</a>, or <code class="docutils literal notranslate"><span class="pre">SLURM_JOB_END_TIME</span></code>; the earliest wins.
+Its drain point is <code class="docutils literal notranslate"><span class="pre">--deadline-margin</span></code> seconds (120 by default) before that
+end. With a known end, a ready job whose <code class="docutils literal notranslate"><span class="pre">mintime</span></code> exceeds the time left until
+the drain point stays ready, and from the drain point on nothing is claimed;
+attempts are told the earlier of their <code class="docutils literal notranslate"><span class="pre">maxtime</span></code> deadline and the drain point.
+<code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">owners</span></code> and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> show each manager’s time left. At the drain
+point the manager <a class="reference internal" href="#draining">drains</a> and exits. An allocation end that has
+passed is never evidence of death on its own.</p>
+</section>
+<section id="allocations">
+<h3>Allocations<a class="headerlink" href="#allocations" title="Link to this heading">¶</a></h3>
+<p>A manager learns what its allocation consists of from an allocation probe
+selected by <code class="docutils literal notranslate"><span class="pre">--allocation</span> <span class="pre">SPEC</span></code>: a list of nodes, each with its host name,
+<code class="docutils literal notranslate"><span class="pre">procs</span></code>, <code class="docutils literal notranslate"><span class="pre">mem</span></code>, <code class="docutils literal notranslate"><span class="pre">gpus</span></code> and, when known, GPU device ids and CPU lists, plus the
+allocation’s end time. The allocation’s capacity is the node sums (<code class="docutils literal notranslate"><span class="pre">procs</span></code>,
+<code class="docutils literal notranslate"><span class="pre">gpus</span></code>, <code class="docutils literal notranslate"><span class="pre">mem</span></code> when every node knows it, and <code class="docutils literal notranslate"><span class="pre">nodes</span></code>) plus any extra resources it
+reports; <code class="docutils literal notranslate"><span class="pre">--worker-resource</span></code> still overrides any same-named capacity. The probe
+runs once, when the manager starts, and the allocation is recorded in the
+manager’s <code class="docutils literal notranslate"><span class="pre">owner.json</span></code>, where the death proof later asks about it.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>SPEC</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">auto</span></code> (default)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">slurm</span></code> when <code class="docutils literal notranslate"><span class="pre">SLURM_JOB_ID</span></code> is set, else <code class="docutils literal notranslate"><span class="pre">none</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">none</span></code></p></td>
+<td><p>no allocation; capacities come only from <code class="docutils literal notranslate"><span class="pre">--worker-resource</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">slurm</span></code></p></td>
+<td><p>the Slurm probe below</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">host</span></code></p></td>
+<td><p>this machine as one node: its usable processors, half its physical memory, and the GPUs announced in <code class="docutils literal notranslate"><span class="pre">CUDA_VISIBLE_DEVICES</span></code>, <code class="docutils literal notranslate"><span class="pre">ROCR_VISIBLE_DEVICES</span></code> or <code class="docutils literal notranslate"><span class="pre">ZE_AFFINITY_MASK</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">exec:PATH</span></code></p></td>
+<td><p>run executable PATH inside the allocation; it prints one allocation envelope (see <a class="reference internal" href="launcher_authoring.html#allocation-probes"><span class="std std-ref">launcher authoring</span></a>) and later answers whether the allocation has ended</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The Slurm probe lists the job’s hosts with <code class="docutils literal notranslate"><span class="pre">scontrol</span> <span class="pre">show</span> <span class="pre">hostnames</span> <span class="pre">$SLURM_JOB_NODELIST</span></code> (a one-node job needs no <code class="docutils literal notranslate"><span class="pre">scontrol</span></code>), splits the tasks
+over them by <code class="docutils literal notranslate"><span class="pre">SLURM_TASKS_PER_NODE</span></code> (<code class="docutils literal notranslate"><span class="pre">16(x2),8</span></code>), splits memory accordingly,
+and reads the GPU device ids of the batch host from the first of the variables
+above. Multiple GPU nodes require <code class="docutils literal notranslate"><span class="pre">SLURM_GPUS_PER_NODE</span></code> consistent with the
+total. The probe also records <code class="docutils literal notranslate"><span class="pre">SLURM_CPUS_PER_TASK</span></code> and the job’s identity
+(<code class="docutils literal notranslate"><span class="pre">SLURM_JOB_ID</span></code> and, when set, <code class="docutils literal notranslate"><span class="pre">SLURM_CLUSTER_NAME</span></code>), so that another host can
+later ask <code class="docutils literal notranslate"><span class="pre">squeue</span></code> whether the allocation has ended. When the nodes cannot be
+described consistently, it warns and keeps the aggregate counts only.</p>
+<p>Launchers choose the probe for the managers they start: the Slurm launcher
+passes <code class="docutils literal notranslate"><span class="pre">--allocation</span> <span class="pre">slurm</span></code> (or its <code class="docutils literal notranslate"><span class="pre">manager.allocation</span></code> setting), and the
+process launcher passes <code class="docutils literal notranslate"><span class="pre">host</span></code> for one manager and <code class="docutils literal notranslate"><span class="pre">none</span></code> for several. Binding
+to devices needs one manager per allocation, so with <code class="docutils literal notranslate"><span class="pre">--count</span></code> above one every
+child gets <code class="docutils literal notranslate"><span class="pre">none</span></code>.</p>
+</section>
+<section id="placement-and-binding">
+<h3>Placement and binding<a class="headerlink" href="#placement-and-binding" title="Link to this heading">¶</a></h3>
+<p>A manager whose allocation lists its nodes keeps a per-node inventory and
+places every attempt on it: <code class="docutils literal notranslate"><span class="pre">procs</span></code>, <code class="docutils literal notranslate"><span class="pre">gpus</span></code>, <code class="docutils literal notranslate"><span class="pre">mem</span></code> and <code class="docutils literal notranslate"><span class="pre">nodes</span></code> are then decided
+by the inventory, while other labels are still counted. Without listed nodes
+everything is counted as described above. <code class="docutils literal notranslate"><span class="pre">mem</span></code> is placed only when every node
+knows its memory.</p>
+<ul class="simple">
+<li><p>An attempt goes on one node when it fits there, on the node with the fewest
+free <code class="docutils literal notranslate"><span class="pre">procs</span></code> that holds its <code class="docutils literal notranslate"><span class="pre">procs</span></code>, <code class="docutils literal notranslate"><span class="pre">gpus</span></code> and <code class="docutils literal notranslate"><span class="pre">mem</span></code> (ties go to the first
+node in allocation order).</p></li>
+<li><p>Otherwise it spills: nodes with the most free <code class="docutils literal notranslate"><span class="pre">gpus</span></code> first when it needs
+GPUs, then the nodes with the largest remaining capacity, with <code class="docutils literal notranslate"><span class="pre">mem</span></code> split in
+proportion to the slots taken on each node. A <code class="docutils literal notranslate"><span class="pre">mem</span></code>-only requirement never
+spills.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nodes=N</span></code> gives the attempt N whole idle nodes to itself, the smallest ones
+in allocation order that together hold its <code class="docutils literal notranslate"><span class="pre">procs</span></code>, <code class="docutils literal notranslate"><span class="pre">gpus</span></code> and <code class="docutils literal notranslate"><span class="pre">mem</span></code>.</p></li>
+</ul>
+<p>Concurrent attempts never share a processor slot or GPU id. A job that can
+never be placed even on an idle inventory, such as <code class="docutils literal notranslate"><span class="pre">nodes=3</span></code> on two nodes, is
+reported under <code class="docutils literal notranslate"><span class="pre">ready_blocked[&quot;resources&quot;]</span></code> with the first of <code class="docutils literal notranslate"><span class="pre">nodes</span></code>, <code class="docutils literal notranslate"><span class="pre">procs</span></code>,
+<code class="docutils literal notranslate"><span class="pre">gpus</span></code>, <code class="docutils literal notranslate"><span class="pre">mem</span></code> that does not fit.</p>
+<p>Every placed attempt is told what it got. Its context member <code class="docutils literal notranslate"><span class="pre">binding</span></code> holds
+<code class="docutils literal notranslate"><span class="pre">nodes</span></code> (per node: <code class="docutils literal notranslate"><span class="pre">host</span></code>, <code class="docutils literal notranslate"><span class="pre">procs</span></code>, <code class="docutils literal notranslate"><span class="pre">gpus</span></code> and, when placed, <code class="docutils literal notranslate"><span class="pre">mem</span></code>),
+<code class="docutils literal notranslate"><span class="pre">nodefile</span></code>, <code class="docutils literal notranslate"><span class="pre">file</span></code> and, when one applies, <code class="docutils literal notranslate"><span class="pre">launch</span></code>. <code class="docutils literal notranslate"><span class="pre">file</span></code> is <code class="docutils literal notranslate"><span class="pre">binding.json</span></code> in
+the attempt directory: the same object with each node’s <code class="docutils literal notranslate"><span class="pre">gpu_ids</span></code> and <code class="docutils literal notranslate"><span class="pre">cpus</span></code>
+added when known. The runner environment carries <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_NODELIST</span></code> (the
+hosts, comma-separated), <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_NODEFILE</span></code> (a file in the manager’s
+launch record below <code class="docutils literal notranslate"><span class="pre">.httk-workspace/owners/</span></code> with exactly one host line per
+reserved processor slot, the <code class="docutils literal notranslate"><span class="pre">PBS_NODEFILE</span></code> convention) and
+<code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_LAUNCH</span></code> (the launch prefix, shell-quoted). The Python SDK
+exposes the member as <code class="docutils literal notranslate"><span class="pre">Attempt.binding</span></code>, and Bash reads it with
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_context</span> <span class="pre">binding</span></code>.</p>
+<p>The launch prefix is what a runner puts before its parallel command. It is
+<code class="docutils literal notranslate"><span class="pre">shlex</span></code>-quoted, so in Bash run <code class="docutils literal notranslate"><span class="pre">eval</span> <span class="pre">&quot;$HTTK_WORKFLOW_LAUNCH</span> <span class="pre">vasp_std&quot;</span></code> (or split
+it with <code class="docutils literal notranslate"><span class="pre">read</span> <span class="pre">-ra</span></code>). Inside a Slurm allocation it is</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>env SLURM_HOSTFILE=NODEFILE srun [--mpi=M] --ntasks=T --distribution=arbitrary
+     --exact --cpus-per-task=C
+     [--mem=MBM | --mem-per-cpu=MBM] [--gpus=G | --gres=none]
+</pre></div>
+</div>
+<p>with <code class="docutils literal notranslate"><span class="pre">T</span></code> the nodefile’s line count, equal to the reserved processor slots,
+and <code class="docutils literal notranslate"><span class="pre">M</span></code> the workspace setting <code class="docutils literal notranslate"><span class="pre">manager.launch_mpi</span></code> when it is set. The hostfile
+alone names the nodes: <code class="docutils literal notranslate"><span class="pre">srun</span></code> refuses <code class="docutils literal notranslate"><span class="pre">--nodes</span></code> with the arbitrary
+distribution, and a <code class="docutils literal notranslate"><span class="pre">--nodelist</span></code> would replace the hostfile, so the prefix
+passes neither (a custom <code class="docutils literal notranslate"><span class="pre">manager.launch_template</span></code> using
+<code class="docutils literal notranslate"><span class="pre">--distribution=arbitrary</span></code> must not either). A one-node attempt with <code class="docutils literal notranslate"><span class="pre">mem</span></code> gets
+<code class="docutils literal notranslate"><span class="pre">--mem</span></code> (its share); a multi-node one gets <code class="docutils literal notranslate"><span class="pre">--mem-per-cpu</span></code>. <code class="docutils literal notranslate"><span class="pre">--gpus=G</span></code> is added
+when it has GPUs and <code class="docutils literal notranslate"><span class="pre">--gres=none</span></code> when the allocation has GPUs it does not
+get. This built-in prefix still needs acceptance on a real Slurm cluster. The
+workspace setting <code class="docutils literal notranslate"><span class="pre">manager.launch_template</span></code> replaces it for every kind of
+allocation; it is split like shell words, and the placeholders are substituted
+in each word:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace settings set --key manager.launch_template \</span>
+<span class="go">  --value 'mpirun -np {procs} --hostfile {nodefile}' WORKSPACE</span>
+</pre></div>
+</div>
+<p>A template naming any other placeholder fails the attempt’s preparation with
+<code class="docutils literal notranslate"><span class="pre">protocol_error</span></code>. Outside Slurm and without a template there is no launch
+prefix.</p>
+<p>The code run helpers (<code class="docutils literal notranslate"><span class="pre">run_vasp</span></code>, <code class="docutils literal notranslate"><span class="pre">run_pw</span></code>, <code class="docutils literal notranslate"><span class="pre">run_cp2k</span></code>, <code class="docutils literal notranslate"><span class="pre">run_abinit</span></code>,
+<code class="docutils literal notranslate"><span class="pre">run_lammps</span></code>, the mdrun step of <code class="docutils literal notranslate"><span class="pre">run_gromacs</span></code>, and the <code class="docutils literal notranslate"><span class="pre">httk_&lt;code&gt;_run</span></code> Bash
+functions and <code class="docutils literal notranslate"><span class="pre">&lt;code&gt;-run</span></code> bridge verbs) prepend this prefix themselves, so a
+code command setting names only the program (<code class="docutils literal notranslate"><span class="pre">vasp.command</span> <span class="pre">=</span> <span class="pre">&quot;vasp_std&quot;</span></code>). ORCA
+gets no prefix by default because it starts its own MPI. A code command that
+itself starts with <code class="docutils literal notranslate"><span class="pre">srun</span></code> or <code class="docutils literal notranslate"><span class="pre">mpirun</span></code> is refused when a prefix applies. The
+generic <code class="docutils literal notranslate"><span class="pre">run</span></code> verb, <code class="docutils literal notranslate"><span class="pre">Attempt.run</span></code> and <code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code> never prepend the
+prefix.</p>
+<p>In a <a class="reference internal" href="#confining-attempts">confined attempt</a> <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_LAUNCH</span></code> is a
+launch client instead, used the same way: the trusted manager records the
+launch under <code class="docutils literal notranslate"><span class="pre">owners/&lt;owner-id&gt;/launches/</span></code> and starts each rank in its own
+sandbox, and the attempt is not committed until every launch is reaped. See
+<a class="reference internal" href="workspace_daemon.html#parallel-launches"><span class="std std-ref">parallel launches</span></a>.</p>
+<p>An attempt placed on one node that is the manager’s own host is executed
+locally, so the manager also binds it to its devices:</p>
+<ul class="simple">
+<li><p>When the share has GPUs whose ids are known, the runner environment sets the
+variable the ids came from (<code class="docutils literal notranslate"><span class="pre">CUDA_VISIBLE_DEVICES</span></code>, <code class="docutils literal notranslate"><span class="pre">ROCR_VISIBLE_DEVICES</span></code>
+or <code class="docutils literal notranslate"><span class="pre">ZE_AFFINITY_MASK</span></code>) to exactly those ids. A local attempt that requests no
+GPUs on a node with known GPUs sees none (except for Level Zero, whose empty
+mask does not hide devices).</p></li>
+<li><p>With <code class="docutils literal notranslate"><span class="pre">manager.bind_cpus</span></code> true, the <code class="docutils literal notranslate"><span class="pre">slurm</span></code> (batch host only) and <code class="docutils literal notranslate"><span class="pre">host</span></code>
+probes split the manager’s CPU affinity into equal slots, one per processor
+slot, and the runner is pinned to the union of its slots’ CPUs before it
+starts. A pin the kernel refuses is logged as <code class="docutils literal notranslate"><span class="pre">attempt_pin_failed</span></code>. Thread
+counts such as <code class="docutils literal notranslate"><span class="pre">OMP_NUM_THREADS</span></code> are not set.</p></li>
+</ul>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace settings set --key manager.bind_cpus --value true WORKSPACE</span>
+</pre></div>
+</div>
+<p>Placement is in memory only: a replacement manager places its own attempts on
+its own inventory. The binding is information for well-behaved runners; there
+is no backfill or reservation, and device identity holds only for attempts
+executed locally.</p>
+</section>
+<section id="capacities-from-slurm">
+<h3>Capacities from SLURM<a class="headerlink" href="#capacities-from-slurm" title="Link to this heading">¶</a></h3>
+<p>Inside a SLURM batch allocation, a manager derives capacities, but only when
+<code class="docutils literal notranslate"><span class="pre">SLURM_JOB_ID</span></code> is present:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>SLURM variable</p></th>
+<th class="head"><p>Manager resource</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SLURM_NTASKS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">procs</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SLURM_GPUS</span></code> (<code class="docutils literal notranslate"><span class="pre">4</span></code>, <code class="docutils literal notranslate"><span class="pre">a100:4</span></code> or <code class="docutils literal notranslate"><span class="pre">a100:2,v100:2</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpus</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SLURM_JOB_NUM_NODES</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">nodes</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SLURM_MEM_PER_CPU</span></code>, <code class="docutils literal notranslate"><span class="pre">SLURM_CPUS_PER_TASK</span></code>, <code class="docutils literal notranslate"><span class="pre">SLURM_NTASKS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">mem</span> <span class="pre">=</span> <span class="pre">MEM_PER_CPU</span> <span class="pre">×</span> <span class="pre">CPUS_PER_TASK</span> <span class="pre">(default</span> <span class="pre">1)</span> <span class="pre">×</span> <span class="pre">NTASKS</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SLURM_MEM_PER_NODE</span></code>, <code class="docutils literal notranslate"><span class="pre">SLURM_JOB_NUM_NODES</span></code></p></td>
+<td><p>fallback <code class="docutils literal notranslate"><span class="pre">mem</span> <span class="pre">=</span> <span class="pre">MEM_PER_NODE</span> <span class="pre">×</span> <span class="pre">JOB_NUM_NODES</span></code> when <code class="docutils literal notranslate"><span class="pre">SLURM_MEM_PER_CPU</span></code> is absent</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Memory is recorded in MB. A trailing <code class="docutils literal notranslate"><span class="pre">M</span></code>, <code class="docutils literal notranslate"><span class="pre">G</span></code> or <code class="docutils literal notranslate"><span class="pre">K</span></code> is accepted. Missing or
+invalid input omits only the affected capacity, with a warning for invalid
+input. For multiple local managers, the launcher supplies host <code class="docutils literal notranslate"><span class="pre">procs</span></code> and half
+the host physical memory in MB when the caller did not, split across managers;
+explicit resource pairs are per-manager values and stay unchanged.</p>
+</section>
+</section>
+<section id="scheduling">
+<h2>Scheduling<a class="headerlink" href="#scheduling" title="Link to this heading">¶</a></h2>
+<p>A manager never reads the whole workspace on a tick. Each tick it checks that
+it is still alive (fail-stop otherwise), gives back any job of its own it does
+not hold, probes a few other owners, serves one bounded window of request
+files, evaluates waiting jobs, commits the attempts that ended, and claims from
+one bounded window of <code class="docutils literal notranslate"><span class="pre">ready</span></code> jobs (<code class="docutils literal notranslate"><span class="pre">discovery_budget</span></code>, 4096 by default),
+resumed from a cursor on the next tick. The terminal state directories are
+never opened by scheduling, so a tick grows with the work in flight, not with
+accumulated history.</p>
+<p>Within a window, eligible jobs are claimed in priority order (<code class="docutils literal notranslate"><span class="pre">p000</span></code> first) up
+to the free worker slots. Priority is therefore best-within-window, not
+exact-global: the price of bounded discovery. Eligibility is checked from
+<code class="docutils literal notranslate"><span class="pre">job.json</span></code> and <code class="docutils literal notranslate"><span class="pre">state.json</span></code> before claiming, in this order: pool, capabilities,
+the workflow and its calls installed and built, the installed <code class="docutils literal notranslate"><span class="pre">requires</span></code>, the
+resources, and <code class="docutils literal notranslate"><span class="pre">mintime</span></code> against the drain point. A job that fails a check stays
+<code class="docutils literal notranslate"><span class="pre">ready</span></code>, unclaimed and not failed.</p>
+<p>A claim is one atomic rename of the job directory into <code class="docutils literal notranslate"><span class="pre">jobs/owned/&lt;owner-id&gt;/</span></code>.
+Of two managers that try, exactly one wins; the other moves on.</p>
+<section id="restricting-a-manager-to-placement-prefixes">
+<h3>Restricting a manager to placement prefixes<a class="headerlink" href="#restricting-a-manager-to-placement-prefixes" title="Link to this heading">¶</a></h3>
+<p>Placement prefixes restrict what a manager scans:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk manager run --workspace WORKSPACE \</span>
+<span class="go">  --placement-prefix project-a \</span>
+<span class="go">  --placement-prefix project-b/2026</span>
+</pre></div>
+</div>
+<p>The flag is repeatable, and every scheduling scan is confined to those
+subtrees. Overlapping assignments are safe, since the claim rename still
+arbitrates each job, and disjoint ones divide the scanning. A manager with
+prefixes does not serve the exchange. <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> reports a prefix mismatch when a
+live manager’s prefixes exclude the diagnosed job.</p>
+</section>
+</section>
+<section id="inspecting-a-workspace-and-its-jobs">
+<h2>Inspecting a workspace and its jobs<a class="headerlink" href="#inspecting-a-workspace-and-its-jobs" title="Link to this heading">¶</a></h2>
+<section id="workspace-status">
+<h3>Workspace status<a class="headerlink" href="#workspace-status" title="Link to this heading">¶</a></h3>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace status WORKSPACE</span>
+<span class="go">httk workspace status --json WORKSPACE</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">status</span></code> prints the job counts per state, whether the workspace is sealed, and
+the owners with their liveness; an owner it proves dead gets its tombstone, for
+the next manager tick or <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code> to recover. <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">monitor</span></code>
+gives an interactive view of the same counts, with pages, details and controls;
+see <a class="reference internal" href="monitor.html"><span class="doc">Workflow monitor</span></a>.</p>
+</section>
+<section id="listing-and-reading-jobs">
+<h3>Listing and reading jobs<a class="headerlink" href="#listing-and-reading-jobs" title="Link to this heading">¶</a></h3>
+<p>For large workspaces, list jobs a page at a time with
+<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">list</span> <span class="pre">--json</span> <span class="pre">--limit</span> <span class="pre">N</span></code>, passing its <code class="docutils literal notranslate"><span class="pre">next_after</span></code> value back as <code class="docutils literal notranslate"><span class="pre">--after</span></code>.
+<code class="docutils literal notranslate"><span class="pre">--kind</span></code> selects states, <code class="docutils literal notranslate"><span class="pre">--placement</span></code> prunes to a placement prefix, and
+<code class="docutils literal notranslate"><span class="pre">--tag-contains</span></code> narrows the stream before state is read.</p>
+<p>These commands find a job by listing its placement in each state and read its
+<code class="docutils literal notranslate"><span class="pre">job.json</span></code>, <code class="docutils literal notranslate"><span class="pre">state.json</span></code> and run logs; none writes anything:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job list --workspace WORKSPACE --kind ready --placement project-a</span>
+<span class="go">httk job show --workspace WORKSPACE JOB</span>
+<span class="go">httk job log --workspace WORKSPACE --limit 20 JOB</span>
+<span class="go">httk job why --workspace WORKSPACE JOB</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">JOB</span></code> is a job UUID, a complete <code class="docutils literal notranslate"><span class="pre">tag--uuid</span></code> job key, a unique prefix of either,
+or a path inside the workspace. A job directory names one job; a placement
+directory names every job below it. Globs such as <code class="docutils literal notranslate"><span class="pre">jobs/ready/silicon*</span></code> expand
+from the current working directory. An ambiguous prefix is refused, listing the
+jobs it matched. A job’s directory name changes at every move, so script with
+UUIDs or keys, never with paths.</p>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">show</span></code> reports the state and phase, placement, priority, workflow, step,
+the activation and attempt counters against the retry budgets, the last
+failure, a waiting job’s children, and the payload, workdir and attempt paths.
+<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">log</span></code> prints the owner’s run log (<code class="docutils literal notranslate"><span class="pre">claimed</span></code>, <code class="docutils literal notranslate"><span class="pre">attempt_started</span></code>, <code class="docutils literal notranslate"><span class="pre">outcome</span></code>,
+<code class="docutils literal notranslate"><span class="pre">committed</span></code>, <code class="docutils literal notranslate"><span class="pre">released</span></code>, <code class="docutils literal notranslate"><span class="pre">recovered</span></code>, …), oldest first, then the runner’s own
+annotations.</p>
+</section>
+<section id="why-a-job-is-not-running">
+<h3>Why a job is not running<a class="headerlink" href="#why-a-job-is-not-running" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> answers this for every state:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ready</span></code>: every claim precondition, one line each: the installed and built
+workflow and its calls, the claim pool, required capabilities, each live
+manager’s verdict, and the attempt budgets;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">owned</span></code>: the owner’s liveness from the death proof (alive, dead and about to
+be recovered, or undecidable from this host) and the phase (<code class="docutils literal notranslate"><span class="pre">idle</span></code>,
+<code class="docutils literal notranslate"><span class="pre">launching</span></code> or <code class="docutils literal notranslate"><span class="pre">running</span></code>);</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">waiting</span></code>: the join condition, every child with its state, and which children
+block;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">failed</span></code>: the failure, whether an operator <code class="docutils literal notranslate"><span class="pre">continue</span></code> still fits in the retry
+budget, and the last attempt’s <code class="docutils literal notranslate"><span class="pre">error.json</span></code> breadcrumb;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">paused</span></code>, <code class="docutils literal notranslate"><span class="pre">succeeded</span></code> and <code class="docutils literal notranslate"><span class="pre">cancelled</span></code>: the state and how to proceed;</p></li>
+<li><p><strong>held</strong>: a job held for a transfer, which is in neither state tree, is shown
+with its hold path, transfer id, destination and the state it returns to,
+and how to take it back.</p></li>
+</ul>
+<p>For <code class="docutils literal notranslate"><span class="pre">ready</span></code>, <code class="docutils literal notranslate"><span class="pre">owned</span></code> and <code class="docutils literal notranslate"><span class="pre">failed</span></code> jobs it also folds the run log into one
+attempt-history line and flags a job under an unlimited retry budget that has
+attempted well past a small threshold as flapping. Operator requests still
+pending for the job are shown.</p>
+</section>
+<section id="reading-results">
+<h3>Reading results<a class="headerlink" href="#reading-results" title="Link to this heading">¶</a></h3>
+<p>Reading results rather than status is collecting: <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">collect</span> <span class="pre">WORKSPACE</span></code>
+streams <code class="docutils literal notranslate"><span class="pre">CollectedJob</span></code> summaries, and <code class="docutils literal notranslate"><span class="pre">--raw</span></code> exposes the <code class="docutils literal notranslate"><span class="pre">JobRecord</span></code> stream for
+a data layer; see <a class="reference internal" href="collecting.html"><span class="doc">Collecting results</span></a>.</p>
+</section>
+</section>
+<section id="controlling-jobs">
+<h2>Controlling jobs<a class="headerlink" href="#controlling-jobs" title="Link to this heading">¶</a></h2>
+<section id="requests">
+<h3>Requests<a class="headerlink" href="#requests" title="Link to this heading">¶</a></h3>
+<p>Operators change jobs only through request files: one
+<code class="docutils literal notranslate"><span class="pre">.httk-workspace/requests/&lt;job-uuid&gt;.&lt;request-uuid&gt;.json</span></code> per job, applied by
+the job’s owner. A manager claims an unowned job to apply its requests and
+releases it; a job a manager is running gets a <code class="docutils literal notranslate"><span class="pre">cancel</span></code> at once and every other
+request at the next attempt boundary.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job request pause --workspace WORKSPACE --reason "inspection" JOB</span>
+<span class="go">httk job request override_step --step relax --reason "redo relax" JOB</span>
+<span class="go">httk job request set_priority --priority 100 --reason "urgent" JOB</span>
+</pre></div>
+</div>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Action</p></th>
+<th class="head"><p>Applies to</p></th>
+<th class="head"><p>Effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cancel</span></code></p></td>
+<td><p>any non-terminal job</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">cancelled</span></code>; a running attempt is stopped first</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">pause</span></code></p></td>
+<td><p>a job not terminal, paused or waiting</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">paused</span></code>, at the next boundary when running</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">continue</span></code></p></td>
+<td><p>a failed or paused job</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ready</span></code>; the failure is cleared and a new attempt counted against the budget</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">override_step</span></code></p></td>
+<td><p>a failed or paused job</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ready</span></code> with a new activation of <code class="docutils literal notranslate"><span class="pre">--step</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">set_priority</span></code></p></td>
+<td><p>any job</p></td>
+<td><p>the new <code class="docutils literal notranslate"><span class="pre">--priority</span></code> (0 is highest)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">detach</span></code></p></td>
+<td><p>a spawned job</p></td>
+<td><p>independent of its parent, permanently</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">eject</span></code></p></td>
+<td><p>a quiescent job</p></td>
+<td><p>moved out as a bundle to <code class="docutils literal notranslate"><span class="pre">--destination</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">delete</span></code></p></td>
+<td><p>a terminal or paused job; a succeeded one only after <code class="docutils literal notranslate"><span class="pre">unseal</span></code>; no waiting parent</p></td>
+<td><p>removed</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">seal</span></code></p></td>
+<td><p>a succeeded job without a seal</p></td>
+<td><p>sealed</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">unseal</span></code></p></td>
+<td><p>a sealed succeeded job</p></td>
+<td><p>released from its seal</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Requests apply once, in posting order. A request that does not apply where the
+job now is is dropped and recorded in the job’s <code class="docutils literal notranslate"><span class="pre">state.json</span></code> history with the
+reason; <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> shows it. A request whose signature fails to verify, or whose
+job cannot be found, is moved to quarantine by <code class="docutils literal notranslate"><span class="pre">gc</span></code> after a day. <code class="docutils literal notranslate"><span class="pre">continue</span></code> and
+<code class="docutils literal notranslate"><span class="pre">override_step</span></code> of a child that a decided join has already consumed are refused
+unless <code class="docutils literal notranslate"><span class="pre">--force</span></code> is given.</p>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">request</span></code> exits <code class="docutils literal notranslate"><span class="pre">0</span></code> once the files are posted, and warns when no live
+manager serves the job. <code class="docutils literal notranslate"><span class="pre">--wait</span></code> (only for <code class="docutils literal notranslate"><span class="pre">pause</span></code>) waits until each job was
+observed <code class="docutils literal notranslate"><span class="pre">paused</span></code>, and exits <code class="docutils literal notranslate"><span class="pre">1</span></code> when a pause was superseded, dropped or timed
+out (<code class="docutils literal notranslate"><span class="pre">--timeout</span> <span class="pre">SECONDS</span></code>). <code class="docutils literal notranslate"><span class="pre">override_step</span></code> is checked against the steps the
+runner recorded after its first attempt; <code class="docutils literal notranslate"><span class="pre">--force</span></code> publishes anyway.</p>
+<p>When the operator has an identity from <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">init</span></code>, the request carries an
+Ed25519 signature over its canonical JSON; it is attribution, not
+authorization. See <a class="reference internal" href="workflow_cli.html#operator-identity"><span class="std std-ref">the command guide</span></a>.</p>
+</section>
+<section id="applying-requests-now">
+<h3>Applying requests now<a class="headerlink" href="#applying-requests-now" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">delete</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">seal</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">unseal</span></code> and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">detach</span></code> post the request and,
+as a short-lived CLI owner, apply it at once to an unowned job. Each job prints
+one line:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Line</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Exit status</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">removed</span></code>, <code class="docutils literal notranslate"><span class="pre">sealed</span></code>, <code class="docutils literal notranslate"><span class="pre">unsealed</span></code>, <code class="docutils literal notranslate"><span class="pre">detached</span></code></p></td>
+<td><p>applied now</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">queued</span></code></p></td>
+<td><p>an owner holds the job and applies the request at its next boundary</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">refused</span></code></p></td>
+<td><p>the request cannot apply where the job is (the reason follows)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="cancelling-a-running-job">
+<h3>Cancelling a running job<a class="headerlink" href="#cancelling-a-running-job" title="Link to this heading">¶</a></h3>
+<p>A <code class="docutils literal notranslate"><span class="pre">cancel</span></code> of a running attempt sends <code class="docutils literal notranslate"><span class="pre">SIGTERM</span></code> to its process group and its
+launches, then <code class="docutils literal notranslate"><span class="pre">SIGKILL</span></code> after the cancellation grace, and the job commits as
+<code class="docutils literal notranslate"><span class="pre">cancelled</span></code> once the attempt is reaped, whatever it published. Transactions the
+attempt had committed still apply. An attempt that ended without an outcome
+while a <code class="docutils literal notranslate"><span class="pre">cancel</span></code> was pending is cancelled too.</p>
+</section>
+<section id="deleting-jobs">
+<h3>Deleting jobs<a class="headerlink" href="#deleting-jobs" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">job</span> <span class="pre">delete</span> <span class="pre">JOB...</span></code> removes a terminal or paused job. A succeeded job is
+never changed by the protocol until it is released from its seal with
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">job</span> <span class="pre">unseal</span></code>, so delete it with:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job unseal --force JOB</span>
+<span class="go">httk job delete --force JOB</span>
+</pre></div>
+</div>
+<p>A child that a non-terminal parent still waits on is refused. <code class="docutils literal notranslate"><span class="pre">--force</span></code> skips
+only the confirmation. Cancel a running or ready job first. Never delete a job
+directory with <code class="docutils literal notranslate"><span class="pre">rm</span> <span class="pre">-r</span></code>: a manager may hold it at that moment.</p>
+</section>
+</section>
+<section id="freeing-disk">
+<h2>Freeing disk<a class="headerlink" href="#freeing-disk" title="Link to this heading">¶</a></h2>
+<p>After a commit, the manager removes the attempt directory unless the job
+failed or was cancelled, which keep it as evidence. Everything else that
+accumulates is collected by <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code>, explicitly or from a long-lived
+manager:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE</span>
+<span class="go">httk workspace gc --dry-run WORKSPACE</span>
+<span class="go">httk workspace gc WORKSPACE</span>
+<span class="go">httk workspace gc --category requests --category tmp_entries WORKSPACE</span>
+<span class="go">httk manager run --workspace WORKSPACE --gc-interval 3600</span>
+</pre></div>
+</div>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Category</p></th>
+<th class="head"><p>What goes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dead_owners</span></code></p></td>
+<td><p>owners proven dead are recovered: their jobs return to the states they were claimed from</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">attempt_control</span></code></p></td>
+<td><p>attempt directories of unowned jobs older than <code class="docutils literal notranslate"><span class="pre">attempt_control_days</span></code>; a failed or cancelled job keeps the one its <code class="docutils literal notranslate"><span class="pre">state.json</span></code> names</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">placement_directories</span></code></p></td>
+<td><p>empty placement directories of the unowned states</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">requests</span></code></p></td>
+<td><p>request files older than a day that are malformed or whose job is not found go to quarantine; old exchange translation records are removed</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">manager_logs</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">logs/managers/&lt;owner-id&gt;.log</span></code> of departed owners older than <code class="docutils literal notranslate"><span class="pre">trash_days</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">owner_tombstones</span></code></p></td>
+<td><p>tombstones of recovered owners older than <code class="docutils literal notranslate"><span class="pre">owner_tombstone_days</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tmp_entries</span></code></p></td>
+<td><p>write temporaries and removal leftovers older than a day, and leftovers of a crashed workflow reinstall</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">gc</span></code> prints one row per category with the candidates, what was removed and the
+bytes reclaimed; <code class="docutils literal notranslate"><span class="pre">--json</span></code> lists every entry, and <code class="docutils literal notranslate"><span class="pre">--category</span></code> (repeatable)
+selects categories. A collection killed halfway leaves the workspace consistent,
+and running it again finishes it. There is no age-based collection of scratch,
+held transfers or quarantine: ownership decides, and quarantine is removed only
+by hand. A manager with <code class="docutils literal notranslate"><span class="pre">--gc-interval</span></code> collects every category but
+<code class="docutils literal notranslate"><span class="pre">dead_owners</span></code>, which its ticks handle anyway; it is off by default.</p>
+</section>
+<section id="checking-a-workspace">
+<h2>Checking a workspace<a class="headerlink" href="#checking-a-workspace" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">fsck</span></code> walks <code class="docutils literal notranslate"><span class="pre">jobs/</span></code> and reports what the kernel cannot read or
+resolve on its own:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace fsck WORKSPACE</span>
+<span class="go">httk workspace fsck --json WORKSPACE</span>
+<span class="go">httk workspace fsck --repair WORKSPACE</span>
+</pre></div>
+</div>
+<p>Like <code class="docutils literal notranslate"><span class="pre">fsck</span></code> for a filesystem, run it only while no other actor uses the
+workspace: no managers, CLI operations, daemon or transfers. Findings from a
+busy workspace may be transient. <code class="docutils literal notranslate"><span class="pre">--repair</span></code> is refused unless the workspace is
+quiescent: every owner must be proven dead, and every dead owner recovered, so
+no owned jobs or dead-owner scratch remain. Stop the managers, run
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">gc</span></code> (which recovers dead owners), then rerun. <code class="docutils literal notranslate"><span class="pre">--repair</span></code> also
+asks “Make sure no other operations are ongoing in this workspace. Continue?”;
+<code class="docutils literal notranslate"><span class="pre">--yes</span></code> answers it, and without a terminal <code class="docutils literal notranslate"><span class="pre">--repair</span></code> needs <code class="docutils literal notranslate"><span class="pre">--yes</span></code>.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Finding</p></th>
+<th class="head"><p>Meaning and remedy</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">unparsable_name</span></code></p></td>
+<td><p>an entry that is neither a placement directory nor a job name of its position; <code class="docutils literal notranslate"><span class="pre">--repair</span></code> moves it to quarantine</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">duplicate_job</span></code></p></td>
+<td><p>one job UUID in two places, after a cross-filesystem crash, a duplicate delivery or two concurrent adoptions; inspect both and delete one</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">orphan_owned</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">jobs/owned/&lt;id&gt;/</span></code> without its owner’s directory; resolve it with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">attest-dead</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tombstoned_owner_with_jobs</span></code></p></td>
+<td><p>a recovered owner holds jobs, launches or scratch again; <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code> recovers it</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">unreadable_state</span></code></p></td>
+<td><p>a <code class="docutils literal notranslate"><span class="pre">state.json</span></code> that exists but does not decode; the next claimant fails the job with <code class="docutils literal notranslate"><span class="pre">protocol_error</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">foreign_owner</span></code></p></td>
+<td><p>a job directory another account owns, which managers skip</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">stale_exchange_index</span></code></p></td>
+<td><p>an exchange index entry whose job is not in the workspace (a job removed by hand), which blocks the client’s resubmission of that name; <code class="docutils literal notranslate"><span class="pre">--repair</span></code> removes it</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">unindexed_exchange_job</span></code></p></td>
+<td><p>an exchange root without its exchange index entry; <code class="docutils literal notranslate"><span class="pre">--repair</span></code> recreates the entry</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Without <code class="docutils literal notranslate"><span class="pre">--repair</span></code> nothing is written. The command exits <code class="docutils literal notranslate"><span class="pre">0</span></code> when nothing is
+left for an operator and <code class="docutils literal notranslate"><span class="pre">1</span></code> otherwise. <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span> <span class="pre">repair</span></code> adds the
+workspace health checks: dead owners not yet recovered, scratch of unknown
+owners, old temporaries, and holds or incoming copies older than seven days.</p>
+</section>
+<section id="the-foreground-debug-runner">
+<h2>The foreground debug runner<a class="headerlink" href="#the-foreground-debug-runner" title="Link to this heading">¶</a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk job debug --workspace WORKSPACE --step relax PAYLOAD</span>
+<span class="go">httk job debug --workspace WORKSPACE --follow-children JOB</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">debug</span></code> drives one job to a terminal state in the foreground, streaming the
+job’s <code class="docutils literal notranslate"><span class="pre">logs/stdio.out</span></code> to the console as it grows. A private task manager
+restricted to that job performs every transition, so the job runs through the
+same code paths as in production and no unrelated work is claimed.
+<code class="docutils literal notranslate"><span class="pre">--log-level</span></code> raises the private manager’s console log, which is quiet by
+default.</p>
+<p>The first argument is a payload directory, submitted fresh at <code class="docutils literal notranslate"><span class="pre">--placement</span></code>
+(default <code class="docutils literal notranslate"><span class="pre">debug</span></code>), or a selector of an existing job. <code class="docutils literal notranslate"><span class="pre">--step</span></code> overrides a fresh
+payload’s initial step; for a job with history use an <code class="docutils literal notranslate"><span class="pre">override_step</span></code> request.
+<code class="docutils literal notranslate"><span class="pre">--follow-children</span></code> drives a waiting job’s spawned children, depth first, then
+resumes the parent. The exit status is <code class="docutils literal notranslate"><span class="pre">0</span></code> when the job succeeded, <code class="docutils literal notranslate"><span class="pre">3</span></code> when it
+failed, and <code class="docutils literal notranslate"><span class="pre">4</span></code> when it stopped without finishing (paused, cancelled, or
+waiting for children without <code class="docutils literal notranslate"><span class="pre">--follow-children</span></code>).</p>
+</section>
+<section id="runner-contract">
+<h2>Runner contract<a class="headerlink" href="#runner-contract" title="Link to this heading">¶</a></h2>
+<p>The runner executes in the job’s workdir <code class="docutils literal notranslate"><span class="pre">run/</span></code>. It reads the context in
+<code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_CONTEXT</span></code> and publishes its outcome by renaming a complete
+<code class="docutils literal notranslate"><span class="pre">outcome.tmp.&lt;nonce&gt;/</span></code> to <code class="docutils literal notranslate"><span class="pre">outcome.ready/</span></code> in its attempt directory
+<code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_CONTROL_DIR</span></code>. Data reaches the payload only through
+transactions, applied by the manager after the attempt ended. See
+<a class="reference internal" href="workflow_filesystem_api.html"><span class="doc">Workflow filesystem API in detail</span></a> for the complete protocol, and
+<a class="reference internal" href="runtime_helpers.html"><span class="doc">Native runner helpers in detail</span></a>, <a class="reference internal" href="../sdks/bash_api.html"><span class="doc">Bash runner API</span></a> or the <a class="reference internal" href="../sdks/sdk_parity.html"><span class="doc">Python and Bash authoring parity</span></a>
+table for the SDKs that implement it.</p>
+<p>The manager puts its own interpreter’s directory first on the runner’s <code class="docutils literal notranslate"><span class="pre">PATH</span></code>,
+so <code class="docutils literal notranslate"><span class="pre">#!/usr/bin/env</span> <span class="pre">python3</span></code> (and <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_PYTHON</span></code>) is the interpreter in
+which the installed workflow’s <code class="docutils literal notranslate"><span class="pre">requires</span></code> were checked at claim. Runners start
+behind a one-byte launch gate that opens only after the launch is recorded, so
+a launch the manager did not record never ran. Converted <code class="docutils literal notranslate"><span class="pre">httk-v1</span></code> packages run
+through the same manager; select their <code class="docutils literal notranslate"><span class="pre">taskset</span></code> pool with <code class="docutils literal notranslate"><span class="pre">--pool</span></code> (see
+<a class="reference internal" href="v1_compatibility.html"><span class="std std-doc"><em>httk</em> v1 task compatibility</span></a>).</p>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="workflow_cli.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Project and workflow command line in detail</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="../notebooks/examples.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Examples</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Task-manager usage in detail</a><ul>
+<li><a class="reference internal" href="#setting-up-a-workspace">Setting up a workspace</a><ul>
+<li><a class="reference internal" href="#initializing">Initializing</a></li>
+<li><a class="reference internal" href="#durability">Durability</a></li>
+<li><a class="reference internal" href="#workspaces-on-a-cluster">Workspaces on a cluster</a></li>
+<li><a class="reference internal" href="#workspace-policy">Workspace policy</a></li>
+<li><a class="reference internal" href="#application-settings">Application settings</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#shared-filesystems">Shared filesystems</a><ul>
+<li><a class="reference internal" href="#mount-options">Mount options</a></li>
+<li><a class="reference internal" href="#the-visibility-deadline">The visibility deadline</a></li>
+<li><a class="reference internal" href="#clocks">Clocks</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#installing-workflows">Installing workflows</a></li>
+<li><a class="reference internal" href="#submitting-jobs">Submitting jobs</a></li>
+<li><a class="reference internal" href="#checking-readiness">Checking readiness</a><ul>
+<li><a class="reference internal" href="#the-precheck">The precheck</a></li>
+<li><a class="reference internal" href="#which-owners-serve-a-workspace">Which owners serve a workspace</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#running-managers">Running managers</a><ul>
+<li><a class="reference internal" href="#starting-a-manager">Starting a manager</a></li>
+<li><a class="reference internal" href="#launching-managers">Launching managers</a></li>
+<li><a class="reference internal" href="#confining-attempts">Confining attempts</a></li>
+<li><a class="reference internal" href="#startup-banner-and-idle-summary">Startup banner and idle summary</a></li>
+<li><a class="reference internal" href="#logging">Logging</a></li>
+<li><a class="reference internal" href="#draining">Draining</a></li>
+<li><a class="reference internal" href="#owners-death-and-recovery">Owners, death and recovery</a></li>
+<li><a class="reference internal" href="#unresolvable-join-children">Unresolvable join children</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#resources">Resources</a><ul>
+<li><a class="reference internal" href="#advertising-capacities">Advertising capacities</a></li>
+<li><a class="reference internal" href="#how-jobs-are-packed">How jobs are packed</a></li>
+<li><a class="reference internal" href="#example">Example</a></li>
+<li><a class="reference internal" href="#time-requirements">Time requirements</a></li>
+<li><a class="reference internal" href="#allocations">Allocations</a></li>
+<li><a class="reference internal" href="#placement-and-binding">Placement and binding</a></li>
+<li><a class="reference internal" href="#capacities-from-slurm">Capacities from SLURM</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#scheduling">Scheduling</a><ul>
+<li><a class="reference internal" href="#restricting-a-manager-to-placement-prefixes">Restricting a manager to placement prefixes</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#inspecting-a-workspace-and-its-jobs">Inspecting a workspace and its jobs</a><ul>
+<li><a class="reference internal" href="#workspace-status">Workspace status</a></li>
+<li><a class="reference internal" href="#listing-and-reading-jobs">Listing and reading jobs</a></li>
+<li><a class="reference internal" href="#why-a-job-is-not-running">Why a job is not running</a></li>
+<li><a class="reference internal" href="#reading-results">Reading results</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#controlling-jobs">Controlling jobs</a><ul>
+<li><a class="reference internal" href="#requests">Requests</a></li>
+<li><a class="reference internal" href="#applying-requests-now">Applying requests now</a></li>
+<li><a class="reference internal" href="#cancelling-a-running-job">Cancelling a running job</a></li>
+<li><a class="reference internal" href="#deleting-jobs">Deleting jobs</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#freeing-disk">Freeing disk</a></li>
+<li><a class="reference internal" href="#checking-a-workspace">Checking a workspace</a></li>
+<li><a class="reference internal" href="#the-foreground-debug-runner">The foreground debug runner</a></li>
+<li><a class="reference internal" href="#runner-contract">Runner contract</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

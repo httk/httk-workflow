@@ -1,0 +1,1377 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.models - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workspaces.html">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workspace_daemon.html">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.workflow.models</h1><div class="highlight"><pre>
+<span></span><span class="sd">"""Protocol models and validation."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Sequence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span><span class="p">,</span> <span class="n">PurePosixPath</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">._durations</span><span class="w"> </span><span class="kn">import</span> <span class="n">TIME_RESOURCES</span><span class="p">,</span> <span class="n">parse_slurm_duration</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">._util</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">DEFAULT_VISIBILITY_DEADLINE_SECONDS</span><span class="p">,</span>
+    <span class="n">json_bytes</span><span class="p">,</span>
+    <span class="n">require_int</span><span class="p">,</span>
+    <span class="n">require_mapping</span><span class="p">,</span>
+    <span class="n">require_number</span><span class="p">,</span>
+    <span class="n">require_string</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.errors</span><span class="w"> </span><span class="kn">import</span> <span class="n">FormatError</span>
+
+<span class="n">CORE_PROFILE</span> <span class="o">=</span> <span class="s2">"core-v3"</span>
+<span class="c1">#: The workspace extension that serves ``WORKSPACE/exchange``: a client-written</span>
+<span class="c1">#: inbox of ejected bundles and an outbox of returned ones.</span>
+<span class="n">EXCHANGE_EXTENSION</span> <span class="o">=</span> <span class="s2">"exchange"</span>
+<span class="n">SUPPORTED_EXTENSIONS</span><span class="p">:</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="n">EXCHANGE_EXTENSION</span><span class="p">})</span>
+<span class="n">RESERVED_WORKFLOW_ENVIRONMENT_PREFIX</span> <span class="o">=</span> <span class="s2">"HTTK_WORKFLOW_"</span>
+
+<span class="c1"># Payload entries that belong to a runner rather than to the immutable job: the</span>
+<span class="c1"># control directory of one attempt, the future run-log directory, and the state</span>
+<span class="c1"># one runner keeps across the attempts and steps of a job. All live inside the</span>
+<span class="c1"># payload because they must travel with it, and none is part of what the payload</span>
+<span class="c1"># digest pins.</span>
+<span class="n">ATTEMPTS_DIRECTORY</span> <span class="o">=</span> <span class="s2">"attempts"</span>
+<span class="n">LOGS_DIRECTORY</span> <span class="o">=</span> <span class="s2">"logs"</span>
+<span class="n">JOBS_DIRECTORY</span> <span class="o">=</span> <span class="s2">"jobs"</span>
+<span class="n">POSTPROCESS_DIRECTORY</span> <span class="o">=</span> <span class="s2">"postprocess"</span>
+<span class="n">EXCHANGE_DIRECTORY</span> <span class="o">=</span> <span class="s2">"exchange"</span>
+<span class="n">JOB_STATE_DIRECTORY</span> <span class="o">=</span> <span class="s2">".httk-job"</span>
+<span class="c1"># The envelope a detached or ejected job carries while it is out of every</span>
+<span class="c1"># workspace: its manifest, its marker, and any shared runner it pins. It</span>
+<span class="c1"># describes the bundle rather than the job, so no payload digest or seal covers it.</span>
+<span class="n">TRANSFER_DIRECTORY</span> <span class="o">=</span> <span class="s2">".httk-transfer"</span>
+<span class="n">WORKSPACE_DIRECTORY</span> <span class="o">=</span> <span class="s2">".httk-workspace"</span>
+<span class="c1"># Workspace policy: the tunables the specification calls "configured", stored</span>
+<span class="c1"># once in format.json so that two implementations attaching the same workspace</span>
+<span class="c1"># cannot disagree about them.</span>
+<span class="n">POLICY_KEYS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">"visibility_deadline_seconds"</span><span class="p">,</span> <span class="s2">"retention"</span><span class="p">})</span>
+<span class="n">RETENTION_KEYS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">"attempt_control_days"</span><span class="p">,</span> <span class="s2">"trash_days"</span><span class="p">,</span> <span class="s2">"owner_tombstone_days"</span><span class="p">})</span>
+<span class="c1">#: Members older workspaces still store; reading ignores them and the next policy write drops them.</span>
+<span class="n">_RETIRED_POLICY_KEYS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">"journal_segment_bytes"</span><span class="p">,</span> <span class="s2">"lease_seconds"</span><span class="p">})</span>
+<span class="n">_RETIRED_RETENTION_KEYS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">"journal_days"</span><span class="p">})</span>
+<span class="c1"># A deadline longer than a day is a hang rather than a filesystem waiting to settle.</span>
+<span class="n">MAXIMUM_VISIBILITY_DEADLINE_SECONDS</span> <span class="o">=</span> <span class="mf">86400.0</span>
+
+<span class="c1"># The serialized budget of the optional application-defined ``parameters`` object.</span>
+<span class="c1"># Parameters describe one job; bulk data belongs in the payload or in transactional</span>
+<span class="c1"># data, so a small bound keeps job.json readable and cheap to digest.</span>
+<span class="n">MAXIMUM_PARAMETERS_BYTES</span> <span class="o">=</span> <span class="mi">262144</span>
+<span class="c1"># The serialized budget of the optional ``declarations`` object, which gets its</span>
+<span class="c1"># own allowance of exactly the same size as ``parameters`` for exactly the same</span>
+<span class="c1"># reason: a declaration describes one job, it is not a place for bulk content.</span>
+<span class="n">MAXIMUM_DECLARATIONS_BYTES</span> <span class="o">=</span> <span class="mi">262144</span>
+<span class="n">MAXIMUM_ENVIRONMENT_BYTES</span> <span class="o">=</span> <span class="mi">262144</span>
+<span class="c1"># The serialized budget of the optional ``declared`` object, which mirrors the</span>
+<span class="c1"># environment member: it carries the declared parameter and input metadata a</span>
+<span class="c1"># workflow announced, so a later precheck can consume it. Same allowance, same</span>
+<span class="c1"># reason — it describes one job rather than carrying bulk content.</span>
+<span class="n">MAXIMUM_DECLARED_BYTES</span> <span class="o">=</span> <span class="mi">262144</span>
+
+<span class="n">_UUID_PATTERN</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">"[0-9a-f]</span><span class="si">{8}</span><span class="s2">-[0-9a-f]</span><span class="si">{4}</span><span class="s2">-[0-9a-f]</span><span class="si">{4}</span><span class="s2">-[0-9a-f]</span><span class="si">{4}</span><span class="s2">-[0-9a-f]</span><span class="si">{12}</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">_TAG_PATTERN</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">"[a-z0-9][a-z0-9._-]{0,47}"</span><span class="p">)</span>
+<span class="n">_LABEL_PATTERN</span> <span class="o">=</span> <span class="n">_TAG_PATTERN</span>
+<span class="c1"># A declaration name is also one file basename below ``.httk-job/declarations/``,</span>
+<span class="c1"># so it stays within the same conservative character set as every other name the</span>
+<span class="c1"># protocol coins, plus the underscore the property vocabularies use.</span>
+<span class="n">_DECLARATION_NAME_PATTERN</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}"</span><span class="p">)</span>
+<span class="n">_FAILURE_MEMBERS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">"code"</span><span class="p">,</span> <span class="s2">"message"</span><span class="p">,</span> <span class="s2">"details"</span><span class="p">,</span> <span class="s2">"retryable"</span><span class="p">})</span>
+<span class="n">_UNSAFE_PATH_COMPONENTS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">""</span><span class="p">,</span> <span class="s2">"."</span><span class="p">,</span> <span class="s2">".."</span><span class="p">,</span> <span class="n">WORKSPACE_DIRECTORY</span><span class="p">})</span>
+
+
+<div class="viewcode-block" id="canonical_uuid">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.canonical_uuid">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">canonical_uuid</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"id"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate and return a canonical lowercase UUID.</span>
+
+<span class="sd">    :param value: The value to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The canonical UUID text.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the value is not canonical UUID text.</span>
+<span class="sd">    """</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">parsed</span> <span class="o">=</span> <span class="n">uuid</span><span class="o">.</span><span class="n">UUID</span><span class="p">(</span><span class="n">text</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must be a UUID"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="n">canonical</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">parsed</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">text</span> <span class="o">!=</span> <span class="n">canonical</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must use lowercase canonical UUID syntax"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">canonical</span></div>
+
+
+
+<div class="viewcode-block" id="validate_label">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_label">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_label</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate and return one protocol label.</span>
+
+<span class="sd">    :param value: The label to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated label.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the value is not valid label text.</span>
+<span class="sd">    """</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">_LABEL_PATTERN</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="n">text</span><span class="p">)</span> <span class="ow">or</span> <span class="s2">"--"</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has invalid component syntax"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">text</span></div>
+
+
+
+<div class="viewcode-block" id="is_payload_private">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.is_payload_private">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">is_payload_private</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Report whether one payload entry name is runner-private scratch.</span>
+
+<span class="sd">    A runner-private entry is excluded from every payload digest, so publishing</span>
+<span class="sd">    an outcome or writing job state can never change the digest of a payload</span>
+<span class="sd">    that a manager, a transfer, or a registration check must still recognize.</span>
+
+<span class="sd">    :param name: The payload entry name to classify.</span>
+<span class="sd">    :return: Whether the name is runner-private.</span>
+<span class="sd">    """</span>
+
+    <span class="k">return</span> <span class="n">name</span> <span class="ow">in</span> <span class="p">{</span><span class="n">ATTEMPTS_DIRECTORY</span><span class="p">,</span> <span class="n">LOGS_DIRECTORY</span><span class="p">,</span> <span class="n">JOB_STATE_DIRECTORY</span><span class="p">}</span></div>
+
+
+
+<div class="viewcode-block" id="validate_parameters">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_parameters">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_parameters</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"parameters"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate the optional application-defined ``parameters`` object of a job.</span>
+
+<span class="sd">    The member is opaque to the protocol: only its shape, its key syntax, and</span>
+<span class="sd">    its serialized size are checked. Its bytes are part of ``job.json`` and are</span>
+<span class="sd">    therefore covered by the immutable job digest like every other member.</span>
+
+<span class="sd">    :param value: The parameters mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated parameters mapping.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the mapping or its serialized contents are invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">mapping</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">key</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> keys must be nonempty strings"</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">json_bytes</span><span class="p">(</span><span class="n">mapping</span><span class="p">))</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must contain only JSON values: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="n">size</span> <span class="o">&gt;</span> <span class="n">MAXIMUM_PARAMETERS_BYTES</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> serializes to </span><span class="si">{</span><span class="n">size</span><span class="si">}</span><span class="s2"> bytes, which exceeds the </span><span class="si">{</span><span class="n">MAXIMUM_PARAMETERS_BYTES</span><span class="si">}</span><span class="s2">-byte limit; "</span>
+            <span class="s2">"put bulk content in the job payload or in transactional data instead"</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="nb">dict</span><span class="p">(</span><span class="n">mapping</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="validate_resources">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_resources">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_resources</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"resources"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate one quantitative resource-requirement mapping in protocol form.</span>
+
+<span class="sd">    Resource names are protocol labels and values are opaque non-negative</span>
+<span class="sd">    integers, except the reserved time labels ``maxtime`` and ``mintime``,</span>
+<span class="sd">    which are seconds: ``maxtime`` is at least 1 and ``mintime`` is at most</span>
+<span class="sd">    ``maxtime`` when one mapping holds both.  The protocol assigns no units or</span>
+<span class="sd">    meanings to other names.</span>
+
+<span class="sd">    :param value: The resource mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated resource mapping.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the mapping, names, or values are invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">raw</span> <span class="ow">in</span> <span class="n">mapping</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">label</span> <span class="o">=</span> <span class="n">validate_label</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> key"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="nb">int</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2"> must be an integer"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">raw</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2"> must be non-negative"</span><span class="p">)</span>
+        <span class="n">result</span><span class="p">[</span><span class="n">label</span><span class="p">]</span> <span class="o">=</span> <span class="n">raw</span>
+    <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"maxtime"</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.maxtime must be at least 1 second"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s2">"maxtime"</span> <span class="ow">in</span> <span class="n">result</span> <span class="ow">and</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"mintime"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">result</span><span class="p">[</span><span class="s2">"maxtime"</span><span class="p">]:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.mintime must not exceed </span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.maxtime"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_resources</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"resources"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Convert one authored resource mapping to protocol form.</span>
+
+<span class="sd">    The time labels ``maxtime`` and ``mintime`` must be Slurm ``--time``</span>
+<span class="sd">    strings and become seconds; other values pass through unchanged.</span>
+
+<span class="sd">    :param value: The authored resource mapping.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated resource mapping in protocol form.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the mapping, names, or values are invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">raw</span> <span class="ow">in</span> <span class="n">mapping</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">TIME_RESOURCES</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2"> must be a Slurm duration such as 01:30:00"</span><span class="p">)</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">raw</span> <span class="o">=</span> <span class="n">parse_slurm_duration</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+        <span class="n">result</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">raw</span>
+    <span class="k">return</span> <span class="n">validate_resources</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_capacity</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate one manager resource-capacity mapping.</span>
+
+<span class="sd">    :param value: The capacity mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated capacity mapping.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the mapping is invalid or names a time label.</span>
+<span class="sd">    """</span>
+
+    <span class="n">result</span> <span class="o">=</span> <span class="n">validate_resources</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">reserved</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">TIME_RESOURCES</span> <span class="o">&amp;</span> <span class="n">result</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+    <span class="k">if</span> <span class="n">reserved</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">reserved</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2"> is a job requirement, not a manager capacity"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_step_resources</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"step_resources"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]]:</span>
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">raw_step</span><span class="p">,</span> <span class="n">raw_resources</span> <span class="ow">in</span> <span class="n">mapping</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">step</span> <span class="o">=</span> <span class="n">validate_step</span><span class="p">(</span><span class="n">raw_step</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> step"</span><span class="p">)</span>
+        <span class="n">result</span><span class="p">[</span><span class="n">step</span><span class="p">]</span> <span class="o">=</span> <span class="n">validate_resources</span><span class="p">(</span><span class="n">raw_resources</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">step</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_matches_environment_type</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">environment_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">environment_type</span> <span class="o">==</span> <span class="s2">"string"</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">environment_type</span> <span class="o">==</span> <span class="s2">"number"</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="p">(</span><span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">))</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">environment_type</span> <span class="o">==</span> <span class="s2">"integer"</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">int</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">environment_type</span> <span class="o">==</span> <span class="s2">"boolean"</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">environment_type</span> <span class="o">==</span> <span class="s2">"array"</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">environment_variable_name</span><span class="p">(</span><span class="n">setting</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return the environment variable derived from one workflow setting."""</span>
+
+    <span class="k">return</span> <span class="s2">"HTTK_"</span> <span class="o">+</span> <span class="n">setting</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"."</span><span class="p">,</span> <span class="s2">"_"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_validate_environment_setting</span><span class="p">(</span><span class="n">setting</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">variable</span> <span class="o">=</span> <span class="n">environment_variable_name</span><span class="p">(</span><span class="n">setting</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">variable</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">RESERVED_WORKFLOW_ENVIRONMENT_PREFIX</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> derives reserved </span><span class="si">{</span><span class="n">RESERVED_WORKFLOW_ENVIRONMENT_PREFIX</span><span class="si">!r}</span><span class="s2"> variable </span><span class="si">{</span><span class="n">variable</span><span class="si">!r}</span><span class="s2">; "</span>
+            <span class="s2">"choose a workflow setting outside the manager-owned namespace"</span>
+        <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_environment</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"environment"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate the declared and overridden workflow environment of a job.</span>
+
+<span class="sd">    :param value: The environment mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated environment mapping.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the mapping or its values are invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">declared_raw</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"declared"</span><span class="p">,</span> <span class="p">{}),</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared"</span><span class="p">)</span>
+    <span class="n">overrides_raw</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"overrides"</span><span class="p">,</span> <span class="p">{}),</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.overrides"</span><span class="p">)</span>
+    <span class="n">declared</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">raw</span> <span class="ow">in</span> <span class="n">declared_raw</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">key</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared keys must be nonempty strings"</span><span class="p">)</span>
+        <span class="n">metadata</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">unknown</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">metadata</span><span class="p">)</span> <span class="o">-</span> <span class="p">{</span><span class="s2">"type"</span><span class="p">,</span> <span class="s2">"description"</span><span class="p">,</span> <span class="s2">"default"</span><span class="p">,</span> <span class="s2">"setting"</span><span class="p">})</span>
+        <span class="k">if</span> <span class="n">unknown</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2"> has unsupported members: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">unknown</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">"description"</span> <span class="ow">in</span> <span class="n">metadata</span><span class="p">:</span>
+            <span class="n">require_string</span><span class="p">(</span><span class="n">metadata</span><span class="p">[</span><span class="s2">"description"</span><span class="p">],</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">.description"</span><span class="p">)</span>
+        <span class="n">environment_type</span> <span class="o">=</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"type"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">environment_type</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">environment_type</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">environment_type</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">.type"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">environment_type</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"string"</span><span class="p">,</span> <span class="s2">"number"</span><span class="p">,</span> <span class="s2">"integer"</span><span class="p">,</span> <span class="s2">"boolean"</span><span class="p">,</span> <span class="s2">"array"</span><span class="p">,</span> <span class="s2">"object"</span><span class="p">}:</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">.type is invalid"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s2">"default"</span> <span class="ow">in</span> <span class="n">metadata</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_matches_environment_type</span><span class="p">(</span><span class="n">metadata</span><span class="p">[</span><span class="s2">"default"</span><span class="p">],</span> <span class="n">environment_type</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">.default does not match type </span><span class="si">{</span><span class="n">environment_type</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">setting</span> <span class="o">=</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"setting"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">setting</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">setting</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">setting</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">.setting"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="n">setting</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+            <span class="ow">and</span> <span class="n">re</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="sa">r</span><span class="s2">"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"</span><span class="p">,</span> <span class="n">setting</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">.setting must be a nonempty dotted identifier"</span><span class="p">)</span>
+        <span class="n">effective_setting</span> <span class="o">=</span> <span class="n">setting</span> <span class="k">if</span> <span class="n">setting</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">key</span>
+        <span class="n">_validate_environment_setting</span><span class="p">(</span><span class="n">effective_setting</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.declared.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">declared</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">metadata</span><span class="p">)</span>
+    <span class="n">overrides</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">override</span> <span class="ow">in</span> <span class="n">overrides_raw</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">declared</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.overrides.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2"> is not declared"</span><span class="p">)</span>
+        <span class="n">environment_type</span> <span class="o">=</span> <span class="n">declared</span><span class="p">[</span><span class="n">key</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"type"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">environment_type</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_matches_environment_type</span><span class="p">(</span><span class="n">override</span><span class="p">,</span> <span class="n">environment_type</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.overrides.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2"> does not match type </span><span class="si">{</span><span class="n">environment_type</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">overrides</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">override</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"declared"</span><span class="p">:</span> <span class="n">declared</span><span class="p">,</span> <span class="s2">"overrides"</span><span class="p">:</span> <span class="n">overrides</span><span class="p">}</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">json_bytes</span><span class="p">(</span><span class="n">result</span><span class="p">))</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must contain only JSON values: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="n">size</span> <span class="o">&gt;</span> <span class="n">MAXIMUM_ENVIRONMENT_BYTES</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> exceeds the </span><span class="si">{</span><span class="n">MAXIMUM_ENVIRONMENT_BYTES</span><span class="si">}</span><span class="s2">-byte limit"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_declared</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"declared"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]]:</span>
+<span class="w">    </span><span class="sd">"""Validate the optional ``declared`` object of a job.</span>
+
+<span class="sd">    The member mirrors the environment member's shape: it carries the parameter</span>
+<span class="sd">    and input metadata a workflow announced at submission — under the optional</span>
+<span class="sd">    ``parameters`` and ``inputs`` sections — so a later precheck can consume the</span>
+<span class="sd">    declaration without re-resolving the workflow. The protocol only checks its</span>
+<span class="sd">    structure, key syntax, and serialized size; the meaning of each metadata</span>
+<span class="sd">    entry is owned by the scaffold that wrote it.</span>
+
+<span class="sd">    :param value: The declared mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated declared sections keyed by ``parameters``/``inputs``.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the mapping, its keys, or its size limit are invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">unsupported</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">mapping</span><span class="p">)</span> <span class="o">-</span> <span class="p">{</span><span class="s2">"parameters"</span><span class="p">,</span> <span class="s2">"inputs"</span><span class="p">})</span>
+    <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has unsupported members: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">unsupported</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">section</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"parameters"</span><span class="p">,</span> <span class="s2">"inputs"</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">section</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">mapping</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="n">raw</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">mapping</span><span class="p">[</span><span class="n">section</span><span class="p">],</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">section</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">entries</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">metadata</span> <span class="ow">in</span> <span class="n">raw</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">key</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">section</span><span class="si">}</span><span class="s2"> keys must be nonempty strings"</span><span class="p">)</span>
+            <span class="n">entries</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">require_mapping</span><span class="p">(</span><span class="n">metadata</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">section</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">"</span><span class="p">))</span>
+        <span class="n">result</span><span class="p">[</span><span class="n">section</span><span class="p">]</span> <span class="o">=</span> <span class="n">entries</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">json_bytes</span><span class="p">(</span><span class="n">result</span><span class="p">))</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must contain only JSON values: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="n">size</span> <span class="o">&gt;</span> <span class="n">MAXIMUM_DECLARED_BYTES</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> exceeds the </span><span class="si">{</span><span class="n">MAXIMUM_DECLARED_BYTES</span><span class="si">}</span><span class="s2">-byte limit"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+
+<div class="viewcode-block" id="validate_declaration_name">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_declaration_name">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_declaration_name</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"declaration name"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate one declaration name of a job.</span>
+
+<span class="sd">    The name keys the ``declarations`` object of ``job.json`` and is also the</span>
+<span class="sd">    basename of the runtime-refined document below ``.httk-job/declarations/``,</span>
+<span class="sd">    so it must be a safe single path component and nothing else.</span>
+
+<span class="sd">    :param value: The declaration name to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated declaration name.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the value is not a safe declaration name.</span>
+<span class="sd">    """</span>
+
+    <span class="n">text</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">_DECLARATION_NAME_PATTERN</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="n">text</span><span class="p">)</span> <span class="ow">or</span> <span class="s2">".."</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has invalid component syntax"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">text</span></div>
+
+
+
+<div class="viewcode-block" id="validate_declarations">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_declarations">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_declarations</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"declarations"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">"""Validate the optional ``declarations`` object of a job.</span>
+
+<span class="sd">    Each member is one workflow-declaration document carried verbatim: the</span>
+<span class="sd">    protocol checks that a declaration is a JSON object and never looks inside</span>
+<span class="sd">    it, because what the members mean is owned by the vocabulary the document</span>
+<span class="sd">    names itself — the OPTIMADE workflow-declaration work is standardizing</span>
+<span class="sd">    exactly that, and an engine that reinterpreted it would only be able to</span>
+<span class="sd">    disagree with it. The bytes live in ``job.json`` and are therefore covered</span>
+<span class="sd">    by the immutable job digest like every other member.</span>
+
+<span class="sd">    :param value: The declarations mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated declaration documents keyed by name.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If a declaration name, document, or size limit is invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">document</span> <span class="ow">in</span> <span class="n">mapping</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">declaration</span> <span class="o">=</span> <span class="n">validate_declaration_name</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> key"</span><span class="p">)</span>
+        <span class="n">result</span><span class="p">[</span><span class="n">declaration</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">require_mapping</span><span class="p">(</span><span class="n">document</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">declaration</span><span class="si">}</span><span class="s2">"</span><span class="p">))</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">json_bytes</span><span class="p">(</span><span class="n">result</span><span class="p">))</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must contain only JSON values: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="n">size</span> <span class="o">&gt;</span> <span class="n">MAXIMUM_DECLARATIONS_BYTES</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> serializes to </span><span class="si">{</span><span class="n">size</span><span class="si">}</span><span class="s2"> bytes, which exceeds the </span><span class="si">{</span><span class="n">MAXIMUM_DECLARATIONS_BYTES</span><span class="si">}</span><span class="s2">-byte limit; "</span>
+            <span class="s2">"a declaration describes one job, so bulk content belongs in the payload or in transactional data"</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_calls</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">source</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate a mapping from call alias to workflow reference.</span>
+
+<span class="sd">    :param value: The mapping to validate.</span>
+<span class="sd">    :param source: Name the member in error messages.</span>
+<span class="sd">    :return: The validated mapping.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If an alias or reference is invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="kn">from</span><span class="w"> </span><span class="nn">httk.core.git_sources</span><span class="w"> </span><span class="kn">import</span> <span class="n">parse_git_uri</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">source</span><span class="p">)</span>
+    <span class="n">calls</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">alias</span><span class="p">,</span> <span class="n">reference</span> <span class="ow">in</span> <span class="n">mapping</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">label</span> <span class="o">=</span> <span class="n">validate_label</span><span class="p">(</span><span class="n">alias</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">source</span><span class="si">}</span><span class="s2"> alias"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">reference</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">reference</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">character</span><span class="o">.</span><span class="n">isspace</span><span class="p">()</span> <span class="k">for</span> <span class="n">character</span> <span class="ow">in</span> <span class="n">reference</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">source</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2"> must be a workflow name or git URI without whitespace"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">reference</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"git+"</span><span class="p">):</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">pinned</span> <span class="o">=</span> <span class="n">parse_git_uri</span><span class="p">(</span><span class="n">reference</span><span class="p">)</span><span class="o">.</span><span class="n">pinned</span>
+            <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">source</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">pinned</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">source</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2"> must pin its git URI to a full commit hash: </span><span class="si">{</span><span class="n">reference</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="s2">"/"</span> <span class="ow">in</span> <span class="n">reference</span> <span class="ow">or</span> <span class="n">reference</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"."</span><span class="p">):</span>
+            <span class="c1"># A path would resolve against whatever directory a job is created from.</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">source</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2"> must name a workflow or a git URI, not a path"</span><span class="p">)</span>
+        <span class="n">calls</span><span class="p">[</span><span class="n">label</span><span class="p">]</span> <span class="o">=</span> <span class="n">reference</span>
+    <span class="n">shadowed</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span>
+        <span class="nb">set</span><span class="p">(</span><span class="n">calls</span><span class="p">)</span> <span class="o">&amp;</span> <span class="nb">set</span><span class="p">(</span><span class="n">calls</span><span class="o">.</span><span class="n">values</span><span class="p">())</span> <span class="o">-</span> <span class="p">{</span><span class="n">alias</span> <span class="k">for</span> <span class="n">alias</span><span class="p">,</span> <span class="n">reference</span> <span class="ow">in</span> <span class="n">calls</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">alias</span> <span class="o">==</span> <span class="n">reference</span><span class="p">}</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">shadowed</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">source</span><span class="si">}</span><span class="s2"> alias </span><span class="si">{</span><span class="n">shadowed</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">!r}</span><span class="s2"> is also another call's reference"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">calls</span>
+
+
+<span class="n">_RUNNER_COMMAND_ELEMENT</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+    <span class="sa">r</span><span class="s2">"(?P&lt;prefix&gt;(?:-*[A-Za-z0-9_.][A-Za-z0-9_.-]*=)?)\{(?P&lt;name&gt;package|artifacts)\}(?P&lt;path&gt;.*)"</span><span class="p">,</span> <span class="n">re</span><span class="o">.</span><span class="n">DOTALL</span>
+<span class="p">)</span>
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">RunnerCommandReference</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""One placeholder reference in a runner command element.</span>
+
+<span class="sd">    :param name: The placeholder name, ``package`` or ``artifacts``.</span>
+<span class="sd">    :param path: The relative POSIX path after the placeholder, or ``None`` for the root itself.</span>
+<span class="sd">    :param prefix: The ``NAME=`` text before the placeholder, or empty at element start.</span>
+<span class="sd">    """</span>
+
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">prefix</span><span class="p">:</span> <span class="nb">str</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">runner_command_reference</span><span class="p">(</span><span class="n">element</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"runner.command"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunnerCommandReference</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return the placeholder reference of one runner command element.</span>
+
+<span class="sd">    A placeholder may appear only at the element start or directly after</span>
+<span class="sd">    ``NAME=``, and the rest of the element is either empty or ``/`` followed by a</span>
+<span class="sd">    relative POSIX path whose parts are nonempty and not ``.`` or ``..``.</span>
+
+<span class="sd">    :param element: The command element.</span>
+<span class="sd">    :param name: The member name used in validation errors.</span>
+<span class="sd">    :return: The reference, or ``None`` for an element without placeholders.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If braces appear outside that form.</span>
+<span class="sd">    """</span>
+
+    <span class="k">if</span> <span class="s2">"{"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">element</span> <span class="ow">and</span> <span class="s2">"}"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">element</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="n">match</span> <span class="o">=</span> <span class="n">_RUNNER_COMMAND_ELEMENT</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="n">element</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">match</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> element </span><span class="si">{</span><span class="n">element</span><span class="si">!r}</span><span class="s2"> must place </span><span class="se">{{</span><span class="s2">package</span><span class="se">}}</span><span class="s2"> or </span><span class="se">{{</span><span class="s2">artifacts</span><span class="se">}}</span><span class="s2"> at its start or after NAME="</span>
+        <span class="p">)</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">match</span><span class="p">[</span><span class="s2">"path"</span><span class="p">]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">path</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">RunnerCommandReference</span><span class="p">(</span><span class="n">match</span><span class="p">[</span><span class="s2">"name"</span><span class="p">],</span> <span class="kc">None</span><span class="p">,</span> <span class="n">match</span><span class="p">[</span><span class="s2">"prefix"</span><span class="p">])</span>
+    <span class="n">parts</span> <span class="o">=</span> <span class="n">path</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">"/"</span><span class="p">)</span> <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"/"</span><span class="p">)</span> <span class="k">else</span> <span class="p">[]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">parts</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">part</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">""</span><span class="p">,</span> <span class="s2">"."</span><span class="p">,</span> <span class="s2">".."</span><span class="p">}</span> <span class="ow">or</span> <span class="s2">"{"</span> <span class="ow">in</span> <span class="n">part</span> <span class="ow">or</span> <span class="s2">"}"</span> <span class="ow">in</span> <span class="n">part</span> <span class="k">for</span> <span class="n">part</span> <span class="ow">in</span> <span class="n">parts</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> element </span><span class="si">{</span><span class="n">element</span><span class="si">!r}</span><span class="s2"> must continue its placeholder with /PATH, "</span>
+            <span class="s2">"a relative path of nonempty parts other than '.' and '..'"</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="n">RunnerCommandReference</span><span class="p">(</span><span class="n">match</span><span class="p">[</span><span class="s2">"name"</span><span class="p">],</span> <span class="s2">"/"</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">parts</span><span class="p">),</span> <span class="n">match</span><span class="p">[</span><span class="s2">"prefix"</span><span class="p">])</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_runner_command</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"runner.command"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate the structure of a declared runner command.</span>
+
+<span class="sd">    A command is a nonempty argument vector whose elements may reference only the</span>
+<span class="sd">    ``{package}`` and ``{artifacts}`` placeholders, in the form</span>
+<span class="sd">    :func:`runner_command_reference` accepts. Its program is a placeholder path</span>
+<span class="sd">    or a bare name resolved on the attempt ``PATH``, never an absolute or</span>
+<span class="sd">    relative filesystem path.</span>
+
+<span class="sd">    :param value: The command value to validate.</span>
+<span class="sd">    :param name: The member name used in validation errors.</span>
+<span class="sd">    :return: The unexpanded command.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the command is malformed.</span>
+<span class="sd">    """</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">))</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">value</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must be a nonempty array of strings"</span><span class="p">)</span>
+    <span class="n">command</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">require_string</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> element"</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">value</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">element</span> <span class="ow">in</span> <span class="n">command</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">element</span> <span class="ow">or</span> <span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span> <span class="ow">in</span> <span class="n">element</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> elements must be nonempty strings without NUL"</span><span class="p">)</span>
+        <span class="n">runner_command_reference</span><span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">program</span> <span class="o">=</span> <span class="n">command</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">reference</span> <span class="o">=</span> <span class="n">runner_command_reference</span><span class="p">(</span><span class="n">program</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">reference</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span><span class="s2">"/"</span> <span class="ow">in</span> <span class="n">program</span> <span class="ow">or</span> <span class="n">program</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"."</span><span class="p">,</span> <span class="s2">".."</span><span class="p">}))</span> <span class="ow">or</span> <span class="p">(</span>
+        <span class="n">reference</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span><span class="n">reference</span><span class="o">.</span><span class="n">prefix</span> <span class="ow">or</span> <span class="n">reference</span><span class="o">.</span><span class="n">path</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> program </span><span class="si">{</span><span class="n">program</span><span class="si">!r}</span><span class="s2"> must be </span><span class="se">{{</span><span class="s2">package</span><span class="se">}}</span><span class="s2">/PATH, </span><span class="se">{{</span><span class="s2">artifacts</span><span class="se">}}</span><span class="s2">/PATH, or a bare name found on PATH"</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="n">command</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">expand_runner_command</span><span class="p">(</span><span class="n">command</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">package</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">artifacts</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Expand the placeholders of a validated runner command.</span>
+
+<span class="sd">    :param command: The unexpanded command.</span>
+<span class="sd">    :param package: The verified runner tree substituted for ``{package}``.</span>
+<span class="sd">    :param artifacts: The registered build artifacts substituted for ``{artifacts}``.</span>
+<span class="sd">    :return: The expanded argument vector.</span>
+<span class="sd">    :raises ValueError: If the command uses ``{artifacts}`` and no artifacts are given.</span>
+<span class="sd">    """</span>
+
+    <span class="n">expanded</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">element</span> <span class="ow">in</span> <span class="n">command</span><span class="p">:</span>
+        <span class="n">reference</span> <span class="o">=</span> <span class="n">runner_command_reference</span><span class="p">(</span><span class="n">element</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">reference</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">expanded</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">element</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">reference</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">"artifacts"</span> <span class="ow">and</span> <span class="n">artifacts</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"the runner command uses </span><span class="si">{artifacts}</span><span class="s2"> but no build artifacts are registered"</span><span class="p">)</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="n">package</span> <span class="k">if</span> <span class="n">reference</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">"package"</span> <span class="k">else</span> <span class="n">artifacts</span>
+        <span class="k">assert</span> <span class="n">root</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+        <span class="n">target</span> <span class="o">=</span> <span class="n">root</span> <span class="k">if</span> <span class="n">reference</span><span class="o">.</span><span class="n">path</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">root</span><span class="o">.</span><span class="n">joinpath</span><span class="p">(</span><span class="o">*</span><span class="n">reference</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">"/"</span><span class="p">))</span>
+        <span class="n">expanded</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">reference</span><span class="o">.</span><span class="n">prefix</span><span class="si">}{</span><span class="n">target</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">expanded</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="job_digest">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.job_digest">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">job_digest</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return the normative immutable job digest of stored ``job.json`` bytes.</span>
+
+<span class="sd">    The digest of a job is the SHA-256 over the ``job.json`` file bytes exactly</span>
+<span class="sd">    as submitted. Nothing rewrites or renormalizes those bytes, so the digest is</span>
+<span class="sd">    reproducible by any implementation with only a hash utility.</span>
+
+<span class="sd">    :param data: The stored ``job.json`` bytes.</span>
+<span class="sd">    :return: The lowercase SHA-256 digest.</span>
+<span class="sd">    """</span>
+
+    <span class="k">return</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">data</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="validate_step">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_step">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_step</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"step"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate and return one workflow step name.</span>
+
+<span class="sd">    :param value: The step name to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated step name.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the value is not a valid step name.</span>
+<span class="sd">    """</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">text</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">"utf-8"</span><span class="p">))</span> <span class="o">&gt;</span> <span class="mi">128</span> <span class="ow">or</span> <span class="s2">"/"</span> <span class="ow">in</span> <span class="n">text</span> <span class="ow">or</span> <span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> is not a valid step name"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">text</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">ensure_step_known</span><span class="p">(</span><span class="n">step</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">steps</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">subject</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return *step* when *subject* implements it, else raise listing the known set.</span>
+
+<span class="sd">    :param step: The requested step name.</span>
+<span class="sd">    :param steps: The steps *subject* is known to implement.</span>
+<span class="sd">    :param subject: A phrase naming the subject, used verbatim in the error.</span>
+<span class="sd">    :return: The validated requested step.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If *step* is malformed or not in *steps*.</span>
+<span class="sd">    """</span>
+    <span class="n">validate_step</span><span class="p">(</span><span class="n">step</span><span class="p">,</span> <span class="s2">"step"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">step</span> <span class="ow">in</span> <span class="n">steps</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">step</span>
+    <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">subject</span><span class="si">}</span><span class="s2"> does not implement the step </span><span class="si">{</span><span class="n">step</span><span class="si">!r}</span><span class="s2">; its steps: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">steps</span><span class="p">)</span><span class="w"> </span><span class="ow">or</span><span class="w"> </span><span class="s1">'none'</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="normalize_placement">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.normalize_placement">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_placement</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">PurePosixPath</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PurePosixPath</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate and normalize one relative POSIX placement.</span>
+
+<span class="sd">    The empty placement (``""`` or ``"."``) is legal and normalizes to ``PurePosixPath()``.</span>
+
+<span class="sd">    :param value: The placement to validate.</span>
+<span class="sd">    :return: The normalized relative placement.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the placement is absolute, unsafe, or too long.</span>
+<span class="sd">    """</span>
+    <span class="n">placement</span> <span class="o">=</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">placement</span><span class="o">.</span><span class="n">is_absolute</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"placement must be a relative POSIX path"</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">part</span> <span class="ow">in</span> <span class="n">placement</span><span class="o">.</span><span class="n">parts</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">part</span> <span class="ow">in</span> <span class="n">_UNSAFE_PATH_COMPONENTS</span> <span class="ow">or</span> <span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span> <span class="ow">in</span> <span class="n">part</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"invalid placement component: </span><span class="si">{</span><span class="n">part</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">part</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span> <span class="o">&gt;</span> <span class="mi">255</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"placement component is too long: </span><span class="si">{</span><span class="n">part</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">placement</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">payload_relative</span><span class="p">(</span><span class="n">placement</span><span class="p">:</span> <span class="n">PurePosixPath</span><span class="p">,</span> <span class="n">job_key</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PurePosixPath</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return a job payload's workspace-relative path, ``jobs/&lt;placement&gt;/&lt;job_key&gt;``.</span>
+
+<span class="sd">    :param placement: The job's normalized placement.</span>
+<span class="sd">    :param job_key: The job key.</span>
+<span class="sd">    :return: The relative payload path.</span>
+<span class="sd">    """</span>
+    <span class="k">return</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="n">JOBS_DIRECTORY</span><span class="p">,</span> <span class="o">*</span><span class="n">placement</span><span class="o">.</span><span class="n">parts</span><span class="p">,</span> <span class="n">job_key</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="placement_text">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.placement_text">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">placement_text</span><span class="p">(</span><span class="n">placement</span><span class="p">:</span> <span class="n">PurePosixPath</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return the canonical text of a placement: ``""`` for the empty placement, else its POSIX form.</span>
+
+<span class="sd">    :param placement: The normalized placement.</span>
+<span class="sd">    :return: The text written to JSON, frames, manifests, and cursors.</span>
+<span class="sd">    """</span>
+    <span class="k">return</span> <span class="n">placement</span><span class="o">.</span><span class="n">as_posix</span><span class="p">()</span> <span class="k">if</span> <span class="n">placement</span><span class="o">.</span><span class="n">parts</span> <span class="k">else</span> <span class="s2">""</span></div>
+
+
+
+<div class="viewcode-block" id="parse_placement_text">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.parse_placement_text">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">parse_placement_text</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"placement"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PurePosixPath</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Parse the canonical text of a placement, allowing the empty string.</span>
+
+<span class="sd">    :param value: The text to parse.</span>
+<span class="sd">    :param name: The field name used in error messages.</span>
+<span class="sd">    :return: The normalized placement.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the value is not a string or not a valid placement.</span>
+<span class="sd">    """</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> must be a string"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">normalize_placement</span><span class="p">(</span><span class="n">value</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="check_job_placement">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.check_job_placement">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">check_job_placement</span><span class="p">(</span><span class="n">placement</span><span class="p">:</span> <span class="n">PurePosixPath</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Refuse a placement that names a job directory, so job directories never nest.</span>
+
+<span class="sd">    Every job directory is ``&lt;placement&gt;/&lt;job_key&gt;``. A placement none of whose</span>
+<span class="sd">    components parses as a job key therefore never places one job inside</span>
+<span class="sd">    another's directory, without any lock or index. New jobs are held to this</span>
+<span class="sd">    rule wherever they enter a workspace.</span>
+
+<span class="sd">    :param placement: The normalized placement to check.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If a component of the placement parses as a job key.</span>
+<span class="sd">    """</span>
+
+    <span class="k">for</span> <span class="n">part</span> <span class="ow">in</span> <span class="n">placement</span><span class="o">.</span><span class="n">parts</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">parse_job_key</span><span class="p">(</span><span class="n">part</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">FormatError</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"placement </span><span class="si">{</span><span class="n">placement_text</span><span class="p">(</span><span class="n">placement</span><span class="p">)</span><span class="si">!r}</span><span class="s2"> has the component </span><span class="si">{</span><span class="n">part</span><span class="si">!r}</span><span class="s2">, which parses as a job key: "</span>
+            <span class="s2">"a placement must not name a job directory, so job directories never nest"</span>
+        <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="make_job_key">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.make_job_key">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">make_job_key</span><span class="p">(</span><span class="n">job_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">tag</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Compose the stable job key from an identifier and optional tag.</span>
+
+<span class="sd">    :param job_id: The job UUID text.</span>
+<span class="sd">    :param tag: The optional job tag.</span>
+<span class="sd">    :return: The job key used by workspace markers.</span>
+<span class="sd">    """</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">tag</span><span class="si">}</span><span class="s2">--</span><span class="si">{</span><span class="n">job_id</span><span class="si">}</span><span class="s2">"</span> <span class="k">if</span> <span class="n">tag</span> <span class="k">else</span> <span class="n">job_id</span></div>
+
+
+
+<div class="viewcode-block" id="parse_job_key">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.parse_job_key">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">parse_job_key</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Split a job key into its optional tag and job identifier.</span>
+
+<span class="sd">    :param value: The job key to parse.</span>
+<span class="sd">    :return: The tag and job identifier.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the key does not use the protocol syntax.</span>
+<span class="sd">    """</span>
+    <span class="n">job_id</span> <span class="o">=</span> <span class="n">value</span><span class="p">[</span><span class="o">-</span><span class="mi">36</span><span class="p">:]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">_UUID_PATTERN</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="n">job_id</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"invalid job key UUID: </span><span class="si">{</span><span class="n">value</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">==</span> <span class="mi">36</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span><span class="p">,</span> <span class="n">job_id</span>
+    <span class="k">if</span> <span class="n">value</span><span class="p">[</span><span class="o">-</span><span class="mi">38</span><span class="p">:</span><span class="o">-</span><span class="mi">36</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">"--"</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"invalid job key separator: </span><span class="si">{</span><span class="n">value</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">tag</span> <span class="o">=</span> <span class="n">validate_label</span><span class="p">(</span><span class="n">value</span><span class="p">[:</span><span class="o">-</span><span class="mi">38</span><span class="p">],</span> <span class="s2">"job key tag"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">tag</span><span class="p">,</span> <span class="n">job_id</span></div>
+
+
+
+<div class="viewcode-block" id="RetentionPolicy">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.RetentionPolicy">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">RetentionPolicy</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""How long a workspace keeps the history it is allowed to collect.</span>
+
+<span class="sd">    ``trash_days`` defaults to one day. An explicit ``null`` or ``"keep"``</span>
+<span class="sd">    value means that category has no limit; omitted ``attempt_control_days``</span>
+<span class="sd">    likewise remains unlimited. The collector that acts on these numbers is a</span>
+<span class="sd">    separate concern; the workspace only carries them so that every</span>
+<span class="sd">    implementation attaching to it agrees on what may be removed and when.</span>
+
+<span class="sd">    :param attempt_control_days: The retention period for attempt controls.</span>
+<span class="sd">    :param trash_days: The retention period for discarded workspace entries.</span>
+<span class="sd">    :param owner_tombstone_days: How long the ``dead.json`` tombstone of a recovered owner is kept.</span>
+<span class="sd">    """</span>
+
+    <span class="n">attempt_control_days</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">trash_days</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="mf">1.0</span>
+    <span class="n">owner_tombstone_days</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="mf">30.0</span>
+
+<div class="viewcode-block" id="RetentionPolicy.from_mapping">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.RetentionPolicy.from_mapping">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_mapping</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"policy.retention"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"RetentionPolicy"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Validate one retention policy mapping.</span>
+
+<span class="sd">        :param value: The policy mapping to validate.</span>
+<span class="sd">        :param name: The field name used in validation errors.</span>
+<span class="sd">        :return: The validated retention policy.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the mapping contains unsupported or invalid members.</span>
+<span class="sd">        """</span>
+        <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">unsupported</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">mapping</span><span class="p">)</span> <span class="o">-</span> <span class="n">RETENTION_KEYS</span> <span class="o">-</span> <span class="n">_RETIRED_RETENTION_KEYS</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has unsupported members: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">unsupported</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+        <span class="n">defaults</span> <span class="o">=</span> <span class="bp">cls</span><span class="p">()</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">optional_days</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">mapping</span><span class="p">:</span>
+                <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">defaults</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+            <span class="n">raw</span> <span class="o">=</span> <span class="n">mapping</span><span class="p">[</span><span class="n">key</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">raw</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">raw</span> <span class="o">==</span> <span class="s2">"keep"</span><span class="p">:</span>
+                <span class="k">return</span> <span class="kc">None</span>
+            <span class="k">return</span> <span class="n">require_number</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="n">minimum</span><span class="o">=</span><span class="mf">0.0</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">attempt_control_days</span><span class="o">=</span><span class="n">optional_days</span><span class="p">(</span><span class="s2">"attempt_control_days"</span><span class="p">),</span>
+            <span class="n">trash_days</span><span class="o">=</span><span class="n">optional_days</span><span class="p">(</span><span class="s2">"trash_days"</span><span class="p">),</span>
+            <span class="n">owner_tombstone_days</span><span class="o">=</span><span class="n">optional_days</span><span class="p">(</span><span class="s2">"owner_tombstone_days"</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="RetentionPolicy.as_mapping">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.RetentionPolicy.as_mapping">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_mapping</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return the JSON representation, omitting only unset attempt retention.</span>
+
+<span class="sd">        :return: The JSON policy mapping.</span>
+<span class="sd">        """</span>
+
+        <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">RETENTION_KEYS</span><span class="p">):</span>
+            <span class="n">value</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"trash_days"</span><span class="p">,</span> <span class="s2">"owner_tombstone_days"</span><span class="p">}:</span>
+                <span class="n">result</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+        <span class="k">return</span> <span class="n">result</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="WorkspacePolicy">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.WorkspacePolicy">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">WorkspacePolicy</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""The tunables every implementation attaching to one workspace shares.</span>
+
+<span class="sd">    These are workspace properties rather than per-process options: two owners</span>
+<span class="sd">    on different hosts must agree on how long another host's renames and writes</span>
+<span class="sd">    may take to become visible. They live in ``format.json`` beside the format</span>
+<span class="sd">    and profile declarations.</span>
+
+<span class="sd">    :param visibility_deadline_seconds: The visibility deadline of another host's writes.</span>
+<span class="sd">    :param retention: The workspace retention policy.</span>
+<span class="sd">    """</span>
+
+    <span class="n">visibility_deadline_seconds</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="n">DEFAULT_VISIBILITY_DEADLINE_SECONDS</span>
+    <span class="n">retention</span><span class="p">:</span> <span class="n">RetentionPolicy</span> <span class="o">=</span> <span class="n">RetentionPolicy</span><span class="p">()</span>
+
+<div class="viewcode-block" id="WorkspacePolicy.from_mapping">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.WorkspacePolicy.from_mapping">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_mapping</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"policy"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"WorkspacePolicy"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Validate one complete policy object, filling in absent members.</span>
+
+<span class="sd">        :param value: The policy mapping to validate.</span>
+<span class="sd">        :param name: The field name used in validation errors.</span>
+<span class="sd">        :return: The validated retention policy.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the mapping contains unsupported or invalid members.</span>
+<span class="sd">        """</span>
+
+        <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">unsupported</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">mapping</span><span class="p">)</span> <span class="o">-</span> <span class="n">POLICY_KEYS</span> <span class="o">-</span> <span class="n">_RETIRED_POLICY_KEYS</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has unsupported members: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">unsupported</span><span class="p">)</span><span class="si">}</span><span class="s2">; "</span>
+                <span class="sa">f</span><span class="s2">"the supported keys are </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">POLICY_KEYS</span><span class="p">))</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="n">defaults</span> <span class="o">=</span> <span class="bp">cls</span><span class="p">()</span>
+        <span class="n">deadline</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"visibility_deadline_seconds"</span><span class="p">)</span>
+        <span class="n">retention</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"retention"</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">visibility_deadline_seconds</span><span class="o">=</span><span class="p">(</span>
+                <span class="n">defaults</span><span class="o">.</span><span class="n">visibility_deadline_seconds</span>
+                <span class="k">if</span> <span class="n">deadline</span> <span class="ow">is</span> <span class="kc">None</span>
+                <span class="k">else</span> <span class="n">require_number</span><span class="p">(</span>
+                    <span class="n">deadline</span><span class="p">,</span>
+                    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.visibility_deadline_seconds"</span><span class="p">,</span>
+                    <span class="n">minimum</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span>
+                    <span class="n">maximum</span><span class="o">=</span><span class="n">MAXIMUM_VISIBILITY_DEADLINE_SECONDS</span><span class="p">,</span>
+                <span class="p">)</span>
+            <span class="p">),</span>
+            <span class="n">retention</span><span class="o">=</span><span class="p">(</span>
+                <span class="n">defaults</span><span class="o">.</span><span class="n">retention</span>
+                <span class="k">if</span> <span class="n">retention</span> <span class="ow">is</span> <span class="kc">None</span>
+                <span class="k">else</span> <span class="n">RetentionPolicy</span><span class="o">.</span><span class="n">from_mapping</span><span class="p">(</span><span class="n">retention</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.retention"</span><span class="p">)</span>
+            <span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="WorkspacePolicy.as_mapping">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.WorkspacePolicy.as_mapping">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_mapping</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return the complete JSON representation stored in ``format.json``.</span>
+
+<span class="sd">        :return: The JSON workspace policy mapping.</span>
+<span class="sd">        """</span>
+
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">"visibility_deadline_seconds"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">visibility_deadline_seconds</span><span class="p">,</span>
+            <span class="s2">"retention"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">retention</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">(),</span>
+        <span class="p">}</span></div>
+
+
+<div class="viewcode-block" id="WorkspacePolicy.updated">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.WorkspacePolicy.updated">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">updated</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">changes</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">],</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"policy"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"WorkspacePolicy"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return this policy with *changes* applied and revalidated.</span>
+
+<span class="sd">        :param changes: Policy members to replace.</span>
+<span class="sd">        :param name: The field name used in validation errors.</span>
+<span class="sd">        :return: The updated workspace policy.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the changes contain unsupported or invalid members.</span>
+<span class="sd">        """</span>
+
+        <span class="n">unsupported</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">changes</span><span class="p">)</span> <span class="o">-</span> <span class="n">POLICY_KEYS</span><span class="p">)</span>
+        <span class="n">retention</span> <span class="o">=</span> <span class="n">changes</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"retention"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">retention</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">):</span>
+            <span class="c1"># Reading tolerates the retired members; writing one is refused.</span>
+            <span class="n">unsupported</span> <span class="o">+=</span> <span class="p">[</span><span class="sa">f</span><span class="s2">"retention.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">retention</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">_RETIRED_RETENTION_KEYS</span><span class="p">)]</span>
+        <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has unsupported members: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">unsupported</span><span class="p">)</span><span class="si">}</span><span class="s2">; "</span>
+                <span class="sa">f</span><span class="s2">"the supported keys are </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">POLICY_KEYS</span><span class="p">))</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="n">WorkspacePolicy</span><span class="o">.</span><span class="n">from_mapping</span><span class="p">({</span><span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">(),</span> <span class="o">**</span><span class="nb">dict</span><span class="p">(</span><span class="n">changes</span><span class="p">)},</span> <span class="n">name</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="RetryPolicy">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.RetryPolicy">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">RetryPolicy</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""The attempt budgets of one job and the failures it retries within them.</span>
+
+<span class="sd">    Two independent rules make a failure retry-eligible, and both are bounded by</span>
+<span class="sd">    exactly the same budgets:</span>
+
+<span class="sd">    * ``retry_on`` lists failure codes. A manager-detected failure — a lost</span>
+<span class="sd">      lease, a process failure, an unusable outcome — is retried when its code</span>
+<span class="sd">      appears in this set.</span>
+<span class="sd">    * A runner-declared failure published with ``retryable: true`` is retried</span>
+<span class="sd">      whether or not its code appears in ``retry_on``, because the runner that</span>
+<span class="sd">      produced the failure is the authority on whether repeating the attempt can</span>
+<span class="sd">      help.</span>
+
+<span class="sd">    Neither rule can exceed ``maximum_attempts_per_activation`` or</span>
+<span class="sd">    ``maximum_total_attempts``: an exhausted budget always ends the job.</span>
+
+<span class="sd">    :param maximum_attempts_per_activation: The per-activation attempt budget.</span>
+<span class="sd">    :param maximum_total_attempts: The total attempt budget.</span>
+<span class="sd">    :param maximum_activations: The activation budget.</span>
+<span class="sd">    :param retry_on: Failure codes eligible for manager-detected retry.</span>
+<span class="sd">    """</span>
+
+    <span class="n">maximum_attempts_per_activation</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">maximum_total_attempts</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">maximum_activations</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">retry_on</span><span class="p">:</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span>
+
+<div class="viewcode-block" id="RetryPolicy.from_mapping">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.RetryPolicy.from_mapping">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_mapping</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"RetryPolicy"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Validate one job retry policy mapping.</span>
+
+<span class="sd">        :param value: The retry policy mapping to validate.</span>
+<span class="sd">        :return: The validated retry policy.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the mapping contains invalid retry settings.</span>
+<span class="sd">        """</span>
+        <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="s2">"retry_policy"</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">optional_limit</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">raw</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">raw</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">require_int</span><span class="p">(</span><span class="n">raw</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"retry_policy.</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="n">minimum</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+        <span class="n">retry_raw</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"retry_on"</span><span class="p">,</span> <span class="p">[])</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">retry_raw</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">retry_raw</span><span class="p">,</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">)):</span>
+            <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="s2">"retry_policy.retry_on must be an array"</span><span class="p">)</span>
+        <span class="n">retry_on</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span><span class="n">require_string</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">"retry_policy.retry_on item"</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">retry_raw</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">maximum_attempts_per_activation</span><span class="o">=</span><span class="n">optional_limit</span><span class="p">(</span><span class="s2">"maximum_attempts_per_activation"</span><span class="p">),</span>
+            <span class="n">maximum_total_attempts</span><span class="o">=</span><span class="n">optional_limit</span><span class="p">(</span><span class="s2">"maximum_total_attempts"</span><span class="p">),</span>
+            <span class="n">maximum_activations</span><span class="o">=</span><span class="n">optional_limit</span><span class="p">(</span><span class="s2">"maximum_activations"</span><span class="p">),</span>
+            <span class="n">retry_on</span><span class="o">=</span><span class="n">retry_on</span><span class="p">,</span>
+        <span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Failure">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.Failure">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Failure</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""One canonical structured failure record.</span>
+
+<span class="sd">    Every failure published by a runner, a bridge, or the manager itself uses</span>
+<span class="sd">    exactly this shape: a stable machine ``code``, one human ``message``,</span>
+<span class="sd">    optional structured ``details``, and the advisory ``retryable`` flag. Retry</span>
+<span class="sd">    policy uses ``retry_on`` for manager-detected failures, while a runner-declared</span>
+<span class="sd">    ``retryable`` failure is retry-eligible regardless of ``retry_on`` when budget</span>
+<span class="sd">    remains.</span>
+
+<span class="sd">    :param code: The stable machine failure code.</span>
+<span class="sd">    :param message: The human-readable failure message.</span>
+<span class="sd">    :param details: Optional structured failure details.</span>
+<span class="sd">    :param retryable: Whether repeating the attempt could help.</span>
+<span class="sd">    """</span>
+
+    <span class="n">code</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">message</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">details</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">retryable</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+
+<div class="viewcode-block" id="Failure.as_mapping">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.Failure.as_mapping">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_mapping</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return the canonical JSON representation of this failure.</span>
+
+<span class="sd">        :return: The JSON failure mapping.</span>
+<span class="sd">        """</span>
+
+        <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"code"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">code</span><span class="p">,</span> <span class="s2">"message"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">message</span><span class="p">}</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">details</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"details"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">details</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">retryable</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"retryable"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="k">return</span> <span class="n">result</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="validate_failure">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/protocol/index.html#httk.workflow.protocol.validate_failure">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_failure</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"failure"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Failure</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate one published failure object.</span>
+
+<span class="sd">    :param value: The failure mapping to validate.</span>
+<span class="sd">    :param name: The field name used in validation errors.</span>
+<span class="sd">    :return: The validated failure record.</span>
+<span class="sd">    :raises httk.workflow.errors.FormatError: If the failure is missing required members or has invalid members.</span>
+<span class="sd">    """</span>
+
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="n">unsupported</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">mapping</span><span class="p">)</span> <span class="o">-</span> <span class="n">_FAILURE_MEMBERS</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">unsupported</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> has unsupported members: </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">unsupported</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">code</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"code"</span><span class="p">),</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.code"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">"utf-8"</span><span class="p">))</span> <span class="o">&gt;</span> <span class="mi">128</span> <span class="ow">or</span> <span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span> <span class="ow">in</span> <span class="n">code</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">character</span><span class="o">.</span><span class="n">isspace</span><span class="p">()</span> <span class="k">for</span> <span class="n">character</span> <span class="ow">in</span> <span class="n">code</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.code must be one short token without whitespace"</span><span class="p">)</span>
+    <span class="n">message</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"message"</span><span class="p">),</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.message"</span><span class="p">)</span>
+    <span class="n">details_raw</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"details"</span><span class="p">)</span>
+    <span class="n">details</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">details_raw</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">require_mapping</span><span class="p">(</span><span class="n">details_raw</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.details"</span><span class="p">)</span>
+    <span class="n">retryable</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"retryable"</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">retryable</span><span class="p">,</span> <span class="nb">bool</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">FormatError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.retryable must be a boolean"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">Failure</span><span class="p">(</span>
+        <span class="n">code</span><span class="o">=</span><span class="n">code</span><span class="p">,</span>
+        <span class="n">message</span><span class="o">=</span><span class="n">message</span><span class="p">,</span>
+        <span class="n">details</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">details</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">dict</span><span class="p">(</span><span class="n">details</span><span class="p">),</span>
+        <span class="n">retryable</span><span class="o">=</span><span class="n">retryable</span><span class="p">,</span>
+    <span class="p">)</span></div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=952df46a"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>
