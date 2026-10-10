@@ -3,7 +3,6 @@
 import glob
 import json
 import os
-import stat
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -202,43 +201,6 @@ def read_job_file(job: Path, relative: str | PurePosixPath, limit: int) -> bytes
         return _fs.read_bounded(_fs.anchored(directory, path.name), limit, nonblock=True)
     finally:
         os.close(directory)
-
-
-def read_job_tail(job: Path, relative: str, size: int, offset: int | None = None) -> tuple[bytes, int]:
-    """Read a slice of a growing file below a job directory, as :func:`read_job_file` reads (unbounded files).
-
-    :param job: The job directory (a trusted anchor).
-    :param relative: The file below it, such as ``logs/stdio.out``.
-    :param size: The most bytes to read.
-    :param offset: Where to start; ``None`` reads the last *size* bytes, and an offset past the end restarts at 0.
-    :return: The bytes and the offset after them; no bytes and *offset* (or 0) when the file is absent.
-    :raises httk.workflow._fs.UnsafePath: If the file is not a regular file, or a directory on its way is a symlink.
-    :raises OSError: If the file is a symlink (``ELOOP``) or cannot be read.
-    """
-
-    path = PurePosixPath(relative)
-    try:
-        directory = _fs.open_dir_under(job, path.parent)
-    except (FileNotFoundError, NotADirectoryError):
-        return b"", offset or 0
-    try:
-        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
-    except FileNotFoundError:
-        return b"", offset or 0
-    finally:
-        os.close(directory)
-    try:
-        length = os.fstat(descriptor)
-        if not stat.S_ISREG(length.st_mode):
-            raise _fs.UnsafePath(f"{job / relative} is not a regular file")
-        if offset is None:
-            start = max(0, length.st_size - size)
-        else:
-            start = offset if offset <= length.st_size else 0
-        data = os.pread(descriptor, size, start)
-    finally:
-        os.close(descriptor)
-    return data, start + len(data)
 
 
 def _jsonl(job: Path, relative: str, *, tail: int | None = None) -> list[dict[str, Any]]:

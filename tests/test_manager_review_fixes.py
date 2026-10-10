@@ -288,6 +288,17 @@ def test_a_commit_that_keeps_failing_is_given_back_unchanged(ws: Workspace, inst
     assert h.find(ws, parent.job_id).state == "succeeded"
 
 
+def test_a_successful_commit_resets_the_failure_count(ws: Workspace, installed: _store.Installed) -> None:
+    ref = h.submit(ws, installed, {"start": "succeed"}, placement="project/ok")
+    with TaskManager(ws, heartbeat_interval=0.01) as task_manager:
+        _until(lambda: task_manager.tick() is not None and task_manager._running)
+        # Earlier failures of this job (a commit that failed and was then resumed) are forgotten once it commits.
+        task_manager._failures[ref.job_key] = manager._GIVE_BACK_AFTER - 1
+        task_manager.run_until_idle(timeout=60)
+        assert ref.job_key not in task_manager._failures
+    assert h.find(ws, ref.job_id).state == "succeeded"
+
+
 # -- B9: runner-chosen child ids are checked -------------------------------------------------------------------------
 
 

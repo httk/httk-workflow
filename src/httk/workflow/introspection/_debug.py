@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import _joins, _kernel
+from .. import _fs, _joins, _kernel
 from .._durations import TIME_RESOURCES
 from .._job import JobDefinition
 from .._kernel import JobRef
@@ -17,7 +17,7 @@ from ..models import LOGS_DIRECTORY, normalize_placement, placement_text, valida
 from ..scaffold import submit_payload
 from ..workspace import Workspace
 from ._diagnosis import observe_join
-from ._reading import read_job, read_job_tail, read_state, resolve_job, resolve_job_selectors
+from ._reading import read_job, read_state, resolve_job, resolve_job_selectors
 
 DEBUG_EXIT_SUCCEEDED = 0
 DEBUG_EXIT_FAILED = 3
@@ -71,7 +71,7 @@ class _Tail:
 
         while True:
             try:
-                data, self._offset = read_job_tail(self.job, f"{LOGS_DIRECTORY}/stdio.out", _TAIL_CHUNK, self._offset)
+                data, self._offset = _fs.read_tail(self.job, f"{LOGS_DIRECTORY}/stdio.out", _TAIL_CHUNK, self._offset)
             except (WorkflowError, OSError):
                 return
             lines = (self._partial + data.decode("utf-8", "replace")).split("\n")

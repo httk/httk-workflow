@@ -343,9 +343,12 @@ def test_refusal_and_force() -> None:
     # A refused delete is always dropped (force is not allowed on delete).
     _, effect = apply(_job(), _doc(), "failed", 500, _request("delete"), refusal=refuse)
     assert isinstance(effect, Drop) and "parent p" in effect.reason
-    # Only continue, override_step and delete consult the check.
+    # A refused eject (an unusable destination) is dropped too, without a force hint.
+    _, effect = apply(_job(), _doc(), "failed", 500, _request("eject"), refusal=refuse)
+    assert isinstance(effect, Drop) and effect.reason == "parent p decided its join on this job"
+    # Only continue, override_step, delete and eject consult the check.
     seen.clear()
-    for action in ("cancel", "pause", "set_priority", "detach", "eject", "seal", "unseal"):
+    for action in ("cancel", "pause", "set_priority", "detach", "seal", "unseal"):
         apply(_job(), _doc(), "paused", 500, _request(action), refusal=refuse)
     assert seen == []
 

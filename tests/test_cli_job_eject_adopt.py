@@ -51,7 +51,7 @@ def test_eject_and_adopt_round_trip(tmp_path: Path, capsys: pytest.CaptureFixtur
 
 def test_adopt_json_reports_already_adopted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
-    _, target_name = registered(tmp_path, "b")
+    target, target_name = registered(tmp_path, "b")
     mapping, _, _ = single(source)
     assert (
         command(
@@ -64,13 +64,19 @@ def test_adopt_json_reports_already_adopted(tmp_path: Path, capsys: pytest.Captu
     copy = tmp_path / "copy"
     copy.mkdir()
     shutil.copytree(bundle, copy / bundle.name, symlinks=True)
+    # A transfer's incoming copy, as a remote `job transfer` pushes it before adopting.
+    incoming = target.control / "transfers" / "incoming" / f"{bundle.name}.x"
+    shutil.copytree(bundle, incoming, symlinks=True)
     assert command(["job", "adopt", "--workspace", target_name, str(bundle)], context(tmp_path)) == 0
     capsys.readouterr()
-    assert (
-        command(["job", "adopt", "--workspace", target_name, str(copy / bundle.name), "--json"], context(tmp_path)) == 0
-    )
+    assert command(["job", "adopt", "--workspace", target_name, str(incoming), "--json"], context(tmp_path)) == 0
     document = json.loads(capsys.readouterr().out)
     assert document["already_adopted"] is True and document["published"] == []
+    assert not incoming.exists()
+    # The operator's own copy is refused and left in place.
+    assert command(["job", "adopt", "--workspace", target_name, str(copy / bundle.name)], context(tmp_path)) == 1
+    assert "already adopted; the bundle was left at" in capsys.readouterr().err
+    assert (copy / bundle.name / "bundle.json").is_file()
 
 
 def test_busy_member_exits_one(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

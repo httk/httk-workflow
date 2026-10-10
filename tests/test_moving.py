@@ -8,11 +8,11 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _fs, _kernel, _moving, _requests, removal
+from httk.workflow import TaskManager, Workspace, _bundles, _fs, _kernel, _moving, _requests, removal, scaffold
 from httk.workflow._bundles import BundleError, BundleManifest
 from httk.workflow._job import JobDefinition
 from httk.workflow._state import Release, StateDoc, read_state_unowned
-from httk.workflow.errors import WorkflowError
+from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.models import make_job_key
 from test_bundles import family, write_bundle
 from v3_helpers import cli_owner, job_mapping, submit_mapping
@@ -103,6 +103,11 @@ def assert_in(ws: Workspace, plan: list[tuple[dict[str, object], str, int]], *, 
         assert ref is not None, mapping["tag"]
         assert (ref.state, ref.priority) == (state, priority)
         assert (ref.path / "input.txt").read_text() == f"payload of {mapping['id']}"
+
+
+def run_log_events(job: Path) -> list[str]:
+    path = job / "logs" / "runlog.jsonl"
+    return [json.loads(line)["event"] for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def job_ids_below(root: Path) -> list[str]:
@@ -201,8 +206,8 @@ def test_busy_member_moves_nothing(tmp_path: Path) -> None:
         with pytest.raises(_moving.Busy) as caught:
             _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
         assert caught.value.job_key == blocker.job_key
-        assert owner.holds(root.ref) and len(owner.owned()) == 1
-        root.give_back()
+        # A refusal gives every claimed job back, the root included.
+        assert not owner.holds(root.ref) and owner.owned() == []
     blocker.give_back()
     other.close()
     assert_in(ws, plan)
@@ -227,8 +232,7 @@ def test_busy_on_a_lost_member_claim_gives_back_the_claimed_ones(
         with pytest.raises(_moving.Busy):
             _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=True)
         monkeypatch.setattr(_kernel, "claim", real)
-        assert [ref.job_id for ref in owner.owned()] == [root.job_id]
-        root.give_back()
+        assert owner.owned() == []
     assert_in(ws, plan)
 
 
@@ -434,13 +438,20 @@ def test_already_adopted_and_partial_presence(tmp_path: Path) -> None:
         )
     copy = tmp_path / "copy" / report.destination.name
     _fs.copy_tree(report.destination, copy, durable=False)
+    # A duplicate delivery the transfer machinery placed (here an incoming copy) is discarded as already adopted.
+    landed = target.control / "transfers" / "incoming" / f"{report.transfer_id}.x"
+    _fs.copy_tree(report.destination, landed, durable=False)
     partial = tmp_path / "partial" / report.destination.name
     _fs.copy_tree(report.destination, partial, durable=False)
     with cli_owner(target) as owner:
         assert _moving.adopt(target, owner, report.destination, untrusted=False) is not None
-        again = _moving.adopt(target, owner, copy, untrusted=False)
+        again = _moving.adopt(target, owner, landed, untrusted=False)
         assert again is not None and again.already_adopted and again.published == ()
-        assert not copy.exists()
+        assert not landed.exists()
+        # A second copy at an operator's plain path is never destroyed: refused, and kept where it was.
+        with pytest.raises(BundleError, match=f"already adopted; the bundle was left at {copy}"):
+            _moving.adopt(target, owner, copy, untrusted=False)
+        assert (copy / "bundle.json").is_file()
         # Delete one member: the second copy is now partially present and refused, back to where it was.
         ref = find(target, plan[3][0]["id"])
         assert ref is not None
@@ -663,8 +674,7 @@ def test_eject_without_tree_refuses_a_root_with_children(tmp_path: Path) -> None
         root = claim_root(ws, owner, plan[0][0]["id"])
         with pytest.raises(_moving.Busy, match="child of the job"):
             _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=False)
-        assert owner.holds(root.ref)
-        root.give_back()
+        assert not owner.holds(root.ref)
     assert_in(ws, plan)
     # The request path: an eject request without tree is refused and the jobs stay; with tree it ejects them all.
     ref = find(ws, plan[0][0]["id"])
@@ -782,7 +792,7 @@ def test_hold_held_release(tmp_path: Path) -> None:
     source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
     plan = tree(source)
     with cli_owner(source) as owner:
-        path = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True)
+        path = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True).destination
     (hold,) = _moving.held(source)
     assert hold.path == path and path.parent == source.control / "transfers" / "outgoing"
     assert hold.transfer_id == path.name == hold.manifest.transfer_id and len(hold.manifest.members) == 4
@@ -823,6 +833,7 @@ def test_eject_request_applied_by_a_manager_tick(tmp_path: Path) -> None:
     member = manifest.member_dir(bundle, manifest.members[0])
     doc, _ = read_state_unowned(member / "state.json")
     assert doc is not None and any(entry.get("action") == "eject" for entry in doc.history_tail)
+    assert "ejected" in run_log_events(member)  # the line travels in the bundle
     assert not list((ws.control / "requests").glob("*.json"))
     assert JobDefinition.from_path(member / "job.json").id == mapping["id"]
 
@@ -846,3 +857,121 @@ def test_eject_request_to_an_occupied_destination_returns_the_job(tmp_path: Path
         assert removal.serve(ws, owner, ref)
     assert_in(ws, [(mapping, state, priority)])
     assert not list((ws.control / "requests").glob("*.json"))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into any directory")
+@pytest.mark.parametrize("kind", ["symlink", "unwritable parent"])
+def test_a_failed_eject_request_returns_the_job_within_the_tick(tmp_path: Path, kind: str) -> None:
+    # A symlinked destination is refused before anything moves; an unwritable one fails the delivery, and the
+    # reconciler's roll back runs at once instead of when the manager closes.
+    ws = v3_workspace(tmp_path / "a")
+    mapping, state, priority = single(ws, "paused", 600)
+    ref = find(ws, mapping["id"])
+    assert ref is not None and ref.placement is not None
+    real = tmp_path / "real"
+    real.mkdir()
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    if kind == "symlink":
+        destination = tmp_path / "link"
+        destination.symlink_to(real)
+    else:
+        destination = locked / "out"
+        locked.chmod(0o555)
+    _requests.post(
+        ws,
+        action="eject",
+        job_id=ref.job_id,
+        placement=ref.placement,
+        operator="t",
+        reason="t",
+        destination=str(destination),
+    )
+    try:
+        with TaskManager(ws, heartbeat_interval=0.01) as manager:
+            manager.tick()
+            assert_in(ws, [(mapping, state, priority)])
+            assert not list((ws.control / "tmp").glob("*.eject.*"))
+    finally:
+        locked.chmod(0o755)
+    assert not list(real.iterdir()) and not list(locked.iterdir())
+    assert not list((ws.control / "requests").glob("*.json"))
+    returned = find(ws, mapping["id"])
+    assert returned is not None
+    if kind == "symlink":
+        doc, _ = read_state_unowned(returned.path / "state.json")
+        assert doc is not None
+        (dropped,) = (entry for entry in doc.history_tail if entry["event"] == "request_dropped")
+        assert "symlink" in str(dropped["note"])
+        assert "ejected" not in run_log_events(returned.path)
+    else:
+        assert "ejected" in run_log_events(returned.path)  # it was in the bundle when the delivery failed
+
+
+def test_a_refused_bundle_leaves_no_ejected_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    mapping, state, priority = single(ws, "failed", 500)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise BundleError("refused for the test")
+
+    monkeypatch.setattr(_bundles, "_check_job", refuse)
+    with cli_owner(ws) as owner:
+        root = claim_root(ws, owner, mapping["id"])
+        with pytest.raises(BundleError, match="refused for the test"):
+            _moving.eject(ws, owner, root, destination=tmp_path / "out", tree=False)
+        assert owner.owned() == []
+    assert_in(ws, [(mapping, state, priority)])
+    returned = find(ws, mapping["id"])
+    assert returned is not None and "ejected" not in run_log_events(returned.path)
+
+
+def test_a_recorded_child_a_stale_listing_misses_is_still_a_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    plan = tree(ws)
+    root = find(ws, plan[0][0]["id"])
+    assert root is not None
+    doc, _ = read_state_unowned(root.path / "state.json")
+    real, calls = _kernel._scan, {"n": 0}
+
+    def stale_first(*args: object, **kwargs: object) -> dict[str, _kernel.JobRef]:
+        calls["n"] += 1
+        return {} if calls["n"] == 1 else real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_kernel, "_scan", stale_first)
+    members = _moving.tree_members(ws, root.job_id, doc)
+    assert sorted(member.job_id for member in members) == sorted(str(mapping["id"]) for mapping, _, _ in plan[1:])
+
+
+# -- submit_payload (ported from the pre-redesign adoption hardening specification) ---------------------------------
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_a_moving_submit_refuses_an_unsafe_job_json_and_moves_nothing(tmp_path: Path, kind: str) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    job = JobDefinition.from_mapping(job_mapping(WORKFLOW, {"start": "succeed"}, tag="p", placement="proj/p"))
+    if kind == "symlink":
+        (tmp_path / "job.json").write_bytes(job.encode())
+        (payload / "job.json").symlink_to(tmp_path / "job.json")
+    else:
+        os.mkfifo(payload / "job.json")
+    with cli_owner(ws) as owner, pytest.raises(FormatError):
+        scaffold.submit_payload(ws, owner, payload, move=True)
+    assert (payload / "job.json").is_symlink() if kind == "symlink" else (payload / "job.json").exists()
+    assert find(ws, job.id) is None
+
+
+def test_a_copying_submit_refuses_a_special_file_in_the_payload(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "a")
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    job = JobDefinition.from_mapping(job_mapping(WORKFLOW, {"start": "succeed"}, tag="p", placement="proj/p"))
+    (payload / "job.json").write_bytes(job.encode())
+    os.mkfifo(payload / "pipe")
+    with cli_owner(ws) as owner, pytest.raises(_fs.UnsafePath, match="special file"):
+        scaffold.submit_payload(ws, owner, payload, move=False)
+    assert find(ws, job.id) is None and (payload / "job.json").is_file()

@@ -17,7 +17,9 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
   ``retention.owner_tombstone_days``;
 - ``tmp_entries``: write temporaries older than a day in ``requests/`` and
   ``owners/*/``, ``tmp/trash.<token>`` entries a crashed removal left, and
-  ``workflows/<slug>--<h16>.old.<token>/`` trees a crashed reinstall left.
+  ``workflows/<slug>--<h16>.old.<token>/`` trees a crashed reinstall left once
+  their installation exists (one whose installation is missing is moved back
+  into place instead).
 
 A retention value of ``None`` (``null`` or ``"keep"``) skips its category.
 Every removal goes through :mod:`httk.workflow._fs` or the kernel, so a

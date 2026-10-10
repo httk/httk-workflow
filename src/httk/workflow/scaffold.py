@@ -1528,7 +1528,8 @@ def submit_payload(
     :param changes: ``job.json`` members to replace in the copy; only without *move*.
     :return: The published reference.
     :raises httk.workflow.errors.FormatError: If ``job.json`` is missing or invalid.
-    :raises httk.workflow._fs.UnsafePath: If the placement below ``jobs/ready/`` is a symlink or not a directory.
+    :raises httk.workflow._fs.UnsafePath: If the placement below ``jobs/ready/`` is a symlink or not a directory,
+        or a copied payload holds a special file.
     :raises ValueError: If the payload carries ``state.json`` or ``logs``, or *changes* come with *move*.
     """
 
@@ -1540,12 +1541,12 @@ def submit_payload(
     for trusted in ("state.json", LOGS_DIRECTORY):
         if os.path.lexists(source / trusted):
             raise ValueError(f"a prepared payload may not carry {trusted}; only a job's owner writes it")
-    _kernel._check_placement(workspace, "ready", job.placement)
+    _kernel.check_placement(workspace, "ready", job.placement)
     scratch = owner.scratch(_SUBMIT)
     if move:
         return _submit_staged(workspace, owner, scratch, source.resolve())
     copied = scratch / "copy"
-    shutil.copytree(source, copied, symlinks=True)
+    _fs.copy_tree(source, copied, durable=workspace.durable)
     if changes:
         _fs.write_file(_fs.loc(copied / "job.json"), job.encode(), durable=workspace.durable)
     return _submit_staged(workspace, owner, scratch, copied)

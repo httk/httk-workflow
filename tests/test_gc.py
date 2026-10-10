@@ -283,7 +283,7 @@ def test_a_manager_collects_in_the_background_every_gc_interval(tmp_path: Path) 
     assert entries["temporary"].exists()  # no gc_interval, no background collection
 
 
-def test_a_reinstall_interrupted_between_its_renames_keeps_the_old_tree_until_gc(tmp_path: Path) -> None:
+def test_a_reinstall_interrupted_between_its_renames_keeps_the_old_tree_installed(tmp_path: Path) -> None:
     ws = _workspace(tmp_path / "ws")
     installed = install(ws, tmp_path / "package")
     (tmp_path / "package" / "notes.txt").write_text("v2", encoding="utf-8")
@@ -300,11 +300,26 @@ def test_a_reinstall_interrupted_between_its_renames_keeps_the_old_tree_until_gc
         _fs.set_fault_injector(None)
     (old,) = (path for path in (ws.root / "workflows").iterdir() if ".old." in path.name)
     assert (old / "install.json").is_file() and not installed.directory.exists()
-    assert _store.lookup(ws, installed.id) is None and _store.list_installed(ws) == []
-    assert collect_garbage(ws, dry_run=True, categories=("tmp_entries",)).candidates == 0  # moved aside just now
+    # The moved-aside tree is the only copy: lookups use it, and gc moves it back into place, never removes it.
+    assert _store.lookup(ws, installed.id).directory == old  # type: ignore[union-attr]
+    assert [found.directory for found in _store.list_installed(ws)] == [old]
     later = time.time() + 2 * _DAY
-    assert collect_garbage(ws, now=later, categories=("tmp_entries",)).removed == 1
-    assert not old.exists()
+    assert collect_garbage(ws, now=later, dry_run=True, categories=("tmp_entries",)).candidates == 0
+    assert old.exists()
+    assert collect_garbage(ws, now=later, categories=("tmp_entries",)).removed == 0
+    assert not old.exists() and (installed.directory / "install.json").is_file()
+    assert _store.lookup(ws, installed.id).directory == installed.directory  # type: ignore[union-attr]
+
+
+def test_gc_removes_a_moved_aside_tree_once_its_installation_exists(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path / "ws")
+    installed = install(ws, tmp_path / "package")
+    aside = installed.directory.with_name(f"{installed.directory.name}.old.{'a' * 16}")
+    _fs.copy_tree(installed.directory, aside, durable=False)
+    assert [found.directory for found in _store.list_installed(ws)] == [installed.directory]
+    assert collect_garbage(ws, dry_run=True, categories=("tmp_entries",)).candidates == 0  # moved aside just now
+    assert collect_garbage(ws, now=time.time() + 2 * _DAY, categories=("tmp_entries",)).removed == 1
+    assert not aside.exists() and installed.directory.is_dir()
 
 
 def test_a_reinstall_replaces_the_tree_and_leaves_nothing_aside(tmp_path: Path) -> None:

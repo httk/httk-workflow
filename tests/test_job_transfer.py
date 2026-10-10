@@ -274,7 +274,7 @@ def test_stale_holds_are_reported_and_never_touched(tmp_path: Path, project: Pat
     with cli_owner(source) as owner:
         root = _moving._kernel.claim(source, owner, find(source, mapping["id"]))  # type: ignore[arg-type]
         assert root is not None
-        path = _moving.hold(source, owner, root, tree=False, destination_locator="cluster:far")
+        path = _moving.hold(source, owner, root, tree=False, destination_locator="cluster:far").destination
     finding = hygiene._check_transfers(source.root, days=0)
     assert finding.status == "warning" and finding.details["stale_holds"] == [str(path)]
     assert finding.details["stale_incoming"] == [str(source.control / "transfers" / "incoming" / "leftover")]

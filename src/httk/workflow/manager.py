@@ -17,7 +17,6 @@ import random
 import shlex
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -388,19 +387,7 @@ def _logged_events(owned: OwnedJob, attempt_id: str) -> set[str]:
     """Return the events the tail of ``logs/runlog.jsonl`` already records for *attempt_id*."""
 
     try:
-        directory = _fs.open_dir_under(owned.path, "logs")
-        try:
-            descriptor = os.open(
-                "runlog.jsonl", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
-            )
-        finally:
-            os.close(directory)
-        try:
-            info = os.fstat(descriptor)
-            start = max(0, info.st_size - _RUNLOG_TAIL_BYTES)
-            data = os.pread(descriptor, _RUNLOG_TAIL_BYTES, start) if stat.S_ISREG(info.st_mode) else b""
-        finally:
-            os.close(descriptor)
+        data, _ = _fs.read_tail(owned.path, "logs/runlog.jsonl", _RUNLOG_TAIL_BYTES)
     except (OSError, _fs.UnsafePath):
         return set()
     events: set[str] = set()
@@ -1796,6 +1783,8 @@ class TaskManager:
             except Exception as exc:
                 # The job stays owned with its intent; self-healing resumes the commit on a later tick.
                 self._job_failed(local.owned, "commit", exc)
+            else:
+                self._failures.pop(local.owned.job_key, None)
             changed = True
         return changed
 

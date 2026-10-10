@@ -378,15 +378,31 @@ def _decode(data: bytes, name: str) -> object:
         raise BundleError(f"{name} is not valid UTF-8 JSON: {exc}") from exc
 
 
-def _read(path: Path, limit: int) -> bytes:
+def _read_optional(path: Path, limit: int) -> bytes | None:
     # Bounded, regular files only, never following a symlink, and never blocking on a planted FIFO.
     try:
-        data = _fs.read_bounded(_fs.loc(path), limit, nonblock=True)
+        return _fs.read_bounded(_fs.loc(path), limit, nonblock=True)
     except (_fs.UnsafePath, _fs.TooLarge) as exc:
         raise BundleError(str(exc)) from exc
+
+
+def _read(path: Path, limit: int) -> bytes:
+    data = _read_optional(path, limit)
     if data is None:
         raise BundleError(f"{path} does not exist")
     return data
+
+
+def read_manifest(path: Path) -> tuple[bytes, BundleManifest] | None:
+    """Read a manifest file (``bundle.json``, or an adoption's ``plan.json``): bounded, regular, never followed.
+
+    :param path: The file.
+    :return: Its exact bytes and the parsed manifest, or ``None`` when it does not exist.
+    :raises BundleError: For a symlink, a special or oversized file, or a malformed manifest.
+    """
+
+    data = _read_optional(path, MAX_MANIFEST_BYTES)
+    return None if data is None else (data, BundleManifest.from_json(data))
 
 
 # -- building -------------------------------------------------------------------------------------------------------
@@ -399,6 +415,7 @@ def build_bundle(
     source_workspace_id: str,
     destination_workspace_id: str | None = None,
     destination_locator: str | None = None,
+    event: tuple[str, Mapping[str, object]] | None = None,
 ) -> Path:
     """Build a bundle of quiescent owned jobs in a fresh ``eject`` scratch of *owner*.
 
@@ -411,6 +428,8 @@ def build_bundle(
     :param source_workspace_id: This workspace's id.
     :param destination_workspace_id: The intended destination workspace, or ``None``.
     :param destination_locator: The intended destination path or address, or ``None``.
+    :param event: A run-log event and its members, appended to each member once every check passed, right
+        before its extraction: a refusal leaves no such line, and the line travels in the bundle.
     :return: The bundle directory, ``tmp/<owner-id>.eject.<token>/bundle``.
     :raises ValueError: For no members, a member held by another owner or listed out of order.
     :raises httk.workflow.errors.FormatError: For a malformed id or locator, or a ``job.json`` that is
@@ -459,6 +478,8 @@ def build_bundle(
     for job, member in zip(members, manifest.members, strict=True):
         target = manifest.member_dir(bundle, member)
         _fs.make_dirs(target.parent, durable=durable)
+        if event is not None:
+            job.append_log(event[0], **event[1])
         job.extract(target)
     return bundle
 
@@ -564,7 +585,10 @@ def _structural_kinds(path: Path, manifest: BundleManifest) -> dict[PurePosixPat
 def _read_manifest(path: Path, kind: str | None) -> BundleManifest:
     if kind != "file":
         raise BundleError(f"{path}/bundle.json is {'missing' if kind is None else f'a {kind}'}, not a regular file")
-    return BundleManifest.from_json(_read(path / _MANIFEST_NAME, MAX_MANIFEST_BYTES))
+    read = read_manifest(path / _MANIFEST_NAME)
+    if read is None:
+        raise BundleError(f"{path / _MANIFEST_NAME} does not exist")
+    return read[1]
 
 
 def validate_bundle(path: Path, *, untrusted: bool, limits: _fs.WalkLimits = _fs.DEFAULT_LIMITS) -> BundleManifest:
@@ -642,10 +666,7 @@ def _rekey(manifest: BundleManifest, names: Mapping[str, str]) -> BundleManifest
 
 
 def _load_rekey(scratch: Path) -> tuple[BundleManifest, dict[str, str]] | None:
-    try:
-        data = _fs.read_bounded(_fs.loc(scratch / "rekey.json"), MAX_REKEY_BYTES, nonblock=True)
-    except (_fs.UnsafePath, _fs.TooLarge) as exc:
-        raise BundleError(str(exc)) from exc
+    data = _read_optional(scratch / "rekey.json", MAX_REKEY_BYTES)
     if data is None:
         return None
     value = _decode(data, "rekey.json")

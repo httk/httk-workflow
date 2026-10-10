@@ -5,11 +5,13 @@ goes through :mod:`~httk.workflow._fs`.
 
 **Eject** claims the tree members, builds the bundle in an ``eject`` scratch (``bundle.json`` first, recording
 each member's ``from`` state and priority) and delivers it to ``<destination>/<root key>``; across filesystems
-it copies to ``<destination>/.<name>.partial.<transfer id>`` and delivers that. An occupied destination rolls
-the members back.
+it copies to ``<destination>/.<name>.partial.<transfer id>`` and delivers that. An occupied destination or a
+failed delivery runs the ``eject`` reconciler's decision at once, which rolls the members back; a refusal before
+the bundle is built gives every claimed job back.
 
 **Adopt** takes a bundle into an ``adopt`` scratch, validates it (the trust boundary), rekeys an untrusted one,
-deduplicates against the workspace and publishes the members bottom-up.
+deduplicates against the workspace and publishes the members bottom-up. A bundle already adopted is discarded
+only when it is a duplicate delivery; an operator's bundle is refused back to its path.
 
 **Crash-resume contract** of the reconcilers, registered with the kernel at import:
 
@@ -34,17 +36,18 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 from httk.workflow import _fs, _kernel, _store
 from httk.workflow._bundles import (
-    MAX_MANIFEST_BYTES,
     BundleError,
     BundleManifest,
     build_bundle,
     exchange_names,
+    read_manifest,
     read_rekeyed,
     rekey_untrusted,
     validate_bundle,
@@ -54,23 +57,26 @@ from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import EXCHANGE_DIRECTORY, placement_text
+from httk.workflow.models import EXCHANGE_DIRECTORY, WORKSPACE_DIRECTORY, placement_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from httk.workflow.workspace import Workspace
 
 __all__ = [
+    "RESERVED_NAMES",
     "AdoptReport",
     "Busy",
     "EjectReport",
     "Hold",
     "adopt",
+    "destination_problem",
     "eject",
     "held",
     "hold",
     "reconcile_adopt",
     "reconcile_eject",
     "release_hold",
+    "tree_members",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,7 +91,7 @@ _SOURCE = "source.json"
 _PLAN = "plan.json"
 _PARTIAL = ".partial"
 #: Names an ``adopt`` scratch holds besides the bundle; a bundle may not be named like one of them.
-_RESERVED = frozenset({_SOURCE, _PLAN, "rekey.json", _PARTIAL})
+RESERVED_NAMES = frozenset({_SOURCE, _PLAN, "rekey.json", _PARTIAL})
 _RECORD_TEMPORARY = re.compile(r"\.(source|plan|rekey)\.json\.[a-z2-7]{16}\.tmp")
 _RECORD_LIMIT = 1 << 16
 #: The format of the ``reason.json`` beside a refused bundle.
@@ -149,10 +155,21 @@ class Hold:
 # -- eject ----------------------------------------------------------------------------------------------------------
 
 
-def _tree(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: StateDoc | None) -> list[JobRef]:
-    # The children a parent published are recorded in its state.json and confirmed from the child's side: its
-    # job.json names this parent and it is not detached. A recorded child that is gone is no member. A member
-    # neither terminal nor paused raises Busy.
+def tree_members(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: StateDoc | None) -> list[JobRef]:
+    """List the descendants an eject of the root with *tree* moves, top-down (breadth first).
+
+    The children a parent published are recorded in its ``state.json`` and confirmed from the child's side: its
+    ``job.json`` names this parent and it is not detached. A recorded child is looked up across the visibility
+    deadline before it counts as gone (and so as no member).
+
+    :param workspace: The workspace.
+    :param root_id: The root's job UUID.
+    :param root_doc: The root's ``state.json``, or ``None``.
+    :return: The members besides the root.
+    :raises Busy: For a member neither terminal nor paused, or one whose ``job.json`` or ``state.json`` is
+        unreadable.
+    """
+
     found: list[JobRef] = []
     queue: list[tuple[str, StateDoc | None]] = [(root_id, root_doc)]
     seen = {root_id}
@@ -162,7 +179,8 @@ def _tree(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: StateDoc |
             job_id = str(child.get("job_id"))
             if job_id in seen:
                 continue
-            ref = _kernel.locate(workspace, job_id, placement_hint=PurePosixPath(str(child.get("placement"))))
+            hint = PurePosixPath(str(child.get("placement")))
+            ref = _kernel.locate(workspace, job_id, placement_hint=hint, settle=True)
             if ref is None:
                 continue
             if ref.state not in _MEMBER_STATES:
@@ -185,7 +203,7 @@ def _tree(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: StateDoc |
 
 
 def _claim_tree(workspace: "Workspace", owner: Owner, root: OwnedJob) -> list[OwnedJob]:
-    refs = _tree(workspace, root.job_id, root.read_state())
+    refs = tree_members(workspace, root.job_id, root.read_state())
     claimed: dict[str, OwnedJob] = {}
     # Sorted claims: two ejectors of overlapping trees cannot each hold a part forever.
     for ref in sorted(refs, key=lambda item: item.job_id):
@@ -198,10 +216,28 @@ def _claim_tree(workspace: "Workspace", owner: Owner, root: OwnedJob) -> list[Ow
     return [claimed[ref.job_id] for ref in refs]
 
 
-def _read_manifest(path: Path) -> tuple[bytes, BundleManifest] | None:
-    # Our own bundle.json (trusted): bounded, regular, never a symlink.
-    data = _fs.read_bounded(_fs.loc(path), MAX_MANIFEST_BYTES)
-    return None if data is None else (data, BundleManifest.from_json(data))
+def destination_problem(destination: Path) -> str | None:
+    """Report why *destination* cannot receive an eject, before anything moves.
+
+    It must be absolute, and either a real directory or a missing name whose parent is a real directory; a
+    symlink is neither.
+
+    :param destination: The eject destination.
+    :return: The reason, or ``None`` when it is usable.
+    """
+
+    if not destination.is_absolute():
+        return f"the eject destination must be absolute: {destination}"
+    checked = destination
+    try:
+        try:
+            mode = os.lstat(checked).st_mode
+        except FileNotFoundError:
+            checked = destination.parent
+            mode = os.lstat(checked).st_mode
+    except OSError as exc:
+        return f"the eject destination {destination} is unusable: {exc}"
+    return None if stat.S_ISDIR(mode) else f"{checked} is a symlink or not a directory"
 
 
 def _deliver(workspace: "Workspace", bundle: Path, target: Path, token: bytes, transfer_id: str) -> bool:
@@ -234,93 +270,15 @@ def _roll_back(owner: Owner, bundle: Path, manifest: BundleManifest) -> list[Job
     return returned
 
 
-def _eject(
-    workspace: "Workspace",
-    owner: Owner,
-    root: OwnedJob,
-    *,
-    destination: Path,
-    tree: bool,
-    by_transfer_id: bool,
-    locator: str | None,
-) -> EjectReport:
-    if tree:
-        members = _claim_tree(workspace, owner, root)
-    else:
-        members = []
-        # Ejecting the root alone would orphan the children present here: it is refused.
-        if children := _tree(workspace, root.job_id, root.read_state()):
-            raise Busy(children[0].job_key, "it is a child of the job; eject the whole tree")
-    try:
-        for job in (root, *members):
-            job.append_log("ejected", destination=str(destination))
-        bundle = build_bundle(
-            owner,
-            [root, *members],
-            source_workspace_id=workspace.workspace_id,
-            destination_locator=locator,
-        )
-    except Exception:
-        # A refusal moved nothing; the members go back, the root stays with the caller.
-        for job in members:
-            if owner.holds(job.ref):
-                job.give_back()
-        raise
-    read = _read_manifest(bundle / "bundle.json")
-    assert read is not None
-    token, manifest = read
-    target = destination / (manifest.transfer_id if by_transfer_id else root.job_key)
-    if _deliver(workspace, bundle, target, token, manifest.transfer_id):
-        owner.discard_scratch(bundle.parent)
-        return EjectReport(target, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
-    _roll_back(owner, bundle, manifest)
-    owner.discard_scratch(bundle.parent)
-    raise WorkflowError(f"{target} is occupied; the jobs were returned to the states they were taken from")
-
-
-def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: Path, tree: bool) -> EjectReport:
-    """Move a claimed job, and with *tree* its descendants, out of the workspace into ``<destination>/<root key>``.
-
-    Tree members are the root's non-detached descendants; each must be terminal or paused, and they are claimed
-    in sorted job-UUID order. Without *tree*, a root that has such descendants present is refused. Once :func:`~httk.workflow._bundles.build_bundle` has run, the root's handle is
-    retired whatever happens: on an occupied destination every member, the root included, is returned to the
-    state and priority it was taken from.
-
-    :param workspace: The workspace.
-    :param owner: The owner holding *root*.
-    :param root: The claimed, quiescent root, in any unowned state.
-    :param destination: An absolute directory; created when missing.
-    :param tree: Eject the root's descendants too.
-    :return: Where the bundle went.
-    :raises Busy: When a member cannot be claimed, or without *tree* when the root has descendants; the members
-        claimed so far are given back, *root* stays held.
-    :raises ValueError: For a relative destination.
-    :raises httk.workflow.errors.WorkflowError: When the destination is occupied (the jobs were returned), or
-        :class:`~httk.workflow._bundles.BundleError` when the jobs cannot form a bundle (*root* stays held).
-    """
-
-    destination = Path(destination)
-    if not destination.is_absolute():
-        raise ValueError(f"the eject destination must be absolute: {destination}")
-    return _eject(
-        workspace, owner, root, destination=destination, tree=tree, by_transfer_id=False, locator=str(destination)
-    )
-
-
-def reconcile_eject(owner: Owner, scratch: Path) -> bool:
-    """The ``eject`` scratch reconciler: roll forward when the bundle was delivered, otherwise roll back.
-
-    :param owner: The owner the scratch is named after.
-    :param scratch: ``tmp/<owner-id>.eject.<token>/``.
-    :return: ``True`` when resolved (the kernel then discards the scratch); ``False`` when the destination
-        cannot be read, which keeps the scratch.
-    """
+def _settle(owner: Owner, scratch: Path) -> bool | None:
+    """Resolve an ``eject`` scratch: ``True`` when its bundle was delivered, ``False`` when every member still in it
+    went back (or none was taken), ``None`` when the destination cannot be read (the scratch stays)."""
 
     bundle = scratch / _BUNDLE
-    read = _read_manifest(bundle / "bundle.json")
+    read = read_manifest(bundle / "bundle.json")
     if read is None:
         # build_bundle writes bundle.json before any member moves: nothing to return.
-        return True
+        return False
     data, manifest = read
     # A hold delivers to this workspace's outgoing/<transfer id> and records its transfer's destination instead.
     candidates = [_outgoing(owner.workspace) / manifest.transfer_id]
@@ -339,10 +297,105 @@ def reconcile_eject(owner: Owner, scratch: Path) -> bool:
                 _fs.discard(_fs.loc(partial), trash_dir=partial.parent, durable=owner.workspace.durable)
     except OSError as exc:
         _LOGGER.warning("keeping %s: cannot check its destination: %s", scratch, exc)
-        return False
+        return None
     returned = _roll_back(owner, bundle, manifest)
-    _LOGGER.warning("rolled back the interrupted eject %s: %d jobs returned", manifest.transfer_id, len(returned))
-    return True
+    _LOGGER.warning("rolled back the eject %s: %d jobs returned", manifest.transfer_id, len(returned))
+    return False
+
+
+def _eject(
+    workspace: "Workspace",
+    owner: Owner,
+    root: OwnedJob,
+    *,
+    destination: Path,
+    tree: bool,
+    by_transfer_id: bool,
+    locator: str | None,
+) -> EjectReport:
+    members: list[OwnedJob] = []
+    try:
+        if tree:
+            members = _claim_tree(workspace, owner, root)
+        elif children := tree_members(workspace, root.job_id, root.read_state()):
+            # Ejecting the root alone would orphan the children present here: it is refused.
+            raise Busy(children[0].job_key, "it is a child of the job; eject the whole tree")
+        bundle = build_bundle(
+            owner,
+            [root, *members],
+            source_workspace_id=workspace.workspace_id,
+            destination_locator=locator,
+            event=("ejected", {"destination": str(destination)}),
+        )
+    except Exception:
+        # A refusal moved nothing: every job still held goes back, the root included.
+        for job in (root, *members):
+            if owner.holds(job.ref):
+                job.give_back()
+        raise
+    scratch = bundle.parent
+    read = read_manifest(bundle / "bundle.json")
+    assert read is not None
+    token, manifest = read
+    target = destination / (manifest.transfer_id if by_transfer_id else root.job_key)
+    report = EjectReport(target, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
+    error: Exception | None = None
+    try:
+        if _deliver(workspace, bundle, target, token, manifest.transfer_id):
+            owner.discard_scratch(scratch)
+            return report
+        problem = f"{target} is occupied"
+    except Exception as exc:
+        # Never left in the scratch until this owner closes: the reconciler's decision is taken now.
+        problem, error = f"cannot deliver to {target}: {exc}", exc
+    settled = _settle(owner, scratch)
+    if settled is None:
+        raise WorkflowError(f"{problem}; the bundle stays in {scratch} for the eject reconciler") from error
+    owner.discard_scratch(scratch)
+    if settled:
+        return report  # the delivery happened after all
+    raise WorkflowError(f"{problem}; the jobs were returned to the states they were taken from") from error
+
+
+def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: Path, tree: bool) -> EjectReport:
+    """Move a claimed job, and with *tree* its descendants, out of the workspace into ``<destination>/<root key>``.
+
+    Tree members are the root's non-detached descendants (:func:`tree_members`); each must be terminal or paused,
+    and they are claimed in sorted job-UUID order. Without *tree*, a root that has such descendants present is
+    refused. *root*'s handle is retired whatever happens: a refusal, an occupied destination or a failed delivery
+    returns every job, the root included, to the state and priority it was taken from.
+
+    :param workspace: The workspace.
+    :param owner: The owner holding *root*.
+    :param root: The claimed, quiescent root, in any unowned state.
+    :param destination: An absolute directory, or a missing name in one (:func:`destination_problem`).
+    :param tree: Eject the root's descendants too.
+    :return: Where the bundle went.
+    :raises Busy: When a member cannot be claimed, or without *tree* when the root has descendants.
+    :raises ValueError: For an unusable destination.
+    :raises httk.workflow.errors.WorkflowError: When the destination is occupied or the delivery failed, or
+        :class:`~httk.workflow._bundles.BundleError` when the jobs cannot form a bundle.
+    """
+
+    destination = Path(destination)
+    if (problem := destination_problem(destination)) is not None:
+        root.give_back()
+        raise ValueError(problem)
+    return _eject(
+        workspace, owner, root, destination=destination, tree=tree, by_transfer_id=False, locator=str(destination)
+    )
+
+
+def reconcile_eject(owner: Owner, scratch: Path) -> bool:
+    """The ``eject`` scratch reconciler: roll forward when the bundle was delivered, otherwise roll back.
+
+    :param owner: The owner the scratch is named after.
+    :param scratch: ``tmp/<owner-id>.eject.<token>/``.
+    :return: ``True`` when resolved (the kernel then discards the scratch); ``False`` when the destination
+        cannot be read, which keeps the scratch.
+    """
+
+    return _settle(owner, scratch) is not None
 
 
 # -- adopt ----------------------------------------------------------------------------------------------------------
@@ -424,8 +477,9 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
             # A client replaced the directory (a symlink): the bundle waits in the scratch for a later refusal.
             return f"bundle refused: {reason}; it stays in {scratch}, since {record.refused_to} cannot take it: {exc}"
     elif record.source is not None and not _fs.exists(_fs.loc(Path(record.source))):
-        target = Path(record.source)
-        _fs.move_owned(_fs.loc(bundle), _fs.loc(target), durable=durable)
+        _fs.move_owned(_fs.loc(bundle), _fs.loc(Path(record.source)), durable=durable)
+        owner.discard_scratch(scratch)
+        return f"bundle refused: {reason}; the bundle was left at {record.source}"
     else:
         return f"bundle refused: {reason}; it stays in {scratch}"
     owner.discard_scratch(scratch)
@@ -435,7 +489,7 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
 def _validated(workspace: "Workspace", scratch: Path, bundle: Path, *, untrusted: bool) -> BundleManifest:
     if read_rekeyed(scratch) is not None:
         # An interrupted rekey: finish it, then the bundle is a trusted one (the _bundles contract).
-        read = _read_manifest(bundle / "bundle.json")
+        read = read_manifest(bundle / "bundle.json")
         if read is None:
             raise BundleError(f"{bundle}/bundle.json is missing")
         manifest = rekey_untrusted(scratch, bundle, read[1], workspace_id=workspace.workspace_id)
@@ -445,6 +499,23 @@ def _validated(workspace: "Workspace", scratch: Path, bundle: Path, *, untrusted
     if untrusted:
         manifest = rekey_untrusted(scratch, bundle, manifest, workspace_id=workspace.workspace_id)
     return manifest
+
+
+def _redelivered(workspace: "Workspace", record: _Record) -> bool:
+    """Whether a bundle whose jobs are all here is a duplicate delivery that may be discarded (plan §9.3).
+
+    That is an exchange bundle, a cross-filesystem copy (its source is untouched), or a bundle the transfer
+    machinery placed: a hold or landing in some workspace's ``transfers/outgoing`` or ``transfers/incoming``, or
+    in this workspace's own scratch (a pulled landing). Any other bundle is an operator's, never destroyed.
+    """
+
+    if record.untrusted or record.copied:
+        return True
+    if record.source is None:
+        return False
+    source = Path(record.source)
+    transfers = {(WORKSPACE_DIRECTORY, "transfers", "outgoing"), (WORKSPACE_DIRECTORY, "transfers", "incoming")}
+    return source.parent.parts[-3:] in transfers or source.is_relative_to(workspace.control / "tmp")
 
 
 def _presence(workspace: "Workspace", bundle: Path, manifest: BundleManifest, *, untrusted: bool) -> str | None:
@@ -475,7 +546,7 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
     """Steps 2-6 of adoption on a taken bundle: the report, or the message of a refusal."""
 
     durable = workspace.durable
-    read = _read_manifest(scratch / _PLAN)
+    read = read_manifest(scratch / _PLAN)
     if read is None:
         try:
             manifest = _validated(workspace, scratch, bundle, untrusted=record.untrusted)
@@ -483,6 +554,8 @@ def _finish(workspace: "Workspace", owner: Owner, scratch: Path, bundle: Path, r
         except BundleError as exc:
             return _refuse(owner, scratch, bundle, record, str(exc))
         if presence == "all":
+            if not _redelivered(workspace, record):
+                return _refuse(owner, scratch, bundle, record, "already adopted")
             owner.discard_scratch(scratch)
             return AdoptReport((), True, ())
         if presence is not None:
@@ -549,8 +622,10 @@ def adopt(
 ) -> AdoptReport | None:
     """Take a bundle into the workspace: validate, rekey when untrusted, deduplicate and publish bottom-up.
 
-    A bundle whose members are all present already is "already adopted"; one with only some present, or (when
-    trusted) whose root's parent is here, is refused. An untrusted bundle's members get fresh ids, enter
+    A bundle whose members are all present already is "already adopted" and discarded when it is a duplicate
+    delivery (an exchange bundle, a copy, or a transfer's hold or landing); any other such bundle (an operator's
+    path) is refused and left in place. One with only some members present, or (when trusted) whose root's
+    parent is here, is refused. An untrusted bundle's members get fresh ids, enter
     ``ready`` with ``origin: exchange`` and their client ids as ``exchange_name``, after the root's exchange
     name was claimed. A refused bundle moves to a fresh name below *refused_to*, else back to *source* when that
     is free, else it stays in the owner's scratch. Installation of the jobs' workflows is not checked.
@@ -567,7 +642,7 @@ def adopt(
     durable = workspace.durable
     src = source if isinstance(source, _fs.Loc) else _fs.loc(Path(source))
     name = src.name()
-    if name in _RESERVED or _RECORD_TEMPORARY.fullmatch(name):
+    if name in RESERVED_NAMES or _RECORD_TEMPORARY.fullmatch(name):
         raise BundleError(f"a bundle may not be named {name!r}")
     record = _Record(
         None if src.at is not None else str(src.path),
@@ -609,7 +684,9 @@ def reconcile_adopt(owner: Owner, scratch: Path) -> bool:
     """
 
     entries = [
-        name for name in sorted(os.listdir(scratch)) if name not in _RESERVED and not _RECORD_TEMPORARY.fullmatch(name)
+        name
+        for name in sorted(os.listdir(scratch))
+        if name not in RESERVED_NAMES and not _RECORD_TEMPORARY.fullmatch(name)
     ]
     if not entries:
         # An incomplete cross-filesystem copy (its source is untouched), or nothing was taken.
@@ -636,7 +713,7 @@ def _outgoing(workspace: _kernel.KernelWorkspace) -> Path:
 
 def hold(
     workspace: "Workspace", owner: Owner, root: OwnedJob, *, tree: bool, destination_locator: str | None = None
-) -> Path:
+) -> EjectReport:
     """Eject into this workspace's own ``transfers/outgoing/<transfer-id>/``: the held bundle of a transfer.
 
     :param workspace: The workspace.
@@ -644,16 +721,15 @@ def hold(
     :param root: The claimed, quiescent root.
     :param tree: Hold the root's descendants too.
     :param destination_locator: The transfer's destination, recorded in ``bundle.json`` for resumption.
-    :return: The held bundle directory.
-    :raises Busy: As :func:`eject`.
+    :return: The report; its destination is the held bundle directory.
+    :raises Busy: As :func:`eject`, which also gives the other failures and their outcome: *root*'s handle is
+        retired whatever happens.
     """
 
     outgoing = _outgoing(workspace)
-    _fs.make_dirs(outgoing, durable=workspace.durable)
-    report = _eject(
+    return _eject(
         workspace, owner, root, destination=outgoing, tree=tree, by_transfer_id=True, locator=destination_locator
     )
-    return report.destination
 
 
 def held(workspace: "Workspace") -> list[Hold]:
@@ -670,7 +746,7 @@ def held(workspace: "Workspace") -> list[Hold]:
         return []
     holds = []
     for name in names:
-        if _TRANSFER_ID.fullmatch(name) and (read := _read_manifest(outgoing / name / "bundle.json")) is not None:
+        if _TRANSFER_ID.fullmatch(name) and (read := read_manifest(outgoing / name / "bundle.json")) is not None:
             holds.append(Hold(name, outgoing / name, read[1]))
     return holds
 

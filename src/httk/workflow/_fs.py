@@ -546,10 +546,20 @@ def publish_dir(staging: Loc, dst: Loc, *, nonce: bytes, durable: bool) -> bool:
     return won
 
 
-def _write_all(descriptor: int, data: bytes) -> None:
+def write_all(descriptor: int, data: bytes) -> None:
+    """Write all of *data* to *descriptor*, however many short writes that takes.
+
+    :param descriptor: An open, writable descriptor.
+    :param data: The bytes.
+    :raises OSError: ``EIO`` when a write makes no progress, and any error of :func:`os.write`.
+    """
+
     view = memoryview(data)
     while view:
-        view = view[os.write(descriptor, view) :]
+        written = os.write(descriptor, view)
+        if written == 0:
+            raise OSError(errno.EIO, f"a write to descriptor {descriptor} made no progress")
+        view = view[written:]
 
 
 def write_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
@@ -568,7 +578,7 @@ def write_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> No
     try:
         try:
             written = os.fstat(descriptor)
-            _write_all(descriptor, data)
+            write_all(descriptor, data)
             if durable:
                 os.fsync(descriptor)
         finally:
@@ -606,7 +616,7 @@ def create_exclusive(dst: Loc, data: bytes = b"", *, durable: bool, mode: int = 
 
     descriptor = os.open(dst.path, _CREATE_FLAGS, mode, dir_fd=dst.at)
     try:
-        _write_all(descriptor, data)
+        write_all(descriptor, data)
         if durable:
             os.fsync(descriptor)
             _fsync_parent(dst)
@@ -664,7 +674,7 @@ def append_file(target: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -
 
     descriptor = open_append(target, durable=durable, mode=mode)
     try:
-        _write_all(descriptor, data)
+        write_all(descriptor, data)
         if durable:
             os.fsync(descriptor)
     finally:
@@ -702,6 +712,43 @@ def read_bounded(src: Loc, limit: int, *, nonblock: bool = False) -> bytes | Non
     if len(data) > limit:
         raise TooLarge(f"{src.path} is larger than {limit} bytes")
     return bytes(data)
+
+
+def read_tail(anchor: Path, relative: str | PurePosixPath, size: int, offset: int | None = None) -> tuple[bytes, int]:
+    """Read a slice of a growing regular file below a trusted directory, never following a symlink or blocking.
+
+    :param anchor: The trusted directory.
+    :param relative: The file below it, such as ``logs/runlog.jsonl``.
+    :param size: The most bytes to read.
+    :param offset: Where to start; ``None`` reads the last *size* bytes, and an offset past the end restarts at 0.
+    :return: The bytes and the offset after them; no bytes and *offset* (or 0) when the file is absent.
+    :raises UnsafePath: If the file is not a regular file, or a directory on its way is a symlink.
+    :raises OSError: If the file is a symlink (``ELOOP``) or cannot be read.
+    """
+
+    path = PurePosixPath(relative)
+    try:
+        directory = open_dir_under(anchor, path.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        return b"", offset or 0
+    try:
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError:
+        return b"", offset or 0
+    finally:
+        os.close(directory)
+    try:
+        length = os.fstat(descriptor)
+        if not stat.S_ISREG(length.st_mode):
+            raise UnsafePath(f"{anchor / path} is not a regular file")
+        if offset is None:
+            start = max(0, length.st_size - size)
+        else:
+            start = offset if offset <= length.st_size else 0
+        data = os.pread(descriptor, size, start)
+    finally:
+        os.close(descriptor)
+    return data, start + len(data)
 
 
 def _remove_leaf(at: int | None, name: str) -> bool:

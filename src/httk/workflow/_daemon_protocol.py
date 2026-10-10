@@ -22,22 +22,6 @@ _SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
 _REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
 _OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy", "accepted"})
-#: A job bundle name in the exchange; the reserved names are the exchange's own entries.
-_BUNDLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_RESERVED_NAMES = frozenset(
-    {
-        "daemon.json",
-        "exchange.json",
-        "status.json",
-        "managers.json",
-        "managers",
-        "rejected",
-        "requests",
-        "responses",
-        "inbox",
-        "outbox",
-    }
-)
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
 

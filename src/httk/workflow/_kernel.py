@@ -71,8 +71,10 @@ __all__ = [
     "Release",
     "ReleasedJobError",
     "attest_dead",
+    "check_placement",
     "claim",
     "claim_exchange_name",
+    "drop_exchange_index",
     "exchange_index",
     "exchange_translation_applied",
     "format_job_name",
@@ -448,9 +450,18 @@ def _state_dir(workspace: KernelWorkspace, state: str, placement: PurePosixPath 
     return workspace.jobs / state / placement
 
 
-def _check_placement(workspace: KernelWorkspace, state: str, placement: PurePosixPath) -> None:
-    # §3.1: placement directories are real directories. _fs checks only the deepest existing ancestor, so a
-    # symlinked component whose target already holds the rest would be followed out of jobs/.
+def check_placement(workspace: KernelWorkspace, state: str, placement: PurePosixPath) -> None:
+    """Check that every existing component of ``jobs/<state>/<placement>`` is a real directory (§3.1).
+
+    :func:`~httk.workflow._fs.make_dirs` checks only the deepest existing ancestor, so a symlinked component
+    whose target already holds the rest would be followed out of ``jobs/``.
+
+    :param workspace: The workspace.
+    :param state: The state directory.
+    :param placement: The placement below it.
+    :raises httk.workflow._fs.UnsafePath: When a component is a symlink or not a directory.
+    """
+
     root = _state_dir(workspace, state)
     for depth in range(len(placement.parts) + 1):
         current = root.joinpath(*placement.parts[:depth])
@@ -945,11 +956,10 @@ class OwnedJob:
         self._present()
         if not event or {"at", "event", "owner_id"} & detail.keys():
             raise ValueError("a run-log line needs an event and may not override at/event/owner_id")
-        line = memoryview(_encode({"at": _now(), "event": event, "owner_id": self.owner.owner_id, **detail}) + b"\n")
+        line = _encode({"at": _now(), "event": event, "owner_id": self.owner.owner_id, **detail}) + b"\n"
         descriptor = self.open_log("runlog.jsonl")
         try:
-            while line:
-                line = line[os.write(descriptor, line) :]
+            _fs.write_all(descriptor, line)
             if self.owner.workspace.durable:
                 os.fsync(descriptor)
         finally:
@@ -1094,7 +1104,7 @@ class OwnedJob:
             doc = None
         if doc is not None and doc.origin == "exchange" and doc.exchange_name is not None:
             # §8.5: the index goes first; a crash before the job goes leaves the delete request pending.
-            _drop_exchange_index(self.owner, doc.exchange_name, self.job_id)
+            drop_exchange_index(self.owner, doc.exchange_name, self.job_id)
         self._present()
         self.owner._discard(self.path)
         self._retire()
@@ -1231,7 +1241,7 @@ class OwnedJob:
         )
         # §5.3 step 5: move_owned decides by the source alone, so a vanished source must be caught first.
         self._present()
-        _check_placement(self.owner.workspace, state, placement)
+        check_placement(self.owner.workspace, state, placement)
         _fs.move_owned(_fs.loc(self.path), _fs.loc(target), durable=self.owner.workspace.durable)
         self._retire()
         return JobRef.from_path(target, state=state, placement=placement)
@@ -1266,7 +1276,14 @@ def _request_id(name: str, job_id: str) -> str | None:
         return None
 
 
-def _drop_exchange_index(owner: Owner, exchange_name: str, job_id: str) -> None:
+def drop_exchange_index(owner: Owner, exchange_name: str, job_id: str) -> None:
+    """Discard the exchange index entry of *exchange_name*, but only while it indexes *job_id*.
+
+    :param owner: The owner whose trash receives the entry.
+    :param exchange_name: The exchange name (the client's job UUID).
+    :param job_id: The job the entry must index (an exchange root leaving the workspace).
+    """
+
     entry = _exchange_entry(owner.workspace, exchange_name)
     index = _read_json_quietly(entry / "index.json")
     # Never remove an entry that indexes another job.
@@ -1489,7 +1506,7 @@ def submit(
     target = _state_dir(workspace, state, header.placement) / format_job_name(
         header.job_key, header.priority if priority is None else priority, _fs.fresh_token()
     )
-    _check_placement(workspace, state, header.placement)
+    check_placement(workspace, state, header.placement)
     _fs.move_owned(_fs.loc(staging), _fs.loc(target), durable=workspace.durable)
     return JobRef.from_path(target, state=state, placement=header.placement)
 
@@ -1652,7 +1669,7 @@ def _return_jobs(
             ref = JobRef.from_path(path, state=OWNED, owner_id=dead_owner_id)
             header = _read_header(path, ref.job_key)
             assert ref.from_state is not None
-            _check_placement(workspace, ref.from_state, header.placement)
+            check_placement(workspace, ref.from_state, header.placement)
         except (WorkflowError, OSError):
             if not _fs.exists(_fs.loc(path)):
                 # A concurrent recoverer moved it after the listing: its job.json was not unreadable.

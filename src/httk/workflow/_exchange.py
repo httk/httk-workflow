@@ -69,8 +69,6 @@ from ._bundles import BundleError
 from ._daemon_auth import check_request_time, verify_request
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_DOCUMENT_BYTES
 from ._daemon_protocol import (
-    _BUNDLE_NAME,
-    _RESERVED_NAMES,
     JOB_OPERATIONS,
     Request,
     Response,
@@ -127,6 +125,22 @@ PROGRESS_DOCUMENT = "progress.json"
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _PUBLICATION = re.compile(r"[0-9a-f]{32}\.json")
+#: A job bundle name in the exchange; the reserved names are the exchange's own entries.
+_BUNDLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_RESERVED_NAMES = frozenset(
+    {
+        "daemon.json",
+        "exchange.json",
+        "status.json",
+        "managers.json",
+        "managers",
+        "rejected",
+        "requests",
+        "responses",
+        "inbox",
+        "outbox",
+    }
+)
 _PROGRESS_LIMIT = 4096
 _PROGRESS_KEYS = 32
 _PROGRESS_TEXT = 256
@@ -464,7 +478,7 @@ def _listing(directory_fd: int) -> list[str]:
 def _eligible(name: str) -> bool:
     """Report whether an inbox entry name is one a manager adopts (dot, reserved and scratch names never are)."""
 
-    return _BUNDLE_NAME.fullmatch(name) is not None and name not in _RESERVED_NAMES and name not in _moving._RESERVED
+    return _BUNDLE_NAME.fullmatch(name) is not None and name not in _RESERVED_NAMES | _moving.RESERVED_NAMES
 
 
 def _authorized_keys(workspace: Workspace) -> frozenset[str]:
@@ -767,7 +781,7 @@ class ExchangeService:
         if damaged or doc is None or doc.origin != "exchange":
             return False
         try:
-            members = _moving._tree(self.workspace, job.job_id, doc)
+            members = _moving.tree_members(self.workspace, job.job_id, doc)
         except _moving.Busy:
             return False
         if any(member.state not in TERMINAL_STATES for member in members):

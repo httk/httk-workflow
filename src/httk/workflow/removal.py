@@ -127,7 +127,8 @@ def refusal(
     request: _requests.Request,
     cache: ListingCache | None = None,
 ) -> str | None:
-    """The revival guard for ``continue``/``override_step``, and the waiting-parent check for ``delete``.
+    """The revival guard for ``continue``/``override_step``, the waiting-parent check for ``delete``, and the
+    destination check for ``eject`` (an unusable destination is a refusal that moves nothing).
 
     :param workspace: The workspace.
     :param job: The job the request is for.
@@ -138,6 +139,8 @@ def refusal(
 
     if request.action in ("continue", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
+    if request.action == "eject":
+        return _moving.destination_problem(Path(str(request.document["destination"])))
     parent = job.parent
     if request.action != "delete" or parent is None:
         return None
@@ -223,24 +226,24 @@ def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDo
 
 
 def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _requests.Eject) -> None:
-    """Eject the owned job for an ``eject`` request (the ``Eject`` effect); a refusal leaves it where it was."""
+    """Eject the owned job for an ``eject`` request (the ``Eject`` effect); a failure leaves every job where it was."""
 
     workspace = cast("Workspace", owned.owner.workspace)
     # The applied id and its history entry travel with the bundle, so a returning job never re-applies it.
-    # ponytail: at most once; a crash before delivery returns the job with the request applied, and the
-    # operator posts it again.
+    # ponytail: at most once; a failed delivery returns the job with the request applied, and the operator (or
+    # the exchange, whose next request id follows the changed state) posts it again.
     owned.write_state(doc)
     _fs.remove_file(_fs.loc(request.path), durable=workspace.durable)
     try:
         report = _moving.eject(workspace, owned.owner, owned, destination=Path(effect.destination), tree=effect.tree)
-    except (WorkflowError, ValueError) as exc:
-        if owned.owner.holds(owned.ref):
-            owned.give_back()
+    except _kernel.OwnerLost:
+        raise
+    except Exception as exc:
         _LOGGER.warning("eject request %s for %s refused: %s", request.request_id, owned.job_key, exc)
         return
     if doc.origin == "exchange" and doc.exchange_name is not None:
         # A returned (or otherwise ejected) exchange root leaves the index; a child's entry is its root's.
-        _kernel._drop_exchange_index(owned.owner, doc.exchange_name, owned.job_id)
+        _kernel.drop_exchange_index(owned.owner, doc.exchange_name, owned.job_id)
     _LOGGER.info(
         "ejected %s to %s (request %s)",
         owned.job_key,

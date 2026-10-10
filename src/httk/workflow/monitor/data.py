@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .. import _kernel
+from .. import _fs, _kernel
 from .._kernel import JobRef
 from ..adapters import (
     REMOTE_JOB_LIST_COMMAND,
@@ -25,7 +25,6 @@ from ..introspection import (
     list_jobs,
     read_managers,
 )
-from ..introspection._reading import read_job_tail
 from ..models import normalize_placement
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from ..workspace import Workspace
@@ -284,7 +283,7 @@ class WorkspaceView:
 
         offset = self._tail_offsets.get(ref.job_id, 0) if follow else None
         try:
-            data, self._tail_offsets[ref.job_id] = read_job_tail(
+            data, self._tail_offsets[ref.job_id] = _fs.read_tail(
                 ref.path, "logs/stdio.out", min(size, 256 * 1024), offset
             )
         except (WorkflowError, OSError):

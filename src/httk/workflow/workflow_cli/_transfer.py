@@ -24,7 +24,7 @@ from typing import Any
 from httk.core.cli import CLIContext
 
 from .. import _fs, _kernel, _moving
-from .._bundles import BundleError, BundleManifest
+from .._bundles import BundleError
 from .._util import write_json_atomic
 from ..adapters import (
     REMOTE_JOB_ADOPT_COMMAND,
@@ -522,7 +522,7 @@ def eject_once(
     :param destination: Where the bundle goes; ``None`` holds it in ``transfers/outgoing/``.
     :param tree: Move the job's descendants too.
     :param locator: The transfer destination a hold records.
-    :return: The report, or the reason; a job that cannot move stays where it is.
+    :return: The report, or the reason; a job that cannot move stays where it is (as after any raised error).
     """
 
     root = _kernel.claim(workspace, owner, ref)
@@ -531,17 +531,9 @@ def eject_once(
     try:
         if destination is not None:
             return _moving.eject(workspace, owner, root, destination=destination, tree=tree)
-        path = _moving.hold(workspace, owner, root, tree=tree, destination_locator=locator)
+        return _moving.hold(workspace, owner, root, tree=tree, destination_locator=locator)
     except _moving.Busy as exc:
-        root.give_back()
         return str(exc)
-    except Exception:
-        # A refusal before the bundle was built leaves the root with us: it goes back unchanged.
-        if owner.holds(root.ref):
-            root.give_back()
-        raise
-    manifest = BundleManifest.from_json((path / "bundle.json").read_bytes())
-    return _moving.EjectReport(path, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
 
 
 def adopt_document(report: _moving.AdoptReport) -> dict[str, object]:

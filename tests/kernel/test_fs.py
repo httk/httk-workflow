@@ -619,6 +619,20 @@ def test_write_file_replaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert len(calls) == 2
 
 
+def test_write_all_raises_eio_when_a_write_makes_no_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    descriptor = os.open(tmp_path / "f", os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        monkeypatch.setattr(_fs.os, "write", lambda _descriptor, _data: 0)
+        with pytest.raises(OSError) as caught:
+            _fs.write_all(descriptor, b"data")
+        assert caught.value.errno == errno.EIO
+        monkeypatch.undo()
+        _fs.write_all(descriptor, b"data")
+    finally:
+        os.close(descriptor)
+    assert (tmp_path / "f").read_bytes() == b"data"
+
+
 def test_write_file_mode(tmp_path: Path) -> None:
     write_file(loc(tmp_path / "f"), b"", durable=False, mode=0o600)
     assert (tmp_path / "f").stat().st_mode & 0o777 == 0o600

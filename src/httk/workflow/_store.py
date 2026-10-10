@@ -17,9 +17,11 @@ decision: users do not change workflows that jobs are using, and two
 operators installing the same id concurrently is not handled. Every tree is
 assembled in an owner scratch and moved into place with
 :func:`httk.workflow._fs.move_owned`. A replaced installation is first moved
-aside to ``<slug>--<h16>.old.<token>/``, so a crash leaves one version or the
-other (``httk workspace gc`` removes a stale one); a replaced or removed
-installation is discarded from the owner's scratch.
+aside to ``<slug>--<h16>.old.<token>/``. A crash between the two renames
+leaves only that moved-aside tree, which lookups then use as the installation
+and ``httk workspace gc`` moves back into place; gc removes a moved-aside tree
+only once the installation exists. A replaced or removed installation is
+discarded from the owner's scratch.
 """
 
 import hashlib
@@ -180,27 +182,62 @@ def _subdirectories(path: Path) -> list[Path]:
         return []
 
 
+def _ctime(path: Path) -> float | None:
+    try:
+        return os.lstat(path).st_ctime
+    except FileNotFoundError:
+        return None
+
+
+def _only_copies(directories: list[Path]) -> dict[str, Path]:
+    # A crash between a reinstall's two renames leaves <slug>--<h16>.old.<token> and no <slug>--<h16>: the newest
+    # such tree is then the installation.
+    names = {path.name for path in directories}
+    aside = [
+        (moved, path)
+        for path in directories
+        if _REPLACED.fullmatch(path.name)
+        and path.name.partition(".old.")[0] not in names
+        and (moved := _ctime(path)) is not None
+    ]
+    # Oldest first, so the newest tree of each installation is the one kept.
+    return {path.name.partition(".old.")[0]: path for _, path in sorted(aside)}
+
+
 def _installations(workspace: KernelWorkspace) -> list[Path]:
-    # Only <slug>--<h16> names: a replaced tree moved aside as <slug>--<h16>.old.<token> is not installed.
-    return [path for path in _subdirectories(_workflows(workspace)) if _INSTALLATION.fullmatch(path.name)]
+    directories = _subdirectories(_workflows(workspace))
+    primaries = [path for path in directories if _INSTALLATION.fullmatch(path.name)]
+    return sorted([*primaries, *_only_copies(directories).values()])
 
 
 def stale_replacements(workspace: KernelWorkspace, cutoff: float, *, writable: bool) -> list[Path]:
-    """Return the installations a crashed reinstall left moved aside, ``workflows/<slug>--<h16>.old.<token>/``.
+    """Return the trees a reinstall moved aside, ``workflows/<slug>--<h16>.old.<token>/``, that may be removed.
+
+    A moved-aside tree whose installation is missing is the only copy (a crash between the reinstall's two
+    renames): it is never returned, and with *writable* the newest one is moved back into place.
 
     :param workspace: The workspace.
     :param cutoff: Only entries moved aside (their ``ctime``) before this epoch time.
-    :param writable: Make each one's directories writable, so a removal that does not chmod succeeds.
+    :param writable: Prepare for removal (not a dry run): restore an only copy, and make each returned entry's
+        directories writable, so a removal that does not chmod succeeds.
     :return: The entries.
     """
 
+    directories = _subdirectories(_workflows(workspace))
+    if writable:
+        for primary, path in _only_copies(directories).items():
+            if (_ctime(path) or cutoff) < cutoff:
+                try:
+                    _fs.move_owned(_fs.loc(path), _fs.loc(path.with_name(primary)), durable=workspace.durable)
+                except _fs.MoveFailed as exc:
+                    # A reinstall landed meanwhile (store operations are not concurrency-protected): later sweep.
+                    _LOGGER.warning("cannot move %s back into place: %s", path, exc)
+        directories = _subdirectories(_workflows(workspace))
+    restoring = set(_only_copies(directories).values())
     stale = []
-    for path in _subdirectories(_workflows(workspace)):
-        try:
-            moved = os.lstat(path).st_ctime
-        except FileNotFoundError:
-            continue
-        if _REPLACED.fullmatch(path.name) and moved < cutoff:
+    for path in directories:
+        moved = _ctime(path)
+        if _REPLACED.fullmatch(path.name) and path not in restoring and moved is not None and moved < cutoff:
             if writable:
                 _writable(path)
             stale.append(path)
@@ -209,6 +246,8 @@ def stale_replacements(workspace: KernelWorkspace, cutoff: float, *, writable: b
 
 def list_installed(workspace: KernelWorkspace) -> list[Installed]:
     """List the installed workflows, skipping directories without a readable ``install.json``.
+
+    An installation a crashed reinstall left only moved aside (``<slug>--<h16>.old.<token>/``) is listed there.
 
     :param workspace: The workspace.
     :return: The installations, in directory-name order.
@@ -230,7 +269,8 @@ def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
     # listing is scanned for the h16 suffix; only matching install.json files are read.
     suffix = f"--{_h16(id_or_name)}"
     for directory in _installations(workspace):
-        if directory.name.endswith(suffix) and (found := _read(directory)) is not None and found.id == id_or_name:
+        stem = directory.name.partition(".old.")[0]
+        if stem.endswith(suffix) and (found := _read(directory)) is not None and found.id == id_or_name:
             return found
     named = [found for found in list_installed(workspace) if found.name == id_or_name]
     if len(named) > 1:
@@ -643,7 +683,7 @@ def _install(
             _build_into(tree / "package", provider.build, tree / "builds", work, stamp, durable=workspace.durable)
         target = _workflows(workspace) / _dirname(workflow_id, name)
         # A replaced installation is moved aside beside it, outside the scratch, so a crash between the two
-        # renames leaves it as <target>.old.<token> (which lookups ignore and gc sweeps), never neither version.
+        # renames leaves it as <target>.old.<token>: lookups use it while <target> is missing, gc restores it.
         old = target.with_name(f"{target.name}.old.{_fs.fresh_token()}")
         replacing = _fs.exists(_fs.loc(target))
         if replacing:

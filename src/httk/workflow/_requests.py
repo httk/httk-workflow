@@ -370,9 +370,9 @@ def apply(
     :param from_state: The unowned state the job was claimed from.
     :param from_priority: The priority it was claimed with.
     :param request: The request, for this job.
-    :param refusal: The caller's check for ``continue``, ``override_step`` (the revival guard) and ``delete``
-        (the waiting-parent check): why the request must not apply, or ``None``. A reason drops the request,
-        unless a ``continue``/``override_step`` carries ``force``.
+    :param refusal: The caller's check for ``continue``, ``override_step`` (the revival guard), ``delete`` (the
+        waiting-parent check) and ``eject`` (the destination check): why the request must not apply, or ``None``.
+        A reason drops the request, unless a ``continue``/``override_step`` carries ``force``.
     :return: The new document and the effect.
     :raises ValueError: If the request, document and definition name different jobs.
     """
@@ -390,10 +390,11 @@ def apply(
     if "operator_key" in document:
         audit["operator_key"] = document["operator_key"]
     reason = _refusal(job, doc, from_state, action)
-    checked = reason is None and action in ("continue", "override_step", "delete")
+    checked = reason is None and action in ("continue", "override_step", "delete", "eject")
     if checked and refusal is not None and (hazard := refusal(request)) is not None:
         if document.get("force") is not True:
-            reason = hazard if action == "delete" else f"{hazard}; republish with force to accept the hazard"
+            forceable = action in ("continue", "override_step")
+            reason = f"{hazard}; republish with force to accept the hazard" if forceable else hazard
         else:
             _LOGGER.warning("forced revival of %s: %s", job.job_key, hazard)
             audit["revival_hazard"] = hazard
