@@ -316,9 +316,10 @@ def _stale_exchange_index(workspace: "Workspace", *, removing: bool) -> list[Fsc
             if indexed is None:
                 continue
             job_id, placement, nonce = indexed
-            # The settled locate first, then the in-flight check right before the decision: an eject that
-            # extracts the job after the locate is in a scratch by the time of the check. The second locate
-            # catches a job that went back home from a scratch in between.
+            # The settled locate first, then the in-flight check: an eject that extracts the job after the
+            # locate is in a scratch by the time of the check. The second settled locate catches a job that
+            # went back home from a scratch in between, and the second in-flight check a scratch renamed
+            # while the first listing ran.
             if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is not None:
                 continue
             in_flight = _in_flight(workspace)
@@ -326,6 +327,12 @@ def _stale_exchange_index(workspace: "Workspace", *, removing: bool) -> list[Fsc
                 continue
             if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is not None:
                 continue
+            # A second in-flight check, a visibility deadline after the first: one listing of tmp/ can miss a
+            # scratch a concurrent recoverer is renaming within it.
+            again = _in_flight(workspace)
+            if again is not None and (job_id in again[0] or nonce in again[1]):
+                continue
+            in_flight = None if again is None else in_flight
             if in_flight is None:
                 # An unreadable hold or scratch may hold the job: reported, never removed.
                 unknown = f"{detail} (a hold or scratch cannot be read, so it is not removed)"

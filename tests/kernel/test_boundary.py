@@ -15,7 +15,21 @@ SOURCE = Path(__file__).resolve().parents[2] / "src" / "httk" / "workflow"
 
 #: Raw operations by module; ``os.remove``, ``os.renames`` and ``os.removedirs`` unlink, rename and rmdir too.
 RAW_CALLS: Mapping[str, frozenset[str]] = {
-    "os": frozenset({"rename", "renames", "replace", "link", "unlink", "remove", "removedirs", "rmdir", "symlink"}),
+    "os": frozenset(
+        {
+            "rename",
+            "renames",
+            "replace",
+            "link",
+            "unlink",
+            "remove",
+            "removedirs",
+            "rmdir",
+            "symlink",
+            "mkfifo",
+            "mknod",
+        }
+    ),
     "shutil": frozenset({"rmtree", "move"}),
     "fcntl": frozenset({"flock", "lockf"}),
 }
@@ -29,6 +43,8 @@ RAW_METHODS = frozenset({"unlink", "rename", "rmdir", "replace"}) | WRITE_METHOD
 CONTESTED = frozenset({"move_once", "publish_dir", "publish_record"})
 #: Never in any module: no hard links, no symlinks created, no file locks.
 LINKS = {"os": frozenset({"link", "symlink"})}
+#: The pathlib spellings of the same, on any object (ruff's banned-api cannot see instance methods).
+LINK_METHODS = frozenset({"hardlink_to", "symlink_to", "link_to"})
 #: The one exception: a trusted ``_fs.copy_tree`` recreates a symlink it copies as a symlink (an untrusted copy,
 #: one with limits, refuses symlinks).
 LINKS_ALLOWED = {"_fs.py": {"os.symlink"}}
@@ -324,19 +340,40 @@ def _util_json(tree: ast.Module) -> set[str]:
 
 
 def _open_for_writing(tree: ast.Module) -> set[str]:
-    """The qualified name of every function calling the builtin ``open(`` with a mode literal that writes."""
+    """The qualified name of every function that may open a file for writing by path.
+
+    That is the builtin ``open(path, mode)`` and any ``x.open(...)`` other than ``os.open`` (``Path.open(mode)``,
+    ``io.open``, ``codecs.open``) whose mode writes (``w``, ``x``, ``a`` or ``+``) or is not a literal.
+    """
 
     found: set[str] = set()
+
+    def modes_of(call: ast.Call) -> list[ast.expr] | None:
+        func = call.func
+        if isinstance(func, ast.Name) and func.id == "open":
+            positional = call.args[1:2]
+        elif isinstance(func, ast.Attribute) and func.attr == "open":
+            if isinstance(func.value, ast.Name) and func.value.id == "os":
+                return None  # flags, not a mode; O_CREAT is scanned by rule A
+            positional = (
+                call.args[1:2]
+                if isinstance(func.value, ast.Name) and func.value.id in ("io", "codecs")
+                else call.args[0:1]
+            )
+        else:
+            return None
+        return [*positional, *(keyword.value for keyword in call.keywords if keyword.arg == "mode")]
+
+    def writes(mode: ast.expr) -> bool:
+        return not isinstance(mode, ast.Constant) or bool(set(str(mode.value)) & set("wxa+"))
 
     def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 visit(child, (*scope, child.name))
                 continue
-            if isinstance(child, ast.Call) and getattr(child.func, "id", None) == "open":
-                modes = [*child.args[1:2], *(keyword.value for keyword in child.keywords if keyword.arg == "mode")]
-                if any(isinstance(mode, ast.Constant) and set(str(mode.value)) & set("wxa") for mode in modes):
-                    found.add(".".join(scope) or "<module>")
+            if isinstance(child, ast.Call) and (modes := modes_of(child)) and any(writes(m) for m in modes):
+                found.add(".".join(scope) or "<module>")
             visit(child, scope)
 
     visit(tree, ())
@@ -402,6 +439,27 @@ def f(o, _fs):
     }
     assert _names_used(tree, CONTESTED) == {"move_once", "publish_dir"}
     assert _module_uses(ast.parse("import os\nos.link(a, b)\nos.symlink(a, b)\n"), LINKS) == {"os.link", "os.symlink"}
+    assert _method_calls(ast.parse("p.hardlink_to(q)\np.symlink_to(q)\n"), LINK_METHODS) == {
+        ".hardlink_to",
+        ".symlink_to",
+    }
+    assert _raw_uses(ast.parse("import os\nos.mkfifo(p)\n")) == {"os.mkfifo"}
+    opened = """
+import io, os
+def reads(p):
+    open(p)
+    p.open("rb")
+    os.open(p, os.O_RDONLY)
+def w1(p):
+    p.open("w")
+def w2(p):
+    io.open(p, "a")
+def w3(p, mode):
+    open(p, mode)
+def w4(p):
+    open(p, "r+")
+"""
+    assert _open_for_writing(ast.parse(opened)) == {"w1", "w2", "w3", "w4"}
     spelled = ast.parse(
         """
 from tempfile import mkstemp
@@ -520,7 +578,8 @@ def test_no_module_uses_links_or_locks() -> None:
     offenders = {}
     for module in _modules():
         tree = _tree(module)
-        if used := (_module_uses(tree, LINKS) | _names_used(tree, LOCKS)) - LINKS_ALLOWED.get(module, set()):
+        used = _module_uses(tree, LINKS) | _names_used(tree, LOCKS) | _method_calls(tree, LINK_METHODS)
+        if used := used - LINKS_ALLOWED.get(module, set()):
             offenders[module] = sorted(used)
     assert offenders == {}, f"links or locks in the new modules: {offenders}"
 
