@@ -256,7 +256,7 @@ writer is live, is taken by an anchored move and validated as hostile input.
   bundle or deletion, or by recovery after O was tombstoned.
 - **I4.** Before the move or write that makes a decision visible, everything
   needed to finish it is recorded: the `commit` intent and `release_to` in
-  `state.json`, `bundle.json` in an eject scratch, `source.json`,
+  `state.json`, `bundle.json` and `eject.json` in an eject scratch, `source.json`,
   `rekey.json` and `plan.json` in an adopt scratch. Every later step is
   idempotent: "source gone" and "destination carries my token" both mean done.
 - **I5.** No decision that hands over ownership or removes data depends on a
@@ -297,8 +297,8 @@ across one deadline (tree members, presumed duplicates, vanished join children,
 jobs of stale requests); recovery waits one deadline and re-lists before it
 removes a dead owner's directories; the death proof waits one deadline before
 it lists a dead owner's launches; the shared-memory sweep lists launch records
-twice, one deadline apart; `move_once(settle=s)` re-observes for `s` seconds.
-Where a missed observation heals itself, callers settle for zero seconds: a
+twice, one deadline apart. Where a missed observation heals itself, callers
+settle for zero seconds (`move_once` never re-observes): a
 claim misjudged as lost is found by self-healing, a lost recovery move means
 another recoverer moved the job, and `take` recognizes a won move by a
 non-empty scratch.
@@ -307,17 +307,24 @@ non-empty scratch.
 
 **`make_dirs(path)`** creates `path` and its missing ancestors as real
 directories: a concurrent `mkdir` of a directory is success, a symlink or
-non-directory component raises `UnsafePath`, and an ancestor pruned meanwhile
-restarts the walk. A crash leaves ancestors, which mean nothing.
+non-directory at the deepest existing ancestor or at a component it creates
+raises `UnsafePath`, and an ancestor pruned meanwhile restarts the walk. A
+symlink further up is followed, so `path` MUST lie below directories only
+trusted parties write; below a client-writable directory, `open_dir_under`
+creates instead. A crash leaves ancestors, which mean nothing.
 
-**`move_once(src, dst, settle=0)`** is the contested move.
+Plain locations (`lstat`, `exists`, and the destinations below) follow
+symlinks in their intermediate components; only the final name is observed
+unfollowed.
+
+**`move_once(src, dst)`** is the contested move.
 
 - *Precondition:* `dst` does not exist (otherwise `ValueError`), is fresh (it
   contains a fresh token or the caller's owner id) and, once there, only the
   caller can move it.
 - *Steps:* create `dst`'s parents (unless forbidden), `rename`, then observe:
-  `dst` exists → `WON`; `src` exists → retry; both absent → re-observe `dst`
-  every 0.05 s for `settle` seconds, then `WON` if it appeared, else `LOST`.
+  `dst` exists → `WON`; `src` exists → retry; both absent → `LOST` (a win
+  misjudged as lost is found where the next point says).
 - *Post and crash:* `WON` means the caller possesses `dst` (durable mode
   fsyncs both parents). After a crash `dst` sits below a name only the caller
   reaches (`owned/<self>/` or its scratch), where self-healing or the scratch
@@ -332,14 +339,17 @@ job, its scratch, a staged transaction entry of its quiescent job.
   the last `errno`.
 - It MAY replace a file or symlink at `dst`, which is why `dst` proves
   nothing. A caller MUST first check that `src` exists: an absent source would
-  read as done (the kernel raises `OwnerLost` instead).
+  read as done (the kernel raises `OwnerLost` instead). A `dst` whose parent an
+  untrusted party writes MUST be anchored.
 - *Crash:* the entry is at either name, both of which the caller owns.
 
 **`deliver(src, dst, token_name, token)`** moves a caller-owned directory to a
 name another party may occupy (`<DEST>/<root key>`, an exchange outbox name).
 
 - *Precondition:* `src` holds the regular file `token_name` with exactly
-  `token`; `dst`'s parent is never pruned.
+  `token`; `dst`'s parent is never pruned. A `dst` whose parent an untrusted
+  party writes (the exchange outbox) MUST be anchored at its parent, opened
+  with `open_dir_under` from the workspace root.
 - *Steps:* create `dst`'s parent, `rename`, then: `src` still present with
   `errno` in {`EEXIST`, `ENOTEMPTY`, `ENOTDIR`, `EISDIR`} → `OCCUPIED`; `src`
   present with any other error → re-raise it; `src` gone and `dst` carries
@@ -379,17 +389,19 @@ name another party may occupy (`<DEST>/<root key>`, an exchange outbox name).
 even as a symlink, writes `data` and returns the descriptor (the launch output
 files in a live attempt's `launch/`).
 
-**`append_file(target, data)`** appends to a regular file, creating it when
-absent, opened `O_APPEND|O_NOFOLLOW|O_NONBLOCK`; anything but a regular file is
+**`open_append(target)`** opens a regular file for appending, creating it when
+absent, `O_APPEND|O_NOFOLLOW|O_NONBLOCK`; anything but a regular file is
 refused, so a planted FIFO cannot block it. One appender per file. The owner
-logs use the same opening (`OwnedJob.open_log`), after removing, unfollowed,
-anything but a real `logs/` directory and regular log files.
+logs use it (`OwnedJob.open_log`), after removing, unfollowed, anything but a
+real `logs/` directory and regular log files.
 
 **`read_bounded(src, limit, nonblock=False)`** reads a regular file of at most
 `limit` bytes with `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, plus `O_NONBLOCK` for
 anything a job or client may have written. It returns `None` for an absent
 file and raises `UnsafePath` for a symlink or non-regular file and `TooLarge`
-past the limit. Every reader of job-written or client-written files uses
+past the limit. `UnsafePath.kind` says which: `symlink`, `not_regular`, or
+`not_directory` for a directory open (Linux does not tell a symlink from a
+non-directory there). Every reader of job-written or client-written files uses
 `nonblock`.
 
 **`discard(target, trash_dir)`** removes a caller-owned tree: `move_owned` to
@@ -406,12 +418,17 @@ or absent directory. These are the only single-entry removals.
 **`walk_untrusted(root, limits)`** validates and lists a tree written by an
 untrusted party, without following symlinks. It refuses a root that is a
 symlink or not a directory, special files, regular files with `st_nlink > 1`
-(no inode is shared between jobs), names with NUL, more than 1,000,000 entries
-and depths beyond 256. Symlinks below the root are returned as opaque leaves.
+(no inode is shared between jobs), names with NUL, more than 1,000,000 entries,
+depths beyond 256 and more than 1 TiB of regular files in all. Symlinks below
+the root are returned as opaque leaves.
 
-**`copy_tree(src, dst)`** copies a tree to a fresh name, possibly on another
-filesystem: regular files and directories, symlinks as symlinks, special files
-refused; durable mode fsyncs every file, directory and `dst`'s parent. It is not
+**`copy_tree(src, dst, limits=None)`** copies a tree to a fresh name, possibly
+on another filesystem: regular files and directories, special files refused;
+durable mode fsyncs every file, directory and `dst`'s parent. A trusted copy
+recreates symlinks as symlinks (the only symlinks the protocol creates). With
+`limits` (an untrusted source) it refuses symlinks and hard-linked files and
+enforces the entry, depth and byte bounds of `walk_untrusted`, counting bytes
+as they are read, so a file the source keeps growing ends the copy. It is not
 atomic: callers copy to a private or partial name and move or deliver it
 afterwards.
 
@@ -566,15 +583,17 @@ Every temporary directory belongs to an owner and is named after it:
 `tmp/<owner-id>.<purpose>.<t>/`, created `0700`. A scratch is reconciled by
 its owner's clean exit or, after its owner's death, by the recoverer that won
 its rename. An empty scratch and one of a purpose in `DISCARDABLE_PURPOSES`
-are discarded; any other purpose needs its registered reconciler, and a
-scratch whose reconciler is not registered in the process, or cannot finish,
-is kept (it may hold the only copy of a job).
+are discarded without a reconciler; any other purpose needs its registered
+reconciler, and a scratch whose reconciler is not registered in the process,
+or cannot finish, is kept (it may hold the only copy of a job). A purpose whose
+reconciler must still decide after a step that empties the scratch records
+what it needs first (an eject's `eject.json`).
 
 | Purpose | Holds | Reconciler |
 | --- | --- | --- |
-| `trash`, `build`, `copy`, `landing`, `release`, `claim` | entries being removed, store installations, copies, pulled landings, released holds, exchange-index staging | discard (`DISCARDABLE_PURPOSES`) |
+| `trash`, `build`, `landing`, `release`, `claim` | entries being removed, store installations, pulled landings, released holds, exchange-index staging | discard (`DISCARDABLE_PURPOSES`) |
 | `submit` | a payload being submitted, complete once named `job/` | submit `job/` to `ready`; without it, discard |
-| `eject` | a bundle being built and delivered | roll forward or back (§Moving jobs) |
+| `eject`, `hold` | a bundle being built and delivered, and `eject.json` once delivery starts | roll forward or back (§Moving jobs) |
 | `adopt`, `adopt-untrusted` | a bundle being adopted; the trust is in the purpose | resume adoption (§Moving jobs) |
 | `quarantine` | an entry won for quarantine | finish the move into `quarantine/` |
 
@@ -1203,8 +1222,10 @@ destination workspace in `destination.workspace_id`.
 `job eject JOB DEST [--tree] [--wait]`, the `eject` request and holds share
 one sequence, run by an owner that has claimed the root in any unowned state:
 
-1. **Check the destination:** absolute, and a real directory or a missing name
-   whose parent is a real directory; otherwise the root is given back.
+1. **Check the destination:** absolute without `..`, and a real directory or a
+   missing name whose parent is a real directory; below `WORKSPACE/exchange`,
+   every directory from the workspace root down is opened (and created) with
+   `open_dir_under`. Otherwise the root is given back.
 2. **Members.** With `tree`, the descendants are the children recorded in each
    `state.json`, confirmed from the child's side (its `job.json` names the
    parent and it is not detached), located with settling. Each MUST be
@@ -1216,18 +1237,28 @@ one sequence, run by an owner that has claimed the root in any unowned state:
    (recording each member's `from` state and priority), then append `ejected`
    to each member's run log and extract each member (`move_owned` out of
    `owned/`) into `bundle/jobs/<placement>/<key>`.
-4. **Deliver** with `deliver(…, token = the bundle.json bytes)` to
-   `DEST/<root key>` (a hold: `transfers/outgoing/<transfer-id>`). Across
-   filesystems the bundle is first copied to `DEST/.<name>.partial.<transfer-id>`
-   and that copy is delivered. `DONE` discards the scratch.
-5. **Occupied or failed:** the reconciler's decision runs at once: if a
-   candidate destination carries the token, the delivery happened; otherwise
-   the partial copy is discarded and every member still in the bundle is
-   submitted back to its recorded state and priority. A destination that
+4. **Record** `<scratch>/eject.json` (`{target, token, transfer_id,
+   exchange}`: the target path, the `bundle.json` bytes, and the exchange name
+   and job id of an exchange root, read from its `state.json` in the scratch,
+   or `null`) beside `bundle/`.
+5. **Deliver** with `deliver(…, token = the bundle.json bytes)` to
+   `DEST/<root key>` (a hold: `transfers/outgoing/<transfer-id>`); a target
+   below `WORKSPACE/exchange` is anchored at its parent, opened with
+   `open_dir_under` from the workspace root. Across filesystems the bundle is
+   first copied to `DEST/.<name>.partial.<transfer-id>` and that copy is
+   delivered; never into the exchange, which the enabling rename probe proved
+   to share the filesystem. `DONE` removes an exchange root's index entry and
+   discards the scratch.
+6. **Occupied or failed:** the reconciler's decision runs at once. Without
+   `eject.json` nothing was delivered. With it, the delivery happened when
+   `bundle/` has left the scratch (only its owner moves it) or the target
+   carries the token; then the recorded exchange root leaves the index.
+   Otherwise the partial copy is discarded and every member still in the bundle
+   is submitted back to its recorded state and priority. A destination that
    cannot be read keeps the scratch for the reconciler.
 
-The `eject` reconciler makes the same decision after a crash. An exchange root
-that left the workspace has its index entry removed.
+The `eject` reconciler makes the same decision after a crash; the scratch is
+never empty while a delivery is in doubt, so it always runs.
 
 ### Adopt
 
@@ -1322,7 +1353,7 @@ does not have the jobs.
 | eject, after claims | jobs in `owned/<ejector>/` | recovery returns them to their states |
 | eject, bundle being built | `bundle.json` and some members in the eject scratch | reconciler: no destination carries the token, so members go back; owned ones are recovered |
 | eject, during a cross-filesystem copy | `DEST/.<name>.partial.<T>` | reconciler discards it and rolls back |
-| eject, after delivery | the bundle at its destination, an empty scratch | reconciler finds the token: roll forward |
+| eject, after delivery | the bundle at its destination, only `eject.json` in the scratch | reconciler: the bundle left the scratch, so roll forward and leave the index |
 | adopt, after the take | the bundle in an adopt scratch | reconciler resumes from validation |
 | adopt, during a cross-filesystem copy | only `.partial/` | reconciler discards the scratch; the source is intact |
 | adopt, during the rekey | `rekey.json` | reconciler finishes the recorded rekey |
@@ -1385,11 +1416,14 @@ its `state.json` says `origin: exchange`), a manager posts an `eject` request
 of the tree to `outbox/<exchange-name>/`, with operator `exchange-return` and
 request id `uuid5(5d0c8f2e-8f5e-4a43-9a51-7f2b0c3e9b61, "<job-id>/<sha256 of
 state.json>")`, so every manager seeing one state posts the same request. The
-owner applies it with `deliver`, so a client-planted entry at that name only
+owner applies it with `deliver`, anchored at `outbox/<exchange-name>/` opened
+without following a symlink, so a client-planted entry or symlink there only
 makes the eject roll back, and the changed state yields a fresh request id for
 the retry. A manager posts no return while `outbox/<exchange-name>/<root-key>`
-exists (the client has not fetched the previous copy), and repeated returns of
-one job back off: 10 s, doubling, capped at one hour.
+exists (the client has not fetched the previous copy) or while `outbox` or
+`outbox/<exchange-name>` is not a real directory, looking from the exchange's
+descriptor; repeated returns of one job back off: 10 s, doubling, capped at one
+hour.
 
 ### Job control
 
@@ -1416,7 +1450,7 @@ once. A manager:
    crash rerun, and posting continues; a different nonce or a missing index
    entry is a replay, refused with `request_replayed`. gc prunes records once
    the request could no longer verify (the maximum request lifetime plus twice
-   the clock skew);
+   the clock skew), with a margin of one more clock skew and a day;
 5. writes the unsigned `responses/<id>.json` (`accepted`, or `refused` with
    `request_unauthorized`, `request_expired`, `wrong_workspace` or
    `unknown_job`), the same bytes from every manager;
@@ -1517,8 +1551,10 @@ There is no age-based collection of scratch, held bundles or quarantine.
 | `tombstoned_owner_with_jobs` | A recovered owner that holds jobs, launches or scratch again; `gc` recovers it. |
 | `unreadable_state` | A `state.json` that exists but does not decode. |
 | `foreign_owner` | A job directory another uid owns. |
+| `stale_exchange_index` | An exchange index entry whose job is not here (a settled lookup), nor in a hold or an eject or adopt scratch (checked after the lookup, so an eject extracting the job meanwhile is seen). With `--repair` it is removed. |
 
-Everything but unparsable entries is left to the operator.
+Everything but unparsable entries and stale exchange index entries is left to
+the operator.
 
 
 ### Hygiene and inspection

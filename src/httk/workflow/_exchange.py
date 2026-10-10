@@ -87,7 +87,7 @@ from ._daemon_protocol import (
 )
 from ._kernel import OWNED, TERMINAL_STATES, JobRef
 from ._state import encode_state, read_state_unowned
-from ._util import json_bytes, read_json, utc_now, write_json_atomic
+from ._util import json_bytes, utc_now
 from .errors import FormatError, WorkflowError
 from .introspection._reading import read_job_file
 from .models import EXCHANGE_DIRECTORY, EXCHANGE_EXTENSION
@@ -295,18 +295,11 @@ def enable_exchange(workspace: Workspace) -> bool:
     _complete_layout(workspace)
     _rename_probe(workspace)
     if EXCHANGE_EXTENSION not in workspace.extensions:
-        path = workspace.control / "format.json"
-        stored = read_json(path)
-        extensions = stored.get("extensions", [])
-        if not isinstance(extensions, list):
-            raise FormatError("workspace extensions must be an array of strings")
-        stored["extensions"] = sorted({*extensions, EXCHANGE_EXTENSION})
-        write_json_atomic(path, stored, durable=workspace.durable)
-        workspace.refresh_format()
+        workspace._add_extension(EXCHANGE_EXTENSION)
         if EXCHANGE_EXTENSION not in workspace.extensions:
             raise WorkflowError(
-                f"{path} does not record the exchange extension after it was written (a concurrent writer "
-                "replaced it); run the command again"
+                f"{workspace.control / 'format.json'} does not record the exchange extension after it was written "
+                "(a concurrent writer replaced it); run the command again"
             )
     _LOGGER.info(
         "enabled the exchange extension of workspace %s at %s",
@@ -794,7 +787,7 @@ class ExchangeService:
         changed = False
         if returns:
             for job in jobs:
-                changed |= self._return(job, now)
+                changed |= self._return(job, now, directories.exchange)
         if status:
             document = self._status_document(jobs)
             _install(
@@ -802,8 +795,12 @@ class ExchangeService:
             )
         return changed
 
-    def _return(self, job: _ExchangeJob, now: float) -> bool:
-        """Post the ``eject`` request of one finished exchange tree to ``outbox/<exchange-name>/``."""
+    def _return(self, job: _ExchangeJob, now: float, exchange: int) -> bool:
+        """Post the ``eject`` request of one finished exchange tree to ``outbox/<exchange-name>/``.
+
+        *exchange* is the exchange directory's descriptor: the outbox is client-writable, so it is looked into
+        anchored, never following a symlink.
+        """
 
         ref = job.ref
         if ref is None or ref.state not in TERMINAL_STATES:
@@ -821,8 +818,19 @@ class ExchangeService:
         if any(member.state not in TERMINAL_STATES for member in members):
             return False
         outbox = exchange_directory(self.workspace) / "outbox" / job.exchange_name
-        if _fs.exists(_fs.loc(outbox / ref.job_key)):
-            return False  # the client has not fetched an earlier return: an eject now would only roll back
+        try:
+            descriptor = _fs.open_dir_under(exchange, f"outbox/{job.exchange_name}")
+        except FileNotFoundError:
+            pass  # nothing returned there yet
+        except _fs.UnsafePath:
+            return False  # a client replaced the outbox with a symlink or a file: the delivery would be refused
+        else:
+            try:
+                occupied = _fs.exists(_fs.anchored(descriptor, ref.job_key))
+            finally:
+                os.close(descriptor)
+            if occupied:
+                return False  # the client has not fetched an earlier return: an eject now would only roll back
         # One id per state of the root: every manager that sees this state posts the same request, and a rolled
         # back eject (which records the applied request) changes the state, so the retry is a fresh request.
         digest = hashlib.sha256(encode_state(doc)).hexdigest()

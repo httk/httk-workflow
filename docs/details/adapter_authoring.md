@@ -331,7 +331,7 @@ destination for remote transfers and the resolved absolute path for local
 copies, so the result value is authoritative and the request value is not.
 
 A local copy onto an existing destination is idempotent when both sides carry
-the identical `.httk-transfer/manifest.json`, and an error otherwise. A resumed
+the identical `bundle.json`, and an error otherwise. A resumed
 transfer therefore does not need to know whether the previous attempt finished.
 
 ## The optional `daemon` operation

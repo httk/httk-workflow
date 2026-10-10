@@ -1186,7 +1186,6 @@ class TaskManager:
                     **observation,
                     "workspace_id": self.workspace.workspace_id,
                     "kind": observation["state"],
-                    "data_generation": None,
                     **located,
                 }
             )

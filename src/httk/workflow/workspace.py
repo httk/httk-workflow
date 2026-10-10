@@ -1,17 +1,18 @@
 """Execution workspace creation, attachment, format, policy and application settings."""
 
+import json
 import logging
 import os
 import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from . import _fs
 from ._kernel import OWNED
 from ._state import UNOWNED_STATES
-from ._util import json_bytes, read_json, utc_now
+from ._util import json_bytes, utc_now
 from .errors import FormatError, SealedError, UnsupportedExtensionError
 from .models import (
     CORE_PROFILE,
@@ -30,6 +31,26 @@ _LOGGER = logging.getLogger(__name__)
 #: The ``format.json`` ``layout`` of a workspace with ``jobs/<state>/`` job directories and owners (plan §3).
 LAYOUT = "jobs-v3"
 WORKFLOWS_DIRECTORY = "workflows"
+
+
+#: The largest accepted ``format.json``.
+_FORMAT_LIMIT = 1 << 20
+
+
+def _read_format(control: Path) -> dict[str, Any]:
+    """Read ``<control>/format.json``, bounded and without following a symlink."""
+
+    path = control / "format.json"
+    try:
+        data = _fs.read_bounded(_fs.loc(path), _FORMAT_LIMIT)
+        value = None if data is None else json.loads(data)
+    except (OSError, ValueError, _fs.UnsafePath) as exc:
+        raise FormatError(f"cannot read JSON object {path}: {exc}") from exc
+    if data is None:
+        raise FormatError(f"cannot read JSON object {path}: it does not exist")
+    if not isinstance(value, dict):
+        raise FormatError(f"expected JSON object in {path}")
+    return value
 
 
 def _validate_setting_key(key: str) -> str:
@@ -154,7 +175,7 @@ class Workspace:
         self.jobs = self.root / JOBS_DIRECTORY
         self.control = self.root / WORKSPACE_DIRECTORY
         self.durable = durable
-        self.format = read_json(self.control / "format.json")
+        self.format = _read_format(self.control)
         if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 3:
             raise _refuse_format(self.root, self.format.get("format_version"), self.format.get("core_profile"))
         self.core_profile = self.format.get("core_profile")
@@ -339,6 +360,17 @@ class Workspace:
     def _write_format(self, stored: Mapping[str, object]) -> None:
         _fs.write_file(_fs.loc(self.control / "format.json"), json_bytes(stored) + b"\n", durable=self.durable)
 
+    def _add_extension(self, name: str) -> None:
+        """Record *name* in ``format.json`` ``extensions`` (a read-modify-write) and re-read the extensions."""
+
+        stored = _read_format(self.control)
+        extensions = stored.get("extensions", [])
+        if not isinstance(extensions, list):
+            raise FormatError("workspace extensions must be an array of strings")
+        stored["extensions"] = sorted({*extensions, name})
+        self._write_format(stored)
+        self.refresh_format()
+
     def set_policy(self, changes: Mapping[str, object]) -> WorkspacePolicy:
         """Validate *changes*, merge them into the stored policy, and publish it.
 
@@ -355,7 +387,7 @@ class Workspace:
         from .seals import require_cli_modifiable
 
         require_cli_modifiable(self)
-        stored = read_json(self.control / "format.json")
+        stored = _read_format(self.control)
         merged = WorkspacePolicy.from_mapping(_section(stored, "policy")).updated(changes)
         stored["policy"] = merged.as_mapping()
         self._write_format(stored)
@@ -399,7 +431,7 @@ class Workspace:
         :raises httk.workflow.errors.UnsupportedExtensionError: If it enables an unsupported extension.
         """
 
-        stored = read_json(self.control / "format.json")
+        stored = _read_format(self.control)
         if stored.get("format") != "httk-workflow-filesystem" or stored.get("format_version") != 3:
             raise _refuse_format(self.root, stored.get("format_version"), stored.get("core_profile"))
         if stored.get("core_profile") != CORE_PROFILE:
@@ -471,7 +503,7 @@ class Workspace:
         from .seals import require_cli_modifiable
 
         require_cli_modifiable(self)
-        stored = read_json(self.control / "format.json")
+        stored = _read_format(self.control)
         settings = _validate_settings(_section(stored, "settings"))
         for key in unset:
             if key not in settings:
@@ -501,7 +533,7 @@ class Workspace:
         """
 
         merged = _validate_settings(seeds)
-        stored = read_json(self.control / "format.json")
+        stored = _read_format(self.control)
         current = _validate_settings(_section(stored, "settings"))
         for key, value in merged.items():
             if any(
@@ -525,7 +557,7 @@ class Workspace:
         :raises httk.workflow.errors.FormatError: If the stored preludes are not valid.
         """
 
-        return _validate_workflow_preludes(_section(read_json(self.control / "format.json"), "workflow_preludes"))
+        return _validate_workflow_preludes(_section(_read_format(self.control), "workflow_preludes"))
 
     def set_workflow_prelude(self, workflow_id: str, value: str) -> dict[str, str]:
         """Store one workflow prelude and return the resulting map.
@@ -546,7 +578,7 @@ class Workspace:
         require_cli_modifiable(self)
         _validate_workflow_prelude_id(workflow_id)
         _validate_workflow_prelude_value(workflow_id, value)
-        stored = read_json(self.control / "format.json")
+        stored = _read_format(self.control)
         preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         preludes[workflow_id] = value
         stored["workflow_preludes"] = preludes
@@ -566,7 +598,7 @@ class Workspace:
         from .seals import require_cli_modifiable
 
         require_cli_modifiable(self)
-        stored = read_json(self.control / "format.json")
+        stored = _read_format(self.control)
         preludes = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
         if workflow_id not in preludes:
             raise ValueError(f"workflow prelude is not set: {workflow_id}")

@@ -4,8 +4,8 @@ Every outcome is decided by observation (``lstat`` of the source and the
 destination), never by a return code: NFS can report an error for a rename that
 happened (a retransmission), and ``ENOENT`` can come from a concurrently pruned
 parent directory. Only atomic rename and basic POSIX are used: no file locks,
-no hard links, and no symlink is created except where :func:`copy_tree` copies
-one as a symlink. Plain :class:`Loc` values address trusted
+no hard links, and no symlink is created except where a trusted :func:`copy_tree`
+copies one as a symlink. Plain :class:`Loc` values address trusted
 directories; anchored ones address a name below a directory descriptor that an
 untrusted party may write.
 """
@@ -15,19 +15,61 @@ import enum
 import errno
 import logging
 import os
-import re
 import stat
-import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
 from httk.workflow.errors import FormatError, WorkflowError
 
+__all__ = [
+    "DEFAULT_LIMITS",
+    "STAGING_MARK",
+    "CrossDevice",
+    "Delivered",
+    "DeliveryUncertain",
+    "Entry",
+    "Fault",
+    "FilesystemUnsupported",
+    "Loc",
+    "MoveFailed",
+    "Moved",
+    "TooLarge",
+    "UnsafePath",
+    "UntrustedContentError",
+    "WalkLimits",
+    "anchored",
+    "carries",
+    "copy_tree",
+    "create_exclusive",
+    "deliver",
+    "discard",
+    "exists",
+    "fresh_token",
+    "loc",
+    "lstat",
+    "make_dirs",
+    "move_once",
+    "move_owned",
+    "open_append",
+    "open_dir",
+    "open_dir_under",
+    "publish_dir",
+    "publish_record",
+    "read_bounded",
+    "read_tail",
+    "remove_empty_dir",
+    "remove_file",
+    "rename_probe",
+    "set_fault_injector",
+    "walk_untrusted",
+    "write_all",
+    "write_file",
+]
+
 _LOGGER = logging.getLogger(__name__)
 
 _ATTEMPTS = 8
-_SETTLE_STEP = 0.05
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _OCCUPIED_ERRNOS = frozenset({errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR})
@@ -56,7 +98,17 @@ class DeliveryUncertain(WorkflowError):
 
 
 class UnsafePath(WorkflowError):
-    """A path is a symlink, a special file or otherwise not the plain entry expected."""
+    """A path is a symlink, a special file or otherwise not the plain entry expected.
+
+    :param message: Human-readable failure description.
+    :param kind: ``"symlink"`` for a symlink where a file was opened, ``"not_regular"`` for a special file or a
+        directory where a regular file was expected, ``"not_directory"`` for a component that is a symlink or
+        not a directory where a directory was opened (Linux does not tell those two apart).
+    """
+
+    def __init__(self, message: str, kind: Literal["symlink", "not_regular", "not_directory"]) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class TooLarge(FormatError):
@@ -154,7 +206,7 @@ def open_dir(path: Path) -> int:
     except OSError as exc:
         # Linux reports a symlink opened O_DIRECTORY|O_NOFOLLOW as ENOTDIR, not ELOOP.
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise UnsafePath(f"{path} is a symlink or not a directory") from exc
+            raise UnsafePath(f"{path} is a symlink or not a directory", "not_directory") from exc
         raise
 
 
@@ -201,7 +253,9 @@ def open_dir_under(
             except OSError as exc:
                 # Linux reports a symlink opened O_DIRECTORY|O_NOFOLLOW as ENOTDIR, not ELOOP.
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise UnsafePath(f"{root}/{relative}: {name} is a symlink or not a directory") from exc
+                    raise UnsafePath(
+                        f"{root}/{relative}: {name} is a symlink or not a directory", "not_directory"
+                    ) from exc
                 raise
             descriptor, previous = child, descriptor
             os.close(previous)
@@ -252,7 +306,10 @@ class Delivered(enum.Enum):
 
 
 def lstat(target: Loc) -> os.stat_result | None:
-    """Observe an entry without following a symlink.
+    """Observe an entry without following a symlink at its final name.
+
+    A plain *target* follows symlinks in its intermediate components; anchor a name below a directory an
+    untrusted party may write.
 
     :param target: The location to observe.
     :return: Its ``lstat`` result, or ``None`` when no entry has the name (or a component is not a directory).
@@ -265,7 +322,7 @@ def lstat(target: Loc) -> os.stat_result | None:
 
 
 def exists(target: Loc) -> bool:
-    """Report whether an entry exists, without following a symlink.
+    """Report whether an entry exists, without following a symlink at its final name (see :func:`lstat`).
 
     :param target: The location to observe.
     :return: Whether ``lstat`` finds an entry.
@@ -278,28 +335,6 @@ def fresh_token() -> str:
     """Return 80 random bits as 16 lowercase base32 characters."""
 
     return base64.b32encode(os.urandom(10)).decode("ascii").lower()
-
-
-def remove_write_temporaries(directory: Path, name: str, *, durable: bool) -> int:
-    """Remove the temporaries an interrupted :func:`write_file` of *name* left in *directory*.
-
-    Only regular files named ``.<name>.<token>.tmp`` are removed; call this only where every such
-    name is the caller's own.
-
-    :param directory: The directory holding *name*.
-    :param name: The target file name.
-    :param durable: Durability of the removals.
-    :return: The number of temporaries removed.
-    """
-
-    pattern = re.compile(rf"\.{re.escape(name)}\.[a-z2-7]{{16}}\.tmp")
-    removed = 0
-    for entry in os.listdir(directory):
-        info = lstat(Loc(directory / entry)) if pattern.fullmatch(entry) else None
-        if info is not None and stat.S_ISREG(info.st_mode):
-            remove_file(Loc(directory / entry), durable=durable)
-            removed += 1
-    return removed
 
 
 def _fsync_parent(target: Loc) -> None:
@@ -328,12 +363,16 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
     """Create *path* and its missing ancestors as real directories.
 
     A concurrent creation of the same directory is success. An ancestor removed
-    concurrently (by a pruner) makes the walk start again.
+    concurrently (by a pruner) makes the walk start again. Only the components
+    this call creates and the deepest existing ancestor are checked: a symlink
+    further up is followed, so *path* must lie below directories only trusted
+    parties write (anchor with :func:`open_dir_under` otherwise).
 
     :param path: The absolute directory path.
     :param durable: fsync the parent of every directory created.
     :param mode: The permission bits of the created directories (before the umask).
-    :raises UnsafePath: When a component is a symlink or not a directory.
+    :raises UnsafePath: When the deepest existing ancestor, or a component created concurrently, is a symlink or
+        not a directory.
     :raises MoveFailed: When concurrent removals defeat every attempt.
     """
 
@@ -345,7 +384,7 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
             missing.append(current)
             current = current.parent
         if not stat.S_ISDIR(info.st_mode):
-            raise UnsafePath(f"{current} is a symlink or not a directory")
+            raise UnsafePath(f"{current} is a symlink or not a directory", "not_directory")
         try:
             for directory in reversed(missing):
                 try:
@@ -354,7 +393,7 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
                     # A concurrent mkdir is success, provided it made a directory and not a symlink.
                     created = lstat(Loc(directory))
                     if created is not None and not stat.S_ISDIR(created.st_mode):
-                        raise UnsafePath(f"{directory} is a symlink or not a directory") from None
+                        raise UnsafePath(f"{directory} is a symlink or not a directory", "not_directory") from None
                     continue
                 if durable:
                     _fsync_parent(Loc(directory))
@@ -388,13 +427,15 @@ def _rename(src: Loc, dst: Loc) -> OSError | None:
     return error
 
 
-def move_once(src: Loc, dst: Loc, *, durable: bool, settle: float = 0.0, create_parents: bool = True) -> Moved:
+def move_once(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True) -> Moved:
     """Move a contested entry to a fresh name that, once there, only the caller can move.
+
+    When both names look absent, the move is lost: callers settle for zero seconds, because a win misjudged as
+    lost leaves *dst* below a name only the caller reaches, where self-healing or a reconciler finds it.
 
     :param src: The entry other actors may also try to move.
     :param dst: A fresh name (it contains a fresh token or an owner id); nothing may exist there yet.
     :param durable: Fsync both parent directories after a win.
-    :param settle: Seconds to keep re-observing *dst* when both names look absent.
     :param create_parents: Create *dst*'s missing ancestors; with ``False`` a missing parent fails the move.
     :return: :attr:`Moved.WON` when *dst* was observed, else :attr:`Moved.LOST`.
     :raises ValueError: When *dst* already exists: an existing name would be observed as a win.
@@ -419,14 +460,7 @@ def move_once(src: Loc, dst: Loc, *, durable: bool, settle: float = 0.0, create_
             # src still here: the rename did not happen (e.g. a pruner removed dst's parent); retry.
             continue
         # Both absent: another actor moved src first, or our dst is not yet visible here (NFS
-        # attribute caching). Only dst can decide; the name src cannot legitimately come back.
-        deadline = time.monotonic() + settle
-        while (remaining := deadline - time.monotonic()) > 0:
-            time.sleep(min(_SETTLE_STEP, remaining))
-            if exists(dst):
-                if durable:
-                    _fsync_parents(src, dst)
-                return Moved.WON
+        # attribute caching); the caller's self-healing finds a misjudged win.
         return Moved.LOST
     raise MoveFailed(
         f"{src.path} stayed in place after {_ATTEMPTS} attempts", error.errno if error else None
@@ -440,7 +474,8 @@ def move_owned(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True
     (a replacing rename) or a successor may already have moved it on.
 
     :param src: The caller-owned entry.
-    :param dst: The destination name.
+    :param dst: The destination name; when its parent is writable by an untrusted party it MUST be anchored
+        (a plain path follows a symlink planted on the way, and the created parents are checked only partly).
     :param durable: Fsync both parent directories after the move.
     :param create_parents: Create *dst*'s missing ancestors; with ``False`` a missing parent fails the move.
     :raises MoveFailed: When the source stayed in place after every attempt; ``errno`` carries the last error.
@@ -501,7 +536,8 @@ def deliver(src: Loc, dst: Loc, *, token_name: str, token: bytes, durable: bool)
     pruned-parent retry.
 
     :param src: The caller-owned directory holding ``token_name``.
-    :param dst: The destination name.
+    :param dst: The destination name; when its parent is writable by an untrusted party (the exchange outbox) it
+        MUST be anchored, since a plain path follows a symlink planted on the way.
     :param token_name: The name of the token file inside the directory.
     :param token: The token the delivered directory carries.
     :param durable: Fsync both parent directories after a delivery.
@@ -659,38 +695,21 @@ def open_append(target: Loc, *, durable: bool, mode: int = 0o644) -> int:
             descriptor = os.open(target.path, flags, dir_fd=target.at)
         except OSError as exc:
             # ELOOP: a symlink. ENXIO: a FIFO without a reader (O_NONBLOCK never waits for one). EISDIR.
-            if exc.errno in (errno.ELOOP, errno.ENXIO, errno.EISDIR):
-                raise UnsafePath(f"{target.path} is not a regular file") from exc
+            if exc.errno == errno.ELOOP:
+                raise UnsafePath(f"{target.path} is a symlink", "symlink") from exc
+            if exc.errno in (errno.ENXIO, errno.EISDIR):
+                raise UnsafePath(f"{target.path} is not a regular file", "not_regular") from exc
             raise
     try:
         # A FIFO with a reader, or a device, opens: only a regular file is accepted.
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise UnsafePath(f"{target.path} is not a regular file")
+            raise UnsafePath(f"{target.path} is not a regular file", "not_regular")
         if durable and created:
             _fsync_parent(target)
     except BaseException:
         os.close(descriptor)
         raise
     return descriptor
-
-
-def append_file(target: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
-    """Append *data* to a regular file, creating it when absent; one appender per file.
-
-    :param target: The file to append to.
-    :param data: The bytes to append.
-    :param durable: Fsync the file, and its directory when this call created it.
-    :param mode: The permission bits of a newly created file (before the umask).
-    :raises UnsafePath: When *target* is a symlink, a FIFO, a directory or any other non-regular file.
-    """
-
-    descriptor = open_append(target, durable=durable, mode=mode)
-    try:
-        write_all(descriptor, data)
-        if durable:
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def read_bounded(src: Loc, limit: int, *, nonblock: bool = False) -> bytes | None:
@@ -711,11 +730,11 @@ def read_bounded(src: Loc, limit: int, *, nonblock: bool = False) -> bytes | Non
         return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise UnsafePath(f"{src.path} is a symlink") from exc
+            raise UnsafePath(f"{src.path} is a symlink", "symlink") from exc
         raise
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise UnsafePath(f"{src.path} is not a regular file")
+            raise UnsafePath(f"{src.path} is not a regular file", "not_regular")
         data = bytearray()
         while len(data) <= limit and (chunk := os.read(descriptor, min(1 << 20, limit + 1 - len(data)))):
             data += chunk
@@ -752,7 +771,7 @@ def read_tail(anchor: Path, relative: str | PurePosixPath, size: int, offset: in
     try:
         length = os.fstat(descriptor)
         if not stat.S_ISREG(length.st_mode):
-            raise UnsafePath(f"{anchor / path} is not a regular file")
+            raise UnsafePath(f"{anchor / path} is not a regular file", "not_regular")
         if offset is None:
             start = max(0, length.st_size - size)
         else:
@@ -896,14 +915,17 @@ def remove_file(target: Loc, *, durable: bool) -> None:
 
 @dataclass(frozen=True)
 class WalkLimits:
-    """Bounds of :func:`walk_untrusted`.
+    """Bounds of :func:`walk_untrusted` and of an untrusted :func:`copy_tree`.
 
     :param entries: The largest accepted number of entries.
     :param depth: The deepest accepted entry, counted in path components below the root.
+    :param max_bytes: The largest accepted total size of the regular files; it also ends the copy of a file an
+        untrusted party keeps growing.
     """
 
     entries: int = 1_000_000
     depth: int = 256
+    max_bytes: int = 1 << 40
 
 
 DEFAULT_LIMITS = WalkLimits()
@@ -915,7 +937,7 @@ def _open_child_dir(at: int | None, name: str) -> int:
     except OSError as exc:
         # Linux reports a symlink opened O_DIRECTORY|O_NOFOLLOW as ENOTDIR, not ELOOP.
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise UnsafePath(f"{name} is a symlink or not a directory") from exc
+            raise UnsafePath(f"{name} is a symlink or not a directory", "not_directory") from exc
         raise
 
 
@@ -927,22 +949,34 @@ def _finish_copy(descriptor: int, source: os.stat_result, *, durable: bool) -> N
         os.fsync(descriptor)
 
 
-def _copy_file(src: int, dst: int, name: str, relative: PurePosixPath, *, durable: bool, untrusted: bool) -> None:
+def _copy_file(
+    src: int,
+    dst: int,
+    name: str,
+    relative: PurePosixPath,
+    *,
+    durable: bool,
+    limits: WalkLimits | None,
+    count: list[int],
+) -> None:
     try:
         source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=src)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise UnsafePath(f"{relative} became a symlink while it was copied") from exc
+            raise UnsafePath(f"{relative} became a symlink while it was copied", "symlink") from exc
         raise
     try:
         opened = os.fstat(source)
         if not stat.S_ISREG(opened.st_mode):
-            raise UnsafePath(f"{relative} is not a regular file")
-        if untrusted and opened.st_nlink > 1:
+            raise UnsafePath(f"{relative} is not a regular file", "not_regular")
+        if limits is not None and opened.st_nlink > 1:
             raise UntrustedContentError(relative, "a hard-linked file")
         target = os.open(name, _CREATE_FLAGS, 0o600, dir_fd=dst)
         try:
             while chunk := os.read(source, 1 << 20):
+                count[1] += len(chunk)
+                if limits is not None and count[1] > limits.max_bytes:
+                    raise UntrustedContentError(relative, f"more than {limits.max_bytes} bytes in all")
                 write_all(target, chunk)
             _finish_copy(target, opened, durable=durable)
         finally:
@@ -976,12 +1010,14 @@ def _copy_dir(
             finally:
                 os.close(child)
         elif stat.S_ISLNK(mode):
-            # The one place a symlink is created: a copy keeps a link a link, and never follows it.
+            if limits is not None:
+                raise UntrustedContentError(path, "a symlink")
+            # The one place a symlink is created: a trusted copy keeps a link a link, and never follows it.
             os.symlink(os.readlink(name, dir_fd=src), name, dir_fd=dst)  # noqa: TID251
         elif stat.S_ISREG(mode):
-            _copy_file(src, dst, name, path, durable=durable, untrusted=limits is not None)
+            _copy_file(src, dst, name, path, durable=durable, limits=limits, count=count)
         else:
-            raise UnsafePath(f"{path} is a special file")
+            raise UnsafePath(f"{path} is a special file", "not_regular")
 
 
 def copy_tree(src: Path | Loc, dst: Path, *, durable: bool, limits: WalkLimits | None = None) -> None:
@@ -989,18 +1025,19 @@ def copy_tree(src: Path | Loc, dst: Path, *, durable: bool, limits: WalkLimits |
 
     Every directory of *src* is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent's descriptor, and every
     regular file is read through an anchored ``O_NOFOLLOW|O_NONBLOCK`` open, so a party that renames or replaces
-    entries of *src* during the copy changes what is copied, never where it is read from. Symlinks are recreated
-    as symlinks (their targets are never examined), permission bits and times are kept, and anything else is
-    refused. The copy is not atomic: callers copy to a private or partial name and move or deliver it afterwards.
+    entries of *src* during the copy changes what is copied, never where it is read from. In a trusted copy,
+    symlinks are recreated as symlinks (their targets are never examined); an untrusted copy refuses them.
+    Permission bits and times are kept, and anything else is refused. The copy is not atomic: callers copy to a private or partial name and move or deliver it afterwards.
 
     :param src: The directory to copy: an absolute path (a symlink there is refused) or an anchored location.
     :param dst: The destination, which must not exist; its parent is created.
     :param durable: Fsync every copied file and directory, and the parent of *dst*.
-    :param limits: For a source an untrusted party writes: refuse hard-linked files, and more or deeper entries
-        than these bounds, as :func:`walk_untrusted` does.
+    :param limits: For a source an untrusted party writes: refuse symlinks, hard-linked files, and more, deeper or
+        larger entries than these bounds.
     :raises FileExistsError: When *dst* exists.
     :raises UnsafePath: For a special file, or an entry replaced by another kind of entry during the copy.
-    :raises UntrustedContentError: With *limits*, for a hard-linked file or too many or too deep entries.
+    :raises UntrustedContentError: With *limits*, for a symlink, a hard-linked file, or too many, too deep or too
+        large entries.
     """
 
     if exists(loc(dst)):
@@ -1011,7 +1048,7 @@ def copy_tree(src: Path | Loc, dst: Path, *, durable: bool, limits: WalkLimits |
         os.mkdir(dst, 0o700)
         target = open_dir(dst)
         try:
-            _copy_dir(source, target, PurePosixPath(), durable=durable, limits=limits, count=[0])
+            _copy_dir(source, target, PurePosixPath(), durable=durable, limits=limits, count=[0, 0])
             _finish_copy(target, os.fstat(source), durable=durable)
         finally:
             os.close(target)
@@ -1069,10 +1106,10 @@ def walk_untrusted(root: Path, *, limits: WalkLimits = DEFAULT_LIMITS) -> tuple[
     """Validate and list a tree written by an untrusted party, never following a symlink.
 
     :param root: The directory to walk.
-    :param limits: The accepted entry count and depth.
+    :param limits: The accepted entry count, depth and total size.
     :return: Every entry below *root* in sorted, top-down order.
     :raises UntrustedContentError: For a special file, a hard-linked file, a name with NUL,
-        too many or too deep entries, or a root that is a symlink or not a directory.
+        too many, too deep or too large entries, or a root that is a symlink or not a directory.
     """
 
     top = PurePosixPath(".")
@@ -1082,6 +1119,7 @@ def walk_untrusted(root: Path, *, limits: WalkLimits = DEFAULT_LIMITS) -> tuple[
     if not stat.S_ISDIR(info.st_mode):
         raise UntrustedContentError(top, "the root is not a directory")
     entries: list[Entry] = []
+    total = 0
     pending: list[tuple[Path, PurePosixPath]] = [(root, PurePosixPath())]
     while pending:
         directory, relative = pending.pop()
@@ -1102,6 +1140,9 @@ def walk_untrusted(root: Path, *, limits: WalkLimits = DEFAULT_LIMITS) -> tuple[
                     if info.st_nlink > 1:
                         raise UntrustedContentError(path, "a hard-linked file")
                     entries.append(Entry(path, "file", info.st_size))
+                    total += info.st_size
+                    if total > limits.max_bytes:
+                        raise UntrustedContentError(path, f"more than {limits.max_bytes} bytes in all")
                 else:
                     raise UntrustedContentError(path, "a special file")
                 if len(entries) > limits.entries:

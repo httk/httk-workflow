@@ -1,5 +1,6 @@
 """Focused tests for the descriptor-anchored daemon mailbox primitive."""
 
+import errno
 import os
 import re
 import socket
@@ -12,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from httk.workflow import _daemon_mailbox as mailbox_module
-from httk.workflow._daemon_mailbox import MailboxDirectory
+from httk.workflow import _fs
+from httk.workflow._daemon_mailbox import MailboxDirectory, read_regular
 
 _NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 
@@ -421,3 +423,14 @@ def test_set_aside_moves_any_publication_named_entry_out_of_scans(tmp_path: Path
             mailbox.set_aside(name)
         with pytest.raises(ValueError):
             mailbox.set_aside("../x")
+
+
+def test_read_regular_tells_a_symlink_from_a_special_file_by_the_unsafe_kind(tmp_path: Path) -> None:
+    (tmp_path / "target").write_text("x")
+    (tmp_path / "link").symlink_to("target")
+    os.mkfifo(tmp_path / "fifo")
+    with pytest.raises(OSError) as raised:
+        read_regular(_fs.loc(tmp_path / "link"), 16)
+    assert raised.value.errno == errno.ELOOP
+    with pytest.raises(ValueError, match="not a regular file"):
+        read_regular(_fs.loc(tmp_path / "fifo"), 16)

@@ -477,7 +477,7 @@ def check_placement(workspace: KernelWorkspace, state: str, placement: PurePosix
         except FileNotFoundError:
             return
         if not stat.S_ISDIR(mode):
-            raise _fs.UnsafePath(f"placement component {current} is a symlink or not a directory")
+            raise _fs.UnsafePath(f"placement component {current} is a symlink or not a directory", "not_directory")
 
 
 def _tmp(workspace: KernelWorkspace) -> Path:
@@ -1207,7 +1207,9 @@ class OwnedJob:
             except (FileNotFoundError, NotADirectoryError):
                 return False
             if depth < len(path.parts) and not stat.S_ISDIR(modes[-1]):
-                raise _fs.UnsafePath(f"{self.path.joinpath(*path.parts[:depth])} is a symlink or not a directory")
+                raise _fs.UnsafePath(
+                    f"{self.path.joinpath(*path.parts[:depth])} is a symlink or not a directory", "not_directory"
+                )
         target = self.path.joinpath(*path.parts)
         if stat.S_ISDIR(modes[-1]) or stat.S_ISREG(modes[-1]):
             self.owner.discard_tree(target)
@@ -1553,7 +1555,7 @@ def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | N
 _RECONCILERS: dict[str, Callable[[Owner, Path], bool]] = {}
 
 #: Scratch purposes whose content is always safe to discard: nothing in them is the only copy of a job.
-DISCARDABLE_PURPOSES = frozenset({"trash", "build", "copy", "landing", "release", "claim"})
+DISCARDABLE_PURPOSES = frozenset({"trash", "build", "landing", "release", "claim"})
 
 
 def register_reconciler(purpose: str, function: Callable[[Owner, Path], bool]) -> None:
@@ -1571,6 +1573,9 @@ def register_reconciler(purpose: str, function: Callable[[Owner, Path], bool]) -
 
 def reconcile_scratch(owner: Owner, path: Path) -> bool:
     """Finish or discard one of the owner's scratch directories (used by recovery and :meth:`Owner.close`).
+
+    An empty scratch is discarded without calling its reconciler: a purpose whose reconciler must run after a
+    step that empties the scratch (an eject's delivery) records what it needs there first (``eject.json``).
 
     :param owner: The owner the scratch is named after.
     :param path: ``tmp/<owner-id>.<purpose>.<token>/``.

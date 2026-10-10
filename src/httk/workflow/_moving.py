@@ -4,12 +4,15 @@ Everything here composes :mod:`~httk.workflow._kernel` and :mod:`~httk.workflow.
 goes through :mod:`~httk.workflow._fs`.
 
 **Eject** claims the tree members, builds the bundle in an ``eject`` scratch (a ``hold`` scratch for a hold;
-``bundle.json`` first, recording each member's ``from`` state and priority) and delivers it to
+``bundle.json`` first, recording each member's ``from`` state and priority), records ``eject.json`` beside the
+bundle (the target, the token, the transfer id and the exchange root, if any) and delivers the bundle to
 ``<destination>/<root key>`` (a hold to ``transfers/outgoing/<transfer id>``); across filesystems it copies to
-``<destination>/.<name>.partial.<transfer id>`` and delivers that. An occupied destination, a failed delivery or
-an error after some members were extracted runs the reconciler's decision at once, which rolls the members back;
-a refusal before the bundle is built gives every claimed job back. A delivered exchange root leaves the exchange
-index (decided from the bundle root's ``state.json``).
+``<destination>/.<name>.partial.<transfer id>`` and delivers that. A target below ``WORKSPACE/exchange``, which a
+client writes, is reached through its parent opened component by component without following a symlink, and is
+never copied to. An occupied destination, a failed delivery or an error after some members were extracted runs
+the reconciler's decision at once, which rolls the members back; a refusal before the bundle is built gives every
+claimed job back. A delivered exchange root leaves the exchange index (decided from the bundle root's
+``state.json`` before delivery).
 
 **Adopt** takes a bundle into an ``adopt`` scratch, validates it (the trust boundary), rekeys an untrusted one,
 deduplicates against the workspace and publishes the members bottom-up. A bundle already adopted is discarded
@@ -20,11 +23,13 @@ original, which a client holding open descriptors could still change. Every late
 
 **Crash-resume contract** of the reconcilers, registered with the kernel at import:
 
-- ``eject`` and ``hold``: if the destination carries this bundle's exact ``bundle.json`` (an eject's under the
-  root key in its recorded destination, a hold's under the transfer id in ``transfers/outgoing``), the delivery
-  happened, an exchange root leaves the index, and the scratch is discarded (roll forward). Otherwise every
-  member still in the bundle is submitted back to its recorded state and priority (roll back). A destination
-  that cannot be read keeps the scratch. Delivery is at least once: verify the destination before re-ejecting.
+- ``eject`` and ``hold``: without ``eject.json`` no delivery was attempted, and every member in the bundle is
+  submitted back to its recorded state and priority (roll back). With it, the delivery happened when the bundle
+  has left the scratch (only its owner moves it) or the recorded target carries the recorded ``bundle.json``
+  bytes (a cross-filesystem copy): a recorded exchange root leaves the index and the scratch is discarded (roll
+  forward). Otherwise any partial copy is discarded and the members go back. The scratch is never empty while a
+  delivery is in doubt, so the reconciler always runs. A destination that cannot be read keeps the scratch.
+  Delivery is at least once: verify the destination before re-ejecting.
 - ``adopt`` and ``adopt-untrusted`` (the trust is in the scratch's purpose, so it is known from the take on):
   ``source.json`` records where the bundle came from, where refusals go and the adoption's nonce (kept in the
   exchange index entry it claims, so a rerun recognizes its own claim and another adopter of a copy does not);
@@ -96,6 +101,8 @@ _LOGGER = logging.getLogger(__name__)
 _MEMBER_STATES = frozenset({*TERMINAL_STATES, "paused"})
 _TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 _BUNDLE = "bundle"
+#: The delivery record of an ``eject`` or ``hold`` scratch, written before the delivery is attempted.
+_DELIVERY = "eject.json"
 #: The scratch purpose of a hold; an eject's is ``eject``.
 _HOLD = "hold"
 #: The scratch purposes of adoption: the trust travels in the name, atomically with the take.
@@ -310,18 +317,52 @@ def _claim_tree(workspace: "Workspace", owner: Owner, root: OwnedJob) -> list[Ow
     return [claimed[ref.job_id] for ref in refs]
 
 
-def destination_problem(destination: Path) -> str | None:
+def _anchored_target(workspace: _kernel.KernelWorkspace, target: Path, *, create: bool) -> tuple[int | None, _fs.Loc]:
+    """The location of a delivery target: anchored at its parent's descriptor when it lies below the exchange.
+
+    ``WORKSPACE/exchange`` is client-writable, so every directory from the workspace root down to the parent is
+    opened without following a symlink (and created when *create*); a target elsewhere is a plain location in
+    a directory only trusted parties write.
+
+    :param workspace: The ejecting workspace.
+    :param target: The absolute target path.
+    :param create: Create the missing exchange directories on the way.
+    :return: The parent's descriptor (``None`` for a plain location), which the caller closes, and the location.
+    :raises httk.workflow._fs.UnsafePath: When a directory on the way below the root is a symlink or not one.
+    :raises FileNotFoundError: Without *create*, when a directory on the way is missing.
+    """
+
+    if not target.is_relative_to(workspace.root / EXCHANGE_DIRECTORY):
+        return None, _fs.loc(target)
+    relative = PurePosixPath(target.relative_to(workspace.root))
+    descriptor = _fs.open_dir_under(
+        workspace.root, relative.parent, create=create, mode=0o755, durable=workspace.durable
+    )
+    return descriptor, _fs.anchored(descriptor, relative.name)
+
+
+def destination_problem(destination: Path, workspace: _kernel.KernelWorkspace | None = None) -> str | None:
     """Report why *destination* cannot receive an eject, before anything moves.
 
-    It must be absolute, and either a real directory or a missing name whose parent is a real directory; a
-    symlink is neither.
+    It must be absolute without ``..``, and either a real directory or a missing name whose parent is a real
+    directory; a symlink is neither. Below *workspace*'s exchange directory, every directory from the workspace
+    root down is opened (and created) without following a symlink, as the delivery does.
 
     :param destination: The eject destination.
+    :param workspace: The ejecting workspace.
     :return: The reason, or ``None`` when it is usable.
     """
 
-    if not destination.is_absolute():
-        return f"the eject destination must be absolute: {destination}"
+    if not destination.is_absolute() or ".." in destination.parts:
+        return f"the eject destination must be absolute and without '..': {destination}"
+    if workspace is not None and destination.is_relative_to(workspace.root / EXCHANGE_DIRECTORY):
+        try:
+            descriptor, _target = _anchored_target(workspace, destination / "probe", create=True)
+        except (OSError, _fs.UnsafePath, ValueError) as exc:
+            return f"the eject destination {destination} is unusable: {exc}"
+        if descriptor is not None:
+            os.close(descriptor)
+        return None
     checked = destination
     try:
         try:
@@ -336,20 +377,27 @@ def destination_problem(destination: Path) -> str | None:
 
 def _deliver(workspace: "Workspace", bundle: Path, target: Path, token: bytes, transfer_id: str) -> bool:
     durable = workspace.durable
+    descriptor, destination = _anchored_target(workspace, target, create=True)
 
     def deliver(source: Path) -> bool:
-        outcome = _fs.deliver(_fs.loc(source), _fs.loc(target), token_name="bundle.json", token=token, durable=durable)
+        outcome = _fs.deliver(_fs.loc(source), destination, token_name="bundle.json", token=token, durable=durable)
         return outcome is _fs.Delivered.DONE
 
     try:
         return deliver(bundle)
     except _fs.CrossDevice:
+        if descriptor is not None:
+            # Enabling the exchange proved it renames to and from tmp/: nothing is ever copied into it.
+            raise
         partial = target.with_name(f".{target.name}.partial.{transfer_id}")
         _fs.copy_tree(bundle, partial, durable=durable)
         if deliver(partial):
             return True
         _fs.discard(_fs.loc(partial), trash_dir=partial.parent, durable=durable)
         return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _roll_back(owner: Owner, bundle: Path, manifest: BundleManifest) -> list[JobRef]:
@@ -380,37 +428,84 @@ def _leave_index(owner: Owner, exchange: tuple[str, str] | None) -> None:
         _kernel.drop_exchange_index(owner, *exchange)
 
 
+@dataclass(frozen=True)
+class _Delivery:
+    """``eject.json``: what deciding a delivery needs once the bundle may have left the scratch."""
+
+    target: Path
+    token: bytes
+    transfer_id: str
+    exchange: tuple[str, str] | None
+
+    def encode(self) -> bytes:
+        exchange = None if self.exchange is None else list(self.exchange)
+        fields = {
+            "target": str(self.target),
+            "token": self.token.decode("utf-8"),
+            "transfer_id": self.transfer_id,
+            "exchange": exchange,
+        }
+        return json.dumps(fields).encode()
+
+    @classmethod
+    def read(cls, scratch: Path) -> Self | None:
+        data = _fs.read_bounded(_fs.loc(scratch / _DELIVERY), _RECORD_LIMIT)
+        if data is None:
+            return None
+        value = json.loads(data)
+        exchange = value["exchange"]
+        return cls(
+            Path(value["target"]),
+            str(value["token"]).encode("utf-8"),
+            str(value["transfer_id"]),
+            None if exchange is None else (str(exchange[0]), str(exchange[1])),
+        )
+
+
+def _carried(workspace: _kernel.KernelWorkspace, target: Path, token: bytes) -> bool:
+    """Whether *target* carries *token*, never following a symlink in a client-writable directory on the way."""
+
+    try:
+        descriptor, destination = _anchored_target(workspace, target, create=False)
+    except (FileNotFoundError, _fs.UnsafePath):
+        return False  # an exchange directory on the way is gone or replaced: nothing is delivered there
+    try:
+        return _fs.carries(destination, "bundle.json", token)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _settle(owner: Owner, scratch: Path) -> bool | None:
     """Resolve an ``eject`` or ``hold`` scratch: ``True`` when its bundle was delivered, ``False`` when every member
     still in it went back (or none was taken), ``None`` when the destination cannot be read (the scratch stays)."""
 
     bundle = scratch / _BUNDLE
+    delivery = _Delivery.read(scratch)
+    if delivery is not None:
+        target = delivery.target
+        try:
+            carried = _carried(owner.workspace, target, delivery.token)
+            if carried or not _fs.exists(_fs.loc(bundle)):
+                # Only this owner moves its scratch: a bundle gone from it was delivered.
+                if not carried:
+                    _LOGGER.warning("the eject %s left %s, which does not carry it now", delivery.transfer_id, target)
+                _leave_index(owner, delivery.exchange)
+                return True
+            partial = target.with_name(f".{target.name}.partial.{delivery.transfer_id}")
+            plain = not target.is_relative_to(owner.workspace.root / EXCHANGE_DIRECTORY)
+            if plain and _fs.exists(_fs.loc(partial)):
+                # An undelivered cross-filesystem copy is ours alone; the members go back, so it goes too.
+                _fs.discard(_fs.loc(partial), trash_dir=partial.parent, durable=owner.workspace.durable)
+        except OSError as exc:
+            _LOGGER.warning("keeping %s: cannot check its destination: %s", scratch, exc)
+            return None
     read = read_manifest(bundle / "bundle.json")
     if read is None:
         # build_bundle writes bundle.json before any member moves: nothing to return.
         return False
-    data, manifest = read
-    if scratch.name.split(".")[1] == _HOLD:
-        candidates = [_outgoing(owner.workspace) / manifest.transfer_id]
-    else:
-        # An eject records its absolute destination (destination_problem) and delivers under the root's key.
-        locator = manifest.destination_locator
-        candidates = [] if locator is None else [Path(locator) / manifest.members[0].job_key]
-    try:
-        # The destination may be writable by others (the exchange outbox): never follow a symlink there.
-        if any(_fs.carries(_fs.loc(candidate), "bundle.json", data) for candidate in candidates):
-            _leave_index(owner, _exchange_root(bundle, manifest))
-            return True
-        partials = [path.with_name(f".{path.name}.partial.{manifest.transfer_id}") for path in candidates]
-        for partial in partials:
-            if _fs.exists(_fs.loc(partial)):
-                # An undelivered cross-filesystem copy is ours alone; the members go back, so it goes too.
-                _fs.discard(_fs.loc(partial), trash_dir=partial.parent, durable=owner.workspace.durable)
-    except OSError as exc:
-        _LOGGER.warning("keeping %s: cannot check its destination: %s", scratch, exc)
-        return None
-    returned = _roll_back(owner, bundle, manifest)
-    _LOGGER.warning("rolled back the eject %s: %d jobs returned", manifest.transfer_id, len(returned))
+    returned = _roll_back(owner, bundle, read[1])
+    _LOGGER.warning("rolled back the eject %s: %d jobs returned", read[1].transfer_id, len(returned))
     return False
 
 
@@ -461,6 +556,9 @@ def _eject(
     exchange = _exchange_root(bundle, manifest)
     error: Exception | None = None
     try:
+        # Recorded first: a crash after the delivery leaves a scratch whose reconciler can still decide it.
+        delivery = _Delivery(target, token, manifest.transfer_id, exchange)
+        _fs.write_file(_fs.loc(scratch / _DELIVERY), delivery.encode(), durable=workspace.durable)
         if _deliver(workspace, bundle, target, token, manifest.transfer_id):
             _leave_index(owner, exchange)
             owner.discard_scratch(scratch)
@@ -489,7 +587,8 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     :param workspace: The workspace.
     :param owner: The owner holding *root*.
     :param root: The claimed, quiescent root, in any unowned state.
-    :param destination: An absolute directory, or a missing name in one (:func:`destination_problem`).
+    :param destination: An absolute directory, or a missing name in one (:func:`destination_problem`); below
+        the exchange, every directory on the way is opened without following a symlink.
     :param tree: Eject the root's descendants too.
     :return: Where the bundle went.
     :raises Busy: When a member cannot be claimed, or without *tree* when the root has descendants.
@@ -499,7 +598,7 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     """
 
     destination = Path(destination)
-    if (problem := destination_problem(destination)) is not None:
+    if (problem := destination_problem(destination, workspace)) is not None:
         root.give_back()
         raise ValueError(problem)
     report, _manifest = _eject(
@@ -613,7 +712,9 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
         except (_fs.UnsafePath, _fs.MoveFailed, OSError) as exc:
             # A client replaced the directory (a symlink): the bundle waits in the scratch for a later refusal.
             return f"bundle refused: {reason}; it stays in {scratch}, since {record.refused_to} cannot take it: {exc}"
-    elif record.source is not None and Path(record.source).parent == owner.workspace.control / "transfers" / "incoming":
+    elif record.source is not None and Path(record.source).resolve().is_relative_to(
+        (owner.workspace.control / "transfers" / "incoming").resolve()
+    ):
         # A remote transfer's landing is a copy of a hold by construction: the hold stays, the copy goes.
         owner.discard_scratch(scratch)
         return f"bundle refused: {reason}; it was a copy of a held bundle and was discarded (the hold stays)"

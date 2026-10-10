@@ -12,13 +12,15 @@ The check walks ``jobs/`` and reports:
 - ``unreadable_state``: a ``state.json`` that exists but cannot be decoded;
 - ``foreign_owner``: a job directory another user owns;
 - ``stale_exchange_index``: an exchange index entry (``exchange-jobs/<name>/``) whose job is not in the
-  workspace (after a settled lookup), in a hold, or in an owner's scratch: a crash between an exchange job's
-  delivery and its index removal left it, and it blocks the client's resubmission of that name.
+  workspace (after a settled lookup), in a hold, or in an owner's scratch (checked after the lookup): an index
+  removal that never ran (a job removed by hand, an eject scratch an operator deleted) left it, and it blocks
+  the client's resubmission of that name.
 
 With ``repair`` the unparsable entries are moved to ``quarantine/`` and stale exchange index entries are
 removed; every other finding is left to the operator.
 """
 
+import contextlib
 import json
 import os
 import stat
@@ -282,27 +284,39 @@ def _stale_exchange_index(workspace: "Workspace", *, removing: bool) -> list[Fsc
     names = _kernel.list_names(directory)
     if not names:
         return []
-    ids, nonces = _in_flight(workspace)
-    stale: list[tuple[str, str]] = []
-    for name in names:
-        try:
-            indexed = _kernel.exchange_index(workspace, name)
-        except FormatError:
-            continue  # not an exchange name: a leftover the kernel never writes
-        if indexed is None:
-            continue
-        job_id, placement, nonce = indexed
-        if job_id in ids or nonce in nonces:
-            continue
-        if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is None:
-            stale.append((name, job_id))
     detail = "its job is not in the workspace, a hold or a scratch"
-    if not removing or not stale:
-        return [FsckFinding(directory / name, "stale_exchange_index", detail, job_id=job_id) for name, job_id in stale]
-    with _kernel.register_owner(workspace, kind="cli", label="workspace fsck", allocation=None, advertised={}) as owner:
-        for name, job_id in stale:
+    findings: list[FsckFinding] = []
+    with contextlib.ExitStack() as stack:
+        owner = None
+        for name in names:
+            try:
+                indexed = _kernel.exchange_index(workspace, name)
+            except FormatError:
+                continue  # not an exchange name: a leftover the kernel never writes
+            if indexed is None:
+                continue
+            job_id, placement, nonce = indexed
+            # The settled locate first, then the in-flight check right before the decision: an eject that
+            # extracts the job after the locate is in a scratch by the time of the check. The second locate
+            # catches a job that went back home from a scratch in between.
+            if _kernel.locate(workspace, job_id, placement_hint=placement, settle=True) is not None:
+                continue
+            ids, nonces = _in_flight(workspace)
+            if job_id in ids or nonce in nonces:
+                continue
+            if _kernel.locate(workspace, job_id, placement_hint=placement, settle=False) is not None:
+                continue
+            if not removing:
+                findings.append(FsckFinding(directory / name, "stale_exchange_index", detail, job_id=job_id))
+                continue
+            if owner is None:
+                owner = stack.enter_context(
+                    _kernel.register_owner(
+                        workspace, kind="cli", label="workspace fsck", allocation=None, advertised={}
+                    )
+                )
             _kernel.drop_exchange_index(owner, name, job_id)
-    return [
-        FsckFinding(directory / name, "stale_exchange_index", f"{detail}; removed", "removed", job_id=job_id)
-        for name, job_id in stale
-    ]
+            findings.append(
+                FsckFinding(directory / name, "stale_exchange_index", f"{detail}; removed", "removed", job_id=job_id)
+            )
+    return findings

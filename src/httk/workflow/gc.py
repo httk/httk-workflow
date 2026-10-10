@@ -71,10 +71,11 @@ GC_REPORT_FORMAT = "httk-workflow-gc"
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: How long a malformed request, or one whose job cannot be found, waits before it is quarantined.
 REQUEST_GRACE_SECONDS = 24 * 60 * 60
-#: How long the record of a translated exchange job action is kept: a request is accepted at most this long after
-#: its translation (its lifetime plus the clock skew allowed on both sides), so a replay after it is refused as
-#: expired.
-EXCHANGE_TRANSLATION_SECONDS = DEFAULT_REQUEST_MAX_AGE + 2 * CLOCK_SKEW_SECONDS
+#: How long the record of a translated exchange job action is kept: a request is accepted at most its lifetime plus
+#: the clock skew allowed on both sides after its translation, so a replay after that is refused as expired. A
+#: further skew and a day are added as a margin against the clocks of gc and the translator disagreeing, since the
+#: records are tiny and a record removed too early would let a replay through.
+EXCHANGE_TRANSLATION_SECONDS = DEFAULT_REQUEST_MAX_AGE + 3 * CLOCK_SKEW_SECONDS + 24 * 60 * 60
 #: Every category, in the order a collection runs them.
 GC_CATEGORIES = (
     "dead_owners",

@@ -1132,23 +1132,68 @@ def test_a_held_exchange_job_leaves_the_exchange_index(tmp_path: Path) -> None:
     assert len(hold.members) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
 
 
-def test_a_crash_before_the_index_removal_is_found_and_repaired_by_fsck(
+def _outbox(ws: Workspace, client_id: object) -> Path:
+    return ws.root / "exchange" / "outbox" / str(client_id)
+
+
+@pytest.mark.parametrize("where", ["outbox", "plain"])
+def test_a_crash_right_after_the_delivery_rolls_forward_and_leaves_the_index(tmp_path: Path, where: str) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    destination = _outbox(ws, jobs[0]["id"]) if where == "outbox" else tmp_path / "out"
+    owner = cli_owner(ws)
+
+    def crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "after" and src is not None and src.name() == "bundle":
+            raise Crash("delivered, not yet out of the index")
+
+    _fs.set_fault_injector(crash_after_delivery)
+    with pytest.raises(Crash):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
+    # The bundle left the scratch; its eject.json keeps the scratch for the reconciler.
+    (scratch,) = [name for name in os.listdir(ws.control / "tmp") if ".eject." in name]
+    assert os.listdir(ws.control / "tmp" / scratch) == ["eject.json"]
+    die_and_recover(ws, owner)
+    assert job_ids_below(ws.jobs) == [] and len(job_ids_below(destination)) == 3
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
+    # The client fetches the return and sends the same jobs again: they are adopted.
+    shutil.rmtree(destination)
+    client_bundle(tmp_path / "inbox" / "again", jobs)
+    with cli_owner(ws) as again:
+        resent = _moving.adopt(ws, again, tmp_path / "inbox" / "again", untrusted=True)
+    assert resent is not None and len(resent.published) == 3
+
+
+def test_a_return_fetched_before_recovery_still_leaves_the_index(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    destination = _outbox(ws, jobs[0]["id"])
+    owner = cli_owner(ws)
+
+    def crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "after" and src is not None and src.name() == "bundle":
+            raise Crash("delivered, not yet out of the index")
+
+    _fs.set_fault_injector(crash_after_delivery)
+    with pytest.raises(Crash):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
+    shutil.rmtree(destination)  # fetched by the client before the owner is recovered
+    die_and_recover(ws, owner)
+    # The bundle left the scratch, which only its owner moves: the delivery happened.
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
+
+
+def test_an_index_entry_whose_removal_never_ran_is_found_and_repaired_by_fsck(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from httk.workflow.fsck import check_workspace
 
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
-    owner = cli_owner(ws)
-
-    def crash(*_args: object) -> None:
-        raise Crash("delivered, not yet out of the index")
-
-    monkeypatch.setattr(_kernel, "drop_exchange_index", crash)
-    with pytest.raises(Crash):
+    monkeypatch.setattr(_kernel, "drop_exchange_index", lambda *_args: None)
+    with cli_owner(ws) as owner:
         _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
     monkeypatch.undo()
-    die_and_recover(ws, owner)
     assert job_ids_below(ws.jobs) == [] and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
     report = check_workspace(ws)
     (finding,) = [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
@@ -1178,6 +1223,81 @@ def test_fsck_leaves_index_entries_of_held_and_in_flight_jobs_alone(tmp_path: Pa
     assert check_workspace(ws).ok
     die_and_recover(ws, owner)
     assert check_workspace(ws).ok and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+
+
+def test_fsck_repair_keeps_the_index_of_a_job_an_eject_extracts_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The in-flight check runs after the settled locate: an eject that extracts the job while fsck looks is seen.
+    from httk.workflow import fsck
+
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    owner = cli_owner(ws)
+    real_locate = _kernel.locate
+    ejected: list[bool] = []
+
+    def locate_then_eject(*args: Any, **kwargs: Any) -> _kernel.JobRef | None:
+        found = real_locate(*args, **kwargs)
+        if not ejected:
+            ejected.append(True)
+            _fs.set_fault_injector(crash_at_extract(3, "after"))
+            with pytest.raises(Crash):
+                _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+            _fs.set_fault_injector(None)
+            return None  # the job was not found: it is in the eject scratch now
+        return found
+
+    monkeypatch.setattr(fsck._kernel, "locate", locate_then_eject)
+    report = fsck.check_workspace(ws, repair=True)
+    monkeypatch.undo()
+    assert ejected and not [finding for finding in report.findings if finding.problem == "stale_exchange_index"]
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+    die_and_recover(ws, owner)  # the eject rolls back: the jobs come home, still indexed
+    assert len(job_ids_below(ws.jobs)) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+
+
+@pytest.mark.parametrize("planted", ["outbox", "outbox/name"])
+def test_a_symlink_in_the_outbox_never_redirects_an_eject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
+) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    exchange = ws.root / "exchange"
+    exchange.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / str(jobs[0]["id"])).mkdir(parents=True)
+    if planted == "outbox":
+        os.symlink(elsewhere, exchange / "outbox")  # the client's doing
+    else:
+        (exchange / "outbox").mkdir()
+        os.symlink(elsewhere / str(jobs[0]["id"]), exchange / "outbox" / str(jobs[0]["id"]))
+    destination = exchange / "outbox" / str(jobs[0]["id"])
+    assert _moving.destination_problem(destination, ws) is not None
+    with cli_owner(ws) as owner, pytest.raises(ValueError, match="unusable"):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
+    # Planted after the check: the delivery itself opens every directory without following a link.
+    monkeypatch.setattr(_moving, "destination_problem", lambda *_args: None)
+    with cli_owner(ws) as owner, pytest.raises(WorkflowError, match="returned"):
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
+    assert not list(elsewhere.rglob("bundle.json")) and len(job_ids_below(ws.jobs)) == 3
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+
+
+def test_an_outbox_target_is_anchored_and_a_plain_one_is_not(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    descriptor, target = _moving._anchored_target(ws, ws.root / "exchange" / "outbox" / "name" / "key", create=True)
+    try:
+        assert descriptor is not None and target == _fs.anchored(descriptor, "key")
+    finally:
+        assert descriptor is not None
+        os.close(descriptor)
+    assert (ws.root / "exchange" / "outbox" / "name").is_dir()
+    assert _moving._anchored_target(ws, tmp_path / "out" / "key", create=True) == (
+        None,
+        _fs.loc(tmp_path / "out" / "key"),
+    )
+    assert _moving.destination_problem(ws.root / "exchange" / ".." / "jobs", ws) is not None
 
 
 def test_a_delivered_cross_filesystem_copy_rolls_forward_and_leaves_the_index(

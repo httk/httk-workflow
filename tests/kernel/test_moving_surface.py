@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import _fs
+from httk.workflow import _bundles, _fs
 from httk.workflow._kernel import Owner, claim, register_owner, submit
 
 
@@ -83,9 +83,35 @@ def test_copy_tree(tmp_path: Path) -> None:
         assert os.readlink(target / "link") == "a/b/file"
         with pytest.raises(FileExistsError):
             _fs.copy_tree(source, target, durable=durable)
+    # An untrusted copy refuses a symlink: only trusted copies recreate one.
+    with pytest.raises(_fs.UntrustedContentError, match="a symlink"):
+        _fs.copy_tree(source, tmp_path / "untrusted", durable=False, limits=_fs.DEFAULT_LIMITS)
     os.mkfifo(source / "pipe")
     with pytest.raises(_fs.UnsafePath):
         _fs.copy_tree(source, tmp_path / "fifo", durable=False)
+
+
+def test_an_untrusted_copy_is_bounded_in_bytes_even_for_a_growing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "small").write_bytes(b"x" * 10)
+    (source / "grows").write_bytes(b"y" * 10)
+    limits = _fs.WalkLimits(max_bytes=100)
+    _fs.copy_tree(source, tmp_path / "fits", durable=False, limits=limits)
+    real_read = os.read
+
+    def growing(descriptor: int, size: int) -> bytes:
+        # A writer keeps appending while the copy reads: the file never reaches its end.
+        return real_read(descriptor, size) or b"z" * 7
+
+    monkeypatch.setattr(os, "read", growing)
+    with pytest.raises(_fs.UntrustedContentError, match="more than 100 bytes"):
+        _fs.copy_tree(source, tmp_path / "grown", durable=False, limits=limits)
+    monkeypatch.undo()
+    with pytest.raises(_fs.UntrustedContentError, match="more than 15 bytes"):
+        _fs.walk_untrusted(source, limits=_fs.WalkLimits(max_bytes=15))
 
 
 def test_remove_write_temporaries(tmp_path: Path) -> None:
@@ -93,7 +119,7 @@ def test_remove_write_temporaries(tmp_path: Path) -> None:
     (tmp_path / ".job.json.ABCDEFGHIJKLMNOP.tmp").write_text("x")
     (tmp_path / ".other.json.abcdefghijklmnop.tmp").write_text("x")
     (tmp_path / ".job.json.qrstuvwxyz234567.tmp").mkdir()
-    assert _fs.remove_write_temporaries(tmp_path, "job.json", durable=False) == 1
+    _bundles._remove_write_temporaries(tmp_path, "job.json")
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         ".job.json.ABCDEFGHIJKLMNOP.tmp",
         ".job.json.qrstuvwxyz234567.tmp",

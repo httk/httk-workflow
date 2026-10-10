@@ -352,6 +352,35 @@ def test_an_occupied_outbox_name_is_not_requested_until_fetched(tmp_path: Path) 
     assert (occupant / "bundle.json").is_file() and _all_jobs(ws) == []
 
 
+@pytest.mark.parametrize("planted", ["outbox", "outbox/name"])
+def test_a_symlinked_outbox_never_redirects_a_return(tmp_path: Path, planted: str) -> None:
+    ws = _server(tmp_path / "ws")
+    jobs = _send(ws)
+    _pass(ws)
+    root = _indexed(ws, jobs[0]["id"])
+    _finish(ws)
+    assert _pass(ws) is True  # the return request is posted before the client plants its symlink
+    outbox = exchange_directory(ws) / "outbox"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if planted == "outbox":
+        shutil.rmtree(outbox)
+        os.symlink(elsewhere, outbox)
+    else:
+        os.symlink(elsewhere, outbox / str(jobs[0]["id"]))
+    _apply(ws, root)
+    # The eject opened the outbox without following the link, so it rolled back: nothing left the workspace.
+    assert os.listdir(elsewhere) == [] and len(_all_jobs(ws)) == 3
+    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
+    # No new return is requested while the outbox is a symlink, and the pre-check looks at nothing through it.
+    (elsewhere / root.job_key).mkdir()
+    with cli_owner(ws) as owner:
+        service = ExchangeService(ws, owner)
+        service._backoff.clear()
+        assert service.run() is False
+    assert not list((ws.control / "requests").glob("*.json"))
+
+
 def test_a_return_that_rolled_back_waits_out_a_doubling_backoff(tmp_path: Path) -> None:
     ws = _server(tmp_path / "ws")
     jobs = _send(ws)

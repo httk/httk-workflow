@@ -970,3 +970,16 @@ def test_manager_log_refuses_unsafe_files(tmp_path: Path) -> None:
         client_module.read_manager_log(endpoint, HANDLE)
     path.write_bytes(b"x" * (1024 * 1024))
     assert len(client_module.read_manager_log(endpoint, HANDLE)) == 1024 * 1024
+
+
+def test_writing_a_cache_entry_sweeps_stagings_a_crash_left(tmp_path: Path) -> None:
+    directory = client_module._cache_directory("enrollment")
+    old, young = directory / f".x{_fs.STAGING_MARK}aaaa", directory / f".y{_fs.STAGING_MARK}bbbb"
+    for staging in (old, young):
+        staging.mkdir()
+        (staging / "record").write_bytes(b"partial")
+    stale = time.time() - 2 * 3600
+    os.utime(old, (stale, stale))
+    client_module._write_exclusive(directory / "entry", b"data")
+    assert not old.exists() and young.is_dir()
+    assert (directory / "entry" / "record").read_bytes() == b"data"

@@ -4,8 +4,6 @@ import errno
 import os
 import re
 import shutil
-import threading
-import time
 from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
 
@@ -26,7 +24,6 @@ from httk.workflow._fs import (
     UntrustedContentError,
     WalkLimits,
     anchored,
-    append_file,
     create_exclusive,
     deliver,
     discard,
@@ -209,32 +206,6 @@ def test_move_once_lost_when_another_actor_moved_src(tmp_path: Path) -> None:
     REAL_RENAME(src, tmp_path / "theirs")
     assert move_once(loc(src), loc(tmp_path / "dst"), durable=False) is Moved.LOST
     assert not (tmp_path / "dst").exists()
-
-
-def test_move_once_lost_after_settle(tmp_path: Path) -> None:
-    started = time.monotonic()
-    assert move_once(loc(tmp_path / "gone"), loc(tmp_path / "dst"), durable=False, settle=0.2) is Moved.LOST
-    assert time.monotonic() - started >= 0.2
-
-
-def test_move_once_won_when_dst_appears_during_settle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    src = _tree(tmp_path / "src")
-    dst = tmp_path / "dst"
-    hidden = tmp_path / "in-flight"
-    late = threading.Timer(0.15, REAL_RENAME, (hidden, dst))
-
-    def rename(source: object, destination: object, **kwargs: object) -> None:
-        # The rename happened but is not yet visible: dst only appears later.
-        REAL_RENAME(src, hidden)
-        late.start()
-        raise OSError(errno.ENOENT, "stale")
-
-    monkeypatch.setattr(os, "rename", rename)
-    try:
-        assert move_once(loc(src), loc(dst), durable=True, settle=5.0) is Moved.WON
-    finally:
-        late.join()
-    assert (dst / "payload").exists()
 
 
 def test_move_once_retries_when_dst_parent_is_pruned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -753,38 +724,34 @@ def test_create_exclusive_refuses_existing_file_and_symlink(tmp_path: Path) -> N
     assert not (tmp_path / "nowhere").exists()
 
 
-# append_file
+# open_append
 
 
-def test_append_file_creates_then_appends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _count_fsync(monkeypatch)
-    append_file(loc(tmp_path / "log"), b"one\n", durable=True, mode=0o600)
-    # The file, and its directory because this call created it.
-    assert len(calls) == 2
-    append_file(loc(tmp_path / "log"), b"two\n", durable=True)
-    assert len(calls) == 3
-    append_file(loc(tmp_path / "log"), b"three\n", durable=False)
-    assert len(calls) == 3
-    assert (tmp_path / "log").read_bytes() == b"one\ntwo\nthree\n"
-    assert (tmp_path / "log").stat().st_mode & 0o777 == 0o600
+def _append(target: Loc, data: bytes) -> None:
+    descriptor = open_append(target, durable=False)
+    try:
+        os.write(descriptor, data)
+    finally:
+        os.close(descriptor)
 
 
-def test_append_file_refuses_symlink(tmp_path: Path) -> None:
+def test_open_append_refuses_symlink(tmp_path: Path) -> None:
     (tmp_path / "target").write_text("precious")
     (tmp_path / "link").symlink_to("target")
     (tmp_path / "dangling").symlink_to("nowhere")
     for name in ("link", "dangling"):
-        with pytest.raises(UnsafePath):
-            append_file(loc(tmp_path / name), b"x", durable=False)
+        with pytest.raises(UnsafePath) as raised:
+            _append(loc(tmp_path / name), b"x")
+        assert raised.value.kind == "symlink"
     assert (tmp_path / "target").read_text() == "precious"
     assert not (tmp_path / "nowhere").exists()
 
 
-def test_append_file_anchored(tmp_path: Path) -> None:
+def test_open_append_anchored(tmp_path: Path) -> None:
     descriptor = open_dir(tmp_path)
     try:
-        append_file(anchored(descriptor, "log"), b"a", durable=True)
-        append_file(anchored(descriptor, "log"), b"b", durable=True)
+        _append(anchored(descriptor, "log"), b"a")
+        _append(anchored(descriptor, "log"), b"b")
     finally:
         os.close(descriptor)
     assert (tmp_path / "log").read_bytes() == b"ab"
@@ -802,10 +769,9 @@ def test_open_append_refuses_non_regular_without_blocking(tmp_path: Path, monkey
     (tmp_path / "dir").mkdir()
     os.mkfifo(tmp_path / "fifo")
     for name in ("dir", "fifo"):
-        with pytest.raises(UnsafePath):
+        with pytest.raises(UnsafePath) as raised:
             open_append(loc(tmp_path / name), durable=False)
-        with pytest.raises(UnsafePath):
-            append_file(loc(tmp_path / name), b"x", durable=False)
+        assert raised.value.kind == "not_regular"
     # A FIFO with a reader opens without blocking, and is still refused.
     reader = os.open(tmp_path / "fifo", os.O_RDONLY | os.O_NONBLOCK)
     try:
@@ -1147,7 +1113,7 @@ def test_fault_injector_points(tmp_path: Path) -> None:
     (tmp_path / "empty").mkdir()
     remove_empty_dir(loc(tmp_path / "empty"))
     remove_file(loc(tmp_path / "empty"), durable=False)
-    append_file(loc(tmp_path / "log"), b"x", durable=False)
+    _append(loc(tmp_path / "log"), b"x")
     read_bounded(loc(tmp_path / "f"), 10)
     assert exists(loc(tmp_path / "f"))
     os.close(create_exclusive(loc(tmp_path / "g"), durable=False))

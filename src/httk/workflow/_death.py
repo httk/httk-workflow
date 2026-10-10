@@ -26,6 +26,16 @@ from . import _fs
 from ._allocation import RecordedAllocation, Run, allocation_ended, can_ask
 from .errors import WorkflowError
 
+__all__ = [
+    "Evidence",
+    "Liveness",
+    "ProcessIdentity",
+    "SchedulerQueries",
+    "probe",
+    "process_gone",
+    "process_identity",
+]
+
 _OWNER_FORMAT = "httk-workflow-owner"
 _OWNER_FILE = "owner.json"
 _TOMBSTONE_FILE = "dead.json"

@@ -54,7 +54,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from httk.core.building import BuildSpec
 from httk.core.digests import tree_digest
@@ -138,9 +138,6 @@ _INSTANTIATE_TIMEOUT = 3600.0
 _TAG_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
 _MAXIMUM_TAG_LENGTH = 48
 
-type DataMode = Literal["none", "transactional"]
-type WorkdirMode = Literal["persistent", "isolated"]
-
 
 @dataclass(frozen=True)
 class RecognizeSpec:
@@ -182,8 +179,6 @@ class WorkflowProvider:
     :param resources: Declare the default resource requirement; ``maxtime`` and ``mintime`` are Slurm
         duration strings such as ``"24:00:00"``.
     :param step_resources: Declare per-step resource requirements, time labels spelled as in *resources*.
-    :param data_mode: Declare the workflow's default data mode.
-    :param workdir_mode: Declare the workflow's default workdir mode.
     :param seal_succeeded: Seal a succeeded job of it (``[workflow.runner] seal_succeeded``); ``None``
         leaves it to the workspace setting.
     :param summary: Describe the workflow for callers.
@@ -222,8 +217,6 @@ class WorkflowProvider:
     steps: tuple[str, ...] = ()
     resources: Mapping[str, int | str] = field(default_factory=dict)
     step_resources: Mapping[str, Mapping[str, int | str]] = field(default_factory=dict)
-    data_mode: DataMode = "none"
-    workdir_mode: WorkdirMode = "persistent"
     seal_succeeded: bool | None = None
     summary: str = ""
     inputs: Mapping[str, str | None] = field(default_factory=dict)
@@ -543,8 +536,6 @@ class ResolvedWorkflow:
     :param steps: Preserve the steps the runner provides.
     :param resources: Preserve the default resource requirement, time labels in seconds.
     :param step_resources: Preserve per-step resource requirements, time labels in seconds.
-    :param data_mode: Preserve the workflow data mode.
-    :param workdir_mode: Preserve the workflow workdir mode.
     :param packaged: Preserve the packaged runner file name when applicable.
     :param runner_package: Preserve the package containing packaged members.
     :param registration_id: Preserve the registration id when applicable.
@@ -584,8 +575,6 @@ class ResolvedWorkflow:
     steps: tuple[str, ...] = ()
     resources: Mapping[str, int] = field(default_factory=dict)
     step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
-    data_mode: DataMode = "none"
-    workdir_mode: WorkdirMode = "persistent"
     packaged: str | None = None
     runner_package: str | None = None
     registration_id: str | None = None
@@ -1023,8 +1012,6 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         steps=provider.steps,
         resources=resources,
         step_resources=step_resources,
-        data_mode=provider.data_mode,
-        workdir_mode=provider.workdir_mode,
         packaged=None if provider.directory is not None else provider.runner_file,
         registration_id=provider.workflow_id,
         summary=provider.summary,
@@ -1059,7 +1046,6 @@ def resolve_workflow(
     *,
     workflow_id: str | None = None,
     step: str | None = None,
-    data_mode: DataMode | None = None,
     format: str | None = None,
 ) -> ResolvedWorkflow:
     """Return the :class:`ResolvedWorkflow` *workflow* names.
@@ -1074,7 +1060,6 @@ def resolve_workflow(
     :param workflow: Select a registered workflow, package directory, or runner file.
     :param workflow_id: Override the resolved workflow id.
     :param step: Override the resolved initial step.
-    :param data_mode: Override the resolved data mode.
     :param format: Force a language for a bare document or directory.
     :return: The resolved workflow description.
     :raises ValueError: If the workflow cannot be found, its description is invalid, or its
@@ -1119,8 +1104,6 @@ def resolve_workflow(
                 alias=provider.alias,
                 initial_step=provider.initial_step,
                 steps=provider.steps,
-                data_mode=provider.data_mode,
-                workdir_mode=provider.workdir_mode,
                 summary=provider.summary,
                 inputs=provider.inputs,
                 resources=resources,
@@ -1222,8 +1205,6 @@ def resolve_workflow(
         if resolved.steps:
             ensure_step_known(step, resolved.steps, f"the runner {resolved.source}")
         resolved = replace(resolved, initial_step=step)
-    if data_mode is not None:
-        resolved = replace(resolved, data_mode=data_mode)
     if resolved.requires:
         check_requirements(
             parse_requirements(list(resolved.requires), "requires"), f"workflow {resolved.workflow_id!r}"
@@ -1628,7 +1609,8 @@ def _installed(
         return _store.install(workspace, owner, path if path.exists() else text)
     raise ValueError(
         f"workflow {text!r} is not installed in the workspace {workspace.root}; "
-        f"install it first with `httk workflow install {shlex.quote(text)}` (or pass install=True)"
+        f"install it first with `httk workflow install --workspace {shlex.quote(str(workspace.root))} "
+        f"{shlex.quote(text)}`, or create the job with `httk job new --install` (install=True)"
     )
 
 

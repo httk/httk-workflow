@@ -141,7 +141,7 @@ def refusal(
     if request.action in ("continue", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
     if request.action == "eject":
-        return _moving.destination_problem(Path(str(request.document["destination"])))
+        return _moving.destination_problem(Path(str(request.document["destination"])), workspace)
     parent = job.parent
     if request.action != "delete" or parent is None:
         return None

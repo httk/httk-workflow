@@ -193,8 +193,9 @@ def _files(request: Mapping[str, object]) -> list[str] | None:
 def _copy(source: Path, destination: Path) -> None:
     if source.is_dir():
         if destination.exists():
-            source_manifest = source / ".httk-transfer" / "manifest.json"
-            destination_manifest = destination / ".httk-transfer" / "manifest.json"
+            # A repeated copy of one bundle is a no-op: both carry the same bundle.json.
+            source_manifest = source / "bundle.json"
+            destination_manifest = destination / "bundle.json"
             if (
                 not destination.is_dir()
                 or not source_manifest.is_file()

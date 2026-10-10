@@ -60,8 +60,7 @@ def read_regular(target: _fs.Loc, limit: int) -> bytes:
     try:
         data = _fs.read_bounded(target, limit, nonblock=True)
     except _fs.UnsafePath as exc:
-        # read_bounded chains the ELOOP its O_NOFOLLOW open raised for a symlink.
-        if isinstance(exc.__cause__, OSError):
+        if exc.kind == "symlink":
             raise OSError(errno.ELOOP, f"{target.path} is a symlink") from exc
         raise ValueError(f"{target.path} is not a regular file") from exc
     except _fs.TooLarge as exc:

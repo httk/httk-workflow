@@ -31,7 +31,7 @@ from .models import (
     validate_declarations,
     validate_runner_command,
 )
-from .scaffold import DataMode, RecognizeSpec, WorkdirMode, WorkflowProvider, payload_relative, register_workflow
+from .scaffold import RecognizeSpec, WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
 _LOGGER = logging.getLogger(__name__)
@@ -793,6 +793,8 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             initial_step = requested_initial_step
         if initial_step not in steps:
             raise _error(root, f"[workflow.runner].initial_step {initial_step!r} is not in steps")
+    # ponytail: data_mode and workdir_mode are still validated as documented but nothing reads them; retire the
+    # keys together with their documentation.
     data_mode = runner.get("data_mode", "none")
     workdir_mode = runner.get("workdir_mode", "persistent")
     seal_succeeded = runner.get("seal_succeeded")
@@ -959,8 +961,6 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         initial_step=initial_step,
         alias=alias,
         steps=steps,
-        data_mode=cast(DataMode, data_mode),
-        workdir_mode=cast(WorkdirMode, workdir_mode),
         seal_succeeded=seal_succeeded,
         summary=description,
         inputs=inputs,

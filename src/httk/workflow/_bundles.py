@@ -757,10 +757,20 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
     _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), rekeyed.to_json(), durable=True)
     # A resumed rekey may find the temporaries of a write that died; untrusted validation passed before rekey.json
     # existed, so at these positions such names are ours.
-    _fs.remove_write_temporaries(bundle, _MANIFEST_NAME.name, durable=True)
+    _remove_write_temporaries(bundle, _MANIFEST_NAME.name)
     for member in rekeyed.members:
-        _fs.remove_write_temporaries(rekeyed.member_dir(bundle, member), "job.json", durable=True)
+        _remove_write_temporaries(rekeyed.member_dir(bundle, member), "job.json")
     return rekeyed
+
+
+def _remove_write_temporaries(directory: Path, name: str) -> None:
+    """Durably remove the regular files ``.<name>.<token>.tmp`` an interrupted ``_fs.write_file`` left."""
+
+    pattern = re.compile(rf"\.{re.escape(name)}\.[a-z2-7]{{16}}\.tmp")
+    for entry in os.listdir(directory):
+        info = _fs.lstat(_fs.loc(directory / entry)) if pattern.fullmatch(entry) else None
+        if info is not None and stat.S_ISREG(info.st_mode):
+            _fs.remove_file(_fs.loc(directory / entry), durable=True)
 
 
 def read_rekeyed(scratch: Path) -> BundleManifest | None:

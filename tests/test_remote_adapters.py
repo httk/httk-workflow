@@ -719,3 +719,14 @@ def test_probe_remote_workspace_refuses_an_older_remote_with_the_upgrade(tmp_pat
 
     with pytest.raises(ValueError, match="Upgrade httk-workflow on the remote"):
         probe_remote_workspace(target, "ws", timeout=None, adapter=_old_adapter)
+
+
+def test_a_repeated_local_copy_of_one_bundle_is_a_no_op(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    (bundle / "jobs").mkdir(parents=True)
+    (bundle / "bundle.json").write_text('{"transfer_id": "a"}')
+    adapter_runtime._copy(bundle, tmp_path / "copy")
+    adapter_runtime._copy(bundle, tmp_path / "copy")  # the same bundle.json: already copied
+    (bundle / "bundle.json").write_text('{"transfer_id": "b"}')
+    with pytest.raises(FileExistsError):
+        adapter_runtime._copy(bundle, tmp_path / "copy")

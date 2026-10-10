@@ -52,6 +52,8 @@ _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff",
 _CACHE_FORMAT = "httk-workspace-daemon-request-cache"
 _CACHE_FORMAT_VERSION = 1
 _MAX_CACHE_DOCUMENT_BYTES = 16 * 1024
+#: How old a cache staging a crash left must be to be swept.
+_STAGING_MAXIMUM_AGE = 3600.0
 
 
 def _canonical_uuid(value: object, name: str) -> str:
@@ -460,10 +462,29 @@ def _cache_directory(enrollment_id: str) -> Path:
     """Return the private cache directory for one enrollment, created when absent."""
 
     directory = data_home() / "daemon-requests" / enrollment_id
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        _fs.make_dirs(directory, durable=False, mode=0o700)
+    except _fs.UnsafePath as exc:
+        raise ValueError("daemon request cache directory is unsafe") from exc
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("daemon request cache directory is unsafe")
     return directory
+
+
+def _sweep_stagings(directory: Path) -> None:
+    """Remove the :func:`httk.workflow._fs.publish_record` stagings older than an hour a crash left in the cache."""
+
+    cutoff = time.time() - _STAGING_MAXIMUM_AGE
+    for name in os.listdir(directory):
+        if not (name.startswith(".") and _fs.STAGING_MARK in name):
+            continue
+        info = _fs.lstat(_fs.loc(directory / name))
+        if info is None or not stat.S_ISDIR(info.st_mode) or info.st_mtime >= cutoff:
+            continue
+        try:
+            _fs.discard(_fs.loc(directory / name), trash_dir=directory, durable=False)
+        except (OSError, _fs.MoveFailed) as exc:
+            _LOGGER.debug("cannot sweep the cache staging %s: %s", name, exc)
 
 
 def _write_exclusive(path: Path, data: bytes) -> None:
@@ -475,6 +496,7 @@ def _write_exclusive(path: Path, data: bytes) -> None:
     :raises OSError: If the entry could not be published.
     """
 
+    _sweep_stagings(path.parent)
     won = _fs.publish_record(path.parent, path.name, data, nonce=uuid.uuid4().hex.encode("ascii"), durable=True)
     if not won:
         if not _fs.exists(_fs.loc(path)):
