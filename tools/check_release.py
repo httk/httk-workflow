@@ -22,7 +22,7 @@ _SUPPORTED_PYTHON_VERSIONS = ("3.12", "3.13", "3.14")
 
 def _normal_test_command(version: str) -> list[str]:
     """Run the repository's normal tests in an isolated uv environment."""
-    return ["uv", "run", "--isolated", "--python", version, "--extra", "dev", "make", "test"]
+    return ["uv", "run", "--isolated", "--python", version, "--extra", "dev", "--extra", "ci", "make", "test"]
 
 
 def _environment(work: Path) -> dict[str, str]:
@@ -278,7 +278,7 @@ def main() -> int:
             passed.append(name)
 
         gate("create-environment", [sys.executable, "-I", "-m", "venv", str(work / ".venv")])
-        gate("install-dev", [python, "-I", "-m", "pip", "install", "-e", ".[dev]"])
+        gate("install-dev", [python, "-I", "-m", "pip", "install", "-e", ".[dev,ci]"])
         # The Makefiles invoke this Python tool directly, rather than via -m.
         # Require the fresh environment's executable, not a user PATH fallback.
         gate("dev-cli", [str(work / ".venv/bin/pydoclint"), "--version"])
@@ -296,7 +296,7 @@ def main() -> int:
         gate("ci", ["make", "ci"])
         for version in _SUPPORTED_PYTHON_VERSIONS:
             gate(f"python-{version}-tests", _normal_test_command(version))
-        gate("install-release", [python, "-I", "-m", "pip", "install", "-e", ".[dev,docs,release]"])
+        gate("install-release", [python, "-I", "-m", "pip", "install", "-e", ".[dev,ci,docs,release]"])
         gate("dependencies", [python, "-I", "-m", "pip", "check"])
         gate("environment", [python, "-I", "-m", "pip", "freeze"])
         gate("preflight", [python, "-I", "-m", "httk.core.docs", "check-release", "--tag", tag])

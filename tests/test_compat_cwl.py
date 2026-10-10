@@ -3,6 +3,7 @@ import json
 import re
 from collections.abc import Iterator
 from dataclasses import replace
+from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -30,6 +31,9 @@ from httk.workflow.introspection import list_jobs
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.scaffold import describe_runner, resolve_workflow
 from httk.workflow.workflow_cli import command
+
+# The optional language integration is in the [ci] extra; these tests skip without it.
+NEEDS_CWL = pytest.mark.skipif(find_spec("cwl_utils") is None, reason="needs the httk-workflow[cwl] extra")
 
 _ECHO_TOOL = """
 cwlVersion: v1.2
@@ -336,6 +340,7 @@ def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Works
     assert any(record.outputs.get("spoken") is not None for record in collect(workspace))
 
 
+@NEEDS_CWL
 def test_cwl_language_collects_records_and_product_links(
     tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -384,6 +389,7 @@ def test_cwl_language_collects_records_and_product_links(
     assert item.products[0].label == "spoken"
 
 
+@NEEDS_CWL
 def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path, workspace: Workspace) -> None:
     source = tmp_path / "input.txt"
     source.write_text("hello\n", encoding="utf-8")
@@ -408,6 +414,7 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
     assert find(workspace, job.job_id).path.exists()
 
 
+@NEEDS_CWL
 def test_cwl_file_output_rejects_outside_and_missing_paths(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "confined", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     job = new_job(workspace, package, inputs={"message": "hello"})
@@ -430,6 +437,7 @@ def test_cwl_file_output_rejects_outside_and_missing_paths(tmp_path: Path, works
     assert "missing" in missing.missing_collector
 
 
+@NEEDS_CWL
 def test_cwl_bare_jobs_collect_with_or_without_allow_job_collector(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "allow", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})
@@ -445,6 +453,7 @@ def test_cwl_bare_jobs_collect_with_or_without_allow_job_collector(tmp_path: Pat
     assert without_output == with_output
 
 
+@NEEDS_CWL
 def test_cwl_custom_package_collect_marker_degrades_without_provider(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(
         tmp_path / "custom-hook",
@@ -489,6 +498,7 @@ def test_generated_definitions_follow_a_role_when_its_kind_changes() -> None:
     assert hyphenated.definition_id != underscored.definition_id
 
 
+@NEEDS_CWL
 def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: Workspace, capsys) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
@@ -529,6 +539,7 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     assert entry.id == report["stored"]["entries"][0]
 
 
+@NEEDS_CWL
 def test_cwl_file_list_output_stays_a_data_record_descriptor_list(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(
         tmp_path / "collect-file-list",
@@ -565,6 +576,7 @@ def test_cwl_language_reserved_parameter_and_file_collisions_fail(
         new_job(workspace, package, parameters={"cwl_inputs": "other.json"})
 
 
+@NEEDS_CWL
 def test_cwl_language_rejects_literal_file_path_traversal(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "literal", "file.cwl", _FILE_TOOL, "input_file", "spoken")
     with pytest.raises(ValueError, match=r"\.\./\.\./"):
@@ -582,6 +594,7 @@ def test_cwl_language_rejects_literal_file_path_traversal(tmp_path: Path, worksp
     assert not (workspace.control / "tmp" / "job.json").exists()
 
 
+@NEEDS_CWL
 def test_cwl_language_rejects_generated_member_collision(tmp_path: Path, workspace: Workspace) -> None:
     source = tmp_path / "letters.txt"
     source.write_text("one\n", encoding="utf-8")
@@ -605,6 +618,7 @@ def test_cwl_language_rejects_generated_member_collision(tmp_path: Path, workspa
         )
 
 
+@NEEDS_CWL
 def test_cwl_language_rejects_duplicate_generated_members(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "duplicate", "any.cwl", _ANY_TOOL, "value", "spoken", input_port="message")
     with pytest.raises(ValueError, match=r"duplicates.*message\.a\.b"):
@@ -621,6 +635,7 @@ def test_cwl_language_rejects_duplicate_generated_members(tmp_path: Path, worksp
     assert not list((workspace.control / "tmp").iterdir())
 
 
+@NEEDS_CWL
 def test_cwl_language_scatter_runs_labeled_children_and_publishes_data(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(
         tmp_path / "scatter",
@@ -649,6 +664,7 @@ def test_cwl_language_scatter_runs_labeled_children_and_publishes_data(tmp_path:
     assert [path.name for path in published] == ["0000-joined.txt"]
 
 
+@NEEDS_CWL
 def test_cwl_language_subworkflow_carries_its_target(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(
         tmp_path / "nested",
@@ -673,6 +689,7 @@ def test_cwl_language_subworkflow_carries_its_target(tmp_path: Path, workspace: 
     assert child_definition["parameters"]["cwl_root"] == {"job_id": job.job_id, "placement": ""}
 
 
+@NEEDS_CWL
 def test_cwl_language_command_line_tool_is_a_workflow_of_one(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "solo", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     job = new_job(workspace, package, inputs={"message": "solo"}, tag="solo")
@@ -686,6 +703,7 @@ def test_cwl_language_command_line_tool_is_a_workflow_of_one(tmp_path: Path, wor
     assert outputs["spoken"]["checksum"].startswith("sha1$")
 
 
+@NEEDS_CWL
 def test_cwl_language_stages_file_inputs_by_effective_port(tmp_path: Path, workspace: Workspace) -> None:
     source = tmp_path / "letters.txt"
     source.write_text("one\ntwo\n", encoding="utf-8")
@@ -715,6 +733,7 @@ def test_cwl_language_stages_file_inputs_by_effective_port(tmp_path: Path, works
     assert _located(workspace, outputs["joined"]).read_text(encoding="utf-8") == "one\ntwo\n"
 
 
+@NEEDS_CWL
 def test_cwl_language_v1_document_is_upgraded_and_runs(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "old", "old.cwl", _ECHO_TOOL.replace("v1.2", "v1.0"), "message", "spoken")
     job = new_job(workspace, package, inputs={"message": "vintage"}, tag="old")
@@ -727,6 +746,7 @@ def test_cwl_language_v1_document_is_upgraded_and_runs(tmp_path: Path, workspace
     assert _located(workspace, outputs["spoken"]).read_text(encoding="utf-8").strip() == "vintage"
 
 
+@NEEDS_CWL
 def test_cwl_language_tool_failure_is_terminal_with_stderr(tmp_path: Path, workspace: Workspace) -> None:
     document = _ECHO_TOOL.replace("baseCommand: echo", "baseCommand: [cat]").replace(
         "stdout: spoken.txt", "stdout: out.txt"
@@ -746,6 +766,7 @@ def test_cwl_language_tool_failure_is_terminal_with_stderr(tmp_path: Path, works
     assert attempt is not None and attempt["ordinal"] == 1
 
 
+@NEEDS_CWL
 def test_cwl_language_docker_requirement_is_recorded_and_warned(tmp_path: Path, workspace: Workspace) -> None:
     document = _ECHO_TOOL.replace(
         "baseCommand: echo",
@@ -768,6 +789,7 @@ def test_load_cwl_inputs_teaches_on_malformed_json(tmp_path: Path) -> None:
         load_cwl_inputs(inputs)
 
 
+@NEEDS_CWL
 def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, workspace: Workspace, capsys) -> None:
     document = _ECHO_TOOL.replace(
         "baseCommand: echo",

@@ -34,7 +34,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e .[dev]
+          pip install -e .[dev,ci]
 
       - name: Run CI
         run: make ci

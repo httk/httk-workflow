@@ -47,8 +47,6 @@ Issues = "https://github.com/httk/httk-workflow/issues"
 
 [project.optional-dependencies]
 dev = [
-  # Full-source type checks cover the optional workflow language integrations.
-  "httk-workflow[cwl,jobflow,atomate2]",
   "pytest>=8.0",
   "pytest-xdist>=3.6",
   "ruff>=0.16,<0.17",
@@ -56,6 +54,9 @@ dev = [
   "mypy",
   "pydoclint>=0.9,<1"
 ]
+# Full-source type checks and the language tests cover these optional workflow
+# language integrations; the full CI gate installs [dev,ci].
+ci = ["httk-workflow[cwl,jobflow,atomate2]"]
 docs = [
   "sphinx",
   "furo",

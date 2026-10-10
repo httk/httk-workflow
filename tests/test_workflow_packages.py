@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +21,9 @@ from httk.workflow.packages import (
     workflow_declaration_from_manifest,
 )
 from httk.workflow.scaffold import BuildSpec, resolve_workflow, workflow_provider
+
+# The optional language integration is in the [ci] extra; these tests skip without it.
+NEEDS_CWL = pytest.mark.skipif(find_spec("cwl_utils") is None, reason="needs the httk-workflow[cwl] extra")
 
 _MANIFEST = '''
 [workflow]
@@ -281,6 +285,7 @@ def test_buildless_installation_keeps_the_plain_tree_digest(tmp_path: Path) -> N
     assert tree_digest(installed.package) == tree_digest(package) == installed.record["tree_sha256"]
 
 
+@NEEDS_CWL
 def test_cwl_language_manifest_uses_registry_defaults(tmp_path: Path) -> None:
     provider = parse_workflow_manifest(_language_package(tmp_path / "cwl"))
     assert provider.language == "cwl"
@@ -389,6 +394,7 @@ def test_jobflow_manifest_preserves_declared_maker_parameters(tmp_path: Path) ->
     assert provider.parameters == {"relax_steps": {"type": "integer", "default": 300}}
 
 
+@NEEDS_CWL
 def test_language_environment_declarations_are_under_manifest_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -595,6 +601,7 @@ document = "maker.json"
         parse_workflow_manifest(v1)
 
 
+@NEEDS_CWL
 def test_language_collect_file_overrides_default(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "cwl", manifest_extra='\n[workflow.collect]\nfile = "collect.py"')
     (package / "collect.py").write_text("def collect(record):\n    return {}\n", encoding="utf-8")
@@ -742,6 +749,7 @@ def test_language_manifest_reports_missing_or_invalid_runner_data(tmp_path: Path
         parse_workflow_manifest(package)
 
 
+@NEEDS_CWL
 def test_language_ports_default_and_validate_names(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "ports", manifest_extra='')
     manifest = (
@@ -763,6 +771,7 @@ def test_language_ports_default_and_validate_names(tmp_path: Path) -> None:
     assert provider._input_metadata["message"]["port"] == "message"
 
 
+@NEEDS_CWL
 def test_language_inputs_reject_duplicate_effective_ports(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "inputs")
     manifest = (
@@ -780,6 +789,7 @@ port = "message"
         parse_workflow_manifest(package)
 
 
+@NEEDS_CWL
 def test_language_outputs_reject_duplicate_effective_ports(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "outputs")
     manifest = (
@@ -801,6 +811,7 @@ def test_port_is_rejected_in_entry_manifests(tmp_path: Path) -> None:
         parse_workflow_manifest(_package(tmp_path / "entry", manifest))
 
 
+@NEEDS_CWL
 def test_language_resolution_scaffolds_from_the_installed_package(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "package")
     provider = load_workflow_package(package, register=False)

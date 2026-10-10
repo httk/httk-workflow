@@ -16,6 +16,11 @@ from httk.workflow.collecting import JobRecord
 from httk.workflow.compat import LanguageRequest, available_languages, jobflow, match_document
 from httk.workflow.scaffold import InstantiateContext, describe_runner, resolve_workflow
 
+# The optional language integration is in the [ci] extra; these tests skip without it.
+NEEDS_JOBFLOW = pytest.mark.skipif(
+    importlib.util.find_spec("jobflow") is None, reason="needs the httk-workflow[jobflow] extra"
+)
+
 
 def _request(
     tmp_path: Path,
@@ -256,6 +261,7 @@ def test_jobflow_runner_dependency_messages(monkeypatch: pytest.MonkeyPatch) -> 
         jobflow_runner._require_dependencies("atomate2.toy")
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_master_store_snapshot_is_atomic_and_recovers_from_stray_temp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -282,6 +288,7 @@ def test_jobflow_master_store_snapshot_is_atomic_and_recovers_from_stray_temp(
     assert document is not None and document["output"] == 2
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_phantom_spawn_is_re_pended_and_can_complete() -> None:
     from jobflow.core.flow import Flow
     from jobflow.core.job import job
@@ -342,6 +349,7 @@ def test_jobflow_linear_maker_runs_through_task_manager(tmp_path: Path, monkeypa
     assert collected.record.provenance["activations"]
 
 
+@NEEDS_JOBFLOW
 @pytest.mark.timing
 def test_jobflow_parallel_diamond_runs_branches_concurrently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     marker_dir = tmp_path / "parallel"
@@ -397,6 +405,7 @@ class Maker:
     assert parent.provenance["activations"]
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_dynamic_replace_adds_replacement_children(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = _jobflow_package(
         tmp_path / "replace-package",
@@ -436,6 +445,7 @@ class Maker:
     assert len(_parent_record(workspace, root_job.job_id).children) >= 4
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_dynamic_addition_runs_without_changing_flow_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -482,6 +492,7 @@ class Maker:
     assert len(_parent_record(workspace, root_job.job_id).children) >= 4
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_failure_poisoning_preserves_independent_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -544,6 +555,7 @@ class Maker:
     assert degraded.missing_collector is not None
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_maker_parameters_and_document_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = '''from dataclasses import dataclass
 from jobflow import Flow, job
@@ -601,6 +613,7 @@ default = "declared"
     assert _collected_value(workspace, document_job.job_id) == 8
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_structure_input_is_decoded_in_the_real_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = _jobflow_package(
         tmp_path / "structure-package",
@@ -649,6 +662,7 @@ Si Si1 0 0 0
     assert _collected_value(workspace, root_job.job_id) == "Si"
 
 
+@NEEDS_JOBFLOW
 def test_jobflow_bare_document_runs_and_collects_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = '''from dataclasses import dataclass
 from jobflow import Flow, job
