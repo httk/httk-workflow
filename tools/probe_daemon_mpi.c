@@ -4,6 +4,8 @@
  * --spawn requires independently confirmed spare capacity. It never writes to host home paths.
  * Exit 0: communication passed (and, if requested, explicit unsupported-spawn evidence).
  * Exit 1: communication failure or dynamic spawn succeeded. Exit 77: spawn refusal inconclusive.
+ * Node-local ranks must also see distinct process ids (OpenMP runtimes register under theirs in /dev/shm) and
+ * share System V shared memory (as VASP's getshmem.c does).
  * Positive communication does not prove which MPI transport was selected: record transport logs.
  */
 #include <mpi.h>
@@ -12,7 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ipc.h>
 #include <sys/mman.h>
+#include <sys/shm.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -77,13 +81,41 @@ int main(int argc, char **argv)
     munmap((void *)slots, bytes);
     close(fd);
     if (local_rank == 0) shm_unlink(name);
+
+    long pid = (long)getpid();
+    long *pids = malloc(sizeof(long) * (size_t)local_size);
+    if (pids == NULL) MPI_Abort(MPI_COMM_WORLD, 1);
+    MPI_Allgather(&pid, 1, MPI_LONG, pids, 1, MPI_LONG, local);
+    for (int i = 0; i < local_size; ++i) {
+        for (int j = i + 1; j < local_size; ++j) {
+            if (pids[i] == pids[j]) {
+                if (local_rank == 0) fprintf(stderr, "FAIL: node-local ranks share process id %ld\n", pids[i]);
+                fail = 1;
+            }
+        }
+    }
+    free(pids);
+    int shmid = local_rank == 0 ? shmget(IPC_PRIVATE, bytes, IPC_CREAT | 0600) : -1;
+    if (local_rank == 0 && shmid < 0) perror("System V shared-memory creation");
+    MPI_Bcast(&shmid, 1, MPI_INT, 0, local);
+    if (shmid < 0) MPI_Abort(MPI_COMM_WORLD, 1);
+    void *attached = shmat(shmid, NULL, 0);
+    int sysv = attached != (void *)-1;
+    if (!sysv) perror("System V shared-memory attach");
+    if (sysv) ((volatile int *)attached)[local_rank] = local_rank + 1;
+    MPI_Barrier(local);
+    for (int i = 0; sysv && i < local_size; ++i) fail |= ((volatile int *)attached)[i] != i + 1;
+    fail |= !sysv;
+    MPI_Barrier(local);
+    if (sysv) shmdt(attached);
+    if (local_rank == 0) shmctl(shmid, IPC_RMID, NULL);
     int peers = local_size > 1, peer_nodes;
     MPI_Allreduce(&peers, &peer_nodes, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     int total_fail;
     MPI_Allreduce(&fail, &total_fail, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
     int verdict = total_fail ? 1 : (peer_nodes ? 0 : 77);
     if (rank == 0) {
-        printf("%s: collectives, ring exchange and allocation POSIX shared memory; ranks=%d\n",
+        printf("%s: collectives, ring exchange, POSIX and System V shared memory, distinct node-local pids; ranks=%d\n",
                total_fail ? "FAIL" : "PASS", size);
         if (!peer_nodes) printf("INCONCLUSIVE: no node had multiple ranks to test shared-memory peers\n");
     }

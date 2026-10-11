@@ -858,7 +858,11 @@ starts the launch behind a gate, writes `process.json`, and answers in
 `ID.stop` or the attempt ending stops the launch. Ranks share a per-launch
 directory `httk-<token>/` below the node-local `confine.shm_root`; a rank helper
 removes every such directory whose token no launch record names, from two
-listings one visibility deadline apart. No lock is involved.
+listings one visibility deadline apart. In its `ns/`, the rank helpers of the
+launch on the node elect the one that starts the node's namespace keeper
+supervisor by renaming a prepared generation directory into place, and count
+the ranks still running through a FIFO whose read end the supervisor holds. No
+lock is involved.
 
 
 ### Outcomes

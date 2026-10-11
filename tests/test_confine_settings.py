@@ -36,6 +36,26 @@ def test_defaults_leave_attempts_unconfined_with_isolated_network() -> None:
     )
     # A null value reads as unset.
     assert confine_settings({"manager.confine": None, "confine.isolate_network": None}) == settings
+    assert confine_settings({"manager.confine": "bwrap"}).shm_root == Path("/dev/shm")
+
+
+@pytest.mark.parametrize(
+    ("shm_root", "readonly_path"),
+    [
+        ("/opt/site/shm", "/opt/site"),
+        ("/opt/site", "/opt/site/readonly"),
+        ("/opt/site", "/opt/site"),
+    ],
+)
+def test_shm_root_must_not_overlap_a_readonly_path(shm_root: str, readonly_path: str) -> None:
+    with pytest.raises(ValueError, match=r"confine\.shm_root .*confine\.readonly_paths entry"):
+        confine_settings({"confine.shm_root": shm_root, "confine.readonly_paths": readonly_path})
+
+
+def test_shm_root_accepts_a_disjoint_readonly_path() -> None:
+    settings = confine_settings({"confine.shm_root": "/scratch/shm", "confine.readonly_paths": "/opt/site"})
+    assert settings.shm_root == Path("/scratch/shm")
+    assert settings.readonly_paths == (Path("/opt/site"),)
 
 
 def test_default_readonly_paths_drop_nested_entries_and_include_the_prefix() -> None:

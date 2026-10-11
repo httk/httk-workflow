@@ -2,7 +2,8 @@
 
 The attempt sandbox is a pass-through (as in ``test_manager_confinement.py``) and the rank sandbox is
 ``tests/fake_bwrap.py``, so a launch runs the real launch client, the real rank helper and the real inner
-exec on this host without namespaces. The launch template is a recording script around the rank helper,
+exec on this host; its keeper sandbox gets real namespaces from Bubblewrap where the host allows it, but no
+mount confinement, and tests that run a rank need that. The launch template is a recording script around the rank helper,
 so the "parallel start" is one local rank. ``fake_bwrap`` provides no ``--die-with-parent``: a rank that
 outlives its SIGKILLed helper is killed by the test itself.
 """
@@ -14,7 +15,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from fake_bwrap import require_namespaces, write_wrapper
 from httk.workflow import TaskManager, Workspace, _confine, _confine_rank, _kernel, _manager_launches
 from httk.workflow._allocation import Allocation, Node
 from httk.workflow._launch_protocol import trusted_name
@@ -34,7 +35,6 @@ from httk.workflow._state import read_state_unowned
 from httk.workflow.errors import ConfinementUnavailableError
 from test_manager_confinement import find, submit_runner
 
-_FAKE_BWRAP = Path(__file__).with_name("fake_bwrap.py")
 _TIMEOUT = 60.0
 
 _RUNNER = """#!/usr/bin/env python3
@@ -177,9 +177,7 @@ class _Bench:
         self.pids.mkdir()
         bin_directory = root / "bin"
         bin_directory.mkdir()
-        self.bwrap = bin_directory / "bwrap"
-        self.bwrap.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{_FAKE_BWRAP}" "$@"\n', encoding="utf-8")
-        self.bwrap.chmod(0o755)
+        self.bwrap = write_wrapper(bin_directory / "bwrap")
         self.record = root / "launches.log"
         self.recorder = bin_directory / "record-launch"
         self.recorder.write_text(_RECORDER.format(record=shlex.quote(str(self.record))), encoding="utf-8")
@@ -302,6 +300,7 @@ result["first"] = run([*launch, "sh", "-c", 'pwd; echo "out $FOO"; echo err >&2;
 def test_a_confined_launch_runs_through_the_manager_and_reports_its_exit(
     bench: _Bench, caplog: pytest.LogCaptureFixture
 ) -> None:
+    require_namespaces()
     job_id = bench.submit("basic", _BASIC)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
@@ -559,7 +558,8 @@ def test_admission_is_refused_for_every_attempt_that_is_not_live(
 _CLIENT_SIGNALS = """
 term_pid = results.parent / "pids" / "term"
 kill_pid = results.parent / "pids" / "kill"
-rank = 'echo $$ > "$1"; exec sleep 60'
+# The rank's $$ is its pid in the keeper's PID namespace; the fake keeper shows the host's /proc.
+rank = 'read -r pid _ < /proc/self/stat; echo "$pid" > "$1"; exec sleep 60'
 result["term"] = signalled(signal.SIGTERM, rank, term_pid)
 result["term_rank_alive"] = alive(int(term_pid.read_text()))
 result["kill"] = signalled(signal.SIGKILL, rank, kill_pid)
@@ -573,6 +573,7 @@ result["kill_rank_alive"] = alive(int(kill_pid.read_text()))
 def test_a_signalled_client_stops_its_launch_and_a_killed_one_leaves_it_to_the_attempt_end(
     bench: _Bench, caplog: pytest.LogCaptureFixture
 ) -> None:
+    require_namespaces()
     job_id = bench.submit("signals", _CLIENT_SIGNALS)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager(cancel_grace_seconds=5.0) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
@@ -617,6 +618,7 @@ result["order"] = (workdir / "order").read_text().split()
 
 @pytest.mark.timing
 def test_a_second_request_waits_for_the_first_launch_to_finish(bench: _Bench) -> None:
+    require_namespaces()
     job_id = bench.submit("queued", _QUEUED)
     with bench.manager() as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
@@ -627,7 +629,7 @@ def test_a_second_request_waits_for_the_first_launch_to_finish(bench: _Bench) ->
 
 
 _IGNORING_TERM = """
-rank = 'trap "" TERM; echo $$ > "$1"; while :; do sleep 0.1; done'
+rank = 'trap "" TERM; read -r pid _ < /proc/self/stat; echo "$pid" > "$1"; while :; do sleep 0.1; done'
 result["stop"] = signalled(signal.SIGTERM, rank, results.parent / "pids" / "ignoring")
 """
 
@@ -636,6 +638,7 @@ result["stop"] = signalled(signal.SIGTERM, rank, results.parent / "pids" / "igno
 def test_a_launch_ignoring_sigterm_is_killed_after_the_cancel_grace(
     bench: _Bench, caplog: pytest.LogCaptureFixture
 ) -> None:
+    require_namespaces()
     job_id = bench.submit("ignoring", _IGNORING_TERM)
     with caplog.at_level("INFO", logger="httk.workflow.manager"), bench.manager(cancel_grace_seconds=1.0) as manager:
         manager.run_until_idle(timeout=_TIMEOUT)
@@ -648,7 +651,7 @@ def test_a_launch_ignoring_sigterm_is_killed_after_the_cancel_grace(
 
 
 _UNCERTAIN = """
-result["stop"] = signalled(signal.SIGTERM, 'echo $$ > "$1"; exec sleep 60', results.parent / "pids" / "stuck")
+result["stop"] = signalled(signal.SIGTERM, 'read -r pid _ < /proc/self/stat; echo "$pid" > "$1"; exec sleep 60', results.parent / "pids" / "stuck")
 result["after"] = run([*launch, "true"])
 """
 
@@ -683,7 +686,7 @@ def test_a_launch_that_cannot_be_reaped_is_uncertain_and_closes_admission(
 
 _OUTLIVING = """
 rank_pid = results.parent / "pids" / "outliving"
-rank = 'trap "" TERM; echo $$ > "$1"; sleep 4'
+rank = 'trap "" TERM; read -r pid _ < /proc/self/stat; echo "$pid" > "$1"; sleep 4'
 client = subprocess.Popen([*launch, "sh", "-c", rank, "sh", str(rank_pid)], start_new_session=True, cwd=workdir)
 (results.parent / "pids" / "client").write_text(str(client.pid))
 wait_for(rank_pid)
@@ -692,6 +695,7 @@ wait_for(rank_pid)
 
 @pytest.mark.timing
 def test_the_attempt_keeps_its_placement_and_its_commit_waits_until_its_launch_is_reaped(bench: _Bench) -> None:
+    require_namespaces()
     job_id = bench.submit("outliving", _OUTLIVING)
     with bench.manager(cancel_grace_seconds=2.0) as manager:
         _until(manager, lambda: (bench.results / f"{job_id}.json").exists())
@@ -749,6 +753,7 @@ result["same"] = request(os.environ["HTTK_TEST_REQUEST_ID"])
 
 
 def test_two_attempts_may_use_the_same_request_id(bench: _Bench, monkeypatch: pytest.MonkeyPatch) -> None:
+    require_namespaces()
     # Request ids are chosen by jobs and visible to other jobs; one job cannot block another's launch.
     monkeypatch.setenv("HTTK_TEST_REQUEST_ID", "0123456789abcdef0123456789abcdef")
     identifiers = [bench.submit(tag, _SAME_REQUEST) for tag in ("one", "two")]
@@ -771,6 +776,7 @@ wait_for(results / (context["job_id"] + ".release"), 60)
 
 @pytest.mark.timing
 def test_a_reaped_launch_leaves_no_trusted_record(bench: _Bench) -> None:
+    require_namespaces()
     job_id = bench.submit("sequential", _SEQUENTIAL)
     with bench.manager() as manager:
         _until(manager, lambda: (bench.results / f"{job_id}.launched").exists())
@@ -799,6 +805,7 @@ result["shm"] = run([*launch, "sh", "-c", listing])
 def test_the_shared_memory_directory_is_named_by_the_launch_token(
     bench: _Bench, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    require_namespaces()
     monkeypatch.setenv("HTTK_TEST_SHM_ROOT", str(bench.shm))
     job_id = bench.submit("shm", _SHARED_MEMORY)
     with bench.manager() as manager:

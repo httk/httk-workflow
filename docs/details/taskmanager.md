@@ -613,8 +613,8 @@ prefix.
 
 In a [confined attempt](#confining-attempts) `HTTK_WORKFLOW_LAUNCH` is a
 launch client instead, used the same way: the trusted manager records the
-launch under `owners/<owner-id>/launches/` and starts each rank in its own
-sandbox, and the attempt is not committed until every launch is reaped. See
+launch under `owners/<owner-id>/launches/` and the ranks of a launch on each
+node run in one shared sandbox, and the attempt is not committed until every launch is reaped. See
 [parallel launches](workspace_daemon.md#parallel-launches).
 
 An attempt placed on one node that is the manager's own host is executed

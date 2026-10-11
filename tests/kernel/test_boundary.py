@@ -98,6 +98,9 @@ RUNNER_SIDE = frozenset(
         "sdk.py",
     }
 )
+#: Node-local state outside every workspace: a launch's rank helpers coordinate its namespace keeper in
+#: ``<confine.shm_root>/httk-<token>/ns/`` with their own rename and FIFO protocol.
+NODE_LOCAL = frozenset({"_confine_keeper.py"})
 #: Modules whose only raw operations are pathlib-style calls on entries private to one actor.
 METHOD_RAW = frozenset(
     {
@@ -511,7 +514,7 @@ def _listed_writes(module: str) -> set[str]:
 def test_only_fs_performs_raw_operations() -> None:
     # Rule A: a raw rename/unlink/rmdir/lock/O_CREAT or plain-path write outside _fs is a race the reviewed
     # surfaces do not own; listed private writes excepted.
-    allowed = {"_fs.py"} | RUNNER_SIDE | LEGACY_RAW | METHOD_RAW
+    allowed = {"_fs.py"} | RUNNER_SIDE | NODE_LOCAL | LEGACY_RAW | METHOD_RAW
     offenders = {
         module: sorted(uses)
         for module in _modules()
@@ -546,6 +549,8 @@ def test_legacy_allowlist_is_tight() -> None:
     assert stale == [], f"remove these from LEGACY_RAW: {stale}"
     idle = sorted(module for module in RUNNER_SIDE if module not in present or not _raw_uses(_tree(module)))
     assert idle == [], f"remove these from RUNNER_SIDE: {idle}"
+    unused = sorted(module for module in NODE_LOCAL if module not in present or not _raw_uses(_tree(module)))
+    assert unused == [], f"remove these from NODE_LOCAL: {unused}"
     # A METHOD_RAW module may hold nothing but pathlib-style calls, and must still hold one.
     misfiled = sorted(
         module

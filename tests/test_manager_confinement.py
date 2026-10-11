@@ -335,6 +335,19 @@ def test_an_unusable_bubblewrap_refuses_the_manager_start(tmp_path: Path, sandbo
     assert not list((workspace.control / "owners").iterdir())
 
 
+def test_shm_root_readonly_alias_refuses_manager_start(tmp_path: Path, sandbox: _Sandbox) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    shm_root = tmp_path / "shm"
+    shm_root.mkdir(mode=0o700)
+    readonly_alias = tmp_path / "readonly-shm"
+    readonly_alias.symlink_to(shm_root, target_is_directory=True)
+    settings = _PINNED | {"confine.shm_root": str(shm_root), "confine.readonly_paths": str(readonly_alias)}
+    with pytest.raises(ConfinementUnavailableError, match="confine.shm_root"):
+        TaskManager(workspace, setting_overrides=settings)
+    assert not list((workspace.control / "owners").iterdir())
+    assert not sandbox.probes
+
+
 def test_a_workspace_switched_to_bwrap_is_probed_once_lazily(tmp_path: Path, sandbox: _Sandbox) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:

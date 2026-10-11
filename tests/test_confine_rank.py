@@ -1,6 +1,8 @@
 """The rank helper and inner exec of a confined launch, with the plumbing-only fake Bubblewrap."""
 
 import builtins
+import ctypes
+import ctypes.util
 import fcntl
 import io
 import os
@@ -22,7 +24,8 @@ from typing import Literal
 
 import pytest
 
-from httk.workflow import Workspace, _confine_exec, _confine_rank, _fs, _kernel
+from fake_bwrap import require_namespaces, write_wrapper
+from httk.workflow import Workspace, _confine_exec, _confine_keeper, _confine_rank, _fs, _kernel
 from httk.workflow._confine import ConfinementUnavailableError, confine_settings, default_readonly_paths, probe_bwrap
 from httk.workflow._launch_protocol import (
     LaunchConfinement,
@@ -34,10 +37,8 @@ from httk.workflow._launch_protocol import (
     request_relative_path,
     trusted_name,
 )
-from httk.workflow._sandbox import PreparedSandbox
 from test_pmi_proxy import INIT, REPLIES, SPAWN, serve_slurm
 
-_FAKE_BWRAP = Path(__file__).with_name("fake_bwrap.py")
 _TIMEOUT = 60.0
 _WORKSPACE_ID = "0f6b6c2a-1d55-4c69-8d43-7c0a1b2c3d4e"
 
@@ -80,10 +81,7 @@ class _Launch:
 
 
 def _fake_bwrap(directory: Path) -> Path:
-    wrapper = directory / "bwrap"
-    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{_FAKE_BWRAP}" "$@"\n', encoding="utf-8")
-    wrapper.chmod(0o755)
-    return wrapper
+    return write_wrapper(directory / "bwrap")
 
 
 def _host_shm_directory() -> Path:
@@ -177,14 +175,15 @@ def opened(launch: _Launch) -> Iterator[_Opened]:
 
 
 def _prepare(launch: _Launch, opened: _Opened, environ: dict[str, str]) -> tuple[list[str], dict[str, str]]:
-    prepared, environment = _confine_rank.prepare_rank_sandbox(
+    environment = _confine_rank.prepare_rank_environment(launch.trusted, environ)
+    prepared = _confine_rank.prepare_keeper_sandbox(
         launch.trusted,
         workspace=opened.workspace,
         workspace_fd=opened.workspace_fd,
         job=opened.job,
         job_fd=opened.job_fd,
         shm_fd=opened.shm_fd,
-        environ=environ,
+        environment=environment,
     )
     try:
         for descriptor in prepared.descriptors:
@@ -263,8 +262,9 @@ def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened
     assert argv[remount + 4 : argv.index("--chdir")] == []
     assert argv[shm - 2] == "--bind-fd"
     separator = argv.index("--")
-    assert argv[separator - 2 : separator] == ["--chdir", str(launch.job)]
-    assert argv[separator + 1 :] == [
+    assert argv[separator - 2 : separator] == ["--chdir", "/"]
+    assert argv[separator + 1 :] == [sys.executable, "-I", "-S", "-c", _confine_keeper.KEEPER_PROGRAM]
+    assert _confine_rank.inner_command(launch.trusted, launch.job) == [
         sys.executable,
         "-I",
         "-m",
@@ -278,18 +278,15 @@ def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened
     ]
 
 
-def test_rank_descriptors_match_bind_options_except_pmi(launch: _Launch, opened: _Opened) -> None:
-    left, right = socket.socketpair()
-    pmi_fd = right.detach()
-    prepared, _environment = _confine_rank.prepare_rank_sandbox(
+def test_keeper_descriptors_match_bind_options(launch: _Launch, opened: _Opened) -> None:
+    prepared = _confine_rank.prepare_keeper_sandbox(
         launch.trusted,
         workspace=opened.workspace,
         workspace_fd=opened.workspace_fd,
         job=opened.job,
         job_fd=opened.job_fd,
         shm_fd=opened.shm_fd,
-        environ={},
-        pmi_fd=pmi_fd,
+        environment={},
     )
     try:
         bind_descriptors = {
@@ -297,13 +294,9 @@ def test_rank_descriptors_match_bind_options_except_pmi(launch: _Launch, opened:
             for index, option in enumerate(prepared.argv[:-1])
             if option in {"--bind-fd", "--ro-bind-fd", "--ro-bind-data"}
         }
-        descriptors = {str(descriptor) for descriptor in prepared.descriptors}
-        assert bind_descriptors <= descriptors
-        assert descriptors - bind_descriptors == {str(pmi_fd)}
-        assert bind_descriptors | {str(pmi_fd)} == descriptors
+        assert bind_descriptors == {str(descriptor) for descriptor in prepared.descriptors}
     finally:
         prepared.close()
-        left.close()
 
 
 def test_no_environment_value_appears_in_the_rank_argv(launch: _Launch, opened: _Opened) -> None:
@@ -430,6 +423,23 @@ def test_readonly_ancestor_of_the_workspace_is_refused(launch: _Launch, opened: 
             _prepare(launch, opened, {})
 
 
+def test_shm_root_must_not_overlap_a_readonly_path(launch: _Launch, opened: _Opened) -> None:
+    launch.trusted = replace(
+        launch.trusted,
+        confine=replace(launch.trusted.confine, readonly_paths=(launch.shm_root,)),
+    )
+    with pytest.raises(ValueError, match="confine.shm_root"):
+        _prepare(launch, opened, {})
+
+
+def test_shm_root_must_not_overlap_the_workspace(launch: _Launch, opened: _Opened) -> None:
+    shm_root = launch.workspace / "inside-shm"
+    shm_root.mkdir()
+    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, shm_root=shm_root))
+    with pytest.raises(ValueError, match="confine.shm_root.*workspace"):
+        _prepare(launch, opened, {})
+
+
 def test_read_launch_refusals(launch: _Launch) -> None:
     with pytest.raises(ValueError, match="--launch-dir"):
         _confine_rank.read_launch(launch.launch_dir.parent)
@@ -511,8 +521,10 @@ def test_shared_memory_is_shared_and_kept_for_the_manager(launch: _Launch) -> No
     first = _confine_rank.join_shared_memory(launch.shm_root, token)
     second = _confine_rank.join_shared_memory(launch.shm_root, token)
     assert os.path.samestat(os.fstat(first.fd), os.fstat(second.fd))
-    information = os.stat(launch.shm)
-    assert stat.S_IMODE(information.st_mode) == 0o700 and information.st_uid == os.geteuid()
+    for path in (launch.shm, launch.shm / "shm", launch.shm / "ns"):
+        information = os.stat(path)
+        assert stat.S_IMODE(information.st_mode) == 0o700 and information.st_uid == os.geteuid()
+    assert os.path.samestat(os.fstat(first.shm_fd), os.stat(launch.shm / "shm"))
     _confine_rank.leave_shared_memory(first)
     _confine_rank.leave_shared_memory(second)
     # No rank removes it: the manager does at the reap, a later rank helper's sweep once the record is gone.
@@ -523,6 +535,8 @@ def test_the_sweep_removes_only_unrecorded_shared_memory(launch: _Launch) -> Non
     stale = launch.shm_root / f"httk-{secrets.token_hex(16)}"
     stale.mkdir(mode=0o700)
     (stale / "segment").write_bytes(b"x")
+    (stale / "ns" / "0").mkdir(parents=True)
+    os.mkfifo(stale / "ns" / "0" / _confine_keeper.MEMBERS)
     launch.shm.mkdir(mode=0o700)
     unrelated = launch.shm_root / "not-httk"
     unrelated.mkdir()
@@ -551,6 +565,10 @@ def test_shared_memory_refuses_unsafe_existing_entries(launch: _Launch, monkeypa
         _confine_rank.join_shared_memory(launch.shm_root, token)
     launch.shm.unlink()
     launch.shm.mkdir(mode=0o700)
+    (launch.shm / "ns").symlink_to(target)
+    with pytest.raises(ValueError, match="not a real directory"):
+        _confine_rank.join_shared_memory(launch.shm_root, token)
+    (launch.shm / "ns").unlink()
     real_uid = os.geteuid()
     monkeypatch.setattr(_confine_rank, "_check_shm_root", lambda _descriptor, _path: None)
     monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
@@ -588,6 +606,7 @@ def _run_helper(
 
 
 def test_end_to_end_with_fake_bwrap(launch: _Launch) -> None:
+    require_namespaces()
     (launch.job / "sub").mkdir()
     script = 'pwd; echo "$FOO|$PMI_RANK|$OMPI_MCA_btl_vader_single_copy_mechanism|$HOME|$SLURM_CONF|$X"; exit 7'
     launch.request(("sh", "-c", script), cwd="sub", environment={"PATH": os.environ["PATH"], "FOO": "bar"})
@@ -610,6 +629,7 @@ def test_helper_refuses_pmix_outside_the_roots(launch: _Launch) -> None:
 
 
 def test_helper_reports_signal_exit_and_forwards_signals(launch: _Launch) -> None:
+    require_namespaces()
     launch.request(("sh", "-c", 'touch started; exec sleep 30'))
     process = _run_helper(launch, wait=False)
     try:
@@ -631,14 +651,42 @@ def _alive(pid: int) -> bool:
     return state != "Z"
 
 
+def _wait_gone(*pids: int) -> bool:
+    """Wait until every process in *pids* is gone, returning false at the test timeout."""
+
+    deadline = time.monotonic() + _TIMEOUT
+    while any(_alive(pid) for pid in pids):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _pids_running(marker: str) -> list[int]:
+    """Return the host pids whose command line contains *marker*; ranks see other pids in their namespace."""
+
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                if marker.encode() in (entry / "cmdline").read_bytes() and _alive(int(entry.name)):
+                    found.append(int(entry.name))
+            except OSError:
+                pass
+    return found
+
+
 def test_helper_signal_reaches_the_whole_rank_group(launch: _Launch) -> None:
-    launch.request(("sh", "-c", 'sleep 30 & echo "$!" > bg.pid; echo "$$" > sh.pid; touch started; wait'))
+    require_namespaces()
+    marker = f"rank-{uuid.uuid4().hex}"
+    pause = f"30.{secrets.randbelow(10**6):06d}"
+    launch.request(("sh", "-c", f"sleep {pause} & touch started; wait", marker))
     process = _run_helper(launch, wait=False)
     try:
         _wait_for(launch.job / "started", process)
-        background = int((launch.job / "bg.pid").read_text())
-        shell = int((launch.job / "sh.pid").read_text())
-        assert os.getpgid(background) == os.getpgid(shell) == shell != os.getpgid(process.pid)
+        (shell,) = _pids_running(marker)
+        (background,) = _pids_running(f"sleep\0{pause}")
+        assert os.getpgid(background) == os.getpgid(shell) != os.getpgid(process.pid)
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=_TIMEOUT) == 128 + signal.SIGTERM
         assert not _alive(shell) and not _alive(background)
@@ -650,6 +698,7 @@ def test_helper_signal_reaches_the_whole_rank_group(launch: _Launch) -> None:
 
 
 def test_helper_waits_until_the_rank_group_is_gone(launch: _Launch) -> None:
+    require_namespaces()
     # The survivor reports "started" only once its TERM trap is in place, so
     # the signal below cannot arrive before the trap is set.
     survivor = '(trap "" TERM; touch started; while [ ! -e release ]; do sleep 0.05; done; touch survived) &'
@@ -682,7 +731,10 @@ def _wait_for(path: Path, *processes: subprocess.Popen[bytes]) -> None:
 
 
 def test_concurrent_helpers_share_shm(launch: _Launch) -> None:
-    script = 'touch "started.$PMI_RANK"; while [ ! -e "release.$PMI_RANK" ]; do sleep 0.02; done'
+    require_namespaces()
+    script = (
+        'touch "started.$PMI_RANK"; while [ ! -e "release.$PMI_RANK" ]; do sleep 0.02; done; touch "done.$PMI_RANK"'
+    )
     launch.request(("sh", "-c", script))
     first = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
     second = _run_helper(launch, {"PMI_RANK": "1"}, wait=False)
@@ -691,8 +743,11 @@ def test_concurrent_helpers_share_shm(launch: _Launch) -> None:
         _wait_for(launch.job / "started.1", first, second)
         assert launch.shm.is_dir()
         (launch.job / "release.0").touch()
-        assert first.wait(timeout=_TIMEOUT) == 0
+        _wait_for(launch.job / "done.0", first, second)
+        time.sleep(0.2)
         assert launch.shm.is_dir(), "the first rank removed shared memory still in use"
+        assert first.wait(timeout=_TIMEOUT) == 0
+        assert second.poll() is None
         (launch.job / "release.1").touch()
         assert second.wait(timeout=_TIMEOUT) == 0
         assert launch.shm.is_dir(), "a rank removed shared memory its launch record still names"
@@ -701,6 +756,346 @@ def test_concurrent_helpers_share_shm(launch: _Launch) -> None:
             if process.poll() is None:
                 process.kill()
             process.communicate()
+
+
+# -- the node's keeper namespaces ------------------------------------------------------------------------
+
+# A rank that registers itself under its pid in REGISTRY as Intel and LLVM OpenMP do in /dev/shm (O_EXCL, so
+# equal pids collide), then creates a System V shared-memory segment of KEY and a marker file in REGISTRY and
+# waits for READERS attaching ranks, or attaches the segment and reports what it saw and whether the marker
+# is visible.
+_SYSV_RANK = """
+import ctypes, glob, os, sys, time
+rank, key, mode, registry, readers = os.environ["PMI_RANK"], int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+libc = ctypes.CDLL(None, use_errno=True)
+libc.shmat.restype = ctypes.c_void_p
+libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
+open("pid." + rank, "w").write(str(os.getpid()))
+os.close(os.open(f"{registry}/__KMP_REGISTERED_LIB_{os.getpid()}_{os.getuid()}", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+if mode == "create":
+    open(f"{registry}/launch-marker", "w").close()
+    shmid = libc.shmget(key, 4096, 0o3600)  # IPC_CREAT | IPC_EXCL | 0600
+    assert shmid >= 0, ctypes.get_errno()
+    ctypes.memmove(libc.shmat(shmid, None, 0), b"from-rank-" + rank.encode(), 11)
+    open("ready", "w").close()
+    while len(glob.glob("read.*")) < readers:
+        time.sleep(0.02)
+    libc.shmctl(shmid, 0, None)  # IPC_RMID
+else:
+    while not os.path.exists("ready"):
+        time.sleep(0.02)
+    shmid = libc.shmget(key, 0, 0)
+    seen = "absent" if shmid < 0 else ctypes.string_at(libc.shmat(shmid, None, 0), 11).decode()
+    seen += "|shared" if os.path.exists(f"{registry}/launch-marker") else "|private"
+    open("seen." + rank, "w").write(seen)
+    open("read." + rank, "w").close()
+"""
+
+
+def _host_segment_exists(key: int) -> bool:
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.shmget(key, 0, 0) >= 0
+
+
+def _keeper_record(launch: _Launch, generation: int = 0) -> _confine_keeper.KeeperRecord:
+    return _confine_keeper.KeeperRecord.decode(
+        (launch.shm / "ns" / str(generation) / _confine_keeper.KEEPER_FILE).read_bytes()
+    )
+
+
+def _parent(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rpartition(")")[2].split()[1])
+
+
+def _sibling_launch(launch: _Launch) -> _Launch:
+    """Return a second launch of the same job, with its own request and launch token."""
+
+    request_id = new_request_id()
+    trusted = replace(
+        launch.trusted,
+        request_id=request_id,
+        request=request_relative_path(launch.trusted.attempt_id, request_id),
+        token=secrets.token_hex(16),
+    )
+    launch_dir = launch.launch_dir.with_name(trusted_name(trusted.attempt_id, request_id))
+    sibling = replace(launch, launch_dir=launch_dir, trusted=trusted)
+    sibling.write()
+    return sibling
+
+
+def _sysv_request(
+    launch: _Launch, key: int, mode: str, *, readers: int = 1, python: str = sys.executable, registry: str = ""
+) -> None:
+    if not registry:
+        # One registry per launch, as each launch has its own /dev/shm: separate launches may reuse pids.
+        (launch.job / f"registry-{launch.trusted.token}").mkdir(exist_ok=True)
+        registry = str(launch.job / f"registry-{launch.trusted.token}")
+    launch.request((python, "-I", "-c", _SYSV_RANK, str(key), mode, registry, str(readers)))
+
+
+def _finish(*processes: subprocess.Popen[bytes]) -> list[tuple[int, bytes]]:
+    results = []
+    for process in processes:
+        try:
+            _stdout, stderr = process.communicate(timeout=_TIMEOUT)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+        results.append((process.returncode, stderr))
+    return results
+
+
+def test_ranks_of_a_launch_share_pids_and_system_v_shared_memory(launch: _Launch) -> None:
+    require_namespaces()
+    key = secrets.randbelow(2**30) + 1
+    _sysv_request(launch, key, "create")
+    creator = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    _wait_for(launch.job / "ready", creator)
+    _sysv_request(launch, key, "attach")
+    attacher = _run_helper(launch, {"PMI_RANK": "1"}, wait=False)
+    record = _keeper_record(launch)
+    results = _finish(creator, attacher)
+    assert results == [(0, b""), (0, b"")], results
+    assert (launch.job / "seen.1").read_text() == "from-rank-0|shared"
+    # Distinct pids in one PID namespace, so pid-named registrations do not collide.
+    assert (launch.job / "pid.0").read_text() != (launch.job / "pid.1").read_text()
+    assert len(list((launch.job / f"registry-{launch.trusted.token}").glob("__KMP_REGISTERED_LIB_*"))) == 2
+    # The segment lived in the keeper's IPC namespace, and the keeper ended with the launch's last rank.
+    assert not _host_segment_exists(key)
+    assert _wait_gone(record.pid)
+    assert not (launch.shm / "ns" / "1").exists()
+
+
+def test_separate_launches_do_not_share_system_v_objects(launch: _Launch) -> None:
+    require_namespaces()
+    key = secrets.randbelow(2**30) + 1
+    _sysv_request(launch, key, "create")
+    creator = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    _wait_for(launch.job / "ready", creator)
+    other = _sibling_launch(launch)
+    _sysv_request(other, key, "attach")
+    attacher = _run_helper(other, {"PMI_RANK": "1"}, wait=False)
+    assert _finish(creator, attacher) == [(0, b""), (0, b"")]
+    assert (launch.job / "seen.1").read_text() == "absent|private"
+    assert _keeper_record(launch).namespaces["ipc"] != _keeper_record(other).namespaces["ipc"]
+
+
+def test_cancelled_ranks_end_their_keeper(launch: _Launch) -> None:
+    require_namespaces()
+    marker = f"rank-{uuid.uuid4().hex}"
+    launch.request(("sh", "-c", 'touch "started.$PMI_RANK"; exec sleep 60', marker))
+    helpers = [_run_helper(launch, {"PMI_RANK": str(rank)}, wait=False) for rank in range(2)]
+    try:
+        for rank in range(2):
+            _wait_for(launch.job / f"started.{rank}", *helpers)
+        record = _keeper_record(launch)
+        for helper in helpers:
+            helper.send_signal(signal.SIGTERM)
+        assert [code for code, _stderr in _finish(*helpers)] == [128 + signal.SIGTERM] * 2
+    finally:
+        for helper in helpers:
+            if helper.poll() is None:
+                helper.kill()
+    assert _wait_gone(record.pid) and not _pids_running(marker)
+    assert (launch.shm / "ns" / "0" / _confine_keeper.CLOSING).is_dir()
+
+
+def test_a_killed_leading_helper_leaves_the_other_ranks_running(launch: _Launch) -> None:
+    require_namespaces()
+    marker = f"rank-{uuid.uuid4().hex}"
+    launch.request(("sh", "-c", 'touch "started.$PMI_RANK"; while [ ! -e release ]; do sleep 0.02; done', marker))
+    first = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    helpers = [first]
+    try:
+        _wait_for(launch.job / "started.0", first)
+        record = _keeper_record(launch)
+        supervisor = _parent(_parent(record.pid))
+        assert _parent(supervisor) == first.pid
+        follower = _run_helper(launch, {"PMI_RANK": "1"}, wait=False)
+        helpers.append(follower)
+        _wait_for(launch.job / "started.1", *helpers)
+        leader = first
+        leader.kill()
+        (launch.job / "release").touch()
+        assert follower.wait(timeout=_TIMEOUT) == 0
+    finally:
+        _finish(*helpers)
+    assert _wait_gone(supervisor)
+    assert not _alive(record.pid) and not _pids_running(marker)
+
+
+def test_a_failing_leader_rank_is_reported_at_once(launch: _Launch) -> None:
+    require_namespaces()
+    launch.request(
+        (
+            "sh",
+            "-c",
+            'touch "started.$PMI_RANK"; [ "$PMI_RANK" = 0 ] && exit 3; while [ ! -e release ]; do sleep 0.02; done',
+        )
+    )
+    first = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    second: subprocess.Popen[bytes] | None = None
+    try:
+        _wait_for(launch.shm / "ns" / "0" / _confine_keeper.KEEPER_FILE, first)
+        second = _run_helper(launch, {"PMI_RANK": "1"}, wait=False)
+        _wait_for(launch.job / "started.1", second)
+        assert first.wait(timeout=_TIMEOUT) == 3
+        assert second.poll() is None
+        (launch.job / "release").touch()
+        assert second.wait(timeout=_TIMEOUT) == 0
+    finally:
+        _finish(first, *((second,) if second is not None else ()))
+    assert _wait_gone(_keeper_record(launch).pid)
+
+
+def test_a_killed_supervisor_ends_every_rank(launch: _Launch) -> None:
+    require_namespaces()
+    marker = f"rank-{uuid.uuid4().hex}"
+    launch.request(("sh", "-c", 'touch "started.$PMI_RANK"; exec sleep 60', marker))
+    helpers = [_run_helper(launch, {"PMI_RANK": str(rank)}, wait=False) for rank in range(2)]
+    try:
+        for rank in range(2):
+            _wait_for(launch.job / f"started.{rank}", *helpers)
+        record = _keeper_record(launch)
+        os.kill(_parent(_parent(record.pid)), signal.SIGKILL)
+        assert [code for code, _stderr in _finish(*helpers)] == [128 + signal.SIGKILL] * 2
+    finally:
+        for helper in helpers:
+            if helper.poll() is None:
+                helper.kill()
+    assert not _pids_running(marker)
+
+
+def test_the_keeper_has_no_control_pipe(launch: _Launch) -> None:
+    require_namespaces()
+    launch.request(("sh", "-c", 'touch started; exec sleep 60'))
+    helper = _run_helper(launch, wait=False)
+    try:
+        _wait_for(launch.job / "started", helper)
+        assert os.readlink(f"/proc/{_keeper_record(launch).pid}/fd/0") == "/dev/null"
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+        helper.communicate()
+
+
+def test_a_rank_inherits_only_its_standard_streams(launch: _Launch) -> None:
+    require_namespaces()
+    launch.request((sys.executable, "-c", "import os; print(sorted(int(n) for n in os.listdir('/proc/self/fd')) )"))
+    helper = _run_helper(launch)
+    stdout, stderr = helper.communicate()
+    assert helper.returncode == 0, stderr
+    assert stdout == b"[0, 1, 2, 3]\n"
+
+
+def test_a_killed_keeper_kills_its_ranks(launch: _Launch) -> None:
+    require_namespaces()
+    marker = f"rank-{uuid.uuid4().hex}"
+    launch.request(("sh", "-c", 'touch "started.$PMI_RANK"; exec sleep 60', marker))
+    helpers = [_run_helper(launch, {"PMI_RANK": str(rank)}, wait=False) for rank in range(2)]
+    try:
+        for rank in range(2):
+            _wait_for(launch.job / f"started.{rank}", *helpers)
+        os.kill(_keeper_record(launch).pid, signal.SIGKILL)
+        assert [code for code, _stderr in _finish(*helpers)] == [128 + signal.SIGKILL] * 2
+    finally:
+        for helper in helpers:
+            if helper.poll() is None:
+                helper.kill()
+    assert not _pids_running(marker)
+
+
+def test_a_rank_that_cannot_join_is_refused_and_the_others_finish(launch: _Launch) -> None:
+    require_namespaces()
+    launch.request(("sh", "-c", 'touch "started.$PMI_RANK"; while [ ! -e release ]; do sleep 0.02; done'))
+    first = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    _wait_for(launch.job / "started.0", first)
+    step = launch.pmix_root / "pmix.1.0"
+    step.mkdir()
+    second = _run_helper(launch, {"PMI_RANK": "1", "PMIX_SERVER_TMPDIR": str(step)}, wait=False)
+    code, stderr = _finish(second)[0]
+    assert code == 2 and b"PMIX_SERVER_TMPDIR differs" in stderr
+    (launch.job / "release").touch()
+    assert _finish(first) == [(0, b"")]
+    assert _wait_gone(_keeper_record(launch).pid)
+
+
+def test_a_rank_after_its_node_finished_starts_a_new_generation(launch: _Launch) -> None:
+    require_namespaces()
+    launch.request(("sh", "-c", 'echo "$PMI_RANK" >> ran'))
+    assert _finish(_run_helper(launch, {"PMI_RANK": "0"}, wait=False)) == [(0, b"")]
+    assert _finish(_run_helper(launch, {"PMI_RANK": "1"}, wait=False)) == [(0, b"")]
+    assert (launch.job / "ran").read_text().split() == ["0", "1"]
+    assert (launch.shm / "ns" / "0" / _confine_keeper.CLOSING).is_dir()
+    assert _keeper_record(launch, 1).pid != _keeper_record(launch, 0).pid
+
+
+def test_a_keeper_without_namespaces_of_its_own_is_refused(launch: _Launch) -> None:
+    require_namespaces()
+    launch.write(
+        replace(
+            launch.trusted,
+            confine=replace(
+                launch.trusted.confine,
+                bwrap=write_wrapper(launch.root / "bin" / "bwrap-without-namespaces", namespaces=False),
+            ),
+        )
+    )
+    launch.request(("sh", "-c", "touch ran"))
+    code, stderr = _finish(_run_helper(launch, {"PMI_RANK": "0"}, wait=False))[0]
+    assert code == 2 and b"namespace keeper on this node failed" in stderr and b"confinement refused" in stderr
+    # The failure is recorded, so the generation's other ranks are refused too.
+    code, stderr = _finish(_run_helper(launch, {"PMI_RANK": "1"}, wait=False))[0]
+    assert code == 2 and b"namespace keeper on this node failed" in stderr and b"confinement refused" in stderr
+    assert not (launch.job / "ran").exists()
+
+
+def _prepared_generation(ns: Path, name: str, *, reader: bool) -> int | None:
+    """Create a generation directory the way a leader does, holding its read end when *reader*."""
+
+    generation = ns / name
+    generation.mkdir(mode=0o700, parents=True)
+    os.mkfifo(generation / _confine_keeper.MEMBERS, 0o600)
+    if not reader:
+        return None
+    return os.open(generation / _confine_keeper.MEMBERS, os.O_RDONLY | os.O_NONBLOCK)
+
+
+def _never_start() -> _confine_rank.PreparedSandbox:
+    raise AssertionError("this helper must not lead")
+
+
+def test_a_generation_whose_leader_is_gone_or_closing_is_skipped(tmp_path: Path) -> None:
+    ns = tmp_path / "ns"
+    _prepared_generation(ns, "0", reader=False)  # the leader died before publishing its keeper
+    reader = _prepared_generation(ns, "1", reader=True)
+    (ns / "1" / _confine_keeper.CLOSING).mkdir()
+    (ns / "1" / _confine_keeper.KEEPER_FILE).write_text("{}")
+    failed = _prepared_generation(ns, "2", reader=True)
+    (ns / "2" / _confine_keeper.FAILED_FILE).write_text("no namespaces here")
+    ns_fd = os.open(ns, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ValueError, match="keeper on this node failed: no namespaces here"):
+            _confine_keeper.join(ns_fd, prepare=_never_start, pmix=None, python=Path(sys.executable))
+    finally:
+        for descriptor in (ns_fd, reader, failed):
+            assert descriptor is not None
+            os.close(descriptor)
+
+
+def test_a_follower_times_out_without_a_keeper_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_confine_keeper, "KEEPER_WAIT_SECONDS", 0.2)
+    ns = tmp_path / "ns"
+    reader = _prepared_generation(ns, "0", reader=True)
+    ns_fd = os.open(ns, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ValueError, match="timed out waiting"):
+            _confine_keeper.join(ns_fd, prepare=_never_start, pmix=None, python=Path(sys.executable))
+    finally:
+        for descriptor in (ns_fd, reader):
+            assert descriptor is not None
+            os.close(descriptor)
 
 
 def _exec(launch: _Launch, monkeypatch: pytest.MonkeyPatch, **changes: str) -> int:
@@ -802,40 +1197,18 @@ def test_slurm_pmi_fd_parses_the_descriptor_number(tmp_path: Path) -> None:
     [("on", True, True), ("on", False, True), ("off", True, False), ("auto", True, True), ("auto", False, False)],
 )
 def test_prepare_pmi_plumbing_per_mode(
-    launch: _Launch, opened: _Opened, mode: Literal["on", "off", "auto"], has_fd: bool, relayed: bool
+    launch: _Launch, mode: Literal["on", "off", "auto"], has_fd: bool, relayed: bool
 ) -> None:
     trusted = _with_mode(launch, mode)
-    other, passed = socket.socketpair()
-    pmi_fd = passed.detach() if has_fd else None
+    pmi_fd = 42 if has_fd else None
     environ = {"PMI_PORT": "node1:4242", "PMI_RANK": "3"}
     if has_fd:  # never the passed number, so a reassigned PMI_FD shows
         environ["PMI_FD"] = "99"
     assert _confine_rank.blocks_mpi_spawn(trusted, environ) is relayed
-    prepared, environment = _confine_rank.prepare_rank_sandbox(
-        trusted,
-        workspace=opened.workspace,
-        workspace_fd=opened.workspace_fd,
-        job=opened.job,
-        job_fd=opened.job_fd,
-        shm_fd=opened.shm_fd,
-        environ=environ,
-        pmi_fd=pmi_fd,
-    )
-    try:
-        if pmi_fd is not None:
-            assert pmi_fd in prepared.descriptors
-            assert os.get_inheritable(pmi_fd)
-        assert environment.get("PMI_FD") == ((str(pmi_fd) if relayed else "99") if has_fd else None)
-        assert environment.get("PMI_PORT") == (None if relayed else "node1:4242")
-        assert environment["PMI_RANK"] == "3"
-    finally:
-        prepared.close()
-        other.close()
-        if pmi_fd is None:
-            passed.close()
-    if pmi_fd is not None:
-        with pytest.raises(OSError):
-            os.fstat(pmi_fd)
+    environment = _confine_rank.prepare_rank_environment(trusted, environ, pmi_fd)
+    assert environment.get("PMI_FD") == ((str(pmi_fd) if relayed else "99") if has_fd else None)
+    assert environment.get("PMI_PORT") == (None if relayed else "node1:4242")
+    assert environment["PMI_RANK"] == "3"
 
 
 class _UnstartableThread(threading.Thread):
@@ -850,10 +1223,10 @@ def test_run_refuses_when_the_pmi_relay_cannot_start(
     saved = {signum: signal.getsignal(signum) for signum in _confine_rank._FORWARDED_SIGNALS}
     first, second = socket.socketpair()
     pmi = (first.detach(), second.detach())
-    prepared = PreparedSandbox([sys.executable, "-c", "import time; time.sleep(60)"], ())
     started = time.monotonic()
     try:
-        assert _confine_rank._run(prepared, dict(os.environ), pmi) == 2
+        command = [sys.executable, "-c", "import time; time.sleep(60)"]
+        assert _confine_rank._run(command, environment=dict(os.environ), pmi=pmi) == 2
     finally:
         for signum, handler in saved.items():
             signal.signal(signum, handler)
@@ -862,6 +1235,21 @@ def test_run_refuses_when_the_pmi_relay_cannot_start(
     for descriptor in pmi:
         with pytest.raises(OSError):
             os.fstat(descriptor)
+
+
+def test_run_signal_handler_stops_forwarding_after_the_group_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved = {signum: signal.getsignal(signum) for signum in _confine_rank._FORWARDED_SIGNALS}
+    try:
+        assert _confine_rank._run([sys.executable, "-c", "pass"], environment=dict(os.environ)) == 0
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler) and handler is not signal.SIG_DFL
+        calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(_confine_rank.os, "killpg", lambda group, signum: calls.append((group, signum)))
+        handler(signal.SIGTERM, None)
+        assert calls == []
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
 
 
 _PMI_CLIENT = """
@@ -928,6 +1316,7 @@ def _assert_pmi_session(process: subprocess.Popen[bytes], received: list[bytes],
 
 
 def test_helper_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
+    require_namespaces()
     _assert_pmi_session(*_pmi_session(launch, sys.executable))
     assert launch.shm.is_dir()
 
@@ -940,6 +1329,7 @@ def _answer_spawn(slurm: socket.socket, line: bytes) -> None:
 
 
 def test_block_mpi_spawn_off_passes_slurms_pmi_fd(launch: _Launch) -> None:
+    require_namespaces()
     launch.write(_with_mode(launch, "off"))
     process, received, server = _pmi_session(launch, sys.executable, _answer_spawn)
     stdout, stderr = process.communicate()
@@ -959,6 +1349,7 @@ def test_block_mpi_spawn_off_passes_slurms_pmi_fd(launch: _Launch) -> None:
 
 
 def test_block_mpi_spawn_auto_without_pmi_fd_keeps_pmi_port(launch: _Launch) -> None:
+    require_namespaces()
     launch.write(_with_mode(launch, "auto"))
     launch.request(("sh", "-c", 'echo "$PMI_PORT|${PMI_FD-unset}"'))
     process = _run_helper(launch, {"PMI_PORT": "node1:4242"})
@@ -1021,6 +1412,8 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
     (daemon / "response.seed").write_text("private-seed", encoding="utf-8")
     visible = launch.workspace / "visible.txt"
     visible.write_text("workspace-file", encoding="utf-8")
+    canary = launch.root / "host-canary.txt"
+    canary.write_text("host-only", encoding="utf-8")
     sibling = launch.workspace / "jobs" / "ready" / "project" / f"other--{uuid.uuid4()}~p500~{_fs.fresh_token()}"
     sibling.mkdir(parents=True)
     script = (
@@ -1031,8 +1424,9 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         'else echo "seed absent"; fi\n'
         'if cat "$3/visible.txt" >/dev/null 2>&1; then echo "workspace readable"; '
         'else echo "workspace missing"; fi\n'
+        'if test -e "$4"; then echo "canary visible"; else echo "canary absent"; fi\n'
     )
-    launch.request(("/bin/sh", "-c", script, "sh", str(launch.job), str(sibling), str(launch.workspace)))
+    launch.request(("/bin/sh", "-c", script, "sh", str(launch.job), str(sibling), str(launch.workspace), str(canary)))
     process = _run_helper(launch)
     stdout, stderr = process.communicate()
     assert process.returncode == 0, stderr
@@ -1043,6 +1437,7 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         "writable /dev/shm/x",
         "seed absent",
         "workspace missing",
+        "canary absent",
     ]
     assert not (sibling / "x").exists() and not (launch.workspace / "x").exists()
     assert launch.shm.is_dir()
@@ -1055,6 +1450,70 @@ def test_real_bwrap_rank_relays_pmi_and_refuses_spawn(launch: _Launch) -> None:
         pytest.skip("no system python3 to run the PMI client in the sandbox")
     _assert_pmi_session(*_pmi_session(launch, python))
     assert launch.shm.is_dir()
+
+
+def _system_python() -> str:
+    python = shutil.which("python3", path="/usr/bin:/bin")
+    if python is None:
+        pytest.skip("no system python3 to run in the sandbox")
+    return python
+
+
+def test_real_bwrap_ranks_share_namespaces_only_within_their_launch(launch: _Launch) -> None:
+    _use_real_bwrap(launch)
+    python = _system_python()
+    key = secrets.randbelow(2**30) + 1
+    _sysv_request(launch, key, "create", readers=2, python=python, registry="/dev/shm")
+    creator = _run_helper(launch, {"PMI_RANK": "0"}, wait=False)
+    _wait_for(launch.job / "ready", creator)
+    _sysv_request(launch, key, "attach", python=python, registry="/dev/shm")
+    attacher = _run_helper(launch, {"PMI_RANK": "1"}, wait=False)
+    other = _sibling_launch(launch)
+    _sysv_request(other, key, "attach", python=python, registry="/dev/shm")
+    outsider = _run_helper(other, {"PMI_RANK": "2"}, wait=False)
+    record = _keeper_record(launch)
+    assert _finish(creator, attacher, outsider) == [(0, b""), (0, b""), (0, b"")]
+    assert (launch.job / "seen.1").read_text() == "from-rank-0|shared"
+    assert (launch.job / "seen.2").read_text() == "absent|private"
+    assert (launch.job / "pid.0").read_text() != (launch.job / "pid.1").read_text()
+    registrations = sorted(path.name for path in (launch.shm / "shm").glob("__KMP_REGISTERED_LIB_*"))
+    assert len(registrations) == 2, registrations
+    assert [path.name for path in (other.shm / "shm").glob("__KMP_REGISTERED_LIB_*")] != []
+    assert not _host_segment_exists(key)
+    assert _wait_gone(record.pid)
+
+
+# Load an LLVM or Intel OpenMP runtime, whose initialization registers it in /dev/shm under the process id,
+# and stay initialized until the other rank is. With a PID namespace per rank both ranks were pid 2, and the
+# second runtime found the first one's registration and aborted (OMP: Error #13 or #15).
+_OPENMP_RANK = """
+import ctypes, os, sys, time
+rank = os.environ["PMI_RANK"]
+threads = ctypes.CDLL(sys.argv[1]).omp_get_max_threads()
+def registrations():
+    return len([name for name in os.listdir("/dev/shm") if name.startswith("__KMP_REGISTERED_LIB_")])
+deadline = time.monotonic() + 30
+while registrations() < 2 and time.monotonic() < deadline:
+    time.sleep(0.02)
+seen = registrations()
+open("omp." + rank, "w").close()  # a runtime unregisters when its process exits: keep both alive until here
+while not os.path.exists("omp." + ("1" if rank == "0" else "0")) and time.monotonic() < deadline:
+    time.sleep(0.02)
+print(threads > 0, seen)
+"""
+
+
+def test_real_bwrap_openmp_ranks_initialize_concurrently(launch: _Launch) -> None:
+    _use_real_bwrap(launch)
+    python = _system_python()
+    runtime = ctypes.util.find_library("omp") or ctypes.util.find_library("iomp5")
+    if runtime is None:
+        pytest.skip("no LLVM or Intel OpenMP runtime is installed")
+    launch.request((python, "-I", "-c", _OPENMP_RANK, runtime))
+    helpers = [_run_helper(launch, {"PMI_RANK": str(rank)}, wait=False) for rank in range(2)]
+    outputs = [helper.communicate(timeout=_TIMEOUT) for helper in helpers]
+    assert [helper.returncode for helper in helpers] == [0, 0], outputs
+    assert [stdout.decode().split() for stdout, _stderr in outputs] == [["True", "2"], ["True", "2"]], outputs
 
 
 _FDINFO = "pos:\t0\nflags:\t02500000\nmnt_id:\t771\nino:\t1\n"

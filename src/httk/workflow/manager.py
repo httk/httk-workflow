@@ -2273,6 +2273,12 @@ class TaskManager:
         validated = self._confine_checked[1]
         if isinstance(validated, str):
             raise _ConfinementBlocked(validated)
+        try:
+            _confine.check_shm_root_overlap(validated, self.workspace.root)
+        except ValueError as exc:
+            if at_start:
+                raise ConfinementUnavailableError(str(exc)) from exc
+            raise _ConfinementBlocked(f"invalid confinement setting: {exc}") from exc
         block_userns = self._bwrap_block_userns(validated, at_start=at_start)
         try:
             launch = _manager_launches.launch_confinement(validated, block_userns=block_userns)

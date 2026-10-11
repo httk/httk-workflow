@@ -9,16 +9,18 @@ The helper opens the workspace and the job directory, the owner's ``jobs/owned/<
 launch's job key. It first removes every per-launch shared-memory directory on this node that no launch
 record names any more (:func:`httk.workflow._kernel.sweep_unrecorded_shm`), then creates or joins its own
 ``<confine.shm_root>/httk-<token>`` (the manager's random launch token; the manager removes it on its own
-node once the launch is reaped, and later rank helpers' sweeps on other nodes), opens the PMIx directory of
-the step when it lies below ``confine.pmix_roots`` and the approved devices, and runs the inner exec
-(:mod:`httk.workflow._confine_exec`) in a Bubblewrap sandbox with host networking in which only the job
-directory is writable. Bubblewrap runs as a child in its own process group, which every process in the
-sandbox keeps; SIGTERM, SIGINT, SIGHUP and SIGCONT delivered to the helper are forwarded to that whole group,
-and ``--die-with-parent`` ends the sandbox when the helper is killed. Under ``srun --mpi=pmi2`` Slurm's
-``PMI_FD`` socket never enters the sandbox while the launch's ``manager.confine.block_mpi_spawn`` setting is in effect: the rank gets one
-end of a socket pair as its ``PMI_FD``, and a :mod:`~httk.workflow._pmi_proxy` thread relays PMI-1 to Slurm
-and refuses ``MPI_Comm_spawn``. The helper
-exits with the sandbox's status, ``128+N`` for signal ``N``, and with 2 when it refuses.
+node once the launch is reaped, and later rank helpers' sweeps on other nodes). The ranks of the launch on
+this node share one set of namespaces held by a keeper sandbox (:mod:`httk.workflow._confine_keeper`): the
+first helper starts a supervisor, which starts it with the rank mounts (only the job directory writable, ``httk-<token>/shm`` at
+``/dev/shm``, the PMIx directory of the step when it lies below ``confine.pmix_roots``, and the approved
+devices) and host networking, and every helper enters it and runs the inner exec
+(:mod:`httk.workflow._confine_exec`) there. The rank runs in its own process group, which every process it
+starts keeps; SIGTERM, SIGINT, SIGHUP and SIGCONT delivered to the helper are forwarded to that whole group,
+and the rank is killed when the helper dies. Under ``srun --mpi=pmi2`` Slurm's ``PMI_FD`` socket never
+enters the sandbox while the launch's ``manager.confine.block_mpi_spawn`` setting is in effect: the rank gets
+one end of a socket pair as its ``PMI_FD``, and a :mod:`~httk.workflow._pmi_proxy` thread relays PMI-1 to
+Slurm and refuses ``MPI_Comm_spawn``. The helper exits with the rank's status, ``128+N`` for signal ``N``,
+and with 2 when it refuses; the supervisor owns the keeper until every rank of the launch on this node is gone.
 """
 
 import argparse
@@ -36,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 
-from . import _kernel, _pmi_proxy
+from . import _confine_keeper, _kernel, _pmi_proxy
 from ._launch_protocol import (
     MAX_ENVIRONMENT_ENTRIES,
     MAX_ENVIRONMENT_VALUE_BYTES,
@@ -74,7 +76,7 @@ _RANK_EXACT_ENVIRONMENT = frozenset(
     {"SLURM_PROCID", "SLURM_LOCALID", "SLURM_NODEID", "SLURM_NTASKS", "SLURM_JOB_ID", "SLURMD_NODENAME"}
 )
 _RANK_ENVIRONMENT_PREFIXES = ("PMI_", "PMIX_", "OMPI_", "OPAL_")
-_SANDBOX_ENVIRONMENT = {"HOME": "/tmp/home", "TMPDIR": "/tmp"}
+_SANDBOX_ENVIRONMENT = _confine_keeper._SANDBOX_ENVIRONMENT
 _FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGCONT)
 _ANCHOR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 _DIRECTORY_FLAGS = _ANCHOR_FLAGS | os.O_NOFOLLOW
@@ -200,16 +202,20 @@ def _job_key(name: str) -> str | None:
 
 @dataclass(slots=True)
 class SharedMemory:
-    """A joined per-launch shared-memory directory.
+    """A joined per-launch node directory.
 
     :param root_fd: A descriptor of ``confine.shm_root``.
     :param name: The directory's name, ``httk-<token>``.
     :param fd: A descriptor of the directory.
+    :param shm_fd: A descriptor of its ``shm/``, the ranks' ``/dev/shm``.
+    :param ns_fd: A descriptor of its ``ns/``, where the helpers coordinate the namespace keeper.
     """
 
     root_fd: int
     name: str
     fd: int
+    shm_fd: int
+    ns_fd: int
 
 
 def _filesystem_type(descriptor: int) -> str:
@@ -243,56 +249,68 @@ def _check_shm_root(descriptor: int, path: Path) -> None:
         raise ValueError(f"confine.shm_root {path} is world-writable without being a sticky root directory")
 
 
-def join_shared_memory(shm_root: Path, token: str) -> SharedMemory:
-    """Create or join the per-launch shared-memory directory.
+def _private_directory(parent_fd: int, name: str, path: Path) -> int:
+    """Create or open a directory of this user with mode 0700 below *parent_fd*, never following a symlink."""
 
-    An existing directory must be a real directory owned by this user with mode 0700. No rank removes it:
-    the manager does on its node once the launch is reaped, and :func:`sweep_shared_memory` on other nodes.
+    created = True
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        created = False
+    try:
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"shared-memory directory {path} is not a real directory") from exc
+        raise
+    try:
+        if created:
+            os.fchmod(descriptor, 0o700)
+        information = os.fstat(descriptor)
+        if information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700:
+            raise ValueError(f"shared-memory directory {path} must be owned by this user with mode 0700")
+    except BaseException:
+        _close(descriptor)
+        raise
+    return descriptor
+
+
+def join_shared_memory(shm_root: Path, token: str) -> SharedMemory:
+    """Create or join the per-launch node directory with its ``shm/`` and ``ns/``.
+
+    Every existing directory must be a real directory owned by this user with mode 0700. No rank removes
+    them: the manager does on its node once the launch is reaped, and :func:`sweep_shared_memory` on other
+    nodes.
 
     :param shm_root: The node-local parent, ``confine.shm_root``.
     :param token: The launch token of the trusted launch description.
     :return: The joined directory; release its descriptors with :func:`leave_shared_memory`.
-    :raises ValueError: If the root or the directory is unsafe.
-    :raises OSError: If the directory cannot be created or opened.
+    :raises ValueError: If the root or a directory is unsafe.
+    :raises OSError: If a directory cannot be created or opened.
     """
 
     name = f"httk-{token}"
     root_fd = open_directory_nofollow(shm_root)
+    descriptors: list[int] = []
     try:
         _check_shm_root(root_fd, shm_root)
-        created = True
-        try:
-            os.mkdir(name, 0o700, dir_fd=root_fd)
-        except FileExistsError:
-            created = False
-        try:
-            descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=root_fd)
-        except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                raise ValueError(f"shared-memory directory {shm_root / name} is not a real directory") from exc
-            raise
-        try:
-            if created:
-                os.fchmod(descriptor, 0o700)
-            information = os.fstat(descriptor)
-            if information.st_uid != os.geteuid() or stat.S_IMODE(information.st_mode) != 0o700:
-                raise ValueError(f"shared-memory directory {shm_root / name} must be owned by this user with mode 0700")
-        except BaseException:
-            _close(descriptor)
-            raise
-        return SharedMemory(root_fd, name, descriptor)
+        descriptors.append(_private_directory(root_fd, name, shm_root / name))
+        for child in ("shm", "ns"):
+            descriptors.append(_private_directory(descriptors[0], child, shm_root / name / child))
+        return SharedMemory(root_fd, name, *descriptors)
     except BaseException:
-        _close(root_fd)
+        for descriptor in (*descriptors, root_fd):
+            _close(descriptor)
         raise
 
 
 def leave_shared_memory(shared: SharedMemory) -> None:
-    """Close a joined shared-memory directory's descriptors; the directory stays for the other ranks.
+    """Close a joined node directory's descriptors; the directory stays for the other ranks.
 
     :param shared: The joined directory.
     """
 
-    for descriptor in (shared.fd, shared.root_fd):
+    for descriptor in (shared.ns_fd, shared.shm_fd, shared.fd, shared.root_fd):
         _close(descriptor)
 
 
@@ -492,7 +510,29 @@ def inner_command(launch: TrustedLaunch, job: Path) -> list[str]:
     ]
 
 
-def prepare_rank_sandbox(
+def prepare_rank_environment(
+    launch: TrustedLaunch, environ: Mapping[str, str], pmi_fd: int | None = None
+) -> dict[str, str]:
+    """Return the environment a rank starts with: :func:`rank_environment` with its PMI plumbing.
+
+    :param launch: The trusted launch description.
+    :param environ: The helper's environment, as the launcher set it.
+    :param pmi_fd: The rank's PMI descriptor. When :func:`blocks_mpi_spawn` holds, it is the sandbox end from
+        :func:`open_pmi_relay`, which replaces ``PMI_FD``, and ``PMI_PORT`` is dropped; otherwise it is Slurm's
+        own ``PMI_FD``.
+    :return: The environment.
+    :raises ValueError: If the environment is not acceptable.
+    """
+
+    environment = rank_environment(environ, launch)
+    if blocks_mpi_spawn(launch, environ):
+        environment.pop("PMI_PORT", None)
+        if pmi_fd is not None:
+            environment["PMI_FD"] = str(pmi_fd)
+    return environment
+
+
+def prepare_keeper_sandbox(
     launch: TrustedLaunch,
     *,
     workspace: Path,
@@ -500,62 +540,56 @@ def prepare_rank_sandbox(
     job: Path,
     job_fd: int,
     shm_fd: int,
-    environ: Mapping[str, str],
-    pmi_fd: int | None = None,
-) -> tuple[PreparedSandbox, dict[str, str]]:
-    """Build the Bubblewrap argument vector, descriptor set and environment of one rank sandbox.
+    environment: Mapping[str, str],
+) -> PreparedSandbox:
+    """Build the Bubblewrap argument vector and descriptor set of the launch's keeper sandbox on this node.
 
-    The sandbox unshares the user, PID, IPC and UTS namespaces but keeps the host network, dies with its
-    helper (``--die-with-parent``) and drops all capabilities. Its environment is not in the argument
-    vector, which any user can read in ``/proc/<pid>/cmdline``: Bubblewrap is started with exactly the
-    rank environment and passes it through. It binds the read-only paths, ``jobs/`` and ``workflows/``
-    read-only at their real paths, ``.httk-workspace/format.json`` as a read-only content copy, and the job
-    directory writable at its real path. The workspace root is an empty tmpfs that receives only those three
-    view binds and the job bind; it is remounted read-only after all mounts. This also protects workspaces
-    below ``/tmp``, where the parent directories are created in the writable ``/tmp`` mount. The rest of
-    ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is also remounted read-only last.
-    A read-only path may not contain or lie inside the workspace; list a narrower directory such as a
-    software tree. It also binds a private ``/proc`` and ``/dev`` with the shared-memory directory at
-    ``/dev/shm``, the PMIx directory at its own path and the approved devices, and runs
-    :func:`inner_command` in the job directory.
+    The ranks of the launch on this node run in this sandbox's namespaces with its mounts
+    (:mod:`httk.workflow._confine_keeper`). It unshares the user, PID, IPC and UTS namespaces but keeps the
+    host network, dies with its helper (``--die-with-parent``) and drops all capabilities. It binds the
+    read-only paths, ``jobs/`` and ``workflows/`` read-only at their real paths, ``.httk-workspace/format.json``
+    as a read-only content copy, and the job directory writable at its real path. The workspace root is an
+    empty tmpfs that receives only those three view binds and the job bind; it is remounted read-only after all
+    mounts. This also protects workspaces below ``/tmp``, where the parent directories are created in the
+    writable ``/tmp`` mount. The rest of ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is
+    also remounted read-only last. A read-only path may not contain or lie inside the workspace; list a
+    narrower directory such as a software tree. It also binds a private ``/proc`` and ``/dev`` with the
+    launch's ``shm/`` directory at ``/dev/shm``, the PMIx directory at its own path and the approved devices,
+    and runs :data:`httk.workflow._confine_keeper.KEEPER_PROGRAM`.
 
     :param launch: The trusted launch description.
     :param workspace: The workspace's real path.
     :param workspace_fd: A descriptor of the workspace; duplicated, not consumed.
     :param job: The job directory's real path.
     :param job_fd: A descriptor of the job directory; duplicated, not consumed.
-    :param shm_fd: A descriptor of the per-launch shared-memory directory; duplicated, not consumed.
-    :param environ: The helper's environment, as the launcher set it.
-    :param pmi_fd: The rank's PMI descriptor, consumed: it is among the returned descriptors, and closed here
-        on failure. When :func:`blocks_mpi_spawn` holds, it is the sandbox end from :func:`open_pmi_relay`,
-        which replaces ``PMI_FD``, and ``PMI_PORT`` is dropped; otherwise it is Slurm's own ``PMI_FD``.
+    :param shm_fd: A descriptor of the per-launch ``shm/`` directory; duplicated, not consumed.
+    :param environment: The rank environment, whose ``PMIX_SERVER_TMPDIR`` names the PMIx directory.
     :return: The complete argument vector with the inheritable descriptors to pass with ``pass_fds``, which
-        the caller closes after the spawn, and the whole environment to start Bubblewrap with.
-    :raises ValueError: If a path or the environment is not acceptable.
+        the caller closes after the spawn.
+    :raises ValueError: If a path is not acceptable.
     :raises OSError: If a path cannot be opened.
     """
 
     confine = launch.confine
-    descriptors: list[int] = [] if pmi_fd is None else [pmi_fd]
-    try:
-        environment = rank_environment(environ, launch)
-    except BaseException:
-        PreparedSandbox([], tuple(descriptors)).close()
-        raise
-    if blocks_mpi_spawn(launch, environ):
-        environment.pop("PMI_PORT", None)
-        if pmi_fd is not None:
-            environment["PMI_FD"] = str(pmi_fd)
+    descriptors: list[int] = []
     argv = [str(confine.bwrap), "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
     if confine.block_userns:
         argv += BWRAP_USERNS_BLOCK
-    # Unlike an attempt, a rank never outlives its helper, which holds its shared memory and is its only reaper.
+    # The supervisor holds the keeper's lifecycle after the leading helper exits.
     argv += ["--die-with-parent", "--cap-drop", "ALL"]
     argv += ["--tmpfs", "/tmp", "--dir", "/tmp/home"]
     try:
+        shm_root = _resolve(confine.shm_root, "confine.shm_root")
+        workspace_real = _resolve(workspace, "workspace")
+        if _overlap(shm_root, workspace_real):
+            raise ValueError(f"setting confine.shm_root {confine.shm_root} must not overlap workspace {workspace_real}")
         resolved: list[Path] = []
         for path in confine.readonly_paths:
             real = _resolve(path, "confine.readonly_paths entry")
+            if _overlap(shm_root, real):
+                raise ValueError(
+                    f"setting confine.shm_root {confine.shm_root} must not overlap confine.readonly_paths entry {path}"
+                )
             if any(item.is_relative_to(workspace) or workspace.is_relative_to(item) for item in (path, real)):
                 raise ValueError(
                     f"confine.readonly_paths entry {path} contains or lies inside the workspace {workspace}; "
@@ -585,9 +619,9 @@ def prepare_rank_sandbox(
             descriptors.append(open_device_nofollow(device))
             argv += ["--bind-fd", str(descriptors[-1]), str(device)]
         argv += ["--remount-ro", str(workspace), "--remount-ro", "/"]
-        argv += ["--chdir", str(job), "--", *inner_command(launch, job)]
+        argv += ["--chdir", "/", "--", str(launch.python), "-I", "-S", "-c", _confine_keeper.KEEPER_PROGRAM]
         make_inheritable(descriptors)
-        return PreparedSandbox(argv, tuple(descriptors)), environment
+        return PreparedSandbox(argv, tuple(descriptors))
     except BaseException:
         PreparedSandbox([], tuple(descriptors)).close()
         raise
@@ -607,25 +641,36 @@ def _log_pmi(line: str) -> None:
     print(f"httk-workflow rank: PMI {line}", file=sys.stderr, flush=True)
 
 
-def _run(prepared: PreparedSandbox, environment: Mapping[str, str], pmi: tuple[int, int] | None = None) -> int:
-    """Run Bubblewrap in its own process group, forward signals to the group, and return its status.
+def _run(
+    command: Sequence[str],
+    *,
+    environment: Mapping[str, str],
+    pass_fds: tuple[int, ...] = (),
+    pmi: tuple[int, int] | None = None,
+) -> int:
+    """Start the rank in its own process group, forward signals to the group, and return its status.
 
-    With *pmi*, ``(server, relay_end)`` from :func:`open_pmi_relay`, a daemon thread relays PMI-1 between
-    them once Bubblewrap runs and the helper has closed its copy of the sandbox end; *pmi* is consumed. If
-    the thread cannot start, the rank's process group is killed and the launch is refused with status 2.
+    *command* is the rank's entry into its keeper's namespaces (:meth:`~httk.workflow._confine_keeper.Membership.command`);
+    *pass_fds* are its only inherited descriptors besides its standard streams, and are consumed. With *pmi*,
+    ``(server, relay_end)`` from :func:`open_pmi_relay`, a daemon thread relays PMI-1 between them once the
+    rank runs and the helper has closed its copy of the rank end; *pmi* is consumed. If the thread cannot
+    start, the rank's process group is killed and the launch is refused with status 2.
 
-    Bubblewrap does not forward signals into its namespace, and a launcher such as ``mpirun`` signals only
-    its direct children (the helpers), so the helper signals the whole group: the rank sandbox has no
-    ``--new-session``, so every process inside keeps the group. The helper returns only after the group is
-    gone, so the shared-memory directory is never removed under a live rank.
+    A launcher such as ``mpirun`` signals only its direct children (the helpers), so the helper signals the
+    whole group: every process the rank starts keeps it unless it starts a new session, and processes that do
+    end with the keeper. The helper returns only after the group is gone, so the shared-memory directory is
+    never removed under a live rank.
     """
 
     group: int | None = None
     pending: list[int] = []
+    forwarding = True
 
     def forward(signum: int, _frame: FrameType | None) -> None:
         if group is None:
             pending.append(signum)
+            return
+        if not forwarding:
             return
         try:
             os.killpg(group, signum)
@@ -635,48 +680,54 @@ def _run(prepared: PreparedSandbox, environment: Mapping[str, str], pmi: tuple[i
     for signum in _FORWARDED_SIGNALS:
         signal.signal(signum, forward)
     try:
-        process = subprocess.Popen(prepared.argv, env=dict(environment), pass_fds=prepared.descriptors, process_group=0)
+        process = subprocess.Popen(list(command), env=dict(environment), pass_fds=pass_fds, process_group=0)
     except BaseException:
         for descriptor in pmi or ():
             _close(descriptor)
         raise
-    prepared.close()
+    finally:
+        for descriptor in pass_fds:
+            _close(descriptor)
     group = process.pid
-    relay: threading.Thread | None = None
-    refused = False
-    if pmi is not None:
-        relay = threading.Thread(
-            target=_pmi_proxy.relay, args=pmi, kwargs={"log": _log_pmi}, daemon=True, name="pmi-relay"
-        )
-        try:
-            relay.start()
-        except Exception as exc:  # the rank must never run without its relay
-            relay = None
-            refused = True
+    try:
+        relay: threading.Thread | None = None
+        refused = False
+        if pmi is not None:
+            relay = threading.Thread(
+                target=_pmi_proxy.relay, args=pmi, kwargs={"log": _log_pmi}, daemon=True, name="pmi-relay"
+            )
             try:
-                os.killpg(group, signal.SIGKILL)
-            except OSError:
-                pass
-            for descriptor in pmi:
-                _close(descriptor)
-            print(f"httk-workflow rank: refused: cannot start the PMI relay: {exc}", file=sys.stderr, flush=True)
-    for received in pending:
-        forward(received, None)
-    status = process.wait()
-    while _group_alive(group):
-        time.sleep(_GROUP_POLL_SECONDS)
-    if relay is not None:
-        relay.join(_RELAY_JOIN_SECONDS)  # the rank end is gone; a daemon thread still blocked dies with the helper
-    if refused:
-        return 2
-    return 128 - status if status < 0 else status
+                relay.start()
+            except Exception as exc:  # the rank must never run without its relay
+                relay = None
+                refused = True
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except OSError:
+                    pass
+                for descriptor in pmi:
+                    _close(descriptor)
+                print(f"httk-workflow rank: refused: cannot start the PMI relay: {exc}", file=sys.stderr, flush=True)
+        for received in pending:
+            forward(received, None)
+        status = process.wait()
+        while _group_alive(group):
+            time.sleep(_GROUP_POLL_SECONDS)
+        forwarding = False
+        if relay is not None:
+            relay.join(_RELAY_JOIN_SECONDS)  # the rank end is gone; a daemon thread still blocked dies with the helper
+        if refused:
+            return 2
+        return 128 - status if status < 0 else status
+    finally:
+        forwarding = False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run one rank of a confined launch in its Bubblewrap sandbox.
+    """Run one rank of a confined launch in its node's keeper namespaces.
 
     :param argv: The helper arguments, or the process arguments when omitted.
-    :return: The sandbox's exit status, ``128+N`` for signal ``N``, or 2 when the launch is refused.
+    :return: The rank's exit status, ``128+N`` for signal ``N``, or 2 when the launch is refused.
     """
 
     parser = argparse.ArgumentParser(prog="python -I -m httk.workflow._confine_rank", description=__doc__)
@@ -684,7 +735,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     descriptors: list[int] = []
     relay_descriptors: list[int] = []  # (server, relay_end) until handed to _run
+    pmi_fd: int | None = None  # the rank's PMI descriptor until handed to _run
     shared: SharedMemory | None = None
+    membership: _confine_keeper.Membership | None = None
     try:
         try:
             launch, workspace, workspace_fd = read_launch(arguments.launch_dir)
@@ -693,7 +746,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             descriptors.append(job_fd)
             sweep_shared_memory(workspace, launch.confine.shm_root)
             shared = join_shared_memory(launch.confine.shm_root, launch.token)
-            pmi_fd = None
             if blocks_mpi_spawn(launch, os.environ):
                 pmi = open_pmi_relay(os.environ)
                 if pmi is not None:
@@ -701,37 +753,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                     pmi_fd = pmi[2]
             else:
                 pmi_fd = slurm_pmi_fd(os.environ)
-            prepared, environment = prepare_rank_sandbox(
-                launch,
-                workspace=workspace,
-                workspace_fd=workspace_fd,
-                job=job,
-                job_fd=job_fd,
-                shm_fd=shared.fd,
-                environ=os.environ,
-                pmi_fd=pmi_fd,
+            environment = prepare_rank_environment(launch, os.environ, pmi_fd)
+            node = shared
+
+            def prepare() -> PreparedSandbox:
+                return prepare_keeper_sandbox(
+                    launch,
+                    workspace=workspace,
+                    workspace_fd=workspace_fd,
+                    job=job,
+                    job_fd=job_fd,
+                    shm_fd=node.shm_fd,
+                    environment=environment,
+                )
+
+            membership = _confine_keeper.join(
+                shared.ns_fd, prepare=prepare, pmix=environment.get("PMIX_SERVER_TMPDIR"), python=launch.python
             )
+            for descriptor in descriptors:
+                _close(descriptor)
+            descriptors.clear()
+            leave_shared_memory(shared)
+            shared = None
         except (OSError, ValueError) as exc:
             print(f"httk-workflow rank: refused: {exc}", file=sys.stderr, flush=True)
             return 2
-        for descriptor in descriptors:
-            _close(descriptor)
-        descriptors.clear()
         relay_pair = (relay_descriptors[0], relay_descriptors[1]) if relay_descriptors else None
         relay_descriptors.clear()
+        rank_fds = () if pmi_fd is None else (pmi_fd,)
+        pmi_fd = None
+        command = membership.command(inner_command(launch, job), python=launch.python, cwd=job, pass_fds=rank_fds)
         try:
-            return _run(prepared, environment, relay_pair)
-        except OSError as exc:
-            prepared.close()
-            print(
-                f"httk-workflow rank: cannot run Bubblewrap {launch.confine.bwrap}: {exc}", file=sys.stderr, flush=True
+            return _run(
+                command, environment=environment, pass_fds=(*rank_fds, *membership.take_descriptors()), pmi=relay_pair
             )
+        except OSError as exc:
+            print(f"httk-workflow rank: cannot start the rank: {exc}", file=sys.stderr, flush=True)
             return 2
     finally:
-        for descriptor in descriptors + relay_descriptors:
+        for descriptor in [*descriptors, *relay_descriptors, *(() if pmi_fd is None else (pmi_fd,))]:
             _close(descriptor)
         if shared is not None:
             leave_shared_memory(shared)
+        if membership is not None:
+            membership.leave()
 
 
 if __name__ == "__main__":

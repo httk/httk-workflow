@@ -13,6 +13,7 @@ on:
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
       - "tests/test_confine_*.py"
+      - "tests/fake_bwrap.py"
       - "tests/test_launch_client.py"
       - "tests/test_launch_protocol.py"
       - "tests/test_manager_confinement.py"
@@ -32,6 +33,7 @@ on:
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
       - "tests/test_confine_*.py"
+      - "tests/fake_bwrap.py"
       - "tests/test_launch_client.py"
       - "tests/test_launch_protocol.py"
       - "tests/test_manager_confinement.py"
@@ -59,7 +61,7 @@ jobs:
       - name: Install Bubblewrap and enable user namespaces on the isolated runner
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap openmpi-bin libopenmpi-dev
+          sudo apt-get install --yes bubblewrap openmpi-bin libopenmpi-dev libomp-dev
           sudo sysctl -w kernel.unprivileged_userns_clone=1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 

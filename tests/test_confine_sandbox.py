@@ -319,6 +319,22 @@ def test_readonly_ancestor_and_symlinked_ancestor_are_refused(layout: _Layout) -
             _prepare(layout, _settings(readonly_paths=(path,)))
 
 
+def test_readonly_symlink_to_shm_root_is_refused(layout: _Layout) -> None:
+    shm_root = layout.readonly / "shm-root"
+    shm_root.mkdir()
+    alias = layout.readonly.parent / "shm-alias"
+    alias.symlink_to(shm_root, target_is_directory=True)
+    with pytest.raises(ValueError, match=r"confine\.shm_root .*confine\.readonly_paths entry"):
+        _prepare(layout, _settings(shm_root=shm_root, readonly_paths=(alias,)))
+
+
+def test_disjoint_shm_root_and_readonly_path_prepare(layout: _Layout) -> None:
+    shm_root = layout.readonly.parent / "shm-root"
+    shm_root.mkdir()
+    prepared = _prepare(layout, _settings(shm_root=shm_root, readonly_paths=(layout.readonly,)))
+    prepared.close()
+
+
 def test_descriptors_are_closed_on_every_error(layout: _Layout) -> None:
     before = _open_descriptors()
     with pytest.raises(ValueError, match="unavailable"):

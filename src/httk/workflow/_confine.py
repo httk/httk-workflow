@@ -261,17 +261,59 @@ def confine_settings(settings: Mapping[str, object]) -> ConfineSettings:
         raise ValueError(f"setting manager.confine.block_mpi_spawn must be on, off or auto: {raw_spawn!r}")
     bwrap_text = _string(settings, "confine.bwrap")
     shm_root = _string(settings, "confine.shm_root")
+    readonly_paths = _readonly_paths(settings)
+    shm_root_path = _DEFAULT_SHM_ROOT if shm_root is None else _absolute("confine.shm_root", shm_root)
+    for path in readonly_paths:
+        if path == shm_root_path or path.is_relative_to(shm_root_path) or shm_root_path.is_relative_to(path):
+            raise ValueError(
+                f"setting confine.shm_root {shm_root_path} must not overlap confine.readonly_paths entry {path}"
+            )
     return ConfineSettings(
         mode=mode,
-        readonly_paths=_readonly_paths(settings),
+        readonly_paths=readonly_paths,
         isolate_network=_boolean(settings, "confine.isolate_network", True),
         bwrap=_default_bwrap() if bwrap_text is None else _absolute("confine.bwrap", bwrap_text),
         devices=_devices(settings),
         pmix_roots=_paths(settings, "confine.pmix_roots") or (),
-        shm_root=_DEFAULT_SHM_ROOT if shm_root is None else _absolute("confine.shm_root", shm_root),
+        shm_root=shm_root_path,
         environment=_environment(settings),
         block_mpi_spawn=block_mpi_spawn,
     )
+
+
+def check_shm_root_overlap(settings: ConfineSettings, workspace_root: Path) -> None:
+    """Refuse a shared-memory root visible through a read-only bind or overlapping the workspace.
+
+    A missing shared-memory root is left for the manager's startup probe; attempts do not need it to prepare
+    their sandbox.
+
+    :param settings: The validated confinement settings.
+    :param workspace_root: The workspace root.
+    :raises ValueError: If the shared-memory root cannot be resolved or overlaps the workspace or a read-only path.
+    """
+
+    try:
+        shm_root_real = settings.shm_root.resolve(strict=True)
+    except FileNotFoundError:
+        return
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"setting confine.shm_root is unavailable: {settings.shm_root}") from exc
+    workspace_real = workspace_root.resolve(strict=True)
+    if (
+        shm_root_real == workspace_real
+        or shm_root_real.is_relative_to(workspace_real)
+        or workspace_real.is_relative_to(shm_root_real)
+    ):
+        raise ValueError(f"setting confine.shm_root {settings.shm_root} overlaps workspace {workspace_real}")
+    for path in settings.readonly_paths:
+        try:
+            real = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"confine.readonly_paths entry is unavailable: {path}") from exc
+        if shm_root_real == real or shm_root_real.is_relative_to(real) or real.is_relative_to(shm_root_real):
+            raise ValueError(
+                f"setting confine.shm_root {settings.shm_root} overlaps confine.readonly_paths entry {path}"
+            )
 
 
 def launch_mpi_setting(settings: Mapping[str, object]) -> str | None:
@@ -434,6 +476,7 @@ def prepare_attempt_sandbox(
     argv = [*_namespace_options(settings, block_userns=block_userns), "--tmpfs", "/tmp", "--dir", "/tmp/home"]
     descriptors: list[int] = []
     try:
+        check_shm_root_overlap(settings, workspace_root)
         resolved: list[Path] = []
         for path in settings.readonly_paths:
             try:
