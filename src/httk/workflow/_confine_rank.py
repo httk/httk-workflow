@@ -53,10 +53,9 @@ from ._sandbox import (
     BWRAP_USERNS_BLOCK,
     O_PATH,
     PreparedSandbox,
-    device_parent_dirs,
+    device_and_proc_mounts,
     make_inheritable,
     merged_usr_symlinks,
-    open_device_nofollow,
     open_directory_nofollow,
     workspace_view,
 )
@@ -554,7 +553,8 @@ def prepare_keeper_sandbox(
     writable ``/tmp`` mount. The rest of ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is
     also remounted read-only last. A read-only path may not contain or lie inside the workspace; list a
     narrower directory such as a software tree. It also binds a private ``/proc`` and ``/dev`` with the
-    launch's ``shm/`` directory at ``/dev/shm``, the PMIx directory at its own path and the approved devices,
+    launch's ``shm/`` directory at ``/dev/shm``, the PMIx directory at its own path and the approved devices
+    with device access,
     and runs :data:`httk.workflow._confine_keeper.KEEPER_PROGRAM`.
 
     :param launch: The trusted launch description.
@@ -604,7 +604,7 @@ def prepare_keeper_sandbox(
         descriptors.extend(workspace_descriptors)
         descriptors.append(os.dup(job_fd))
         argv += ["--bind-fd", str(descriptors[-1]), str(job)]
-        argv += ["--proc", "/proc", "--dev", "/dev"]
+        argv += ["--dev", "/dev"]
         descriptors.append(os.dup(shm_fd))
         argv += ["--bind-fd", str(descriptors[-1]), "/dev/shm"]
         pmix = open_pmix_directory(environment, launch, workspace=workspace, job=job)
@@ -613,11 +613,7 @@ def prepare_keeper_sandbox(
             descriptors.append(pmix_fd)
             argv += _pmix_parent_dirs(pmix_path)
             argv += ["--bind-fd", str(pmix_fd), str(pmix_path)]
-        created: set[Path] = set()
-        for device in confine.devices:
-            argv += device_parent_dirs(device, created)
-            descriptors.append(open_device_nofollow(device))
-            argv += ["--bind-fd", str(descriptors[-1]), str(device)]
+        argv += device_and_proc_mounts(confine.devices, descriptors)
         argv += ["--remount-ro", str(workspace), "--remount-ro", "/"]
         argv += ["--chdir", "/", "--", str(launch.python), "-I", "-S", "-c", _confine_keeper.KEEPER_PROGRAM]
         make_inheritable(descriptors)

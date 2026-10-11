@@ -243,9 +243,10 @@ def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened
         str(launch.workspace / ".httk-workspace" / "format.json"),
     )
     job = _option_index(argv, "--bind-fd", argv[argv.index(str(launch.job)) - 1], str(launch.job))
-    dev = _option_index(argv, "--proc", "/proc", "--dev", "/dev")
+    dev = _option_index(argv, "--dev", "/dev")
     shm = argv.index("/dev/shm")
-    assert tmpfs < readonly < workspace_tmpfs < jobs < workflows < format_copy < job < dev < shm
+    proc = _option_index(argv, "--proc", "/proc")
+    assert tmpfs < readonly < workspace_tmpfs < jobs < workflows < format_copy < job < dev < shm < proc
     assert argv[workspace_tmpfs : workspace_tmpfs + 2] == ["--tmpfs", str(launch.workspace)]
     assert workspace_tmpfs + 2 == jobs
     assert not any(
@@ -395,9 +396,12 @@ def test_devices_are_bound_after_dev_with_parent_dirs(launch: _Launch, opened: _
         devices.append(nested)
     launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, devices=tuple(devices)))
     argv, _environment = _prepare(launch, opened, {})
-    dev = _option_index(argv, "--proc", "/proc", "--dev", "/dev")
+    dev = _option_index(argv, "--dev", "/dev")
     null = argv.index("/dev/null")
-    assert argv[null - 2] == "--bind-fd" and null > dev
+    descriptor = argv[null - 1].removeprefix("/proc/self/fd/")
+    assert argv[null - 2] == "--dev-bind" and null > dev
+    assert argv[null + 1 : null + 4] == ["--ro-bind-fd", descriptor, "/proc/.httk-devices/0"]
+    assert null < _option_index(argv, "--proc", "/proc")
     if nested is not None:
         parent = _option_index(argv, "--dir", str(nested.parent))
         assert dev < parent < argv.index(str(nested))

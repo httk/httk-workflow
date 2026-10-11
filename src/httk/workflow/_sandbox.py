@@ -332,6 +332,32 @@ def device_parent_dirs(device: Path, created: set[Path]) -> list[str]:
     return argv
 
 
+def device_and_proc_mounts(devices: Iterable[Path], descriptors: list[int]) -> list[str]:
+    """Return the Bubblewrap options binding approved devices with device access, ending in the ``/proc`` mount.
+
+    Bubblewrap has no descriptor form of ``--dev-bind``, and ``--bind-fd`` mounts ``nodev``, which refuses every
+    open of a device. Each device is opened by :func:`open_device_nofollow` and bound with
+    ``--dev-bind /proc/self/fd/N``, which mounts exactly the opened node without resolving its path again.
+    Bubblewrap closes only the descriptors its ``--bind-fd`` options name, so each descriptor is also bound
+    read-only and ``nodev`` below ``/proc``. The ``--proc /proc`` mount that ends the options hides those binds,
+    and the sandboxed command inherits no descriptor of a host device. The options belong after ``--dev /dev``.
+
+    :param devices: The approved device paths below ``/dev``.
+    :param descriptors: Receives each opened descriptor; the caller owns and closes them.
+    :return: The Bubblewrap options.
+    :raises ValueError: If a path is not a character or block device.
+    """
+
+    argv: list[str] = []
+    created: set[Path] = set()
+    for index, device in enumerate(devices):
+        argv += device_parent_dirs(device, created)
+        descriptors.append(open_device_nofollow(device))
+        argv += ["--dev-bind", f"/proc/self/fd/{descriptors[-1]}", str(device)]
+        argv += ["--ro-bind-fd", str(descriptors[-1]), f"/proc/.httk-devices/{index}"]
+    return [*argv, "--proc", "/proc"]
+
+
 def make_inheritable(descriptors: Iterable[int]) -> None:
     """Clear close-on-exec on descriptors, including ``O_PATH`` ones.
 

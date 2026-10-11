@@ -186,11 +186,13 @@ def test_argv_order_binds_and_descriptors(layout: _Layout) -> None:
             _option_index(argv, "--tmpfs", str(layout.workspace)),
             *view,
             _option_index(argv, "--bind-fd", str(job), str(layout.job)),
-            _option_index(argv, "--proc", "/proc", "--dev", "/dev"),
+            _option_index(argv, "--dev", "/dev"),
         ]
-        device = int(argv[argv.index("/dev/null") - 1])
+        device = int(argv[argv.index("/dev/null") - 1].removeprefix("/proc/self/fd/"))
         order += [
-            _option_index(argv, "--bind-fd", str(device), "/dev/null"),
+            _option_index(argv, "--dev-bind", f"/proc/self/fd/{device}", "/dev/null"),
+            _option_index(argv, "--ro-bind-fd", str(device), "/proc/.httk-devices/0"),
+            _option_index(argv, "--proc", "/proc"),
             _option_index(argv, "--remount-ro", "/"),
             len(argv) - 3,
         ]
@@ -233,13 +235,26 @@ def test_argv_order_binds_and_descriptors(layout: _Layout) -> None:
     os.fstat(layout.job_fd)
 
 
-def test_the_device_binds_come_last(layout: _Layout) -> None:
+def test_the_device_binds_and_proc_come_last(layout: _Layout) -> None:
     prepared = _prepare(layout, _settings(devices=(Path("/dev/null"),)))
     try:
         assert len(prepared.descriptors) == 5  # workspace view, job, device
-        assert prepared.argv[_option_index(prepared.argv, "--remount-ro", str(layout.workspace)) - 1] == str(
-            Path("/dev/null")
-        )
+        device = str(prepared.descriptors[-1])
+        remount = _option_index(prepared.argv, "--remount-ro", str(layout.workspace))
+        # The device is mounted with device access; the read-only bind below /proc makes Bubblewrap close
+        # the descriptor, and the /proc mount hides that bind.
+        assert prepared.argv[remount - 10 : remount] == [
+            "--dev",
+            "/dev",
+            "--dev-bind",
+            f"/proc/self/fd/{device}",
+            "/dev/null",
+            "--ro-bind-fd",
+            device,
+            "/proc/.httk-devices/0",
+            "--proc",
+            "/proc",
+        ]
     finally:
         prepared.close()
 
@@ -302,8 +317,8 @@ def test_device_in_a_subdirectory_gets_its_parent_dir(layout: _Layout) -> None:
     prepared = _prepare(layout, _settings(devices=(device,)))
     try:
         index = _option_index(prepared.argv, "--dir", str(device.parent))
-        assert index > _option_index(prepared.argv, "--proc", "/proc", "--dev", "/dev")
-        assert prepared.argv[index + 2] == "--bind-fd" and prepared.argv[index + 4] == str(device)
+        assert index > _option_index(prepared.argv, "--dev", "/dev")
+        assert prepared.argv[index + 2] == "--dev-bind" and prepared.argv[index + 4] == str(device)
     finally:
         prepared.close()
 
@@ -628,6 +643,42 @@ def test_real_attempt_sandbox_confines_writes_and_follows_killpg(layout: _Layout
         process.wait()
         if process.stderr is not None:
             process.stderr.close()
+
+
+def test_real_attempt_device_has_device_access_and_no_inherited_descriptor(layout: _Layout) -> None:
+    if shutil.which("bwrap") is None:
+        if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
+            pytest.fail("required Bubblewrap executable is unavailable")
+        pytest.skip("Bubblewrap executable is unavailable")
+    settings = confine_settings({"manager.confine": "bwrap", "confine.devices": "/dev/zero"})
+    try:
+        block_userns = probe_bwrap(settings)
+    except ConfinementUnavailableError as exc:
+        _unsupported_namespace_failure(str(exc))
+        raise
+    environment = filtered_attempt_environment({"PATH": "/usr/bin:/bin"})
+    prepared = _prepare(layout, settings, block_userns=block_userns, workdir=layout.job, environment=environment)
+    # A nodev mount (Bubblewrap's --bind-fd) refuses the open with "Permission denied".
+    script = 'head -c 4 /dev/zero | od -An -tx1; ls -l "/proc/$$/fd"; ls -A /proc/.httk-devices 2>&1 || true\n'
+    try:
+        result = subprocess.run(
+            [*prepared.argv, "/bin/sh", "-c", script],
+            pass_fds=prepared.descriptors,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+            check=False,
+        )
+    finally:
+        prepared.close()
+    if result.returncode != 0 and not result.stdout:
+        _unsupported_namespace_failure(result.stderr or result.stdout)
+    lines = result.stdout.splitlines()
+    assert lines[0].split() == ["00", "00", "00", "00"], result.stderr
+    assert not any(line.endswith("-> /dev/zero") for line in lines[1:]), result.stdout
+    assert "No such file or directory" in lines[-1]
 
 
 def test_real_attempt_exposes_only_the_selected_workspace_view(layout: _Layout) -> None:

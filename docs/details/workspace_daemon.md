@@ -832,9 +832,11 @@ layout must fit this contract.
 
 `confine.devices` exposes individually approved device nodes, such as RDMA or
 GPU devices, to attempts and ranks; it does not establish tested RDMA or GPU
-support. Host networking and the PMIx endpoint are service authorities: the
-site must verify that they do not let ranks launch unconfined processes or
-reach other protected services.
+support. Each node is opened without following symbolic links and mounted from
+that descriptor with device access, as `bwrap --dev-bind` would mount it. Host
+networking and the PMIx endpoint are service authorities: the site must verify
+that they do not let ranks launch unconfined processes or reach other protected
+services.
 
 ### PMI-2 launches (Intel MPI)
 

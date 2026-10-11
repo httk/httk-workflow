@@ -25,10 +25,9 @@ from ._sandbox import (
     O_PATH,
     PreparedSandbox,
     check_bwrap,
-    device_parent_dirs,
+    device_and_proc_mounts,
     make_inheritable,
     merged_usr_symlinks,
-    open_device_nofollow,
     open_directory_nofollow,
     open_regular_file_nofollow,
     workspace_view,
@@ -438,7 +437,7 @@ def prepare_attempt_sandbox(
     ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is also remounted read-only last.
     A read-only path may not contain or lie inside the workspace; list a narrower directory such as a
     software tree rather than ``/home``.
-    ``/proc``, a private ``/dev`` and the device binds follow. There is no
+    A private ``/dev``, the device binds with device access and ``/proc`` follow. There is no
     ``--new-session`` and no ``--die-with-parent``: the sandbox stays in its launcher's process group, so
     ``killpg`` reaches the sandboxed command, and an attempt survives a manager exit as unconfined ones do.
 
@@ -504,12 +503,7 @@ def prepare_attempt_sandbox(
             if (trusted := _trusted_entry(job_fd, relative, directory)) is not None:
                 descriptors.append(trusted)
                 argv += ["--ro-bind-fd" if directory else "--ro-bind-data", str(trusted), str(job_path / relative)]
-        argv += ["--proc", "/proc", "--dev", "/dev"]
-        created: set[Path] = set()
-        for device in settings.devices:
-            argv += device_parent_dirs(device, created)
-            descriptors.append(open_device_nofollow(device))
-            argv += ["--bind-fd", str(descriptors[-1]), str(device)]
+        argv += ["--dev", "/dev", *device_and_proc_mounts(settings.devices, descriptors)]
         argv += ["--remount-ro", str(workspace_root), "--remount-ro", "/"]
         argv += ["--chdir", str(workdir), "--"]
         make_inheritable(descriptors)
