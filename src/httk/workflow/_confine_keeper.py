@@ -50,7 +50,7 @@ from typing import Self
 
 from . import _death
 from ._launch_protocol import read_bounded
-from ._sandbox import PreparedSandbox
+from ._sandbox import PreparedSandbox, pidfd_open, pidfd_send_signal
 
 #: The stdlib-only program that enters the keeper's namespaces and runs a rank, run by path.
 ENTER_PROGRAM = Path(__file__).with_name("_confine_enter.py")
@@ -334,13 +334,13 @@ def start_keeper(
             raise ValueError("the keeper process ended while starting")
         record = KeeperRecord(pid, start_ticks, namespace_identities(pid), pmix)
         try:
-            pidfd = os.pidfd_open(pid)
+            pidfd = pidfd_open(pid)
         except ProcessLookupError:
             raise ValueError("the keeper process ended while starting") from None
         if _death.process_identity(pid).start_ticks != record.start_ticks:
             raise ValueError("the keeper process ended while starting")
         try:
-            signal.pidfd_send_signal(pidfd, 0)
+            pidfd_send_signal(pidfd, 0)
         except ProcessLookupError:
             raise ValueError("the keeper process ended while starting") from None
         keeper = Keeper(process, record, pidfd)
@@ -371,7 +371,7 @@ def open_namespaces(record: KeeperRecord) -> dict[str, int]:
 
     pid, recorded = record.pid, record.namespaces
     try:
-        pidfd = os.pidfd_open(pid)
+        pidfd = pidfd_open(pid)
     except ProcessLookupError:
         raise ValueError("the launch's namespace keeper on this node is gone") from None
     descriptors: dict[str, int] = {}
@@ -388,7 +388,7 @@ def open_namespaces(record: KeeperRecord) -> dict[str, int]:
             if os.stat(f"/proc/self/ns/{name}").st_ino == recorded[name]:
                 raise ValueError(f"the keeper shares this helper's {name} namespace; confinement refused")
         try:
-            signal.pidfd_send_signal(pidfd, 0)
+            pidfd_send_signal(pidfd, 0)
         except ProcessLookupError:
             raise ValueError("the launch's namespace keeper on this node is gone") from None
         descriptors["owner"] = fcntl.ioctl(descriptors["mnt"], _NS_GET_USERNS)

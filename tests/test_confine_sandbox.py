@@ -21,7 +21,14 @@ from httk.workflow._confine import (
     prepare_attempt_sandbox,
     probe_bwrap,
 )
-from httk.workflow._sandbox import PreparedSandbox, device_parent_dirs, open_directory_nofollow, workspace_view
+from httk.workflow._sandbox import (
+    PreparedSandbox,
+    device_parent_dirs,
+    open_directory_nofollow,
+    pidfd_open,
+    pidfd_send_signal,
+    workspace_view,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +105,22 @@ def _prepare(
 
 def _open_descriptors() -> set[int]:
     return {int(name) for name in os.listdir("/proc/self/fd")}
+
+
+@pytest.mark.parametrize("fallback", (False, True))
+def test_pidfd_helpers_work_with_and_without_stdlib_wrappers(monkeypatch: pytest.MonkeyPatch, fallback: bool) -> None:
+    if fallback:
+        monkeypatch.delattr(os, "pidfd_open", raising=False)
+        monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+    descriptor = pidfd_open(os.getpid())
+    try:
+        pidfd_send_signal(descriptor, 0)
+    finally:
+        os.close(descriptor)
+    child = subprocess.Popen(("true",))
+    child.wait()
+    with pytest.raises(ProcessLookupError):
+        pidfd_open(child.pid)
 
 
 def _option_index(argv: list[str], *items: str) -> int:

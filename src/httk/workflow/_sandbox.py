@@ -8,6 +8,7 @@ import errno
 import fcntl
 import os
 import re
+import signal
 import stat
 import subprocess
 from collections.abc import Iterable, Mapping
@@ -197,6 +198,50 @@ def memfd_create(name: str) -> int:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
     return descriptor
+
+
+# ponytail: 434 and 424 cover x86_64 and Linux's generic syscall table; add an ABI map if other architectures arise.
+def pidfd_open(pid: int) -> int:
+    """Open a pidfd for a process.
+
+    :param pid: The process identifier.
+    :return: Its pidfd.
+    :raises OSError: If the process cannot be opened.
+    """
+
+    if hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid)
+    import ctypes
+
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    descriptor = int(syscall(ctypes.c_long(434), ctypes.c_long(pid), ctypes.c_long(0)))
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
+def pidfd_send_signal(pidfd: int, signum: int) -> None:
+    """Send a signal through a pidfd.
+
+    :param pidfd: The process descriptor.
+    :param signum: The signal number.
+    :return: ``None``.
+    :raises OSError: If the process cannot be signalled.
+    """
+
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(pidfd, signum)
+        return
+    import ctypes
+
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    result = syscall(ctypes.c_long(424), ctypes.c_long(pidfd), ctypes.c_long(signum), None, ctypes.c_long(0))
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def merged_usr_symlinks(
