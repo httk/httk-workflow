@@ -32,7 +32,7 @@ created and returned, as labelled references:
 
 ```json
 {
-  "workflow_declaration_uri": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax",
+  "workflow_declaration_uri": "https://raw.githubusercontent.com/httk/workflows-vasp/refs/tags/wf-decl-v0.1.0/vasp-relax/declaration.json",
   "inputs":    {"initial_structure": {"type": "structures", "id": "<served id>"}},
   "artifacts": {"relaxed_structure": {"type": "structures", "id": "..."}},
   "outputs":   {"total_energy":      {"type": "records", "id": "..."}}

@@ -25,9 +25,11 @@ digest, and reports them faithfully.
 ### Where declarations come from
 
 - Packaged workflows may carry declarations into every scaffolded `job.json`.
-  The VASP workflows of *workflows-vasp* declare their `workflow` `$id` with
-  the published `schemas.httk.org` URIs. {doc}`/details/provenance` describes
-  the rule that uses this `$id` as the workflow URI fallback.
+  The VASP workflows of *workflows-vasp* declare their `workflow` `$id` as the
+  GitHub raw URL of their `declaration.json` at a declaration-only
+  `wf-decl-vX.Y.Z` tag, created only when a declaration changes.
+  {doc}`/details/provenance` describes the rule that uses this `$id` as the
+  workflow URI fallback.
 - Directory packages can generate the declaration from their manifest or carry
   an externally authored, validated declaration file; see
   {doc}`/details/workflow_packages`.
