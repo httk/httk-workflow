@@ -25,6 +25,7 @@ from test_confine_sandbox import (
 )
 
 _TRUSTED = ("job.json", "state.json", ".httk-job/seal.json", "logs")
+_TRUSTED_FILES = ("job.json", "state.json", ".httk-job/seal.json")
 
 
 def _plant_trusted(created: _Layout) -> None:
@@ -42,7 +43,12 @@ def test_trusted_entries_are_overlaid_read_only_after_the_job_bind(layout: _Layo
         argv = prepared.argv
         job_bind = _option_index(argv, "--bind-fd", argv[argv.index(str(layout.job)) - 1], str(layout.job))
         overlays = [
-            _option_index(argv, "--ro-bind-fd", argv[argv.index(str(layout.job / name)) - 1], str(layout.job / name))
+            _option_index(
+                argv,
+                "--ro-bind-data" if name in _TRUSTED_FILES else "--ro-bind-fd",
+                argv[argv.index(str(layout.job / name)) - 1],
+                str(layout.job / name),
+            )
             for name in _TRUSTED
         ]
         assert job_bind < min(overlays) and max(overlays) < _option_index(argv, "--proc", "/proc")
@@ -76,6 +82,29 @@ def test_a_planted_trusted_entry_is_refused_and_descriptors_are_closed(
     before = _open_descriptors()
     with pytest.raises(ValueError, match="trusted job entry"):
         _prepare(layout, _settings())
+    assert _open_descriptors() == before
+
+
+def test_file_overlay_keeps_preparation_content_after_state_replacement(layout: _Layout) -> None:  # noqa: F811
+    _plant_trusted(layout)
+    original = b'{"phase":"prepared"}\n'
+    (layout.job / "state.json").write_bytes(original)
+    before = _open_descriptors()
+    prepared = _prepare(layout, _settings())
+    try:
+        state_path = str(layout.job / "state.json")
+        path_index = prepared.argv.index(state_path)
+        assert prepared.argv[path_index - 2] == "--ro-bind-data"
+        descriptor = int(prepared.argv[path_index - 1])
+        assert descriptor in prepared.descriptors
+
+        replacement = layout.job / "state.json.new"
+        replacement.write_bytes(b'{"phase":"running"}\n')
+        os.rename(replacement, layout.job / "state.json")
+
+        assert os.pread(descriptor, 1024, 0) == original
+    finally:
+        prepared.close()
     assert _open_descriptors() == before
 
 
@@ -123,3 +152,39 @@ def test_real_sandbox_refuses_writes_to_the_trusted_entries(layout: _Layout) -> 
     ]
     assert (layout.job / "state.json").read_text(encoding="utf-8") == "{}\n"
     assert not (layout.job / "logs" / "x").exists()
+
+
+def test_real_sandbox_reads_preparation_content_after_state_replacement(layout: _Layout) -> None:  # noqa: F811
+    if shutil.which("bwrap") is None:
+        pytest.skip("Bubblewrap executable is unavailable")
+    settings = confine_settings({"manager.confine": "bwrap"})
+    try:
+        block_userns = probe_bwrap(settings)
+    except ConfinementUnavailableError as exc:
+        _unsupported_namespace_failure(str(exc))
+        raise
+    _plant_trusted(layout)
+    original = b'{"phase":"prepared"}\n'
+    (layout.job / "state.json").write_bytes(original)
+    environment = filtered_attempt_environment({"PATH": "/usr/bin:/bin"})
+    prepared = _prepare(layout, settings, block_userns=block_userns, workdir=layout.job, environment=environment)
+    try:
+        replacement = layout.job / "state.json.new"
+        replacement.write_bytes(b'{"phase":"running"}\n')
+        os.rename(replacement, layout.job / "state.json")
+        state_path = str(layout.job / "state.json")
+        path_index = prepared.argv.index(state_path)
+        assert prepared.argv[path_index - 2] == "--ro-bind-data"
+        result = subprocess.run(
+            [*prepared.argv, "/bin/cat", "state.json"],
+            pass_fds=prepared.descriptors,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            env=environment,
+            check=False,
+        )
+    finally:
+        prepared.close()
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert result.stdout == original

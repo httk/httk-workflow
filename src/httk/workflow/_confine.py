@@ -309,12 +309,17 @@ def _directory_descriptor(descriptor: int, path: Path) -> int:
 
 
 def _trusted_entry(job_fd: int, relative: str, directory: bool) -> int | None:
-    """Open one trusted entry below the job directory ``O_PATH``, never following a symlink.
+    """Open and classify one trusted entry below the job directory without following a symlink.
+
+    Entries are classified through an ``O_PATH`` no-follow open. Directories return that descriptor; regular
+    files return a readable descriptor reopened from it for ``--ro-bind-data``.
 
     :param job_fd: A directory descriptor of the job directory.
     :param relative: The entry's path below the job directory.
     :param directory: Whether the entry must be a directory rather than a regular file.
-    :return: The descriptor, or ``None`` when the entry (or a parent of it) is absent.
+    :return: The directory's ``O_PATH`` descriptor or the file's readable descriptor, or ``None`` when the
+        entry (or a parent of it) is absent.
+    :raises OSError: If opening an entry fails for a reason other than absence.
     :raises ValueError: When the entry is not the expected kind of entry.
     """
 
@@ -334,14 +339,23 @@ def _trusted_entry(job_fd: int, relative: str, directory: bool) -> int | None:
             descriptor = os.open(name, O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=at)
         except FileNotFoundError:
             return None
+        keep_descriptor = False
+        try:
+            pinned = os.fstat(descriptor)
+            if not (stat.S_ISDIR(pinned.st_mode) if directory else stat.S_ISREG(pinned.st_mode)):
+                raise ValueError(
+                    f"trusted job entry {relative} is not a {'directory' if directory else 'regular file'}"
+                )
+            if directory:
+                keep_descriptor = True
+                return descriptor
+            return os.open(f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        finally:
+            if not keep_descriptor:
+                os.close(descriptor)
     finally:
         if at != job_fd:
             os.close(at)
-    mode = os.fstat(descriptor).st_mode
-    if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
-        os.close(descriptor)
-        raise ValueError(f"trusted job entry {relative} is not a {'directory' if directory else 'regular file'}")
-    return descriptor
 
 
 def _namespace_options(settings: ConfineSettings, *, block_userns: bool) -> list[str]:
@@ -371,7 +385,10 @@ def prepare_attempt_sandbox(
     ``settings.readonly_paths`` read-only, the workspace read-only at its real path, the daemon's private
     directory, when present, hidden under an empty tmpfs, the job directory
     writable at its real path and its trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``
-    and ``logs/``, those present) read-only over it, in that order: a read-only path may be an ancestor of the
+    and ``logs/``, those present) read-only over it, in that order. Files are opened (inode-pinned) at
+    preparation time and copied by Bubblewrap when the sandbox starts, so an atomic manager replacement of
+    ``state.json`` in between neither fails the launch nor reaches the job; ``logs/`` is a read-only directory
+    bind. A read-only path may be an ancestor of the
     workspace (``/home`` for a workspace below it), because the later workspace and job binds overlay it. A
     read-only path at or inside the workspace is refused. ``/proc``, a private ``/dev`` and the device binds follow. There is no
     ``--new-session`` and no ``--die-with-parent``: the sandbox stays in its launcher's process group, so
@@ -434,12 +451,13 @@ def prepare_attempt_sandbox(
         argv += hidden_directory(workspace_fd, f"{WORKSPACE_DIRECTORY}/{DAEMON_DIRECTORY}", daemon_paths)
         descriptors.append(_directory_descriptor(job_fd, job_path))
         argv += ["--bind-fd", str(descriptors[-1]), str(job_path)]
-        # Binds apply in order, so these overlay the writable job directory. Each binds the inode opened here:
-        # a state.json the manager replaces before the gate opens stays read-only to the job as the old inode.
+        # Binds apply in order, so these overlay the writable job directory. Files are opened (inode-pinned)
+        # now and copied by Bubblewrap when the sandbox starts, so an atomic manager replacement of state.json
+        # in between neither fails the launch nor reaches the job; logs/ remains a read-only directory bind.
         for relative, directory in _TRUSTED_OVERLAYS:
             if (trusted := _trusted_entry(job_fd, relative, directory)) is not None:
                 descriptors.append(trusted)
-                argv += ["--ro-bind-fd", str(trusted), str(job_path / relative)]
+                argv += ["--ro-bind-fd" if directory else "--ro-bind-data", str(trusted), str(job_path / relative)]
         argv += ["--proc", "/proc", "--dev", "/dev"]
         created: set[Path] = set()
         for device in settings.devices:
