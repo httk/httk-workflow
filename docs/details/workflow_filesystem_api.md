@@ -1240,7 +1240,8 @@ one sequence, run by an owner that has claimed the root in any unowned state:
    waits until the jobs are quiescent.
 3. **Bundle.** In a fresh `eject` scratch, write `bundle.json` first
    (recording each member's `from` state and priority), then append `ejected`
-   to each member's run log and extract each member (`move_owned` out of
+   to each member that already has a run log (a fresh job gets none and remains
+   adoptable as an untrusted bundle), then extract each member (`move_owned` out of
    `owned/`) into `bundle/jobs/<placement>/<key>`.
 4. **Record** `<scratch>/eject.json` (`{target, token, transfer_id,
    exchange}`: the target path, the `bundle.json` bytes, and for an exchange

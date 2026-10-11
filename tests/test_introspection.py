@@ -166,7 +166,7 @@ def test_log_of_an_unclaimed_job_reports_that_no_owner_moved_it(ws: Workspace, i
     submitted = _submit(ws, installed, _THREE_STEPS)
     events = job_events(resolve_job(ws, submitted.job_id))
     assert events == []
-    assert "no owner has claimed it yet" in render_events(events)
+    assert "this job has no owner history yet" in render_events(events)
 
 
 def test_job_selector_paths_expand_directories_and_deduplicate(ws: Workspace, installed: Any) -> None:

@@ -212,7 +212,7 @@ def render_events(events: Sequence[Mapping[str, Any]]) -> str:
             parts.append(f"detail={detail if isinstance(detail, str) else json.dumps(detail, sort_keys=True)}")
         lines.append(" ".join(parts))
     if not lines:
-        lines.append("this job has no owner history: no owner has claimed it yet")
+        lines.append("this job has no owner history yet")
     return "\n".join(lines)
 
 

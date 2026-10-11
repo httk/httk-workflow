@@ -16,7 +16,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _requests, removal
+from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, _requests, removal
 from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest
 from httk.workflow._daemon_auth import sign_request
 from httk.workflow._daemon_protocol import Request, decode_response
@@ -33,7 +33,9 @@ from httk.workflow.errors import ConfinementUnavailableError, SealedError
 from httk.workflow.seals import seal_workspace
 from httk.workflow.workflow_cli import command
 from test_bundles import write_bundle
-from v3_helpers import cli_owner, install, job_mapping
+from test_moving import claim_root
+from v3_helpers import cli_owner, install, job_mapping, submit_mapping
+from v3_helpers import workspace as v3_workspace
 
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
 
@@ -244,6 +246,25 @@ def test_an_inbox_bundle_is_adopted_with_fresh_ids_and_its_exchange_name(tmp_pat
     assert root.state == "ready"
     # Nothing more to adopt: the next pass changes nothing.
     assert _pass(ws) is False
+
+
+def test_an_ejected_fresh_job_is_adopted_from_the_inbox(tmp_path: Path) -> None:
+    client, server = v3_workspace(tmp_path / "client"), _server(tmp_path / "server")
+    mapping = job_mapping(("demo--0123456789abcdef", "demo"), {"start": "succeed"}, tag="fresh")
+    ref = submit_mapping(client, mapping)
+    inbox = exchange_directory(server) / "inbox"
+    with cli_owner(client) as owner:
+        report = _moving.eject(client, owner, claim_root(client, owner, ref.job_id), destination=inbox, tree=False)
+
+    assert report.destination.parent == inbox and report.destination.is_dir()
+    member = next((report.destination / "jobs").rglob("job.json")).parent
+    assert not (member / "logs").exists()
+    assert _pass(server) is True
+    assert os.listdir(inbox) == []
+    assert _rejections(server) == []
+    [adopted] = _all_jobs(server)
+    doc, damaged = read_state_unowned(adopted.path / "state.json")
+    assert adopted.state == "ready" and doc is not None and not damaged and doc.origin == "exchange"
 
 
 def _fifo(path: Path) -> None:

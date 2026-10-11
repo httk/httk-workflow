@@ -133,10 +133,13 @@ def test_eject_and_adopt_a_single_job_keeps_state_priority_and_payload(tmp_path:
         assert removal.serve(source, owner, ref)
     assert find(source, mapping["id"]).priority == 77  # type: ignore[union-attr]
     with cli_owner(source) as owner:
-        report = _moving.eject(
-            source, owner, claim_root(source, owner, mapping["id"]), destination=tmp_path / "out", tree=False
-        )
+        owned = claim_root(source, owner, mapping["id"])
+        assert (owned.path / "logs" / "runlog.jsonl").exists()
+        report = _moving.eject(source, owner, owned, destination=tmp_path / "out", tree=False)
     assert report.destination == tmp_path / "out" / ref.job_key and report.members == (ref.job_key,)
+    run_log = report.destination / "jobs" / ref.placement / ref.job_key / "logs" / "runlog.jsonl"
+    last_line = json.loads(run_log.read_text().splitlines()[-1])
+    assert last_line["event"] == "ejected" and last_line["destination"] == str(tmp_path / "out")
     assert find(source, mapping["id"]) is None
     assert not list((source.control / "tmp").iterdir())
     with cli_owner(target) as owner:

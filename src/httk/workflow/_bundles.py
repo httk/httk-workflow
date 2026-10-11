@@ -429,8 +429,9 @@ def build_bundle(
     :param source_workspace_id: This workspace's id.
     :param destination_workspace_id: The intended destination workspace, or ``None``.
     :param destination_locator: The intended destination path or address, or ``None``.
-    :param event: A run-log event and its members, appended to each member once every check passed, right
-        before its extraction: a refusal leaves no such line, and the line travels in the bundle.
+    :param event: A run-log event and its members, appended to each member that already has a run log once
+        every check passed, right before its extraction; a fresh job (no run log) gets none, so it remains
+        adoptable as an untrusted bundle, and a refusal leaves no such line.
     :param scratch: The owner's empty scratch to build in, created by the caller (whose purpose names the
         reconciler); ``None`` creates an ``eject`` scratch once every check passed.
     :return: The bundle directory, ``<scratch>/bundle``.
@@ -480,7 +481,8 @@ def build_bundle(
     for job, member in zip(members, manifest.members, strict=True):
         target = manifest.member_dir(bundle, member)
         _fs.make_dirs(target.parent, durable=durable)
-        if event is not None:
+        # A fresh job gets no run log, so it stays an untrusted-adoptable exchange bundle.
+        if event is not None and _fs.exists(_fs.loc(job.path / "logs" / "runlog.jsonl")):
             job.append_log(event[0], **event[1])
         job.extract(target)
     return bundle
