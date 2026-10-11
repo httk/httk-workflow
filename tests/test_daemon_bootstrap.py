@@ -24,6 +24,7 @@ REQUIRED_BWRAP_OPTIONS = (
     "--new-session",
     "--ro-bind-data",
     "--ro-bind-fd",
+    "--remount-ro",
     "--unshare-ipc",
     "--unshare-net",
     "--unshare-pid",

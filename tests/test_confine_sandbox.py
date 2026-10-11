@@ -8,7 +8,6 @@ import stat
 import subprocess
 import time
 from collections.abc import Iterator
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,7 @@ from httk.workflow._confine import (
     prepare_attempt_sandbox,
     probe_bwrap,
 )
-from httk.workflow._sandbox import PreparedSandbox, device_parent_dirs, open_directory_nofollow
+from httk.workflow._sandbox import PreparedSandbox, device_parent_dirs, open_directory_nofollow, workspace_view
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +32,7 @@ def _shm_roots_are_tmpfs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 _REQUIRED_HELP = (
     "--bind-fd --clearenv --new-session --ro-bind-data --ro-bind-fd --unshare-ipc --unshare-net "
-    "--unshare-pid --unshare-user --unshare-uts --cap-drop --proc --dev --tmpfs --dir --chdir"
+    "--unshare-pid --unshare-user --unshare-uts --cap-drop --proc --dev --tmpfs --dir --remount-ro --chdir"
 )
 
 
@@ -45,8 +44,10 @@ class _Layout:
         self.sibling = self.workspace / "jobs" / "b"
         self.workdir = self.job / "payload"
         self.readonly = root / "ro"
-        for path in (self.control, self.workdir, self.sibling, self.readonly):
+        self.workflows = self.workspace / "workflows"
+        for path in (self.control, self.workdir, self.sibling, self.workflows, self.readonly):
             path.mkdir(parents=True)
+        (self.control / "format.json").write_text("{}\n", encoding="utf-8")
         self.workspace_fd = open_directory_nofollow(self.workspace)
         self.job_fd = open_directory_nofollow(self.job)
 
@@ -129,38 +130,79 @@ def test_argv_order_binds_and_descriptors(layout: _Layout) -> None:
         assert "--disable-userns" not in argv and "--assert-userns-disabled" not in argv
         assert argv[-3:] == ["--chdir", str(layout.workdir), "--"]
 
-        readonly, workspace, job = (
-            int(argv[_option_index(argv, "--ro-bind-fd") + 1]),
-            int(argv[argv.index(str(layout.workspace)) - 1]),
-            int(argv[argv.index(str(layout.job)) - 1]),
+        readonly_index = _option_index(
+            argv, "--ro-bind-fd", argv[_option_index(argv, "--ro-bind-fd") + 1], str(layout.readonly)
         )
+        readonly = int(argv[readonly_index + 1])
+        jobs_index = next(
+            index
+            for index in range(len(argv))
+            if argv[index : index + 1] == ["--ro-bind-fd"] and argv[index + 2] == str(layout.workspace / "jobs")
+        )
+        jobs_descriptor = int(argv[jobs_index + 1])
+        workflows_index = next(
+            index
+            for index in range(len(argv))
+            if argv[index : index + 1] == ["--ro-bind-fd"] and argv[index + 2] == str(layout.workflows)
+        )
+        format_index = next(
+            index
+            for index in range(len(argv))
+            if argv[index : index + 1] == ["--ro-bind-data"] and argv[index + 2] == str(layout.control / "format.json")
+        )
+        job = int(argv[argv.index(str(layout.job)) - 1])
+        view = [
+            jobs_index,
+            workflows_index,
+            format_index,
+        ]
+        workspace_descriptors = (jobs_descriptor, int(argv[workflows_index + 1]), int(argv[format_index + 1]))
         order = [
             _option_index(argv, "--tmpfs", "/tmp", "--dir", "/tmp/home"),
             _option_index(argv, "--ro-bind-fd", str(readonly), str(layout.readonly)),
-            _option_index(argv, "--ro-bind-fd", str(workspace), str(layout.workspace)),
+            _option_index(argv, "--tmpfs", str(layout.workspace)),
+            *view,
             _option_index(argv, "--bind-fd", str(job), str(layout.job)),
             _option_index(argv, "--proc", "/proc", "--dev", "/dev"),
         ]
         device = int(argv[argv.index("/dev/null") - 1])
-        order += [_option_index(argv, "--bind-fd", str(device), "/dev/null"), len(argv) - 3]
+        order += [
+            _option_index(argv, "--bind-fd", str(device), "/dev/null"),
+            _option_index(argv, "--remount-ro", "/"),
+            len(argv) - 3,
+        ]
         assert order == sorted(order)
-        assert "--tmpfs" not in argv or str(layout.control / "daemon") not in argv
-        assert argv[_option_index(argv, "--bind-fd", str(job)) - 3 : _option_index(argv, "--bind-fd", str(job))] == [
-            "--ro-bind-fd",
-            str(workspace),
+        assert not any(
+            option in {"--ro-bind-fd", "--bind-fd", "--ro-bind-data"} and argv[index + 2] == str(layout.workspace)
+            for index, option in enumerate(argv[:-2])
+        )
+        assert argv.count("--tmpfs") == 2
+        assert [argv[index + 1] for index, option in enumerate(argv) if option == "--tmpfs"] == [
+            "/tmp",
             str(layout.workspace),
         ]
-
-        assert prepared.descriptors == (readonly, workspace, job, device)
-        assert workspace not in (layout.workspace_fd, layout.job_fd) and job not in (layout.workspace_fd, layout.job_fd)
+        assert argv[view[0] - 2 : view[0]] == ["--tmpfs", str(layout.workspace)]
+        remount = _option_index(argv, "--remount-ro", str(layout.workspace), "--remount-ro", "/")
+        assert argv[remount : remount + 4] == ["--remount-ro", str(layout.workspace), "--remount-ro", "/"]
+        assert argv[remount + 4 : argv.index("--chdir")] == []
+        assert prepared.descriptors[:3] == (readonly, jobs_descriptor, int(argv[workflows_index + 1]))
+        assert prepared.descriptors[3:] == (int(argv[format_index + 1]), job, device)
+        descriptor_operands = {
+            int(argv[index + 1])
+            for index, option in enumerate(argv)
+            if option in {"--bind-fd", "--ro-bind-fd", "--ro-bind-data"}
+        }
+        assert set(prepared.descriptors) == descriptor_operands
+        descriptors = prepared.descriptors
+        workspace = workspace_descriptors[0]
         for descriptor in prepared.descriptors:
             assert os.get_inheritable(descriptor)
-        assert os.fstat(workspace).st_ino == layout.workspace.stat().st_ino
+        assert os.fstat(workspace).st_ino == (layout.workspace / "jobs").stat().st_ino
         assert os.fstat(job).st_ino == layout.job.stat().st_ino
         assert stat.S_ISCHR(os.fstat(device).st_mode)
     finally:
         prepared.close()
-    for descriptor in (readonly, workspace, job, device):
+    for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
     # The caller's descriptors are duplicated, never consumed.
@@ -171,76 +213,12 @@ def test_argv_order_binds_and_descriptors(layout: _Layout) -> None:
 def test_the_device_binds_come_last(layout: _Layout) -> None:
     prepared = _prepare(layout, _settings(devices=(Path("/dev/null"),)))
     try:
-        assert len(prepared.descriptors) == 3  # workspace, job, device
-        assert prepared.argv[-4:-3] == [str(Path("/dev/null"))]
+        assert len(prepared.descriptors) == 5  # workspace view, job, device
+        assert prepared.argv[_option_index(prepared.argv, "--remount-ro", str(layout.workspace)) - 1] == str(
+            Path("/dev/null")
+        )
     finally:
         prepared.close()
-
-
-def test_daemon_directory_is_masked_only_when_present(layout: _Layout) -> None:
-    daemon = layout.control / "daemon"
-    prepared = _prepare(layout, _settings())
-    try:
-        assert str(daemon) not in prepared.argv
-    finally:
-        prepared.close()
-
-    daemon.mkdir()
-    prepared = _prepare(layout, _settings())
-    try:
-        workspace_bind = _option_index(
-            prepared.argv,
-            "--ro-bind-fd",
-            prepared.argv[prepared.argv.index(str(layout.workspace)) - 1],
-            str(layout.workspace),
-        )
-        job_bind = _option_index(
-            prepared.argv,
-            "--bind-fd",
-            prepared.argv[prepared.argv.index(str(layout.job)) - 1],
-            str(layout.job),
-        )
-        assert prepared.argv[workspace_bind + 3 : workspace_bind + 5] == ["--tmpfs", str(daemon)]
-        assert workspace_bind < _option_index(prepared.argv, "--tmpfs", str(daemon)) < job_bind
-    finally:
-        prepared.close()
-
-
-def test_daemon_directory_is_masked_at_workspace_aliases(layout: _Layout) -> None:
-    daemon = layout.control / "daemon"
-    daemon.mkdir()
-    alias = layout.readonly.parent / "workspace-parent-alias"
-    alias.symlink_to(layout.workspace.parent, target_is_directory=True)
-    alias_daemon = alias / layout.workspace.name / ".httk-workspace" / "daemon"
-    prepared = _prepare(layout, _settings(readonly_paths=(alias,)))
-    try:
-        canonical_mask = _option_index(prepared.argv, "--tmpfs", str(daemon))
-        alias_mask = _option_index(prepared.argv, "--tmpfs", str(alias_daemon))
-        workspace_bind = _option_index(
-            prepared.argv,
-            "--ro-bind-fd",
-            prepared.argv[prepared.argv.index(str(layout.workspace)) - 1],
-            str(layout.workspace),
-        )
-        job_bind = _option_index(
-            prepared.argv,
-            "--bind-fd",
-            prepared.argv[prepared.argv.index(str(layout.job)) - 1],
-            str(layout.job),
-        )
-        assert workspace_bind < canonical_mask < job_bind
-        assert workspace_bind < alias_mask < job_bind
-    finally:
-        prepared.close()
-
-
-def test_a_symlink_at_the_daemon_directory_refuses_confinement(layout: _Layout) -> None:
-    daemon = layout.control / "daemon"
-    real_daemon = layout.control / "daemon.real"
-    real_daemon.mkdir()
-    daemon.symlink_to(real_daemon, target_is_directory=True)
-    with pytest.raises(ValueError, match="must be a real directory.*confinement refused"):
-        _prepare(layout, _settings())
 
 
 def test_no_environment_value_enters_the_world_readable_argv(layout: _Layout) -> None:
@@ -313,19 +291,13 @@ def test_merged_usr_links_follow_the_readonly_binds(layout: _Layout) -> None:
         for link in ("/bin", "/lib", "/lib64", "/sbin"):
             if Path(link).is_symlink() and Path(link).resolve().is_relative_to("/usr"):
                 index = _option_index(prepared.argv, "--symlink", os.readlink(link), link)
-                assert index < _option_index(prepared.argv, "--ro-bind-fd") + 3 + 3 * 4
-                assert index < prepared.argv.index(str(layout.workspace))
-    finally:
-        prepared.close()
-
-
-def test_readonly_ancestor_of_the_workspace_is_overlaid(layout: _Layout) -> None:
-    ancestor = layout.workspace.parent
-    prepared = _prepare(layout, _settings(readonly_paths=(ancestor,)))
-    try:
-        assert _option_index(prepared.argv, "--ro-bind-fd", prepared.argv[prepared.argv.index(str(ancestor)) - 1]) < (
-            prepared.argv.index(str(layout.workspace))
-        )
+                jobs_bind = next(
+                    option
+                    for option in range(len(prepared.argv))
+                    if prepared.argv[option : option + 1] == ["--ro-bind-fd"]
+                    and prepared.argv[option + 2] == str(layout.workspace / "jobs")
+                )
+                assert index < jobs_bind
     finally:
         prepared.close()
 
@@ -334,16 +306,17 @@ def test_readonly_ancestor_of_the_workspace_is_overlaid(layout: _Layout) -> None
 def test_readonly_path_inside_the_workspace_is_refused(layout: _Layout, inside: str) -> None:
     before = _open_descriptors()
     path = layout.workspace / inside if inside else layout.workspace
-    with pytest.raises(ValueError, match="inside the workspace"):
+    with pytest.raises(ValueError, match="contains or lies inside the workspace"):
         _prepare(layout, _settings(readonly_paths=(layout.readonly, path)))
     assert _open_descriptors() == before
 
 
-def test_readonly_symlink_into_the_workspace_is_refused(layout: _Layout) -> None:
-    link = layout.readonly.parent / "link"
-    link.symlink_to(layout.control)
-    with pytest.raises(ValueError, match="inside the workspace"):
-        _prepare(layout, _settings(readonly_paths=(link,)))
+def test_readonly_ancestor_and_symlinked_ancestor_are_refused(layout: _Layout) -> None:
+    alias = layout.readonly.parent / "workspace-parent-alias"
+    alias.symlink_to(layout.workspace.parent, target_is_directory=True)
+    for path in (layout.workspace.parent, alias):
+        with pytest.raises(ValueError, match="contains or lies inside the workspace"):
+            _prepare(layout, _settings(readonly_paths=(path,)))
 
 
 def test_descriptors_are_closed_on_every_error(layout: _Layout) -> None:
@@ -356,6 +329,39 @@ def test_descriptors_are_closed_on_every_error(layout: _Layout) -> None:
     with pytest.raises(ValueError, match="not a device node"):
         _prepare(layout, _settings(readonly_paths=(layout.readonly,), devices=(Path("/dev/null"), plain)))
     assert _open_descriptors() == before
+
+
+@pytest.mark.parametrize("missing", ["workflows", "format"])
+def test_workspace_view_missing_path_closes_descriptors(layout: _Layout, missing: str) -> None:
+    path = layout.workflows if missing == "workflows" else layout.control / "format.json"
+    if path.is_dir():
+        path.rmdir()
+    else:
+        path.unlink()
+    before = _open_descriptors()
+    with pytest.raises(ValueError, match="confinement refused"):
+        _prepare(layout, _settings())
+    assert _open_descriptors() == before
+
+
+def test_workspace_view_symlinked_jobs_closes_descriptors(layout: _Layout, tmp_path: Path) -> None:
+    jobs = layout.workspace / "jobs"
+    jobs.rename(tmp_path / "jobs-real")
+    jobs.symlink_to(tmp_path / "jobs-real", target_is_directory=True)
+    before = _open_descriptors()
+    with pytest.raises(ValueError, match="confinement refused"):
+        _prepare(layout, _settings())
+    assert _open_descriptors() == before
+
+
+@pytest.mark.parametrize("workspace_root", [Path("/"), Path("/tmp"), Path("/tmp/home")])
+def test_workspace_view_refuses_reserved_roots(workspace_root: Path) -> None:
+    workspace_fd = open_directory_nofollow(Path("/"))
+    try:
+        with pytest.raises(ValueError, match="a confined workspace may not be rooted at"):
+            workspace_view(workspace_fd, workspace_root)
+    finally:
+        os.close(workspace_fd)
 
 
 def test_misplaced_paths_and_environment_are_refused(layout: _Layout) -> None:
@@ -585,21 +591,21 @@ def test_real_attempt_sandbox_confines_writes_and_follows_killpg(layout: _Layout
             process.stderr.close()
 
 
-def test_real_attempt_masks_daemon_at_canonical_and_readonly_alias_paths(layout: _Layout) -> None:
+def test_real_attempt_exposes_only_the_selected_workspace_view(layout: _Layout) -> None:
     if shutil.which("bwrap") is None:
         if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
             pytest.fail("required Bubblewrap executable is unavailable")
         pytest.skip("Bubblewrap executable is unavailable")
-    alias = layout.readonly
-    alias.rmdir()
-    alias.symlink_to(layout.workspace.parent, target_is_directory=True)
     daemon = layout.control / "daemon"
     daemon.mkdir()
     (daemon / "response.seed").write_text("private-seed", encoding="utf-8")
-    visible = layout.workspace / "visible.txt"
-    visible.write_text("workspace-file", encoding="utf-8")
-    alias_workspace = alias / layout.workspace.name
-    settings = replace(confine_settings({"manager.confine": "bwrap"}), readonly_paths=(alias,))
+    (layout.workspace / "exchange").mkdir()
+    (layout.workspace / "exchange" / "x").write_text("exchange", encoding="utf-8")
+    (layout.sibling / "visible.txt").write_text("sibling", encoding="utf-8")
+    runner = layout.workflows / "w" / "package"
+    runner.mkdir(parents=True)
+    (runner / "runner.sh").write_text("runner", encoding="utf-8")
+    settings = confine_settings({"manager.confine": "bwrap"})
     try:
         block_userns = probe_bwrap(settings)
     except ConfinementUnavailableError as exc:
@@ -613,17 +619,22 @@ def test_real_attempt_masks_daemon_at_canonical_and_readonly_alias_paths(layout:
         workdir=layout.job,
         environment=environment,
     )
+    format_content = (layout.control / "format.json").read_text(encoding="utf-8").strip()
     script = (
-        'for target in "$1/.httk-workspace/daemon/response.seed" "$2/.httk-workspace/daemon/response.seed"; do\n'
-        '  if cat "$target" >/dev/null 2>&1; then echo "readable $target"; else echo "refused $target"; fi\n'
-        "done\n"
-        'for target in "$1/visible.txt" "$2/visible.txt"; do\n'
-        '  if cat "$target" >/dev/null 2>&1; then echo "visible $target"; else echo "missing $target"; fi\n'
-        "done\n"
+        'printf "format=%s\\n" "$(cat "$1/.httk-workspace/format.json")"\n'
+        'test -r "$1/jobs/b/visible.txt" && echo sibling=readable\n'
+        'test -r "$1/workflows/w/package/runner.sh" && echo workflow=readable\n'
+        'test ! -e "$1/.httk-workspace/daemon/response.seed" && echo daemon=absent\n'
+        'test ! -e "$1/exchange/x" && echo exchange=absent\n'
+        'if mkdir "$1/.httk-workspace/x" 2>/dev/null; then echo control=write; else echo control=readonly; fi\n'
+        'if touch "$1/planted" 2>/dev/null; then echo workspace=write; else echo workspace=readonly; fi\n'
+        'if touch "$1/jobs/planted" 2>/dev/null; then echo jobs=write; else echo jobs=readonly; fi\n'
+        'touch "$2/own.txt" && echo job=writable\n'
+        'touch /tmp/home/t && echo tmp=writable\n'
     )
     try:
         result = subprocess.run(
-            [*prepared.argv, "/bin/sh", "-c", script, "sh", str(layout.workspace), str(alias_workspace)],
+            [*prepared.argv, "/bin/sh", "-c", script, "sh", str(layout.workspace), str(layout.job)],
             pass_fds=prepared.descriptors,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -634,11 +645,16 @@ def test_real_attempt_masks_daemon_at_canonical_and_readonly_alias_paths(layout:
         )
     finally:
         prepared.close()
-    if result.returncode != 0:
-        _unsupported_namespace_failure(result.stderr or result.stdout)
+    assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        f"refused {daemon}/response.seed",
-        f"refused {alias_workspace}/.httk-workspace/daemon/response.seed",
-        f"visible {visible}",
-        f"visible {alias_workspace}/visible.txt",
+        f"format={format_content}",
+        "sibling=readable",
+        "workflow=readable",
+        "daemon=absent",
+        "exchange=absent",
+        "control=readonly",
+        "workspace=readonly",
+        "jobs=readonly",
+        "job=writable",
+        "tmp=writable",
     ]

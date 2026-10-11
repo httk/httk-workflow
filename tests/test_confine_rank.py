@@ -226,12 +226,41 @@ def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened
         "TMPDIR": "/tmp",
     }
     tmpfs = _option_index(argv, "--tmpfs", "/tmp", "--dir", "/tmp/home")
+    workspace_tmpfs = _option_index(argv, "--tmpfs", str(launch.workspace))
     readonly = argv.index("/usr")
-    workspace = _option_index(argv, "--ro-bind-fd", argv[argv.index(str(launch.workspace)) - 1], str(launch.workspace))
+    jobs = _option_index(
+        argv, "--ro-bind-fd", argv[argv.index(str(launch.workspace / "jobs")) - 1], str(launch.workspace / "jobs")
+    )
+    workflows = _option_index(
+        argv,
+        "--ro-bind-fd",
+        argv[argv.index(str(launch.workspace / "workflows")) - 1],
+        str(launch.workspace / "workflows"),
+    )
+    format_copy = _option_index(
+        argv,
+        "--ro-bind-data",
+        argv[argv.index(str(launch.workspace / ".httk-workspace" / "format.json")) - 1],
+        str(launch.workspace / ".httk-workspace" / "format.json"),
+    )
     job = _option_index(argv, "--bind-fd", argv[argv.index(str(launch.job)) - 1], str(launch.job))
     dev = _option_index(argv, "--proc", "/proc", "--dev", "/dev")
     shm = argv.index("/dev/shm")
-    assert tmpfs < readonly < workspace < job < dev < shm
+    assert tmpfs < readonly < workspace_tmpfs < jobs < workflows < format_copy < job < dev < shm
+    assert argv[workspace_tmpfs : workspace_tmpfs + 2] == ["--tmpfs", str(launch.workspace)]
+    assert workspace_tmpfs + 2 == jobs
+    assert not any(
+        option in {"--ro-bind-fd", "--bind-fd", "--ro-bind-data"} and argv[index + 2] == str(launch.workspace)
+        for index, option in enumerate(argv[:-2])
+    )
+    assert argv.count("--tmpfs") == 2
+    assert [argv[index + 1] for index, option in enumerate(argv) if option == "--tmpfs"] == [
+        "/tmp",
+        str(launch.workspace),
+    ]
+    remount = _option_index(argv, "--remount-ro", str(launch.workspace), "--remount-ro", "/")
+    assert argv[remount : remount + 4] == ["--remount-ro", str(launch.workspace), "--remount-ro", "/"]
+    assert argv[remount + 4 : argv.index("--chdir")] == []
     assert argv[shm - 2] == "--bind-fd"
     separator = argv.index("--")
     assert argv[separator - 2 : separator] == ["--chdir", str(launch.job)]
@@ -249,28 +278,32 @@ def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened
     ]
 
 
-def test_rank_sandbox_hides_daemon_directory_after_workspace_bind(launch: _Launch, opened: _Opened) -> None:
-    daemon = launch.workspace / ".httk-workspace" / "daemon"
-    daemon.mkdir()
-    alias = launch.root / "workspace-parent-alias"
-    alias.symlink_to(launch.workspace.parent, target_is_directory=True)
-    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, readonly_paths=(alias,)))
-    argv, _ = _prepare(launch, opened, {"PATH": os.environ["PATH"]})
-    alias_daemon = alias / launch.workspace.name / ".httk-workspace" / "daemon"
-    workspace_index = argv.index(str(launch.workspace))
-    assert argv[workspace_index - 2] == "--ro-bind-fd"
-    assert argv[workspace_index + 1 : workspace_index + 3] == ["--tmpfs", str(daemon)]
-    assert argv[workspace_index + 3 : workspace_index + 5] == ["--tmpfs", str(alias_daemon)]
-    assert argv.index("--tmpfs", workspace_index + 1) < argv.index(str(launch.job))
-
-
-def test_rank_sandbox_refuses_a_symlink_at_the_daemon_directory(launch: _Launch, opened: _Opened) -> None:
-    control = launch.workspace / ".httk-workspace"
-    real_daemon = control / "daemon.real"
-    real_daemon.mkdir()
-    (control / "daemon").symlink_to(real_daemon, target_is_directory=True)
-    with pytest.raises(ValueError, match="must be a real directory.*confinement refused"):
-        _prepare(launch, opened, {"PATH": os.environ["PATH"]})
+def test_rank_descriptors_match_bind_options_except_pmi(launch: _Launch, opened: _Opened) -> None:
+    left, right = socket.socketpair()
+    pmi_fd = right.detach()
+    prepared, _environment = _confine_rank.prepare_rank_sandbox(
+        launch.trusted,
+        workspace=opened.workspace,
+        workspace_fd=opened.workspace_fd,
+        job=opened.job,
+        job_fd=opened.job_fd,
+        shm_fd=opened.shm_fd,
+        environ={},
+        pmi_fd=pmi_fd,
+    )
+    try:
+        bind_descriptors = {
+            prepared.argv[index + 1]
+            for index, option in enumerate(prepared.argv[:-1])
+            if option in {"--bind-fd", "--ro-bind-fd", "--ro-bind-data"}
+        }
+        descriptors = {str(descriptor) for descriptor in prepared.descriptors}
+        assert bind_descriptors <= descriptors
+        assert descriptors - bind_descriptors == {str(pmi_fd)}
+        assert bind_descriptors | {str(pmi_fd)} == descriptors
+    finally:
+        prepared.close()
+        left.close()
 
 
 def test_no_environment_value_appears_in_the_rank_argv(launch: _Launch, opened: _Opened) -> None:
@@ -384,8 +417,17 @@ def test_readonly_path_inside_the_workspace_is_refused(launch: _Launch, opened: 
     launch.trusted = replace(
         launch.trusted, confine=replace(launch.trusted.confine, readonly_paths=(launch.workspace,))
     )
-    with pytest.raises(ValueError, match="inside the workspace"):
+    with pytest.raises(ValueError, match="contains or lies inside the workspace"):
         _prepare(launch, opened, {})
+
+
+def test_readonly_ancestor_of_the_workspace_is_refused(launch: _Launch, opened: _Opened) -> None:
+    alias = launch.root / "workspace-parent-alias"
+    alias.symlink_to(launch.workspace.parent, target_is_directory=True)
+    for path in (launch.workspace.parent, alias):
+        launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, readonly_paths=(path,)))
+        with pytest.raises(ValueError, match="contains or lies inside the workspace"):
+            _prepare(launch, opened, {})
 
 
 def test_read_launch_refusals(launch: _Launch) -> None:
@@ -986,7 +1028,7 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         '  if (echo data > "$target") 2>/dev/null; then echo "writable $target"; else echo "refused $target"; fi\n'
         "done\n"
         'if cat "$3/.httk-workspace/daemon/response.seed" >/dev/null 2>&1; then echo "seed readable"; '
-        'else echo "seed refused"; fi\n'
+        'else echo "seed absent"; fi\n'
         'if cat "$3/visible.txt" >/dev/null 2>&1; then echo "workspace readable"; '
         'else echo "workspace missing"; fi\n'
     )
@@ -999,8 +1041,8 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         f"refused {sibling}/x",
         f"refused {launch.workspace}/x",
         "writable /dev/shm/x",
-        "seed refused",
-        "workspace readable",
+        "seed absent",
+        "workspace missing",
     ]
     assert not (sibling / "x").exists() and not (launch.workspace / "x").exists()
     assert launch.shm.is_dir()

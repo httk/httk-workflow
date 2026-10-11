@@ -269,9 +269,13 @@ retrying.
 With `manager.confine=bwrap` the manager, which stays trusted and unconfined,
 starts each attempt inside a Bubblewrap sandbox:
 
-- the workspace is visible read-only at its real path, so cross-job reads,
-  `stage_input` and `Attempt.parent` keep working, and the attempt's own job
-  directory is writable at its real path; the job's trusted entries
+- `jobs/` and `workflows/` are visible read-only at their real paths, and
+  `.httk-workspace/format.json` is available as a read-only content snapshot.
+  This keeps cross-job reads, `stage_input`, `Attempt.parent` and installed
+  workflow reads working. The attempt's own job directory is writable at its
+  real path; other workspace paths, including the rest of `.httk-workspace/`
+  and `exchange/`, are absent, and the sandbox root is remounted read-only. The
+  job's trusted entries
   (`job.json`, `state.json`, `.httk-job/seal.json`, `logs/`) are read-only
   overlays, and the attempt cannot write the workspace root,
   `.httk-workspace/` or another job;
@@ -285,6 +289,8 @@ or code needs at run time (module trees, conda or virtual-environment prefixes,
 code binaries) must be listed in `confine.readonly_paths`. The PID namespace is
 also what makes an attempt's end provable: an unconfined attempt can leave
 processes behind. The keys and their defaults are in {doc}`launchers`.
+Entries in `confine.readonly_paths` may not contain or lie inside the workspace;
+list a narrower directory such as `/software` rather than `/home`.
 
 A manager probes Bubblewrap when it starts and refuses to start if it cannot
 build the sandbox or a confinement setting is malformed. If confinement becomes

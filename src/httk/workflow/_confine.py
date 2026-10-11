@@ -1,7 +1,8 @@
 """Attempt confinement: the ``manager.confine`` and ``confine.*`` settings and the Bubblewrap attempt sandbox.
 
 The manager is trusted and runs unconfined; with ``manager.confine=bwrap`` it starts every attempt inside
-the sandbox built here. The workspace is visible read-only at its real path and only the attempt's own job
+the sandbox built here. The sandbox exposes ``jobs/`` and ``workflows/`` read-only and
+``.httk-workspace/format.json`` as a read-only content copy at their real paths. Only the attempt's own job
 directory is writable, so ``HTTK_WORKFLOW_*_DIR`` paths stay valid inside the sandbox unchanged.
 """
 
@@ -25,14 +26,14 @@ from ._sandbox import (
     PreparedSandbox,
     check_bwrap,
     device_parent_dirs,
-    hidden_directory,
     make_inheritable,
     merged_usr_symlinks,
     open_device_nofollow,
     open_directory_nofollow,
+    open_regular_file_nofollow,
+    workspace_view,
 )
 from .errors import ConfinementUnavailableError
-from .models import DAEMON_DIRECTORY, WORKSPACE_DIRECTORY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -335,21 +336,22 @@ def _trusted_entry(job_fd: int, relative: str, directory: bool) -> int | None:
             if at != job_fd:
                 os.close(at)
             at = parent
+        if not directory:
+            try:
+                descriptor = open_regular_file_nofollow(at, name)
+            except ValueError as exc:
+                raise ValueError(f"trusted job entry {relative} is not a regular file") from exc
+            return descriptor
         try:
             descriptor = os.open(name, O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=at)
         except FileNotFoundError:
             return None
         keep_descriptor = False
         try:
-            pinned = os.fstat(descriptor)
-            if not (stat.S_ISDIR(pinned.st_mode) if directory else stat.S_ISREG(pinned.st_mode)):
-                raise ValueError(
-                    f"trusted job entry {relative} is not a {'directory' if directory else 'regular file'}"
-                )
-            if directory:
-                keep_descriptor = True
-                return descriptor
-            return os.open(f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise ValueError(f"trusted job entry {relative} is not a directory")
+            keep_descriptor = True
+            return descriptor
         finally:
             if not keep_descriptor:
                 os.close(descriptor)
@@ -382,15 +384,19 @@ def prepare_attempt_sandbox(
     """Build the Bubblewrap argument vector and descriptor set of one confined attempt.
 
     The sandbox starts from Bubblewrap's empty root with a private ``/tmp`` (and ``/tmp/home``), then binds
-    ``settings.readonly_paths`` read-only, the workspace read-only at its real path, the daemon's private
-    directory, when present, hidden under an empty tmpfs, the job directory
+    ``settings.readonly_paths`` read-only, ``jobs/`` and ``workflows/`` read-only at their real paths and
+    ``.httk-workspace/format.json`` as a read-only content copy, the job directory
     writable at its real path and its trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``
     and ``logs/``, those present) read-only over it, in that order. Files are opened (inode-pinned) at
     preparation time and copied by Bubblewrap when the sandbox starts, so an atomic manager replacement of
     ``state.json`` in between neither fails the launch nor reaches the job; ``logs/`` is a read-only directory
-    bind. A read-only path may be an ancestor of the
-    workspace (``/home`` for a workspace below it), because the later workspace and job binds overlay it. A
-    read-only path at or inside the workspace is refused. ``/proc``, a private ``/dev`` and the device binds follow. There is no
+    bind. The workspace root is an empty tmpfs that receives only those three view binds, the job bind and
+    its trusted overlays; it is remounted read-only after all mounts. This also protects workspaces below
+    ``/tmp``, where the parent directories are created in the writable ``/tmp`` mount. The rest of
+    ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is also remounted read-only last.
+    A read-only path may not contain or lie inside the workspace; list a narrower directory such as a
+    software tree rather than ``/home``.
+    ``/proc``, a private ``/dev`` and the device binds follow. There is no
     ``--new-session`` and no ``--die-with-parent``: the sandbox stays in its launcher's process group, so
     ``killpg`` reaches the sandboxed command, and an attempt survives a manager exit as unconfined ones do.
 
@@ -429,26 +435,23 @@ def prepare_attempt_sandbox(
     descriptors: list[int] = []
     try:
         resolved: list[Path] = []
-        daemon_paths = [workspace_root / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY]
         for path in settings.readonly_paths:
             try:
                 real = path.resolve(strict=True)
             except (OSError, RuntimeError) as exc:
                 raise ValueError(f"confine.readonly_paths entry is unavailable: {path}") from exc
-            if any(item.is_relative_to(workspace_root) for item in (path, real)):
-                raise ValueError(f"confine.readonly_paths entry {path} lies inside the workspace {workspace_root}")
+            if any(item.is_relative_to(workspace_root) or workspace_root.is_relative_to(item) for item in (path, real)):
+                raise ValueError(
+                    f"confine.readonly_paths entry {path} contains or lies inside the workspace {workspace_root}; "
+                    "list a narrower directory"
+                )
             descriptors.append(os.open(real, O_PATH | os.O_CLOEXEC))
             argv += ["--ro-bind-fd", str(descriptors[-1]), str(path)]
             resolved.append(real)
-            if workspace_root.is_relative_to(real):
-                alias = path / workspace_root.relative_to(real) / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
-                if alias not in daemon_paths:
-                    daemon_paths.append(alias)
         argv += merged_usr_symlinks(tuple(resolved), set(settings.readonly_paths))
-        descriptors.append(_directory_descriptor(workspace_fd, workspace_root))
-        argv += ["--ro-bind-fd", str(descriptors[-1]), str(workspace_root)]
-        # The directory holds the daemon's private signing seed and ledger, which a job must not read.
-        argv += hidden_directory(workspace_fd, f"{WORKSPACE_DIRECTORY}/{DAEMON_DIRECTORY}", daemon_paths)
+        workspace_options, workspace_descriptors = workspace_view(workspace_fd, workspace_root)
+        argv += workspace_options
+        descriptors.extend(workspace_descriptors)
         descriptors.append(_directory_descriptor(job_fd, job_path))
         argv += ["--bind-fd", str(descriptors[-1]), str(job_path)]
         # Binds apply in order, so these overlay the writable job directory. Files are opened (inode-pinned)
@@ -464,6 +467,7 @@ def prepare_attempt_sandbox(
             argv += device_parent_dirs(device, created)
             descriptors.append(open_device_nofollow(device))
             argv += ["--bind-fd", str(descriptors[-1]), str(device)]
+        argv += ["--remount-ro", str(workspace_root), "--remount-ro", "/"]
         argv += ["--chdir", str(workdir), "--"]
         make_inheritable(descriptors)
         return PreparedSandbox(argv, tuple(descriptors))

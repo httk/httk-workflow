@@ -107,7 +107,7 @@ The exchange is a directory of the workspace, `WORKSPACE/exchange/`:
 
 ```text
 WORKSPACE/
-  exchange/              the only client-mounted directory
+  exchange/              the only client-mounted directory; not visible to confined jobs
     exchange.json        workspace identity, written when the extension is enabled
     daemon.json          the daemon's public menu, written by the daemon
     status.json          exchange jobs, states and progress, written by the managers
@@ -117,7 +117,7 @@ WORKSPACE/
     outbox/              returned trees in outbox/<client job UUID>/;
                          outbox/rejected/<unique>/{<name>, reason.json}
     requests/ responses/ signed daemon actions and job actions
-  .httk-workspace/daemon/  mode 0700; hidden from confined jobs
+  .httk-workspace/daemon/  mode 0700; not visible to confined jobs
     configuration.json  operator configuration; broker read-only
     response.seed       private Ed25519 response-signing seed, mode 0600;
                          broker read-only
@@ -133,8 +133,10 @@ WORKSPACE/
   without following symlinks. It reads the rest of the host, including the
   configuration, key, pointer and snapshots, read-only, so exchange takeover
   cannot change them.
-- Confined jobs see the workspace read-only, but `.httk-workspace/daemon/` is
-  hidden beneath an empty tmpfs, so they cannot read the daemon key or ledger.
+- Confined jobs do not see `exchange/` or `.httk-workspace/daemon/`; the sandbox
+  exposes only `jobs/`, `workflows/` and a content copy of
+  `.httk-workspace/format.json` from the workspace. The rest of
+  `.httk-workspace/` is not visible.
 - Entries whose names start with `.` or that are not plain file names
   (`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`) are ignored by the trusted side.
 
@@ -170,9 +172,10 @@ clients whose output the broker parses run in the C locale.
 A manager with `manager.confine=bwrap` runs each attempt in a Bubblewrap
 sandbox with:
 
-- the workspace **read-only** at its real path, so parent outputs,
-  `stage_input`, `Attempt.parent` and other cross-job reads keep working,
-  except `.httk-workspace/daemon/`, which is hidden under an empty tmpfs;
+- `jobs/` and `workflows/` **read-only** at their real paths, plus
+  `.httk-workspace/format.json` as a read-only content snapshot, so parent
+  outputs, `stage_input`, `Attempt.parent` and installed workflow reads keep
+  working; the rest of `.httk-workspace/` and `exchange/` are absent;
 - the attempt's **job directory writable** at its real path, so every
   `HTTK_WORKFLOW_*_DIR` path is valid unchanged;
 - the paths of `confine.readonly_paths` read-only, a private `/tmp` with
@@ -185,13 +188,16 @@ sandbox with:
   `SRUN_*`, `SBATCH_*`, `SALLOC_*`, `PMI_*` and `PMIX_*` variables, with
   `HTTK_WORKFLOW_CONFINED=1`.
 
-The attempt cannot write the workspace root, `.httk-workspace/`, or any other
-job. The workflow prelude runs inside the sandbox; the launcher's
+After all mounts the sandbox root is remounted read-only. The attempt cannot
+write the workspace root, create files in the read-only `jobs/` or `workflows/`
+parents, or write another job. The workflow prelude runs inside the sandbox; the launcher's
 `environment.prelude` runs before the manager, and its environment reaches the
 attempt through the filter above. Anything a prelude or a code needs at run
 time, such as a module tree, a conda or virtual-environment prefix or code
 binaries, must therefore be listed in
-`confine.readonly_paths`. The default covers `/usr` (with the `/bin`, `/lib`,
+`confine.readonly_paths`. Entries may not contain or lie inside the workspace;
+list a narrower directory such as `/software` rather than `/home`. The default
+covers `/usr` (with the `/bin`, `/lib`,
 `/lib64` and `/sbin` links of merged-`/usr` systems), `/etc`, the manager's
 Python installation and the directories *httk* itself is imported from.
 
@@ -209,8 +215,11 @@ every other restriction above. Ranks of a confined launch always use the host
 network.
 
 Job directories never nest and are never symlinks; placement directories may
-be operator symlinks, but a job reached through a placement symlink pointing
-outside the workspace cannot be confined, and its attempt fails. See
+be operator symlinks. A job reached through a placement symlink pointing
+outside the workspace cannot be confined, and its attempt fails. A job reached
+through a placement symlink pointing elsewhere inside the workspace runs with
+its job directory bound at its real path, but does not see the other jobs of
+that placement. See
 {doc}`taskmanager` for the general confinement settings.
 
 
@@ -729,8 +738,12 @@ On every rank the trusted rank helper opens the workspace and the job
 directory without following symlinks, refusing the workspace root,
 `.httk-workspace` and nested placements, and only then enters Bubblewrap with:
 
-- the workspace read-only and the job directory writable at their real paths,
-  and the paths of `confine.readonly_paths`;
+- `jobs/` and `workflows/` read-only at their real paths,
+  `.httk-workspace/format.json` as a read-only content snapshot, the job
+  directory writable at its real path, and the paths of
+  `confine.readonly_paths`; all other workspace paths, including the rest of
+  `.httk-workspace/` and `exchange/`, are absent, and the sandbox root is
+  remounted read-only;
 - the launch's shared-memory directory at `/dev/shm`, the Slurm step's PMIx
   directory (only when it lies below `confine.pmix_roots`), and the devices of
   `confine.devices`;

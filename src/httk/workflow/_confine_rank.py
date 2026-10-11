@@ -1,9 +1,9 @@
 """Rank helper of a confined launch: the trusted program the launch template starts on every rank.
 
 Run as ``python -I -m httk.workflow._confine_rank --launch-dir T`` with ``T`` the owner's launch
-directory ``<workspace>/.httk-workspace/owners/<owner_id>/launches/<attempt_id>.<request_id>``. Jobs see
-``.httk-workspace`` read-only, so ``T/launch.json`` is trusted input; it is still read without following a
-symlink below ``.httk-workspace`` and bounded.
+directory ``<workspace>/.httk-workspace/owners/<owner_id>/launches/<attempt_id>.<request_id>``. The helper
+reads ``T/launch.json`` as trusted input without following a symlink below ``.httk-workspace`` and with a
+size bound.
 
 The helper opens the workspace and the job directory, the owner's ``jobs/owned/<owner_id>/`` entry of the
 launch's job key. It first removes every per-launch shared-memory directory on this node that no launch
@@ -52,17 +52,15 @@ from ._sandbox import (
     O_PATH,
     PreparedSandbox,
     device_parent_dirs,
-    hidden_directory,
     make_inheritable,
     merged_usr_symlinks,
     open_device_nofollow,
     open_directory_nofollow,
+    workspace_view,
 )
 from .errors import FormatError, WorkflowError
 from .models import (
-    DAEMON_DIRECTORY,
     JOBS_DIRECTORY,
-    WORKSPACE_DIRECTORY,
     check_job_placement,
     normalize_placement,
     parse_job_key,
@@ -510,9 +508,15 @@ def prepare_rank_sandbox(
     The sandbox unshares the user, PID, IPC and UTS namespaces but keeps the host network, dies with its
     helper (``--die-with-parent``) and drops all capabilities. Its environment is not in the argument
     vector, which any user can read in ``/proc/<pid>/cmdline``: Bubblewrap is started with exactly the
-    rank environment and passes it through. It binds the read-only paths, the workspace read-only and the
-    job directory writable at their real paths, a private ``/proc`` and ``/dev`` with the shared-memory
-    directory at ``/dev/shm``, the PMIx directory at its own path and the approved devices, and runs
+    rank environment and passes it through. It binds the read-only paths, ``jobs/`` and ``workflows/``
+    read-only at their real paths, ``.httk-workspace/format.json`` as a read-only content copy, and the job
+    directory writable at its real path. The workspace root is an empty tmpfs that receives only those three
+    view binds and the job bind; it is remounted read-only after all mounts. This also protects workspaces
+    below ``/tmp``, where the parent directories are created in the writable ``/tmp`` mount. The rest of
+    ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is also remounted read-only last.
+    A read-only path may not contain or lie inside the workspace; list a narrower directory such as a
+    software tree. It also binds a private ``/proc`` and ``/dev`` with the shared-memory directory at
+    ``/dev/shm``, the PMIx directory at its own path and the approved devices, and runs
     :func:`inner_command` in the job directory.
 
     :param launch: The trusted launch description.
@@ -550,23 +554,20 @@ def prepare_rank_sandbox(
     argv += ["--tmpfs", "/tmp", "--dir", "/tmp/home"]
     try:
         resolved: list[Path] = []
-        daemon_paths = [workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY]
         for path in confine.readonly_paths:
             real = _resolve(path, "confine.readonly_paths entry")
-            if any(item.is_relative_to(workspace) for item in (path, real)):
-                raise ValueError(f"confine.readonly_paths entry {path} lies inside the workspace {workspace}")
+            if any(item.is_relative_to(workspace) or workspace.is_relative_to(item) for item in (path, real)):
+                raise ValueError(
+                    f"confine.readonly_paths entry {path} contains or lies inside the workspace {workspace}; "
+                    "list a narrower directory"
+                )
             descriptors.append(os.open(real, O_PATH | os.O_CLOEXEC))
             argv += ["--ro-bind-fd", str(descriptors[-1]), str(path)]
             resolved.append(real)
-            if workspace.is_relative_to(real):
-                alias = path / workspace.relative_to(real) / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
-                if alias not in daemon_paths:
-                    daemon_paths.append(alias)
         argv += merged_usr_symlinks(tuple(resolved), set(confine.readonly_paths))
-        descriptors.append(os.dup(workspace_fd))
-        argv += ["--ro-bind-fd", str(descriptors[-1]), str(workspace)]
-        # The directory holds the daemon's private signing seed and ledger, which a job must not read.
-        argv += hidden_directory(workspace_fd, f"{WORKSPACE_DIRECTORY}/{DAEMON_DIRECTORY}", daemon_paths)
+        workspace_options, workspace_descriptors = workspace_view(workspace_fd, workspace)
+        argv += workspace_options
+        descriptors.extend(workspace_descriptors)
         descriptors.append(os.dup(job_fd))
         argv += ["--bind-fd", str(descriptors[-1]), str(job)]
         argv += ["--proc", "/proc", "--dev", "/dev"]
@@ -583,6 +584,7 @@ def prepare_rank_sandbox(
             argv += device_parent_dirs(device, created)
             descriptors.append(open_device_nofollow(device))
             argv += ["--bind-fd", str(descriptors[-1]), str(device)]
+        argv += ["--remount-ro", str(workspace), "--remount-ro", "/"]
         argv += ["--chdir", str(job), "--", *inner_command(launch, job)]
         make_inheritable(descriptors)
         return PreparedSandbox(argv, tuple(descriptors)), environment

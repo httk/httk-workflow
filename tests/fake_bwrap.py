@@ -31,6 +31,7 @@ _ARITIES = {
     "--cap-drop": 1,
     "--unsetenv": 1,
     "--tmpfs": 1,
+    "--remount-ro": 1,
     "--dir": 1,
     "--proc": 1,
     "--dev": 1,

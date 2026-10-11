@@ -10,7 +10,7 @@ import os
 import re
 import stat
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +31,7 @@ BWRAP_REQUIRED = frozenset(
         "--new-session",
         "--ro-bind-data",
         "--ro-bind-fd",
+        "--remount-ro",
         "--unshare-ipc",
         "--unshare-net",
         "--unshare-pid",
@@ -43,29 +44,82 @@ MERGED_USR_LINKS = (Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin"))
 _HELP_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
 
-def hidden_directory(directory_fd: int, relative: str, paths: Sequence[Path]) -> list[str]:
-    """Return Bubblewrap arguments that hide one directory below a bound root under empty tmpfs mounts.
+def open_regular_file_nofollow(dir_fd: int, name: str) -> int | None:
+    """Open a regular file relative to a directory without following its final symlink.
 
-    :param directory_fd: Descriptor of the bound root.
-    :param relative: The directory's path relative to the root.
-    :param paths: The directory's absolute paths inside the sandbox.
-    :return: One ``--tmpfs`` mount per path when the directory exists, else no arguments.
+    :param dir_fd: The parent directory descriptor.
+    :param name: The file name relative to the parent.
+    :return: A readable descriptor, or ``None`` when absent.
+    :raises ValueError: If the entry is not a regular file.
     """
 
     try:
-        descriptor = os.open(
-            relative,
-            O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=directory_fd,
-        )
+        descriptor = os.open(name, O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
     except FileNotFoundError:
-        return []
-    except OSError as exc:
-        if exc.errno not in (errno.ENOTDIR, errno.ELOOP):
-            raise
-        raise ValueError(f"{paths[0]} must be a real directory, not a symlink or file; confinement refused") from exc
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"{name} is not a regular file")
+        readable = os.open(f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except BaseException:
+        os.close(descriptor)
+        raise
     os.close(descriptor)
-    return [argument for path in paths for argument in ("--tmpfs", str(path))]
+    return readable
+
+
+def workspace_view(workspace_fd: int, workspace_root: Path) -> tuple[list[str], list[int]]:
+    """Open and describe the three workspace paths visible in a confined job.
+
+    :param workspace_fd: The workspace directory descriptor.
+    :param workspace_root: The workspace's real path.
+    :return: Bubblewrap options and the descriptors they name; the caller owns the descriptors.
+    :raises ValueError: If a required path is absent, a symlink or the wrong kind.
+    """
+
+    if workspace_root in (Path("/"), Path("/tmp"), Path("/tmp/home")):
+        raise ValueError(f"a confined workspace may not be rooted at {workspace_root}; confinement refused")
+
+    descriptors: list[int] = []
+    argv = ["--tmpfs", str(workspace_root)]
+    try:
+        for name in ("jobs", "workflows"):
+            path = workspace_root / name
+            try:
+                descriptor = os.open(name, O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=workspace_fd)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    raise
+                raise ValueError(f"{path} must be a real directory; confinement refused") from exc
+            descriptors.append(descriptor)
+            argv += ["--ro-bind-fd", str(descriptor), str(path)]
+
+        control_path = workspace_root / ".httk-workspace"
+        try:
+            control_fd = os.open(
+                ".httk-workspace", O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=workspace_fd
+            )
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                raise
+            raise ValueError(f"{control_path} must be a real directory; confinement refused") from exc
+        format_path = control_path / "format.json"
+        try:
+            try:
+                format_fd = open_regular_file_nofollow(control_fd, "format.json")
+            finally:
+                os.close(control_fd)
+        except ValueError as exc:
+            raise ValueError(f"{format_path} must be a regular file; confinement refused") from exc
+        if format_fd is None:
+            raise ValueError(f"{format_path} must be a regular file; confinement refused")
+        descriptors.append(format_fd)
+        argv += ["--ro-bind-data", str(format_fd), str(format_path)]
+        return argv, descriptors
+    except BaseException:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
 
 
 @dataclass(slots=True)

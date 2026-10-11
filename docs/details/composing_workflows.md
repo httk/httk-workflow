@@ -255,8 +255,10 @@ in the gathering step.
   from the workspace store and stages the child in the calling attempt's
   outcome, so the workspace root must be readable from where the step
   executes, as {py:attr}`~httk.workflow.Attempt.parent` also requires. This
-  works in a confined attempt, which sees the workspace read-only and writes
-  only its own job directory.
+  works in a confined attempt, which sees `jobs/` and `workflows/` read-only
+  and `.httk-workspace/format.json` as a read-only content snapshot, while
+  writing only its own job directory. Other workspace paths, including the
+  rest of `.httk-workspace/` and `exchange/`, are absent.
 - **Unrestricted nesting.** A called workflow is just another job, so it may
   call further workflows; the depth is not capped.
 - **Workspace and placement are inherited.** Like every spawned child, a
