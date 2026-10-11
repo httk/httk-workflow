@@ -1051,6 +1051,24 @@ def test_a_keeper_without_namespaces_of_its_own_is_refused(launch: _Launch) -> N
     assert not (launch.job / "ran").exists()
 
 
+def test_a_dead_supervisor_fails_the_generation_with_its_log(launch: _Launch) -> None:
+    python = launch.root / "bin" / "python-supervisor-dies"
+    python.write_text(
+        "#!/bin/sh\n"
+        'for argument; do [ "$argument" = "httk.workflow._confine_keeper" ] && { echo supervisor-boom >&2; exit 3; }; done\n'
+        f'exec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    launch.write(replace(launch.trusted, python=python))
+    launch.request(("true",))
+    code, stderr = _finish(_run_helper(launch, {"PMI_RANK": "0"}, wait=False))[0]
+    assert code == 2 and b"exited with status 3" in stderr and b"supervisor-boom" in stderr
+    code, stderr = _finish(_run_helper(launch, {"PMI_RANK": "1"}, wait=False))[0]
+    assert code == 2 and b"namespace keeper on this node failed" in stderr and b"supervisor-boom" in stderr
+    assert not (launch.shm / "ns" / "1").exists()
+
+
 def _prepared_generation(ns: Path, name: str, *, reader: bool) -> int | None:
     """Create a generation directory the way a leader does, holding its read end when *reader*."""
 
@@ -1088,9 +1106,10 @@ def test_a_follower_times_out_without_a_keeper_record(tmp_path: Path, monkeypatc
     monkeypatch.setattr(_confine_keeper, "KEEPER_WAIT_SECONDS", 0.2)
     ns = tmp_path / "ns"
     reader = _prepared_generation(ns, "0", reader=True)
+    (ns / "0" / _confine_keeper.SUPERVISOR_LOG).write_text("known supervisor line\n")
     ns_fd = os.open(ns, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with pytest.raises(ValueError, match="timed out waiting"):
+        with pytest.raises(ValueError, match="timed out waiting.*known supervisor line"):
             _confine_keeper.join(ns_fd, prepare=_never_start, pmix=None, python=Path(sys.executable))
     finally:
         for descriptor in (ns_fd, reader):

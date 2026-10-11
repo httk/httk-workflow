@@ -799,6 +799,8 @@ keeper that cannot start refuses every later rank of that launch on the node;
 a rank whose helper cannot enter the keeper is refused alone. Killing the
 supervisor ends every rank of the launch on that node. A rank that starts after
 all earlier ranks of its launch on the node are gone gets a fresh keeper.
+When the keeper cannot start or does not start in time, each rank's refusal on
+the launch's standard error includes the tail of the node's keeper supervisor log.
 
 Bubblewrap must not be installed setuid: the keeper's namespaces must belong
 to the job's user, so that the rank helpers can enter them.

@@ -31,6 +31,7 @@ dies by ``--die-with-parent``, and every rank dies with its own helper.
 """
 
 import argparse
+import datetime
 import errno
 import fcntl
 import json
@@ -63,6 +64,7 @@ MEMBERS = "members"
 KEEPER_FILE = "keeper.json"
 FAILED_FILE = "failed"
 CLOSING = "closing"
+SUPERVISOR_LOG = "supervisor.log"
 # The namespaces a keeper record names: the keeper's user namespace and the four its owning user namespace owns.
 _OWNED = ("mnt", "pid", "ipc", "uts")
 _RECORDED = ("user", *_OWNED)
@@ -120,6 +122,24 @@ def _read_until_eof(descriptor: int, deadline: float, what: str) -> bytes:
         data.extend(chunk)
         if len(data) > _MAX_RECORD_BYTES:
             raise ValueError(f"{what} is too large")
+
+
+def _log_tail(generation_fd: int, limit: int = 2048) -> str:
+    """Return at most *limit* bytes from the end of this generation's supervisor log."""
+
+    try:
+        descriptor = os.open(SUPERVISOR_LOG, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=generation_fd)
+    except FileNotFoundError:
+        return ""
+    try:
+        size = os.fstat(descriptor).st_size
+        return os.pread(descriptor, min(limit, size), max(0, size - limit)).decode(errors="replace")
+    finally:
+        _close(descriptor)
+
+
+def _with_log_tail(message: str, generation_fd: int) -> str:
+    return f"{message} (keeper supervisor log: {_log_tail(generation_fd)})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +234,14 @@ def namespace_identities(pid: int) -> dict[str, int]:
     return {name: os.stat(f"/proc/{pid}/ns/{name}").st_ino for name in _RECORDED}
 
 
-def start_keeper(prepared: PreparedSandbox, environment: Mapping[str, str], *, pmix: str | None) -> Keeper:
+def start_keeper(
+    prepared: PreparedSandbox,
+    environment: Mapping[str, str],
+    *,
+    pmix: str | None,
+    timeout: float = KEEPER_WAIT_SECONDS,
+    log: Callable[[str], None] | None = None,
+) -> Keeper:
     """Start a keeper sandbox and wait until its program runs inside the finished sandbox.
 
     *prepared* is consumed. The keeper's standard error is captured during start-up for failure diagnostics and
@@ -225,6 +252,8 @@ def start_keeper(prepared: PreparedSandbox, environment: Mapping[str, str], *, p
         is added here.
     :param environment: The environment Bubblewrap and the keeper program are started with.
     :param pmix: The ``PMIX_SERVER_TMPDIR`` the keeper binds, recorded so that every member must match it.
+    :param timeout: The maximum startup time, in seconds.
+    :param log: Receives supervisor startup milestones when given.
     :return: The running keeper.
     :raises ValueError: If the keeper does not start or does not become ready in time.
     :raises OSError: If Bubblewrap cannot be started.
@@ -266,11 +295,13 @@ def start_keeper(prepared: PreparedSandbox, environment: Mapping[str, str], *, p
             # The supervisor ignores SIGPIPE after closing its startup diagnostics pipe.
             restore_signals=False,
         )
+        if log is not None:
+            log(f"Bubblewrap started (pid {process.pid})")
         for descriptor in (info_write, ready_write, stderr_write):
             os.close(descriptor)
         info_write = ready_write = stderr_write = -1
         prepared.close()
-        deadline = time.monotonic() + KEEPER_WAIT_SECONDS
+        deadline = time.monotonic() + timeout
         try:
             information = _read_until_eof(info_read, deadline, "the keeper's Bubblewrap information")
             if not information:
@@ -287,12 +318,16 @@ def start_keeper(prepared: PreparedSandbox, environment: Mapping[str, str], *, p
             raise failed("Bubblewrap did not report the keeper's process") from exc
         if not isinstance(pid, int) or pid <= 0:
             raise failed("Bubblewrap reported an invalid keeper process")
+        if log is not None:
+            log(f"info received (keeper PID 1 {pid})")
         # Read one byte, not to the end: the sandbox's PID 1 keeps its copy of the keeper's standard output.
         ready, _writable, _failed = select.select([ready_read], [], [], max(0.0, deadline - time.monotonic()))
         if not ready or os.read(ready_read, 1) != b"r":
             raise failed(
                 f"the keeper sandbox did not start (Bubblewrap exit status {process.poll()}); diagnostics follow"
             )
+        if log is not None:
+            log("ready")
         drain_stderr()
         start_ticks = _death.process_identity(pid).start_ticks
         if start_ticks is None:
@@ -463,11 +498,26 @@ def _await_keeper(
     while not _exists(KEEPER_FILE, generation_fd):
         _raise_failed(generation_fd)
         if poller.poll(_POLL_MILLISECONDS):
+            if supervisor is not None and not _exists(FAILED_FILE, generation_fd):
+                try:
+                    status: int | None = supervisor.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    status = supervisor.poll()
+                message = _with_log_tail(
+                    f"the keeper supervisor exited with status {status} before starting the keeper", generation_fd
+                )
+                try:
+                    _publish(generation_fd, FAILED_FILE, message.encode()[:_MAX_RECORD_BYTES])
+                except OSError:
+                    pass
+                raise ValueError(message)
             _close(writer)
             _close(generation_fd)
             return None
         if time.monotonic() > deadline:
-            raise ValueError("timed out waiting for the launch's namespace keeper on this node")
+            raise ValueError(
+                _with_log_tail("timed out waiting for the launch's namespace keeper on this node", generation_fd)
+            )
     _raise_failed(generation_fd)
     if _exists(CLOSING, generation_fd):
         _close(writer)
@@ -480,7 +530,7 @@ def _await_keeper(
 
 
 def _start_supervisor(
-    generation_fd: int, reader: int, prepared: PreparedSandbox, *, pmix: str | None, python: Path
+    generation_fd: int, reader: int, prepared: PreparedSandbox, *, pmix: str | None, python: Path, stderr: int
 ) -> subprocess.Popen[bytes]:
     """Start the detached keeper owner with the descriptors its Bubblewrap command names."""
 
@@ -503,7 +553,7 @@ def _start_supervisor(
         env=_SANDBOX_ENVIRONMENT,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr,
         pass_fds=(generation_fd, reader, *prepared.descriptors),
     )
 
@@ -520,7 +570,7 @@ def _lead(
 
     prepared = f".{secrets.token_hex(8)}"
     os.mkdir(prepared, 0o700, dir_fd=ns_fd)
-    reader = writer = generation_fd = -1
+    reader = writer = generation_fd = log = -1
     try:
         generation_fd = os.open(prepared, _DIRECTORY_FLAGS, dir_fd=ns_fd)
         os.mkfifo(MEMBERS, 0o600, dir_fd=generation_fd)
@@ -544,8 +594,16 @@ def _lead(
         raise
     prepared_sandbox: PreparedSandbox | None = None
     try:
+        log = os.open(
+            SUPERVISOR_LOG,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=generation_fd,
+        )
         prepared_sandbox = prepare()
-        supervisor = _start_supervisor(generation_fd, reader, prepared_sandbox, pmix=pmix, python=python)
+        supervisor = _start_supervisor(generation_fd, reader, prepared_sandbox, pmix=pmix, python=python, stderr=log)
+        _close(log)
+        log = -1
     except BaseException as exc:
         try:
             _publish(generation_fd, FAILED_FILE, str(exc).encode()[:_MAX_RECORD_BYTES])
@@ -553,7 +611,7 @@ def _lead(
             pass
         if prepared_sandbox is not None:
             prepared_sandbox.close()
-        for descriptor in (reader, writer, generation_fd):
+        for descriptor in (log, reader, writer, generation_fd):
             _close(descriptor)
         raise
     prepared_sandbox.close()
@@ -570,7 +628,7 @@ def _lead(
 def _raise_failed(generation_fd: int) -> None:
     if _exists(FAILED_FILE, generation_fd):
         reason = read_bounded(generation_fd, FAILED_FILE, _MAX_RECORD_BYTES).decode(errors="replace")
-        raise ValueError(f"the launch's namespace keeper on this node failed: {reason}")
+        raise ValueError(_with_log_tail(f"the launch's namespace keeper on this node failed: {reason}", generation_fd))
 
 
 def _follow(ns_fd: int, generation: str, pmix: str | None, deadline: float) -> Membership | None:
@@ -642,15 +700,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("expected a keeper Bubblewrap command after --")
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
+
+    def log(message: str) -> None:
+        timestamp = datetime.datetime.now(datetime.UTC).isoformat()
+        print(f"httk-workflow keeper: {timestamp} {message}", file=sys.stderr, flush=True)
+
     keeper: Keeper | None = None
     try:
         try:
-            keeper = start_keeper(PreparedSandbox(command, tuple(parsed.bind_fd)), os.environ, pmix=parsed.pmix)
+            log(f"start (pid {os.getpid()}, Bubblewrap {command[0]})")
+            keeper = start_keeper(
+                PreparedSandbox(command, tuple(parsed.bind_fd)),
+                os.environ,
+                pmix=parsed.pmix,
+                timeout=KEEPER_WAIT_SECONDS / 2,
+                log=log,
+            )
             for name, identity in keeper.record.namespaces.items():
                 if os.stat(f"/proc/self/ns/{name}").st_ino == identity:
                     raise ValueError(f"the keeper shares the supervisor's {name} namespace; confinement refused")
             _publish(parsed.generation_fd, KEEPER_FILE, keeper.record.encode())
+            log("namespaces verified and record published")
         except (OSError, ValueError) as exc:
+            log(f"start failure: {exc}")
             try:
                 _publish(parsed.generation_fd, FAILED_FILE, str(exc).encode()[:_MAX_RECORD_BYTES])
             except OSError:
@@ -659,11 +731,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         poller = select.poll()
         poller.register(parsed.members_fd, select.POLLIN)
         _wait_hangup(poller)
+        log("members gone")
         try:
             os.mkdir(CLOSING, 0o700, dir_fd=parsed.generation_fd)
         finally:
             _wait_hangup(poller)
         keeper.stop()
+        log("keeper stopped")
         return 0
     finally:
         if keeper is not None and keeper.process.poll() is None:
