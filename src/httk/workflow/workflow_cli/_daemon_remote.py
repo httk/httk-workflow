@@ -74,12 +74,10 @@ def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLICo
     return 0
 
 
-def _request_id(value: str | None, *, required: bool) -> str:
-    """Return a supplied request ID or generate one for a read-only request."""
+def _request_id(value: str | None) -> str:
+    """Return a supplied request ID, or generate a fresh one."""
 
     if value is None:
-        if required:
-            raise ValueError("--request-id is required for this daemon operation")
         return uuid.uuid4().hex
     if len(value) != 32 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError("request ID must be 32 lowercase hexadecimal digits")
@@ -187,7 +185,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         if configuration_digest is None:
             available = ", ".join(sorted(configurations)) or "(none)"
             raise ValueError(f"unknown approved daemon configuration {configuration!r}; available: {available}")
-    request_id = _request_id(arguments.request_id, required=verb in {"start", "cancel"})
+    request_id = _request_id(arguments.request_id)
     intent = Request(
         request_id,
         endpoint.workspace_id,
@@ -223,7 +221,12 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
         print(
             f"daemon request {request.request_id} has no acknowledged result: {exc}. "
-            "If retrying, reuse this request ID with identical fields; do not create a new ID.",
+            "It may still be queued in the exchange and be applied when the daemon picks it up, "
+            "until the request expires. Check with "
+            f"`{context.program} remote daemon status {arguments.remote}`. "
+            f"To keep waiting for this request, rerun with identical fields and --request-id {request.request_id}; "
+            "rerunning without it sends a new request"
+            + (" and may start another manager." if verb == "start" else "."),
             file=sys.stderr,
         )
         return 2
@@ -305,12 +308,16 @@ def build_daemon_remote_parser(
                 help="approved manager configuration",
             )
             parser.add_argument(
-                "--request-id", required=True, metavar="ID", help="32 lowercase hexadecimal request ID; reuse on retry"
+                "--request-id",
+                metavar="ID",
+                help="32 lowercase hexadecimal request ID (default: generated); reuse one to keep waiting for a request",
             )
         elif verb == "cancel":
             parser.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
             parser.add_argument(
-                "--request-id", required=True, metavar="ID", help="32 lowercase hexadecimal request ID; reuse on retry"
+                "--request-id",
+                metavar="ID",
+                help="32 lowercase hexadecimal request ID (default: generated); reuse one to keep waiting for a request",
             )
         elif verb == "status":
             parser.add_argument(

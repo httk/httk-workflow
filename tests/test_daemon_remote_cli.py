@@ -387,8 +387,9 @@ def test_parser_exposes_only_typed_daemon_controls(project: Path) -> None:
     )
     assert parsed.daemon_verb == "start"
     assert parsed.request_id == "a" * 32
+    assert parser.parse_args(["remote", "daemon", "start", "cluster", "--configuration", "serial"]).request_id is None
     with pytest.raises(SystemExit):
-        parser.parse_args(["remote", "daemon", "start", "cluster", "--configuration", "serial"])
+        parser.parse_args(["remote", "daemon", "start", "cluster"])
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "daemon", "start", "cluster", "--profile", "serial", "--request-id", "a" * 32])
     with pytest.raises(SystemExit):
@@ -535,8 +536,33 @@ def test_adapter_failure_preserves_request_id_retry_guidance(project: Path, monk
     )
     assert code == 2
     assert stdout == ""
-    assert request_id in stderr
-    assert "reuse this request ID with identical fields" in stderr
+    assert f"--request-id {request_id}" in stderr
+    assert "may still be queued" in stderr and "remote daemon status cluster" in stderr
+    assert "may start another manager" in stderr
+
+
+@pytest.mark.parametrize(
+    "verb_args",
+    [["start", "cluster", "--configuration", "serial"], ["cancel", "cluster", "--handle", "2" * 32]],
+)
+def test_omitted_request_id_is_generated_and_announced_for_retry(
+    project: Path, monkeypatch: pytest.MonkeyPatch, verb_args: list[str]
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    seen: list[str] = []
+
+    def failed(_bundle, _operation, payload, *, timeout):
+        seen.append(payload["daemon_request"]["request_id"])
+        raise TimeoutError("late")
+
+    monkeypatch.setattr(cli, "run_adapter", failed)
+    code, stdout, stderr = _invoke(project, verb_args)
+    assert code == 2 and stdout == ""
+    assert len(seen) == 1 and uuid.UUID(hex=seen[0]).hex == seen[0]
+    assert f"daemon request ID: {seen[0]}" in stderr
+    assert f"--request-id {seen[0]}" in stderr
+    assert ("may start another manager" in stderr) == (verb_args[0] == "start")
 
 
 def test_random_read_request_id_is_canonical(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -577,7 +603,7 @@ def test_cli_rejects_mismatched_response_identity(project: Path, monkeypatch: py
     assert code == 2
     assert stdout == ""
     assert "has no acknowledged result" in stderr
-    assert "reuse this request ID with identical fields" in stderr
+    assert "rerun with identical fields and --request-id" in stderr
 
 
 def _passive(project: Path) -> tuple[dict[str, object], Path]:

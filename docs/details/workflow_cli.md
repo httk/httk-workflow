@@ -735,9 +735,9 @@ remote meaning "this machine", so `remote add local` is refused.
 | `remote remove NAME...` | remove remote bundles; refused while a registered workspace holds a transfer bound for the remote | `--force` skips only the confirmation |
 | `remote daemon configure REMOTE` | pin the identities in the mounted `exchange.json` and `daemon.json` | required `--exchange` |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
-| `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`, `--request-id`; `--wait-seconds` |
+| `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`; `--request-id`, `--wait-seconds` |
 | `remote daemon status REMOTE` | print the passive `status.json` and `managers.json`, or with `--handle` inspect a manager by signed request | `--handle`, `--request-id`, `--wait-seconds` |
-| `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`, `--request-id`; `--wait-seconds` |
+| `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`; `--request-id`, `--wait-seconds` |
 | `remote daemon log REMOTE` | print a manager's published log | required `--handle` |
 | `remote daemon take-back REMOTE NAME [DESTINATION]` | take your bundle back from `inbox` before a manager takes it | `DESTINATION` defaults to `./NAME` |
 

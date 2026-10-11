@@ -286,11 +286,10 @@ Jobs move through the exchange with the ordinary `job eject` and `job adopt`:
 
 ```console
 $ httk job eject JOB /mnt/cluster/exchange/inbox
-$ python -c 'import secrets; print(secrets.token_hex(16))'
-$ httk remote daemon start confined --configuration small --request-id REQUEST_ID
+$ httk remote daemon start confined --configuration small
 $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
-$ httk remote daemon cancel confined --handle MANAGER_HANDLE --request-id ANOTHER_REQUEST_ID
+$ httk remote daemon cancel confined --handle MANAGER_HANDLE
 $ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
@@ -321,14 +320,20 @@ lifecycle, rejected bundles, `status.json` and signed job control.
 
 ### Request ids and retries
 
-Replace `REQUEST_ID` and `ANOTHER_REQUEST_ID` with separately generated
-32-character lowercase hexadecimal ids, and keep them. Start and cancel
-require an explicit id; health and status generate one unless supplied. Each call prints
-its id to stderr before dispatch and a validated JSON response to stdout.
+Each call generates a fresh 32-character lowercase hexadecimal request id
+unless `--request-id ID` supplies one, prints it to stderr before dispatch, and
+prints a validated JSON response to stdout.
 
-- After a timeout, retry with **the same id and identical fields**. Never retry
-  an uncertain submission with a new id; reconcile it with the operator.
-- Use a fresh id for each status refresh.
+A call that exits without an acknowledged result has not necessarily failed: the
+request may still be queued in the exchange, and the daemon applies it when it
+picks it up, until the request expires. The error message names the id.
+
+- To keep waiting for that request, rerun with **`--request-id ID` and
+  identical fields**. Rerunning `start` without it sends a new request and may
+  start a second manager; check `httk remote daemon status confined` first.
+- Never retry an uncertain submission with a new id; reconcile it with the
+  operator.
+- Use a fresh id (the default) for each status refresh.
 - The client stores the exact signed requests in its local httk data directory
   before publication. Retries reuse their original timestamps and signatures;
   changing the intent, signer or endpoint pin under an existing id is refused.
