@@ -40,11 +40,16 @@ def _write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
 def _layout(
     tmp_path: Path, help_options: tuple[str, ...] = REQUIRED_BWRAP_OPTIONS
 ) -> tuple[Path, dict[str, Any], Path]:
-    roots = {name: tmp_path / name for name in ("site/workspace", "state", "runtime", "broker")}
+    roots = {name: tmp_path / name for name in ("site/workspace", "runtime", "broker")}
+    roots["daemon"] = roots["site/workspace"] / ".httk-workspace" / "daemon"
+    roots["daemon_broker"] = roots["daemon"] / "broker"
     for directory in (
         roots["site/workspace"] / "exchange/requests",
         roots["site/workspace"] / "exchange/responses",
-        roots["state"],
+        roots["daemon"],
+        roots["daemon"] / "snapshots",
+        roots["daemon"] / "jobs",
+        roots["daemon_broker"],
         roots["runtime"],
         roots["broker"],
     ):
@@ -71,12 +76,10 @@ def _layout(
         _write_executable(roots["broker"] / name)
     policy: dict[str, Any] = {
         "format": "httk-workspace-daemon-policy",
-        "format_version": 5,
+        "format_version": 6,
         "workspace": str(roots["site/workspace"]),
         "workspace_id": str(uuid.uuid4()),
         "enrollment_id": "1" * 32,
-        "state": str(roots["state"]),
-        "snapshots": str(tmp_path / "snapshots"),
         "bwrap": str(bwrap),
         "python": str(python),
         "sbatch": str(roots["broker"] / "sbatch"),
@@ -273,14 +276,17 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         *("--tmpfs", "/tmp"),
         "--dir",
     ]
-    assert argv.count("--ro-bind") == 1 and "--ro-bind-fd" not in argv
+    assert argv.count("--ro-bind") == 1
     assert all(argv[index + 1].startswith("/tmp/") for index, item in enumerate(argv) if item == "--dir")
     assert not {"/workspace", "/run", "/daemon-root", "/tmp/daemon-root", "/control", "/daemon-policy.json"} & set(argv)
     assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/tmp/daemon-policy.json"]
+    readonly = _pairs(argv, "--ro-bind-fd")
+    assert [destination for _, destination in readonly] == ["/tmp/daemon"]
     assert "POISON" not in observed["env"]
     assert str(leak) not in observed["fds"].values()
     writable = _pairs(argv, "--bind-fd")
-    # Exactly two writable binds: the workspace's exchange (not its parent, not the workspace) and the state.
+    assert not {"state", "snapshots"} & set(policy)
+    # Exactly two writable binds: the workspace's exchange and the broker directory.
     assert sorted(destination for _, destination in writable) == ["/tmp/control", "/tmp/daemon-exchange"]
     exchange_fd = next(source for source, destination in writable if destination == "/tmp/daemon-exchange")
     assert observed["fds"][exchange_fd] == str(Path(policy["workspace"]) / "exchange")
@@ -288,8 +294,10 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         str(tmp_path / "site") not in observed["fds"].values() and policy["workspace"] not in observed["fds"].values()
     )
     assert "--bind" not in argv
-    state_fd = next(source for source, destination in writable if destination == "/tmp/control")
-    assert observed["fds"][state_fd] == policy["state"]
+    broker_fd = next(source for source, destination in writable if destination == "/tmp/control")
+    assert observed["fds"][broker_fd] == str(Path(policy["workspace"]) / ".httk-workspace/daemon/broker")
+    daemon_fd = readonly[0][0]
+    assert observed["fds"][daemon_fd] == str(Path(policy["workspace"]) / ".httk-workspace/daemon")
     separator = argv.index("--")
     assert argv[separator + 1 :] == [
         policy["python"],
@@ -321,7 +329,7 @@ def test_broker_commands_keep_ownership_checks(tmp_path: Path, monkeypatch: pyte
     api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
     _, policy, _ = _layout(tmp_path)
     sbatch = Path(policy["sbatch"])
-    mutable = (Path(policy["state"]), Path(policy["workspace"]))
+    mutable = (Path(policy["workspace"]),)
     # The broker sees the Slurm clients through its read-only host view, so only ownership and roots matter.
     api["_check_command"](sbatch, mutable)
     if defect == "world_writable":
@@ -329,16 +337,32 @@ def test_broker_commands_keep_ownership_checks(tmp_path: Path, monkeypatch: pyte
     elif defect == "foreign_owner":
         monkeypatch.setattr(api["os"], "geteuid", lambda: sbatch.stat().st_uid + 1)
     else:
-        sbatch = Path(policy["state"]) / "sbatch"
+        sbatch = Path(policy["workspace"]) / ".httk-workspace/daemon/broker/sbatch"
         _write_executable(sbatch)
     with pytest.raises(ValueError, match="unprotected ownership or mode|across a mutable root"):
         api["_check_command"](sbatch, mutable)
 
 
-@pytest.mark.parametrize("mode", ["workspace", "exchange", "state"])
+def test_mutable_root_resolves_workspace_symlinks(tmp_path: Path) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    real_parent = tmp_path / "real-parent"
+    workspace = real_parent / "workspace"
+    workspace.mkdir(parents=True)
+    command = workspace / "sbatch"
+    _write_executable(command)
+    alias_parent = tmp_path / "alias-parent"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    policy = SimpleNamespace(workspace=alias_parent / "workspace")
+
+    roots = api["_mutable_roots"](policy)
+    with pytest.raises(ValueError, match="mutable root"):
+        api["_check_command"](alias_parent / "workspace" / "sbatch", roots)
+
+
+@pytest.mark.parametrize("mode", ["workspace", "exchange"])
 def test_mutable_root_symlink_is_refused(tmp_path: Path, mode: str) -> None:
     policy_path, policy, record = _layout(tmp_path)
-    original = Path(policy["workspace"]) / "exchange" if mode == "exchange" else Path(policy[mode])
+    original = Path(policy["workspace"]) if mode == "workspace" else Path(policy["workspace"]) / "exchange"
     target = tmp_path / f"{mode}-target"
     original.rename(target)
     original.symlink_to(target, target_is_directory=True)
@@ -356,27 +380,6 @@ def test_a_missing_exchange_is_refused_with_the_way_to_create_it(tmp_path: Path)
     result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--once"])
     assert result.returncode == 2
     assert "httk workspace exchange enable" in result.stderr
-    assert not record.exists()
-
-
-@pytest.mark.parametrize("name", ["state", "snapshots"])
-@pytest.mark.parametrize("inside", ["exchange", "."])
-def test_private_paths_inside_the_workspace_are_refused_on_every_entry(tmp_path: Path, name: str, inside: str) -> None:
-    policy_path, policy, record = _layout(tmp_path)
-    arguments = ["--workspace", str(policy["workspace"]), "--once"]
-    workspace = Path(policy["workspace"])
-    # Spelled inside the workspace: the policy itself is refused.
-    document = {**policy, name: str(workspace / inside / "private")}
-    _rewrite_policy(policy_path, document)
-    assert _run(tmp_path, policy_path, arguments).returncode == 2
-    assert not record.exists()
-    # Spelled outside, resolving inside through a symlink: refused at bootstrap, after the policy loads.
-    (workspace / inside / "private").mkdir(exist_ok=True)
-    (tmp_path / "link").symlink_to(workspace / inside / "private")
-    _rewrite_policy(policy_path, {**policy, name: str(tmp_path / "link" / "inner")})
-    result = _run(tmp_path, policy_path, arguments)
-    assert result.returncode == 2
-    assert "overlaps the workspace" in result.stderr
     assert not record.exists()
 
 

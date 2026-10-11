@@ -4,7 +4,6 @@ import base64
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -108,8 +107,6 @@ def _initialize(
     *names: str,
     changes: list[tuple[str, str]] | None = None,
     broker: list[tuple[str, str]] | None = None,
-    state: Path | None = None,
-    snapshots: Path | None = None,
 ) -> Path:
     added = [("add", f"launchers={name}") for name in names or ("small", "large")]
     return _daemon_setup.initialize(
@@ -120,13 +117,11 @@ def _initialize(
             ("add", f"authorized_keys={AUTHORIZED_KEY}"),
             *(changes or []),
         ],
-        state=state,
-        snapshots=snapshots,
     )
 
 
 def _state(layout: Layout) -> Path:
-    return _daemon_setup._state_default(layout.workspace.root)
+    return layout.workspace.root / ".httk-workspace" / "daemon"
 
 
 def _active(layout: Layout, state: Path | None = None) -> Path:
@@ -150,8 +145,14 @@ def _bundle_digest(name: str) -> str:
     return hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(tmp_path: Path) -> None:
+def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     layout = _layout(tmp_path)
+    data_home = tmp_path / "httk-data"
+    data_home.mkdir()
+    monkeypatch.setattr("httk.core.userdirs.data_home", lambda: data_home)
+    control_mode = (layout.workspace.root / ".httk-workspace").stat().st_mode & 0o777
     snapshot = _initialize(layout)
     policy = load_policy(snapshot)
     assert dict(policy.launcher("small").settings) == {**CONFINED, "slurm.partition": "short", "manager.workers": "3"}
@@ -159,8 +160,9 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(tm
     assert [launcher.name for launcher in policy.launchers] == ["large", "small"]
     assert [launcher.digest for launcher in policy.launchers] == [_bundle_digest("large"), _bundle_digest("small")]
     assert policy.exchange == layout.exchange == layout.workspace.root / "exchange"
-    assert policy.state == _state(layout) and policy.state.parent.name == "workspace-daemons"
-    assert policy.snapshots == policy.state.with_name(policy.state.name + ".snapshots") == snapshot.parent
+    assert policy.daemon == _state(layout)
+    assert policy.snapshots == policy.daemon / "snapshots" == snapshot.parent
+    assert policy.broker == policy.daemon / "broker"
     assert policy.authorized_keys == (AUTHORIZED_KEY,)
     assert (policy.bwrap, policy.sbatch, policy.cluster) == (
         layout.runtime / "bwrap",
@@ -169,9 +171,16 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(tm
     )
     assert policy.max_submissions == 128
     assert policy.python.is_relative_to(Path(sys.prefix).resolve())
-    for directory in (policy.state, policy.snapshots, policy.jobs):
+    for directory in (policy.daemon, policy.snapshots, policy.jobs, policy.broker):
         assert directory.stat().st_mode & 0o777 == 0o700
-    assert policy.jobs == policy.snapshots / "jobs"
+    assert policy.jobs == policy.daemon / "jobs"
+    assert (policy.daemon / "broker/ledger").is_dir()
+    assert (policy.daemon / "active.json").is_file()
+    assert (policy.daemon / "configuration.json").is_file()
+    assert snapshot.is_file()
+    assert response_seed_path(policy.daemon).stat().st_mode & 0o777 == 0o600
+    assert list(data_home.iterdir()) == []
+    assert (layout.workspace.root / ".httk-workspace").stat().st_mode & 0o777 == control_mode
     for name in ("requests", "responses", "inbox", "outbox", "outbox/rejected", "managers"):
         assert (layout.exchange / name).is_dir()
     # Setup enables the extension: every manager on the workspace must then be confined. No marker, no staging.
@@ -188,12 +197,12 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(tm
         "format_version": 1,
         "workspace_id": layout.workspace.workspace_id,
         "enrollment_id": policy.enrollment_id,
-        "daemon_public_key": response_public_key(response_seed_path(policy.state)),
+        "daemon_public_key": response_public_key(response_seed_path(policy.daemon)),
         "configurations": {name: policy.configuration_digest(name) for name in ("small", "large")},
         "request_max_age": 3600,
     }
     assert _active(layout) == snapshot
-    configuration = _state(layout) / "configuration.json"
+    configuration = policy.daemon / "configuration.json"
     assert configuration.stat().st_mode & 0o777 == 0o600
     assert _stored_configuration(layout) == {
         "format": "httk-workspace-daemon-configuration",
@@ -210,6 +219,8 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(tm
         "max_submissions": 128,
         "force": False,
     }
+    with pytest.raises(ValueError, match=f"daemon directory already exists: {policy.daemon}"):
+        _initialize(layout, "small")
 
 
 def test_bundle_edits_take_effect_at_the_next_activation_without_another_command(tmp_path: Path) -> None:
@@ -429,45 +440,6 @@ def test_old_daemon_flags_are_gone(tmp_path: Path, capsys: pytest.CaptureFixture
         assert "error:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("change", "message"),
-    [
-        ("state_inside", "must be disjoint from state"),
-        ("state_in_exchange", "must be disjoint from state"),
-        ("snapshots_inside", "must be disjoint from snapshots"),
-        ("state_symlink", "daemon state .* overlaps the workspace"),
-        ("snapshots_symlink", "daemon snapshots .* overlaps the workspace"),
-        ("data_home", "must be disjoint from the httk data home"),
-    ],
-)
-def test_state_and_snapshots_inside_the_workspace_are_refused_before_any_artifact(
-    change: str, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    layout = _layout(tmp_path)
-    workspace = layout.workspace.root
-    options: dict[str, Path] = {}
-    if change == "state_inside":
-        options["state"] = workspace / "state"
-    elif change == "state_in_exchange":
-        options["state"] = workspace / "exchange" / "state"
-    elif change == "snapshots_inside":
-        options["state"] = tmp_path / "state"
-        options["snapshots"] = workspace / "snapshots"
-    elif change in ("state_symlink", "snapshots_symlink"):
-        (workspace / "inner").mkdir()
-        (tmp_path / "alias").symlink_to(workspace / "inner")
-        options["state" if change == "state_symlink" else "snapshots"] = tmp_path / "alias" / "private"
-        if change == "snapshots_symlink":
-            options["state"] = tmp_path / "state"
-    else:
-        monkeypatch.setattr(_daemon_setup, "data_home", lambda: workspace / "home")
-        options["state"] = tmp_path / "state"
-    with pytest.raises(ValueError, match=message):
-        _initialize(layout, "small", state=options.get("state"), snapshots=options.get("snapshots"))
-    assert not _state(layout).exists() and not (tmp_path / "state").exists()
-    assert not layout.exchange.exists() and "exchange" not in Workspace(workspace).extensions
-
-
 def test_initialize_enables_the_exchange_without_a_dedicated_parent_or_staging(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     reports: list[str] = []
@@ -682,7 +654,7 @@ def _broker(policy: Policy, snapshot: Path, stack: ExitStack) -> Broker:
 
     ledger = stack.enter_context(
         Ledger(
-            policy.state,
+            policy.broker,
             policy.workspace_id,
             policy.enrollment_id,
             max_records=policy.max_records,
@@ -695,8 +667,8 @@ def _broker(policy: Policy, snapshot: Path, stack: ExitStack) -> Broker:
         ledger,
         stack.enter_context(MailboxDirectory(policy.requests)),
         stack.enter_context(MailboxDirectory(policy.responses)),
-        response_seed=response_seed_path(policy.state),
-        activation=_daemon_service._activation_check(policy.state, snapshot, policy),
+        response_seed=response_seed_path(policy.daemon),
+        activation=_daemon_service._activation_check(policy.daemon, snapshot, policy),
     )
 
 
@@ -777,7 +749,7 @@ def test_activation_retires_running_daemons_at_their_next_admission_or_decision(
 def test_activation_refuses_an_sqlite_ledger_with_the_way_forward(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     snapshot = _initialize(layout)
-    (_state(layout) / "ledger.sqlite3").write_bytes(b"SQLite format 3\x00")
+    (_state(layout) / "broker" / "ledger.sqlite3").write_bytes(b"SQLite format 3\x00")
     with pytest.raises(LedgerError, match=r"no migration.*daemon init"):
         _activate(layout)
     assert _active(layout) == snapshot
@@ -801,8 +773,6 @@ def test_configure_accepts_slurm_client_changes_but_refuses_fixed_connection_cha
     assert (changed.sbatch, changed.python, changed.max_submissions) == (other / "sbatch", other / "python3", 3)
     assert changed.squeue == first.squeue
     assert changed.configuration_digest("small") != first.configuration_digest("small")
-    with pytest.raises(ValueError, match="snapshots"):
-        _activate(layout, snapshots=tmp_path / "elsewhere")
     for key in ("cluster", "scontrol"):
         with pytest.raises(ValueError, match=f"{key} is fixed by the enrollment; .*new enrollment"):
             _configure(layout, ("set", f"{key}=another-cluster"))
@@ -843,22 +813,22 @@ def test_show_prints_the_enrollment_and_the_configuration(tmp_path: Path, capsys
     workspace = str(layout.workspace.root)
     assert _daemon_cli.command(["show", workspace], program="httk") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[:7] == [
+    assert lines[:6] == [
         f"workspace: {layout.workspace.root}",
         f"workspace_id: {policy.workspace_id}",
         f"enrollment_id: {policy.enrollment_id}",
         f"exchange: {layout.exchange}",
-        f"state: {policy.state}",
-        f"snapshots: {policy.snapshots}",
+        f"daemon: {policy.daemon}",
         "cluster: test-cluster",
     ]
-    assert lines[7:9] == ["launchers=small,large", f"authorized_keys={AUTHORIZED_KEY}"]
+    assert lines[6:8] == ["launchers=small,large", f"authorized_keys={AUTHORIZED_KEY}"]
     assert lines[-4:] == ["sacct=", "slurm_conf=", "max_submissions=128", "force=false"]
     assert _daemon_cli.command(["show", workspace, "--json"], program="httk") == 0
     document = json.loads(capsys.readouterr().out)
     assert document == _daemon_setup.describe(layout.workspace.root)
     assert document["configuration"]["launchers"] == ["small", "large"]
     assert document["configuration"]["force"] is False and document["configuration"]["sacct"] is None
+    assert "state" not in document and "snapshots" not in document
 
 
 def test_configure_through_the_cli_prints_the_configuration_and_when_it_applies(
@@ -951,19 +921,6 @@ def test_unset_broker_tools_are_discovered_on_the_path(tmp_path: Path, monkeypat
     )
 
 
-def test_a_custom_state_must_be_repeated_and_custom_snapshots_are_remembered(tmp_path: Path) -> None:
-    layout = _layout(tmp_path)
-    state, snapshots = tmp_path / "custom-state", tmp_path / "custom-snapshots"
-    snapshot = _initialize(layout, "small", state=state, snapshots=snapshots)
-    assert snapshot.parent == snapshots
-    assert _daemon_setup.activate(layout.workspace.root, state=state, snapshots=snapshots) == (snapshot, None)
-    assert _daemon_setup.activate(layout.workspace.root, state=state) == (snapshot, None)
-    with pytest.raises(FileNotFoundError):
-        _activate(layout)
-    with pytest.raises(ValueError, match="keeps its snapshots"):
-        _activate(layout, state=state, snapshots=tmp_path / "other")
-
-
 def test_duplicate_and_oversized_launcher_metadata_are_bounded(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     metadata = _metadata_path("small")
@@ -989,7 +946,6 @@ def test_exact_runtime_policy_size_limit_round_trips_without_an_extra_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = _layout(tmp_path)
-    state = _state(layout)
     configuration = _daemon_setup._Configuration(
         launchers=("small",),
         authorized_keys=(AUTHORIZED_KEY,),
@@ -1005,8 +961,6 @@ def test_exact_runtime_policy_size_limit_round_trips_without_an_extra_byte(
     )
     compiled: Policy = _daemon_setup._compile(
         layout.workspace.root,
-        state,
-        state.with_name(state.name + ".snapshots"),
         "0" * 32,
         "test-cluster",
         configuration,
@@ -1029,11 +983,11 @@ def test_partial_initialization_is_preserved_and_never_retried(tmp_path: Path, m
     with pytest.raises(OSError, match="injected"):
         _initialize(layout, "small")
     state = _state(layout)
-    assert (state / "ledger" / "format").is_file()
+    assert (state / "broker" / "ledger" / "format").is_file()
     assert (state / "response.seed").is_file()
     assert not (state / "active.json").exists()
     assert not (layout.exchange / "daemon.json").exists()
-    with pytest.raises(ValueError, match="daemon state already exists"):
+    with pytest.raises(ValueError, match="daemon directory already exists"):
         _initialize(layout, "small")
 
 
@@ -1086,18 +1040,6 @@ def test_activation_snapshot_failure_keeps_old_active_and_retry_recovers(
     assert dict(load_policy(new_snapshot).launcher("small").settings)["slurm.cpus_per_task"] == "16"
 
 
-def test_world_writable_ancestry_is_refused_without_artifacts_and_group_writable_accepted(tmp_path: Path) -> None:
-    layout = _layout(tmp_path)
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    shared.chmod(0o777)
-    with pytest.raises(ValueError, match="world-writable"):
-        _initialize(layout, "small", state=shared / "state")
-    assert not layout.exchange.exists() and not (shared / "state").exists()
-    shared.chmod(0o770)
-    _initialize(layout, "small", state=shared / "state")
-
-
 def test_at_least_one_launcher_and_key_are_required(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     launcher, key = ("add", "launchers=small"), ("add", f"authorized_keys={AUTHORIZED_KEY}")
@@ -1112,14 +1054,12 @@ def test_at_least_one_launcher_and_key_are_required(tmp_path: Path) -> None:
     assert not _state(layout).exists()
 
 
-def test_leftover_state_is_refused_before_the_exchange_is_touched(tmp_path: Path) -> None:
+def test_leftover_daemon_directory_is_refused_before_the_exchange_is_touched(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _state(layout).mkdir(parents=True)
-    with pytest.raises(ValueError, match="daemon state already exists: .*different --state"):
+    with pytest.raises(ValueError, match=f"daemon directory already exists: {_state(layout)}"):
         _initialize(layout, "small")
     assert not layout.exchange.exists()
-    fresh = tmp_path / "fresh-state"
-    assert load_policy(_initialize(layout, "small", state=fresh)).state == fresh
 
 
 def test_max_submissions_flows_into_the_policy_and_the_ledger_quota(tmp_path: Path) -> None:
@@ -1128,7 +1068,7 @@ def test_max_submissions_flows_into_the_policy_and_the_ledger_quota(tmp_path: Pa
     assert policy.max_submissions == 2
     digest = policy.configuration_digest("small")
     with Ledger(
-        policy.state,
+        policy.broker,
         policy.workspace_id,
         policy.enrollment_id,
         max_records=policy.max_records,
@@ -1158,8 +1098,8 @@ def test_max_submissions_flows_into_the_policy_and_the_ledger_quota(tmp_path: Pa
             )
 
 
-@pytest.mark.parametrize("problem", ["world_writable", "inside_state"])
-def test_launcher_bundle_must_be_protected_and_outside_daemon_roots(
+@pytest.mark.parametrize("problem", ["world_writable", "inside_workspace"])
+def test_launcher_bundle_must_be_protected_and_outside_workspace(
     problem: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = _layout(tmp_path)
@@ -1168,13 +1108,12 @@ def test_launcher_bundle_must_be_protected_and_outside_daemon_roots(
         with pytest.raises(ValueError, match="world-writable"):
             _initialize(layout, "small")
     else:
-        state = tmp_path / "custom-state"
-        home = state / "launchers"
+        home = layout.workspace.root / "launchers"
         home.mkdir(parents=True)
         (launchers_home() / "small").rename(home / "small")
         monkeypatch.setattr(_daemon_setup, "launchers_home", lambda: home)
-        with pytest.raises(ValueError, match="'small' must not lie inside the workspace, state or snapshots"):
-            _initialize(layout, "small", state=state)
+        with pytest.raises(ValueError, match="'small' must not lie inside the workspace"):
+            _initialize(layout, "small")
 
 
 def test_sacct_is_optional_discovered_at_initialize_and_kept_or_configured_later(
@@ -1196,6 +1135,3 @@ def test_sacct_is_optional_discovered_at_initialize_and_kept_or_configured_later
         _configure(layout, ("set", f"sacct={tmp_path / 'absent/sacct'}"))
     _configure(layout, ("set", "sacct="))
     assert load_policy(_activate(layout)).sacct is None
-    monkeypatch.setattr(_daemon_setup, "_state_default", lambda _workspace: tmp_path / "second-state")
-    shutil.rmtree(layout.exchange)
-    assert load_policy(_initialize(layout, "small")).sacct == sacct

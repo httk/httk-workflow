@@ -167,8 +167,13 @@ def test_an_sqlite_ledger_or_its_lock_is_refused_with_the_way_forward(
         with _open(directory, initialize=True):
             pass
     (directory / legacy).write_bytes(b"SQLite format 3\x00")
-    with pytest.raises(LedgerError, match=r"SQLite daemon ledger.*no migration.*daemon init.*httk system reset"):
+    with pytest.raises(
+        LedgerError, match=r"SQLite daemon ledger.*no migration.*manager jobs.*squeue and scancel.*daemon init"
+    ) as raised:
         _open(directory, initialize=initialize)
+    message = str(raised.value)
+    assert ".httk-workspace/daemon" in message
+    assert str(directory.parent) not in message.partition(" is a SQLite daemon ledger")[2]
 
 
 def test_missing_wrong_identity_unsupported_and_incomplete_ledgers_fail_closed(tmp_path: Path, state: Path) -> None:

@@ -50,9 +50,9 @@ def _decode_seed(data: bytes) -> bytes:
 
 
 def response_seed_path(directory: Path) -> Path:
-    """Return the protected response seed path below a state directory.
+    """Return the protected response seed path below the daemon directory.
 
-    :param directory: Protected daemon state directory.
+    :param directory: Protected daemon directory.
     :return: Absolute path of the response-signing seed.
     """
 
@@ -64,7 +64,7 @@ def response_seed_path(directory: Path) -> Path:
 def initialize_response_seed(directory: Path) -> Path:
     """Exclusively create and synchronize a protected response-signing seed.
 
-    :param directory: Existing protected daemon state directory.
+    :param directory: Existing protected daemon directory.
     :return: Path of the newly created seed.
     :raises FileExistsError: If this enrollment already has a response seed.
     """

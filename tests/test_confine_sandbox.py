@@ -8,6 +8,7 @@ import stat
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,7 @@ def test_argv_order_binds_and_descriptors(layout: _Layout) -> None:
         device = int(argv[argv.index("/dev/null") - 1])
         order += [_option_index(argv, "--bind-fd", str(device), "/dev/null"), len(argv) - 3]
         assert order == sorted(order)
+        assert "--tmpfs" not in argv or str(layout.control / "daemon") not in argv
         assert argv[_option_index(argv, "--bind-fd", str(job)) - 3 : _option_index(argv, "--bind-fd", str(job))] == [
             "--ro-bind-fd",
             str(workspace),
@@ -173,6 +175,72 @@ def test_the_device_binds_come_last(layout: _Layout) -> None:
         assert prepared.argv[-4:-3] == [str(Path("/dev/null"))]
     finally:
         prepared.close()
+
+
+def test_daemon_directory_is_masked_only_when_present(layout: _Layout) -> None:
+    daemon = layout.control / "daemon"
+    prepared = _prepare(layout, _settings())
+    try:
+        assert str(daemon) not in prepared.argv
+    finally:
+        prepared.close()
+
+    daemon.mkdir()
+    prepared = _prepare(layout, _settings())
+    try:
+        workspace_bind = _option_index(
+            prepared.argv,
+            "--ro-bind-fd",
+            prepared.argv[prepared.argv.index(str(layout.workspace)) - 1],
+            str(layout.workspace),
+        )
+        job_bind = _option_index(
+            prepared.argv,
+            "--bind-fd",
+            prepared.argv[prepared.argv.index(str(layout.job)) - 1],
+            str(layout.job),
+        )
+        assert prepared.argv[workspace_bind + 3 : workspace_bind + 5] == ["--tmpfs", str(daemon)]
+        assert workspace_bind < _option_index(prepared.argv, "--tmpfs", str(daemon)) < job_bind
+    finally:
+        prepared.close()
+
+
+def test_daemon_directory_is_masked_at_workspace_aliases(layout: _Layout) -> None:
+    daemon = layout.control / "daemon"
+    daemon.mkdir()
+    alias = layout.readonly.parent / "workspace-parent-alias"
+    alias.symlink_to(layout.workspace.parent, target_is_directory=True)
+    alias_daemon = alias / layout.workspace.name / ".httk-workspace" / "daemon"
+    prepared = _prepare(layout, _settings(readonly_paths=(alias,)))
+    try:
+        canonical_mask = _option_index(prepared.argv, "--tmpfs", str(daemon))
+        alias_mask = _option_index(prepared.argv, "--tmpfs", str(alias_daemon))
+        workspace_bind = _option_index(
+            prepared.argv,
+            "--ro-bind-fd",
+            prepared.argv[prepared.argv.index(str(layout.workspace)) - 1],
+            str(layout.workspace),
+        )
+        job_bind = _option_index(
+            prepared.argv,
+            "--bind-fd",
+            prepared.argv[prepared.argv.index(str(layout.job)) - 1],
+            str(layout.job),
+        )
+        assert workspace_bind < canonical_mask < job_bind
+        assert workspace_bind < alias_mask < job_bind
+    finally:
+        prepared.close()
+
+
+def test_a_symlink_at_the_daemon_directory_refuses_confinement(layout: _Layout) -> None:
+    daemon = layout.control / "daemon"
+    real_daemon = layout.control / "daemon.real"
+    real_daemon.mkdir()
+    daemon.symlink_to(real_daemon, target_is_directory=True)
+    with pytest.raises(ValueError, match="must be a real directory.*confinement refused"):
+        _prepare(layout, _settings())
 
 
 def test_no_environment_value_enters_the_world_readable_argv(layout: _Layout) -> None:
@@ -515,3 +583,62 @@ def test_real_attempt_sandbox_confines_writes_and_follows_killpg(layout: _Layout
         process.wait()
         if process.stderr is not None:
             process.stderr.close()
+
+
+def test_real_attempt_masks_daemon_at_canonical_and_readonly_alias_paths(layout: _Layout) -> None:
+    if shutil.which("bwrap") is None:
+        if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
+            pytest.fail("required Bubblewrap executable is unavailable")
+        pytest.skip("Bubblewrap executable is unavailable")
+    alias = layout.readonly
+    alias.rmdir()
+    alias.symlink_to(layout.workspace.parent, target_is_directory=True)
+    daemon = layout.control / "daemon"
+    daemon.mkdir()
+    (daemon / "response.seed").write_text("private-seed", encoding="utf-8")
+    visible = layout.workspace / "visible.txt"
+    visible.write_text("workspace-file", encoding="utf-8")
+    alias_workspace = alias / layout.workspace.name
+    settings = replace(confine_settings({"manager.confine": "bwrap"}), readonly_paths=(alias,))
+    try:
+        block_userns = probe_bwrap(settings)
+    except ConfinementUnavailableError as exc:
+        _unsupported_namespace_failure(str(exc))
+        raise
+    environment = filtered_attempt_environment({"PATH": "/usr/bin:/bin"})
+    prepared = _prepare(
+        layout,
+        settings,
+        block_userns=block_userns,
+        workdir=layout.job,
+        environment=environment,
+    )
+    script = (
+        'for target in "$1/.httk-workspace/daemon/response.seed" "$2/.httk-workspace/daemon/response.seed"; do\n'
+        '  if cat "$target" >/dev/null 2>&1; then echo "readable $target"; else echo "refused $target"; fi\n'
+        "done\n"
+        'for target in "$1/visible.txt" "$2/visible.txt"; do\n'
+        '  if cat "$target" >/dev/null 2>&1; then echo "visible $target"; else echo "missing $target"; fi\n'
+        "done\n"
+    )
+    try:
+        result = subprocess.run(
+            [*prepared.argv, "/bin/sh", "-c", script, "sh", str(layout.workspace), str(alias_workspace)],
+            pass_fds=prepared.descriptors,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+            check=False,
+        )
+    finally:
+        prepared.close()
+    if result.returncode != 0:
+        _unsupported_namespace_failure(result.stderr or result.stdout)
+    assert result.stdout.splitlines() == [
+        f"refused {daemon}/response.seed",
+        f"refused {alias_workspace}/.httk-workspace/daemon/response.seed",
+        f"visible {visible}",
+        f"visible {alias_workspace}/visible.txt",
+    ]

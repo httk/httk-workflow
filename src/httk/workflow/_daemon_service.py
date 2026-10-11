@@ -31,6 +31,7 @@ from ._exchange import ExchangeUnavailableError, publish_file
 _LOGGER = logging.getLogger(__name__)
 _SNAPSHOT_POLICY = Path("/tmp/daemon-policy.json")
 _STATE_DIRECTORY = Path("/tmp/control")
+_DAEMON_DIRECTORY = Path("/tmp/daemon")
 _EXCHANGE_DIRECTORY = Path("/tmp/daemon-exchange")
 _HANDLE = re.compile(r"[0-9a-f]{32}\Z")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
@@ -232,6 +233,7 @@ class Broker:
     :param mailboxes: Reopen the request and response mailboxes; called at the start of every poll, so a
         client that replaced either directory is followed (or, for a symlink, refused) at the next poll.
         The broker then owns and closes the mailboxes it holds. ``None`` keeps *requests* and *responses*.
+    :param jobs: The visible directory holding Slurm output, defaulting to the policy's host path.
     """
 
     def __init__(
@@ -247,6 +249,7 @@ class Broker:
         observe: bool = False,
         activation: Callable[[], None] | None = None,
         mailboxes: Callable[[], tuple[MailboxDirectory, MailboxDirectory]] | None = None,
+        jobs: Path | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
             raise ValueError("response_seed must be a Path")
@@ -261,6 +264,7 @@ class Broker:
         self.observe = observe
         self.activation = activation
         self.mailboxes = mailboxes
+        self.jobs = policy.jobs if jobs is None else jobs
         self._mailbox_problem: str | None = None
         #: Rejected publications that could be neither removed nor set aside, in the directory identified.
         self._stuck: set[str] = set()
@@ -855,18 +859,19 @@ class Broker:
         """
 
         assert self.exchange is not None
-        source = self.policy.jobs / f"httk-{observation['job_id']}.out"
+        host_source = self.policy.jobs / f"httk-{observation['job_id']}.out"
+        source = self.jobs / host_source.name
         try:
             data = _read_tail(source, _MAX_LOG_BYTES)
         except FileNotFoundError:
-            data = os.fsencode(f"no Slurm output was found at {source}\n")
+            data = os.fsencode(f"no Slurm output was found at {host_source}\n")
         except ValueError:
-            data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
+            data = os.fsencode(f"the Slurm output at {host_source} is not a regular file\n")
         except OSError as exc:
             if exc.errno != errno.ELOOP:
                 _LOGGER.warning("daemon_manager_log_unread handle=%s reason=%s", handle, exc.strerror)
                 return False
-            data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
+            data = os.fsencode(f"the Slurm output at {host_source} is not a regular file\n")
         if not self.exchange.publish_log(handle, data):
             return False
         _LOGGER.info("daemon_manager_log handle=%s path=managers/%s.log", handle, handle)
@@ -881,17 +886,17 @@ class Broker:
                 return
 
 
-def _activation_check(state: Path, snapshot: Path, policy: Policy) -> Callable[[], None]:
+def _activation_check(daemon: Path, snapshot: Path, policy: Policy) -> Callable[[], None]:
     """Return the check a broker runs before each admission and decision.
 
-    :param state: The protected state directory holding ``active.json``.
+    :param daemon: The protected daemon directory holding ``active.json``.
     :param snapshot: The host path of the snapshot this broker serves.
     :param policy: The policy loaded from that snapshot.
     :return: A callable that raises when the active snapshot pointer names anything else.
     """
 
     def check() -> None:
-        verify_active_snapshot(state, snapshot, policy)
+        verify_active_snapshot(daemon, snapshot, policy)
 
     return check
 
@@ -915,12 +920,13 @@ def _run(arguments: argparse.Namespace) -> None:
     policy = load_policy(arguments.policy)
     gateway = SlurmGateway(policy)
 
-    seed = response_seed_path(_STATE_DIRECTORY)
+    seed = response_seed_path(_DAEMON_DIRECTORY)
     try:
         read_response_seed(seed)
     except (OSError, ValueError) as exc:
         raise ValueError(
-            "daemon response seed is missing or invalid; preserve protected state and reconcile initialization"
+            f"daemon response seed is missing or invalid; reconcile outstanding manager jobs with squeue and scancel, "
+            f"then remove (or move aside) {policy.daemon} and run 'httk workspace daemon init'"
         ) from exc
 
     stop = threading.Event()
@@ -941,7 +947,7 @@ def _run(arguments: argparse.Namespace) -> None:
                     max_submissions=policy.max_submissions,
                 )
             )
-            verify_active_snapshot(_STATE_DIRECTORY, policy_source, policy)
+            verify_active_snapshot(_DAEMON_DIRECTORY, policy_source, policy)
             if arguments.check:
                 # Every record is validated whenever it is read; 'daemon check' also validates them all.
                 ledger.verify()
@@ -979,8 +985,9 @@ def _run(arguments: argparse.Namespace) -> None:
                 exchange=publisher,
                 response_seed=seed,
                 observe=True,
-                activation=_activation_check(_STATE_DIRECTORY, policy_source, policy),
+                activation=_activation_check(_DAEMON_DIRECTORY, policy_source, policy),
                 mailboxes=mailboxes,
+                jobs=_DAEMON_DIRECTORY / "jobs",
             )
             stack.callback(broker.close)
             _LOGGER.info(

@@ -40,14 +40,16 @@ def _client(path: Path, body: str) -> None:
 def policy(tmp_path: Path) -> Policy:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    for name in ("site/data/exchange/requests", "site/data/exchange/responses", "state"):
+    for name in (
+        "site/data/exchange/requests",
+        "site/data/exchange/responses",
+        "site/data/.httk-workspace/daemon/broker",
+    ):
         (tmp_path / name).mkdir(parents=True)
     return Policy(
         workspace=tmp_path / "site/data",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="b" * 32,
-        state=tmp_path / "state",
-        snapshots=tmp_path / "snapshots",
         bwrap=Path("/usr/bin/bwrap"),
         python=Path(sys.executable),
         sbatch=runtime / "sbatch",
@@ -95,7 +97,7 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "--input=/dev/null",
         "--clusters=cluster",
         f"--job-name=httk-{_HANDLE}",
-        f"--output={tmp_path / 'snapshots/jobs/httk-%j.out'}",
+        f"--output={policy.jobs / 'httk-%j.out'}",
     ]
     assert environment["NSC_RESOURCE_NAME"] == "tetralith"
     assert environment["LANG"] == environment["LC_ALL"] == "C"
@@ -137,7 +139,6 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         str(policy.workspace),
         "--idle",
     ]
-    assert not (policy.workspace / ".httk-workspace").exists()
 
 
 def _submission_identity(policy: Policy) -> SubmissionIdentity:
@@ -345,7 +346,7 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
     client_keys = tmp_path / "client-keys"
     client_keys.mkdir()
     client_seed = initialize_response_seed(client_keys)
-    response_seed = initialize_response_seed(policy.state)
+    response_seed = initialize_response_seed(policy.daemon)
     policy = replace(policy, authorized_keys=(response_public_key(client_seed),))
     submitted_calls = tmp_path / "submitted"
     cancelled_calls = tmp_path / "cancelled"
@@ -369,7 +370,7 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
     with ExitStack() as stack:
         requests = stack.enter_context(MailboxDirectory(policy.requests))
         responses = stack.enter_context(MailboxDirectory(policy.responses))
-        with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True) as ledger:
+        with Ledger(policy.broker, policy.workspace_id, policy.enrollment_id, initialize=True) as ledger:
             requests.replace(start.request_id + ".json", encode_request(start))
             Broker(
                 policy,
@@ -385,7 +386,7 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
         handle = submitted.handle
         _client(policy.squeue, f"print('123|httk-{handle}|{os.getuid()}|RUNNING')\n")
         _client(policy.scancel, f"open({str(cancelled_calls)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-        with Ledger(policy.state, policy.workspace_id, policy.enrollment_id) as ledger:
+        with Ledger(policy.broker, policy.workspace_id, policy.enrollment_id) as ledger:
             broker = Broker(
                 policy,
                 SlurmGateway(policy),

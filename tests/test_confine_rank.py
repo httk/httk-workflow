@@ -249,6 +249,30 @@ def test_argv_keeps_host_network_and_binds_shm_after_dev(launch: _Launch, opened
     ]
 
 
+def test_rank_sandbox_hides_daemon_directory_after_workspace_bind(launch: _Launch, opened: _Opened) -> None:
+    daemon = launch.workspace / ".httk-workspace" / "daemon"
+    daemon.mkdir()
+    alias = launch.root / "workspace-parent-alias"
+    alias.symlink_to(launch.workspace.parent, target_is_directory=True)
+    launch.trusted = replace(launch.trusted, confine=replace(launch.trusted.confine, readonly_paths=(alias,)))
+    argv, _ = _prepare(launch, opened, {"PATH": os.environ["PATH"]})
+    alias_daemon = alias / launch.workspace.name / ".httk-workspace" / "daemon"
+    workspace_index = argv.index(str(launch.workspace))
+    assert argv[workspace_index - 2] == "--ro-bind-fd"
+    assert argv[workspace_index + 1 : workspace_index + 3] == ["--tmpfs", str(daemon)]
+    assert argv[workspace_index + 3 : workspace_index + 5] == ["--tmpfs", str(alias_daemon)]
+    assert argv.index("--tmpfs", workspace_index + 1) < argv.index(str(launch.job))
+
+
+def test_rank_sandbox_refuses_a_symlink_at_the_daemon_directory(launch: _Launch, opened: _Opened) -> None:
+    control = launch.workspace / ".httk-workspace"
+    real_daemon = control / "daemon.real"
+    real_daemon.mkdir()
+    (control / "daemon").symlink_to(real_daemon, target_is_directory=True)
+    with pytest.raises(ValueError, match="must be a real directory.*confinement refused"):
+        _prepare(launch, opened, {"PATH": os.environ["PATH"]})
+
+
 def test_no_environment_value_appears_in_the_rank_argv(launch: _Launch, opened: _Opened) -> None:
     step = launch.pmix_root / "pmix-secret-dir"
     step.mkdir()
@@ -950,12 +974,21 @@ def _use_real_bwrap(launch: _Launch) -> None:
 
 def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
     _use_real_bwrap(launch)
+    daemon = launch.workspace / ".httk-workspace" / "daemon"
+    daemon.mkdir()
+    (daemon / "response.seed").write_text("private-seed", encoding="utf-8")
+    visible = launch.workspace / "visible.txt"
+    visible.write_text("workspace-file", encoding="utf-8")
     sibling = launch.workspace / "jobs" / "ready" / "project" / f"other--{uuid.uuid4()}~p500~{_fs.fresh_token()}"
     sibling.mkdir(parents=True)
     script = (
         'for target in "$1/own" "$2/x" "$3/x" "/dev/shm/x"; do\n'
         '  if (echo data > "$target") 2>/dev/null; then echo "writable $target"; else echo "refused $target"; fi\n'
         "done\n"
+        'if cat "$3/.httk-workspace/daemon/response.seed" >/dev/null 2>&1; then echo "seed readable"; '
+        'else echo "seed refused"; fi\n'
+        'if cat "$3/visible.txt" >/dev/null 2>&1; then echo "workspace readable"; '
+        'else echo "workspace missing"; fi\n'
     )
     launch.request(("/bin/sh", "-c", script, "sh", str(launch.job), str(sibling), str(launch.workspace)))
     process = _run_helper(launch)
@@ -966,6 +999,8 @@ def test_real_bwrap_rank_writes_only_its_job_directory(launch: _Launch) -> None:
         f"refused {sibling}/x",
         f"refused {launch.workspace}/x",
         "writable /dev/shm/x",
+        "seed refused",
+        "workspace readable",
     ]
     assert not (sibling / "x").exists() and not (launch.workspace / "x").exists()
     assert launch.shm.is_dir()

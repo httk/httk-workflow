@@ -13,7 +13,7 @@ from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 _FORMAT = "httk-workspace-daemon-policy"
-_FORMAT_VERSION = 5
+_FORMAT_VERSION = 6
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _LAUNCHER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SLURM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
@@ -22,6 +22,12 @@ _SETTING_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 #: The exchange directory below the workspace root (the bootstrap loads this module by path, so no import).
 EXCHANGE_DIRECTORY = "exchange"
+#: The workspace control directory (the bootstrap loads this module by path, so no import).
+WORKSPACE_DIRECTORY = ".httk-workspace"
+#: The daemon's private directory below the workspace control directory (the bootstrap loads this module by path).
+DAEMON_DIRECTORY = "daemon"
+#: The response-signing seed filename (the bootstrap loads this module by path, so no import).
+RESPONSE_SEED_NAME = "response.seed"
 
 
 def _integer(value: object, name: str, minimum: int, maximum: int) -> int:
@@ -55,14 +61,6 @@ def _path(value: object, name: str) -> Path:
     if not value.is_absolute() or "\0" in text or ".." in value.parts:
         raise ValueError(f"{name} must be an absolute path without '..' or NUL")
     return value
-
-
-def _contains(root: Path, candidate: Path) -> bool:
-    return candidate == root or candidate.is_relative_to(root)
-
-
-def _overlap(left: Path, right: Path) -> bool:
-    return _contains(left, right) or _contains(right, left)
 
 
 def _authorized_keys(value: object) -> tuple[str, ...]:
@@ -164,8 +162,6 @@ class Policy:
     :param workspace: Uploaded workspace root; its ``exchange`` directory is the one client-writable mount.
     :param workspace_id: Canonical workspace UUID.
     :param enrollment_id: Enrollment identifier as 32 lowercase hexadecimal digits.
-    :param state: Broker state root, outside the workspace.
-    :param snapshots: Directory of immutable runtime policy snapshots.
     :param bwrap: Approved Bubblewrap executable for the broker sandbox, run on the host.
     :param python: Approved Python executable that runs the broker and the submitted managers.
     :param sbatch: Approved Slurm submission executable.
@@ -187,8 +183,6 @@ class Policy:
     workspace: Path
     workspace_id: str
     enrollment_id: str
-    state: Path
-    snapshots: Path
     bwrap: Path
     python: Path
     sbatch: Path
@@ -207,16 +201,9 @@ class Policy:
     sacct: Path | None = None
 
     def __post_init__(self) -> None:
-        for name, value in (("workspace", self.workspace), ("state", self.state)):
-            _path(value, name)
-        snapshots = _path(self.snapshots, "snapshots")
+        _path(self.workspace, "workspace")
         if self.workspace == Path("/"):
             raise ValueError("the workspace must not be the filesystem root")
-        if _overlap(self.state, snapshots):
-            raise ValueError("state and snapshots must be disjoint")
-        for name, value in (("state", self.state), ("snapshots", snapshots)):
-            if _overlap(self.workspace, value):
-                raise ValueError(f"workspace {self.workspace} must be disjoint from {name} {value}")
 
         if type(self.workspace_id) is not str:
             raise ValueError("invalid workspace_id")
@@ -263,9 +250,33 @@ class Policy:
 
     @property
     def jobs(self) -> Path:
-        """Private directory of Slurm batch job output, outside the workspace."""
+        """Directory of Slurm batch job output."""
 
-        return self.snapshots / "jobs"
+        return self.daemon / "jobs"
+
+    @property
+    def daemon(self) -> Path:
+        """The daemon's private workspace directory."""
+
+        return self.workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+
+    @property
+    def broker(self) -> Path:
+        """The broker-writable directory containing its ledger."""
+
+        return self.daemon / "broker"
+
+    @property
+    def snapshots(self) -> Path:
+        """Directory of immutable runtime policy snapshots."""
+
+        return self.daemon / "snapshots"
+
+    @property
+    def response_seed(self) -> Path:
+        """The daemon's private response-signing seed."""
+
+        return self.daemon / RESPONSE_SEED_NAME
 
     @property
     def requests(self) -> Path:
@@ -408,8 +419,6 @@ def policy_document(policy: Policy) -> dict[str, object]:
         "workspace": str(policy.workspace),
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
-        "state": str(policy.state),
-        "snapshots": str(policy.snapshots),
         "bwrap": str(policy.bwrap),
         "python": str(policy.python),
         "sbatch": str(policy.sbatch),
@@ -466,8 +475,6 @@ def _decode_policy(data: bytes) -> Policy:
         "workspace",
         "workspace_id",
         "enrollment_id",
-        "state",
-        "snapshots",
         "bwrap",
         "python",
         "sbatch",
@@ -522,8 +529,6 @@ def _decode_policy(data: bytes) -> Policy:
         workspace=_json_path(value["workspace"], "workspace"),
         workspace_id=value["workspace_id"],
         enrollment_id=value["enrollment_id"],
-        state=_json_path(value["state"], "state"),
-        snapshots=_json_path(value["snapshots"], "snapshots"),
         bwrap=_json_path(value["bwrap"], "bwrap"),
         python=_json_path(value["python"], "python"),
         sbatch=_json_path(value["sbatch"], "sbatch"),
@@ -561,33 +566,6 @@ def _open_directory(path: Path, base: int | None = None) -> int:
     return descriptor
 
 
-def check_private_paths(policy: Policy) -> None:
-    """Refuse a state or snapshots directory that resolves into the workspace, or into each other.
-
-    Inside ``exchange/`` they would hand the client the configuration and ledger; anywhere else in the
-    workspace they would expose the daemon's keys to jobs. Symlinks are followed, so a link that leads
-    into the workspace is caught however the path is spelled.
-
-    :param policy: Validated runtime policy.
-    :raises ValueError: If a path cannot be resolved or overlaps the workspace or the other private path.
-    """
-
-    try:
-        workspace = policy.workspace.resolve(strict=False)
-        state = policy.state.resolve(strict=False)
-        snapshots = policy.snapshots.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"cannot resolve the daemon workspace, state or snapshots path: {exc}") from exc
-    for name, resolved, declared in (("state", state, policy.state), ("snapshots", snapshots, policy.snapshots)):
-        if _overlap(workspace, resolved):
-            raise ValueError(
-                f"daemon {name} {declared} resolves to {resolved}, which overlaps the workspace {workspace}; "
-                f"the private {name} directory must lie outside the workspace"
-            )
-    if _overlap(state, snapshots):
-        raise ValueError(f"daemon state {state} and snapshots {snapshots} must be disjoint once symlinks are resolved")
-
-
 def _load_policy_with_bytes(path: Path) -> tuple[Policy, bytes]:
     data = _read_policy_bytes(path)
     return _decode_policy(data), data
@@ -607,4 +585,4 @@ def load_policy(path: Path) -> Policy:
     return _load_policy_with_bytes(path)[0]
 
 
-__all__ = ["ApprovedLauncher", "Policy", "check_private_paths", "load_policy", "policy_document"]
+__all__ = ["ApprovedLauncher", "Policy", "load_policy", "policy_document"]

@@ -24,8 +24,6 @@ def _snapshot(tmp_path: Path) -> Path:
         workspace=tmp_path / "site/workspace",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="1" * 32,
-        state=tmp_path / "state",
-        snapshots=tmp_path / "snapshots",
         bwrap=runtime / "bwrap",
         python=runtime / "python",
         sbatch=runtime / "sbatch",
@@ -53,8 +51,8 @@ def test_daemon_dispatch_does_not_build_ordinary_parser(monkeypatch: pytest.Monk
     monkeypatch.setattr(workflow_cli, "command", forbidden)
     monkeypatch.setattr(_daemon_cli, "command", daemon)
     context = CLIContext(program="httk", cwd=tmp_path)
-    assert workflow_cli.workspace_command(["daemon", "run", "/data", "--state", "/state", "--once"], context) == 0
-    assert observed == [["run", "/data", "--state", "/state", "--once"], "httk workspace daemon"]
+    assert workflow_cli.workspace_command(["daemon", "run", "/data", "--once"], context) == 0
+    assert observed == [["run", "/data", "--once"], "httk workspace daemon"]
 
 
 def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
@@ -82,7 +80,8 @@ def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
     [
         ["run", "/data/../other"],
         ["run", "data/../other"],
-        ["run", "/data", "--state", "../link/../state"],
+        ["run", "/data", "--state", "/state"],
+        ["init", "/data", "--snapshots", "/snapshots"],
         ["check", "/data", "--once"],
         ["run", "/data", "--command", "rm"],
         ["run", "/data", "--policy", "/policy"],
@@ -112,8 +111,8 @@ def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
     cwd.mkdir(parents=True)
     calls: list[tuple[Path, Path | None]] = []
 
-    def initialize(workspace: Path, *, state: Path | None, **_options: object) -> Path:
-        calls.append((workspace, state))
+    def initialize(workspace: Path, **_options: object) -> Path:
+        calls.append((workspace, None))
         return _snapshot(tmp_path)
 
     monkeypatch.setattr(_daemon_setup, "initialize", initialize)
@@ -121,9 +120,9 @@ def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
     monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
     monkeypatch.chdir(cwd)
-    assert _daemon_cli.command(["init", ".", "--state", "../../state"], program="httk") == 0
+    assert _daemon_cli.command(["init", "."], program="httk") == 0
     assert _daemon_cli.command(["init", "link/x"], program="httk") == 0
-    assert calls == [(cwd, tmp_path / "state"), (cwd / "link" / "x", None)]
+    assert calls == [(cwd, None), (cwd / "link" / "x", None)]
 
 
 def test_isolated_handoff_cleans_environment_cwd_and_inherited_descriptors(tmp_path: Path) -> None:
@@ -219,7 +218,7 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
     changes = ["--set", "bwrap=tools/bwrap", "--add", "launchers=small", "--set", "cluster=c1"]
     changes += ["--add", f"authorized_keys={AUTHORIZED_KEY}"]
     assert _daemon_cli.command(["init", "/workspace", *changes], program="httk") == 0
-    arguments = ["configure", "/workspace", "--remove", "launchers=large", "--set", "force=true", "--state", "/state"]
+    arguments = ["configure", "/workspace", "--remove", "launchers=large", "--set", "force=true"]
     assert _daemon_cli.command(arguments, program="httk") == 0
     assert calls == [
         (
@@ -232,8 +231,6 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
                     ("set", "cluster=c1"),
                     ("add", f"authorized_keys={AUTHORIZED_KEY}"),
                 ],
-                "state": None,
-                "snapshots": None,
                 "report": print,
             },
         ),
@@ -242,8 +239,6 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
             Path("/workspace"),
             {
                 "changes": [("remove", "launchers=large"), ("set", "force=true")],
-                "state": Path("/state"),
-                "snapshots": None,
             },
         ),
     ]
@@ -256,33 +251,33 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
 def test_show_renders_or_prints_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls: list[object] = []
 
-    def describe(workspace: Path, **options: object) -> dict[str, object]:
-        calls.append((workspace, options))
+    def describe(workspace: Path) -> dict[str, object]:
+        calls.append(workspace)
         return _description()
 
     monkeypatch.setattr(_daemon_setup, "describe", describe)
-    assert _daemon_cli.command(["show", "/workspace", "--snapshots", "/snapshots"], program="httk") == 0
+    assert _daemon_cli.command(["show", "/workspace"], program="httk") == 0
     assert capsys.readouterr().out == _RENDERED
     assert _daemon_cli.command(["show", "/workspace", "--json"], program="httk") == 0
     assert json.loads(capsys.readouterr().out) == _description()
     assert calls == [
-        (Path("/workspace"), {"state": None, "snapshots": Path("/snapshots")}),
-        (Path("/workspace"), {"state": None, "snapshots": None}),
+        Path("/workspace"),
+        Path("/workspace"),
     ]
 
 
-def test_run_modes_hand_state_and_snapshots_to_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_modes_activate_the_workspace_enrollment(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[object] = []
 
-    def activate(workspace: Path, **options: object) -> tuple[Path, None]:
-        observed.append((workspace, options))
+    def activate(workspace: Path) -> tuple[Path, None]:
+        observed.append(workspace)
         raise ValueError("inspection stop")
 
     monkeypatch.setattr(_daemon_setup, "activate", activate)
     for mode in (["run", "--once"], ["check"]):
-        arguments = [mode[0], "/workspace", *mode[1:], "--state", "/state", "--snapshots", "/snapshots"]
+        arguments = [mode[0], "/workspace", *mode[1:]]
         assert _daemon_cli.command(arguments, program="httk") == 2
-    assert observed == [(Path("/workspace"), {"state": Path("/state"), "snapshots": Path("/snapshots")})] * 2
+    assert observed == [Path("/workspace")] * 2
 
 
 def test_incompatible_ledger_is_a_clean_local_refusal(

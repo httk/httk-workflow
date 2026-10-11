@@ -64,7 +64,7 @@ def _read_pointer(state: Path) -> bytes:
 def read_active_snapshot(state: Path) -> tuple[Path, str]:
     """Read and validate the protected active-snapshot pointer.
 
-    :param state: Protected local daemon state directory.
+    :param state: Protected daemon directory containing ``active.json``.
     :return: Immutable snapshot path and canonical policy digest.
     :raises OSError: If the pointer cannot be opened or read.
     :raises ValueError: If the pointer is malformed or unsafe.
@@ -99,7 +99,7 @@ def read_active_snapshot(state: Path) -> tuple[Path, str]:
 def verify_active_snapshot(state: Path, snapshot: Path, policy: Policy) -> None:
     """Verify that this startup still names the protected active policy.
 
-    :param state: Protected local daemon state directory.
+    :param state: Protected daemon directory containing ``active.json``.
     :param snapshot: Host snapshot path selected before sandbox entry.
     :param policy: Validated snapshot policy.
     :raises OSError: If the protected pointer cannot be read.

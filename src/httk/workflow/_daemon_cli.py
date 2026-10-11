@@ -79,11 +79,6 @@ def add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]"
             parser.add_argument("--json", action="store_true", help="print the description as one JSON document")
         if mode == "run":
             parser.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
-        parser.add_argument(
-            "--state", type=Path, help="broker state directory, outside the workspace, when not the default"
-        )
-        snapshots = "when not <state>.snapshots" if mode == "init" else "of the enrollment, checked when given"
-        parser.add_argument("--snapshots", type=Path, help=f"runtime snapshot directory {snapshots}")
 
 
 def _anchored(path: Path, name: str) -> Path:
@@ -180,9 +175,7 @@ def _render(description: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _local(
-    arguments: argparse.Namespace, workspace: Path, state: Path | None, snapshots: Path | None
-) -> list[str] | int:
+def _local(arguments: argparse.Namespace, workspace: Path) -> list[str] | int:
     """Run a local mode, returning an exit status, or the bootstrap argv for ``check`` and ``run``."""
 
     from . import _daemon_setup
@@ -192,21 +185,19 @@ def _local(
         snapshot = _daemon_setup.initialize(
             workspace,
             changes=arguments.changes or (),
-            state=state,
-            snapshots=snapshots,
             report=print,
         )
-        print(_render(_daemon_setup.describe(workspace, state=state, snapshots=snapshots)))
+        print(_render(_daemon_setup.describe(workspace)))
         return _check_after_setup(workspace, snapshot)
     if mode == "configure":
-        print(_render(_daemon_setup.configure(workspace, arguments.changes or (), state=state, snapshots=snapshots)))
+        print(_render(_daemon_setup.configure(workspace, arguments.changes or ())))
         print(f"the configuration takes effect when the daemon next starts: httk workspace daemon run {workspace}")
         return 0
     if mode == "show":
-        description = _daemon_setup.describe(workspace, state=state, snapshots=snapshots)
+        description = _daemon_setup.describe(workspace)
         print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render(description))
         return 0
-    snapshot, changed = _daemon_setup.activate(workspace, state=state, snapshots=snapshots)
+    snapshot, changed = _daemon_setup.activate(workspace)
     if changed is not None:
         print(f"activated the changed daemon configuration; changed launchers: {', '.join(changed) or 'none'}")
         sys.stdout.flush()
@@ -223,9 +214,7 @@ def launch(arguments: argparse.Namespace) -> int:
 
     try:
         workspace = _anchored(arguments.workspace, "workspace")
-        state = None if arguments.state is None else _anchored(arguments.state, "state")
-        snapshots = None if arguments.snapshots is None else _anchored(arguments.snapshots, "snapshots")
-        result = _local(arguments, workspace, state, snapshots)
+        result = _local(arguments, workspace)
     except (OSError, RuntimeError, ValueError) as exc:  # LedgerError is a RuntimeError
         print(f"httk workspace daemon: {exc}", file=sys.stderr)
         return 2

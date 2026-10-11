@@ -99,11 +99,11 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | --- | --- | --- |
 | `workspace init [OPTIONS] PATH...` | create a workspace in a new or empty directory of its own, or adopt an existing one, registering each name (basename or `--name`) and recording it in the project's `members.json` | `--name` (one path only), `--setting KEY=VALUE`, `--no-durable` |
 | `workspace exchange enable [WORKSPACE]` | enable the `exchange/` extension of a workspace (idempotent) | |
-| `workspace daemon init WORKSPACE` | approve global `slurm` launchers, enable the exchange when needed and enroll the workspace, then check the sandbox | `--set KEY=VALUE`, `--add KEY=VALUE`, `--state`, `--snapshots` |
-| `workspace daemon configure WORKSPACE` | change the daemon configuration, activated when the daemon next starts | `--set`, `--add`, `--unset`, `--remove`, `--state`, `--snapshots` |
-| `workspace daemon show WORKSPACE` | describe the enrollment and its daemon configuration | `--json`, `--state`, `--snapshots` |
-| `workspace daemon check WORKSPACE` | activate the configuration and check the real sandbox and scheduler clients | `--state`, `--snapshots` |
-| `workspace daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker | `--once`, `--state`, `--snapshots` |
+| `workspace daemon init WORKSPACE` | approve global `slurm` launchers, enable the exchange when needed and enroll the workspace, then check the sandbox | `--set KEY=VALUE`, `--add KEY=VALUE` |
+| `workspace daemon configure WORKSPACE` | change the daemon configuration, activated when the daemon next starts | `--set`, `--add`, `--unset`, `--remove` |
+| `workspace daemon show WORKSPACE` | describe the enrollment and its daemon configuration | `--json` |
+| `workspace daemon check WORKSPACE` | activate the configuration and check the real sandbox and scheduler clients | |
+| `workspace daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker | `--once` |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace adopt [PATH...]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only), `--json` |

@@ -15,13 +15,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from httk.core.userdirs import data_home
-
 from . import _fs
 from ._confine import confine_settings
 from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_cli import _anchored
-from ._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
+from ._daemon_keys import initialize_response_seed, response_public_key
 from ._daemon_policy import (
     _LAUNCHER_NAME,
     ApprovedLauncher,
@@ -29,10 +27,8 @@ from ._daemon_policy import (
     _object_without_duplicates,
     _open_directory,
     _open_nofollow,
-    _overlap,
     _parse_float,
     _reject_constant,
-    check_private_paths,
     load_policy,
     policy_document,
 )
@@ -45,7 +41,7 @@ from ._daemon_state import Ledger
 from ._exchange import ExchangeUnavailableError, enable_exchange, install_document
 from .configuration import launchers_home
 from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
-from .models import EXCHANGE_DIRECTORY
+from .models import DAEMON_DIRECTORY, EXCHANGE_DIRECTORY, WORKSPACE_DIRECTORY
 from .workspace import Workspace
 
 _DAEMON_DOCUMENT = "daemon.json"
@@ -128,11 +124,6 @@ def _decode_object(data: bytes, *, description: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"{description} must be a JSON object")
     return value
-
-
-def _state_default(workspace: Path) -> Path:
-    digest = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()
-    return data_home() / "workspace-daemons" / digest
 
 
 def _workspace_id(workspace: Path) -> str:
@@ -274,7 +265,7 @@ def _check_resources(settings: Mapping[str, object], *, force: bool) -> None:
         _time_minutes(time_limit, force=force)
 
 
-def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -> ApprovedLauncher:
+def _approved_launcher(name: str, workspace: Path, *, force: bool) -> ApprovedLauncher:
     """Read one global ``slurm`` launcher bundle and freeze its approved settings; never execute it."""
 
     if type(name) is not str or _LAUNCHER_NAME.fullmatch(name) is None:
@@ -283,8 +274,8 @@ def _approved_launcher(name: str, forbidden: tuple[Path, ...], *, force: bool) -
         bundle = (launchers_home() / name).resolve(strict=True)
     except FileNotFoundError:
         raise ValueError(f"unknown global launcher: {name!r}") from None
-    if any(bundle.is_relative_to(path.resolve()) for path in forbidden):
-        raise ValueError(f"daemon launcher {name!r} must not lie inside the workspace, state or snapshots")
+    if bundle.is_relative_to(workspace.resolve()):
+        raise ValueError(f"daemon launcher {name!r} must not lie inside the workspace")
     metadata = _decode_object(
         _read_bounded(bundle / LAUNCHER_METADATA, _MAX_LAUNCHER_BYTES, protected=True), description="launcher metadata"
     )
@@ -516,8 +507,6 @@ def _configuration(document: Mapping[str, object]) -> _Configuration:
 
 def _compile(
     workspace: Path,
-    state: Path,
-    snapshots: Path,
     enrollment_id: str,
     cluster: str,
     configuration: _Configuration,
@@ -530,15 +519,11 @@ def _compile(
     if len(set(launchers)) != len(launchers):
         raise ValueError("daemon launcher names must be unique")
     # In name order, the order of the canonical snapshot document.
-    approved = tuple(
-        _approved_launcher(name, (workspace, state, snapshots), force=configuration.force) for name in sorted(launchers)
-    )
+    approved = tuple(_approved_launcher(name, workspace, force=configuration.force) for name in sorted(launchers))
     policy = Policy(
         workspace=workspace,
         workspace_id=_workspace_id(workspace),
         enrollment_id=enrollment_id,
-        state=state,
-        snapshots=snapshots,
         launchers=approved,
         authorized_keys=_runtime_authorized_keys(configuration.authorized_keys),
         bwrap=configuration.bwrap,
@@ -655,7 +640,7 @@ def _publish(policy: Policy) -> Path:
     snapshot = policy.snapshots / f"{digest}.json"
     _write_exclusive(snapshot, canonical)
     active = activation_document(snapshot, policy)
-    _write_atomic(policy.state / "active.json", _canonical_bytes(active))
+    _write_atomic(policy.daemon / "active.json", _canonical_bytes(active))
     return snapshot
 
 
@@ -672,7 +657,7 @@ def _write_daemon_document(policy: Policy) -> None:
         "format_version": _DAEMON_VERSION,
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
-        "daemon_public_key": response_public_key(response_seed_path(policy.state)),
+        "daemon_public_key": response_public_key(policy.response_seed),
         "configurations": {launcher.name: policy.configuration_digest(launcher.name) for launcher in policy.launchers},
         "request_max_age": policy.request_max_age,
     }
@@ -685,21 +670,17 @@ def _write_daemon_document(policy: Policy) -> None:
         ) from exc
 
 
-def _snapshots_default(state: Path) -> Path:
-    return state.with_name(state.name + ".snapshots")
-
-
-def _save_configuration(state: Path, configuration: _Configuration) -> None:
-    _write_atomic(state / _CONFIGURATION_FILE, _canonical_bytes(_configuration_document(configuration)))
+def _save_configuration(daemon: Path, configuration: _Configuration) -> None:
+    _write_atomic(daemon / _CONFIGURATION_FILE, _canonical_bytes(_configuration_document(configuration)))
 
 
 def _load_configuration(policy: Policy) -> _Configuration:
     try:
-        data = _read_bounded(policy.state / _CONFIGURATION_FILE, _MAX_CONFIGURATION_BYTES, protected=True)
+        data = _read_bounded(policy.daemon / _CONFIGURATION_FILE, _MAX_CONFIGURATION_BYTES, protected=True)
     except FileNotFoundError:
         raise ValueError(
-            f"the daemon state {policy.state} has no {_CONFIGURATION_FILE}; this enrollment predates the saved "
-            "configuration and is not migrated. Remove its state and snapshots directories and run "
+            f"the daemon directory {policy.daemon} has no {_CONFIGURATION_FILE}; this enrollment predates the saved "
+            "configuration and is not migrated. Remove its daemon directory and run "
             "'httk workspace daemon init' again"
         ) from None
     return _configuration(_decode_object(data, description="daemon configuration"))
@@ -713,8 +694,7 @@ def _description(policy: Policy, configuration: _Configuration) -> dict[str, obj
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
         "exchange": str(policy.exchange),
-        "state": str(policy.state),
-        "snapshots": str(policy.snapshots),
+        "daemon": str(policy.daemon),
         "cluster": policy.cluster,
         "configuration": document,
     }
@@ -724,15 +704,13 @@ def initialize(
     workspace: Path,
     *,
     changes: Sequence[tuple[str, str]] = (),
-    state: Path | None = None,
-    snapshots: Path | None = None,
     report: Callable[[str], None] | None = None,
 ) -> Path:
     """Compile and publish a fresh enrollment from approved global ``slurm`` launchers.
 
     The exchange is the workspace's own ``exchange`` directory. The workspace's exchange extension is enabled
     when it is absent (and *report* told so) before ``exchange/daemon.json`` is written: from then on every
-    manager of the workspace must confine its attempts. *state* and *snapshots* must lie outside the workspace.
+    manager of the workspace must confine its attempts.
 
     Configuration values that *changes* does not set are discovered: executables on ``PATH``, the running
     interpreter, the effective Slurm configuration and its cluster, 128 submissions, and ``force=false``.
@@ -740,8 +718,6 @@ def initialize(
     :param workspace: Workspace data root.
     :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set`` or ``add``, applied in order to
         ``CONFIGURATION_KEYS`` and ``INITIALIZE_KEYS``; at least one launcher and one key must result.
-    :param state: Broker state directory outside the workspace, by default under the httk data home.
-    :param snapshots: Snapshot directory outside the workspace, by default ``<state>.snapshots``.
     :param report: Called with one line when this call enables the workspace's exchange extension.
     :return: Path of the published runtime snapshot.
     :raises ValueError: If a launcher, key, configuration value or the layout is refused.
@@ -749,8 +725,11 @@ def initialize(
     """
 
     workspace = workspace.resolve(strict=True)
-    state = _state_default(workspace) if state is None else state
-    snapshots = _snapshots_default(state) if snapshots is None else snapshots
+    daemon = workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+    if os.path.lexists(daemon):
+        raise ValueError(
+            f"daemon directory already exists: {daemon}; remove the earlier enrollment's directory and run init again"
+        )
     document: dict[str, object] = {
         "format": _CONFIGURATION_FORMAT,
         "format_version": _CONFIGURATION_VERSION,
@@ -763,24 +742,14 @@ def initialize(
     _discover(document)
     configuration = _configuration(document)
     cluster = _cluster(cluster, configuration.slurm_conf, None if scontrol is None else Path(scontrol))
-    policy = _compile(workspace, state, snapshots, secrets.token_hex(16), cluster, configuration)
-    home = data_home().resolve()
-    if _overlap(policy.workspace, home):
-        raise ValueError(f"workspace {policy.workspace} must be disjoint from the httk data home {home}")
-    check_private_paths(policy)
+    policy = _compile(workspace, secrets.token_hex(16), cluster, configuration)
     _runtime_policy_bytes(policy)
-    leftover = [str(path) for path in (state, snapshots) if os.path.lexists(path)]
-    if leftover:
-        raise ValueError(
-            f"daemon state already exists: {', '.join(leftover)}; remove an earlier enrollment's state "
-            "or give a different --state"
-        )
-    for directory in (state, snapshots, policy.jobs):
+    for directory in (policy.daemon, policy.snapshots, policy.jobs, policy.broker):
         _mkdir_exclusive(directory)
-    _save_configuration(state, configuration)
-    initialize_response_seed(state)
+    _save_configuration(policy.daemon, configuration)
+    initialize_response_seed(policy.daemon)
     with Ledger(
-        state,
+        policy.broker,
         policy.workspace_id,
         policy.enrollment_id,
         initialize=True,
@@ -796,17 +765,15 @@ def initialize(
         return snapshot
 
 
-def _active(workspace: Path, state: Path | None, snapshots: Path | None) -> tuple[Path, Policy, str]:
+def _active(workspace: Path) -> tuple[Path, Policy, str]:
     workspace = workspace.resolve(strict=True)
-    state = _state_default(workspace) if state is None else state
-    _validate_private_directory(state)
-    snapshot, digest = read_active_snapshot(state)
+    daemon = workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+    _validate_private_directory(daemon)
+    snapshot, digest = read_active_snapshot(daemon)
     policy = load_policy(snapshot)
-    verify_active_snapshot(state, snapshot, policy)
+    verify_active_snapshot(daemon, snapshot, policy)
     if policy.workspace != workspace:
         raise ValueError("active daemon enrollment belongs to a different workspace")
-    if snapshots is not None and policy.snapshots != snapshots:
-        raise ValueError(f"active daemon enrollment keeps its snapshots in {policy.snapshots}, not {snapshots}")
     return snapshot, policy, digest
 
 
@@ -815,8 +782,6 @@ def _recompile(active: Policy, configuration: _Configuration) -> Policy:
 
     policy = _compile(
         active.workspace,
-        active.state,
-        active.snapshots,
         active.enrollment_id,
         active.cluster,
         configuration,
@@ -827,25 +792,20 @@ def _recompile(active: Policy, configuration: _Configuration) -> Policy:
     return policy
 
 
-def describe(workspace: Path, *, state: Path | None = None, snapshots: Path | None = None) -> dict[str, object]:
+def describe(workspace: Path) -> dict[str, object]:
     """Describe the fixed enrollment connection and the saved daemon configuration.
 
     :param workspace: Workspace data root.
-    :param state: Broker state directory when not the default.
-    :param snapshots: Expected snapshot directory, checked when given.
     :return: JSON-compatible description with the configuration under ``configuration``.
     """
 
-    _snapshot, active, _digest = _active(workspace, state, snapshots)
+    _snapshot, active, _digest = _active(workspace)
     return _description(active, _load_configuration(active))
 
 
 def configure(
     workspace: Path,
     changes: Sequence[tuple[str, str]],
-    *,
-    state: Path | None = None,
-    snapshots: Path | None = None,
 ) -> dict[str, object]:
     """Change the saved daemon configuration after compiling the result as activation would.
 
@@ -854,24 +814,20 @@ def configure(
     :param workspace: Workspace data root.
     :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set``, ``add`` or ``remove``,
         or ``("unset", "KEY")`` to clear an optional value or restore a default, applied in order.
-    :param state: Broker state directory when not the default.
-    :param snapshots: Expected snapshot directory, checked when given.
     :return: The resulting description, as ``describe`` returns it.
     :raises ValueError: If a change or the resulting configuration is refused; nothing is then saved.
     """
 
-    _snapshot, active, _digest = _active(workspace, state, snapshots)
+    _snapshot, active, _digest = _active(workspace)
     document = _configuration_document(_load_configuration(active))
     _apply(document, changes, CONFIGURATION_KEYS)
     configuration = _configuration(document)
     _recompile(active, configuration)
-    _save_configuration(active.state, configuration)
+    _save_configuration(active.daemon, configuration)
     return _description(active, configuration)
 
 
-def activate(
-    workspace: Path, *, state: Path | None = None, snapshots: Path | None = None
-) -> tuple[Path, tuple[str, ...] | None]:
+def activate(workspace: Path) -> tuple[Path, tuple[str, ...] | None]:
     """Compile the saved configuration from the current launcher bundles and activate it when it changed.
 
     The job-output directory is recreated when missing and ``exchange/daemon.json`` is reinstalled every
@@ -881,8 +837,6 @@ def activate(
     deciding a submission and submitting it), so the change takes effect when the daemon is started again.
 
     :param workspace: Workspace data root.
-    :param state: Broker state directory when not the default.
-    :param snapshots: Expected snapshot directory, checked when given.
     :return: The active runtime snapshot, and the names of the launchers whose approval changed, or
         ``None`` when the active snapshot already matched.
     :raises ValueError: If the configuration is refused, or the active snapshot changed during activation.
@@ -890,14 +844,13 @@ def activate(
         SQLite ledger of an earlier version.
     """
 
-    old_snapshot, old, old_digest = _active(workspace, state, snapshots)
+    old_snapshot, old, old_digest = _active(workspace)
     new = _recompile(old, _load_configuration(old))
     _validate_private_directory(old.snapshots)
     _mkdir_exclusive(new.jobs, exist_ok=True)
-    check_private_paths(new)
     # Opening the ledger refuses an earlier version's SQLite ledger and an identity mismatch; it takes no lock.
     with Ledger(
-        old.state,
+        old.broker,
         old.workspace_id,
         old.enrollment_id,
         max_records=old.max_records,
@@ -907,9 +860,9 @@ def activate(
     if _runtime_policy_bytes(new) == _runtime_policy_bytes(old):
         _write_daemon_document(new)
         return old_snapshot, None
-    if read_active_snapshot(old.state) != (old_snapshot, old_digest):
+    if read_active_snapshot(old.daemon) != (old_snapshot, old_digest):
         raise ValueError("the active daemon snapshot changed while activation was compiling; activate again")
-    verify_active_snapshot(old.state, old_snapshot, old)
+    verify_active_snapshot(old.daemon, old_snapshot, old)
     snapshot = _publish(new)
     _write_daemon_document(new)
     return snapshot, tuple(sorted({launcher.name for launcher in set(old.launchers) ^ set(new.launchers)}))

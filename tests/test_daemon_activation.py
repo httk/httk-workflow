@@ -17,8 +17,6 @@ def _policy(tmp_path: Path) -> Policy:
         workspace=tmp_path / "site/workspace",
         workspace_id="12345678-1234-1234-1234-123456789abc",
         enrollment_id="1" * 32,
-        state=tmp_path / "state",
-        snapshots=tmp_path / "snapshots",
         bwrap=broker / "bwrap",
         python=runtime / "python",
         sbatch=broker / "sbatch",
@@ -36,7 +34,7 @@ def _write(state: Path, document: object) -> None:
 
 
 def test_activation_document_round_trips_and_verifies_exact_policy(tmp_path: Path) -> None:
-    state = tmp_path / "state"
+    state = tmp_path / "daemon"
     state.mkdir()
     snapshot = tmp_path / "snapshots" / ("a" * 64 + ".json")
     policy = _policy(tmp_path)

@@ -60,7 +60,6 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Workspace,
             ("set", "cluster=test-cluster"),
             ("set", "slurm_conf="),
         ],
-        state=tmp_path / "state",
         report=reports.append,
     )
     # Enrolling enables the exchange extension, and says so.

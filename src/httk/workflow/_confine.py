@@ -25,12 +25,14 @@ from ._sandbox import (
     PreparedSandbox,
     check_bwrap,
     device_parent_dirs,
+    hidden_directory,
     make_inheritable,
     merged_usr_symlinks,
     open_device_nofollow,
     open_directory_nofollow,
 )
 from .errors import ConfinementUnavailableError
+from .models import DAEMON_DIRECTORY, WORKSPACE_DIRECTORY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -366,7 +368,8 @@ def prepare_attempt_sandbox(
     """Build the Bubblewrap argument vector and descriptor set of one confined attempt.
 
     The sandbox starts from Bubblewrap's empty root with a private ``/tmp`` (and ``/tmp/home``), then binds
-    ``settings.readonly_paths`` read-only, the workspace read-only at its real path, the job directory
+    ``settings.readonly_paths`` read-only, the workspace read-only at its real path, the daemon's private
+    directory, when present, hidden under an empty tmpfs, the job directory
     writable at its real path and its trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``
     and ``logs/``, those present) read-only over it, in that order: a read-only path may be an ancestor of the
     workspace (``/home`` for a workspace below it), because the later workspace and job binds overlay it. A
@@ -409,6 +412,7 @@ def prepare_attempt_sandbox(
     descriptors: list[int] = []
     try:
         resolved: list[Path] = []
+        daemon_paths = [workspace_root / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY]
         for path in settings.readonly_paths:
             try:
                 real = path.resolve(strict=True)
@@ -419,9 +423,15 @@ def prepare_attempt_sandbox(
             descriptors.append(os.open(real, O_PATH | os.O_CLOEXEC))
             argv += ["--ro-bind-fd", str(descriptors[-1]), str(path)]
             resolved.append(real)
+            if workspace_root.is_relative_to(real):
+                alias = path / workspace_root.relative_to(real) / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+                if alias not in daemon_paths:
+                    daemon_paths.append(alias)
         argv += merged_usr_symlinks(tuple(resolved), set(settings.readonly_paths))
         descriptors.append(_directory_descriptor(workspace_fd, workspace_root))
         argv += ["--ro-bind-fd", str(descriptors[-1]), str(workspace_root)]
+        # The directory holds the daemon's private signing seed and ledger, which a job must not read.
+        argv += hidden_directory(workspace_fd, f"{WORKSPACE_DIRECTORY}/{DAEMON_DIRECTORY}", daemon_paths)
         descriptors.append(_directory_descriptor(job_fd, job_path))
         argv += ["--bind-fd", str(descriptors[-1]), str(job_path)]
         # Binds apply in order, so these overlay the writable job directory. Each binds the inode opened here:

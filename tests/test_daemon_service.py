@@ -28,7 +28,7 @@ from httk.workflow._daemon_keys import initialize_response_seed, response_public
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy
 from httk.workflow._daemon_protocol import Request, Response, decode_response, encode_request
-from httk.workflow._daemon_service import Broker, ExchangePublisher
+from httk.workflow._daemon_service import Broker, ExchangePublisher, _Observation
 from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
 from httk.workflow._daemon_state import Ledger, LedgerError
 
@@ -92,8 +92,6 @@ def _policy(tmp_path: Path, *, max_records: int = 64, max_submissions: int = 8) 
         workspace=tmp_path / "site/workspace",
         workspace_id=WORKSPACE_ID,
         enrollment_id=ENROLLMENT_ID,
-        state=tmp_path / "state",
-        snapshots=tmp_path / "snapshots",
         bwrap=runtime / "bwrap",
         python=runtime / "python",
         sbatch=broker / "sbatch",
@@ -142,14 +140,14 @@ def _request(
 
 
 def _open(tmp_path: Path, policy: Policy, *, initialize: bool = True) -> tuple[ExitStack, Broker, Ledger]:
-    for path in (policy.requests, policy.responses, policy.state):
+    for path in (policy.requests, policy.responses, policy.daemon, policy.broker):
         path.mkdir(parents=True, exist_ok=True)
     if initialize:
-        initialize_response_seed(policy.state)
+        initialize_response_seed(policy.daemon)
     stack = ExitStack()
     ledger = stack.enter_context(
         Ledger(
-            policy.state,
+            policy.broker,
             policy.workspace_id,
             policy.enrollment_id,
             initialize=initialize,
@@ -166,7 +164,7 @@ def _open(tmp_path: Path, policy: Policy, *, initialize: bool = True) -> tuple[E
         requests,
         responses,
         exchange=_publisher(policy),
-        response_seed=response_seed_path(policy.state),
+        response_seed=response_seed_path(policy.daemon),
     )
     return stack, broker, ledger
 
@@ -283,15 +281,15 @@ def test_service_rechecks_protected_activation_after_opening_the_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     policy = _policy(tmp_path)
-    for path in (policy.state, policy.requests, policy.responses):
+    for path in (policy.daemon, policy.requests, policy.responses, policy.broker):
         path.mkdir(parents=True)
-    initialize_response_seed(policy.state)
-    with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
+    initialize_response_seed(policy.daemon)
+    with Ledger(policy.broker, policy.workspace_id, policy.enrollment_id, initialize=True):
         pass
     selected = tmp_path / "snapshots/selected.json"
     replacement = tmp_path / "snapshots/replacement.json"
-    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
-    (policy.state / "active.json").chmod(0o600)
+    (policy.daemon / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.daemon / "active.json").chmod(0o600)
     checks: list[None] = []
 
     class Gateway(RecordingGateway):
@@ -302,7 +300,8 @@ def test_service_rechecks_protected_activation_after_opening_the_ledger(
             checks.append(None)
 
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
-    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.broker)
+    monkeypatch.setattr(service_module, "_DAEMON_DIRECTORY", policy.daemon)
     monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", Gateway)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
@@ -320,16 +319,16 @@ def test_service_rechecks_protected_activation_after_opening_the_ledger(
     startup = threading.Thread(target=lambda: _capture_run_error(arguments, errors))
     startup.start()
     assert loaded.wait(5)
-    (policy.state / "active.json").write_text(json.dumps(activation_document(replacement, policy)), encoding="utf-8")
-    (policy.state / "active.json").chmod(0o600)
+    (policy.daemon / "active.json").write_text(json.dumps(activation_document(replacement, policy)), encoding="utf-8")
+    (policy.daemon / "active.json").chmod(0o600)
     resume.set()
     startup.join(5)
     assert not startup.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], ValueError)
     assert "stale or mismatched" in str(errors[0])
     assert checks == []
-    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
-    (policy.state / "active.json").chmod(0o600)
+    (policy.daemon / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.daemon / "active.json").chmod(0o600)
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     service_module._run(arguments)
     assert checks == [None]
@@ -719,7 +718,7 @@ def test_requests_and_confirmed_submissions_are_logged(tmp_path: Path, caplog: p
             _publish(broker, start)
             broker.process_once(threading.Event())
         handle = _read(broker, start).handle
-        log = tmp_path / "snapshots/jobs/httk-42.out"
+        log = policy.jobs / "httk-42.out"
         assert f"daemon_submitted handle={handle} job_id=42 cluster=cluster-1 log={log}" in caplog.text
         assert (
             f"daemon_request request_id={health.request_id} operation=health outcome=ready reason=None handle=None"
@@ -768,16 +767,17 @@ def test_service_logs_check_and_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     policy = _policy(tmp_path)
-    for path in (policy.state, policy.requests, policy.responses):
+    for path in (policy.daemon, policy.requests, policy.responses, policy.broker):
         path.mkdir(parents=True)
-    initialize_response_seed(policy.state)
-    with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
+    initialize_response_seed(policy.daemon)
+    with Ledger(policy.broker, policy.workspace_id, policy.enrollment_id, initialize=True):
         pass
     selected = tmp_path / "snapshots/selected.json"
-    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
-    (policy.state / "active.json").chmod(0o600)
+    (policy.daemon / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.daemon / "active.json").chmod(0o600)
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
-    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.broker)
+    monkeypatch.setattr(service_module, "_DAEMON_DIRECTORY", policy.daemon)
     monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
@@ -871,14 +871,14 @@ def test_exchange_failure_is_logged_and_does_not_stop_the_loop(
 
 def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     policy = _policy(tmp_path)
-    for path in (policy.state, policy.requests, policy.responses):
+    for path in (policy.daemon, policy.requests, policy.responses, policy.broker):
         path.mkdir(parents=True)
-    initialize_response_seed(policy.state)
-    with Ledger(policy.state, policy.workspace_id, policy.enrollment_id, initialize=True):
+    initialize_response_seed(policy.daemon)
+    with Ledger(policy.broker, policy.workspace_id, policy.enrollment_id, initialize=True):
         pass
     selected = tmp_path / "snapshots/selected.json"
-    (policy.state / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
-    (policy.state / "active.json").chmod(0o600)
+    (policy.daemon / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    (policy.daemon / "active.json").chmod(0o600)
     opened: list[str] = []
     original = MailboxDirectory.child.__func__  # type: ignore[attr-defined]
 
@@ -888,7 +888,8 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
         return original(cls, parent_fd, name)
 
     monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
-    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.state)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.broker)
+    monkeypatch.setattr(service_module, "_DAEMON_DIRECTORY", policy.daemon)
     monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(MailboxDirectory, "child", classmethod(record))
@@ -951,7 +952,12 @@ class ScriptedGateway(RecordingGateway):
 
 
 def _observing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, initialize: bool = True, sacct: bool = False
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    initialize: bool = True,
+    sacct: bool = False,
+    jobs: Path | None = None,
 ) -> tuple[ExitStack, Broker, ScriptedGateway, list[float]]:
     """Open a broker that follows its managers, on a settable clock."""
 
@@ -970,6 +976,7 @@ def _observing(
         exchange=_publisher(policy),
         response_seed=broker.response_seed,
         observe=True,
+        jobs=jobs,
     )
     clock = [time.time()]
     monkeypatch.setattr(service_module, "time", SimpleNamespace(time=lambda: clock[0]))
@@ -978,6 +985,36 @@ def _observing(
 
 def _managers(policy: Policy) -> Any:
     return json.loads((policy.exchange / "managers.json").read_bytes())
+
+
+def test_manager_log_reads_sandbox_jobs_but_names_host_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sandbox_jobs = tmp_path / "sandbox-daemon/jobs"
+    sandbox_jobs.mkdir(parents=True)
+    (sandbox_jobs / "httk-42.out").write_bytes(b"sandbox output")
+    stack, broker, _, _ = _observing(tmp_path, monkeypatch, jobs=sandbox_jobs)
+    try:
+        observation: _Observation = {
+            "job_id": "42",
+            "cluster": "cluster-1",
+            "scheduler_state": "FAILED",
+            "exit_code": "1:0",
+            "started_at": None,
+            "ended_at": None,
+            "final": True,
+            "log_published": False,
+            "checked_at": 1.0,
+            "unknown_since": None,
+        }
+        broker._publish_log("a" * 32, observation)
+        published = broker.policy.exchange / "managers" / f"{'a' * 32}.log"
+        assert published.read_bytes() == b"sandbox output"
+
+        observation["job_id"] = "43"
+        broker._publish_log("b" * 32, observation)
+        missing = broker.policy.exchange / "managers" / f"{'b' * 32}.log"
+        assert missing.read_bytes() == f"no Slurm output was found at {broker.policy.jobs / 'httk-43.out'}\n".encode()
+    finally:
+        stack.close()
 
 
 def test_managers_are_followed_to_their_final_state_and_their_log_published_once(
@@ -1036,7 +1073,7 @@ def test_managers_are_followed_to_their_final_state_and_their_log_published_once
             "RUNNING exit_code=None",
             "FAILED exit_code=1:0",
         ]
-        saved = json.loads((policy.state / "ledger" / "observations" / f"{handle}.json").read_bytes())
+        saved = json.loads((policy.broker / "ledger" / "observations" / f"{handle}.json").read_bytes())
         assert saved["final"] is True and saved["log_published"] is True
     finally:
         stack.close()
@@ -1101,7 +1138,7 @@ def test_scheduler_and_state_failures_are_warnings_that_never_stop_the_loop(
             # The job ID comes from the ledger, before any check has succeeded.
             row = _managers(broker.policy)["managers"][0]
             assert (row["job_id"], row["scheduler_state"]) == ("42", None)
-            stored = broker.policy.state / "ledger" / "observations" / f"{row['handle']}.json"
+            stored = broker.policy.broker / "ledger" / "observations" / f"{row['handle']}.json"
             assert not stored.exists()  # the failed check recorded nothing
             stored.mkdir()
             gateway.status_error = False
@@ -1364,7 +1401,7 @@ def _instance(broker: Broker, *, gateway: RecordingGateway | None = None) -> Bro
     """Open another daemon instance on the same state, mailboxes and exchange."""
 
     ledger = Ledger(
-        broker.policy.state,
+        broker.policy.broker,
         broker.policy.workspace_id,
         broker.policy.enrollment_id,
         max_records=broker.policy.max_records,
@@ -1657,7 +1694,7 @@ def test_the_decision_is_durable_before_sbatch_and_the_response_before_publicati
     monkeypatch.setattr(gateway, "submit", submit)
     monkeypatch.setattr(broker.responses, "replace", replace_response)
     start = _request(tmp_path, 1, "start_manager", profile="cpu")
-    anchor = policy.state / "ledger" / "req" / start.request_id
+    anchor = policy.broker / "ledger" / "req" / start.request_id
     try:
         _publish(broker, start)
         broker.process_once(threading.Event())

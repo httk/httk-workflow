@@ -35,6 +35,8 @@ LOGS_DIRECTORY = "logs"
 JOBS_DIRECTORY = "jobs"
 POSTPROCESS_DIRECTORY = "postprocess"
 EXCHANGE_DIRECTORY = "exchange"
+#: The daemon's private directory below ``WORKSPACE_DIRECTORY``.
+DAEMON_DIRECTORY = "daemon"
 JOB_STATE_DIRECTORY = ".httk-job"
 # The envelope a detached or ejected job carries while it is out of every
 # workspace: its manifest, its marker, and any shared runner it pins. It

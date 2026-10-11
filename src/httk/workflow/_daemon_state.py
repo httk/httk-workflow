@@ -1,6 +1,6 @@
 """Lock-free durable ledger of the confined workspace daemon.
 
-The ledger is a directory, ``<state>/ledger/``, that any number of daemon
+The ledger is a directory, ``<broker>/ledger/``, that any number of daemon
 instances share without a lock. Every decision is one atomic no-replace
 operation: the rename of a prepared directory onto a name that must not
 exist (:func:`httk.workflow._fs.publish_dir`). A once-written record is such a
@@ -222,10 +222,9 @@ def refusal_response(request: Request, handle: str | None, reason: str) -> Respo
 
 def _legacy_message(path: Path) -> str:
     return (
-        f"{path} belongs to the SQLite daemon ledger of an earlier httk-workflow; the daemon ledger is now a "
-        "lock-free directory, and there is no migration. Reconcile the enrollment's outstanding manager jobs "
-        "with squeue and scancel, then initialize a new enrollment with 'httk workspace daemon init' and a new "
-        "--state (old per-user state can be removed with 'httk system reset')"
+        f"{path} is a SQLite daemon ledger from an earlier httk-workflow; there is no migration. Reconcile the "
+        "enrollment's outstanding manager jobs with squeue and scancel, then remove (or move aside) "
+        "the workspace's .httk-workspace/daemon directory and run 'httk workspace daemon init'"
     )
 
 
@@ -334,7 +333,7 @@ class Ledger:
 
     Any number of instances may open the same ledger at once; each gets its own random :attr:`nonce`.
 
-    :param directory: The protected daemon state directory holding ``ledger/``.
+    :param directory: The protected broker directory holding ``ledger/``.
     :param workspace_id: Workspace identity pinned by protected policy.
     :param enrollment_id: Enrollment identity pinned by protected policy.
     :param initialize: Create the ledger; it must not exist yet.
@@ -344,7 +343,7 @@ class Ledger:
     :raises FileExistsError: If *initialize* is set and a ledger already exists.
     :raises LedgerError: If the ledger is missing, malformed, belongs to another enrollment, or the state
         directory holds the SQLite ledger of an earlier version.
-    :raises OSError: If the state directory cannot be opened.
+    :raises OSError: If the broker directory cannot be opened.
     """
 
     def __init__(
@@ -393,7 +392,7 @@ class Ledger:
 
     @staticmethod
     def _open_state(path: Path) -> None:
-        """Require the state directory to be reachable from ``/`` without following any symlink."""
+        """Require the broker directory to be reachable from ``/`` without following any symlink."""
 
         try:
             os.close(_fs.open_dir_under(Path("/"), PurePosixPath(path.relative_to("/"))))
@@ -427,7 +426,8 @@ class Ledger:
         information = _fs.lstat(_fs.loc(self._root))
         if information is None:
             raise LedgerError(
-                f"daemon ledger {self._root} is missing; preserve this state and initialize a new enrollment"
+                f"daemon ledger {self._root} is missing; remove (or move aside) the workspace's "
+                ".httk-workspace/daemon directory and run 'httk workspace daemon init'"
             )
         if not stat.S_ISDIR(information.st_mode):
             raise LedgerError(f"daemon ledger {self._root} is not a directory")
@@ -439,8 +439,9 @@ class Ledger:
             if len(fields) == 4 and fields[0] == _FORMAT.encode() and fields[1] == str(_FORMAT_VERSION).encode():
                 raise LedgerError("daemon ledger identity mismatch: it belongs to another workspace or enrollment")
             raise LedgerError(
-                "unsupported daemon ledger format; preserve this state, reconcile outstanding work, "
-                "and initialize a new enrollment"
+                "unsupported daemon ledger format; reconcile outstanding manager jobs with squeue and scancel, "
+                "then remove (or move aside) the workspace's .httk-workspace/daemon directory and run "
+                "'httk workspace daemon init'"
             )
         for name in _SUBDIRECTORIES:
             child = _fs.lstat(_fs.loc(self._root / name))

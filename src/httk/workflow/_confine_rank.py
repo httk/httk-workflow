@@ -52,13 +52,21 @@ from ._sandbox import (
     O_PATH,
     PreparedSandbox,
     device_parent_dirs,
+    hidden_directory,
     make_inheritable,
     merged_usr_symlinks,
     open_device_nofollow,
     open_directory_nofollow,
 )
 from .errors import FormatError, WorkflowError
-from .models import JOBS_DIRECTORY, check_job_placement, normalize_placement, parse_job_key
+from .models import (
+    DAEMON_DIRECTORY,
+    JOBS_DIRECTORY,
+    WORKSPACE_DIRECTORY,
+    check_job_placement,
+    normalize_placement,
+    parse_job_key,
+)
 
 #: The trusted launch description inside the launch directory.
 LAUNCH_FILE = "launch.json"
@@ -542,6 +550,7 @@ def prepare_rank_sandbox(
     argv += ["--tmpfs", "/tmp", "--dir", "/tmp/home"]
     try:
         resolved: list[Path] = []
+        daemon_paths = [workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY]
         for path in confine.readonly_paths:
             real = _resolve(path, "confine.readonly_paths entry")
             if any(item.is_relative_to(workspace) for item in (path, real)):
@@ -549,9 +558,15 @@ def prepare_rank_sandbox(
             descriptors.append(os.open(real, O_PATH | os.O_CLOEXEC))
             argv += ["--ro-bind-fd", str(descriptors[-1]), str(path)]
             resolved.append(real)
+            if workspace.is_relative_to(real):
+                alias = path / workspace.relative_to(real) / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+                if alias not in daemon_paths:
+                    daemon_paths.append(alias)
         argv += merged_usr_symlinks(tuple(resolved), set(confine.readonly_paths))
         descriptors.append(os.dup(workspace_fd))
         argv += ["--ro-bind-fd", str(descriptors[-1]), str(workspace)]
+        # The directory holds the daemon's private signing seed and ledger, which a job must not read.
+        argv += hidden_directory(workspace_fd, f"{WORKSPACE_DIRECTORY}/{DAEMON_DIRECTORY}", daemon_paths)
         descriptors.append(os.dup(job_fd))
         argv += ["--bind-fd", str(descriptors[-1]), str(job)]
         argv += ["--proc", "/proc", "--dev", "/dev"]

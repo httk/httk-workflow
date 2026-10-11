@@ -4,12 +4,13 @@ The isolated daemon bootstrap (``python -I -S``) loads this file by path with :m
 protected-file check, so it uses the standard library only and no package-relative imports.
 """
 
+import errno
 import fcntl
 import os
 import re
 import stat
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,31 @@ BWRAP_REQUIRED = frozenset(
 BWRAP_USERNS_BLOCK = ("--disable-userns", "--assert-userns-disabled")
 MERGED_USR_LINKS = (Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin"))
 _HELP_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+
+def hidden_directory(directory_fd: int, relative: str, paths: Sequence[Path]) -> list[str]:
+    """Return Bubblewrap arguments that hide one directory below a bound root under empty tmpfs mounts.
+
+    :param directory_fd: Descriptor of the bound root.
+    :param relative: The directory's path relative to the root.
+    :param paths: The directory's absolute paths inside the sandbox.
+    :return: One ``--tmpfs`` mount per path when the directory exists, else no arguments.
+    """
+
+    try:
+        descriptor = os.open(
+            relative,
+            O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTDIR, errno.ELOOP):
+            raise
+        raise ValueError(f"{paths[0]} must be a real directory, not a symlink or file; confinement refused") from exc
+    os.close(descriptor)
+    return [argument for path in paths for argument in ("--tmpfs", str(path))]
 
 
 @dataclass(slots=True)
