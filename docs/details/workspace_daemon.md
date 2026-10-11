@@ -300,7 +300,7 @@ key to the destination operator; the private key stays on the client:
 
 ```console
 httk init --name "Your Name" --email you@example.org
-python -c 'from httk.core.identity import identity_public_key; print(identity_public_key())'
+httk identity key
 ```
 
 ### Initializing and running
