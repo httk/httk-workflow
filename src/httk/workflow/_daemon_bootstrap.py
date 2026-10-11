@@ -235,7 +235,7 @@ def _prepare_sandbox(
     _check_protected_file(source, mutable_roots)
     _check_protected_file(source.with_name("_daemon_policy.py"), mutable_roots)
     _check_protected_file(source.with_name("_sandbox.py"), mutable_roots)
-    _check_protected_file(policy_source, mutable_roots)
+    _check_protected_file(policy_source, (policy.exchange, policy.broker))
     for command in (policy.python, policy.bwrap, policy.sbatch, policy.squeue, policy.scancel):
         _check_command(command, resolved_mutable)
     if policy.slurm_conf is not None:
