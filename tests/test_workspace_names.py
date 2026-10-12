@@ -209,6 +209,53 @@ def test_protocol_path_forms_all_surface_a_corrupt_registry(tmp_path: Path, valu
         _protocol_workspace(value, context)
 
 
+def _status_root(argv: list[str], context: CLIContext, capsys) -> str:
+    assert command(argv, context) == 0, argv
+    (row,) = json.loads(capsys.readouterr().out)
+    return str(row["root"])
+
+
+def test_workspace_arguments_accept_a_workspace_directory(tmp_path: Path, capsys) -> None:
+    unregistered = Workspace.initialize(tmp_path / "unregistered")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    context = _context(elsewhere)
+    root = str(unregistered.root)
+    assert _status_root(["workspace", "status", "--json", root], context, capsys) == root
+    assert _status_root(["workspace", "status", "--json", "../unregistered"], context, capsys) == root
+    for argv in (
+        ["job", "list", "--json", "--workspace", root],
+        ["list", "--workspace", root],
+        ["workspace", "settings", "show", "../unregistered"],
+    ):
+        assert command(argv, context) == 0, argv
+    capsys.readouterr()
+    assert not workspaces_path().exists()  # nothing was registered, no default was created
+
+
+def test_a_registered_name_wins_and_dot_slash_picks_the_directory(tmp_path: Path, capsys) -> None:
+    registered = tmp_path / "registered"
+    context = _context(tmp_path)
+    assert command(["workspace", "init", "--name", "runs", str(registered)], context) == 0
+    shadow = Workspace.initialize(tmp_path / "runs")
+    capsys.readouterr()
+    assert _status_root(["workspace", "status", "--json", "runs"], context, capsys) == str(registered)
+    assert _status_root(["workspace", "status", "--json", "./runs"], context, capsys) == str(shadow.root)
+
+
+@pytest.mark.parametrize("value", ["plain", "./plain", "missing/dir"])
+def test_a_directory_that_is_not_a_workspace_is_refused_clearly(tmp_path: Path, value: str, capsys) -> None:
+    (tmp_path / "plain").mkdir()
+    assert command(["job", "list", "--workspace", value], _context(tmp_path)) != 0
+    assert "neither a registered workspace name nor a workspace directory" in capsys.readouterr().err
+    assert not (tmp_path / "plain" / ".httk-workspace").exists()
+
+
+def test_an_unknown_bare_name_keeps_the_registry_hint(tmp_path: Path, capsys) -> None:
+    assert command(["job", "list", "--workspace", "nosuch"], _context(tmp_path)) != 0
+    assert "unknown workspace: nosuch" in capsys.readouterr().err
+
+
 def test_remote_delete_requires_force_before_contacting_remote(tmp_path: Path, remote: Remote, capsys) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="remote-delete")

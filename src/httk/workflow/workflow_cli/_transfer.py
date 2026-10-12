@@ -7,7 +7,6 @@ on :mod:`httk.workflow._moving`, locally or through the remote adapters'
 
 import argparse
 import json
-import os
 import re
 import shlex
 import sys
@@ -42,11 +41,11 @@ from ..adapters import (
     split_settings,
     store_credentials,
 )
-from ..errors import ResolutionMiss, WorkflowError
+from ..errors import WorkflowError
 from ..hygiene import describe_remote, remove_remote
 from ..introspection import iter_jobs, read_job, read_state, resolve_job_selectors
 from ..models import WORKSPACE_DIRECTORY, canonical_uuid, normalize_placement
-from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
+from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace
 from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 from ._common import (
@@ -59,6 +58,7 @@ from ._common import (
     _required,
     _run_remote_workspace,
     _settings,
+    _workspace_argument,
     add_durability_arguments,
     confirm,
     remote_workspace_output,
@@ -420,24 +420,10 @@ _DELIVERED = ("adopted", "already_adopted")
 def _workspace_reference(value: str, context: CLIContext) -> Path | WorkspaceBinding:
     """Resolve a registered name (``REMOTE:WS`` included) or a workspace directory: a local root or a remote binding."""
 
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path(context.cwd) / candidate
-    path_like = (
-        value in {".", ".."} or ":" in value or os.sep in value or (os.altsep is not None and os.altsep in value)
-    )
-    # A path-like value never reads the registry through resolve_workspace (it
-    # fails name validation first), so read it explicitly: a corrupt registry
-    # must surface rather than be masked by the path fallback.
-    list_workspaces()
-    try:
-        binding = resolve_workspace(value, project=context.cwd)
-    except ResolutionMiss:
-        if not path_like and not candidate.is_dir():
-            raise
-        return candidate
-    if binding.remote == LOCAL_REMOTE and binding.path is not None:
-        return Path(binding.path)
+    binding, root = _workspace_argument(value, context)
+    if root is not None:
+        return root
+    assert binding is not None
     return binding
 
 

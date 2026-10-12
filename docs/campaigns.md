@@ -32,7 +32,7 @@ south	screening-b
 Each `--partition NAME=WORKSPACE` names a bucket and the registered workspace
 it points at, and `--assignment` sets how a root job's partition is chosen.
 The workspaces must exist first ({doc}`workspaces`); a partition names a
-workspace the way every other command does, never a bare path.
+registered workspace, never a bare path, because the campaign records it.
 
 Change individual entries without restating the whole map:
 

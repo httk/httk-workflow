@@ -19,8 +19,9 @@ httk workspace status
 sign what you publish; it is idempotent. `project init` writes the project
 anchor `httk_project/`. `workspace init` creates a workspace and registers it
 under a name in the per-user registry, so every later command can address it
-with `--workspace NAME`; without `--workspace`, commands use the enclosing
-workspace, then the project's default, then the per-user default. A workspace
+with `--workspace NAME`; a workspace's directory path works too, registered or
+not. Without `--workspace`, commands use the enclosing workspace, then the
+project's default, then the per-user default. A workspace
 is a directory of its own (`workspace init` refuses a non-empty directory, so
 a project root is never a workspace); a project records its workspaces as
 members, and the first workspace initialized inside a project becomes its

@@ -7,8 +7,19 @@ import sys
 from httk.core.cli import CLIContext
 
 from ..monitor.data import WorkspaceView
-from ..registry import list_workspaces, resolve_workspace
-from ._common import _add_adapter_timeout, _leaf
+from ..registry import WorkspaceBinding, list_workspaces
+from ..workspace import Workspace
+from ._common import _add_adapter_timeout, _leaf, _workspace_argument
+
+
+def _monitored(value: str, context: CLIContext) -> WorkspaceBinding | Workspace:
+    """Resolve one ``--workspace`` value: a registered binding, or a workspace opened by its root path."""
+
+    binding, root = _workspace_argument(value, context)
+    if binding is not None:
+        return binding
+    assert root is not None
+    return Workspace(root)
 
 
 def handle_monitor(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -24,10 +35,8 @@ def handle_monitor(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("workflow monitor requires the stdlib curses module on this platform") from exc
 
     names = arguments.workspace
-    bindings = (
-        [resolve_workspace(name, project=context.cwd) for name in names]
-        if names
-        else list_workspaces(project=context.cwd)
+    bindings: list[WorkspaceBinding | Workspace] = (
+        [_monitored(name, context) for name in names] if names else list(list_workspaces(project=context.cwd))
     )
     if not bindings:
         raise ValueError("no workspaces are registered; pass --workspace NAME")
@@ -56,8 +65,8 @@ def build_monitor_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
     parser.add_argument(
         "--workspace",
         action="append",
-        metavar="NAME|REMOTE:NAME",
-        help="workspace to show (repeatable; default: all registered local workspaces)",
+        metavar="WORKSPACE",
+        help="the workspace to show (repeatable; default: all registered local workspaces)",
     )
     parser.add_argument(
         "--refresh",

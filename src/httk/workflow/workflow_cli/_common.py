@@ -20,6 +20,7 @@ import argparse
 import fnmatch
 import json
 import logging
+import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -28,8 +29,9 @@ import httk.core
 from httk.core.cli import CLIContext
 
 from ..adapters import resolve_remote, run_adapter
-from ..errors import WorkflowError
-from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, resolve_workspace
+from ..errors import ResolutionMiss, WorkflowError
+from ..models import WORKSPACE_DIRECTORY
+from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
 from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
 from ..seals import require_cli_modifiable
 from ..workspace import Workspace
@@ -379,13 +381,14 @@ def _field(name: str, value: object) -> str:
 # ---------------------------------------------------------------------------
 # Workspace name resolution
 #
-# Every explicitly named workspace is a registered name, never a bare path. The
-# helpers below turn that name into either a local path or a remote binding.
-# An omitted name may resolve to an enclosing workspace path. The other
-# unregistered path spelling is ``--by-path``: a hidden switch the transfer
-# choreography and remote-workspace creation set when one machine invokes a
-# command on another, where there is no registry and the workspace is addressed
-# by its path.
+# An explicit workspace argument is a registered name (``REMOTE:NAME``
+# included) or, failing that, a local workspace root directory: one holding
+# ``.httk-workspace/``, with no upward discovery. A registered name wins, so
+# ``./NAME`` picks a same-named directory. An omitted argument may resolve to an
+# enclosing workspace path. ``--by-path`` is a hidden protocol switch the
+# transfer choreography and remote-workspace creation set when one machine
+# invokes a command on another: the value is then a literal path and the
+# registry is not read at all.
 # ---------------------------------------------------------------------------
 
 
@@ -395,14 +398,50 @@ def _by_path(arguments: argparse.Namespace) -> bool:
     return bool(getattr(arguments, "by_path", False))
 
 
+def _workspace_argument(value: str, context: CLIContext) -> tuple[WorkspaceBinding | None, Path | None]:
+    """Resolve an explicit workspace argument to a binding and, when local, its path.
+
+    A registered name wins, so ``./NAME`` picks a same-named directory.
+
+    :param value: A registered name, ``REMOTE:NAME``, or a workspace root directory.
+    :param context: The CLI invocation; relative paths resolve against its working directory.
+    :return: ``(binding, path)`` for a registered local name, ``(binding, None)``
+        for a remote one, and ``(None, path)`` for a workspace directory.
+    :raises httk.workflow.errors.ResolutionMiss: If *value* is neither a
+        registered name nor a workspace root directory.
+    """
+
+    # A path-like value never reads the registry through resolve_workspace (it
+    # fails name validation first), so read it explicitly: a corrupt registry
+    # must surface rather than be masked by the path fallback.
+    list_workspaces()
+    try:
+        binding = resolve_workspace(value, project=context.cwd)
+    except ResolutionMiss:
+        candidate = Path(context.cwd) / Path(value).expanduser()
+        if (candidate / WORKSPACE_DIRECTORY).is_dir():
+            return None, candidate
+        path_like = value in {".", ".."} or os.sep in value or (os.altsep is not None and os.altsep in value)
+        if path_like or candidate.is_dir():
+            raise ResolutionMiss(
+                f"{value} is neither a registered workspace name nor a workspace directory "
+                f"(no {WORKSPACE_DIRECTORY}/ in {candidate})"
+            ) from None
+        raise
+    if binding.remote == LOCAL_REMOTE:
+        assert binding.path is not None
+        return binding, Path(binding.path)
+    return binding, None
+
+
 def _resolve_binding(arguments: argparse.Namespace, context: CLIContext) -> tuple[WorkspaceBinding | None, Path | None]:
     """Resolve the workspace argument to a binding and, when local, its path.
 
     ``--by-path`` yields ``(None, path)``: a literal filesystem path with no
     registry lookup, for the protocol spellings one machine runs on another. A
     missing workspace argument first checks for an enclosing workspace and
-    yields ``(None, path)`` in the same way. A registered name yields the
-    binding, and its path too when the binding is local; a remote binding yields
+    yields ``(None, path)`` in the same way. An explicit argument resolves
+    through :func:`_workspace_argument`: a remote binding yields
     ``(binding, None)`` so the caller either dispatches over the adapter or
     refuses.
     """
@@ -411,15 +450,12 @@ def _resolve_binding(arguments: argparse.Namespace, context: CLIContext) -> tupl
         if arguments.workspace is None:
             raise ValueError("--by-path requires an explicit path")
         return None, Path(arguments.workspace)
-    if arguments.workspace is None:
-        discovered = Workspace.discover(context.cwd)
-        if discovered is not None:
-            return None, discovered
-    binding = (
-        default_workspace(project=context.cwd)
-        if arguments.workspace is None
-        else resolve_workspace(arguments.workspace, project=context.cwd)
-    )
+    if arguments.workspace is not None:
+        return _workspace_argument(arguments.workspace, context)
+    discovered = Workspace.discover(context.cwd)
+    if discovered is not None:
+        return None, discovered
+    binding = default_workspace(project=context.cwd)
     if binding.remote == LOCAL_REMOTE:
         assert binding.path is not None
         return binding, Path(binding.path)

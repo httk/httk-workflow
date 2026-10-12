@@ -30,7 +30,7 @@ httk workflow precheck  [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow run       [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
 httk manager            run
 httk launcher           list | add | configure | show | check | remove
-httk workflow monitor   [--workspace NAME …] [--refresh SECONDS]
+httk workflow monitor   [--workspace WORKSPACE …] [--refresh SECONDS]
 httk workflow postprocess
 httk v1                 collect
 httk remote             list | add | configure | check | import-v1 | show | remove | daemon
@@ -76,11 +76,16 @@ be settled first.
 
 ### Workspace selection
 
-A `WORKSPACE` is an optional registered local name. When it is omitted,
-commands resolve the workspace in this order: the closest enclosing workspace
-containing `.httk-workspace/format.json`, the project's recorded default, the
-registry's default, then an auto-created per-user default. Remote names are
-written `REMOTE:NAME` at use time.
+A `WORKSPACE`, positional or given with `--workspace`, is a registered name,
+`REMOTE:NAME` for a workspace on a remote, or else the path of a local
+workspace directory (one holding `.httk-workspace/`, relative to the current
+directory; no upward search). A registered name wins over a same-named
+directory, so `./NAME` addresses the directory. The registry verbs
+`workspace forget`, `delete`, `move` and `default` take registered names only.
+When the workspace is omitted, commands resolve it in this order: the closest
+enclosing workspace containing `.httk-workspace/format.json`, the project's
+recorded default, the registry's default, then an auto-created per-user
+default.
 
 The registry is machine-owned and stores only absolute local paths, in
 `$XDG_CONFIG_HOME/httk/workspaces.json`. When a command reaches a remote
@@ -648,7 +653,7 @@ See {doc}`launchers` and {doc}`launcher_authoring`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workflow monitor` | open the curses workspace monitor | `--workspace NAME` (repeatable), `--refresh SECONDS`, `--adapter-timeout SECONDS`, `--non-interactive` |
+| `workflow monitor` | open the curses workspace monitor | `--workspace WORKSPACE` (repeatable), `--refresh SECONDS`, `--adapter-timeout SECONDS`, `--non-interactive` |
 
 See {doc}`monitor` for the panes, keys, and read budget.
 
