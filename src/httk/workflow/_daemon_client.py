@@ -238,16 +238,18 @@ def read_daemon(exchange: Path) -> dict[str, object]:
 
 
 _MAX_PASSIVE_BYTES = 1024 * 1024
-# kind -> (format, identity field, timestamp field, list name, required string fields, nullable string fields, extra)
+# kind -> (format, identity field, timestamp field, list name, required string fields, nullable string fields, extra,
+#          optional scalar-excerpt fields)
 _PASSIVE = {
     "status": (
         "httk-workspace-exchange-status",
         "workspace_id",
         "updated_at",
         "jobs",
-        ("job_id", "job_key", "state"),
+        ("exchange_name", "job_id", "job_key", "state"),
         (),
         ("truncated",),
+        ("progress",),
     ),
     "managers": (
         "httk-workspace-daemon-managers",
@@ -257,9 +259,10 @@ _PASSIVE = {
         ("handle", "profile", "request_id", "state"),
         ("job_id", "scheduler_state", "exit_code", "started_at", "ended_at", "log"),
         (),
+        (),
     ),
 }
-_PASSIVE_VERSIONS = {"status": 1, "managers": 3}
+_PASSIVE_VERSIONS = {"status": 2, "managers": 3}
 _MAX_LOG_BYTES = 1024 * 1024
 
 
@@ -272,10 +275,16 @@ def _read_passive_file(directory: MailboxDirectory, name: str) -> object | None:
         return None
 
 
+def _is_excerpt(value: object) -> bool:
+    """Report whether ``value`` is a flat object of scalar members, like a job's ``progress`` excerpt."""
+
+    return isinstance(value, dict) and all(type(item) in (str, bool, int, float) for item in value.values())
+
+
 def _check_passive(name: str, value: object, kind: str, identity: str | None) -> dict[str, object]:
     """Validate the shape and (when pinned) the identity of one passive status document."""
 
-    fmt, identity_field, stamp, list_name, strings, nullable, extra = _PASSIVE[kind]
+    fmt, identity_field, stamp, list_name, strings, nullable, extra, excerpts = _PASSIVE[kind]
     if not isinstance(value, dict) or set(value) != {
         "format",
         "format_version",
@@ -298,9 +307,10 @@ def _check_passive(name: str, value: object, kind: str, identity: str | None) ->
     items = value[list_name]
     if not isinstance(items, list) or not all(
         isinstance(item, dict)
-        and set(item) == {*strings, *nullable}
+        and set(item) - set(excerpts) == {*strings, *nullable}
         and all(type(item[field]) is str for field in strings)
         and all(item[field] is None or type(item[field]) is str for field in nullable)
+        and all(_is_excerpt(item[field]) for field in excerpts if field in item)
         for item in items
     ):
         raise ValueError(f"{name} has an invalid {list_name} list")

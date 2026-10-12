@@ -19,6 +19,7 @@ from conftest import configure_identity, register_ws
 from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, _requests, removal
 from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest
 from httk.workflow._daemon_auth import sign_request
+from httk.workflow._daemon_client import Endpoint, read_passive_status
 from httk.workflow._daemon_protocol import Request, decode_response
 from httk.workflow._exchange import (
     EXCHANGE_SUBDIRECTORIES,
@@ -764,6 +765,9 @@ def test_the_status_lists_exchange_jobs_with_a_sanitized_progress_excerpt(tmp_pa
     assert entry["progress"] == {"step": "relax", "fraction": 0.5, "text": "ab" + "c" * 254}
     assert "progress" not in by_name[str(second[0]["id"])]
     assert status["truncated"] is False
+    # The client reader accepts exactly what the managers write.
+    endpoint = Endpoint(exchange_directory(ws), ws.workspace_id)
+    assert read_passive_status(endpoint)["status"] == status
 
 
 def test_a_symlink_at_status_json_is_replaced_not_followed(tmp_path: Path) -> None:

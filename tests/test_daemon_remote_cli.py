@@ -611,7 +611,7 @@ def _passive(project: Path) -> tuple[dict[str, object], Path]:
     outbox = Path(str(settings["exchange"]))
     status = {
         "format": "httk-workspace-exchange-status",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": WORKSPACE_ID,
         "updated_at": "2026-01-01T00:00:00.000000Z",
         "jobs": [],

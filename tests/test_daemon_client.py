@@ -636,10 +636,19 @@ def test_exchange_refuses_invalid_wait_without_publication(tmp_path: Path, wait:
 def _passive_documents(endpoint: Endpoint) -> tuple[dict[str, object], dict[str, object]]:
     status: dict[str, object] = {
         "format": "httk-workspace-exchange-status",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": endpoint.workspace_id,
         "updated_at": "2026-01-01T00:00:00.000000Z",
-        "jobs": [{"job_id": "j", "job_key": "k", "state": "submitted"}],
+        "jobs": [
+            {"exchange_name": "e", "job_id": "j", "job_key": "k", "state": "submitted"},
+            {
+                "exchange_name": "f",
+                "job_id": "i",
+                "job_key": "l",
+                "state": "running",
+                "progress": {"step": "relax", "n": 2},
+            },
+        ],
         "truncated": False,
     }
     managers: dict[str, object] = {
@@ -700,9 +709,15 @@ def test_passive_status_reads_both_files_or_none(tmp_path: Path) -> None:
     [
         ("status.json", {"format": "other"}),
         ("status.json", {"extra": 1}),
-        ("status.json", {"format_version": 2}),
+        ("status.json", {"format_version": 1}),
         ("status.json", {"truncated": "no"}),
-        ("status.json", {"jobs": [{"job_id": 1, "job_key": "k", "state": "s"}]}),
+        ("status.json", {"jobs": [{"exchange_name": "e", "job_id": 1, "job_key": "k", "state": "s"}]}),
+        ("status.json", {"jobs": [{"job_id": "j", "job_key": "k", "state": "s"}]}),
+        ("status.json", {"jobs": [{"exchange_name": "e", "job_id": "j", "job_key": "k", "state": "s", "progress": 1}]}),
+        (
+            "status.json",
+            {"jobs": [{"exchange_name": "e", "job_id": "j", "job_key": "k", "state": "s", "progress": {"a": []}}]},
+        ),
         ("status.json", {"jobs": [{"job_id": "j"}]}),
         ("status.json", {"workspace_id": "12345678-1234-1234-1234-000000000000"}),
         ("managers.json", {"enrollment_id": "0" * 32}),
