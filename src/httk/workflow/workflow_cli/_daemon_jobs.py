@@ -106,7 +106,11 @@ def _await_pause(
         if remaining <= 0:
             return "refused", "pause request timed out and remains pending", state
         time.sleep(min(_POLL_SECONDS, remaining))
-        wait = min(_WAIT_SECONDS, max(_MIN_WAIT_SECONDS, math.inf if deadline is None else deadline - time.monotonic()))
+        remaining = math.inf if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            return "refused", "pause request timed out and remains pending", state
+        # ponytail: a status request can overrun by the 50 ms server minimum; reduce it if strict bounds are needed.
+        wait = min(_WAIT_SECONDS, max(_MIN_WAIT_SECONDS, remaining))
         _, response = job_request_status(
             bundle, endpoint, identity, command_id, wait_seconds=wait, adapter_timeout=adapter_timeout
         )

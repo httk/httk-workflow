@@ -38,43 +38,21 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
 
 
-_SCOPE = {"hostname": "test-host", "boot_id": "a" * 32, "pid": 27645, "start_ticks": 9182}
+_SCOPE = {"hostname": "test-host", "boot_id": "a" * 32}
+_IDENTITY = ProcessIdentity("test-host", "a" * 32, 27645, 9182)
 
 
 def _service_arguments(policy: Path, policy_source: Path, *, check: bool, once: bool) -> argparse.Namespace:
-    """Build service arguments with a bootstrap-captured execution scope."""
+    """Build service arguments with a host identity and scope descriptor placeholder."""
 
     return argparse.Namespace(
         policy=policy,
         policy_source=policy_source,
-        execution_scope=json.dumps(_SCOPE),
+        execution_scope_fd=12345,
+        host_identity=json.dumps(_SCOPE),
         check=check,
         once=once,
     )
-
-
-def test_execution_scope_is_the_exact_bootstrap_identity() -> None:
-    assert service_module._execution_scope(json.dumps(_SCOPE)) == ProcessIdentity("test-host", "a" * 32, 27645, 9182)
-
-
-@pytest.mark.parametrize(
-    "scope",
-    [
-        "not json",
-        "[]",
-        {key: value for key, value in _SCOPE.items() if key != "start_ticks"},
-        {**_SCOPE, "extra": 1},
-        {**_SCOPE, "hostname": "bad/name"},
-        {**_SCOPE, "boot_id": ""},
-        {**_SCOPE, "pid": 1},
-        {**_SCOPE, "pid": "2"},
-        {**_SCOPE, "start_ticks": -1},
-        {**_SCOPE, "start_ticks": None},
-    ],
-)
-def test_execution_scope_refuses_incomplete_or_malformed_identity(scope: object) -> None:
-    with pytest.raises(ValueError, match="execution scope"):
-        service_module._execution_scope(scope if isinstance(scope, str) else json.dumps(scope))
 
 
 class RecordingGateway(SlurmGateway):
@@ -346,6 +324,7 @@ def test_service_rechecks_protected_activation_after_opening_the_ledger(
     monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", Gateway)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(service_module, "read_execution_scope", lambda *_args: _IDENTITY)
     arguments = _service_arguments(selected, selected, check=True, once=False)
     loaded = threading.Event()
     resume = threading.Event()
@@ -791,7 +770,9 @@ def test_main_reports_state_recovery_guidance_and_scheduler_reasons(
                         "/tmp/daemon-policy.json",
                         "--policy-source",
                         "/protected-policy.json",
-                        "--execution-scope",
+                        "--execution-scope-fd",
+                        "123",
+                        "--host-identity",
                         json.dumps(_SCOPE),
                         "--once",
                     ]
@@ -812,7 +793,9 @@ def test_service_entry_point_logs_to_stdout() -> None:
             "/x",
             "--policy-source",
             "/y",
-            "--execution-scope",
+            "--execution-scope-fd",
+            "123",
+            "--host-identity",
             json.dumps(_SCOPE),
         ],
         capture_output=True,
@@ -844,6 +827,7 @@ def test_service_logs_check_and_startup(
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(service_module, "read_execution_scope", lambda *_args: _IDENTITY)
     active_owners: list[dict[str, object]] = []
 
     def inspect_owner(_broker: Broker, _stop: threading.Event, *, once: bool = False) -> None:
@@ -859,7 +843,7 @@ def test_service_logs_check_and_startup(
     assert f"daemon_started workspace={policy.workspace_id} enrollment={ENROLLMENT_ID} launchers=cpu" in caplog.text
     assert active_owners[0]["kind"] == "daemon"
     recorded = tuple(active_owners[0][key] for key in ("hostname", "boot_id", "pid", "process_start_ticks"))
-    assert recorded == tuple(_SCOPE.values())
+    assert recorded == (_IDENTITY.hostname, _IDENTITY.boot_id, _IDENTITY.pid, _IDENTITY.start_ticks)
     assert _kernel.list_owners(initialized) == []
 
 
@@ -970,6 +954,7 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
     monkeypatch.setattr(MailboxDirectory, "child", classmethod(record))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(service_module, "read_execution_scope", lambda *_args: _IDENTITY)
     service_module._run(_service_arguments(selected, selected, check=True, once=False))
     assert opened == ["requests", "responses"]
     policy.requests.rmdir()

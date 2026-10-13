@@ -83,8 +83,8 @@ workspace setting.
 ### Host requirements
 
 - Linux with a Bubblewrap that supports `--bind-fd`, `--ro-bind-fd`,
-  `--ro-bind-data`, `--new-session` and `--clearenv`, on the broker host and
-  on every compute node. With Bubblewrap 0.8.0 or later the sandboxes also
+  `--ro-bind-data`, `--new-session`, `--clearenv` and `--info-fd`, on the broker
+  host and on every compute node. With Bubblewrap 0.8.0 or later the sandboxes also
   block nested user namespaces (`--disable-userns`); where that option is
   absent or refused, the broker's startup and the manager log a warning and
   run without that block. It reduces kernel attack surface; confinement does
@@ -170,18 +170,26 @@ configuration. Its writable paths are the overlays listed above, and it has
 host networking for Slurm. Authentication, scheduler handling and workspace
 operations share this service process; there is no execution helper or nested
 sandbox. One `kind="daemon"` workspace owner lives for the service lifetime.
-It records the bootstrap's host, boot ID, PID and start time, captured just
-before the bootstrap execs Bubblewrap: Bubblewrap's monitor keeps that PID for
-the sandbox's lifetime, and `--die-with-parent` ends the sandbox with it, so a
-probe on the daemon's host can prove the owner alive or dead. The daemon never
-probes peer owners through its private process table. Instead, before it enters
-the sandbox (not for `check`), the bootstrap recovers on the host the
-workspace's daemon owners recorded on this host that are proven dead, returning
-the jobs they held to the states they left. A daemon owner on another host, or
-one whose death cannot be proven, stays until a manager on its host recovers it;
-`httk workspace attest-dead` records its death so that the next daemon start on
-its host or any manager recovers it. A failed recovery is reported
-and does not stop the daemon.
+The owner is Bubblewrap's init, the sandbox's PID 1, under which the service
+runs. `--info-fd` supplies the init's host PID, its start time comes from the
+namespace-local `/proc/1/stat`, and the bootstrap supplies hostname and boot ID.
+A probe on the daemon's host can then prove the owner alive or dead. When
+namespace PID 1 exits, the kernel kills and reaps every other process in the
+namespace first, so a proven-dead owner means no sandbox process, including one
+blocked in a filesystem call, is still running. Once started, the init dies with
+the Bubblewrap monitor (`--die-with-parent`), so stopping the monitor normally
+ends the sandbox, but only the init's death proves that it has ended: a process
+blocked in a filesystem call can outlive the monitor until the call returns, and
+a monitor that dies while Bubblewrap is still setting up can leave the init
+running. The daemon never probes
+peer owners through its private process table.
+Instead, before it enters the sandbox (not for `check`), the bootstrap recovers
+on the host the workspace's daemon owners recorded on this host that are
+proven dead, returning the jobs they held to the states they left. A daemon
+owner on another host, or one whose death cannot be proven, stays until a
+manager on its host recovers it; `httk workspace attest-dead` records its death
+so that the next daemon start on its host or any manager recovers it. A failed
+recovery is reported and does not stop the daemon.
 The broker and its Slurm clients inherit the environment the daemon was
 started in, so site wrappers find their module and site variables; only
 `SBATCH_*`, `SALLOC_*`, `SRUN_*` and `SLURM_*` (except `SLURM_CONF`),

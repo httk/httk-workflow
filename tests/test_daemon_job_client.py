@@ -302,6 +302,23 @@ def test_pause_wait_timeout_bounds_the_status_polls(remote, monkeypatch: pytest.
     assert stdout.split("\t")[1:5:3] == ["refused", "pause request timed out and remains pending"]
 
 
+def test_pause_wait_timeout_does_not_poll_after_sleep_exhausts_deadline(
+    remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, _endpoint, identity, response_seed = remote
+    seen = _mock_adapter(monkeypatch, response_seed, [("queued", "running")])
+
+    status, stdout = _daemon_jobs.request_remote_jobs(
+        WorkspaceBinding("cluster:runs", "cluster", None),
+        CLIContext("httk", bundle.parent),
+        _arguments(action="pause", wait=True, timeout=0.01, reason="pause for review"),
+        identity,
+    )
+
+    assert status == 1 and len(seen) == 1
+    assert stdout.split("\t")[1:5:3] == ["refused", "pause request timed out and remains pending"]
+
+
 def test_monitor_mount_daemon_request_uses_complete_argument_namespace(remote, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle, _endpoint, identity, response_seed = remote
     _mock_adapter(monkeypatch, response_seed, [("queued", "running")])

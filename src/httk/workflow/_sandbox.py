@@ -29,6 +29,7 @@ BWRAP_REQUIRED = frozenset(
     {
         "--bind-fd",
         "--clearenv",
+        "--info-fd",
         "--new-session",
         "--ro-bind-data",
         "--ro-bind-fd",

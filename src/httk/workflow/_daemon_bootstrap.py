@@ -201,26 +201,25 @@ def _policy_snapshot(data: bytes) -> int:
         raise
 
 
-def _execution_scope() -> str:
-    """Return this process's host identity for the daemon owner record.
+def _host_identity() -> str:
+    """Return the bootstrap host's identity for the daemon owner record.
 
-    This process execs Bubblewrap, whose monitor keeps this PID and start time on the host for as long as the
-    sandbox lives (``--die-with-parent`` ends the sandbox with it), so it identifies the daemon's execution scope.
-    The bootstrap runs without site-packages, so it reads the identity itself rather than through ``_death``.
+    The owner's PID comes from Bubblewrap ``--info-fd`` and its start ticks from the namespace ``/proc/1/stat``:
+    both name Bubblewrap's init, the sandbox's PID 1, which normally dies with the Bubblewrap monitor
+    (``--die-with-parent``) and whose death means the kernel has killed and reaped every process in the namespace — which the monitor's
+    death alone does not establish.
 
-    :return: Compact JSON with ``hostname``, ``boot_id``, ``pid`` and ``start_ticks``.
-    :raises ValueError: If the boot identity or this process's start time cannot be read.
+    :return: Compact JSON with ``hostname`` and ``boot_id``.
+    :raises ValueError: If the host boot identity cannot be read.
     """
 
     try:
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-        data = Path("/proc/self/stat").read_bytes()
-        # The command name may contain spaces and parentheses; the start time is field 22.
-        start_ticks = int(data[data.rindex(b")") + 2 :].split()[19])
-    except (OSError, UnicodeDecodeError, ValueError, IndexError) as exc:
-        raise ValueError("cannot read this host's boot identity and the bootstrap's start time") from exc
-    identity = {"hostname": socket.gethostname(), "boot_id": boot_id, "pid": os.getpid(), "start_ticks": start_ticks}
-    return json.dumps(identity, separators=(",", ":"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError("cannot read this host's boot identity") from exc
+    if not boot_id or len(boot_id) > 64:
+        raise ValueError("host boot identity is malformed")
+    return json.dumps({"hostname": socket.gethostname(), "boot_id": boot_id}, separators=(",", ":"))
 
 
 def _host_config_home() -> Path:
@@ -262,7 +261,7 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
     return argv
 
 
-def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: Path) -> list[str]:
+def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: Path, *, scope_fd: int) -> list[str]:
     result = [
         str(policy.python),
         "-I",
@@ -272,8 +271,10 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
         _HOST_POLICY_DESTINATION,
         "--policy-source",
         str(policy_source),
-        "--execution-scope",
-        _execution_scope(),
+        "--execution-scope-fd",
+        str(scope_fd),
+        "--host-identity",
+        _host_identity(),
     ]
     if arguments.check:
         result.append("--check")
@@ -424,8 +425,16 @@ def _prepare_sandbox(
         policy_fd = _policy_snapshot(policy_data)
         descriptors.append(policy_fd)
         argv += ["--ro-bind-data", str(policy_fd), _HOST_POLICY_DESTINATION]
+        scope_writer_fd = _memfd_create("httk-daemon-execution-scope")
+        descriptors.append(scope_writer_fd)
+        os.fchmod(scope_writer_fd, 0o600)
+        scope_reader_fd = os.open(f"/proc/self/fd/{scope_writer_fd}", os.O_RDONLY | os.O_CLOEXEC)
+        descriptors.append(scope_reader_fd)
+        os.set_inheritable(scope_writer_fd, True)
+        os.set_inheritable(scope_reader_fd, True)
+        argv += ["--info-fd", str(scope_writer_fd)]
         argv += ["--chdir", "/"]
-        argv += ["--", *_inside_command(arguments, policy, policy_source)]
+        argv += ["--", *_inside_command(arguments, policy, policy_source, scope_fd=scope_reader_fd)]
         return _PreparedSandbox(argv, tuple(descriptors))
     except BaseException:
         for descriptor in descriptors:

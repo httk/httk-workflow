@@ -38,7 +38,7 @@ def _shm_roots_are_tmpfs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 _REQUIRED_HELP = (
-    "--bind-fd --clearenv --new-session --ro-bind-data --ro-bind-fd --unshare-ipc --unshare-net "
+    "--bind-fd --clearenv --info-fd --new-session --ro-bind-data --ro-bind-fd --unshare-ipc --unshare-net "
     "--unshare-pid --unshare-user --unshare-uts --cap-drop --proc --dev --tmpfs --dir --remount-ro --chdir"
 )
 

@@ -113,7 +113,15 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
         f"    open({str(broker / 'recovery.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
         "    raise SystemExit(0)\n"
         "report = {}\n"
-        "report['identity'] = json.loads(sys.argv[sys.argv.index('--execution-scope') + 1])\n"
+        "report['service_pid'] = os.getpid()\n"
+        "report['service_parent'] = os.getppid()\n"
+        "scope_fd = int(sys.argv[sys.argv.index('--execution-scope-fd') + 1])\n"
+        "host_identity = sys.argv[sys.argv.index('--host-identity') + 1]\n"
+        f"sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        "from httk.workflow._daemon_scope import read_execution_scope\n"
+        "identity = read_execution_scope(scope_fd, host_identity)\n"
+        "report['identity'] = {'hostname': identity.hostname, 'boot_id': identity.boot_id,\n"
+        "    'pid': identity.pid, 'start_ticks': identity.start_ticks}\n"
         f"open({str(daemon_broker / 'scope.json')!r}, 'w').write(json.dumps(report['identity']))\n"
         f"release = {str(daemon_broker / 'release')!r}\n"
         "if '--check' in sys.argv:\n"
@@ -204,8 +212,7 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
         else:
             identity_data = json.loads(scope_path.read_text(encoding="utf-8"))
             identity = ProcessIdentity(**identity_data)
-            # The bootstrap execs Bubblewrap, whose monitor keeps its pid for the sandbox's lifetime.
-            assert identity.pid == process.pid
+            assert identity.pid != process.pid
             host_stat = Path(f"/proc/{identity.pid}/stat").read_text(encoding="ascii")
             host_ticks = int(host_stat[host_stat.rindex(")") + 2 :].split()[19])
             assert identity.start_ticks == host_ticks
@@ -218,6 +225,9 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
                 (daemon_broker / "release").touch()
             stdout, stderr = process.communicate(timeout=20)
             result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            deadline = time.monotonic() + 5
+            while not process_gone(identity, here=process_identity()) and time.monotonic() < deadline:
+                time.sleep(0.01)
             assert process_gone(identity, here=process_identity()) is True
     if not scope_started:
         _unsupported_namespace_failure(result)
@@ -240,6 +250,7 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
         _unsupported_namespace_failure(result)
     report = json.loads(result.stdout)
     identity = report["identity"]
+    assert report["service_pid"] != 1 and report["service_parent"] == 1
     assert identity["hostname"] == os.uname().nodename
     assert identity["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     assert report["project_metadata_read"] and report["project_metadata_write"] is False

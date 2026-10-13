@@ -26,9 +26,9 @@ from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_SCANNED_ENTRIES, MailboxDirectory
 from ._daemon_policy import Policy, _open_directory, load_policy
 from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
+from ._daemon_scope import read_execution_scope
 from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger, LedgerError, refusal_response
-from ._death import ProcessIdentity
 from ._exchange import ExchangeUnavailableError, publish_file
 from .workspace import Workspace
 
@@ -40,8 +40,6 @@ _EXCHANGE_DIRECTORY = Path("/tmp/daemon-exchange")
 _HANDLE = re.compile(r"[0-9a-f]{32}\Z")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_HOSTNAME = re.compile(r"[A-Za-z0-9_.-]{1,255}\Z")
-_BOOT_ID = re.compile(r"[0-9a-fA-F-]{1,64}\Z")
 #: The least time between two scheduler checks of the submitted managers.
 _OBSERVE_SECONDS = 60.0
 #: How long a manager may be unknown to both squeue and sacct before it is reported ``GONE``.
@@ -976,35 +974,12 @@ def _activation_check(daemon: Path, snapshot: Path, policy: Policy) -> Callable[
     return check
 
 
-def _execution_scope(text: str) -> ProcessIdentity:
-    """Parse the host identity of the daemon's Bubblewrap monitor, which the bootstrap captured before its exec.
-
-    :param text: Compact JSON with exactly ``hostname``, ``boot_id``, ``pid`` and ``start_ticks``.
-    :return: The daemon owner's execution scope.
-    :raises ValueError: If the identity is incomplete or malformed.
-    """
-
-    try:
-        value = json.loads(text)
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise ValueError("daemon execution scope is not valid JSON") from exc
-    if type(value) is not dict or set(value) != {"hostname", "boot_id", "pid", "start_ticks"}:
-        raise ValueError("daemon execution scope must name exactly hostname, boot_id, pid and start_ticks")
-    hostname, boot_id, pid, start_ticks = value["hostname"], value["boot_id"], value["pid"], value["start_ticks"]
-    if type(hostname) is not str or _HOSTNAME.fullmatch(hostname) is None:
-        raise ValueError("daemon execution scope hostname is malformed")
-    if type(boot_id) is not str or _BOOT_ID.fullmatch(boot_id) is None:
-        raise ValueError("daemon execution scope boot_id is malformed")
-    if type(pid) is not int or pid <= 1 or type(start_ticks) is not int or start_ticks < 0:
-        raise ValueError("daemon execution scope needs a host pid above one and nonnegative start ticks")
-    return ProcessIdentity(hostname, boot_id, pid, start_ticks)
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="httk-workspace-daemon-service")
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--policy-source", type=Path, required=True)
-    parser.add_argument("--execution-scope", required=True)
+    parser.add_argument("--execution-scope-fd", type=int, required=True)
+    parser.add_argument("--host-identity", required=True)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true")
     modes.add_argument("--once", action="store_true")
@@ -1017,7 +992,7 @@ def _run(arguments: argparse.Namespace) -> None:
     policy_source: Path = arguments.policy_source
     if not policy_source.is_absolute() or ".." in policy_source.parts:
         raise ValueError("policy source must be an absolute path without '..'")
-    execution_scope = _execution_scope(arguments.execution_scope)
+    execution_scope = read_execution_scope(arguments.execution_scope_fd, arguments.host_identity)
     policy = load_policy(arguments.policy)
     gateway = SlurmGateway(policy)
 

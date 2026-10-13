@@ -15,6 +15,7 @@ on:
       - "src/httk/workflow/_launch_*.py"
       - "src/httk/workflow/_manager_launches.py"
       - "tests/test_daemon_bootstrap.py"
+      - "tests/test_daemon_scope.py"
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
       - "tests/test_daemon_service.py"
@@ -44,6 +45,7 @@ on:
       - "src/httk/workflow/_launch_*.py"
       - "src/httk/workflow/_manager_launches.py"
       - "tests/test_daemon_bootstrap.py"
+      - "tests/test_daemon_scope.py"
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
       - "tests/test_daemon_service.py"
@@ -98,6 +100,7 @@ jobs:
           python -m pytest -q -n 0
           tests/test_daemon_policy.py
           tests/test_daemon_bootstrap.py
+          tests/test_daemon_scope.py
           tests/test_daemon_sandbox.py
           tests/test_daemon_service.py
           tests/test_daemon_job_control.py

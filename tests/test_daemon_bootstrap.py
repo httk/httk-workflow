@@ -21,6 +21,7 @@ REQUIRED_BWRAP_OPTIONS = (
     "--bind-fd",
     "--clearenv",
     "--disable-userns",
+    "--info-fd",
     "--new-session",
     "--ro-bind-data",
     "--ro-bind-fd",
@@ -265,7 +266,8 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "--die-with-parent",
     ):
         assert option in argv
-    assert "--as-pid-1" not in argv and "--info-fd" not in argv
+    assert "--info-fd" in argv
+    assert "--as-pid" + "-1" not in argv
     assert argv[argv.index("--cap-drop") + 1] == "ALL"
     environment = _set_environment(argv)
     assert environment["NSC_RESOURCE_NAME"] == "tetralith" and environment["POISON"] == "yes"
@@ -334,16 +336,18 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "--policy-source",
         str(policy_path),
     ]
-    # The bootstrap execs Bubblewrap, so the scope it captured names the Bubblewrap monitor process.
-    scope = json.loads(inside[inside.index("--execution-scope") + 1])
-    assert scope["pid"] == observed["pid"] and scope["hostname"] == os.uname().nodename
-    assert scope["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-    assert type(scope["start_ticks"]) is int and scope["start_ticks"] >= 0
-    # Exactly the named descriptors reach Bubblewrap: every inherited one is a bind operand.
+    info_writer = argv[argv.index("--info-fd") + 1]
+    scope_reader = inside[inside.index("--execution-scope-fd") + 1]
+    assert info_writer.isdecimal() and scope_reader.isdecimal() and info_writer != scope_reader
+    host_identity = json.loads(inside[inside.index("--host-identity") + 1])
+    assert set(host_identity) == {"hostname", "boot_id"}
+    assert host_identity["hostname"] == os.uname().nodename
+    assert host_identity["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    # Every inherited descriptor is named by a bind operand or the execution-scope channel.
     operands = {
         source for option in ("--ro-bind-fd", "--bind-fd", "--ro-bind-data") for source, _ in _pairs(argv, option)
     }
-    assert set(observed["fds"]) - {"0", "1", "2"} == operands
+    assert set(observed["fds"]) - {"0", "1", "2"} == operands | {info_writer, scope_reader}
     assert inside[-1] == "--once"
 
 
