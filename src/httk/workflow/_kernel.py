@@ -76,6 +76,7 @@ __all__ = [
     "claim_exchange_name",
     "drop_exchange_index",
     "exchange_index",
+    "exchange_owner_key",
     "format_job_name",
     "list_jobs",
     "list_names",
@@ -1785,6 +1786,7 @@ def claim_exchange_name(
     placement: PurePosixPath,
     *,
     nonce: str,
+    owner_key: str | None = None,
 ) -> ExchangeClaim:
     """Create the exchange index entry ``exchange-jobs/<name>/`` at most once, before the job is submitted.
 
@@ -1795,6 +1797,7 @@ def claim_exchange_name(
     :param placement: The job's placement.
     :param nonce: The adoption's own nonce, kept in its scratch, so that a reconciler rerun of the same adoption
         recognizes its entry and a concurrent adopter of another copy does not.
+    :param owner_key: The optional key that owns control of the adopted root; SAME also requires it to match.
     :return: Whether the entry was created here, by an earlier run of this adoption, or by another one.
     """
 
@@ -1808,12 +1811,20 @@ def claim_exchange_name(
         "placement": placement_text(normalize_placement(placement)),
         "adoption_nonce": nonce,
     }
+    if owner_key is not None:
+        index["owner_key"] = owner_key
     _fs.write_file(_fs.loc(staging / "index.json"), _encode(index), durable=durable)
     # publish_dir removes the staging whether it won or lost.
     if _fs.publish_dir(_fs.loc(staging), _fs.loc(entry), nonce=publish_nonce, durable=durable):
         return ExchangeClaim.WON
-    existing = exchange_index(workspace, exchange_name)
-    return ExchangeClaim.SAME if existing == (job_id, normalize_placement(placement), nonce) else ExchangeClaim.OTHER
+    value = _read_json_quietly(entry / "index.json")
+    existing = _parse_exchange_index(value)
+    key_matches = value is not None and value.get("owner_key") == owner_key
+    return (
+        ExchangeClaim.SAME
+        if existing == (job_id, normalize_placement(placement), nonce) and key_matches
+        else ExchangeClaim.OTHER
+    )
 
 
 def exchange_index(workspace: KernelWorkspace, exchange_name: str) -> tuple[str, PurePosixPath, str | None] | None:
@@ -1826,6 +1837,12 @@ def exchange_index(workspace: KernelWorkspace, exchange_name: str) -> tuple[str,
     """
 
     value = _read_json_quietly(_exchange_entry(workspace, exchange_name) / "index.json")
+    return _parse_exchange_index(value)
+
+
+def _parse_exchange_index(value: dict[str, object] | None) -> tuple[str, PurePosixPath, str | None] | None:
+    """Parse the public fields of one already-read exchange index entry."""
+
     if value is None:
         return None
     try:
@@ -1835,6 +1852,28 @@ def exchange_index(workspace: KernelWorkspace, exchange_name: str) -> tuple[str,
         return None
     nonce = value.get("adoption_nonce")
     return job_id, placement, nonce if isinstance(nonce, str) else None
+
+
+def exchange_owner_key(workspace: KernelWorkspace, exchange_name: str, *, job_id: str, nonce: str) -> str | None:
+    """The key that submitted the exchange root *job_id* under adoption *nonce*, or ``None``.
+
+    :param workspace: The workspace.
+    :param exchange_name: The client's name for the job.
+    :param job_id: The adopted root's job UUID.
+    :param nonce: The adoption nonce recorded in the trusted index.
+    :return: The indexed key when the entry matches, or ``None``.
+    """
+
+    value = _read_json_quietly(_exchange_entry(workspace, exchange_name) / "index.json")
+    indexed = _parse_exchange_index(value)
+    try:
+        expected_job_id = canonical_uuid(job_id, "job_id")
+    except (FormatError, ValueError):
+        return None
+    if indexed is None or indexed[0] != expected_job_id or indexed[2] != nonce or value is None:
+        return None
+    key = value.get("owner_key")
+    return key if isinstance(key, str) else None
 
 
 # -- requests, placements and shared memory -------------------------------------------------------------------------

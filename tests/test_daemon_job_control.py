@@ -2,6 +2,8 @@
 
 import base64
 import dataclasses
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -15,9 +17,9 @@ import pytest
 from httk.core.identity import identity_public_key
 
 import v3_helpers as v3
-from httk.workflow import _death, _kernel, _requests, _store, removal, seals
-from httk.workflow._daemon_auth import sign_request
-from httk.workflow._daemon_jobs import JobExecutor
+from httk.workflow import _death, _kernel, _moving, _requests, _store, removal, seals
+from httk.workflow._daemon_auth import sign_request, verify_request
+from httk.workflow._daemon_jobs import JobExecutor, _Target
 from httk.workflow._daemon_keys import initialize_response_seed, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy
@@ -27,9 +29,11 @@ from httk.workflow._daemon_slurm import SlurmGateway
 from httk.workflow._daemon_state import Ledger
 from httk.workflow._job import JobDefinition
 from httk.workflow._state import Release, StateDoc
+from test_bundles import manifest_of, write_bundle
 
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
 CONFIGURATION_DIGEST = "d" * 64
+_DEFAULT_OWNER_KEY = object()
 
 
 def _seed(tmp_path: Path) -> Path:
@@ -47,6 +51,7 @@ def _request(
     number: int = 1,
     action: str = "pause",
     digest: str = CONFIGURATION_DIGEST,
+    signer_seed: Path | None = None,
     **options: object,
 ) -> Request:
     unsigned = Request(
@@ -60,13 +65,15 @@ def _request(
         reason="authenticated operator request",
         **options,  # type: ignore[arg-type]
     )
-    return sign_request(unsigned, seed_path=_seed(tmp_path), now=int(time.time()), lifetime=300)
+    return sign_request(unsigned, seed_path=signer_seed or _seed(tmp_path), now=int(time.time()), lifetime=300)
 
 
-def _setup(tmp_path: Path):
+def _setup(tmp_path: Path, *, adopted: bool = True):
     workspace = v3.workspace(tmp_path / "workspace")
     installed = v3.install(workspace, tmp_path / "package")
     ref = v3.submit(workspace, installed, {"start": "succeed"}, tag="target")
+    if adopted:
+        ref = _mark_exchange(workspace, ref, str(uuid4()))
     state = tmp_path / "broker"
     state.mkdir()
     with Ledger(state, workspace.workspace_id, ENROLLMENT_ID, initialize=True):
@@ -74,10 +81,26 @@ def _setup(tmp_path: Path):
     return workspace, ref, state
 
 
-def _mark_exchange(workspace, ref, exchange_name: str, nonce: str = "nonce-a"):
+def _mark_exchange(
+    workspace,
+    ref,
+    exchange_name: str,
+    nonce: str = "nonce-a",
+    owner_key: str | None | object = _DEFAULT_OWNER_KEY,
+):
+    if owner_key is _DEFAULT_OWNER_KEY:
+        owner_key = identity_public_key(_seed(workspace.root.parent))
     with _kernel.register_owner(workspace, kind="cli", label="mark exchange", allocation=None, advertised={}) as owner:
         assert (
-            _kernel.claim_exchange_name(workspace, owner, exchange_name, ref.job_id, ref.placement, nonce=nonce)
+            _kernel.claim_exchange_name(
+                workspace,
+                owner,
+                exchange_name,
+                ref.job_id,
+                ref.placement,
+                nonce=nonce,
+                owner_key=owner_key,  # type: ignore[arg-type]
+            )
             is _kernel.ExchangeClaim.WON
         )
         owned = _kernel.claim(workspace, owner, ref)
@@ -127,7 +150,8 @@ def test_authenticated_request_freezes_exact_internal_document_and_applies(tmp_p
         assert ledger.execution_result(entry) is not None
         target = ledger.read_target(entry)
         assert target is not None
-        assert b'"operator":"daemon"' in target
+        frozen = _Target.decode(target)
+        assert frozen.document["operator"] == f"daemon:{frozen.exchange_name}:{frozen.adoption_nonce}"
         assert request.signature is not None and request.signature.encode() not in target
         current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
         assert current is not None and current.state == "paused"
@@ -152,15 +176,174 @@ def test_authenticated_request_freezes_exact_internal_document_and_applies(tmp_p
             enrollment_id=ENROLLMENT_ID,
             command_id=request.request_id,
         )
+        status = sign_request(status, seed_path=_seed(tmp_path), now=int(time.time()), lifetime=300)
         with _kernel.register_owner(
             workspace, kind="daemon", label="status", allocation=None, advertised={}
         ) as status_owner:
-            fresh = JobExecutor(workspace, ledger, status_owner, configuration_digest=CONFIGURATION_DIGEST).status(
-                status
-            )
+            executor = JobExecutor(workspace, ledger, status_owner, configuration_digest=CONFIGURATION_DIGEST)
+            wrong_key_path = tmp_path / "other.seed"
+            wrong_key_path.write_bytes(base64.b64encode(b"x" * 32) + b"\n")
+            wrong_key_path.chmod(0o600)
+            wrong_status = sign_request(status, seed_path=wrong_key_path, now=int(time.time()), lifetime=300)
+            hidden = executor.status(wrong_status)
+            fresh = executor.status(status)
+        assert (hidden.outcome, hidden.reason, hidden.detail) == (
+            "refused",
+            "unknown_command",
+            "the original job command is unknown",
+        )
         assert fresh.outcome == "applied" and fresh.current_state == "ready"
     finally:
         ledger.close()
+
+
+def test_local_job_is_refused_not_owner_without_freezing_or_posting(tmp_path: Path) -> None:
+    workspace, ref, state = _setup(tmp_path, adopted=False)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    state_path = ref.path / "state.json"
+    assert not state_path.exists()
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="local target", allocation=None, advertised={}
+    ) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert not list((workspace.control / "requests").glob("*.json"))
+    assert not state_path.exists()
+    assert ledger.read_target(entry) is None and ledger.execution_decision(entry) is None
+    ledger.close()
+
+
+def test_other_key_cannot_control_keyed_exchange_root(tmp_path: Path) -> None:
+    workspace, ref, state = _setup(tmp_path)
+    other_seed = tmp_path / "other.seed"
+    other_seed.write_bytes(base64.b64encode(b"x" * 32) + b"\n")
+    other_seed.chmod(0o600)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id, signer_seed=other_seed))
+    owner_key = identity_public_key(_seed(tmp_path))
+    other_key = identity_public_key(other_seed)
+    assert owner_key is not None and other_key is not None
+    verify_request(entry.request, (owner_key, other_key))
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    assert current is not None
+    state_before = (current.path / "state.json").read_bytes()
+    with _kernel.register_owner(workspace, kind="daemon", label="foreign key", allocation=None, advertised={}) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert not list((workspace.control / "requests").glob("*.json"))
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    assert current is not None and (current.path / "state.json").read_bytes() == state_before
+    assert ledger.read_target(entry) is None and ledger.execution_decision(entry) is None
+    ledger.close()
+
+
+def test_keyless_exchange_index_cannot_authorize_control(tmp_path: Path) -> None:
+    workspace, ref, state = _setup(tmp_path, adopted=False)
+    exchange_name = str(uuid4())
+    ref = _mark_exchange(workspace, ref, exchange_name, owner_key=None)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    state_before = (ref.path / "state.json").read_bytes()
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="keyless index", allocation=None, advertised={}
+    ) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert not list((workspace.control / "requests").glob("*.json"))
+    assert (ref.path / "state.json").read_bytes() == state_before
+    assert ledger.read_target(entry) is None and ledger.execution_decision(entry) is None
+    ledger.close()
+
+
+def test_exchange_index_without_nonce_cannot_authorize_control(tmp_path: Path) -> None:
+    workspace, ref, state = _setup(tmp_path, adopted=False)
+    exchange_name = str(uuid4())
+    ref = _mark_exchange(workspace, ref, exchange_name)
+    index_path = workspace.control / "exchange-jobs" / exchange_name / "index.json"
+    index = json.loads(index_path.read_bytes())
+    index.pop("adoption_nonce")
+    index_path.write_bytes(json.dumps(index, sort_keys=True, separators=(",", ":")).encode("ascii"))
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    state_before = (ref.path / "state.json").read_bytes()
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="nonce-free index", allocation=None, advertised={}
+    ) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert not list((workspace.control / "requests").glob("*.json"))
+    assert (ref.path / "state.json").read_bytes() == state_before
+    assert ledger.read_target(entry) is None and ledger.execution_decision(entry) is None
+    ledger.close()
+
+
+def test_legacy_plain_daemon_target_without_adoption_fails_decode(tmp_path: Path) -> None:
+    workspace, ref, state = _setup(tmp_path)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="legacy target", allocation=None, advertised={}
+    ) as owner:
+        target = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST)._target(entry)
+    legacy = json.loads(target.encode())
+    legacy.pop("exchange_name")
+    legacy.pop("adoption_nonce")
+    legacy["request"]["operator"] = "daemon"
+    legacy["digest"] = hashlib.sha256(
+        json.dumps(legacy["request"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    ).hexdigest()
+    encoded = json.dumps(legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    with pytest.raises(ValueError, match="fields are invalid"):
+        _Target.decode(encoded)
+    ledger.close()
+
+
+def test_inbox_bundle_owner_key_controls_only_its_adopted_root(tmp_path: Path) -> None:
+    workspace = v3.workspace(tmp_path / "workspace")
+    installed = v3.install(workspace, tmp_path / "package")
+    signer_seed = _seed(tmp_path)
+    owner_key = identity_public_key(signer_seed)
+    assert owner_key is not None
+    mapping = v3.job_mapping(installed, {"start": "succeed"}, tag="bundle-root", placement="0")
+    manifest = dataclasses.replace(manifest_of([mapping]), owner_key=owner_key)
+    bundle = workspace.root / "exchange" / "inbox" / "bundle"
+    write_bundle(bundle, [mapping], manifest)
+    refused_to = workspace.root / "exchange" / "refused"
+    refused_to.mkdir()
+    with _kernel.register_owner(workspace, kind="cli", label="adopt inbox", allocation=None, advertised={}) as adopter:
+        adopted = _moving.adopt(workspace, adopter, bundle, untrusted=True, refused_to=refused_to)
+    assert adopted is not None and len(adopted.published) == 1
+    ref = adopted.published[0]
+    state = tmp_path / "broker"
+    state.mkdir()
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID, initialize=True)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id, signer_seed=signer_seed))
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="bundle owner", allocation=None, advertised={}
+    ) as owner:
+        applied = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    assert (applied.outcome, applied.reason) == ("applied", "request_applied")
+
+    other_seed = tmp_path / "other.seed"
+    other_seed.write_bytes(base64.b64encode(b"x" * 32) + b"\n")
+    other_seed.chmod(0o600)
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    assert current is not None
+    state_before = (current.path / "state.json").read_bytes()
+    other_entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id, number=2, signer_seed=other_seed))
+    other_key = identity_public_key(other_seed)
+    assert other_key is not None
+    verify_request(other_entry.request, (owner_key, other_key))
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="other bundle key", allocation=None, advertised={}
+    ) as owner:
+        refused = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(other_entry)
+    assert (refused.outcome, refused.reason) == ("refused", "not_owner")
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    assert current is not None and (current.path / "state.json").read_bytes() == state_before
+    assert not list((workspace.control / "requests").glob("*.json"))
+    ledger.close()
 
 
 def test_live_owner_queues_then_fresh_status_observes_later_application(tmp_path: Path) -> None:
@@ -191,6 +374,7 @@ def test_live_owner_queues_then_fresh_status_observes_later_application(tmp_path
         enrollment_id=ENROLLMENT_ID,
         command_id=request.request_id,
     )
+    status = sign_request(status, seed_path=_seed(tmp_path), now=int(time.time()), lifetime=300)
     with _kernel.register_owner(workspace, kind="daemon", label="test daemon", allocation=None, advertised={}) as owner:
         observed = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).status(status)
     ledger.close()
@@ -758,6 +942,13 @@ def test_authenticated_executor_applies_every_internal_action_on_real_jobs(
         response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
     ledger.close()
 
+    if action == "detach":
+        assert (response.outcome, response.reason) == ("refused", "not_owner")
+        assert not list((workspace.control / "requests").glob("*.json"))
+        current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+        assert current is not None and current.state == "ready"
+        return
+
     assert (response.outcome, response.reason) == ("applied", "request_applied")
     encoded = encode_response(response)
     assert str(workspace.root).encode() not in encoded
@@ -812,7 +1003,7 @@ def test_authenticated_executor_rechecks_mutable_workspace_guards(tmp_path: Path
     ledger.close()
 
 
-def test_authenticated_continue_obeys_decided_join_guard(tmp_path: Path) -> None:
+def test_authenticated_continue_on_child_is_refused_as_not_owner(tmp_path: Path) -> None:
     workspace, _ref, state = _setup(tmp_path)
     installed = _store.lookup(workspace, "demo")
     assert installed is not None
@@ -846,8 +1037,9 @@ def test_authenticated_continue_obeys_decided_join_guard(tmp_path: Path) -> None
         response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
     current = v3.find(workspace, child.job_id)
     assert current.state == "failed"
-    assert response.outcome == "refused"
-    assert response.detail is not None and parent.job_key in response.detail
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert ledger.execution_decision(entry) is None
+    assert not list((workspace.control / "requests").glob("*.json"))
     ledger.close()
 
 

@@ -279,7 +279,7 @@ manager's platform stays `ready` and unclaimed there.
 | `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
 | `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--force` skips the confirmation |
 | `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace` |
-| `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--hold`, `--destination-id`, `--json` |
+| `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--hold`, `--destination-id`, `--operator`, `--json` |
 | `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--json` |
 | `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--kind`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
 | `job show JOB...` | describe jobs from their documents (remote: over the adapter) | `--workspace`, `--no-children`, `--json` |
@@ -425,6 +425,8 @@ signs the request documents with the identity selected by `--operator`, then
 sends them back for verbatim publication. A mounted-daemon remote instead
 sends one signed typed command for each selector. Daemon batches are
 non-atomic: earlier commands may have been accepted if a later command fails.
+A mounted daemon executes a command only for an exchange root submitted with
+the signing key; other targets are refused with `not_owner`.
 The daemon accepts canonical job UUIDs and UUID prefixes; glob and tag
 selectors are refused before publication. Daemon `--force` is unsupported.
 
@@ -502,7 +504,13 @@ payloads. DEST is an absolute directory, or a missing name in one. A root whose
 descendants are present is refused unless `--tree` is given; with `--tree` every
 descendant must be terminal or paused, and they travel in the same bundle.
 `--wait` first posts `pause` requests and waits (up to `--timeout`, default
-600 s) until the jobs can move, so a running job leaves paused. Across
+600 s) until the jobs can move, so a running job leaves paused. `job eject`
+records the selected identity's public key as the optional, unsigned
+`owner_key` in `bundle.json`; `--operator IDENTITY` selects that identity and
+eject fails without moving the job if it has no key. Without `--operator`, the
+configured default identity is used when keyed, and the member is omitted when
+not. `--hold` and `--operator` cannot be combined. Only untrusted (exchange)
+adoption uses `owner_key`. Across
 filesystems the bundle is copied to a hidden partial name in DEST and renamed
 into place when complete. The command prints `ejected N job(s) to PATH`. A
 failed delivery returns every job to the state it left.

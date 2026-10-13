@@ -295,7 +295,9 @@ $ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
 `job eject` copies the bundle into the mount under a hidden partial name and
-renames it into `inbox/` when complete; the job must be fresh (never run) and
+renames it into `inbox/` when complete. `job eject` records your identity's
+public key as optional `owner_key` in `bundle.json`; only untrusted (exchange)
+adoption uses it. The job must be fresh (never run) and
 have no parent there, since managers adopt it as untrusted input with fresh
 UUIDs, keeping your job UUID as its exchange name. Its workflow must be
 installed in the workspace, an operator task; until then the adopted job waits.
@@ -325,8 +327,9 @@ non-atomic: earlier selectors may already be queued if a later one fails.
 Selectors must be UUIDs or lowercase UUID prefixes; paths, globs and tags are
 refused. `--force` is refused before any command is sent. Eject destinations
 are relative to the daemon exchange `outbox`. `--operator` selects the local
-identity that signs each command; the daemon authorizes keys by policy and
-does not assign key ownership to particular jobs.
+identity that signs each command. The daemon executes a command only for an
+exchange root submitted with that signing key, which must also be authorized;
+`--operator` must select the identity that ejected the job.
 `job request` exits 0 when each command is applied or queued, and 1 for a
 refusal or uncertain result. Each output row includes the resolved job id,
 outcome, internal request id, daemon command id, explanation and observed

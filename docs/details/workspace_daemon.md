@@ -33,7 +33,10 @@ adapter and an unconfined Slurm launcher lack these guarantees.
   configuration.
 - The client controls the exchange and the content of the jobs it sends,
   including everything the trusted side later moves (status documents, ejected
-  bundles). Uploaded job content may be arbitrary.
+  bundles). Uploaded job content may be arbitrary. Every exchange client uses
+  the same transport account, so a client can still replace or delete an inbox
+  bundle, including its `owner_key`, before adoption; recorded ownership
+  protects it after adoption.
 - The managers are trusted. They adopt exchange bundles by first copying them,
   descriptor-anchored, into their own scratch, then verify that copy, filter
   untrusted content, and execute no bundle code outside an attempt sandbox.
@@ -455,7 +458,11 @@ work first, then re-enroll as described in
 [Earlier enrollments](#earlier-enrollments). A snapshot from an earlier policy
 format is refused at start; there is no migration. Update the client before or
 together with the remote host: the current client reads `exchange.json`,
-`daemon.json` and version 3 of `managers.json`.
+`daemon.json` and version 3 of `managers.json`. A bundle carrying `owner_key`
+is refused by an older *httk-workflow* because its manifest members differ;
+the remote host must run this version before a client sends bundles that carry
+`owner_key` (both are then updated together). Exchange jobs adopted before
+this change have no recorded key and cannot be controlled through the daemon.
 
 ## Job flow
 
@@ -467,7 +474,9 @@ httk job eject JOB /mnt/cluster/exchange/inbox
 
 The bundle is copied into the mount under a hidden partial name and renamed
 into `inbox/` when complete; a failed delivery returns the job to the state it
-left. Every unrestricted confined manager of the workspace adopts bundles from
+left. `job eject` records the submitting identity's public key as the
+optional, unsigned `owner_key` in `bundle.json`; untrusted inbox adoption uses
+it to establish ownership. Every unrestricted confined manager of the workspace adopts bundles from
 `inbox` itself: it takes the entry, copies it anchored at directory descriptors
 into its own scratch, and validates, rekeys and publishes only that copy. An
 inbox bundle is untrusted input: it must hold only fresh jobs (never run, no
@@ -499,15 +508,22 @@ fetched, the return waits. Fetch it, removing it from the outbox:
 httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
 
-The daemon handles all ten job-request actions through `httk job request
---workspace REMOTE:NAME`. Authorized daemon keys may control any workspace job.
-Selectors are internal job UUIDs or unique UUID prefixes from `status.json`;
-paths, globs and tags are refused. `--force` is refused. Eject destinations are
-relative to the mounted exchange outbox, resolved by the server, and ejects
-include the whole tree. State, parent/join, runner-step and seal guards still
-apply. Managers need no client keys; existing `exchange.authorized_keys`
-settings are left stored but unused. Per-key job ownership and submission
-association are future work.
+The daemon executes a `job_request` only for an indexed exchange root adopted
+from the inbox whose recorded `owner_key` matches the command-signing key,
+which must also remain in `authorized_keys`. Local jobs, keyless submissions,
+children, transferred or adopted jobs, and roots with an index entry recreated
+by `fsck --repair` are refused with `not_owner`. A mounted-daemon `job request`
+with `--operator` must use the identity that ejected the job. `detach` never
+applies through the daemon because only roots are controllable and roots have
+no parent; children move and stop with their root, daemon ejects include the
+whole tree, and children are absent from `status.json`. A
+`job_request_status` observation answers `unknown_command` unless signed by the
+same key as the original command. Selectors are internal job UUIDs or unique
+UUID prefixes from `status.json`; paths, globs and tags are refused. `--force`
+is refused. Eject destinations are relative to the mounted exchange outbox,
+resolved by the server, and ejects include the whole tree. State, parent/join,
+runner-step and seal guards still apply. Managers need no client keys; existing
+`exchange.authorized_keys` settings are left stored but unused.
 
 An idle job that the daemon safely claims changes immediately. A held job,
 lost claim race or unfinished execution, commit or release stays queued for

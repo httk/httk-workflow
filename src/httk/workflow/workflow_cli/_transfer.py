@@ -544,6 +544,7 @@ def eject_once(
     tree: bool,
     locator: str | None = None,
     destination_workspace_id: str | None = None,
+    owner_key: str | None = None,
 ) -> _moving.EjectReport | _moving.Hold | str:
     """Claim and eject one job, or hold it when *destination* is ``None``: the report, or why it cannot move now.
 
@@ -554,6 +555,7 @@ def eject_once(
     :param tree: Move the job's descendants too.
     :param locator: The transfer destination a hold records.
     :param destination_workspace_id: The destination workspace's id a hold records.
+    :param owner_key: The optional key that may control the adopted root through the workspace daemon.
     :return: The report (the hold, when held), or the reason; a job that cannot move stays where it is (as after
         any raised error).
     """
@@ -563,7 +565,7 @@ def eject_once(
         return f"{ref.job_key} moved before it could be claimed"
     try:
         if destination is not None:
-            return _moving.eject(workspace, owner, root, destination=destination, tree=tree)
+            return _moving.eject(workspace, owner, root, destination=destination, tree=tree, owner_key=owner_key)
         return _moving.hold(
             workspace,
             owner,

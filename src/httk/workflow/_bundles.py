@@ -1,5 +1,7 @@
 """Job bundles: build one from owned jobs, validate one at the trust boundary, and rekey an exchange bundle.
 
+The optional ``owner_key`` names the key that may control the adopted root through the workspace daemon.
+
 A bundle is a plain directory (plan §3.8)::
 
     <bundle>/
@@ -30,6 +32,7 @@ the client's UUID as ``exchange_name`` (from :func:`exchange_names`) when it
 publishes.
 """
 
+import base64
 import contextlib
 import dataclasses
 import json
@@ -238,6 +241,7 @@ class BundleManifest:
     :param destination_workspace_id: The intended destination workspace, or ``None``.
     :param destination_locator: The intended destination path or address, or ``None``.
     :param members: The jobs, top-down: every parent before its children; ``members[0]`` is the root.
+    :param owner_key: The optional key that may control the adopted root through the workspace daemon.
     :raises BundleError: If a member is malformed or the members do not form a top-down tree.
     """
 
@@ -247,6 +251,7 @@ class BundleManifest:
     destination_workspace_id: str | None
     destination_locator: str | None
     members: tuple[BundleMember, ...]
+    owner_key: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the members."""
@@ -274,6 +279,16 @@ class BundleManifest:
         if not all(isinstance(member, BundleMember) for member in self.members):
             raise BundleError("members must be BundleMember values")
         _check_tree(self.members)
+        if self.owner_key is not None:
+            if not isinstance(self.owner_key, str) or not self.owner_key.startswith("ed25519:"):
+                raise BundleError("owner_key must be a canonical Ed25519 public key")
+            encoded = self.owner_key.removeprefix("ed25519:")
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise BundleError("owner_key must be a canonical Ed25519 public key") from exc
+            if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != encoded:
+                raise BundleError("owner_key must be a canonical Ed25519 public key")
 
     def as_mapping(self) -> dict[str, object]:
         """Return the document as written to ``bundle.json``.
@@ -281,7 +296,7 @@ class BundleManifest:
         :return: A fresh mapping.
         """
 
-        return {
+        value: dict[str, object] = {
             "format": BUNDLE_FORMAT,
             "format_version": BUNDLE_VERSION,
             "transfer_id": self.transfer_id,
@@ -290,6 +305,9 @@ class BundleManifest:
             "destination": {"workspace_id": self.destination_workspace_id, "locator": self.destination_locator},
             "members": [member.as_mapping() for member in self.members],
         }
+        if self.owner_key is not None:
+            value["owner_key"] = self.owner_key
+        return value
 
     def to_json(self) -> bytes:
         """Return the canonical bytes of ``bundle.json``: compact, sorted UTF-8 JSON and a newline.
@@ -312,8 +330,13 @@ class BundleManifest:
 
         if not isinstance(value, dict):
             raise BundleError("bundle.json must be a JSON object")
-        if set(value) != _MANIFEST_MEMBERS:
-            raise BundleError(f"bundle.json members differ: {sorted(set(value) ^ _MANIFEST_MEMBERS)}")
+        actual = set(value)
+        missing = _MANIFEST_MEMBERS - actual
+        unknown = actual - (_MANIFEST_MEMBERS | {"owner_key"})
+        if missing or unknown:
+            raise BundleError(
+                f"bundle.json members differ: missing required {sorted(missing)}; unknown {sorted(unknown)}"
+            )
         if value["format"] != BUNDLE_FORMAT:
             raise BundleError(f"bundle.json format must be {BUNDLE_FORMAT!r}: {value['format']!r}")
         if type(value["format_version"]) is not int or value["format_version"] != BUNDLE_VERSION:
@@ -324,6 +347,9 @@ class BundleManifest:
         members = value["members"]
         if not isinstance(members, list):
             raise BundleError("bundle.json members must be an array")
+        owner_key = value.get("owner_key")
+        if "owner_key" in value and not isinstance(owner_key, str):
+            raise BundleError("bundle.json owner_key must be a string")
         return cls(
             transfer_id=_string(value["transfer_id"], "transfer_id"),
             source_workspace_id=_string(value["source_workspace_id"], "source_workspace_id"),
@@ -331,6 +357,7 @@ class BundleManifest:
             destination_workspace_id=_optional(destination["workspace_id"], "destination.workspace_id"),
             destination_locator=_optional(destination["locator"], "destination.locator"),
             members=tuple(BundleMember.from_mapping(member, index) for index, member in enumerate(members)),
+            owner_key=owner_key,
         )
 
     @classmethod
@@ -415,6 +442,7 @@ def build_bundle(
     source_workspace_id: str,
     destination_workspace_id: str | None = None,
     destination_locator: str | None = None,
+    owner_key: str | None = None,
     event: tuple[str, Mapping[str, object]] | None = None,
     scratch: Path | None = None,
 ) -> Path:
@@ -429,6 +457,7 @@ def build_bundle(
     :param source_workspace_id: This workspace's id.
     :param destination_workspace_id: The intended destination workspace, or ``None``.
     :param destination_locator: The intended destination path or address, or ``None``.
+    :param owner_key: The optional key that may control the adopted root through the workspace daemon.
     :param event: A run-log event and its members, appended to each member that already has a run log once
         every check passed, right before its extraction; a fresh job (no run log) gets none, so it remains
         adoptable as an untrusted bundle, and a refusal leaves no such line.
@@ -469,6 +498,7 @@ def build_bundle(
         destination_workspace_id,
         destination_locator,
         tuple(entries),
+        owner_key,
     )
     # Refuse here what adoption would refuse, before anything moves.
     by_id = {member.job_id: member for member in manifest.members}

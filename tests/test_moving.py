@@ -17,7 +17,7 @@ from httk.workflow._job import JobDefinition
 from httk.workflow._state import Release, StateDoc, read_state_unowned
 from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.models import make_job_key
-from test_bundles import family, write_bundle
+from test_bundles import family, manifest_of, write_bundle
 from v3_helpers import cli_owner, job_mapping, submit_mapping
 from v3_helpers import workspace as v3_workspace
 
@@ -384,9 +384,11 @@ def test_adopt_crash_matrix(tmp_path: Path) -> None:
 
 
 def test_untrusted_adopt_crash_matrix(tmp_path: Path) -> None:
+    key = "ed25519:" + "A" * 43 + "="
+
     def setup(name: str) -> tuple[Workspace, list[dict[str, object]], Path]:
         bundle = tmp_path / f"{name}-inbox" / "entry"
-        return v3_workspace(tmp_path / f"{name}-ws"), client_bundle(bundle), bundle
+        return v3_workspace(tmp_path / f"{name}-ws"), client_bundle(bundle, owner_key=key), bundle
 
     ws, _, bundle = setup("probe")
     with cli_owner(ws) as owner:
@@ -404,6 +406,11 @@ def test_untrusted_adopt_crash_matrix(tmp_path: Path) -> None:
             assert len(set(published)) == len(published) == 3 and not bundle.exists(), k
             names = {json.loads(path.read_bytes())["exchange_name"] for path in ws.jobs.rglob("state.json")}
             assert names == {str(job["id"]) for job in jobs}, k
+            indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+            assert indexed is not None
+            indexed_job_id, _, nonce = indexed
+            assert nonce is not None
+            assert _kernel.exchange_owner_key(ws, str(jobs[0]["id"]), job_id=indexed_job_id, nonce=nonce) == key
         else:
             assert sorted(job_ids_below(bundle)) == sorted(str(job["id"]) for job in jobs), k
         assert not job_ids_below(ws.control / "tmp"), k
@@ -485,8 +492,12 @@ def test_a_subtree_whose_parent_is_here_is_refused(tmp_path: Path) -> None:
 # -- untrusted adoption ---------------------------------------------------------------------------------------------
 
 
-def client_bundle(path: Path, jobs: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
-    return write_bundle(path, jobs)[1]
+def client_bundle(
+    path: Path, jobs: list[dict[str, object]] | None = None, *, owner_key: str | None = None
+) -> list[dict[str, object]]:
+    jobs = family() if jobs is None else jobs
+    manifest = dataclasses.replace(manifest_of(jobs), owner_key=owner_key)
+    return write_bundle(path, jobs, manifest)[1]
 
 
 def test_untrusted_adoption_rekeys_and_records_the_exchange_name(tmp_path: Path) -> None:
@@ -506,11 +517,43 @@ def test_untrusted_adoption_rekeys_and_records_the_exchange_name(tmp_path: Path)
         names.add(doc.exchange_name)
     assert names == client_ids
     assert (ws.control / "exchange-jobs" / str(jobs[0]["id"]) / "index.json").is_file()
+    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert indexed is not None
+    _, _, nonce = indexed
+    assert nonce is not None
+    assert _kernel.exchange_owner_key(ws, str(jobs[0]["id"]), job_id=indexed[0], nonce=nonce) is None
     # A second delivery of the same client bundle is already adopted.
     client_bundle(tmp_path / "inbox" / "again", jobs)
     with cli_owner(ws) as owner:
         again = _moving.adopt(ws, owner, tmp_path / "inbox" / "again", untrusted=True, refused_to=tmp_path / "rejected")
     assert again is not None and again.already_adopted
+
+
+def test_untrusted_adoption_records_owner_key_in_exchange_index(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    key = "ed25519:" + "A" * 43 + "="
+    jobs = client_bundle(tmp_path / "inbox" / "entry", owner_key=key)
+    with cli_owner(ws) as owner:
+        report = _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True)
+    assert report is not None and report.published
+    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert indexed is not None
+    _, _, nonce = indexed
+    assert nonce is not None
+    assert _kernel.exchange_owner_key(ws, str(jobs[0]["id"]), job_id=indexed[0], nonce=nonce) == key
+
+
+def test_untrusted_adoption_refuses_invalid_owner_key(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    client_bundle(bundle)
+    document = json.loads((bundle / "bundle.json").read_bytes())
+    document["owner_key"] = "not-a-key"
+    (bundle / "bundle.json").write_text(json.dumps(document))
+    rejected = tmp_path / "rejected"
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="owner_key"):
+        _moving.adopt(ws, owner, bundle, untrusted=True, refused_to=rejected)
+    assert len(list(rejected.iterdir())) == 1 and not bundle.exists()
 
 
 def test_untrusted_duplicate_exchange_name_is_refused_to_the_rejected_directory(tmp_path: Path) -> None:
@@ -573,7 +616,8 @@ def test_untrusted_bundle_with_state_json_is_refused(tmp_path: Path) -> None:
 
 def test_untrusted_rekey_crash_resumes(tmp_path: Path) -> None:
     ws = v3_workspace(tmp_path / "ws")
-    client_bundle(tmp_path / "inbox" / "entry")
+    key = "ed25519:" + "A" * 43 + "="
+    jobs = client_bundle(tmp_path / "inbox" / "entry", owner_key=key)
     owner = cli_owner(ws)
     writes = {"n": 0}
 
@@ -597,13 +641,45 @@ def test_untrusted_rekey_crash_resumes(tmp_path: Path) -> None:
     assert len(published) == 3
     for path in ws.jobs.rglob("state.json"):
         assert json.loads(path.read_bytes())["origin"] == "exchange"
+    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert indexed is not None
+    _, _, nonce = indexed
+    assert nonce is not None
+    assert _kernel.exchange_owner_key(ws, str(jobs[0]["id"]), job_id=indexed[0], nonce=nonce) == key
+
+
+def test_untrusted_adopt_crash_after_plan_before_first_submit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    key = "ed25519:" + "A" * 43 + "="
+    jobs = client_bundle(tmp_path / "inbox" / "entry", owner_key=key)
+    owner = cli_owner(ws)
+
+    def crash_before_first_submit(*args: object, **kwargs: object) -> _kernel.JobRef:
+        plans = list((ws.control / "tmp").glob("*.adopt-untrusted.*/plan.json"))
+        assert len(plans) == 1
+        assert BundleManifest.from_json(plans[0].read_bytes()).owner_key == key
+        raise Crash("plan is installed, before first submit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_kernel, "submit", crash_before_first_submit)
+        with pytest.raises(Crash, match="before first submit"):
+            _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True)
+
+    die_and_recover(ws, owner)
+    assert len(job_ids_below(ws.jobs)) == 3
+    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert indexed is not None
+    _, _, nonce = indexed
+    assert nonce is not None
+    assert _kernel.exchange_owner_key(ws, str(jobs[0]["id"]), job_id=indexed[0], nonce=nonce) == key
 
 
 def test_two_adopters_of_copies_of_one_client_bundle_publish_one_set_of_jobs(tmp_path: Path) -> None:
     ws = v3_workspace(tmp_path / "ws")
-    jobs = client_bundle(tmp_path / "inbox" / "first")
-    client_bundle(tmp_path / "inbox" / "second", jobs)
-    client_bundle(tmp_path / "inbox" / "third", jobs)
+    key = "ed25519:" + "A" * 43 + "="
+    jobs = client_bundle(tmp_path / "inbox" / "first", owner_key=key)
+    client_bundle(tmp_path / "inbox" / "second", jobs, owner_key=key)
+    client_bundle(tmp_path / "inbox" / "third", jobs, owner_key=key)
     crashed = cli_owner(ws)
 
     def crash_after_the_plan(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
@@ -611,10 +687,15 @@ def test_two_adopters_of_copies_of_one_client_bundle_publish_one_set_of_jobs(tmp
             _fs.set_fault_injector(None)
             raise Crash("after the plan")
 
-    # A claims the exchange name and records its plan, then dies before publishing.
+    # A claims the exchange name, then dies while writing its plan before that file is installed.
     _fs.set_fault_injector(crash_after_the_plan)
     with pytest.raises(Crash):
         _moving.adopt(ws, crashed, tmp_path / "inbox" / "first", untrusted=True, refused_to=tmp_path / "rejected")
+    claimed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
+    assert claimed is not None
+    claimed_job_id, _, nonce = claimed
+    assert nonce is not None
+    assert _kernel.exchange_owner_key(ws, str(jobs[0]["id"]), job_id=claimed_job_id, nonce=nonce) == key
     # B adopts a copy meanwhile: the name carries A's nonce and A's job is not here, so B's copy is refused.
     with cli_owner(ws) as owner, pytest.raises(BundleError, match="another adoption"):
         _moving.adopt(ws, owner, tmp_path / "inbox" / "second", untrusted=True, refused_to=tmp_path / "rejected")

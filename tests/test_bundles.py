@@ -1,5 +1,6 @@
 """Tests of :mod:`httk.workflow._bundles`: building, validating (the adoption trust boundary) and rekeying bundles."""
 
+import base64
 import dataclasses
 import json
 import os
@@ -210,6 +211,52 @@ def test_build_validate_round_trip(tmp_path: Path) -> None:
         validate_bundle(bundle, untrusted=True)
     owner.discard_tree(bundle.parent)
     owner.close()
+
+
+def test_manifest_owner_key_is_optional_canonical_and_round_trips() -> None:
+    fixed_id = "00000000-0000-4000-8000-000000000001"
+    fixed = BundleManifest(
+        "a" * 32,
+        SOURCE,
+        CREATED,
+        None,
+        None,
+        (BundleMember(fixed_id, fixed_id, PurePosixPath("p"), "ready", 500, None),),
+    )
+    assert fixed.to_json() == (
+        b'{"created_at":"2026-10-10T08:00:00.000000Z","destination":{"locator":null,"workspace_id":null},'
+        b'"format":"httk-workflow-bundle","format_version":1,"members":[{"job_id":"00000000-0000-4000-'
+        b'8000-000000000001","job_key":"00000000-0000-4000-8000-000000000001","parent_job_id":null,'
+        b'"placement":"p","priority":500,"state":"ready"}],"source_workspace_id":"2d7f3f6e-6f7a-4a4b-'
+        b'9a43-4c1f0d6c8e03","transfer_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'
+    )
+    mapping = family()[0]
+    member = member_of(mapping, None)
+    legacy = BundleManifest(uuid.uuid4().hex, SOURCE, CREATED, None, None, (member,))
+    legacy_bytes = legacy.to_json()
+    assert "owner_key" not in legacy.as_mapping()
+    assert BundleManifest.from_json(legacy_bytes).to_json() == legacy_bytes
+    key = "ed25519:" + base64.b64encode(b"k" * 32).decode("ascii")
+    owned = dataclasses.replace(legacy, owner_key=key)
+    assert BundleManifest.from_json(owned.to_json()) == owned
+    assert BundleManifest.from_json(owned.to_json()).owner_key == key
+    malformed = json.loads(legacy_bytes)
+    for invalid in (
+        "x",
+        "ed25519:!!!",
+        "ed25519:" + base64.b64encode(b"k" * 31).decode("ascii"),
+        "ed25519:" + key.split(":", 1)[1].rstrip("="),
+    ):
+        with pytest.raises(BundleError):
+            BundleManifest.from_mapping({**malformed, "owner_key": invalid})
+    with pytest.raises(BundleError):
+        BundleManifest.from_mapping({**malformed, "owner_key": None})
+    invalid_members = {**malformed, "extra": True}
+    invalid_members.pop("transfer_id")
+    with pytest.raises(BundleError) as error:
+        BundleManifest.from_mapping(invalid_members)
+    assert "missing required ['transfer_id']" in str(error.value)
+    assert "unknown ['extra']" in str(error.value)
 
 
 def test_build_takes_the_name_priority_and_a_subtree_root(tmp_path: Path) -> None:
@@ -794,16 +841,20 @@ def rekeyed_id(workspace_id: str, job_id: object) -> str:
     return str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{workspace_id}/{job_id}"))
 
 
-def inbox(tmp_path: Path, name: str, jobs: list[dict[str, object]] | None = None) -> tuple[Path, Path, BundleManifest]:
+def inbox(
+    tmp_path: Path, name: str, jobs: list[dict[str, object]] | None = None, *, owner_key: str | None = None
+) -> tuple[Path, Path, BundleManifest]:
     scratch = tmp_path / name
     bundle = scratch / "entry"
-    write_bundle(bundle, jobs if jobs is not None else family(str(uuid.uuid4())))
+    jobs = jobs if jobs is not None else family(str(uuid.uuid4()))
+    write_bundle(bundle, jobs, dataclasses.replace(manifest_of(jobs), owner_key=owner_key))
     return scratch, bundle, validate_bundle(bundle, untrusted=True)
 
 
 def test_rekey(tmp_path: Path) -> None:
     jobs = family()
-    scratch, bundle, manifest = inbox(tmp_path, "s", jobs)
+    key = "ed25519:" + base64.b64encode(b"k" * 32).decode("ascii")
+    scratch, bundle, manifest = inbox(tmp_path, "s", jobs, owner_key=key)
     assert read_rekeyed(scratch) is None and exchange_names(scratch) == {}
     rekeyed = rekey_untrusted(scratch, bundle, manifest, workspace_id=ADOPTER)
     new_ids = [rekeyed_id(ADOPTER, mapping["id"]) for mapping in jobs]
@@ -822,6 +873,7 @@ def test_rekey(tmp_path: Path) -> None:
         manifest.created_at,
         manifest.source_workspace_id,
     )
+    assert rekeyed.owner_key == key
     assert exchange_names(scratch) == {new: str(mapping["id"]) for new, mapping in zip(new_ids, jobs, strict=True)}
     assert read_rekeyed(scratch) == rekeyed
     assert validate_bundle(bundle, untrusted=False) == rekeyed
@@ -887,9 +939,10 @@ CRASHES: dict[str, Callable[[BundleManifest], _fs.Fault]] = {
 @pytest.mark.parametrize("crash", CRASHES.values(), ids=CRASHES.keys())
 def test_rekey_resumes_after_a_crash(tmp_path: Path, crash: Callable[[BundleManifest], _fs.Fault]) -> None:
     jobs = family()
-    reference_scratch, reference_bundle, reference_manifest = inbox(tmp_path, "reference", jobs)
+    key = "ed25519:" + base64.b64encode(b"k" * 32).decode("ascii")
+    reference_scratch, reference_bundle, reference_manifest = inbox(tmp_path, "reference", jobs, owner_key=key)
     reference = rekey_untrusted(reference_scratch, reference_bundle, reference_manifest, workspace_id=ADOPTER)
-    scratch, bundle, manifest = inbox(tmp_path, "crashed", jobs)
+    scratch, bundle, manifest = inbox(tmp_path, "crashed", jobs, owner_key=key)
     # The rekeyed keys name the moves' destinations.
     _fs.set_fault_injector(crash(reference))
     with pytest.raises(Crash):

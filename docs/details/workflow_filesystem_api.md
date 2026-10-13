@@ -1215,7 +1215,14 @@ other member's parent is listed before it, ids and (placement, key) pairs are
 unique, and `state`/`priority` are where each member was taken from and where
 adoption publishes it. A member's `job.json` MUST agree with its entry (id,
 key, placement, parent). Seals travel inside the payloads. A hold records the
-destination workspace in `destination.workspace_id`.
+destination workspace in `destination.workspace_id`. The optional `owner_key`
+is the submitting operator's canonical `ed25519:<base64>` public key written
+by `job eject`; it is unsigned. Only untrusted (exchange) adoption uses it. With `--operator IDENTITY`, eject uses
+that identity and fails without moving the job if it has no key. Otherwise it
+uses the configured default identity when keyed, and omits the member when it
+is not. Holds, `job transfer`, manager ejects and exchange returns never write
+it; `--operator` with `--hold` is refused. When omitted, `bundle.json` retains
+exactly its previous bytes. Untrusted adoption refuses a non-canonical key.
 
 ### Eject
 
@@ -1311,9 +1318,11 @@ never empty while a delivery is in doubt, so it always runs.
    `tmp/`. An operator's own bundle is refused as already adopted and left in
    place.
 5. **Claim the exchange name** (untrusted only): `publish_dir` of
-   `exchange-jobs/<client root id>/` with the adoption's nonce, before
-   anything is published. A name claimed by another adoption is refused, unless
-   the indexed job is the rekeyed root and present, which is "already adopted".
+   `exchange-jobs/<client root id>/` with the adoption's nonce and the
+   manifest's `owner_key` (absent when none), before anything is published. A
+   name claimed by another adoption is refused, unless the indexed job is the
+   rekeyed root and present, which is "already adopted". A rerun of the same
+   adoption recognizes its own claim only when the key matches.
 6. **Plan.** Write `<scratch>/plan.json` (the validated manifest). From here
    only publication remains, and validation never reruns.
 7. **Publish** bottom-up: for an untrusted member, write its `state.json`
@@ -1407,7 +1416,11 @@ workspace MUST confine its attempts; only managers without placement prefixes
 that take the `default` pool serve the exchange.
 
 The **exchange index** `.httk-workspace/exchange-jobs/<exchange-name>/` is
-trusted: `.nonce` and `index.json` (`{job_id, placement, adoption_nonce}`).
+trusted: `.nonce` and `index.json` (`{job_id, placement, adoption_nonce, owner_key}`, with
+`owner_key` absent when the bundle had none). This trusted entry is the
+authority for ownership: it binds the exchange name, job id, adoption nonce
+and key. Job-writable files never grant ownership. A rerun of the same
+adoption recognizes the entry only when the key matches.
 Readers ignore anything else in an entry, such as the `translated/` markers of
 earlier versions. It is created once per exchange root before
 the root is published (§Adopt step 5) and removed only by the root's owner when
@@ -1562,7 +1575,7 @@ CLI owner of its own. The check walks `jobs/` and reports:
 | `unreadable_state` | A `state.json` that exists but does not decode. |
 | `foreign_owner` | A job directory another uid owns. |
 | `stale_exchange_index` | An exchange index entry whose job one settled lookup does not find (the settle covers the visibility of writes that finished before fsck started). A held job is not looked for: a delivered hold has left the index already. With `--repair` it is removed under the nonce it was read with. |
-| `unindexed_exchange_job` | An unowned job with `origin: exchange`, no parent, and the job id this workspace rekeys its `exchange_name` to (an exchange root), without `exchange-jobs/<exchange_name>/`. Children, whose `exchange_name` is their own client id or their root's, and exchange jobs adopted from another workspace are not roots here. With `--repair` the entry is recreated by `claim_exchange_name` under a fresh adoption nonce. |
+| `unindexed_exchange_job` | An unowned job with `origin: exchange`, no parent, and the job id this workspace rekeys its `exchange_name` to (an exchange root), without `exchange-jobs/<exchange_name>/`. Children, whose `exchange_name` is their own client id or their root's, and exchange jobs adopted from another workspace are not roots here. With `--repair` the entry is recreated by `claim_exchange_name` under a fresh adoption nonce, without `owner_key`; the root is then no longer daemon-controllable. |
 
 Everything but unparsable entries and stale or missing exchange index entries
 is left to the operator.

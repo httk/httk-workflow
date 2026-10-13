@@ -47,8 +47,8 @@ class _Target:
     document: dict[str, object]
     digest: str
     operator_key: str
-    exchange_name: str | None
-    adoption_nonce: str | None
+    exchange_name: str
+    adoption_nonce: str
 
     def encode(self) -> bytes:
         value: dict[str, object] = {
@@ -61,9 +61,8 @@ class _Target:
             "digest": self.digest,
             "operator_key": self.operator_key,
         }
-        if self.exchange_name is not None:
-            value["exchange_name"] = self.exchange_name
-            value["adoption_nonce"] = self.adoption_nonce
+        value["exchange_name"] = self.exchange_name
+        value["adoption_nonce"] = self.adoption_nonce
         return _canonical(value)
 
     @classmethod
@@ -81,14 +80,13 @@ class _Target:
             "request",
             "digest",
             "operator_key",
+            "exchange_name",
+            "adoption_nonce",
         }
-        optional = {"exchange_name", "adoption_nonce"}
-        if not isinstance(value, dict) or not required <= set(value) <= required | optional:
+        if not isinstance(value, dict) or set(value) != required:
             raise ValueError("stored job target fields are invalid")
         if value["format"] != _TARGET_FORMAT or value["format_version"] != _TARGET_VERSION:
             raise ValueError("stored job target format is unsupported")
-        if ("exchange_name" in value) != ("adoption_nonce" in value):
-            raise ValueError("stored exchange target is incomplete")
         document = value["request"]
         if not isinstance(document, dict):
             raise ValueError("stored internal request is not an object")
@@ -111,15 +109,13 @@ class _Target:
             or hashlib.sha256(_canonical(document)).hexdigest() != digest
         ):
             raise ValueError("stored internal request digest is invalid")
-        exchange_name = value.get("exchange_name")
-        adoption_nonce = value.get("adoption_nonce")
-        if exchange_name is not None:
-            exchange_name = str(uuid.UUID(str(exchange_name)))
-            if value["exchange_name"] != exchange_name:
-                raise ValueError("stored exchange name is not canonical")
-            if type(adoption_nonce) is not str or not adoption_nonce:
-                raise ValueError("stored adoption nonce is invalid")
-        expected_operator = "daemon" if exchange_name is None else f"daemon:{exchange_name}:{cast(str, adoption_nonce)}"
+        exchange_name = str(uuid.UUID(str(value["exchange_name"])))
+        if value["exchange_name"] != exchange_name:
+            raise ValueError("stored exchange name is not canonical")
+        adoption_nonce = value["adoption_nonce"]
+        if type(adoption_nonce) is not str or not adoption_nonce:
+            raise ValueError("stored adoption nonce is invalid")
+        expected_operator = f"daemon:{exchange_name}:{adoption_nonce}"
         if document.get("operator") != expected_operator:
             raise ValueError("stored internal request has invalid daemon attribution")
         operator_key = value["operator_key"]
@@ -134,13 +130,17 @@ class _Target:
             cast(dict[str, object], document),
             digest,
             operator_key,
-            cast(str | None, exchange_name),
-            cast(str | None, adoption_nonce),
+            exchange_name,
+            adoption_nonce,
         )
 
 
+class _NotOwner(Exception):
+    """The signed command key does not own the indexed exchange root."""
+
+
 class JobExecutor:
-    """Resolve, arbitrate, execute and observe authenticated daemon job commands.
+    """Resolve, arbitrate, execute and observe commands only for roots owned by their signing key.
 
     :param workspace: The served workspace.
     :param ledger: The daemon's command ledger, which freezes targets, decisions and results.
@@ -224,6 +224,13 @@ class JobExecutor:
         if len(matches) != 1:
             raise RuntimeError("the UUID prefix matches more than one job")
         ref, placement, doc, exchange_name, adoption_nonce = next(iter(matches.values()))
+        if exchange_name is None or adoption_nonce is None:
+            raise _NotOwner
+        if (
+            _kernel.exchange_owner_key(self.workspace, exchange_name, job_id=ref.job_id, nonce=adoption_nonce)
+            != request.operator_key
+        ):
+            raise _NotOwner
 
         seals.require_cli_modifiable(self.workspace)
 
@@ -238,7 +245,7 @@ class JobExecutor:
             "job_id": ref.job_id,
             "placement": placement_text(placement),
             "action": request.action,
-            "operator": ("daemon" if exchange_name is None else f"daemon:{exchange_name}:{cast(str, adoption_nonce)}"),
+            "operator": f"daemon:{exchange_name}:{adoption_nonce}",
             "reason": request.reason,
             "created_at": created_at,
         }
@@ -284,8 +291,6 @@ class JobExecutor:
         )
 
     def _adoption_changed(self, target: _Target) -> bool:
-        if target.exchange_name is None:
-            return False
         return _kernel.exchange_index(self.workspace, target.exchange_name) != (
             target.job_id,
             target.placement,
@@ -456,6 +461,8 @@ class JobExecutor:
     def execute(self, entry: Entry) -> Response:
         """Execute a newly admitted job request, or recover it without reposting.
 
+        Only the key recorded for the target's current exchange adoption may control it.
+
         :param entry: The admitted ``job_request``.
         :return: The response to the command.
         """
@@ -473,6 +480,13 @@ class JobExecutor:
             self.owner.check_alive()
         try:
             target = self._target(entry)
+        except _NotOwner:
+            return self._response(
+                request,
+                "refused",
+                "not_owner",
+                "only the key that submitted the job through the exchange may control it",
+            )
         except LookupError as exc:
             return self._response(request, "refused", "unknown_job", exc)
         except (RuntimeError, ValueError, WorkflowError) as exc:
@@ -528,11 +542,15 @@ class JobExecutor:
         return self._serve(entry, target, None)
 
     def status(self, request: Request) -> Response:
-        """Observe an original job command without admitting or executing this status request."""
+        """Observe only commands signed by the same key, without admitting or executing this status request."""
 
         assert request.command_id is not None
         entry = self.ledger.lookup_request(request.command_id)
-        if entry is None or entry.request.operation != "job_request":
+        if (
+            entry is None
+            or entry.request.operator_key != request.operator_key
+            or entry.request.operation != "job_request"
+        ):
             return self._response(request, "refused", "unknown_command", "the original job command is unknown")
         stored_target = self.ledger.read_target(entry)
         if stored_target is None:

@@ -17,6 +17,7 @@ from httk.core.cli import CLIContext
 from httk.core.identity import (
     OperatorIdentity,
     configured_operator_identity,
+    identity_public_key,
     identity_seed,
     resolve_operator_identity,
     sign_document,
@@ -1128,6 +1129,25 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     if arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
+    if arguments.hold and arguments.operator is not None:
+        raise ValueError("--operator needs a destination, not --hold")
+    if arguments.hold:
+        owner_key = None
+    elif arguments.operator is not None:
+        identity = _resolve_request_identity(arguments.operator)
+        if identity.seed_path is None:
+            raise ValueError(f"identity {identity.label} has no signing key")
+        ensure_identity_key(identity)
+        owner_key = identity_public_key(identity.seed_path)
+        if owner_key is None:
+            raise ValueError(f"identity {identity.label} has no signing key")
+    else:
+        configured = configured_operator_identity()
+        owner_key = (
+            identity_public_key(configured.seed_path)
+            if configured is not None and configured.seed_path is not None
+            else None
+        )
     if arguments.destination is None and not arguments.hold:
         raise ValueError("job eject needs DEST, or --hold")
     if arguments.destination_id is not None and not arguments.hold:
@@ -1171,6 +1191,7 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
                         tree=arguments.tree,
                         locator=arguments.destination,
                         destination_workspace_id=destination_id,
+                        owner_key=owner_key,
                     )
                 except _ERRORS as exc:
                     print(f"{ref.job_key}: {exc}", file=sys.stderr)
@@ -1710,6 +1731,9 @@ def build_job_parser(
         "destination", metavar="DEST", nargs="?", help="the directory to put the bundle in (with --hold: recorded only)"
     )
     eject.add_argument("--hold", action="store_true", help="hold the bundle in the workspace for a transfer")
+    eject.add_argument(
+        "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
+    )
     eject.add_argument(
         "--destination-id",
         metavar="WORKSPACE_ID",

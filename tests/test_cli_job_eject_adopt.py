@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.identity import add_identity, identity_key_paths, identity_public_key, initialize_identity
 
 from httk.workflow import Workspace, _fs, _kernel
 from httk.workflow.registry import create_workspace
@@ -49,6 +50,128 @@ def test_eject_and_adopt_round_trip(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert_in(target, plan)
     # A second adoption finds no bundle there any more.
     assert command(["job", "adopt", "--workspace", target_name, str(bundle)], context(tmp_path)) == 1
+
+
+def test_eject_records_configured_owner_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _, identity = initialize_identity("Test Operator", "operator@example.test")
+    source, source_name = registered(tmp_path, "owner-key")
+    mapping, _, _ = single(source)
+    assert (
+        command(
+            ["job", "eject", "--workspace", source_name, str(mapping["id"]), str(tmp_path / "out"), "--json"],
+            context(tmp_path),
+        )
+        == 0
+    )
+    destination = Path(json.loads(capsys.readouterr().out)["destination"])
+    manifest = json.loads((destination / "bundle.json").read_bytes())
+    assert manifest["owner_key"] == identity_public_key(identity.seed_path)
+
+
+def test_eject_records_explicit_non_default_identity_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    initialize_identity("Default Operator", "default@example.test")
+    add_identity("secondary", "Second Operator", "second@example.test")
+    expected_key = identity_public_key(identity_key_paths("secondary")[0])
+    source, source_name = registered(tmp_path, "operator")
+    mapping, _, _ = single(source)
+    assert (
+        command(
+            [
+                "job",
+                "eject",
+                "--workspace",
+                source_name,
+                str(mapping["id"]),
+                str(tmp_path / "out"),
+                "--operator",
+                "secondary",
+                "--json",
+            ],
+            context(tmp_path),
+        )
+        == 0
+    )
+    destination = Path(json.loads(capsys.readouterr().out)["destination"])
+    assert json.loads((destination / "bundle.json").read_bytes())["owner_key"] == expected_key
+
+
+def test_eject_operator_without_key_leaves_job_in_place(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "owner-key")
+    mapping, _, _ = single(source)
+    original = find(source, mapping["id"])
+    assert original is not None
+    assert (
+        command(
+            [
+                "job",
+                "eject",
+                "--workspace",
+                source_name,
+                str(mapping["id"]),
+                str(tmp_path / "out"),
+                "--operator",
+                "No Key <no-key@example.test>",
+            ],
+            context(tmp_path),
+        )
+        != 0
+    )
+    assert "has no signing key" in capsys.readouterr().err
+    after = find(source, mapping["id"])
+    assert after is not None and (after.path, after.state) == (original.path, original.state)
+    assert not list((source.control / "requests").glob("*.json"))
+
+
+def test_eject_hold_rejects_operator_without_moving_or_posting_request(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "hold-operator")
+    mapping, _, _ = single(source)
+    original = find(source, mapping["id"])
+    assert original is not None
+    assert (
+        command(
+            [
+                "job",
+                "eject",
+                "--workspace",
+                source_name,
+                str(mapping["id"]),
+                "--hold",
+                "--operator",
+                "someone",
+            ],
+            context(tmp_path),
+        )
+        != 0
+    )
+    assert "--operator needs a destination, not --hold" in capsys.readouterr().err
+    after = find(source, mapping["id"])
+    assert after is not None and (after.path, after.state) == (original.path, original.state)
+    assert not list((source.control / "requests").glob("*.json"))
+
+
+def test_eject_without_identity_and_hold_write_no_owner_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "owner-key")
+    mapping, _, _ = single(source)
+    assert (
+        command(
+            ["job", "eject", "--workspace", source_name, str(mapping["id"]), str(tmp_path / "out"), "--json"],
+            context(tmp_path),
+        )
+        == 0
+    )
+    destination = Path(json.loads(capsys.readouterr().out)["destination"])
+    assert "owner_key" not in json.loads((destination / "bundle.json").read_bytes())
+
+    held, held_name = registered(tmp_path, "hold")
+    held_mapping, _, _ = single(held)
+    assert (
+        command(["job", "eject", "--workspace", held_name, str(held_mapping["id"]), "--hold"], context(tmp_path)) == 0
+    )
+    capsys.readouterr()
+    (bundle,) = (held.control / "transfers" / "outgoing").iterdir()
+    assert "owner_key" not in json.loads((bundle / "bundle.json").read_bytes())
 
 
 def test_adopt_json_reports_already_adopted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -35,6 +35,7 @@ from httk.workflow._kernel import (
     claim,
     claim_exchange_name,
     exchange_index,
+    exchange_owner_key,
     format_job_name,
     list_jobs,
     list_owners,
@@ -1096,6 +1097,33 @@ def test_exchange_names(ws: FakeWorkspace) -> None:
     assert [item for item in os.listdir(ws.control / "tmp") if ".claim." in item] == []
     with pytest.raises(FormatError):
         claim_exchange_name(ws, first, "client", job_id, PurePosixPath(), nonce="a")
+
+
+def test_exchange_owner_key_and_same_claim_include_key(ws: FakeWorkspace) -> None:
+    first, second = new_owner(ws), new_owner(ws)
+    name, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+    key = "ed25519:" + "A" * 43 + "="
+    assert (
+        claim_exchange_name(ws, first, name, job_id, PurePosixPath("p"), nonce="n", owner_key=key) is ExchangeClaim.WON
+    )
+    assert exchange_owner_key(ws, name, job_id=job_id, nonce="n") == key
+    assert exchange_owner_key(ws, name, job_id=str(uuid.uuid4()), nonce="n") is None
+    assert exchange_owner_key(ws, name, job_id=job_id, nonce="wrong") is None
+    assert exchange_owner_key(ws, str(uuid.uuid4()), job_id=job_id, nonce="n") is None
+    assert (
+        claim_exchange_name(ws, second, name, job_id, PurePosixPath("p"), nonce="n", owner_key=key)
+        is ExchangeClaim.SAME
+    )
+    assert (
+        claim_exchange_name(
+            ws, second, name, job_id, PurePosixPath("p"), nonce="n", owner_key="ed25519:" + "B" * 43 + "="
+        )
+        is ExchangeClaim.OTHER
+    )
+    assert claim_exchange_name(ws, second, name, job_id, PurePosixPath("p"), nonce="n") is ExchangeClaim.OTHER
+    no_key = str(uuid.uuid4())
+    assert claim_exchange_name(ws, first, no_key, job_id, PurePosixPath("p"), nonce="n") is ExchangeClaim.WON
+    assert exchange_owner_key(ws, no_key, job_id=job_id, nonce="n") is None
 
 
 # -- 12. locate ---------------------------------------------------------------------------------------------------------------

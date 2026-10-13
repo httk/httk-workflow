@@ -575,6 +575,7 @@ def _eject(
     hold: bool,
     locator: str | None,
     destination_workspace_id: str | None = None,
+    owner_key: str | None = None,
 ) -> tuple[EjectReport, BundleManifest]:
     members: list[OwnedJob] = []
     scratch: Path | None = None
@@ -591,6 +592,7 @@ def _eject(
             source_workspace_id=workspace.workspace_id,
             destination_workspace_id=destination_workspace_id,
             destination_locator=locator,
+            owner_key=owner_key,
             event=("ejected", {"destination": str(destination)}),
             scratch=scratch,
         )
@@ -632,7 +634,15 @@ def _eject(
     raise WorkflowError(f"{problem}; the jobs were returned to the states they were taken from") from error
 
 
-def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: Path, tree: bool) -> EjectReport:
+def eject(
+    workspace: "Workspace",
+    owner: Owner,
+    root: OwnedJob,
+    *,
+    destination: Path,
+    tree: bool,
+    owner_key: str | None = None,
+) -> EjectReport:
     """Move a claimed job, and with *tree* its descendants, out of the workspace into ``<destination>/<root key>``.
 
     Tree members are the root's non-detached descendants (:func:`tree_members`); each must be terminal or paused,
@@ -646,6 +656,7 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
     :param destination: An absolute directory, or a missing name in one (:func:`destination_problem`); below
         the exchange, every directory on the way is opened without following a symlink.
     :param tree: Eject the root's descendants too.
+    :param owner_key: The optional key that may control the adopted root through the workspace daemon.
     :return: Where the bundle went.
     :raises Busy: When a member cannot be claimed, or without *tree* when the root has descendants.
     :raises ValueError: For an unusable destination.
@@ -658,7 +669,14 @@ def eject(workspace: "Workspace", owner: Owner, root: OwnedJob, *, destination: 
         root.give_back()
         raise ValueError(problem)
     report, _manifest = _eject(
-        workspace, owner, root, destination=destination, tree=tree, hold=False, locator=str(destination)
+        workspace,
+        owner,
+        root,
+        destination=destination,
+        tree=tree,
+        hold=False,
+        locator=str(destination),
+        owner_key=owner_key,
     )
     return report
 
@@ -918,7 +936,15 @@ def _finish(
         if record.untrusted:
             root = manifest.members[0]
             name = exchange_names(scratch)[root.job_id]
-            claim = _kernel.claim_exchange_name(workspace, owner, name, root.job_id, root.placement, nonce=record.nonce)
+            claim = _kernel.claim_exchange_name(
+                workspace,
+                owner,
+                name,
+                root.job_id,
+                root.placement,
+                nonce=record.nonce,
+                owner_key=manifest.owner_key,
+            )
             if claim is _kernel.ExchangeClaim.OTHER:
                 indexed = _kernel.exchange_index(workspace, name)
                 if indexed is None or indexed[0] != root.job_id:
