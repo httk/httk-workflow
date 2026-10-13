@@ -169,14 +169,14 @@ def test_remote_batch_sends_one_typed_command_per_selector(remote, monkeypatch: 
     selectors = [JOB_ID, "12345678-1234-1234"]
     seen = _mock_adapter(monkeypatch, response_seed, [("queued", "running"), ("applied", "paused")])
 
-    status, stdout, stderr = _daemon_jobs.request_remote_jobs(
+    status, stdout = _daemon_jobs.request_remote_jobs(
         WorkspaceBinding("cluster:runs", "cluster", None),
         CLIContext("httk", bundle.parent),
         _arguments(job_id=selectors),
         identity,
     )
 
-    assert status == 0 and stderr == ""
+    assert status == 0
     assert len(seen) == 2
     assert all(request.operation == "job_request" for request in seen)
     assert [request.selector for request in seen] == selectors
@@ -209,7 +209,7 @@ def test_changed_reason_retry_is_invalid_cli_input_before_any_publish(
     binding = WorkspaceBinding("cluster:runs", "cluster", None)
     context = CLIContext("httk", bundle.parent)
     first = _arguments(request_id=command_id)
-    status, _stdout, _stderr = _daemon_jobs.request_remote_jobs(binding, context, first, identity)
+    status, _stdout = _daemon_jobs.request_remote_jobs(binding, context, first, identity)
     assert status == 0
 
     calls: list[str] = []
@@ -250,11 +250,11 @@ def test_pause_wait_polls_with_fresh_signed_command_status(remote, monkeypatch: 
     monkeypatch.setattr(_daemon_jobs.time, "sleep", sleeps.append)
     arguments = _arguments(action="pause", wait=True, timeout=10.0, reason="pause for review")
 
-    status, stdout, stderr = _daemon_jobs.request_remote_jobs(
+    status, stdout = _daemon_jobs.request_remote_jobs(
         WorkspaceBinding("cluster:runs", "cluster", None), CLIContext("httk", bundle.parent), arguments, identity
     )
 
-    assert status == 0 and stderr == "" and len(sleeps) == 1
+    assert status == 0 and len(sleeps) == 1
     original, observation = seen
     assert original.operation == "job_request" and original.action == "pause"
     assert observation.operation == "job_request_status"
@@ -274,7 +274,7 @@ def test_pause_wait_reports_refusal_or_supersession(
     seen = _mock_adapter(monkeypatch, response_seed, [("queued", "running"), (outcome, state)])
     monkeypatch.setattr(_daemon_jobs.time, "sleep", lambda _seconds: None)
 
-    status, stdout, _stderr = _daemon_jobs.request_remote_jobs(
+    status, stdout = _daemon_jobs.request_remote_jobs(
         WorkspaceBinding("cluster:runs", "cluster", None),
         CLIContext("httk", bundle.parent),
         _arguments(action="pause", wait=True, timeout=10.0, reason="pause for review"),
@@ -285,6 +285,21 @@ def test_pause_wait_reports_refusal_or_supersession(
     expected = "refused" if outcome == "applied" else outcome
     assert stdout.split("\t")[1] == expected
     assert len(seen) == 2 and seen[1].command_id == seen[0].request_id
+
+
+def test_pause_wait_timeout_bounds_the_status_polls(remote, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle, _endpoint, identity, response_seed = remote
+    seen = _mock_adapter(monkeypatch, response_seed, [("queued", "running")])
+
+    status, stdout = _daemon_jobs.request_remote_jobs(
+        WorkspaceBinding("cluster:runs", "cluster", None),
+        CLIContext("httk", bundle.parent),
+        _arguments(action="pause", wait=True, timeout=0.0, reason="pause for review"),
+        identity,
+    )
+
+    assert status == 1 and len(seen) == 1
+    assert stdout.split("\t")[1:5:3] == ["refused", "pause request timed out and remains pending"]
 
 
 def test_monitor_mount_daemon_request_uses_complete_argument_namespace(remote, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,21 +376,24 @@ def test_real_mounted_exchange_runs_signed_command_through_adapter(remote) -> No
 
     thread = threading.Thread(target=broker)
     thread.start()
-    request, response = _daemon_jobs.job_request(
-        bundle,
-        endpoint,
+    status, stdout = _daemon_jobs.request_remote_jobs(
+        WorkspaceBinding("cluster:runs", "cluster", None),
+        CLIContext("httk", bundle.parent),
+        _arguments(action="pause", reason="integration test", adapter_timeout=10),
         identity,
-        selector=JOB_ID,
-        action="pause",
-        reason="integration test",
-        wait_seconds=5,
-        adapter_timeout=10,
     )
     thread.join(timeout=15)
 
     assert not thread.is_alive()
     assert errors == []
     assert len(received) == 1
-    assert received[0].request_id == request.request_id
     assert received[0].operator_key == identity_public_key(identity.seed_path)
-    assert response.outcome == "queued" and response.current_state == "running"
+    assert status == 0
+    row = stdout.rstrip("\n").split("\t")
+    assert (row[0], row[1], row[2], row[3], row[5]) == (
+        JOB_ID,
+        "queued",
+        INTERNAL_ID,
+        received[0].request_id,
+        "running",
+    )

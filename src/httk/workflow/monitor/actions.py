@@ -73,9 +73,9 @@ def request(view: WorkspaceView, action: str, job_ids: Sequence[str], reason: st
         identity = _resolve_request_identity(None)
         target = resolve_remote(view.binding.remote, project=context.cwd)
         if read_metadata(target.bundle).get("kind") == "mount-daemon":
-            status, stdout, stderr = request_remote_jobs(view.binding, context, arguments, identity)
+            status, stdout = request_remote_jobs(view.binding, context, arguments, identity)
             if status:
-                raise RuntimeError(stderr or stdout.strip() or f"job request failed with exit status {status}")
+                raise RuntimeError(stdout.strip() or f"job request failed with exit status {status}")
             return stdout.strip()
         ensure_identity_key(identity)
         status, _stdout, _stderr = request_remote_job_result(

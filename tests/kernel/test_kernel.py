@@ -35,7 +35,6 @@ from httk.workflow._kernel import (
     claim,
     claim_exchange_name,
     exchange_index,
-    exchange_translation_applied,
     format_job_name,
     list_jobs,
     list_owners,
@@ -45,7 +44,6 @@ from httk.workflow._kernel import (
     post_request,
     prune_empty_placements,
     reconcile_scratch,
-    record_exchange_translation,
     recover,
     recoverable_owners,
     register_owner,
@@ -1077,7 +1075,7 @@ def test_take(ws: FakeWorkspace, tmp_path: Path) -> None:
 
 def test_exchange_names(ws: FakeWorkspace) -> None:
     first, second = new_owner(ws), new_owner(ws)
-    name, job_id, request_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    name, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     assert claim_exchange_name(ws, first, name, job_id, PurePosixPath("x/y"), nonce="a") is ExchangeClaim.WON
     # Another job is refused the name; a rerun of the same adoption (an adopt reconciler whose adopter died, with
     # the adoption's nonce from its scratch) is not.
@@ -1096,12 +1094,6 @@ def test_exchange_names(ws: FakeWorkspace) -> None:
     assert exchange_index(ws, str(uuid.uuid4())) is None
     assert (entry / ".nonce").read_text().startswith(f"{first.owner_id}.")
     assert [item for item in os.listdir(ws.control / "tmp") if ".claim." in item] == []
-    assert not exchange_translation_applied(ws, name, request_id)
-    record_exchange_translation(ws, name, request_id)
-    record_exchange_translation(ws, name, request_id)
-    assert exchange_translation_applied(ws, name, request_id)
-    with pytest.raises(WorkflowError):
-        record_exchange_translation(ws, str(uuid.uuid4()), request_id)
     with pytest.raises(FormatError):
         claim_exchange_name(ws, first, "client", job_id, PurePosixPath(), nonce="a")
 

@@ -15,7 +15,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, _requests, removal
+from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, removal
 from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest
 from httk.workflow._daemon_client import Endpoint, read_passive_status
 from httk.workflow._exchange import (
@@ -26,7 +26,7 @@ from httk.workflow._exchange import (
     exchange_directory,
 )
 from httk.workflow._sandbox import PreparedSandbox
-from httk.workflow._state import Release, StateDoc, read_state_unowned
+from httk.workflow._state import Release, read_state_unowned
 from httk.workflow.errors import ConfinementUnavailableError, SealedError
 from httk.workflow.seals import seal_workspace
 from httk.workflow.workflow_cli import command
@@ -598,30 +598,3 @@ def test_only_unrestricted_managers_serve_the_exchange(tmp_path: Path, sandboxes
         manager.tick()
     assert os.listdir(exchange_directory(ws) / "inbox") == []
     assert len(_all_jobs(ws)) == 3
-
-
-def test_the_translation_guard_covers_only_exchange_derived_requests(tmp_path: Path) -> None:
-    ws = _server(tmp_path / "ws")
-    jobs = _send(ws)
-    _pass(ws)
-    root = _indexed(ws, jobs[0]["id"])
-    doc = StateDoc.empty(root.job_id).updated(origin="exchange", exchange_name=str(jobs[0]["id"]))
-    parsed = _requests.parse(
-        _requests.post(
-            ws,
-            action="cancel",
-            job_id=root.job_id,
-            placement=root.placement or "",
-            operator="exchange",
-            reason="return",
-        )
-    )
-    assert not removal.translation_applied(ws, doc, parsed)
-    _kernel.record_exchange_translation(ws, str(jobs[0]["id"]), parsed.request_id)
-    assert removal.translation_applied(ws, doc, parsed)
-    local = _requests.parse(
-        _requests.post(
-            ws, action="cancel", job_id=root.job_id, placement=root.placement or "", operator="t", reason="t"
-        )
-    )
-    assert not removal.translation_applied(ws, doc, local)

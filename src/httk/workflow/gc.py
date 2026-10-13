@@ -10,9 +10,7 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
   cancelled job keeps the attempt its ``state.json`` names;
 - ``placement_directories``: empty placement directories of the unowned states;
 - ``requests``: request files older than a day that are malformed or whose job
-  cannot be found go to ``quarantine/``, and the exchange's records of translated
-  job actions (``exchange-requests/<id>``) older than any signed request can stay
-  acceptable (:data:`EXCHANGE_TRANSLATION_SECONDS`) are removed;
+  cannot be found go to ``quarantine/``;
 - ``manager_logs``: ``logs/managers/<owner-id>.log`` of owners that are gone,
   older than ``retention.trash_days``;
 - ``owner_tombstones``: ``dead.json`` of recovered owners older than
@@ -39,8 +37,6 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from . import _death, _fs, _kernel, _requests, _store
-from ._daemon_auth import CLOCK_SKEW_SECONDS, DEFAULT_REQUEST_MAX_AGE
-from ._exchange import TRANSLATIONS_DIRECTORY
 from ._kernel import Release
 from ._state import UNOWNED_STATES, StateDoc, read_state_unowned
 from ._util import json_bytes
@@ -51,7 +47,6 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
 
 __all__ = [
-    "EXCHANGE_TRANSLATION_SECONDS",
     "GC_CATEGORIES",
     "GC_REPORT_FORMAT",
     "REQUEST_GRACE_SECONDS",
@@ -71,11 +66,6 @@ GC_REPORT_FORMAT = "httk-workflow-gc"
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: How long a malformed request, or one whose job cannot be found, waits before it is quarantined.
 REQUEST_GRACE_SECONDS = 24 * 60 * 60
-#: How long the record of a translated exchange job action is kept: a request is accepted at most its lifetime plus
-#: the clock skew allowed on both sides after its translation, so a replay after that is refused as expired. A
-#: further skew and a day are added as a margin against the clocks of gc and the translator disagreeing, since the
-#: records are tiny and a record removed too early would let a replay through.
-EXCHANGE_TRANSLATION_SECONDS = DEFAULT_REQUEST_MAX_AGE + 3 * CLOCK_SKEW_SECONDS + 24 * 60 * 60
 #: Every category, in the order a collection runs them.
 GC_CATEGORIES = (
     "dead_owners",
@@ -489,11 +479,6 @@ class _Collection:
             tally.note(path, _bytes(path, self.sizes))
             if self.owner is not None and not self.dry_run and quarantine(self.workspace, self.owner, path, reason):
                 tally.removed += 1
-        translations = self.control / TRANSLATIONS_DIRECTORY
-        expired = self.now - EXCHANGE_TRANSLATION_SECONDS
-        for name in _kernel.list_names(translations):
-            if not name.startswith(".") and self._aged(translations / name, expired):
-                self._remove(tally, translations / name)
 
     def manager_logs(self, tally: _Tally) -> None:
         cutoff = self._cutoff(self.retention.trash_days)

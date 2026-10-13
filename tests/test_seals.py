@@ -239,7 +239,8 @@ def test_a_job_held_by_a_manager_gets_the_request_at_its_next_boundary(tmp_path:
         owned = _kernel.claim(env.workspace, owner, env.jobs[0])
         assert owned is not None
         assert (
-            seal_job(env.workspace, env.jobs[0]) == "a manager holds the job; the request applies at its next boundary"
+            seal_job(env.workspace, env.jobs[0])
+            == "another owner holds the job; the request applies at its next boundary"
         )
         owned.release(owned.read_state() or StateDoc.empty(owned.job_id), Release("succeeded", 500))
     assert not is_job_sealed(env.payload())

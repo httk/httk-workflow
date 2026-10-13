@@ -11,6 +11,7 @@ from httk.workflow import Workspace, _kernel, _store, seals
 from httk.workflow import _requests as request_files
 from httk.workflow import removal as removal_module
 from httk.workflow._state import Release, StateDoc, encode_state, read_state_unowned
+from httk.workflow.errors import WorkflowError
 from httk.workflow.removal import serve_requests
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
@@ -290,28 +291,6 @@ def test_unfinished_state_stays_queued_for_reconciliation(tmp_path: Path, interr
         assert doc.release_to is not None
 
 
-def test_exchange_already_applied_translation_reports_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace, _name = _new_workspace(tmp_path)
-    ref = _job(tmp_path, workspace, "translated-request")
-    exchange_name = str(uuid4())
-    with _kernel.register_owner(
-        workspace, kind="cli", label="exchange fixture", allocation=None, advertised={}
-    ) as owner:
-        owned = _kernel.claim(workspace, owner, ref)
-        assert owned is not None
-        doc = (owned.read_state() or StateDoc.empty(ref.job_id)).updated(origin="exchange", exchange_name=exchange_name)
-        owned.write_state(doc)
-        owned.give_back()
-    monkeypatch.setattr(_kernel, "exchange_translation_applied", lambda *_args: True)
-    published = request_files.post(
-        workspace, action="pause", job_id=ref.job_id, placement=ref.placement or "", operator="exchange", reason="r"
-    )
-
-    (outcome,) = serve_requests(workspace, [(ref, published)])
-    assert outcome.status == "applied" and "already applied" in outcome.explanation
-    assert not _requests(workspace)
-
-
 def test_failed_seal_and_eject_are_reported_as_refused_with_jobs_returned(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -382,3 +361,72 @@ def test_lost_claim_that_deletes_job_reports_uncertainty_for_the_requested_id(
     assert result.status == "uncertain"
     assert result.request_id == path.name.split(".")[1]
     assert _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True) is None
+
+
+def _post(workspace: Workspace, ref: _kernel.JobRef, action: str, created_at: str) -> Path:
+    return request_files.post(
+        workspace,
+        action=action,
+        job_id=ref.job_id,
+        placement=ref.placement or "",
+        operator="tester",
+        reason="r",
+        created_at=created_at,
+    )
+
+
+def test_requests_apply_in_the_order_of_their_instants_not_their_timestamp_strings(tmp_path: Path) -> None:
+    workspace, _name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "instant-order")
+    # 00:00Z, written with an offset, precedes 01:00Z although its string sorts after it.
+    pause = _post(workspace, ref, "pause", "2026-01-01T02:00:00+02:00")
+    cancel = _post(workspace, ref, "cancel", "2026-01-01T01:00:00.000000Z")
+
+    (outcome,) = serve_requests(workspace, [(ref, cancel)])
+    assert (outcome.status, outcome.state) == ("applied", "cancelled")
+    applied = [entry["request_id"] for entry in _applied_state(workspace, ref.job_id)]
+    assert applied == [pause.name.split(".")[1], cancel.name.split(".")[1]]
+
+
+def test_a_preceding_request_that_cannot_be_served_gives_the_requested_one_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, _name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "preceding-fails")
+    _post(workspace, ref, "pause", "2026-01-01T00:00:00Z")
+    target = _post(workspace, ref, "cancel", "2026-01-01T00:00:01Z")
+
+    def fail(*_args: object, **_kwargs: object) -> bool:
+        raise WorkflowError("cannot read the job")
+
+    monkeypatch.setattr(removal_module, "serve", fail)
+    (outcome,) = serve_requests(workspace, [(ref, target)])
+    assert (outcome.status, outcome.explanation) == ("uncertain", "cannot read the job")
+    assert len(_requests(workspace)) == 2
+
+
+def test_a_job_needing_reconciliation_is_claimed_once_for_all_its_preceding_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, _name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "reconcile-once")
+    with _kernel.register_owner(workspace, kind="cli", label="crash fixture", allocation=None, advertised={}) as owner:
+        owned = _kernel.claim(workspace, owner, ref)
+        assert owned is not None
+        doc = (owned.read_state() or StateDoc.empty(ref.job_id)).with_commit({"action": "continue"})
+        owned.write_state(doc)
+        owned.give_back()
+    for second in range(3):
+        _post(workspace, ref, "pause", f"2026-01-01T00:00:0{second}Z")
+    target = _post(workspace, ref, "cancel", "2026-01-01T00:01:00Z")
+    claims: list[object] = []
+    real_claim = _kernel.claim
+
+    def counting_claim(*args, **kwargs):
+        claims.append(args[2])
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(_kernel, "claim", counting_claim)
+    (outcome,) = serve_requests(workspace, [(ref, target)])
+    assert (outcome.status, outcome.explanation) == ("queued", "job needs reconciliation")
+    assert len(claims) == 1 and len(_requests(workspace)) == 4

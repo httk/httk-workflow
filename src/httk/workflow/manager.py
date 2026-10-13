@@ -1124,9 +1124,6 @@ class TaskManager:
         )
         if boundary is not None:
             self._release(owned, boundary, released)
-        if isinstance(request_id, str) and isinstance(audit, Mapping):
-            # After the effect, as apply_requests records the requests it applies.
-            removal.record_translation(self.workspace, final, request_id, audit.get("operator"))
 
     def _remove_attempt(self, owned: OwnedJob, attempt_id: str) -> None:
         try:
@@ -1220,19 +1217,7 @@ class TaskManager:
                 continue
             local = running.get(job_id)
             if local is not None:
-                try:
-                    doc = local.owned.read_state()
-                except (FormatError, _fs.UnsafePath):
-                    doc = None  # the commit fails a damaged job; a cancel still stops it
-                cancel = next(
-                    (
-                        request
-                        for request in requests
-                        if request.action == "cancel"
-                        and (doc is None or not removal.translation_applied(self.workspace, doc, request))
-                    ),
-                    None,
-                )
+                cancel = next((request for request in requests if request.action == "cancel"), None)
                 if cancel is not None and local.cancel is None:
                     self._cancel_attempt(local, cancel)
                     changed = True

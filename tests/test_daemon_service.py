@@ -31,27 +31,50 @@ from httk.workflow._daemon_protocol import Request, Response, decode_response, e
 from httk.workflow._daemon_service import Broker, ExchangePublisher, _Observation
 from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
 from httk.workflow._daemon_state import Ledger, LedgerError
+from httk.workflow._death import ProcessIdentity
 from httk.workflow.workspace import Workspace
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
 
 
-def _service_arguments(policy: Path, policy_source: Path, *, check: bool, once: bool) -> argparse.Namespace:
-    """Build service arguments with real one-use metadata descriptors."""
+_SCOPE = {"hostname": "test-host", "boot_id": "a" * 32, "pid": 27645, "start_ticks": 9182}
 
-    scope_fd = os.memfd_create("daemon-test-scope")
-    host_fd = os.memfd_create("daemon-test-host")
-    os.write(scope_fd, json.dumps({"child-pid": max(2, os.getpid())}).encode())
-    os.write(host_fd, json.dumps({"hostname": "test-host", "boot_id": "a" * 32}).encode())
+
+def _service_arguments(policy: Path, policy_source: Path, *, check: bool, once: bool) -> argparse.Namespace:
+    """Build service arguments with a bootstrap-captured execution scope."""
+
     return argparse.Namespace(
         policy=policy,
         policy_source=policy_source,
-        execution_scope_fd=scope_fd,
-        host_identity_fd=host_fd,
+        execution_scope=json.dumps(_SCOPE),
         check=check,
         once=once,
     )
+
+
+def test_execution_scope_is_the_exact_bootstrap_identity() -> None:
+    assert service_module._execution_scope(json.dumps(_SCOPE)) == ProcessIdentity("test-host", "a" * 32, 27645, 9182)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "not json",
+        "[]",
+        {key: value for key, value in _SCOPE.items() if key != "start_ticks"},
+        {**_SCOPE, "extra": 1},
+        {**_SCOPE, "hostname": "bad/name"},
+        {**_SCOPE, "boot_id": ""},
+        {**_SCOPE, "pid": 1},
+        {**_SCOPE, "pid": "2"},
+        {**_SCOPE, "start_ticks": -1},
+        {**_SCOPE, "start_ticks": None},
+    ],
+)
+def test_execution_scope_refuses_incomplete_or_malformed_identity(scope: object) -> None:
+    with pytest.raises(ValueError, match="execution scope"):
+        service_module._execution_scope(scope if isinstance(scope, str) else json.dumps(scope))
 
 
 class RecordingGateway(SlurmGateway):
@@ -768,10 +791,8 @@ def test_main_reports_state_recovery_guidance_and_scheduler_reasons(
                         "/tmp/daemon-policy.json",
                         "--policy-source",
                         "/protected-policy.json",
-                        "--execution-scope-fd",
-                        "10",
-                        "--host-identity-fd",
-                        "11",
+                        "--execution-scope",
+                        json.dumps(_SCOPE),
                         "--once",
                     ]
                 )
@@ -791,10 +812,8 @@ def test_service_entry_point_logs_to_stdout() -> None:
             "/x",
             "--policy-source",
             "/y",
-            "--execution-scope-fd",
-            "10",
-            "--host-identity-fd",
-            "11",
+            "--execution-scope",
+            json.dumps(_SCOPE),
         ],
         capture_output=True,
         text=True,
@@ -839,7 +858,8 @@ def test_service_logs_check_and_startup(
     assert f"daemon_check_passed workspace={policy.workspace_id} cluster=cluster-1" in caplog.text
     assert f"daemon_started workspace={policy.workspace_id} enrollment={ENROLLMENT_ID} launchers=cpu" in caplog.text
     assert active_owners[0]["kind"] == "daemon"
-    assert (active_owners[0]["hostname"], active_owners[0]["pid"]) == ("test-host", max(2, os.getpid()))
+    recorded = tuple(active_owners[0][key] for key in ("hostname", "boot_id", "pid", "process_start_ticks"))
+    assert recorded == tuple(_SCOPE.values())
     assert _kernel.list_owners(initialized) == []
 
 

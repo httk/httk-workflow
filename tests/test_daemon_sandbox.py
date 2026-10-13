@@ -108,14 +108,12 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
         "            pass\n"
         "    return False\n"
         f"outside = {str(sentinel)!r}\n"
+        "if 'httk.workflow._daemon_jobs' in sys.argv:\n"
+        "    # The bootstrap's host-side recovery of dead daemon owners, before it enters the sandbox.\n"
+        f"    open({str(broker / 'recovery.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "    raise SystemExit(0)\n"
         "report = {}\n"
-        "scope_fd = int(sys.argv[sys.argv.index('--execution-scope-fd') + 1])\n"
-        "host_fd = int(sys.argv[sys.argv.index('--host-identity-fd') + 1])\n"
-        f"sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
-        "from httk.workflow._daemon_scope import read_execution_scope\n"
-        "identity = read_execution_scope(scope_fd, host_fd)\n"
-        "report['identity'] = {'hostname': identity.hostname, 'boot_id': identity.boot_id,\n"
-        "    'pid': identity.pid, 'start_ticks': identity.start_ticks}\n"
+        "report['identity'] = json.loads(sys.argv[sys.argv.index('--execution-scope') + 1])\n"
         f"open({str(daemon_broker / 'scope.json')!r}, 'w').write(json.dumps(report['identity']))\n"
         f"release = {str(daemon_broker / 'release')!r}\n"
         "if '--check' in sys.argv:\n"
@@ -136,7 +134,6 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
         f"report['workflow_config_write'] = attempt(lambda: open({str(workspace / 'workflows/config.toml')!r}, 'w').write('x'))\n"
         "report['daemon_read'] = attempt(lambda: open('/tmp/daemon/response.seed', encoding='utf-8').read())\n"
         "report['daemon_write'] = attempt(lambda: open('/tmp/daemon/x', 'w', encoding='utf-8').write('x'))\n"
-        "report['namespace_pid_one'] = int(open('/proc/1/stat').read().split(' ', 1)[0])\n"
         f"report['project_metadata_read'] = open({str(project_metadata / 'project.json')!r}).read() == '{{\"format\":\"httk-project\"}}'\n"
         f"report['project_metadata_write'] = attempt(lambda: open({str(project_metadata / 'generated')!r}, 'w').write('x'))\n"
         f"report['operator_key_read'] = open({str(operator_config / 'keys/identity.marker')!r}).read() == 'present'\n"
@@ -207,6 +204,8 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
         else:
             identity_data = json.loads(scope_path.read_text(encoding="utf-8"))
             identity = ProcessIdentity(**identity_data)
+            # The bootstrap execs Bubblewrap, whose monitor keeps its pid for the sandbox's lifetime.
+            assert identity.pid == process.pid
             host_stat = Path(f"/proc/{identity.pid}/stat").read_text(encoding="ascii")
             host_ticks = int(host_stat[host_stat.rindex(")") + 2 :].split()[19])
             assert identity.start_ticks == host_ticks
@@ -222,9 +221,17 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
             assert process_gone(identity, here=process_identity()) is True
     if not scope_started:
         _unsupported_namespace_failure(result)
+    recovery = broker / "recovery.json"
     if termination == "startup-error":
         assert result.returncode == 3
+        assert not recovery.exists()
         return
+    assert json.loads(recovery.read_text(encoding="utf-8"))[-4:] == [
+        "--workspace",
+        str(workspace),
+        "--workspace-id",
+        policy["workspace_id"],
+    ]
     if termination in ("term", "kill"):
         signal_number = signal.SIGTERM if termination == "term" else signal.SIGKILL
         assert result.returncode in (-signal_number, 128 + signal_number)
@@ -235,7 +242,6 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
     identity = report["identity"]
     assert identity["hostname"] == os.uname().nodename
     assert identity["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    assert report["namespace_pid_one"] == 1
     assert report["project_metadata_read"] and report["project_metadata_write"] is False
     assert report["operator_key_read"] and report["operator_config_write"] is False
     # The broker runs trusted code with a read-only host view: it reads the host but writes only its roots.

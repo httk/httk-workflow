@@ -558,7 +558,7 @@ def test_monitor_routes_mounted_job_requests_to_typed_daemon_helper(
         assert binding == view.binding and received_context == context
         assert arguments.action == "pause" and arguments.adapter_timeout == 12.5
         called.append(arguments.job_id)
-        return 0, "job\tqueued\trequest\n", ""
+        return 0, "job\tqueued\trequest\n"
 
     monkeypatch.setattr(monitor_actions, "request_remote_jobs", request)
     assert monitor_actions.request(view, "pause", ["12345678"], "pause for review") == "job\tqueued\trequest"

@@ -36,6 +36,8 @@ _OPERATOR_BYTES = 256 * 1024
 # The broker's home and cache lie on its private /tmp: the host view, including the passwd home, is read-only.
 _BROKER_ENVIRONMENT = {"HOME": "/tmp/home", "XDG_CACHE_HOME": "/tmp/home/.cache", "TMPDIR": "/tmp"}
 _BROKER_UNSET = ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HTTK_CONFIG_HOME")
+# Recovery waits out the workspace visibility deadline a few times per dead owner.
+_RECOVERY_TIMEOUT = 300
 _RESERVED_SANDBOX_PATHS = tuple(
     Path(path)
     for path in (
@@ -181,29 +183,6 @@ def _check_command(path: Path, mutable_roots: tuple[Path, ...]) -> None:
         raise ValueError(f"trusted command has unprotected ownership or mode: {path}")
 
 
-def _check_bwrap(path: Path) -> bool:
-    """Check common Bubblewrap confinement plus the daemon's execution identity channel."""
-
-    block_userns = cast(bool, _SANDBOX["check_bwrap"](path, environment=_FIXED_ENVIRONMENT))
-    try:
-        result = subprocess.run(
-            [str(path), "--help"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=_FIXED_ENVIRONMENT,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError("Bubblewrap daemon feature check failed") from exc
-    if result.returncode != 0 or "--info-fd" not in result.stdout + result.stderr:
-        raise ValueError("Bubblewrap lacks required daemon confinement feature: --info-fd")
-    if "--as-pid-1" not in result.stdout + result.stderr:
-        raise ValueError("Bubblewrap lacks required daemon confinement feature: --as-pid-1")
-    return block_userns
-
-
 def _policy_snapshot(data: bytes) -> int:
     descriptor = _memfd_create("httk-daemon-policy")
     try:
@@ -222,48 +201,26 @@ def _policy_snapshot(data: bytes) -> int:
         raise
 
 
-def _host_identity_snapshot() -> int:
-    """Create a sealed, read-only descriptor with the host identity captured before confinement."""
+def _execution_scope() -> str:
+    """Return this process's host identity for the daemon owner record.
+
+    This process execs Bubblewrap, whose monitor keeps this PID and start time on the host for as long as the
+    sandbox lives (``--die-with-parent`` ends the sandbox with it), so it identifies the daemon's execution scope.
+    The bootstrap runs without site-packages, so it reads the identity itself rather than through ``_death``.
+
+    :return: Compact JSON with ``hostname``, ``boot_id``, ``pid`` and ``start_ticks``.
+    :raises ValueError: If the boot identity or this process's start time cannot be read.
+    """
 
     try:
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-    except OSError as exc:
-        raise ValueError("cannot read the host boot identity") from exc
-    if not boot_id or len(boot_id) > 64:
-        raise ValueError("host boot identity is malformed")
-    data = json.dumps({"hostname": socket.gethostname(), "boot_id": boot_id}, separators=(",", ":")).encode()
-    descriptor = _memfd_create("httk-daemon-host-identity")
-    try:
-        os.fchmod(descriptor, 0o400)
-        offset = 0
-        while offset < len(data):
-            written = os.write(descriptor, data[offset:])
-            if written <= 0:
-                raise OSError("host identity snapshot write made no progress")
-            offset += written
-        fcntl.fcntl(descriptor, _F_ADD_SEALS, _SEALS)
-        readonly = os.open(f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_CLOEXEC)
-        os.close(descriptor)
-        return readonly
-    except BaseException:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        raise
-
-
-def _execution_scope_snapshot() -> tuple[int, int]:
-    """Create separate Bubblewrap-writer and service-reader descriptors for the scope packet."""
-
-    writer = _memfd_create("httk-daemon-execution-scope")
-    try:
-        os.fchmod(writer, 0o600)
-        reader = os.open(f"/proc/self/fd/{writer}", os.O_RDONLY | os.O_CLOEXEC)
-        return writer, reader
-    except BaseException:
-        os.close(writer)
-        raise
+        data = Path("/proc/self/stat").read_bytes()
+        # The command name may contain spaces and parentheses; the start time is field 22.
+        start_ticks = int(data[data.rindex(b")") + 2 :].split()[19])
+    except (OSError, UnicodeDecodeError, ValueError, IndexError) as exc:
+        raise ValueError("cannot read this host's boot identity and the bootstrap's start time") from exc
+    identity = {"hostname": socket.gethostname(), "boot_id": boot_id, "pid": os.getpid(), "start_ticks": start_ticks}
+    return json.dumps(identity, separators=(",", ":"))
 
 
 def _host_config_home() -> Path:
@@ -289,7 +246,6 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
         "ALL",
         "--new-session",
         "--die-with-parent",
-        "--as-pid-1",
         "--clearenv",
     ]
     environment = dict(_FIXED_ENVIRONMENT) | _operator_environment(os.environ) | _BROKER_ENVIRONMENT
@@ -306,14 +262,7 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
     return argv
 
 
-def _inside_command(
-    arguments: argparse.Namespace,
-    policy: Any,
-    policy_source: Path,
-    *,
-    scope_fd: int,
-    host_identity_fd: int,
-) -> list[str]:
+def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: Path) -> list[str]:
     result = [
         str(policy.python),
         "-I",
@@ -323,10 +272,8 @@ def _inside_command(
         _HOST_POLICY_DESTINATION,
         "--policy-source",
         str(policy_source),
-        "--execution-scope-fd",
-        str(scope_fd),
-        "--host-identity-fd",
-        str(host_identity_fd),
+        "--execution-scope",
+        _execution_scope(),
     ]
     if arguments.check:
         result.append("--check")
@@ -356,7 +303,7 @@ def _prepare_sandbox(
         resolved_slurm_conf = _resolve_declared_path(policy.slurm_conf, strict=True)
         if any(_overlap(resolved_slurm_conf, mutable_root) for mutable_root in resolved_mutable):
             raise ValueError("Slurm configuration resolves across a mutable root")
-    block_userns = _check_bwrap(policy.bwrap)
+    block_userns = cast(bool, _SANDBOX["check_bwrap"](policy.bwrap, environment=_FIXED_ENVIRONMENT))
     if not block_userns:
         # Mounts stay locked either way; only nested user namespaces (kernel attack surface) remain open.
         print(
@@ -477,19 +424,8 @@ def _prepare_sandbox(
         policy_fd = _policy_snapshot(policy_data)
         descriptors.append(policy_fd)
         argv += ["--ro-bind-data", str(policy_fd), _HOST_POLICY_DESTINATION]
-        scope_writer_fd, scope_reader_fd = _execution_scope_snapshot()
-        descriptors.extend((scope_writer_fd, scope_reader_fd))
-        os.set_inheritable(scope_writer_fd, True)
-        os.set_inheritable(scope_reader_fd, True)
-        identity_fd = _host_identity_snapshot()
-        descriptors.append(identity_fd)
-        os.set_inheritable(identity_fd, True)
-        argv += ["--info-fd", str(scope_writer_fd)]
         argv += ["--chdir", "/"]
-        argv += [
-            "--",
-            *_inside_command(arguments, policy, policy_source, scope_fd=scope_reader_fd, host_identity_fd=identity_fd),
-        ]
+        argv += ["--", *_inside_command(arguments, policy, policy_source)]
         return _PreparedSandbox(argv, tuple(descriptors))
     except BaseException:
         for descriptor in descriptors:
@@ -520,6 +456,38 @@ def _exec_prepared(prepared: _PreparedSandbox) -> None:
     except BaseException:
         prepared.close()
         raise
+
+
+def _recover_dead_owners(policy: Any) -> None:
+    """Recover this host's dead daemon owners on the host, where their death can be proven, before confinement.
+
+    The recovery runs with the trusted policy interpreter, since this bootstrap has no site-packages. A failure is
+    reported and does not stop the daemon: the owners stay for a later start.
+
+    :param policy: The validated daemon policy.
+    """
+
+    command = [
+        str(policy.python),
+        "-I",
+        "-m",
+        "httk.workflow._daemon_jobs",
+        "--workspace",
+        str(policy.workspace),
+        "--workspace-id",
+        str(policy.workspace_id),
+    ]
+    environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"} | _operator_environment(os.environ)
+    try:
+        code = subprocess.run(
+            command, stdin=subprocess.DEVNULL, cwd="/", env=environment, timeout=_RECOVERY_TIMEOUT, check=False
+        ).returncode
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        code, detail = None, str(exc)
+    else:
+        detail = f"exit status {code}"
+    if code != 0:
+        print(f"daemon bootstrap: warning: dead daemon owner recovery failed ({detail})", file=sys.stderr, flush=True)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -560,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
         policy_source = _validate_arguments(arguments, policy)
         prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source)
         try:
+            if not arguments.check:
+                _recover_dead_owners(policy)
             _exec_prepared(prepared)
         finally:
             prepared.close()

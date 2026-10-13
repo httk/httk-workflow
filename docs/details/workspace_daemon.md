@@ -80,7 +80,7 @@ workspace setting.
 ### Host requirements
 
 - Linux with a Bubblewrap that supports `--bind-fd`, `--ro-bind-fd`,
-  `--ro-bind-data`, `--info-fd`, `--new-session` and `--clearenv`, on the broker host and
+  `--ro-bind-data`, `--new-session` and `--clearenv`, on the broker host and
   on every compute node. With Bubblewrap 0.8.0 or later the sandboxes also
   block nested user namespaces (`--disable-userns`); where that option is
   absent or refused, the broker's startup and the manager log a warning and
@@ -167,10 +167,18 @@ configuration. Its writable paths are the overlays listed above, and it has
 host networking for Slurm. Authentication, scheduler handling and workspace
 operations share this service process; there is no execution helper or nested
 sandbox. One `kind="daemon"` workspace owner lives for the service lifetime.
-Bubblewrap's `--info-fd` supplies the host PID of namespace PID 1; its start
-identity comes from namespace-local `/proc/1/stat` and bootstrap-captured host
-and boot IDs. Host recovery can prove that scope alive or dead. The daemon
-never probes peer owners through its private process table.
+It records the bootstrap's host, boot ID, PID and start time, captured just
+before the bootstrap execs Bubblewrap: Bubblewrap's monitor keeps that PID for
+the sandbox's lifetime, and `--die-with-parent` ends the sandbox with it, so a
+probe on the daemon's host can prove the owner alive or dead. The daemon never
+probes peer owners through its private process table. Instead, before it enters
+the sandbox (not for `check`), the bootstrap recovers on the host the
+workspace's daemon owners recorded on this host that are proven dead, returning
+the jobs they held to the states they left. A daemon owner on another host, or
+one whose death cannot be proven, stays until a manager on its host recovers it;
+`httk workspace attest-dead` records its death so that the next daemon start on
+its host or any manager recovers it. A failed recovery is reported
+and does not stop the daemon.
 The broker and its Slurm clients inherit the environment the daemon was
 started in, so site wrappers find their module and site variables; only
 `SBATCH_*`, `SALLOC_*`, `SRUN_*` and `SLURM_*` (except `SLURM_CONF`),
@@ -626,7 +634,10 @@ Job target resolution is frozen in the protected ledger with the exact internal
 request document and digest. An exchange-origin target also pins its observed
 adoption nonce. One newly won execution decision names the winning instance
 and daemon owner; only that winner may publish the internal request. Retries
-never resolve a different target or repost after a crash. Stored definitive
+never resolve a different target or repost after a crash. When the winner
+closed, was recovered or was declared dead with its exact request still
+pending, a retry by a later daemon serves that published request once, as any
+manager would. Stored definitive
 results replay; an exact pending request reports queued; matching request
 state history can establish a later result. Without such evidence the outcome
 is uncertain and grants no permission to take over or re-execute. Fresh signed
@@ -972,23 +983,10 @@ cluster containment, and real Slurm, PMIx and multi-node acceptance remain a
 deployment check. Run those checks before relying on this daemon for
 production jobs.
 
-
-For job control, keep a real SSHFS/Slurm acceptance record with these two cases:
-
-1. Adopt a test job through a confined manager, pause it, and settle that
-   manager's scheduler submission. With no manager running, issue
-   `httk job request continue --workspace REMOTE:NAME --reason acceptance JOB_ID`
-   and then `httk job request cancel --workspace REMOTE:NAME --reason acceptance JOB_ID`.
-   Verify signed `applied` results and fresh signed
-   `httk remote daemon status REMOTE --request-id COMMAND_ID` observations.
-2. Run a long test attempt with a manager holding the job. Issue the same
-   authenticated cancellation and verify `queued` with one internal request.
-   Poll its original command with fresh signed status requests until its owner
-   finishes cancellation. Confirm the internal request is consumed once and
-   the finished tree returns through the manager's normal outbox handling.
-
-Record enrollment/configuration digests, command and internal request IDs,
-owner identity and scheduler handles. Passive status may identify the job;
-execution evidence must come from signed command/status responses and host
-workspace observations. These site cases have not been run by the local
-unit tests or the Bubblewrap canaries.
+Job control has two site cases of its own. With no manager running, a
+`continue` and then a `cancel` of a paused job through
+`httk job request --workspace REMOTE:NAME` must return signed `applied`
+results, which fresh signed `httk remote daemon status REMOTE --request-id
+COMMAND_ID` observations confirm. With a manager holding a running job, a
+cancellation must return `queued` with one internal request, which the manager
+consumes once before it returns the finished tree through the outbox.

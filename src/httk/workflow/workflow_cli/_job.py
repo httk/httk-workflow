@@ -586,11 +586,8 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         assert binding is not None and ":" in binding.name
         target = resolve_remote(binding.remote, project=context.cwd)
         if read_metadata(target.bundle).get("kind") == "mount-daemon":
-            status, stdout, stderr = request_remote_jobs(binding, context, arguments, identity)
-            if stdout:
-                sys.stdout.write(stdout)
-            if stderr:
-                sys.stderr.write(stderr)
+            status, stdout = request_remote_jobs(binding, context, arguments, identity)
+            sys.stdout.write(stdout)
             return status
         if getattr(arguments, "request_id", None) is not None:
             raise ValueError("--request-id is supported only for one mount-daemon job request")
@@ -880,12 +877,11 @@ def _complete_job_requests(
         return 1
     if not wait:
         return 0
-    pending_ids = {
-        outcome.request_id
-        for outcome in outcomes
+    pending = [
+        (ref, outcome.request_id)
+        for (ref, _path), outcome in zip(published, outcomes, strict=True)
         if outcome.status == "queued" or (outcome.status == "applied" and outcome.state != "paused")
-    }
-    pending = [(ref, path) for ref, path in published if path.name.split(".")[1] in pending_ids]
+    ]
     return 0 if not pending else _wait_for_pauses(workspace, pending, timeout=timeout)
 
 
@@ -906,10 +902,10 @@ def _pause_outcome(workspace: Workspace, ref: JobRef, request_id: str) -> tuple[
     return None
 
 
-def _wait_for_pauses(workspace: Workspace, published: list[tuple[JobRef, Path]], *, timeout: float | None) -> int:
-    """Wait for posted pause requests and report each final outcome."""
+def _wait_for_pauses(workspace: Workspace, published: list[tuple[JobRef, str]], *, timeout: float | None) -> int:
+    """Wait for posted pause requests (jobs and request ids) and report each final outcome."""
 
-    pending = {path.name.split(".")[1]: ref for ref, path in published}
+    pending = {request_id: ref for ref, request_id in published}
     outcomes: dict[str, tuple[bool, str]] = {}
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
@@ -924,8 +920,8 @@ def _wait_for_pauses(workspace: Workspace, published: list[tuple[JobRef, Path]],
         time.sleep(1.0 if remaining is None else min(1.0, remaining))
     for request_id, ref in pending.items():
         outcomes[request_id] = (False, f"{ref.job_id}: timeout; still pending (request remains published)")
-    for _, path in published:
-        print(outcomes[path.name.split(".")[1]][1])
+    for _ref, request_id in published:
+        print(outcomes[request_id][1])
     return 0 if all(paused for paused, _ in outcomes.values()) else 1
 
 
@@ -1084,7 +1080,7 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     """Post one *action* request per selected job and apply it now where the job is unowned.
 
     A request for a job an owner holds is ``queued`` for that owner (exit status 0, as ``job request``);
-    one that did not take effect otherwise is ``refused`` (exit status 1).
+    one that did not take effect otherwise is ``refused`` or ``uncertain`` (exit status 1).
     """
 
     workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
@@ -1095,17 +1091,13 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     with _kernel.register_owner(workspace, kind="cli", label=f"job {action}", allocation=None, advertised={}) as owner:
         for ref in refs:
             observed: list[RequestOutcome] = []
-            reason = request_now(workspace, owner, ref, action, f"job {action}", outcomes=observed)
-            outcome = observed[0] if observed else None
-            if outcome is not None and outcome.status == "applied":
+            request_now(workspace, owner, ref, action, f"job {action}", outcomes=observed)
+            (outcome,) = observed
+            if outcome.status == "applied":
                 print(f"{ref.job_id}\t{done}")
-            elif outcome is not None and outcome.status == "queued":
-                print(f"{ref.job_id}\tqueued\t{reason or outcome.explanation}")
             else:
-                failed = True
-                status = "uncertain" if outcome is None else outcome.status
-                explanation = reason if outcome is None else outcome.explanation
-                print(f"{ref.job_id}\t{status}\t{explanation}")
+                failed |= outcome.status != "queued"
+                print(f"{ref.job_id}\t{outcome.status}\t{outcome.explanation}")
     return 1 if failed else 0
 
 

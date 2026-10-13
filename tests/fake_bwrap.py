@@ -37,7 +37,6 @@ _ARITIES = {
     "--disable-userns": 0,
     "--assert-userns-disabled": 0,
     "--die-with-parent": 0,
-    "--as-pid-1": 0,
     "--new-session": 0,
     "--clearenv": 0,
     "--cap-drop": 1,

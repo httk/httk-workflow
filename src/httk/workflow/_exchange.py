@@ -19,16 +19,15 @@ has one directory a client may write, ``WORKSPACE/exchange``:
 ``daemon.json``, ``managers.json`` and the manager logs there
 (:func:`install_document`, :func:`publish_file`).
 
-Every unrestricted manager serving the exchange runs :class:`ExchangeService` in each tick:
+Job-control authentication and dispatch belong to the confined daemon: managers leave the
+``requests/`` and ``responses/`` command documents alone. Every unrestricted manager serving the
+exchange runs :class:`ExchangeService` in each tick:
 
 - **Inbox.** It adopts one inbox entry per pass as an untrusted bundle
   (:func:`httk.workflow._moving.adopt`, which takes it by a descriptor-anchored contested move): fresh job
   UUIDs, the client's UUID kept as ``exchange_name``, ``origin: exchange``, and the root indexed in the trusted
   ``.httk-workspace/exchange-jobs/``. A refused bundle goes to ``outbox/rejected/<unique>/`` with its
   ``reason.json``.
-Job-control authentication and dispatch belong to the confined daemon. Managers leave
-``requests/`` and ``responses/`` command documents alone.
-
 - **Returns.** A finished exchange tree (the indexed root and every member terminal) gets an ``eject`` request
   of the whole tree to ``outbox/<exchange-name>/``; its owner applies it. While the client has not fetched an
   earlier return there, nothing is requested; a request whose eject rolled back anyway is retried after a
@@ -87,7 +86,6 @@ __all__ = [
     "STATUS_LIMIT",
     "STEP_INTERVAL",
     "SWEEP_INTERVAL",
-    "TRANSLATIONS_DIRECTORY",
     "ExchangeService",
     "ExchangeUnavailableError",
     "enable_exchange",
@@ -112,8 +110,6 @@ STATUS_LIMIT = 1024 * 1024
 STEP_INTERVAL = 10.0
 #: The least time between two sweeps of crash leftovers, which also is the age that makes a leftover one.
 SWEEP_INTERVAL = 3600.0
-#: The directory below ``.httk-workspace`` recording each translated job action, ``<directory>/<request-id>``.
-TRANSLATIONS_DIRECTORY = "exchange-requests"
 #: The progress file a job may keep in its payload; its excerpt goes into ``status.json``.
 PROGRESS_DOCUMENT = "progress.json"
 

@@ -1255,6 +1255,26 @@ def test_fsck_finds_and_reindexes_an_exchange_root_without_its_index_entry(tmp_p
     assert check_workspace(ws).ok
 
 
+def test_leftovers_of_the_retired_exchange_translation_records_are_harmless(tmp_path: Path) -> None:
+    from httk.workflow.fsck import check_workspace
+    from httk.workflow.gc import collect_garbage
+
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    name, request_id = str(jobs[0]["id"]), str(uuid.uuid4())
+    # What earlier versions wrote: translated/<request-id> markers in the index entry and exchange-requests/<id>.
+    (ws.control / "exchange-jobs" / name / "translated").mkdir()
+    (ws.control / "exchange-jobs" / name / "translated" / request_id).touch()
+    (ws.control / "exchange-requests").mkdir()
+    (ws.control / "exchange-requests" / request_id).touch()
+    assert check_workspace(ws).ok
+    collect_garbage(ws)
+    assert _kernel.exchange_index(ws, name) is not None
+    with cli_owner(ws) as owner:
+        _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=tmp_path / "out", tree=True)
+    assert not (ws.control / "exchange-jobs" / name).exists() and check_workspace(ws).ok
+
+
 def _crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
     if op == "rename" and phase == "after" and src is not None and src.name() == "bundle":
         raise Crash("delivered, not yet out of the index")

@@ -2,6 +2,9 @@
 
 import base64
 import dataclasses
+import os
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +15,7 @@ import pytest
 from httk.core.identity import identity_public_key
 
 import v3_helpers as v3
-from httk.workflow import _kernel, _requests, _store, removal, seals
+from httk.workflow import _death, _kernel, _requests, _store, removal, seals
 from httk.workflow._daemon_auth import sign_request
 from httk.workflow._daemon_jobs import JobExecutor
 from httk.workflow._daemon_keys import initialize_response_seed, response_seed_path
@@ -328,8 +331,11 @@ def test_daemon_declared_dead_at_execution_boundary_never_reposts(
     restarted = JobExecutor(workspace, ledger, restarted_owner, configuration_digest=CONFIGURATION_DIGEST).execute(
         entry
     )
-    assert restarted.outcome == ("queued" if boundary == "publication" else "uncertain")
+    # The declared-dead decider's exact pending request is served once by its successor, never reposted.
+    assert restarted.outcome == ("applied" if boundary == "publication" else "uncertain")
     assert len(publications) == (boundary == "publication")
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    assert current is not None and current.state == ("paused" if boundary == "publication" else "ready")
     restarted_owner.close()
     ledger.close()
 
@@ -414,11 +420,106 @@ def test_failure_after_decision_recovers_without_reposting(
         restarted = JobExecutor(workspace, ledger, restarted_owner, configuration_digest=CONFIGURATION_DIGEST)
         response = restarted.execute(entry)
     ledger.close()
+    # A crash between publication and serving: the successor serves the exact pending request without reposting.
     assert len(publications) == 1
-    if checkpoint == "effect":
-        assert response.outcome == "queued"
-    else:
-        assert response.outcome == "applied"
+    assert response.outcome == "applied"
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    assert current is not None and current.state == "paused"
+
+
+def test_pending_request_of_a_live_other_decider_is_left_to_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, ref, state = _setup(tmp_path)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    real_serve = removal.serve_requests
+    served: list[str] = []
+
+    def fail_effect(*_args, **_kwargs):
+        raise OSError("injected effect failure")
+
+    monkeypatch.setattr(removal, "serve_requests", fail_effect)
+    decider = _kernel.register_owner(workspace, kind="daemon", label="live decider", allocation=None, advertised={})
+    assert JobExecutor(workspace, ledger, decider, configuration_digest=CONFIGURATION_DIGEST).execute(
+        entry
+    ).outcome == ("queued")
+
+    def record_serve(*args, **kwargs):
+        served.append("serve")
+        return real_serve(*args, **kwargs)
+
+    monkeypatch.setattr(removal, "serve_requests", record_serve)
+    with _kernel.register_owner(workspace, kind="daemon", label="other", allocation=None, advertised={}) as other:
+        response = JobExecutor(workspace, ledger, other, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+        assert response.outcome == "queued" and served == []
+        current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+        assert current is not None and current.state == "ready"
+
+        # The decider itself may serve its own pending request again; that applies it exactly once.
+        response = JobExecutor(workspace, ledger, decider, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+        assert response.outcome == "applied" and served == ["serve"]
+        replay = JobExecutor(workspace, ledger, other, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+        assert replay.outcome == "applied" and served == ["serve"]
+    decider.close()
+    ledger.close()
+
+
+def test_dead_daemon_owner_on_this_host_is_recovered_by_the_bootstrap_entry_point(tmp_path: Path) -> None:
+    workspace = v3.workspace(tmp_path / "workspace")
+    installed = v3.install(workspace, tmp_path / "package")
+    jobs = [v3.submit(workspace, installed, {"start": "succeed"}, tag=name) for name in ("dead", "alive", "elsewhere")]
+    here = _death.process_identity()
+    finished = subprocess.Popen(["true"])
+    finished.wait()
+    scopes = {
+        "dead": dataclasses.replace(here, pid=finished.pid),
+        "alive": _death.process_identity(os.getppid()),
+        "elsewhere": dataclasses.replace(here, hostname="another-host", pid=finished.pid),
+    }
+    owners = {}
+    for (name, scope), job in zip(scopes.items(), jobs, strict=True):
+        owners[name] = _kernel.register_owner(
+            workspace, kind="daemon", label=name, allocation=None, advertised={}, execution_scope=scope
+        )
+        assert _kernel.claim(workspace, owners[name], job) is not None
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "httk.workflow._daemon_jobs",
+            "--workspace",
+            str(workspace.root),
+            "--workspace-id",
+            workspace.workspace_id,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"daemon_owner_recovered owner={owners['dead'].owner_id} returned=1 quarantined=0" in result.stdout
+    located = [_kernel.locate(workspace, job.job_id, placement_hint=job.placement, exhaustive=True) for job in jobs]
+    assert [(None if item is None else (item.state, item.owner_id)) for item in located] == [
+        ("ready", None),
+        ("owned", owners["alive"].owner_id),
+        ("owned", owners["elsewhere"].owner_id),
+    ]
+    assert {item.owner_id for item in _kernel.list_owners(workspace) if item.record is not None} == {
+        owners["alive"].owner_id,
+        owners["elsewhere"].owner_id,
+    }
+
+    mismatch = subprocess.run(
+        [sys.executable, "-I", "-m", "httk.workflow._daemon_jobs", "--workspace", str(workspace.root)]
+        + ["--workspace-id", str(uuid4())],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert mismatch.returncode == 1 and "daemon_owner_recovery_failed" in mismatch.stdout
 
 
 def test_frozen_target_rechecks_active_configuration_before_first_decision(tmp_path: Path) -> None:

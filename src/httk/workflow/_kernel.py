@@ -76,7 +76,6 @@ __all__ = [
     "claim_exchange_name",
     "drop_exchange_index",
     "exchange_index",
-    "exchange_translation_applied",
     "format_job_name",
     "list_jobs",
     "list_names",
@@ -88,7 +87,6 @@ __all__ = [
     "probe_owner",
     "prune_empty_placements",
     "reconcile_scratch",
-    "record_exchange_translation",
     "recover",
     "recoverable_owners",
     "register_owner",
@@ -1811,8 +1809,6 @@ def claim_exchange_name(
         "adoption_nonce": nonce,
     }
     _fs.write_file(_fs.loc(staging / "index.json"), _encode(index), durable=durable)
-    # Anchored at the staging, so a scratch a recoverer took is never recreated.
-    os.close(_fs.open_dir_under(staging, "translated", create=True, mode=0o777, durable=durable))
     # publish_dir removes the staging whether it won or lost.
     if _fs.publish_dir(_fs.loc(staging), _fs.loc(entry), nonce=publish_nonce, durable=durable):
         return ExchangeClaim.WON
@@ -1839,35 +1835,6 @@ def exchange_index(workspace: KernelWorkspace, exchange_name: str) -> tuple[str,
         return None
     nonce = value.get("adoption_nonce")
     return job_id, placement, nonce if isinstance(nonce, str) else None
-
-
-def record_exchange_translation(workspace: KernelWorkspace, exchange_name: str, request_id: str) -> None:
-    """Record an applied exchange request id in the index entry (idempotent).
-
-    :param workspace: The workspace.
-    :param exchange_name: The client's name for the job.
-    :param request_id: The exchange request id.
-    :raises httk.workflow.errors.WorkflowError: When the index entry does not exist.
-    """
-
-    entry = _exchange_entry(workspace, exchange_name)
-    if not _fs.exists(_fs.loc(entry)):
-        raise WorkflowError(f"no exchange index entry {entry}")
-    target = entry / "translated" / canonical_uuid(request_id, "request_id")
-    _fs.write_file(_fs.loc(target), b"", durable=workspace.durable)
-
-
-def exchange_translation_applied(workspace: KernelWorkspace, exchange_name: str, request_id: str) -> bool:
-    """Report whether an exchange request id was recorded as applied.
-
-    :param workspace: The workspace.
-    :param exchange_name: The client's name for the job.
-    :param request_id: The exchange request id.
-    :return: Whether ``translated/<request-id>`` exists.
-    """
-
-    entry = _exchange_entry(workspace, exchange_name)
-    return _fs.exists(_fs.loc(entry / "translated" / canonical_uuid(request_id, "request_id")))
 
 
 # -- requests, placements and shared memory -------------------------------------------------------------------------

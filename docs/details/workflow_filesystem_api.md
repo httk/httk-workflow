@@ -85,7 +85,6 @@ WORKSPACE/
 │   ├── tmp/push.<hex>/                     a remote install's pushed package
 │   ├── quarantine/<epoch>-<token>/         {entry, reason.json}
 │   ├── exchange-jobs/<exchange-name>/      the exchange index
-│   ├── exchange-requests/<id>              translation records of exchange requests (replay guard)
 │   ├── transfers/outgoing/<transfer-id>/   held bundles
 │   ├── transfers/incoming/<transfer-id>.<token>/   pushed bundles awaiting adoption
 │   └── seal.json                           the workspace seal, when sealed
@@ -1094,10 +1093,12 @@ runs, only a `cancel` acts at once: the attempt and its launches are stopped
 (`SIGTERM`, then `SIGKILL` after the cancel grace) and the job commits as
 `cancelled`; other requests wait for the boundary. An unowned job, located at
 the request's placement, is claimed, reconciled (which applies the requests)
-and released. `job delete`, `job seal` and `job unseal` apply their request at
-once, as a CLI owner, when the job is unowned.
+and released. `job request`, `job delete`, `job seal`, `job unseal` and
+`job detach` apply their requests at once, as a CLI owner, when the job is
+unowned.
 
-Requests apply in `created_at` order, then by request id. Each request is
+Requests apply in the order of their `created_at` instants (a time without a
+zone counts as UTC), then by request id. Each request is
 decided by a pure function of `job.json`, `state.json`, the state the job is
 at and the request, giving the new document and one effect:
 
@@ -1133,13 +1134,6 @@ deletion leaves a file whose id is in `applied_requests`: any later owner
 deletes it on sight, unapplied, so a stale `continue` cannot re-apply after the
 job failed again. An id whose file is gone needs no skipping and is dropped
 from `applied_requests` at the next write.
-
-**Exchange guard.** For a job with `origin: exchange`, a request posted by the
-exchange translator (`operator: "exchange"`) is also checked against the
-index's `exchange-jobs/<name>/translated/<request-id>`: present means applied,
-and the file is deleted unapplied. The owner records the id there after
-applying the effect, so once `applied_requests` has shrunk, a lagging
-translator's re-post still cannot apply twice.
 
 ## The workflow store
 
@@ -1413,8 +1407,9 @@ workspace MUST confine its attempts; only managers without placement prefixes
 that take the `default` pool serve the exchange.
 
 The **exchange index** `.httk-workspace/exchange-jobs/<exchange-name>/` is
-trusted: `.nonce`, `index.json` (`{job_id, placement, adoption_nonce}`) and
-`translated/<request-id>` markers. It is created once per exchange root before
+trusted: `.nonce` and `index.json` (`{job_id, placement, adoption_nonce}`).
+Readers ignore anything else in an entry, such as the `translated/` markers of
+earlier versions. It is created once per exchange root before
 the root is published (§Adopt step 5) and removed only by the root's owner when
 the root is deleted or returned, and only while it indexes that job under the
 adoption nonce the remover read (an eject records it in `eject.json`).

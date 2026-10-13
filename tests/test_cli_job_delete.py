@@ -72,7 +72,7 @@ def test_delete_of_a_held_job_waits_for_its_owner(tmp_path: Path) -> None:
         owned = _kernel.claim(workspace, owner, failed)
         assert owned is not None
         report = remove_jobs(workspace, [failed])
-        assert report.refused[0].reason == "a manager holds the job; the request applies at its next boundary"
+        assert report.refused[0].reason == "another owner holds the job; the request applies at its next boundary"
         owned.release(owned.read_state() or StateDoc.empty(owned.job_id), Release("failed", 500))
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.tick()
@@ -120,13 +120,13 @@ def test_cli_delete_of_a_held_job_leaves_the_request_to_its_owner(tmp_path: Path
         assert owned is not None
         assert command(["job", "delete", "--force", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
         assert (
-            f"{failed.job_key}\towned\tqueued\ta manager holds the job; the request applies at its next boundary"
+            f"{failed.job_key}\towned\tqueued\tanother owner holds the job; the request applies at its next boundary"
             in capsys.readouterr().out
         )
         assert owned.path.is_dir()
         # The other request-now verbs report a held job the same way: queued, exit status 0.
         assert command(["job", "seal", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
-        assert f"{failed.job_id}\tqueued\ta manager holds the job" in capsys.readouterr().out
+        assert f"{failed.job_id}\tqueued\tanother owner holds the job" in capsys.readouterr().out
         owned.release(owned.read_state() or StateDoc.empty(owned.job_id), Release("failed", 500))
     # The queued delete applies before this seal request; the later request is uncertain once the job is gone.
     assert command(["job", "seal", "--workspace", name, failed.job_id], _context(tmp_path)) == 1

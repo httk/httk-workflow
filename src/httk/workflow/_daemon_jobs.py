@@ -1,15 +1,19 @@
 """Authenticated daemon job-command execution and crash recovery."""
 
+import argparse
 import hashlib
 import json
+import logging
 import re
+import socket
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import cast
 
-from . import _kernel, _requests, removal, seals
+from . import _death, _kernel, _requests, removal, seals
 from ._daemon_protocol import Request, Response, decode_response, encode_response, request_digest
 from ._daemon_state import Entry, Ledger
 from ._state import StateDoc, read_state_unowned
@@ -20,6 +24,7 @@ from .workspace import Workspace
 _TARGET_FORMAT = "httk-daemon-job-target"
 _TARGET_VERSION = 1
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _ascii_detail(value: object) -> str:
@@ -135,7 +140,13 @@ class _Target:
 
 
 class JobExecutor:
-    """Resolve, arbitrate, execute and observe authenticated daemon job commands."""
+    """Resolve, arbitrate, execute and observe authenticated daemon job commands.
+
+    :param workspace: The served workspace.
+    :param ledger: The daemon's command ledger, which freezes targets, decisions and results.
+    :param owner: The daemon's registered ``kind="daemon"`` workspace owner.
+    :param configuration_digest: The digest of the active daemon configuration that new commands must sign.
+    """
 
     def __init__(
         self,
@@ -150,7 +161,7 @@ class JobExecutor:
         self.owner = owner
         self.configuration_digest = configuration_digest
 
-    def _public_detail(self, request: Request, detail: object, *, eject_destination: str | None = None) -> str:
+    def _public_detail(self, command: Request, detail: object) -> str:
         """Remove server paths and identify an eject destination in client-visible terms."""
 
         value = str(detail)
@@ -158,10 +169,8 @@ class JobExecutor:
         for root in sorted(roots, key=len, reverse=True):
             if root:
                 value = value.replace(root.rstrip("/"), "workspace")
-        if eject_destination is None and request.operation == "job_request" and request.action == "eject":
-            eject_destination = request.destination
-        if eject_destination is not None:
-            destination = f"outbox/{eject_destination}"
+        if command.operation == "job_request" and command.action == "eject":
+            destination = f"outbox/{command.destination}"
             if destination not in value:
                 value = f"{destination}: {value}"
         return _ascii_detail(value)
@@ -173,9 +182,11 @@ class JobExecutor:
         reason: str,
         detail: object,
         *,
-        eject_destination: str | None = None,
+        command: Request | None = None,
         **fields: str | None,
     ) -> Response:
+        """Build the response to *request*; *command* is the job command it concerns, when that is another one."""
+
         return Response(
             request.request_id,
             request.workspace_id,
@@ -183,7 +194,7 @@ class JobExecutor:
             request_digest(request),
             outcome,
             reason=reason,
-            detail=self._public_detail(request, detail, eject_destination=eject_destination),
+            detail=self._public_detail(request if command is None else command, detail),
             command_id=request.request_id if request.operation == "job_request" else request.command_id,
             **fields,
         )
@@ -311,7 +322,7 @@ class JobExecutor:
             job_id=stored.job_id,
             internal_request_id=stored.internal_request_id,
             current_state=(None if current is None else current.state) if fresh_state else stored.current_state,
-            eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+            command=entry.request,
         )
 
     def _history(self, target: _Target) -> tuple[str, str, str | None] | None:
@@ -330,15 +341,22 @@ class JobExecutor:
             return "applied", _ascii_detail(f"{target.document['action']} applied"), current.state
         return None
 
-    def _observe(self, request: Request, entry: Entry, target: _Target) -> Response:
-        if (stored := self._stored_result(request, entry)) is not None:
-            return stored
+    def _pending(self, target: _Target) -> Path | None:
+        """Return the exact internal request file while it is still pending, otherwise ``None``."""
+
         path = self.workspace.control / "requests" / f"{target.job_id}.{target.internal_request_id}.json"
         try:
             parsed = _requests.parse(path)
         except (FileNotFoundError, FormatError, OSError):
-            parsed = None
-        if parsed is not None and hashlib.sha256(_canonical(dict(parsed.document))).hexdigest() == target.digest:
+            return None
+        if parsed is None or hashlib.sha256(_canonical(dict(parsed.document))).hexdigest() != target.digest:
+            return None
+        return path
+
+    def _observe(self, request: Request, entry: Entry, target: _Target) -> Response:
+        if (stored := self._stored_result(request, entry)) is not None:
+            return stored
+        if self._pending(target) is not None:
             current = self._current(target)
             return self._response(
                 request,
@@ -348,7 +366,7 @@ class JobExecutor:
                 job_id=target.job_id,
                 internal_request_id=target.internal_request_id,
                 current_state=None if current is None else current.state,
-                eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+                command=entry.request,
             )
         history = self._history(target)
         if history is not None:
@@ -361,7 +379,7 @@ class JobExecutor:
                 job_id=target.job_id,
                 internal_request_id=target.internal_request_id,
                 current_state=state,
-                eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+                command=entry.request,
             )
         current = self._current(target)
         return self._response(
@@ -372,11 +390,75 @@ class JobExecutor:
             job_id=target.job_id,
             internal_request_id=target.internal_request_id,
             current_state=None if current is None else current.state,
-            eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+            command=entry.request,
         )
 
+    def _decider_gone(self, decision: bytes) -> bool:
+        """Whether the decision's owner is this one, or no longer registered alive (closed, recovered or dead)."""
+
+        try:
+            owner_id = json.loads(decision)["owner_id"]
+        except (ValueError, TypeError, KeyError):
+            return False
+        if owner_id == self.owner.owner_id:
+            return True
+        found = next((item for item in _kernel.list_owners(self.workspace) if item.owner_id == owner_id), None)
+        return found is None or found.record is None or found.tombstone is not None
+
+    def _serve(self, entry: Entry, target: _Target, published: Path | None) -> Response:
+        """Publish the won internal request unless *published* names it, serve it at once and settle the result."""
+
+        request = entry.request
+        try:
+            self.owner.check_alive()
+            path = _kernel.post_request(self.workspace, target.document) if published is None else published
+            current = self._current(target)
+            if current is None:
+                response = self._response(
+                    request,
+                    "uncertain",
+                    "execution_uncertain",
+                    "the target disappeared after its internal request was published",
+                    job_id=target.job_id,
+                    internal_request_id=target.internal_request_id,
+                )
+            else:
+                self.owner.check_alive()
+                (outcome,) = removal.serve_requests(self.workspace, [(current, path)], owner=self.owner)
+                detail = outcome.explanation
+                if request.action == "eject" and outcome.status == "applied":
+                    detail = f"job ejected to outbox/{request.destination}"
+                response = self._response(
+                    request,
+                    outcome.status,
+                    f"request_{outcome.status}",
+                    detail,
+                    job_id=target.job_id,
+                    internal_request_id=target.internal_request_id,
+                    current_state=outcome.state,
+                )
+        except _kernel.OwnerLost:
+            raise
+        except (WorkflowError, OSError):
+            # FormatError and UnsafePath are WorkflowErrors; anything else is a defect and propagates.
+            if any(self.owner.holds(ref) for ref in self.owner.owned()):
+                raise
+            response = self._observe(request, entry, target)
+        return self._settle(entry, response)
+
+    def _settle(self, entry: Entry, response: Response) -> Response:
+        """Store a definitive result once and return the stored winner; other outcomes stay unrecorded."""
+
+        if response.outcome not in {"applied", "refused"}:
+            return response
+        return decode_response(self.ledger.store_execution_result(entry, encode_response(response)))
+
     def execute(self, entry: Entry) -> Response:
-        """Execute a newly admitted job request, or recover it without reposting."""
+        """Execute a newly admitted job request, or recover it without reposting.
+
+        :param entry: The admitted ``job_request``.
+        :return: The response to the command.
+        """
 
         request = entry.request
         decision = self.ledger.execution_decision(entry)
@@ -397,6 +479,15 @@ class JobExecutor:
             return self._response(request, "refused", "request_refused", exc)
 
         if decision is not None:
+            # A crash between publication and serving leaves the exact request pending. Serving it is no
+            # re-execution (it applies that request id at most once), but only this decider or a successor of a
+            # gone one may do it; a live other decider is still serving it.
+            if (
+                self.ledger.execution_result(entry) is None
+                and self._decider_gone(decision)
+                and (pending := self._pending(target)) is not None
+            ):
+                return self._serve(entry, target, pending)
             return self._observe(request, entry, target)
         try:
             self._pre_execution(target)
@@ -422,55 +513,19 @@ class JobExecutor:
         won, _decision = self.ledger.decide_execution(entry, self.ledger.nonce, self.owner.owner_id)
         if not won:
             return self._observe(request, entry, target)
-
-        try:
-            if self._adoption_changed(target):
-                response = self._response(
+        if self._adoption_changed(target):
+            return self._settle(
+                entry,
+                self._response(
                     request,
                     "refused",
                     "adoption_changed",
                     "the exchange adoption changed immediately before publication",
                     job_id=target.job_id,
                     internal_request_id=target.internal_request_id,
-                )
-            else:
-                self.owner.check_alive()
-                path = _kernel.post_request(self.workspace, target.document)
-                current = self._current(target)
-                if current is None:
-                    response = self._response(
-                        request,
-                        "uncertain",
-                        "execution_uncertain",
-                        "the target disappeared after its internal request was published",
-                        job_id=target.job_id,
-                        internal_request_id=target.internal_request_id,
-                    )
-                else:
-                    self.owner.check_alive()
-                    (outcome,) = removal.serve_requests(self.workspace, [(current, path)], owner=self.owner)
-                    detail = outcome.explanation
-                    if request.action == "eject" and outcome.status == "applied":
-                        detail = f"job ejected to outbox/{request.destination}"
-                    response = self._response(
-                        request,
-                        outcome.status,
-                        f"request_{outcome.status}",
-                        detail,
-                        job_id=target.job_id,
-                        internal_request_id=target.internal_request_id,
-                        current_state=outcome.state,
-                    )
-        except _kernel.OwnerLost:
-            raise
-        except Exception:
-            if any(self.owner.holds(ref) for ref in self.owner.owned()):
-                raise
-            response = self._observe(request, entry, target)
-        if response.outcome in {"applied", "refused"}:
-            stored = self.ledger.store_execution_result(entry, encode_response(response))
-            response = decode_response(stored)
-        return response
+                ),
+            )
+        return self._serve(entry, target, None)
 
     def status(self, request: Request) -> Response:
         """Observe an original job command without admitting or executing this status request."""
@@ -488,14 +543,14 @@ class JobExecutor:
                     original.outcome,
                     original.reason or f"request_{original.outcome}",
                     original.detail or f"the job request was {original.outcome}",
-                    eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+                    command=entry.request,
                 )
             return self._response(
                 request,
                 "uncertain",
                 "execution_uncertain",
                 "the command has no frozen target",
-                eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+                command=entry.request,
             )
         target = _Target.decode(stored_target)
         if (result := self._stored_result(request, entry, target=target, fresh_state=True)) is not None:
@@ -511,9 +566,81 @@ class JobExecutor:
                 job_id=target.job_id,
                 internal_request_id=target.internal_request_id,
                 current_state=None if current is None else current.state,
-                eject_destination=entry.request.destination if entry.request.action == "eject" else None,
+                command=entry.request,
             )
         return self._observe(request, entry, target)
 
 
-__all__ = ["JobExecutor"]
+def recover_dead_daemon_owners(workspace: Workspace) -> int:
+    """Recover this host's ``kind="daemon"`` owners that are proven dead, returning the jobs they held.
+
+    A daemon owner's death can be proven only on its own host, and a daemon cannot probe the host process table
+    from its PID namespace, so the bootstrap runs this on the host before the next daemon enters its sandbox.
+    Owners that are alive, or whose death cannot be proven, are left alone.
+
+    :param workspace: The served workspace.
+    :return: The number of dead daemon owners found.
+    """
+
+    hostname = socket.gethostname()
+    records = {item.owner_id: item.record for item in _kernel.list_owners(workspace)}
+    scheduler = _death.SchedulerQueries()
+    dead: list[str] = []
+    for owner_id in _kernel.recoverable_owners(workspace):
+        record = records.get(owner_id)
+        if record is None or record.get("kind") != "daemon" or record.get("hostname") != hostname:
+            continue
+        try:
+            if _kernel.probe_owner(workspace, owner_id, scheduler=scheduler) is _death.Liveness.DEAD:
+                dead.append(owner_id)
+        except (ValueError, WorkflowError, OSError) as exc:
+            _LOGGER.warning("daemon_owner_probe_failed owner=%s reason=%s", owner_id, exc)
+    if not dead:
+        return 0
+    with _kernel.register_owner(
+        workspace, kind="cli", label="daemon owner recovery", allocation=None, advertised={}
+    ) as owner:
+        for owner_id in dead:
+            try:
+                report = _kernel.recover(workspace, owner, owner_id)
+            except (WorkflowError, OSError) as exc:
+                _LOGGER.warning("daemon_owner_recovery_unfinished owner=%s reason=%s", owner_id, exc)
+                continue
+            _LOGGER.warning(
+                "daemon_owner_recovered owner=%s returned=%d quarantined=%d",
+                owner_id,
+                len(report.returned),
+                len(report.quarantined),
+            )
+    return len(dead)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Recover dead daemon owners of one workspace on this host; the daemon bootstrap runs this before confinement.
+
+    :param argv: ``--workspace PATH --workspace-id UUID``, or the process arguments when omitted.
+    :return: Zero after recovery, one when the workspace cannot be opened or does not match.
+    """
+
+    # The entry point owns the process, like the daemon service; library modules stay handler-free.
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(prog="httk-workspace-daemon-recovery")
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--workspace-id", required=True)
+    arguments = parser.parse_args(argv)
+    try:
+        workspace = Workspace(arguments.workspace)
+        if workspace.workspace_id != arguments.workspace_id:
+            raise ValueError("the workspace identity does not match the daemon policy")
+        recover_dead_daemon_owners(workspace)
+    except (OSError, ValueError, WorkflowError) as exc:
+        _LOGGER.error("daemon_owner_recovery_failed reason=%s", exc)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["JobExecutor", "main", "recover_dead_daemon_owners"]

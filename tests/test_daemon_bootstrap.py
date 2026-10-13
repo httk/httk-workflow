@@ -18,11 +18,9 @@ SANDBOX = BOOTSTRAP.with_name("_sandbox.py")
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 REQUIRED_BWRAP_OPTIONS = (
     "--assert-userns-disabled",
-    "--as-pid-1",
     "--bind-fd",
     "--clearenv",
     "--disable-userns",
-    "--info-fd",
     "--new-session",
     "--ro-bind-data",
     "--ro-bind-fd",
@@ -77,7 +75,7 @@ def _layout(
         "    for name in os.listdir('/proc/self/fd'):\n"
         "        try: fds[name] = os.readlink('/proc/self/fd/' + name)\n"
         "        except OSError: pass\n"
-        f"    open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps({{'argv': sys.argv, 'env': dict(os.environ), 'fds': fds, 'ppid': os.getppid()}}))\n",
+        f"    open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps({{'argv': sys.argv, 'env': dict(os.environ), 'fds': fds, 'pid': os.getpid(), 'ppid': os.getppid()}}))\n",
     )
     python = roots["runtime"] / "python"
     _write_executable(python)
@@ -265,9 +263,9 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "--assert-userns-disabled",
         "--new-session",
         "--die-with-parent",
-        "--as-pid-1",
     ):
         assert option in argv
+    assert "--as-pid-1" not in argv and "--info-fd" not in argv
     assert argv[argv.index("--cap-drop") + 1] == "ALL"
     environment = _set_environment(argv)
     assert environment["NSC_RESOURCE_NAME"] == "tetralith" and environment["POISON"] == "yes"
@@ -336,12 +334,63 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "--policy-source",
         str(policy_path),
     ]
-    scope_fd = argv[argv.index("--info-fd") + 1]
-    reader_fd = inside[inside.index("--execution-scope-fd") + 1]
-    assert reader_fd != scope_fd
-    identity_fd = inside[inside.index("--host-identity-fd") + 1]
-    assert identity_fd != scope_fd
+    # The bootstrap execs Bubblewrap, so the scope it captured names the Bubblewrap monitor process.
+    scope = json.loads(inside[inside.index("--execution-scope") + 1])
+    assert scope["pid"] == observed["pid"] and scope["hostname"] == os.uname().nodename
+    assert scope["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    assert type(scope["start_ticks"]) is int and scope["start_ticks"] >= 0
+    # Exactly the named descriptors reach Bubblewrap: every inherited one is a bind operand.
+    operands = {
+        source for option in ("--ro-bind-fd", "--bind-fd", "--ro-bind-data") for source, _ in _pairs(argv, option)
+    }
+    assert set(observed["fds"]) - {"0", "1", "2"} == operands
     assert inside[-1] == "--once"
+
+
+def _recording_python(tmp_path: Path, policy: dict[str, Any], *, status: int = 0) -> Path:
+    recovery = tmp_path / "recovery.json"
+    _write_executable(
+        Path(policy["python"]),
+        f"#!/usr/bin/python3\nimport json, os, sys\n"
+        f"open({str(recovery)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'cwd': os.getcwd()}}))\n"
+        f"raise SystemExit({status})\n",
+    )
+    return recovery
+
+
+@pytest.mark.parametrize("mode", ["--once", None])
+def test_bootstrap_recovers_dead_daemon_owners_on_the_host_before_confinement(tmp_path: Path, mode: str | None) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    recovery = _recording_python(tmp_path, policy)
+    arguments = ["--workspace", str(policy["workspace"])] + ([] if mode is None else [mode])
+    result = _run(tmp_path, policy_path, arguments)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(recovery.read_text(encoding="utf-8")) == {
+        "argv": [
+            "-I",
+            "-m",
+            "httk.workflow._daemon_jobs",
+            "--workspace",
+            policy["workspace"],
+            "--workspace-id",
+            policy["workspace_id"],
+        ],
+        "cwd": "/",
+    }
+    assert record.exists()
+
+
+def test_bootstrap_check_skips_recovery_and_a_failed_recovery_still_starts(tmp_path: Path) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    recovery = _recording_python(tmp_path, policy, status=1)
+    result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--check"])
+    assert result.returncode == 0, result.stderr
+    assert record.exists() and not recovery.exists()
+    record.unlink()
+    result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--once"])
+    assert result.returncode == 0, result.stderr
+    assert "warning: dead daemon owner recovery failed (exit status 1)" in result.stderr
+    assert recovery.exists() and record.exists()
 
 
 @pytest.mark.parametrize("relation", ["parent", "exact", "descendant"])

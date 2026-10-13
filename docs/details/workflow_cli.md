@@ -402,18 +402,22 @@ each action does is tabulated in
 child a decided join already consumed (`continue`, `override_step`) and
 publishes an `override_step` outside the runner's recorded steps.
 
-After publication, the CLI immediately serves a bounded snapshot of requests
-for unowned jobs, in `(created_at, request_id)` order. Each request prints its
+After publication, the CLI immediately serves the pending requests of each
+unowned job, from a snapshot taken then, oldest first by `created_at` instant
+and request id, up to and including the published one. Each request prints its
 job id, request id, outcome (`applied`, `queued`, `refused` or `uncertain`) and
-an explanation. Requests held by another owner, or jobs needing reconciliation,
-remain queued. Exit status is `0` for applied or queued requests and `1` for a
-refusal or uncertain result. `--wait` is valid only for `pause`; it waits for
+an explanation. A job held by another owner, or one needing a manager's
+reconciliation, keeps its request queued for that owner or manager, and so
+does a job with more than 256 pending requests; when an earlier request of the
+job cannot be served, the published one reports the same outcome and reason.
+Exit status is `0` for applied or queued requests and `1` for a refusal or
+uncertain result. `--wait` is valid only for `pause`; it waits for
 queued pauses and exits `0` only when each reaches `paused`. A superseded,
 dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 
 `job delete`, `job seal`, `job unseal` and `job detach` use the same immediate
-serving path and retain their concise per-job `done`, `queued` and `refused`
-results.
+serving path and print one concise line per job: done, or the `queued`,
+`refused` or `uncertain` outcome with its explanation.
 
 For an ordinary remote workspace, `job request ACTION --workspace REMOTE:NAME
 JOB_ID ...` keeps the signed two-leg request-envelope exchange: the client
@@ -930,9 +934,9 @@ domain-separated from every other *httk* signature. They are optional: a
 request without one is applied, but one whose signature does not verify is
 malformed and quarantined by `gc`. A signature means attribution, not
 authorization: anyone who can write the workspace's request directory can still
-post an unsigned request. The exchange's signed job control is the exception:
-there a signature by a key in `exchange.authorized_keys` is required (see
-{doc}`workspace_daemon`).
+post an unsigned request. Job control through the workspace daemon is the
+exception: the daemon accepts only commands signed by a key in its own
+`authorized_keys` policy (see {doc}`workspace_daemon`).
 
 ## Campaigns
 

@@ -874,7 +874,7 @@ httk manager run --workspace WORKSPACE --gc-interval 3600
 | `dead_owners` | owners proven dead are recovered: their jobs return to the states they were claimed from |
 | `attempt_control` | attempt directories of unowned jobs older than `attempt_control_days`; a failed or cancelled job keeps the one its `state.json` names |
 | `placement_directories` | empty placement directories of the unowned states |
-| `requests` | request files older than a day that are malformed or whose job is not found go to quarantine; old exchange translation records are removed |
+| `requests` | request files older than a day that are malformed or whose job is not found go to quarantine |
 | `manager_logs` | `logs/managers/<owner-id>.log` of departed owners older than `trash_days` |
 | `owner_tombstones` | tombstones of recovered owners older than `owner_tombstone_days` |
 | `tmp_entries` | write temporaries and removal leftovers older than a day, and leftovers of a crashed workflow reinstall |

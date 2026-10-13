@@ -4,14 +4,16 @@ A request (``requests/<job-uuid>.<request-uuid>.json``) is applied only by the
 job's owner: :func:`httk.workflow._requests.apply` decides the effect, and
 :func:`apply_requests` carries it out with one kernel call. A manager runs it
 at every boundary of a job it holds; :func:`serve` runs it for one unowned job
-as a short-lived CLI owner, which is how ``job delete``, ``job seal`` and
-``job unseal`` take effect without waiting for a manager.
+as a short-lived CLI owner, which is how :func:`serve_requests` lets ``job
+request``, ``job delete``, ``job seal``, ``job unseal`` and ``job detach`` take effect without
+waiting for a manager.
 """
 
 import dataclasses
 import logging
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, cast
@@ -31,16 +33,13 @@ __all__ = [
     "RemovalOutcome",
     "RemovalReport",
     "RequestOutcome",
-    "RequestOwner",
     "apply_requests",
-    "record_translation",
     "refusal",
     "release",
     "remove_jobs",
     "request_now",
     "serve",
     "serve_requests",
-    "translation_applied",
 ]
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -48,8 +47,12 @@ _LOGGER = logging.getLogger("httk.workflow.manager")
 #: The states a ``delete`` request applies to (a succeeded job only after ``job unseal``).
 REMOVABLE_KINDS = frozenset({*TERMINAL_STATES, "paused"})
 
-#: The kernel owner used to serve requests immediately.
-RequestOwner = _kernel.Owner
+#: Why a request waits for the owner that holds its job.
+_HELD = "another owner holds the job; the request applies at its next boundary"
+#: The most requests of one job that :func:`serve_requests` considers; beyond it every request waits for a manager.
+_SNAPSHOT_LIMIT = 256
+#: The outcomes that settle a request.
+_SETTLED = frozenset({"applied", "refused"})
 
 
 @dataclass(frozen=True)
@@ -212,50 +215,18 @@ def _parse(path: Path) -> _requests.Request | None:
         return None
 
 
-def _exchange_name(doc: StateDoc, operator: object) -> str | None:
-    """The exchange name an exchange-derived request (by *operator*) of an exchange job is guarded by, else ``None``."""
+def _order(request: _requests.Request) -> tuple[datetime, str]:
+    """The application order of *request*: its ``created_at`` instant, then its id.
 
-    if doc.origin == "exchange" and doc.exchange_name is not None and operator == "exchange":
-        return doc.exchange_name
-    return None
-
-
-def translation_applied(workspace: _kernel.KernelWorkspace, doc: StateDoc, request: _requests.Request) -> bool:
-    """Report whether *request* is a job action from the exchange that this exchange job applied already.
-
-    Once ``applied_requests`` no longer holds its id, the index's ``translated/`` set is what tells a lagging
-    translator's re-post apart (plan §13.4).
-
-    :param workspace: The workspace.
-    :param doc: The job's ``state.json``.
-    :param request: The request.
-    :return: Whether the request must be dropped unapplied.
+    Instants are compared, not strings, since posters write ``+00:00`` or ``Z`` and may omit zero microseconds; a
+    naive time counts as UTC and an unreadable one sorts first.
     """
 
-    name = _exchange_name(doc, request.document["operator"])
-    return name is not None and _kernel.exchange_translation_applied(workspace, name, request.request_id)
-
-
-def record_translation(workspace: _kernel.KernelWorkspace, doc: StateDoc, request_id: str, operator: object) -> None:
-    """Record an applied request in the exchange index's ``translated/`` set when it is an exchange job action.
-
-    Every path that applies a request calls it after the effect: :func:`apply_requests`, and a commit that
-    applies the ``cancel`` that stopped an attempt.
-
-    :param workspace: The workspace.
-    :param doc: The job's ``state.json``.
-    :param request_id: The applied request's id.
-    :param operator: The request's ``operator``; only ``exchange`` requests of an exchange job are recorded.
-    """
-
-    name = _exchange_name(doc, operator)
-    if name is None:
-        return
     try:
-        _kernel.record_exchange_translation(workspace, name, request_id)
-    except WorkflowError:
-        # The entry is gone (the job was deleted or returned): nothing can re-post into it.
-        _LOGGER.debug("no exchange index entry %s to record request %s in", name, request_id)
+        created = datetime.fromisoformat(str(request.document["created_at"]))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC), request.request_id
+    return created if created.tzinfo is not None else created.replace(tzinfo=UTC), request.request_id
 
 
 def _history_outcome(workspace: _kernel.KernelWorkspace, ref: JobRef, request_id: str) -> RequestOutcome:
@@ -285,7 +256,7 @@ def _history_outcome(workspace: _kernel.KernelWorkspace, ref: JobRef, request_id
         )
         status: Literal["queued", "uncertain"] = "queued" if reconciling else "uncertain"
         if current.state == _kernel.OWNED:
-            explanation = "another owner holds the job"
+            explanation = _HELD
         elif reconciling:
             explanation = "job needs reconciliation"
         else:
@@ -442,23 +413,19 @@ def apply_requests(
         and request.request_id not in exclude
         and (only is None or request.request_id in only)
     ]
-    requests.sort(key=lambda request: (str(request.document["created_at"]), request.request_id))
+    requests.sort(key=_order)
     extra = tuple(exclude)
+
+    def observe(
+        request: _requests.Request,
+        status: Literal["applied", "queued", "refused", "uncertain"],
+        explanation: str,
+        state: str | None = None,
+    ) -> None:
+        if outcomes is not None:
+            outcomes.append(RequestOutcome(request.job_id, request.request_id, status, explanation, state))
+
     for request in requests:
-        if translation_applied(workspace, doc, request):
-            # A lagging exchange translator re-posted an action this job applied already: never again.
-            _fs.remove_file(_fs.loc(request.path), durable=workspace.durable)
-            owned.append_log(
-                "request_applied",
-                detail={"request_id": request.request_id, "action": request.action, "dropped": "already applied"},
-            )
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(
-                        request.job_id, request.request_id, "applied", "exchange request was already applied"
-                    )
-                )
-            continue
         new, effect = _requests.apply(
             job,
             doc,
@@ -476,10 +443,7 @@ def apply_requests(
         if isinstance(effect, _requests.Defer):
             if deferred is not None:
                 deferred.add(request.request_id)
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(request.job_id, request.request_id, "queued", "waits for the job boundary")
-                )
+            observe(request, "queued", "waits for the job boundary")
             continue
         if deferred is not None:
             deferred.discard(request.request_id)
@@ -490,14 +454,10 @@ def apply_requests(
         if isinstance(effect, _requests.Discard):
             owned.discard()
             _LOGGER.info("deleted %s (request %s)", owned.job_key, request.request_id)
-            if outcomes is not None:
-                outcomes.append(RequestOutcome(request.job_id, request.request_id, "applied", "job deleted"))
+            observe(request, "applied", "job deleted")
         elif isinstance(effect, _requests.Drop):
             release(owned, new, Release(from_state, from_priority, (request.request_id, *extra)))
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(request.job_id, request.request_id, "refused", effect.reason, from_state)
-                )
+            observe(request, "refused", effect.reason, from_state)
         elif isinstance(effect, _requests.Seal):
             sealed = _seal(owned, new, request)
             note = next(
@@ -509,55 +469,26 @@ def apply_requests(
                 None,
             )
             release(owned, sealed, _recording(effect.release, extra))
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(
-                        request.job_id,
-                        request.request_id,
-                        "refused" if note else "applied",
-                        str(note or "job sealed"),
-                        effect.release.state,
-                    )
-                )
+            observe(request, "refused" if note else "applied", str(note or "job sealed"), effect.release.state)
         elif isinstance(effect, _requests.Eject):
-            status, explanation = _eject(owned, new, request, effect)
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(
-                        request.job_id,
-                        request.request_id,
-                        status,
-                        explanation,
-                    )
-                )
+            observe(request, *_eject(owned, new, request, effect))
         elif isinstance(effect, _requests.Unseal):
             try:
                 owned.discard_subtree(".httk-job/seal.json")
             except _fs.UnsafePath as exc:
                 _LOGGER.warning("%s has no real seal document to remove: %s", owned.job_key, exc)
             release(owned, new, _recording(effect.release, extra))
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(request.job_id, request.request_id, "applied", "job unsealed", effect.release.state)
-                )
+            observe(request, "applied", "job unsealed", effect.release.state)
         else:
             release(owned, new, _recording(effect, extra))
-            if outcomes is not None:
-                outcomes.append(
-                    RequestOutcome(
-                        request.job_id, request.request_id, "applied", f"{request.action} applied", effect.state
-                    )
-                )
-        # Recorded after the effect: a crash in between can at worst let a lagging re-post apply once more, while
-        # recording first could lose the action altogether.
-        record_translation(workspace, doc, request.request_id, request.document["operator"])
+            observe(request, "applied", f"{request.action} applied", effect.state)
         return None
     return doc
 
 
 def serve(
     workspace: _kernel.KernelWorkspace,
-    owner: RequestOwner,
+    owner: _kernel.Owner,
     ref: JobRef,
     *,
     only: Collection[str] | None = None,
@@ -636,15 +567,45 @@ def serve(
     return True
 
 
+def _serve_one(
+    workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, request_id: str
+) -> tuple[RequestOutcome, bool]:
+    """Serve one request of an unowned job as *owner*; the flag says that later requests of the job must wait."""
+
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    if current is None:
+        explanation = "job disappeared before the request was observed"
+        return RequestOutcome(ref.job_id, request_id, "uncertain", explanation), True
+    if current.state == _kernel.OWNED:
+        return RequestOutcome(ref.job_id, request_id, "queued", _HELD, current.state), True
+    observed: list[RequestOutcome] = []
+    try:
+        claimed = serve(workspace, owner, current, only={request_id}, outcomes=observed)
+    except (WorkflowError, OSError, _fs.UnsafePath) as exc:
+        return RequestOutcome(ref.job_id, request_id, "uncertain", str(exc)), True
+    if observed:
+        # Queued only when the job needs a manager's reconciliation first, which every later request waits for too.
+        return observed[-1], observed[-1].status == "queued"
+    result = _history_outcome(workspace, ref, request_id)
+    if (
+        not claimed
+        and result.status == "uncertain"
+        and _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True) is not None
+    ):
+        result = dataclasses.replace(result, status="queued", explanation="another owner claimed the job first")
+    return result, result.status not in _SETTLED
+
+
 def serve_requests(
-    workspace: "Workspace", published: Iterable[tuple[JobRef, Path]], *, owner: RequestOwner | None = None
+    workspace: "Workspace", published: Iterable[tuple[JobRef, Path]], *, owner: _kernel.Owner | None = None
 ) -> tuple[RequestOutcome, ...]:
     """Immediately serve a bounded snapshot of published requests for unowned jobs.
 
     Requests for each job run in ``(created_at, request_id)`` order through
-    the requested id. A live owner, lost claim, unfinished reconciliation, or
-    more than 256 preceding requests leaves the request queued. Arrivals after
-    the snapshot are not considered.
+    the requested id. A live owner, lost claim or unfinished reconciliation
+    stops at the request it meets and leaves the requested one queued; a job
+    with more than 256 pending requests is not served here at all, leaving
+    them to a manager. Arrivals after the snapshot are not considered.
 
     :param workspace: The local workspace.
     :param published: Published request files paired with their observed jobs.
@@ -652,88 +613,40 @@ def serve_requests(
     :return: One result per published request, in input order.
     """
 
-    items = list(published)
+    items = [(ref, path.name.split(".")[1]) for ref, path in published]
     if not items:
         return ()
     results: dict[str, RequestOutcome] = {}
-    snapshots: dict[str, list[_requests.Request]] = {}
-    oversized: set[str] = set()
-    for ref, path in items:
+    snapshots: dict[str, list[_requests.Request] | None] = {}
+    for ref, _request_id in items:
         if ref.job_id not in snapshots:
-            found = []
-            candidates = list(islice((workspace.control / "requests").glob(f"{ref.job_id}.*.json"), 257))
-            if len(candidates) > 256:
-                oversized.add(ref.job_id)
-            for candidate in candidates[:256]:
-                parsed = _parse(candidate)
-                if parsed is not None:
-                    found.append(parsed)
-            found.sort(key=lambda request: (str(request.document["created_at"]), request.request_id))
-            snapshots[ref.job_id] = found
+            paths = list(islice((workspace.control / "requests").glob(f"{ref.job_id}.*.json"), _SNAPSHOT_LIMIT + 1))
+            found = [request for path in paths if (request := _parse(path)) is not None]
+            snapshots[ref.job_id] = None if len(paths) > _SNAPSHOT_LIMIT else sorted(found, key=_order)
 
     def process(active: _kernel.Owner) -> None:
-        for ref, path in items:
-            request_id = path.name.split(".")[1]
+        for ref, request_id in items:
             ordered = snapshots[ref.job_id]
-            target = next((request for request in ordered if request.request_id == request_id), None)
-            if ref.job_id in oversized:
-                results[request_id] = RequestOutcome(
-                    ref.job_id, request_id, "queued", "more than 256 requests; retry after reconciliation"
-                )
+            if ordered is None:
+                explanation = f"more than {_SNAPSHOT_LIMIT} requests are pending; they wait for a manager"
+                results[request_id] = RequestOutcome(ref.job_id, request_id, "queued", explanation)
                 continue
+            target = next((request for request in ordered if request.request_id == request_id), None)
             if target is None:
                 results[request_id] = _history_outcome(workspace, ref, request_id)
                 continue
-            target_key = (str(target.document["created_at"]), target.request_id)
             for request in ordered:
-                if (str(request.document["created_at"]), request.request_id) > target_key:
+                if _order(request) > _order(target):
                     break
-                if request.request_id in results and results[request.request_id].status in {"applied", "refused"}:
+                previous = results.get(request.request_id)
+                if previous is not None and previous.status in _SETTLED:
                     continue
-                current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
-                if current is None:
-                    result = RequestOutcome(
-                        ref.job_id, request.request_id, "uncertain", "job disappeared before the request was observed"
-                    )
-                    results[request.request_id] = result
+                result, halt = _serve_one(workspace, active, ref, request.request_id)
+                results[request.request_id] = result
+                if halt:
+                    # The requested one waits behind it, for the same reason.
                     results[request_id] = dataclasses.replace(result, request_id=request_id)
                     break
-                if current.state == _kernel.OWNED:
-                    explanation = "another owner holds the job"
-                    results[request.request_id] = RequestOutcome(
-                        ref.job_id, request.request_id, "queued", explanation, current.state
-                    )
-                    results[request_id] = RequestOutcome(ref.job_id, request_id, "queued", explanation, current.state)
-                    break
-                observed: list[RequestOutcome] = []
-                try:
-                    claimed = serve(workspace, active, current, only={request.request_id}, outcomes=observed)
-                except (WorkflowError, OSError, _fs.UnsafePath) as exc:
-                    results[request.request_id] = RequestOutcome(ref.job_id, request.request_id, "uncertain", str(exc))
-                    break
-                if not claimed:
-                    result = _history_outcome(workspace, ref, request.request_id)
-                    if (
-                        result.status == "uncertain"
-                        and _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
-                        is not None
-                    ):
-                        result = dataclasses.replace(
-                            result, status="queued", explanation="another owner claimed the job first"
-                        )
-                    results[request.request_id] = result
-                    if result.status in {"applied", "refused"}:
-                        continue
-                    results[request_id] = dataclasses.replace(result, request_id=request_id)
-                    break
-                if observed:
-                    results[request.request_id] = observed[-1]
-                else:
-                    outcome = _history_outcome(workspace, ref, request.request_id)
-                    results[request.request_id] = outcome
-                    if outcome.status not in {"applied", "refused"}:
-                        results[request_id] = outcome
-                        break
 
     if owner is None:
         with _kernel.register_owner(
@@ -742,27 +655,21 @@ def serve_requests(
             process(active)
     else:
         process(owner)
-    return tuple(
-        results.get(
-            path.name.split(".")[1],
-            RequestOutcome(ref.job_id, path.name.split(".")[1], "uncertain", "no effect was observed"),
-        )
-        for ref, path in items
-    )
+    return tuple(results[request_id] for _ref, request_id in items)
 
 
 def request_now(
     workspace: "Workspace",
-    owner: RequestOwner,
+    owner: _kernel.Owner,
     ref: JobRef,
     action: str,
     reason: str,
     *,
     outcomes: list[RequestOutcome] | None = None,
 ) -> str | None:
-    """Post one request for a job and apply it now when the job is unowned (``job delete|seal|unseal``).
+    """Post one request for a job and apply it now when the job is unowned (``job delete|seal|unseal|detach``).
 
-    A job a manager holds gets the request at its next boundary. Nothing is posted for a job that is not found.
+    A job another owner holds gets the request at its next boundary. Nothing is posted for a job that is not found.
 
     :param workspace: The workspace.
     :param owner: The CLI owner that applies it.
@@ -785,11 +692,7 @@ def request_now(
     (outcome,) = serve_requests(workspace, [(current, path)], owner=owner)
     if outcomes is not None:
         outcomes.append(outcome)
-    if outcome.status == "applied":
-        return None
-    if outcome.status == "queued" and outcome.explanation == "another owner holds the job":
-        return "a manager holds the job; the request applies at its next boundary"
-    return outcome.explanation
+    return None if outcome.status == "applied" else outcome.explanation
 
 
 def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool = False) -> RemovalReport:
