@@ -274,7 +274,7 @@ manager's platform stays `ready` and unclaimed there.
 | --- | --- | --- |
 | `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
-| `job request ACTION JOB_ID...` | post one operator request per job (remote: over the adapter) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--force`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
 | `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--force` skips the confirmation |
@@ -415,12 +415,29 @@ dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 serving path and retain their concise per-job `done`, `queued` and `refused`
 results.
 
-For a remote workspace, `job request ACTION --workspace REMOTE:NAME JOB_ID ...`
-asks the owning machine for unsigned request documents, signs them with the
-identity selected by `--operator`, and sends the signed documents back for
-verbatim publication. Make `--adapter-timeout` longer than `--timeout` when
-both are given. An adapter timeout during publication leaves the outcome
-indeterminate: requests may already be posted.
+For an ordinary remote workspace, `job request ACTION --workspace REMOTE:NAME
+JOB_ID ...` keeps the signed two-leg request-envelope exchange: the client
+signs the request documents with the identity selected by `--operator`, then
+sends them back for verbatim publication. A mounted-daemon remote instead
+sends one signed typed command for each selector. Daemon batches are
+non-atomic: earlier commands may have been accepted if a later command fails.
+The daemon accepts canonical job UUIDs and UUID prefixes; glob and tag
+selectors are refused before publication. Daemon `--force` is unsupported.
+
+Use `--request-id` with exactly one daemon-mediated job command to retry the
+same command after an uncertain transport result. An exact retry must retain
+the selector, action, reason, options and configuration pin. It reuses the
+original command ID and cached signature; changing any command field is
+rejected. The option is not available for local jobs or ordinary remote
+workspaces.
+
+For `pause --wait`, the client sends the pause command once and then polls
+with fresh signed observations until the daemon reports `paused`, refusal,
+terminal supersession or timeout. Passive `status.json` is not evidence that
+a command completed. Run `httk remote daemon status REMOTE --request-id ID` to
+inspect a previously sent daemon job command; each inspection uses a fresh
+signed observation request. Without `--handle` or `--request-id`, status
+remains passive and informational.
 
 ### Inspecting and debugging jobs
 
@@ -742,7 +759,7 @@ remote meaning "this machine", so `remote add local` is refused.
 | `remote daemon configure REMOTE` | pin the identities in the mounted `exchange.json` and `daemon.json` | required `--exchange` |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
 | `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`; `--request-id`, `--wait-seconds` |
-| `remote daemon status REMOTE` | print the passive `status.json` and `managers.json`, or with `--handle` inspect a manager by signed request | `--handle`, `--request-id`, `--wait-seconds` |
+| `remote daemon status REMOTE` | print passive status, inspect a manager with `--handle`, or inspect an original job command with `--request-id` | mutually exclusive `--handle` / `--request-id`; `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`; `--request-id`, `--wait-seconds` |
 | `remote daemon log REMOTE` | print a manager's published log | required `--handle` |
 | `remote daemon take-back REMOTE NAME [DESTINATION]` | take your bundle back from `inbox` before a manager takes it | `DESTINATION` defaults to `./NAME` |

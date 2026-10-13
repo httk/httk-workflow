@@ -4,6 +4,7 @@ from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from ..adapters import read_metadata, resolve_remote
 from ..removal import remove_jobs, serve_requests
 from ..workflow_cli import (
     ensure_identity_key,
@@ -12,6 +13,7 @@ from ..workflow_cli import (
     request_remote_job_result,
     submit_remote_manager_result,
 )
+from ..workflow_cli._daemon_jobs import request_remote_jobs
 from ..workflow_cli._job import _resolve_request_identity
 from ..workflow_cli._manager import manager_option_defaults
 from ..workspace import Workspace
@@ -24,6 +26,7 @@ def _request_arguments(view: WorkspaceView, action: str, job_ids: Sequence[str],
     return Namespace(
         action=action,
         job_id=list(job_ids),
+        request_id=None,
         reason=reason,
         operator=None,
         priority=None,
@@ -32,6 +35,7 @@ def _request_arguments(view: WorkspaceView, action: str, job_ids: Sequence[str],
         wait=False,
         timeout=None,
         adapter_timeout=view.adapter_timeout,
+        destination=None,
         durable=False,
         no_durable=False,
         workspace=view.name,
@@ -67,6 +71,12 @@ def request(view: WorkspaceView, action: str, job_ids: Sequence[str], reason: st
         raise ValueError("a CLI context is required for monitor actions")
     if view.remote:
         identity = _resolve_request_identity(None)
+        target = resolve_remote(view.binding.remote, project=context.cwd)
+        if read_metadata(target.bundle).get("kind") == "mount-daemon":
+            status, stdout, stderr = request_remote_jobs(view.binding, context, arguments, identity)
+            if status:
+                raise RuntimeError(stderr or stdout.strip() or f"job request failed with exit status {status}")
+            return stdout.strip()
         ensure_identity_key(identity)
         status, _stdout, _stderr = request_remote_job_result(
             view.binding, context, arguments, identity, interactive=False

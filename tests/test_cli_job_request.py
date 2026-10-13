@@ -20,6 +20,7 @@ import v3_helpers as v3
 from httk.workflow import TaskManager, Workspace, _kernel, _store
 from httk.workflow._state import read_state_unowned
 from httk.workflow.registry import create_workspace
+from httk.workflow.removal import serve_requests
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
 
@@ -104,6 +105,20 @@ def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, caps
     assert command(["job", "request", "pause", "--reason", "default workspace", job_id], _context(tmp_path)) == 0
     capsys.readouterr()
     assert v3.find(workspace, job_id).state == "paused"
+
+
+def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "request-id-local").job_id
+
+    status = command(
+        [*_request_args(workspace_name, job_id), "--request-id", "a" * 32],
+        _context(tmp_path),
+    )
+
+    assert status == 2
+    assert "--request-id is supported only for one mount-daemon job request" in capsys.readouterr().err
+    assert not _requests(workspace)
 
 
 @pytest.mark.parametrize(
@@ -365,6 +380,23 @@ def test_wait_reports_terminal_state_and_exits_one(tmp_path: Path, capsys) -> No
         assert command(_request_args(workspace_name, job_id) + ["--wait"], _context(tmp_path)) == 1
 
     assert "refused\tthe job is already succeeded" in capsys.readouterr().out
+
+
+def test_wait_does_not_accept_pause_superseded_after_immediate_apply(tmp_path: Path, capsys) -> None:
+    workspace, _workspace_name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "superseded-pause")
+    pause = job_cli.publish_job_requests(workspace, [ref], action="pause", reason="pause first")
+    assert serve_requests(workspace, pause)[0].status == "applied"
+
+    paused_ref = _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True)
+    assert paused_ref is not None and paused_ref.state == "paused"
+    cancel = job_cli.publish_job_requests(workspace, [paused_ref], action="cancel", reason="cancel afterward")
+    assert serve_requests(workspace, cancel)[0].status == "applied"
+
+    status = job_cli._complete_job_requests(workspace, pause, wait=True, timeout=0)
+
+    assert status == 1
+    assert "pause superseded" in capsys.readouterr().out
 
 
 def test_wait_without_live_manager_fails_after_publishing(tmp_path: Path, capsys) -> None:

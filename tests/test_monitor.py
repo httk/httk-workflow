@@ -290,6 +290,8 @@ def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: py
         return 0, "", ""
 
     monkeypatch.setattr(monitor_actions, "request_remote_job_result", fake_request)
+    monkeypatch.setattr(monitor_actions, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=tmp_path))
+    monkeypatch.setattr(monitor_actions, "read_metadata", lambda _bundle: {"kind": "ssh"})
     monitor_actions.request(remote_view, "cancel", ["id"], "because")
 
     def fake_manager(_root: Path, arguments: Any, _context: object) -> tuple[str, int]:
@@ -540,3 +542,24 @@ def test_monitor_requires_a_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(monitor_cli.sys.stdout, "isatty", lambda: False)
 
     assert command(["monitor", "--workspace", "monitor"], context) == 2
+
+
+def test_monitor_routes_mounted_job_requests_to_typed_daemon_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = CLIContext("httk", tmp_path)
+    view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), context, adapter_timeout=12.5)
+    monkeypatch.setattr(monitor_actions, "_resolve_request_identity", lambda _selector: SimpleNamespace())
+    monkeypatch.setattr(monitor_actions, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=tmp_path))
+    monkeypatch.setattr(monitor_actions, "read_metadata", lambda _bundle: {"kind": "mount-daemon"})
+    called = []
+
+    def request(binding, received_context, arguments, _identity):
+        assert binding == view.binding and received_context == context
+        assert arguments.action == "pause" and arguments.adapter_timeout == 12.5
+        called.append(arguments.job_id)
+        return 0, "job\tqueued\trequest\n", ""
+
+    monkeypatch.setattr(monitor_actions, "request_remote_jobs", request)
+    assert monitor_actions.request(view, "pause", ["12345678"], "pause for review") == "job\tqueued\trequest"
+    assert called == [["12345678"]]

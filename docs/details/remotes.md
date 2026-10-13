@@ -272,10 +272,10 @@ required, and `daemon_enrollment_id` and `daemon_public_key`, which are needed
 only for signed requests. `configure` pins the workspace from `exchange.json`
 and, when a daemon has published `daemon.json`, the daemon identities; without
 `daemon.json` it pins the workspace only, which is enough to send and fetch
-jobs and read status. Approved configuration digests and the request lifetime
-are read live from `daemon.json`, so a changed daemon configuration needs no
-reconfiguration; a changed identity is refused. Configure an *httk* identity
-whose public key the daemon authorizes. `configure` publishes nothing.
+jobs and read status. The active configuration digest and request lifetime are
+read live from protocol 5's `daemon.json`; changed configuration needs no
+reconfiguration, while a changed identity is refused. Configure an *httk*
+identity whose public key the daemon authorizes. `configure` publishes nothing.
 `check` reads `exchange.json` and, when the daemon is pinned, `daemon.json` and
 sends a signed health request; it checks a broker response and does not
 establish compute-node readiness.
@@ -289,6 +289,7 @@ $ httk job eject JOB /mnt/cluster/exchange/inbox
 $ httk remote daemon start confined --configuration small
 $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
+$ httk job request pause --workspace confined:runs --reason 'operator pause' JOB_UUID
 $ httk remote daemon cancel confined --handle MANAGER_HANDLE
 $ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
 ```
@@ -318,6 +319,29 @@ daemon take-back confined NAME [DESTINATION]`. It is client-only: it renames
 If the name is gone, a manager took it. See {doc}`workspace_daemon` for the job
 lifecycle, rejected bundles, `status.json` and signed job control.
 
+`job request` against a `mount-daemon` workspace sends one signed typed
+command per UUID or UUID-prefix selector. A batch is sequential and
+non-atomic: earlier selectors may already be queued if a later one fails.
+Selectors must be UUIDs or lowercase UUID prefixes; paths, globs and tags are
+refused. `--force` is refused before any command is sent. Eject destinations
+are relative to the daemon exchange `outbox`. `--operator` selects the local
+identity that signs each command; the daemon authorizes keys by policy and
+does not assign key ownership to particular jobs.
+`job request` exits 0 when each command is applied or queued, and 1 for a
+refusal or uncertain result. Each output row includes the resolved job id,
+outcome, internal request id, daemon command id, explanation and observed
+state when available.
+
+For a single daemon-mediated job command, `--request-id ID` fixes the
+32-character lowercase hexadecimal command id. Retry with the same selector,
+action, reason and action-specific fields to reuse its exact cached signature,
+even if the active configuration changed. Any semantic change under that id
+is refused. This option is valid only for one selector on a `mount-daemon`
+workspace; local and ordinary remote requests reject it. To inspect the
+original job command, run `httk remote daemon status confined --request-id ID`.
+That command sends a fresh signed observation request. Without `--handle` or
+`--request-id`, `remote daemon status` remains passive and informational.
+
 ### Request ids and retries
 
 Each call generates a fresh 32-character lowercase hexadecimal request id
@@ -334,6 +358,8 @@ picks it up, until the request expires. The error message names the id.
 - Never retry an uncertain submission with a new id; reconcile it with the
   operator.
 - Use a fresh id (the default) for each status refresh.
+- `remote daemon status --request-id ID` refers to the original job command ID;
+  it sends a separate fresh status request each time.
 - The client stores the exact signed requests in its local httk data directory
   before publication. Retries reuse their original timestamps and signatures;
   changing the intent, signer or endpoint pin under an existing id is refused.
@@ -352,6 +378,12 @@ acceptance window and replay rules.
 `uncertain` and unacknowledged calls exit 2. `UNKNOWN` is a valid status and
 does not establish completion. A cancellation acknowledgement does not confirm
 that the job has terminated. Finished jobs appear in the exchange `outbox` on their own.
+For daemon-mediated `job request pause --wait`, the client sends the original
+pause once, then polls with a fresh signed status request every second until
+the job is paused, the command is refused or uncertain, a terminal state
+supersedes the pause, or the finite nonnegative `--timeout` expires. Passive
+exchange status is never used as evidence that the request ran. Refusal,
+uncertainty, supersession and timeout exit 1.
 
 ### What is refused
 

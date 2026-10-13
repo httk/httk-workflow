@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import re
 import shlex
 import sys
@@ -35,6 +36,7 @@ from ..adapters import (
     REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
     REMOTE_JOB_SHOW_COMMAND,
     REMOTE_JOB_WHY_COMMAND,
+    read_metadata,
     resolve_remote,
     run_adapter,
 )
@@ -91,6 +93,7 @@ from ._common import (
     confirm,
     remote_workspace_output,
 )
+from ._daemon_jobs import request_remote_jobs
 from ._transfer import _protocol_workspace, adopt_document, build_transfer_parser, eject_once
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
@@ -569,8 +572,8 @@ def _check_wait(wait: bool, timeout: float | None, actions: Sequence[str]) -> No
         raise ValueError("--timeout requires --wait")
     if wait and any(action != "pause" for action in actions):
         raise ValueError("--wait is only valid with the pause action")
-    if timeout is not None and timeout < 0:
-        raise ValueError("--timeout must not be negative")
+    if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+        raise ValueError("--timeout must be finite and nonnegative")
 
 
 def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -578,10 +581,20 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
 
     _check_wait(arguments.wait, arguments.timeout, (arguments.action,))
     identity = _resolve_request_identity(arguments.operator)
-    ensure_identity_key(identity)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
+        target = resolve_remote(binding.remote, project=context.cwd)
+        if read_metadata(target.bundle).get("kind") == "mount-daemon":
+            status, stdout, stderr = request_remote_jobs(binding, context, arguments, identity)
+            if stdout:
+                sys.stdout.write(stdout)
+            if stderr:
+                sys.stderr.write(stderr)
+            return status
+        if getattr(arguments, "request_id", None) is not None:
+            raise ValueError("--request-id is supported only for one mount-daemon job request")
+        ensure_identity_key(identity)
         for selector in arguments.job_id:
             if selector_uses_remote_path(context.cwd, selector):
                 raise ValueError("path selectors are resolved on this machine; give job ids for a remote workspace")
@@ -595,6 +608,9 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
                 f"remote request envelope build failed (exit {status}); see the relayed remote error above"
             )
         return status
+    if getattr(arguments, "request_id", None) is not None:
+        raise ValueError("--request-id is supported only for one mount-daemon job request")
+    ensure_identity_key(identity)
     workspace = _modifiable(arguments, context, action="post requests in it")
     published = publish_job_requests(
         workspace,
@@ -864,7 +880,11 @@ def _complete_job_requests(
         return 1
     if not wait:
         return 0
-    pending_ids = {outcome.request_id for outcome in outcomes if outcome.status == "queued"}
+    pending_ids = {
+        outcome.request_id
+        for outcome in outcomes
+        if outcome.status == "queued" or (outcome.status == "applied" and outcome.state != "paused")
+    }
     pending = [(ref, path) for ref, path in published if path.name.split(".")[1] in pending_ids]
     return 0 if not pending else _wait_for_pauses(workspace, pending, timeout=timeout)
 
@@ -1552,6 +1572,11 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
     _add_request_options(request)
     request.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
     request.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS (needs --wait)")
+    request.add_argument(
+        "--request-id",
+        metavar="ID",
+        help="32 lowercase hexadecimal daemon command ID for one mount-daemon job request and exact retries",
+    )
     _add_adapter_timeout(request)
     add_durability_arguments(request)
 
