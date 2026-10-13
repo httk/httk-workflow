@@ -402,17 +402,18 @@ each action does is tabulated in
 child a decided join already consumed (`continue`, `override_step`) and
 publishes an `override_step` outside the runner's recorded steps.
 
-The command exits `0` once the requests are posted and warns when no live
-manager serves the job. `--wait` is valid only for `pause` and exits `0` only
-when each requested job was observed `paused`; a superseded, dropped or
-timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
+After publication, the CLI immediately serves a bounded snapshot of requests
+for unowned jobs, in `(created_at, request_id)` order. Each request prints its
+job id, request id, outcome (`applied`, `queued`, `refused` or `uncertain`) and
+an explanation. Requests held by another owner, or jobs needing reconciliation,
+remain queued. Exit status is `0` for applied or queued requests and `1` for a
+refusal or uncertain result. `--wait` is valid only for `pause`; it waits for
+queued pauses and exits `0` only when each reaches `paused`. A superseded,
+dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 
-`job delete`, `job seal`, `job unseal` and `job detach` post the request and,
-as a short-lived CLI owner, apply it at once to an unowned job. Each job prints
-`<job> <done>` when applied (`removed`, `sealed`, `unsealed`, `detached`),
-`<job> queued <reason>` when an owner holds the job and will apply it at its
-next boundary, or `<job> refused <reason>` when it cannot apply. Queued requests
-exit `0`; any refusal exits `1`.
+`job delete`, `job seal`, `job unseal` and `job detach` use the same immediate
+serving path and retain their concise per-job `done`, `queued` and `refused`
+results.
 
 For a remote workspace, `job request ACTION --workspace REMOTE:NAME JOB_ID ...`
 asks the owning machine for unsigned request documents, signs them with the

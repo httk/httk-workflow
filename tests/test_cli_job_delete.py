@@ -128,9 +128,9 @@ def test_cli_delete_of_a_held_job_leaves_the_request_to_its_owner(tmp_path: Path
         assert command(["job", "seal", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
         assert f"{failed.job_id}\tqueued\ta manager holds the job" in capsys.readouterr().out
         owned.release(owned.read_state() or StateDoc.empty(owned.job_id), Release("failed", 500))
-    # Unowned, the seal request is applied now and refused for a failed job: exit status 1.
+    # The queued delete applies before this seal request; the later request is uncertain once the job is gone.
     assert command(["job", "seal", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
-    assert f"{failed.job_id}\trefused\t" in capsys.readouterr().out
+    assert f"{failed.job_id}\tuncertain\tjob disappeared before the request was observed" in capsys.readouterr().out
 
 
 def test_delete_prompt_decline_and_non_tty_refusal_leave_job(

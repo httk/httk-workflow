@@ -240,11 +240,20 @@ def test_monitor_actions_delegate_to_cli_implementations(tmp_path: Path, monkeyp
     monkeypatch.setattr(monitor_actions, "_resolve_request_identity", lambda _selector: object())
     monkeypatch.setattr(view, "ref_for", lambda _job_id: object())
 
-    def fake_publish(*_args: object, **_kwargs: object) -> list[tuple[str, Any, Any]]:
+    def fake_publish(*_args: object, **_kwargs: object) -> list[tuple[Any, Any]]:
         calls.append("publish")
-        return [("id", object(), object())]
+        return [(object(), object())]
 
     monkeypatch.setattr(monitor_actions, "publish_job_requests", fake_publish)
+
+    from httk.workflow.removal import RequestOutcome
+
+    def fake_serve(_workspace: object, published: object) -> tuple[RequestOutcome, ...]:
+        calls.append("serve")
+        assert isinstance(published, list) and len(published) == 1
+        return (RequestOutcome("id", "request", "applied", "cancel applied", "cancelled"),)
+
+    monkeypatch.setattr(monitor_actions, "serve_requests", fake_serve)
 
     def fake_manager(*_args: object) -> tuple[str, int]:
         calls.append("manager")
@@ -252,9 +261,9 @@ def test_monitor_actions_delegate_to_cli_implementations(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(monitor_actions, "launch_workspace_managers", fake_manager)
 
-    assert monitor_actions.request(view, "cancel", ["id"], "because") == "requested cancel for 1 job(s)"
+    assert monitor_actions.request(view, "cancel", ["id"], "because") == "id: applied (cancel applied)"
     assert monitor_actions.start_managers(view, 1) == "started 1 manager(s)"
-    assert calls == ["publish", "manager"]
+    assert calls == ["publish", "serve", "manager"]
 
 
 def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

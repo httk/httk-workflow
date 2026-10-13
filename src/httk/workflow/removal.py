@@ -12,8 +12,9 @@ import dataclasses
 import logging
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from . import _fs, _joins, _kernel, _moving, _requests
 from ._job import JobDefinition
@@ -28,6 +29,8 @@ __all__ = [
     "REMOVABLE_KINDS",
     "RemovalOutcome",
     "RemovalReport",
+    "RequestOutcome",
+    "RequestOwner",
     "apply_requests",
     "record_translation",
     "refusal",
@@ -35,6 +38,7 @@ __all__ = [
     "remove_jobs",
     "request_now",
     "serve",
+    "serve_requests",
     "translation_applied",
 ]
 
@@ -42,6 +46,9 @@ _LOGGER = logging.getLogger("httk.workflow.manager")
 
 #: The states a ``delete`` request applies to (a succeeded job only after ``job unseal``).
 REMOVABLE_KINDS = frozenset({*TERMINAL_STATES, "paused"})
+
+#: The kernel owner used to serve requests immediately.
+RequestOwner = _kernel.Owner
 
 
 @dataclass(frozen=True)
@@ -52,12 +59,14 @@ class RemovalOutcome:
     :param kind: The state it was found in.
     :param removed: Whether it was deleted.
     :param reason: Why not, if it was not.
+    :param request: The immediate request observation, when deletion was requested.
     """
 
     job_key: str
     kind: str
     removed: bool
     reason: str | None = None
+    request: "RequestOutcome | None" = None
 
     @property
     def refused(self) -> bool:
@@ -92,6 +101,24 @@ class RemovalReport:
         """The number of jobs deleted."""
 
         return len(self.removed)
+
+
+@dataclass(frozen=True)
+class RequestOutcome:
+    """The result of immediately serving one published request.
+
+    :param job_id: The target job id.
+    :param request_id: The request id.
+    :param status: ``applied``, ``queued``, ``refused`` or ``uncertain``.
+    :param explanation: What happened or why it is waiting.
+    :param state: The resulting state, when known.
+    """
+
+    job_id: str
+    request_id: str
+    status: Literal["applied", "queued", "refused", "uncertain"]
+    explanation: str
+    state: str | None = None
 
 
 def release(owned: OwnedJob, doc: StateDoc, target: Release) -> JobRef:
@@ -216,6 +243,57 @@ def record_translation(workspace: _kernel.KernelWorkspace, doc: StateDoc, reques
         _LOGGER.debug("no exchange index entry %s to record request %s in", name, request_id)
 
 
+def _history_outcome(workspace: _kernel.KernelWorkspace, ref: JobRef, request_id: str) -> RequestOutcome:
+    """Recover a request result from its matching state-history record, when that proves the effect."""
+
+    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    if current is None:
+        return RequestOutcome(ref.job_id, request_id, "uncertain", "job disappeared before its effect was observed")
+    doc, _damage = read_state_unowned(current.path / "state.json")
+    if doc is None:
+        return RequestOutcome(
+            ref.job_id, request_id, "uncertain", "request effect is absent from readable state history"
+        )
+    entries = [entry for entry in doc.history_tail if entry.get("request_id") == request_id]
+    dropped = next((entry for entry in reversed(entries) if entry.get("event") == "request_dropped"), None)
+    if dropped is not None:
+        return RequestOutcome(
+            ref.job_id, request_id, "refused", str(dropped.get("note", "request was dropped")), current.state
+        )
+    applied = next((entry for entry in reversed(entries) if entry.get("event") == "request_applied"), None)
+    if applied is None:
+        reconciling = (
+            current.state == _kernel.OWNED
+            or doc.release_to is not None
+            or doc.commit is not None
+            or doc.phase["kind"] != "idle"
+        )
+        status: Literal["queued", "uncertain"] = "queued" if reconciling else "uncertain"
+        if current.state == _kernel.OWNED:
+            explanation = "another owner holds the job"
+        elif reconciling:
+            explanation = "job needs reconciliation"
+        else:
+            explanation = "request effect is not in state history"
+        return RequestOutcome(ref.job_id, request_id, status, explanation, current.state)
+    action = applied.get("action")
+    if action in {"delete", "eject"}:
+        return RequestOutcome(
+            ref.job_id,
+            request_id,
+            "uncertain",
+            f"{action} history records intent but cannot prove delivery",
+            current.state,
+        )
+    if action == "seal" and doc.seal is None:
+        return RequestOutcome(ref.job_id, request_id, "uncertain", "seal effect is not present", current.state)
+    if action == "unseal" and (
+        doc.seal is None or doc.seal.get("released") is not True or doc.seal.get("request_id") != request_id
+    ):
+        return RequestOutcome(ref.job_id, request_id, "uncertain", "unseal effect is not present", current.state)
+    return RequestOutcome(ref.job_id, request_id, "applied", f"{action} applied", current.state)
+
+
 def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDoc:
     """Seal the owned job's payload and return the document recording it (the ``Seal`` effect)."""
 
@@ -237,13 +315,14 @@ def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDo
     return doc.updated(seal={"sha256": sha256, "signed": signed})
 
 
-def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _requests.Eject) -> None:
-    """Eject the owned job for an ``eject`` request (the ``Eject`` effect); a failure leaves every job where it was."""
+def _eject(
+    owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _requests.Eject
+) -> tuple[Literal["applied", "refused", "uncertain"], str]:
+    """Eject a job request and distinguish a recorded rollback from an unresolved delivery."""
 
     workspace = cast("Workspace", owned.owner.workspace)
     # The applied id and its history entry travel with the bundle, so a returning job never re-applies it.
-    # ponytail: at most once; a failed delivery returns the job with the request applied, and the operator (or
-    # the exchange, whose next request id follows the changed state) posts it again.
+    # The applied marker travels with a successful bundle; a verified rollback gets a matching dropped event.
     owned.write_state(doc)
     _fs.remove_file(_fs.loc(request.path), durable=workspace.durable)
     try:
@@ -252,7 +331,40 @@ def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _
         raise
     except Exception as exc:
         _LOGGER.warning("eject request %s for %s refused: %s", request.request_id, owned.job_key, exc)
-        return
+        current = _kernel.locate(workspace, request.job_id, placement_hint=request.placement, exhaustive=True)
+        refused = False
+        if current is not None and current.state != _kernel.OWNED:
+            returned = _kernel.claim(workspace, owned.owner, current)
+            if returned is not None:
+                note = f"eject failed and the job was returned: {exc}"
+                try:
+                    returned_doc = returned.read_state()
+                    if returned_doc is not None and request.request_id in returned_doc.applied_requests:
+                        returned.append_log(
+                            "request_dropped",
+                            detail={"request_id": request.request_id, "action": "eject", "note": note},
+                        )
+                        release(
+                            returned,
+                            returned_doc.with_history(
+                                "request_dropped", request_id=request.request_id, action="eject", note=note
+                            ),
+                            Release(returned.from_state, returned.from_priority),
+                        )
+                        refused = True
+                except (WorkflowError, OSError, FormatError, _fs.UnsafePath) as record_error:
+                    _LOGGER.warning("cannot record eject rollback for %s: %s", request.request_id, record_error)
+                finally:
+                    if owned.owner.holds(returned.ref):
+                        try:
+                            returned.give_back()
+                        except (WorkflowError, OSError, FormatError, _fs.UnsafePath) as release_error:
+                            _LOGGER.error(
+                                "cannot release eject rollback claim for %s: %s", request.request_id, release_error
+                            )
+                if refused:
+                    return "refused", note
+        return "uncertain", f"eject outcome is unresolved: {exc}"
     # A delivered exchange root left the exchange index inside _moving (also on crash recovery).
     _LOGGER.info(
         "ejected %s to %s (request %s)",
@@ -261,6 +373,7 @@ def _eject(owned: OwnedJob, doc: StateDoc, request: _requests.Request, effect: _
         request.request_id,
         extra={"event": "ejected", "job_key": owned.job_key, "job_id": owned.job_id},
     )
+    return "applied", f"ejected to {report.destination}"
 
 
 def _recording(target: Release, extra: tuple[str, ...]) -> Release:
@@ -279,6 +392,8 @@ def apply_requests(
     exclude: Collection[str] = (),
     cache: ListingCache | None = None,
     deferred: set[str] | None = None,
+    only: Collection[str] | None = None,
+    outcomes: list[RequestOutcome] | None = None,
 ) -> StateDoc | None:
     """Apply the job's pending requests oldest first; ``None`` once one released (or deleted) the job.
 
@@ -296,6 +411,8 @@ def apply_requests(
     :param exclude: Request ids the caller applies itself; a release made here records them too.
     :param cache: The pass's listings, for the refusal checks.
     :param deferred: Collects the ids of requests that wait for a later boundary.
+    :param only: Apply only these request ids when provided.
+    :param outcomes: Append observations of effects actually carried out.
     :return: The document when every request waits, or ``None`` once the job was released.
     """
 
@@ -308,6 +425,7 @@ def apply_requests(
         if (request := _parse(path)) is not None
         and request.job_id == owned.job_id
         and request.request_id not in exclude
+        and (only is None or request.request_id in only)
     ]
     requests.sort(key=lambda request: (str(request.document["created_at"]), request.request_id))
     extra = tuple(exclude)
@@ -319,6 +437,12 @@ def apply_requests(
                 "request_applied",
                 detail={"request_id": request.request_id, "action": request.action, "dropped": "already applied"},
             )
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(
+                        request.job_id, request.request_id, "applied", "exchange request was already applied"
+                    )
+                )
             continue
         new, effect = _requests.apply(
             job,
@@ -337,6 +461,10 @@ def apply_requests(
         if isinstance(effect, _requests.Defer):
             if deferred is not None:
                 deferred.add(request.request_id)
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(request.job_id, request.request_id, "queued", "waits for the job boundary")
+                )
             continue
         if deferred is not None:
             deferred.discard(request.request_id)
@@ -347,20 +475,64 @@ def apply_requests(
         if isinstance(effect, _requests.Discard):
             owned.discard()
             _LOGGER.info("deleted %s (request %s)", owned.job_key, request.request_id)
+            if outcomes is not None:
+                outcomes.append(RequestOutcome(request.job_id, request.request_id, "applied", "job deleted"))
         elif isinstance(effect, _requests.Drop):
             release(owned, new, Release(from_state, from_priority, (request.request_id, *extra)))
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(request.job_id, request.request_id, "refused", effect.reason, from_state)
+                )
         elif isinstance(effect, _requests.Seal):
-            release(owned, _seal(owned, new, request), _recording(effect.release, extra))
+            sealed = _seal(owned, new, request)
+            note = next(
+                (
+                    entry.get("note")
+                    for entry in reversed(sealed.history_tail)
+                    if entry.get("request_id") == request.request_id and entry.get("event") == "request_dropped"
+                ),
+                None,
+            )
+            release(owned, sealed, _recording(effect.release, extra))
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(
+                        request.job_id,
+                        request.request_id,
+                        "refused" if note else "applied",
+                        str(note or "job sealed"),
+                        effect.release.state,
+                    )
+                )
         elif isinstance(effect, _requests.Eject):
-            _eject(owned, new, request, effect)
+            status, explanation = _eject(owned, new, request, effect)
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(
+                        request.job_id,
+                        request.request_id,
+                        status,
+                        explanation,
+                    )
+                )
         elif isinstance(effect, _requests.Unseal):
             try:
                 owned.discard_subtree(".httk-job/seal.json")
             except _fs.UnsafePath as exc:
                 _LOGGER.warning("%s has no real seal document to remove: %s", owned.job_key, exc)
             release(owned, new, _recording(effect.release, extra))
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(request.job_id, request.request_id, "applied", "job unsealed", effect.release.state)
+                )
         else:
             release(owned, new, _recording(effect, extra))
+            if outcomes is not None:
+                outcomes.append(
+                    RequestOutcome(
+                        request.job_id, request.request_id, "applied", f"{request.action} applied", effect.state
+                    )
+                )
         # Recorded after the effect: a crash in between can at worst let a lagging re-post apply once more, while
         # recording first could lose the action altogether.
         record_translation(workspace, doc, request.request_id, request.document["operator"])
@@ -368,7 +540,14 @@ def apply_requests(
     return doc
 
 
-def serve(workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef) -> bool:
+def serve(
+    workspace: _kernel.KernelWorkspace,
+    owner: RequestOwner,
+    ref: JobRef,
+    *,
+    only: Collection[str] | None = None,
+    outcomes: list[RequestOutcome] | None = None,
+) -> bool:
     """Apply an unowned job's pending requests as *owner* (a CLI owner), without a manager.
 
     A job whose last owner left work unfinished (a pending release, a commit
@@ -378,6 +557,8 @@ def serve(workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef)
     :param workspace: The workspace.
     :param owner: The serving owner.
     :param ref: The unowned job.
+    :param only: Apply only these request ids when provided.
+    :param outcomes: Append observations of effects actually carried out.
     :return: Whether the job was claimed (``False`` when another actor moved it first).
     :raises httk.workflow.errors.WorkflowError: If ``job.json`` or ``state.json`` cannot be read; the job is
         released back first, or quarantined when that cannot be done (its ``job.json`` was damaged already at
@@ -415,17 +596,155 @@ def serve(workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef)
         if isinstance(exc, WorkflowError):
             raise
         raise WorkflowError(f"cannot read {ref.job_key}: {exc}") from exc
-    if doc is None or doc.activation is None:
-        doc = (doc or StateDoc.empty(owned.job_id)).next_activation(job.initial_step, "initial")
-    if owned.pending_release() is not None or doc.commit is not None or doc.phase["kind"] != "idle":
+    if owned.pending_release() is not None or (
+        doc is not None and (doc.commit is not None or doc.phase["kind"] != "idle")
+    ):
+        if outcomes is not None:
+            for path in owned.request_files():
+                request = _parse(path)
+                if request is not None and (only is None or request.request_id in only):
+                    outcomes.append(
+                        RequestOutcome(
+                            request.job_id,
+                            request.request_id,
+                            "queued",
+                            "job needs reconciliation",
+                            owned.from_state,
+                        )
+                    )
         owned.give_back()
         return True
-    if apply_requests(owned, job, doc) is not None:
+    if doc is None or doc.activation is None:
+        doc = (doc or StateDoc.empty(owned.job_id)).next_activation(job.initial_step, "initial")
+    if apply_requests(owned, job, doc, only=only, outcomes=outcomes) is not None:
         release(owned, doc, Release(owned.from_state, owned.from_priority))
     return True
 
 
-def request_now(workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, action: str, reason: str) -> str | None:
+def serve_requests(
+    workspace: "Workspace", published: Iterable[tuple[JobRef, Path]], *, owner: RequestOwner | None = None
+) -> tuple[RequestOutcome, ...]:
+    """Immediately serve a bounded snapshot of published requests for unowned jobs.
+
+    Requests for each job run in ``(created_at, request_id)`` order through
+    the requested id. A live owner, lost claim, unfinished reconciliation, or
+    more than 256 preceding requests leaves the request queued. Arrivals after
+    the snapshot are not considered.
+
+    :param workspace: The local workspace.
+    :param published: Published request files paired with their observed jobs.
+    :param owner: An existing CLI owner, or ``None`` to register one.
+    :return: One result per published request, in input order.
+    """
+
+    items = list(published)
+    if not items:
+        return ()
+    results: dict[str, RequestOutcome] = {}
+    snapshots: dict[str, list[_requests.Request]] = {}
+    oversized: set[str] = set()
+    for ref, path in items:
+        if ref.job_id not in snapshots:
+            found = []
+            candidates = list(islice((workspace.control / "requests").glob(f"{ref.job_id}.*.json"), 257))
+            if len(candidates) > 256:
+                oversized.add(ref.job_id)
+            for candidate in candidates[:256]:
+                parsed = _parse(candidate)
+                if parsed is not None:
+                    found.append(parsed)
+            found.sort(key=lambda request: (str(request.document["created_at"]), request.request_id))
+            snapshots[ref.job_id] = found
+
+    def process(active: _kernel.Owner) -> None:
+        for ref, path in items:
+            request_id = path.name.split(".")[1]
+            ordered = snapshots[ref.job_id]
+            target = next((request for request in ordered if request.request_id == request_id), None)
+            if ref.job_id in oversized:
+                results[request_id] = RequestOutcome(
+                    ref.job_id, request_id, "queued", "more than 256 requests; retry after reconciliation"
+                )
+                continue
+            if target is None:
+                results[request_id] = _history_outcome(workspace, ref, request_id)
+                continue
+            target_key = (str(target.document["created_at"]), target.request_id)
+            for request in ordered:
+                if (str(request.document["created_at"]), request.request_id) > target_key:
+                    break
+                if request.request_id in results and results[request.request_id].status in {"applied", "refused"}:
+                    continue
+                current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+                if current is None:
+                    result = RequestOutcome(
+                        ref.job_id, request.request_id, "uncertain", "job disappeared before the request was observed"
+                    )
+                    results[request.request_id] = result
+                    results[request_id] = dataclasses.replace(result, request_id=request_id)
+                    break
+                if current.state == _kernel.OWNED:
+                    explanation = "another owner holds the job"
+                    results[request.request_id] = RequestOutcome(
+                        ref.job_id, request.request_id, "queued", explanation, current.state
+                    )
+                    results[request_id] = RequestOutcome(ref.job_id, request_id, "queued", explanation, current.state)
+                    break
+                observed: list[RequestOutcome] = []
+                try:
+                    claimed = serve(workspace, active, current, only={request.request_id}, outcomes=observed)
+                except (WorkflowError, OSError, _fs.UnsafePath) as exc:
+                    results[request.request_id] = RequestOutcome(ref.job_id, request.request_id, "uncertain", str(exc))
+                    break
+                if not claimed:
+                    result = _history_outcome(workspace, ref, request.request_id)
+                    if (
+                        result.status == "uncertain"
+                        and _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+                        is not None
+                    ):
+                        result = dataclasses.replace(
+                            result, status="queued", explanation="another owner claimed the job first"
+                        )
+                    results[request.request_id] = result
+                    if result.status in {"applied", "refused"}:
+                        continue
+                    results[request_id] = dataclasses.replace(result, request_id=request_id)
+                    break
+                if observed:
+                    results[request.request_id] = observed[-1]
+                else:
+                    outcome = _history_outcome(workspace, ref, request.request_id)
+                    results[request.request_id] = outcome
+                    if outcome.status not in {"applied", "refused"}:
+                        results[request_id] = outcome
+                        break
+
+    if owner is None:
+        with _kernel.register_owner(
+            workspace, kind="cli", label="immediate job requests", allocation=None, advertised={}
+        ) as active:
+            process(active)
+    else:
+        process(owner)
+    return tuple(
+        results.get(
+            path.name.split(".")[1],
+            RequestOutcome(ref.job_id, path.name.split(".")[1], "uncertain", "no effect was observed"),
+        )
+        for ref, path in items
+    )
+
+
+def request_now(
+    workspace: "Workspace",
+    owner: RequestOwner,
+    ref: JobRef,
+    action: str,
+    reason: str,
+    *,
+    outcomes: list[RequestOutcome] | None = None,
+) -> str | None:
     """Post one request for a job and apply it now when the job is unowned (``job delete|seal|unseal``).
 
     A job a manager holds gets the request at its next boundary. Nothing is posted for a job that is not found.
@@ -435,32 +754,27 @@ def request_now(workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, actio
     :param ref: The job, as last observed.
     :param action: The request action.
     :param reason: The operator's reason.
+    :param outcomes: Append the immediate typed result when supplied.
     :return: ``None`` when the request took effect, otherwise why it did not (yet).
     """
 
     placement = ref.placement if ref.placement is not None else JobDefinition.from_path(ref.path / "job.json").placement
     current = _kernel.locate(workspace, ref.job_id, placement_hint=placement)
     if current is None:
+        if outcomes is not None:
+            outcomes.append(RequestOutcome(ref.job_id, "", "uncertain", "the job was not found"))
         return "the job was not found"
     path = _requests.post(
         workspace, action=action, job_id=ref.job_id, placement=placement, operator="cli", reason=reason
     )
-    request_id = path.name.split(".")[1]
-    if current.state == _kernel.OWNED:
+    (outcome,) = serve_requests(workspace, [(current, path)], owner=owner)
+    if outcomes is not None:
+        outcomes.append(outcome)
+    if outcome.status == "applied":
+        return None
+    if outcome.status == "queued" and outcome.explanation == "another owner holds the job":
         return "a manager holds the job; the request applies at its next boundary"
-    try:
-        if not serve(workspace, owner, current):
-            return "the job moved; the request waits for its owner"
-    except WorkflowError as exc:
-        return str(exc)
-    after = _kernel.locate(workspace, ref.job_id, placement_hint=placement)
-    if after is None:
-        return None if action == "delete" else "the job was not found"
-    doc = read_state_unowned(after.path / "state.json")[0]
-    for entry in reversed(doc.history_tail if doc is not None else ()):
-        if entry.get("request_id") == request_id:
-            return None if entry.get("event") == "request_applied" else str(entry.get("note"))
-    return "the request waits for the job's owner"
+    return outcome.explanation
 
 
 def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool = False) -> RemovalReport:
@@ -476,6 +790,8 @@ def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool =
     outcomes: list[RemovalOutcome] = []
     with _kernel.register_owner(workspace, kind="cli", label="job delete", allocation=None, advertised={}) as owner:
         for ref in refs:
-            refused = request_now(workspace, owner, ref, "delete", "job delete")
-            outcomes.append(RemovalOutcome(ref.job_key, ref.state, refused is None, refused))
+            observed: list[RequestOutcome] = []
+            reason = request_now(workspace, owner, ref, "delete", "job delete", outcomes=observed)
+            request = observed[0] if observed else None
+            outcomes.append(RemovalOutcome(ref.job_key, ref.state, reason is None, reason, request))
     return RemovalReport(tuple(outcomes))

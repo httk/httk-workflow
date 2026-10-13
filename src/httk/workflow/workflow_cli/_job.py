@@ -44,7 +44,6 @@ from ..introspection import (
     JOB_LIST_FORMAT,
     JOB_STATES,
     JobSelectorResolver,
-    claim_requirements,
     count_jobs,
     debug_job,
     describe_job,
@@ -53,9 +52,6 @@ from ..introspection import (
     job_events,
     job_placement,
     list_jobs,
-    manager_refusals,
-    read_job,
-    read_managers,
     read_state,
     render_events,
     render_job,
@@ -67,7 +63,7 @@ from ..introspection import (
 from ..introspection._reading import _jsonl
 from ..models import JOB_STATE_DIRECTORY, canonical_uuid, ensure_step_known, parse_job_key, placement_text
 from ..registry import WorkspaceBinding
-from ..removal import RemovalReport, remove_jobs, request_now
+from ..removal import RemovalReport, RequestOutcome, remove_jobs, request_now, serve_requests
 from ..scaffold import (
     DEFAULT_PLACEMENT,
     ScaffoldedJob,
@@ -558,23 +554,14 @@ def publish_job_requests(
     ensure_identity_key(selected)
     options = _request_options(action, priority=priority, step=step, force=force, destination=destination)
     _prevalidate(refs, action, step, force=force)
-    placements = [_ref_placement(ref) for ref in refs]
-    return [
-        (
-            ref,
-            _requests.post(
-                workspace,
-                action=action,
-                job_id=ref.job_id,
-                placement=placement,
-                operator=operator or selected.label,
-                reason=reason,
-                seed_path=selected.seed_path,
-                **options,
-            ),
-        )
-        for ref, placement in zip(refs, placements, strict=True)
-    ]
+    documents = []
+    for ref in refs:
+        document = _request_document(ref, action, operator or selected.label, reason, options)
+        if selected.seed_path is not None:
+            document = sign_document(document, seed_path=selected.seed_path)
+        _requests.operator_key(document)
+        documents.append(document)
+    return [(ref, _kernel.post_request(workspace, document)) for ref, document in zip(refs, documents, strict=True)]
 
 
 def _check_wait(wait: bool, timeout: float | None, actions: Sequence[str]) -> None:
@@ -867,39 +854,19 @@ def _resolve_request_identity(selector: str | None) -> OperatorIdentity:
 def _complete_job_requests(
     workspace: Workspace, published: list[tuple[JobRef, Path]], *, wait: bool, timeout: float | None
 ) -> int:
-    """Print the posted request files, warn about unserved jobs, and optionally wait for pauses."""
+    """Serve a bounded snapshot immediately, then optionally wait for queued pauses."""
 
-    for _, path in published:
-        print(path)
-    managers = read_managers(workspace)
-    served = [_warn_if_unserved(managers, ref) for ref, _ in published]
+    outcomes = serve_requests(workspace, published)
+    for outcome in outcomes:
+        state = f"; state={outcome.state}" if outcome.state is not None else ""
+        print(f"{outcome.job_id}\t{outcome.request_id}\t{outcome.status}\t{outcome.explanation}{state}")
+    if any(outcome.status in {"refused", "uncertain"} for outcome in outcomes):
+        return 1
     if not wait:
         return 0
-    if not all(served):
-        print("waiting is pointless until a manager starts", file=sys.stderr)
-        return 1
-    return _wait_for_pauses(workspace, published, timeout=timeout)
-
-
-def _warn_if_unserved(managers: Sequence[Any], ref: JobRef) -> bool:
-    """Warn when no live manager could claim the job, so its request would wait with no error.
-
-    The warning is advisory: the request stays valid until a manager starts.
-    """
-
-    job, _error = read_job(ref)
-    if job is None:
-        return True
-    requirements = claim_requirements(job)
-    if any(record.alive() and not manager_refusals(record, requirements) for record in managers):
-        return True
-    capabilities = ",".join(sorted(requirements.capabilities))
-    print(
-        f"no live manager currently serves claim pool {requirements.pool!r}"
-        f"{f' with capabilities {capabilities}' if capabilities else ''}; the request will wait until one starts",
-        file=sys.stderr,
-    )
-    return False
+    pending_ids = {outcome.request_id for outcome in outcomes if outcome.status == "queued"}
+    pending = [(ref, path) for ref, path in published if path.name.split(".")[1] in pending_ids]
+    return 0 if not pending else _wait_for_pauses(workspace, pending, timeout=timeout)
 
 
 def _pause_outcome(workspace: Workspace, ref: JobRef, request_id: str) -> tuple[bool, str] | None:
@@ -1008,22 +975,18 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     return 0
 
 
-def _queued(workspace: Workspace, ref: JobRef) -> bool:
-    """Whether a request that did not take effect waits for the owner now holding the job (``queued``)."""
-
-    current = _kernel.locate(workspace, ref.job_id, placement_hint=None)
-    return current is not None and current.state == _kernel.OWNED
-
-
-def _print_removal_report(workspace: Workspace, refs: Sequence[JobRef], report: RemovalReport) -> int:
+def _print_removal_report(refs: Sequence[JobRef], report: RemovalReport) -> int:
     """Print job removal outcomes and return 1 when one was refused (a queued delete is not refused)."""
 
     refused = False
     for ref, outcome in zip(refs, report.outcomes, strict=True):
         if outcome.removed:
             print(f"{outcome.job_key}\t{outcome.kind}\tremoved")
-        elif _queued(workspace, ref):
+        elif outcome.request is not None and outcome.request.status == "queued":
             print(f"{outcome.job_key}\t{outcome.kind}\tqueued\t{outcome.reason}")
+        elif outcome.request is not None and outcome.request.status == "uncertain":
+            refused = True
+            print(f"{outcome.job_key}\t{outcome.kind}\tuncertain\t{outcome.reason}")
         else:
             refused = True
             print(f"{outcome.job_key}\t{outcome.kind}\trefused\t{outcome.reason}")
@@ -1094,7 +1057,7 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
     if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
-    return _print_removal_report(workspace, refs, remove_jobs(workspace, refs))
+    return _print_removal_report(refs, remove_jobs(workspace, refs))
 
 
 def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str, done: str) -> int:
@@ -1111,14 +1074,18 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     failed = False
     with _kernel.register_owner(workspace, kind="cli", label=f"job {action}", allocation=None, advertised={}) as owner:
         for ref in refs:
-            reason = request_now(workspace, owner, ref, action, f"job {action}")
-            if reason is None:
+            observed: list[RequestOutcome] = []
+            reason = request_now(workspace, owner, ref, action, f"job {action}", outcomes=observed)
+            outcome = observed[0] if observed else None
+            if outcome is not None and outcome.status == "applied":
                 print(f"{ref.job_id}\t{done}")
-            elif _queued(workspace, ref):
-                print(f"{ref.job_id}\tqueued\t{reason}")
+            elif outcome is not None and outcome.status == "queued":
+                print(f"{ref.job_id}\tqueued\t{reason or outcome.explanation}")
             else:
                 failed = True
-                print(f"{ref.job_id}\trefused\t{reason}")
+                status = "uncertain" if outcome is None else outcome.status
+                explanation = reason if outcome is None else outcome.explanation
+                print(f"{ref.job_id}\t{status}\t{explanation}")
     return 1 if failed else 0
 
 

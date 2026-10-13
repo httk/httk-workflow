@@ -4,7 +4,7 @@ from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ..removal import remove_jobs
+from ..removal import remove_jobs, serve_requests
 from ..workflow_cli import (
     ensure_identity_key,
     launch_workspace_managers,
@@ -78,7 +78,12 @@ def request(view: WorkspaceView, action: str, job_ids: Sequence[str], reason: st
     workspace = _mutable_workspace(view)
     refs = [view.ref_for(job_id) for job_id in job_ids]
     published = publish_job_requests(workspace, refs, action=action, reason=reason)
-    return f"requested {action} for {len(published)} job(s)"
+    outcomes = serve_requests(workspace, published)
+    failed = [outcome for outcome in outcomes if outcome.status in {"refused", "uncertain"}]
+    if failed:
+        first = failed[0]
+        raise RuntimeError(f"{first.job_id} request {first.request_id} {first.status}: {first.explanation}")
+    return "; ".join(f"{item.job_id}: {item.status} ({item.explanation})" for item in outcomes)
 
 
 def start_managers(view: WorkspaceView, count: int, launcher: str | None = None) -> str:

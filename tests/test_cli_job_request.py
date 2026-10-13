@@ -18,6 +18,7 @@ from httk.core.identity import (
 
 import v3_helpers as v3
 from httk.workflow import TaskManager, Workspace, _kernel, _store
+from httk.workflow._state import read_state_unowned
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
@@ -60,6 +61,14 @@ def _requests(workspace: Workspace) -> list[dict[str, object]]:
     return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(workspace.control.glob("requests/*.json"))]
 
 
+def _applied(workspace: Workspace, job_id: str) -> list[dict[str, object]]:
+    ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
+    assert ref is not None
+    doc, _damage = read_state_unowned(ref.path / "state.json")
+    assert doc is not None
+    return [dict(entry) for entry in doc.history_tail if entry.get("event") in {"request_applied", "request_dropped"}]
+
+
 def _request_args(workspace_name: str, *job_ids: str, action: str = "pause") -> list[str]:
     return ["job", "request", action, "--workspace", workspace_name, "--reason", "test request", *job_ids]
 
@@ -70,11 +79,9 @@ def test_repeatable_job_ids_post_one_request_and_path_each(tmp_path: Path, capsy
 
     assert command(_request_args(workspace_name, *job_ids), _context(tmp_path)) == 0
     output = capsys.readouterr().out.splitlines()
-    assert len(output) == 2 and all(Path(line).is_file() for line in output)
-    requests = _requests(workspace)
-    assert {request["job_id"] for request in requests} == set(job_ids)
-    assert {request["format_version"] for request in requests} == {3}
-    assert all("expected_generation" not in request and "job_key" not in request for request in requests)
+    assert len(output) == 2 and all("\tapplied\t" in line for line in output)
+    assert {line.split("\t", 1)[0] for line in output} == set(job_ids)
+    assert not _requests(workspace)
 
 
 def test_job_request_accepts_tag_prefix_and_directory_selectors(tmp_path: Path, capsys) -> None:
@@ -83,12 +90,11 @@ def test_job_request_accepts_tag_prefix_and_directory_selectors(tmp_path: Path, 
     nested = _job(tmp_path, workspace, "nested", "jobs/nested/second")
 
     assert command(_request_args(workspace_name, "tagged"), _context(tmp_path)) == 0
-    assert [request["job_id"] for request in _requests(workspace)] == [tagged.job_id]
-    for path in workspace.control.glob("requests/*.json"):
-        path.unlink()
+    assert v3.find(workspace, tagged.job_id).state == "paused"
     assert command(_request_args(workspace_name, str(workspace.jobs), action="cancel"), _context(tmp_path)) == 0
     capsys.readouterr()
-    assert {request["job_id"] for request in _requests(workspace)} == {tagged.job_id, nested.job_id}
+    assert v3.find(workspace, tagged.job_id).state == "cancelled"
+    assert v3.find(workspace, nested.job_id).state == "cancelled"
 
 
 def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, capsys) -> None:
@@ -97,7 +103,7 @@ def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, caps
 
     assert command(["job", "request", "pause", "--reason", "default workspace", job_id], _context(tmp_path)) == 0
     capsys.readouterr()
-    assert [request["job_id"] for request in _requests(workspace)] == [job_id]
+    assert v3.find(workspace, job_id).state == "paused"
 
 
 @pytest.mark.parametrize(
@@ -124,12 +130,22 @@ def test_job_request_carries_the_action_options(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     job_id = _job(tmp_path, workspace, "options").job_id
 
-    for action, options in (("set_priority", ["--priority", "700"]), ("eject", ["--destination", "exchange/outbox"])):
-        assert command([*_request_args(workspace_name, job_id, action=action), *options], _context(tmp_path)) == 0
+    assert (
+        command(
+            [*_request_args(workspace_name, job_id, action="set_priority"), "--priority", "700"], _context(tmp_path)
+        )
+        == 0
+    )
+    assert (
+        command(
+            [*_request_args(workspace_name, job_id, action="eject"), "--destination", "relative/destination"],
+            _context(tmp_path),
+        )
+        == 1
+    )
     capsys.readouterr()
-    by_action = {request["action"]: request for request in _requests(workspace)}
-    assert by_action["set_priority"]["priority"] == 700
-    assert by_action["eject"]["destination"] == "exchange/outbox"
+    assert v3.find(workspace, job_id).priority == 700
+    assert not _requests(workspace)
 
 
 def test_the_removed_confirm_launches_ended_verb_is_refused(tmp_path: Path, capsys) -> None:
@@ -153,7 +169,10 @@ def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: 
     publish = ["job", "publish-requests", "--workspace", workspace_name, "--document", json.dumps(signed)]
     assert command(publish, _context(tmp_path)) == 0
     capsys.readouterr()
-    assert _requests(workspace) == [signed]
+    applied = _applied(workspace, ref.job_id)
+    assert len(applied) == 1 and applied[0]["request_id"] == signed["request_id"]
+    assert applied[0]["operator_key"] == signed["operator_key"]
+    assert not _requests(workspace)
 
 
 def _document(job_id: str, placement: str = "project/x") -> dict[str, object]:
@@ -183,6 +202,25 @@ def test_publish_requests_locates_all_jobs_before_posting_and_checks_signatures(
     forged = {**sign_document(documents[0], seed_path=identity_key_paths("tester")[0]), "reason": "changed"}
     assert command([*publish, "--document", json.dumps(forged)], _context(tmp_path)) == 2
     assert "signature" in capsys.readouterr().err
+    assert not _requests(workspace)
+
+
+def test_local_batch_validates_every_signature_before_posting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    refs = [_job(tmp_path, workspace, tag) for tag in ("batch-one", "batch-two")]
+    original = job_cli.sign_document
+    calls = 0
+
+    def tamper_second(document: dict[str, object], *, seed_path: Path) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        signed = original(document, seed_path=seed_path)
+        if calls == 2:
+            signed["reason"] = "tampered"
+        return signed
+
+    monkeypatch.setattr(job_cli, "sign_document", tamper_second)
+    assert command(_request_args(workspace_name, *(ref.job_id for ref in refs)), _context(tmp_path)) == 2
     assert not _requests(workspace)
 
 
@@ -228,10 +266,9 @@ def test_default_operator_identity_is_recorded_and_signs_request(tmp_path: Path)
     job_id = _job(tmp_path, workspace, "default").job_id
 
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
-    (request,) = _requests(workspace)
+    (request,) = _applied(workspace, job_id)
     assert request["operator"] == "Test User <tester@example.test>"
     assert request["operator_key"] == identity_public_key(identity_key_paths("tester")[0])
-    assert "signature" in request
 
 
 def test_configured_identity_without_key_fails_loudly(tmp_path: Path, capsys) -> None:
@@ -262,7 +299,7 @@ def test_named_operator_identity_selects_its_key(tmp_path: Path) -> None:
     job_id = _job(tmp_path, workspace, "named").job_id
 
     assert command(_request_args(workspace_name, job_id) + ["--operator", "bot"], _context(tmp_path)) == 0
-    (request,) = _requests(workspace)
+    (request,) = _applied(workspace, job_id)
     assert request["operator"] == "Build Bot <bot@example.test>"
     assert request["operator_key"] == identity_public_key(identity_key_paths("bot")[0])
 
@@ -293,7 +330,7 @@ def test_literal_operator_label_is_passed_through(tmp_path: Path) -> None:
 
     argv = _request_args(workspace_name, job_id) + ["--operator", "Ext Person <ext@x>"]
     assert command(argv, _context(tmp_path)) == 0
-    assert _requests(workspace)[0]["operator"] == "Ext Person <ext@x>"
+    assert _applied(workspace, job_id)[0]["operator"] == "Ext Person <ext@x>"
 
 
 def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: Path, monkeypatch) -> None:
@@ -303,9 +340,8 @@ def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: 
     job_id = _job(tmp_path, workspace, "literal-empty").job_id
 
     assert command(_request_args(workspace_name, job_id) + ["--operator", "Ext <e@x>"], _context(tmp_path)) == 0
-    (request,) = _requests(workspace)
-    assert request["operator"] == "Ext <e@x>"
-    assert "operator_key" not in request and "signature" not in request
+    assert _applied(workspace, job_id)[0]["operator"] == "Ext <e@x>"
+    assert "operator_key" not in _applied(workspace, job_id)[0]
 
 
 def test_wait_returns_zero_when_manager_pauses_jobs(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -317,7 +353,7 @@ def test_wait_returns_zero_when_manager_pauses_jobs(tmp_path: Path, capsys, monk
         assert command(_request_args(workspace_name, *job_ids) + ["--wait"], _context(tmp_path)) == 0
 
     output = capsys.readouterr().out
-    assert output.count(": paused") == 2
+    assert output.count("state=paused") == 2
 
 
 def test_wait_reports_terminal_state_and_exits_one(tmp_path: Path, capsys) -> None:
@@ -328,30 +364,33 @@ def test_wait_reports_terminal_state_and_exits_one(tmp_path: Path, capsys) -> No
         assert v3.find(workspace, job_id).state == "succeeded"
         assert command(_request_args(workspace_name, job_id) + ["--wait"], _context(tmp_path)) == 1
 
-    assert "succeeded (pause superseded)" in capsys.readouterr().out
+    assert "refused\tthe job is already succeeded" in capsys.readouterr().out
 
 
 def test_wait_without_live_manager_fails_after_publishing(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     job_id = _job(tmp_path, workspace, "unserved").job_id
 
-    assert command(_request_args(workspace_name, job_id) + ["--wait"], _context(tmp_path)) == 1
+    assert command(_request_args(workspace_name, job_id) + ["--wait"], _context(tmp_path)) == 0
     captured = capsys.readouterr()
-    assert "no live manager currently serves claim pool 'default'" in captured.err
-    assert "waiting is pointless until a manager starts" in captured.err
-    assert len(_requests(workspace)) == 1
+    assert not captured.err
+    assert "\tapplied\t" in captured.out and "state=paused" in captured.out
+    assert not _requests(workspace)
 
 
 def test_wait_timeout_names_pending_job_and_keeps_request(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    job_id = _job(tmp_path, workspace, "pending").job_id
+    ref = _job(tmp_path, workspace, "pending")
 
-    with TaskManager(workspace, heartbeat_interval=0.01):
-        argv = _request_args(workspace_name, job_id) + ["--wait", "--timeout", "0.01"]
+    with _kernel.register_owner(workspace, kind="manager", label="held", allocation=None, advertised={}) as owner:
+        owned = _kernel.claim(workspace, owner, ref)
+        assert owned is not None
+        argv = _request_args(workspace_name, ref.job_id) + ["--wait", "--timeout", "0.01"]
         assert command(argv, _context(tmp_path)) == 1
+        owned.give_back()
 
     captured = capsys.readouterr()
-    assert "timeout" in captured.out and job_id in captured.out
+    assert "timeout" in captured.out and ref.job_id in captured.out
     assert _requests(workspace)
 
 

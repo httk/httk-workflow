@@ -18,7 +18,7 @@ from httk.core.cli import CLIContext
 
 import v3_helpers as v3
 from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace, _kernel, _store
+from httk.workflow import Workspace, _kernel, _store
 from httk.workflow.gc import collect_garbage
 from httk.workflow.workflow_cli import command
 
@@ -47,15 +47,15 @@ def test_run_leaf_capability_claims_a_gated_job(tmp_path: Path, context: CLICont
     assert v3.find(workspace, ref.job_id).state == "succeeded"
 
 
-def test_job_request_warns_when_no_live_manager_serves_the_pool(tmp_path: Path, context: CLIContext, capsys) -> None:
+def test_job_request_applies_without_a_manager_serving_the_pool(tmp_path: Path, context: CLIContext, capsys) -> None:
     workspace, installed, name = _setup(tmp_path, context, "orphan-ws")
     ref = v3.submit(workspace, installed, {"start": "succeed"}, pool="vasp")
 
     assert command(_request(name, ref.job_id, "cancel"), context) == 0
-    assert "no live manager currently serves claim pool 'vasp'" in capsys.readouterr().err
-    with TaskManager(workspace, heartbeat_interval=0.01, pools=["vasp"]):
-        assert command(_request(name, ref.job_id, "cancel"), context) == 0
-        assert "no live manager currently serves" not in capsys.readouterr().err
+    output = capsys.readouterr()
+    assert "\tapplied\t" in output.out and output.err == ""
+    assert v3.find(workspace, ref.job_id).state == "cancelled"
+    assert not list(workspace.control.glob("requests/*.json"))
 
 
 def _failed_with_steps(workspace: Workspace, installed: _store.Installed) -> _kernel.JobRef:
@@ -91,6 +91,8 @@ def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(
     workspace, installed, name = _setup(tmp_path, context, "unstarted-ws")
     ref = v3.submit(workspace, installed, {"start": "succeed"})
 
+    assert command(_request(name, ref.job_id, "pause"), context) == 0
+    capsys.readouterr()
     assert command(_request(name, ref.job_id, "override_step", "--step", "whatever"), context) == 0
     assert "could not be pre-validated" in capsys.readouterr().err
 
