@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -451,6 +452,83 @@ def test_cancelling_a_running_job_stops_it_then_proves_its_process_is_gone(
         "to": "cancelled",
     }
     assert any("cancelling attempt" in record.getMessage() for record in caplog.records)
+
+
+def test_stale_daemon_cancel_does_not_stop_a_running_attempt(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    job_id = _job(workspace, tmp_path, _SLEEPING, tag="stale-daemon-cancel")
+
+    with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=5.0) as manager:
+        local = _drive_until_running(manager)
+        name = str(uuid.uuid4())
+        placement = local.owned.placement()
+        with cli_owner(workspace) as owner:
+            _kernel.claim_exchange_name(workspace, owner, name, job_id, placement, nonce="nonce-b")
+        stale = _requests.post(
+            workspace,
+            action="cancel",
+            job_id=job_id,
+            placement=placement,
+            operator=f"daemon:{name}:nonce-a",
+            reason="stale adoption",
+        )
+        stale_id = _requests.parse(stale).request_id
+
+        for _ in range(5):
+            manager.tick()
+        assert local.process.poll() is None
+        assert local.cancel is None
+
+        current = _requests.post(
+            workspace,
+            action="cancel",
+            job_id=job_id,
+            placement=placement,
+            operator=f"daemon:{name}:nonce-b",
+            reason="current adoption",
+        )
+        current_id = _requests.parse(current).request_id
+        _drive_until(workspace, manager, job_id, {"cancelled"})
+
+    history = _doc(workspace, job_id).history_tail
+    dropped = next(entry for entry in history if entry.get("event") == "request_dropped")
+    applied = next(entry for entry in history if entry.get("event") == "request_applied")
+    assert dropped["request_id"] == stale_id and "adoption changed" in str(dropped["note"])
+    assert applied["request_id"] == current_id
+
+
+def test_pending_cancel_ignores_stale_daemon_attribution(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    job_id = _job(workspace, tmp_path, _SLEEPING, tag="pending-daemon-cancel", pool="elsewhere")
+    ref = find(workspace, job_id)
+    placement = ref.placement
+    assert placement is not None
+    name = str(uuid.uuid4())
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager, cli_owner(workspace) as owner:
+        owned = _kernel.claim(workspace, owner, ref)
+        assert owned is not None
+        _kernel.claim_exchange_name(workspace, owner, name, job_id, placement, nonce="nonce-b")
+        _requests.post(
+            workspace,
+            action="cancel",
+            job_id=job_id,
+            placement=placement,
+            operator=f"daemon:{name}:nonce-a",
+            reason="stale adoption",
+        )
+        assert manager._pending_cancel(owned) is None
+
+        current = _requests.post(
+            workspace,
+            action="cancel",
+            job_id=job_id,
+            placement=placement,
+            operator=f"daemon:{name}:nonce-b",
+            reason="current adoption",
+        )
+        assert manager._pending_cancel(owned) == _requests.parse(current)
+        owned.give_back()
 
 
 def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(

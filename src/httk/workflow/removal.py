@@ -34,6 +34,7 @@ __all__ = [
     "RemovalReport",
     "RequestOutcome",
     "apply_requests",
+    "daemon_attribution_refusal",
     "refusal",
     "release",
     "remove_jobs",
@@ -153,6 +154,37 @@ def release(owned: OwnedJob, doc: StateDoc, target: Release) -> JobRef:
     return ref
 
 
+def daemon_attribution_refusal(
+    workspace: _kernel.KernelWorkspace, job_id: str, placement: PurePosixPath, request: _requests.Request
+) -> str | None:
+    """Return why a ``daemon:`` request no longer holds for the exchange adoption it was authorized for.
+
+    Every owner applies this before any effect of a daemon request, including stopping a running attempt.
+
+    :param workspace: The workspace.
+    :param job_id: The job's UUID.
+    :param placement: The job's placement.
+    :param request: The request.
+    :return: Why the request must not apply, or ``None`` (always for requests of other operators).
+    """
+
+    operator = request.document["operator"]
+    if isinstance(operator, str) and operator.startswith("daemon:"):
+        attribution = operator.split(":", 2)
+        if len(attribution) != 3 or not attribution[2]:
+            return "the daemon request carries malformed exchange adoption attribution"
+        try:
+            exchange_name = canonical_uuid(attribution[1], "daemon exchange name")
+        except FormatError:
+            return "the daemon request carries malformed exchange adoption attribution"
+        if exchange_name != attribution[1]:
+            return "the daemon request carries malformed exchange adoption attribution"
+        expected = (job_id, placement, attribution[2])
+        if _kernel.exchange_index(workspace, exchange_name) != expected:
+            return "the exchange adoption changed after this daemon request was authorized"
+    return None
+
+
 def refusal(
     workspace: _kernel.KernelWorkspace,
     job: JobDefinition,
@@ -169,20 +201,9 @@ def refusal(
     :return: Why the request must not apply, or ``None``.
     """
 
-    operator = request.document["operator"]
-    if isinstance(operator, str) and operator.startswith("daemon:"):
-        attribution = operator.split(":", 2)
-        if len(attribution) != 3 or not attribution[2]:
-            return "the daemon request carries malformed exchange adoption attribution"
-        try:
-            exchange_name = canonical_uuid(attribution[1], "daemon exchange name")
-        except FormatError:
-            return "the daemon request carries malformed exchange adoption attribution"
-        if exchange_name != attribution[1]:
-            return "the daemon request carries malformed exchange adoption attribution"
-        expected = (job.id, job.placement, attribution[2])
-        if _kernel.exchange_index(workspace, exchange_name) != expected:
-            return "the exchange adoption changed after this daemon request was authorized"
+    attribution_refusal = daemon_attribution_refusal(workspace, job.id, job.placement, request)
+    if attribution_refusal is not None:
+        return attribution_refusal
     if request.action in ("continue", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
     if request.action == "eject":

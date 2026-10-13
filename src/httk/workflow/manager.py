@@ -1193,9 +1193,9 @@ class TaskManager:
     def _requests_pass(self) -> bool:
         """Serve the request files of one bounded listing (plan §7.5).
 
-        A ``cancel`` of an attempt this manager runs stops the attempt now; every other request of a running
-        job waits for its boundary. A job found unowned at the request's placement is claimed, reconciled
-        (which applies its requests) and released.
+        A ``cancel`` of an attempt this manager runs stops the attempt now, unless it is a daemon request whose
+        exchange adoption changed; every other request of a running job waits for its boundary. A job found
+        unowned at the request's placement is claimed, reconciled (which applies its requests) and released.
         """
 
         directory = self.workspace.control / "requests"
@@ -1217,7 +1217,18 @@ class TaskManager:
                 continue
             local = running.get(job_id)
             if local is not None:
-                cancel = next((request for request in requests if request.action == "cancel"), None)
+                cancel = next(
+                    (
+                        request
+                        for request in requests
+                        if request.action == "cancel"
+                        and removal.daemon_attribution_refusal(
+                            self.workspace, local.owned.job_id, local.owned.placement(), request
+                        )
+                        is None
+                    ),
+                    None,
+                )
                 if cancel is not None and local.cancel is None:
                     self._cancel_attempt(local, cancel)
                     changed = True
@@ -1254,7 +1265,12 @@ class TaskManager:
 
         for path in owned.request_files():
             request = self._parse_request(path)
-            if request is not None and request.job_id == owned.job_id and request.action == "cancel":
+            if (
+                request is not None
+                and request.job_id == owned.job_id
+                and request.action == "cancel"
+                and removal.daemon_attribution_refusal(self.workspace, owned.job_id, owned.placement(), request) is None
+            ):
                 return request
         return None
 

@@ -656,13 +656,18 @@ operation fields are rejected. The operations are `health`, and:
 
 Job target resolution is frozen in the protected ledger with the exact internal
 request document and digest. An exchange-origin target also pins its observed
-adoption nonce. One newly won execution decision names the winning instance
-and daemon owner; only that winner may publish the internal request. Retries
-never resolve a different target or repost after a crash. When the winner
-closed, was recovered or was declared dead with its exact request still
-pending, a retry by a later daemon serves that published request once, as any
-manager would. Stored definitive
-results replay; an exact pending request reports queued; matching request
+adoption nonce. A frozen target carries no authority of its own: before a new
+execution decision and again before publication, the daemon rechecks that the
+pinned adoption is still indexed and still records the signing key, and
+otherwise refuses the command (`adoption_changed` or `not_owner`). Managers
+apply the same pin before acting on a delayed `cancel`, so a cancel authorized
+for one adoption never stops an attempt of a later one. One newly won
+execution decision names the winning instance and daemon owner; only that
+winner may publish the internal request. Retries never resolve a different
+target or repost after a crash. When the winner closed, was recovered or was
+declared dead with its exact request still pending, a retry by a later daemon
+serves that published request once, as any manager would, under its adoption
+pin. Stored definitive results replay; an exact pending request reports queued; matching request
 state history can establish a later result. Without such evidence the outcome
 is uncertain and grants no permission to take over or re-execute. Fresh signed
 status observations may later supersede uncertainty.

@@ -297,6 +297,17 @@ class JobExecutor:
             target.adoption_nonce,
         )
 
+    def _owner_changed(self, target: _Target) -> bool:
+        return (
+            _kernel.exchange_owner_key(
+                self.workspace,
+                target.exchange_name,
+                job_id=target.job_id,
+                nonce=target.adoption_nonce,
+            )
+            != target.operator_key
+        )
+
     def _pre_execution(self, target: _Target) -> None:
         """Recheck mutable policy and recorded runner steps immediately before a new decision."""
 
@@ -523,6 +534,15 @@ class JobExecutor:
                 job_id=target.job_id,
                 internal_request_id=target.internal_request_id,
             )
+        if self._owner_changed(target):
+            return self._response(
+                request,
+                "refused",
+                "not_owner",
+                "only the key that submitted the job through the exchange may control it",
+                job_id=target.job_id,
+                internal_request_id=target.internal_request_id,
+            )
         self.owner.check_alive()
         won, _decision = self.ledger.decide_execution(entry, self.ledger.nonce, self.owner.owner_id)
         if not won:
@@ -535,6 +555,18 @@ class JobExecutor:
                     "refused",
                     "adoption_changed",
                     "the exchange adoption changed immediately before publication",
+                    job_id=target.job_id,
+                    internal_request_id=target.internal_request_id,
+                ),
+            )
+        if self._owner_changed(target):
+            return self._settle(
+                entry,
+                self._response(
+                    request,
+                    "refused",
+                    "not_owner",
+                    "only the key that submitted the job through the exchange may control it",
                     job_id=target.job_id,
                     internal_request_id=target.internal_request_id,
                 ),

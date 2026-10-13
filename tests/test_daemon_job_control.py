@@ -278,6 +278,61 @@ def test_exchange_index_without_nonce_cannot_authorize_control(tmp_path: Path) -
     ledger.close()
 
 
+def test_frozen_target_is_refused_when_the_root_has_no_recorded_owner(tmp_path: Path) -> None:
+    workspace, ref, state = _setup(tmp_path, adopted=False)
+    exchange_name = str(uuid4())
+    ref = _mark_exchange(workspace, ref, exchange_name)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    state_before = (ref.path / "state.json").read_bytes()
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="freeze target", allocation=None, advertised={}
+    ) as owner:
+        executor = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST)
+        executor._target(entry)
+        index_path = workspace.control / "exchange-jobs" / exchange_name / "index.json"
+        index = json.loads(index_path.read_bytes())
+        index.pop("owner_key")
+        index_path.write_bytes(json.dumps(index, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        response = executor.execute(entry)
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert not list((workspace.control / "requests").glob("*.json"))
+    assert (ref.path / "state.json").read_bytes() == state_before
+    assert ledger.execution_decision(entry) is None
+    ledger.close()
+
+
+def test_owner_change_after_decision_is_refused_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, ref, state = _setup(tmp_path, adopted=False)
+    exchange_name = str(uuid4())
+    ref = _mark_exchange(workspace, ref, exchange_name)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id))
+    state_before = (ref.path / "state.json").read_bytes()
+    real_decide = ledger.decide_execution
+
+    def decide_then_drop_owner(*args, **kwargs):
+        result = real_decide(*args, **kwargs)
+        index_path = workspace.control / "exchange-jobs" / exchange_name / "index.json"
+        index = json.loads(index_path.read_bytes())
+        index.pop("owner_key")
+        index_path.write_bytes(json.dumps(index, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        return result
+
+    monkeypatch.setattr(ledger, "decide_execution", decide_then_drop_owner)
+    with _kernel.register_owner(
+        workspace, kind="daemon", label="owner change", allocation=None, advertised={}
+    ) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    assert (response.outcome, response.reason) == ("refused", "not_owner")
+    assert not list((workspace.control / "requests").glob("*.json"))
+    assert (ref.path / "state.json").read_bytes() == state_before
+    assert ledger.execution_result(entry) is not None
+    ledger.close()
+
+
 def test_legacy_plain_daemon_target_without_adoption_fails_decode(tmp_path: Path) -> None:
     workspace, ref, state = _setup(tmp_path)
     ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
