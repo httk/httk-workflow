@@ -2,10 +2,13 @@
 
 import argparse
 import fcntl
+import json
 import os
 import re
 import runpy
+import socket
 import stat
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,7 +35,17 @@ _OPERATOR_LIMIT = 512
 _OPERATOR_BYTES = 256 * 1024
 # The broker's home and cache lie on its private /tmp: the host view, including the passwd home, is read-only.
 _BROKER_ENVIRONMENT = {"HOME": "/tmp/home", "XDG_CACHE_HOME": "/tmp/home/.cache", "TMPDIR": "/tmp"}
-_BROKER_UNSET = ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME")
+_BROKER_UNSET = ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HTTK_CONFIG_HOME")
+_RESERVED_SANDBOX_PATHS = tuple(
+    Path(path)
+    for path in (
+        _HOST_STATE_DESTINATION,
+        _HOST_DAEMON_DESTINATION,
+        _HOST_EXCHANGE_DESTINATION,
+        _HOST_POLICY_DESTINATION,
+        _FIXED_ENVIRONMENT["HOME"],
+    )
+)
 
 
 def _operator_environment(environ: Mapping[str, str]) -> dict[str, str]:
@@ -76,6 +89,20 @@ def _is_within(path: Path, roots: tuple[Path, ...]) -> bool:
 
 def _overlap(left: Path, right: Path) -> bool:
     return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _check_reserved_sandbox_paths(workspace: Path, config_home: Path) -> None:
+    """Refuse workspace and operator paths that overlap private sandbox destinations.
+
+    :param workspace: The resolved workspace root.
+    :param config_home: The resolved operator configuration directory.
+    :raises ValueError: If either path overlaps a sandbox service destination.
+    """
+
+    for label, path in (("workspace", workspace), ("HTTK_CONFIG_HOME", config_home)):
+        reserved = next((candidate for candidate in _RESERVED_SANDBOX_PATHS if _overlap(path, candidate)), None)
+        if reserved is not None:
+            raise ValueError(f"{label} overlaps reserved daemon sandbox path {reserved}")
 
 
 def _check_protected_file(path: Path, mutable_roots: tuple[Path, ...] = ()) -> os.stat_result:
@@ -155,9 +182,26 @@ def _check_command(path: Path, mutable_roots: tuple[Path, ...]) -> None:
 
 
 def _check_bwrap(path: Path) -> bool:
-    """Check the Bubblewrap options from its help text; return whether it can block nested user namespaces."""
+    """Check common Bubblewrap confinement plus the daemon's execution identity channel."""
 
-    return cast(bool, _SANDBOX["check_bwrap"](path, environment=_FIXED_ENVIRONMENT))
+    block_userns = cast(bool, _SANDBOX["check_bwrap"](path, environment=_FIXED_ENVIRONMENT))
+    try:
+        result = subprocess.run(
+            [str(path), "--help"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=_FIXED_ENVIRONMENT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Bubblewrap daemon feature check failed") from exc
+    if result.returncode != 0 or "--info-fd" not in result.stdout + result.stderr:
+        raise ValueError("Bubblewrap lacks required daemon confinement feature: --info-fd")
+    if "--as-pid-1" not in result.stdout + result.stderr:
+        raise ValueError("Bubblewrap lacks required daemon confinement feature: --as-pid-1")
+    return block_userns
 
 
 def _policy_snapshot(data: bytes) -> int:
@@ -178,6 +222,58 @@ def _policy_snapshot(data: bytes) -> int:
         raise
 
 
+def _host_identity_snapshot() -> int:
+    """Create a sealed, read-only descriptor with the host identity captured before confinement."""
+
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise ValueError("cannot read the host boot identity") from exc
+    if not boot_id or len(boot_id) > 64:
+        raise ValueError("host boot identity is malformed")
+    data = json.dumps({"hostname": socket.gethostname(), "boot_id": boot_id}, separators=(",", ":")).encode()
+    descriptor = _memfd_create("httk-daemon-host-identity")
+    try:
+        os.fchmod(descriptor, 0o400)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise OSError("host identity snapshot write made no progress")
+            offset += written
+        fcntl.fcntl(descriptor, _F_ADD_SEALS, _SEALS)
+        readonly = os.open(f"/proc/self/fd/{descriptor}", os.O_RDONLY | os.O_CLOEXEC)
+        os.close(descriptor)
+        return readonly
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _execution_scope_snapshot() -> tuple[int, int]:
+    """Create separate Bubblewrap-writer and service-reader descriptors for the scope packet."""
+
+    writer = _memfd_create("httk-daemon-execution-scope")
+    try:
+        os.fchmod(writer, 0o600)
+        reader = os.open(f"/proc/self/fd/{writer}", os.O_RDONLY | os.O_CLOEXEC)
+        return writer, reader
+    except BaseException:
+        os.close(writer)
+        raise
+
+
+def _host_config_home() -> Path:
+    override = os.environ.get("HTTK_CONFIG_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))).expanduser()
+    return (base / "httk").resolve()
+
+
 def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
     argv = [
         str(policy.bwrap),
@@ -193,6 +289,7 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
         "ALL",
         "--new-session",
         "--die-with-parent",
+        "--as-pid-1",
         "--clearenv",
     ]
     environment = dict(_FIXED_ENVIRONMENT) | _operator_environment(os.environ) | _BROKER_ENVIRONMENT
@@ -200,6 +297,7 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
         environment.pop(name, None)
     if policy.slurm_conf is not None:
         environment["SLURM_CONF"] = str(policy.slurm_conf)
+    environment["HTTK_CONFIG_HOME"] = str(_host_config_home())
     for name, value in environment.items():
         argv += ["--setenv", name, value]
     # Recursive, so host submounts (/software, /etc, the munge socket) come in read-only as well.
@@ -208,7 +306,14 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
     return argv
 
 
-def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: Path) -> list[str]:
+def _inside_command(
+    arguments: argparse.Namespace,
+    policy: Any,
+    policy_source: Path,
+    *,
+    scope_fd: int,
+    host_identity_fd: int,
+) -> list[str]:
     result = [
         str(policy.python),
         "-I",
@@ -218,6 +323,10 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
         _HOST_POLICY_DESTINATION,
         "--policy-source",
         str(policy_source),
+        "--execution-scope-fd",
+        str(scope_fd),
+        "--host-identity-fd",
+        str(host_identity_fd),
     ]
     if arguments.check:
         result.append("--check")
@@ -229,6 +338,11 @@ def _inside_command(arguments: argparse.Namespace, policy: Any, policy_source: P
 def _prepare_sandbox(
     arguments: argparse.Namespace, policy: Any, policy_data: bytes, policy_source: Path
 ) -> _PreparedSandbox:
+    workspace = _resolve_declared_path(policy.workspace, strict=False)
+    if workspace in (Path("/"), Path("/tmp")):
+        raise ValueError(f"daemon workspace may not be rooted at {workspace}")
+    config_home = _host_config_home()
+    _check_reserved_sandbox_paths(workspace, config_home)
     mutable_roots = (policy.workspace,)
     resolved_mutable = _mutable_roots(policy)
     source = _source_path()
@@ -255,34 +369,127 @@ def _prepare_sandbox(
     descriptors: list[int] = []
     argv = _base_bwrap_argv(policy, block_userns=block_userns)
     try:
-        # Two writable binds, each from a no-follow descriptor: the exchange and the broker directory (the ledger).
-        # The daemon directory is bound read-only for the seed, the active pointer and the Slurm output.
-        for source_path, destination in (
-            (policy.exchange, _HOST_EXCHANGE_DESTINATION),
-            (policy.broker, _HOST_STATE_DESTINATION),
-        ):
-            try:
-                descriptor = _open_directory_nofollow(source_path)
-            except OSError as exc:
-                raise ValueError(
-                    f"cannot open {source_path} as a real directory ({exc.strerror}); "
-                    "the daemon serves the workspace's exchange, which 'httk workspace exchange enable' creates"
-                ) from exc
-            descriptors.append(descriptor)
-            argv += ["--dir", destination, "--bind-fd", str(descriptor), destination]
         try:
-            daemon_descriptor = _open_directory_nofollow(policy.daemon)
+            workspace_descriptor = _open_directory_nofollow(policy.workspace)
+        except OSError as exc:
+            raise ValueError(f"cannot open {policy.workspace} as a real workspace directory ({exc.strerror})") from exc
+        descriptors.append(workspace_descriptor)
+        workspace = _resolve_declared_path(policy.workspace, strict=True)
+        if workspace in (Path("/"), Path("/tmp"), Path("/tmp/home")):
+            raise ValueError(f"daemon workspace may not be rooted at {workspace}")
+
+        # Private /tmp hides host workspaces beneath /tmp, so recreate only its parent chain before the bind.
+        if workspace.is_relative_to(Path("/tmp")):
+            parts = workspace.parent.parts[2:]
+            parent = Path("/tmp")
+            for part in parts:
+                parent /= part
+                argv += ["--dir", str(parent)]
+            argv += ["--dir", str(workspace)]
+        argv += ["--ro-bind-fd", str(workspace_descriptor), str(workspace)]
+
+        def bind_workspace_directory(relative: str, destination: str | None = None, *, readonly: bool = False) -> int:
+            parts = Path(relative).parts
+            current = workspace_descriptor
+            owned: list[int] = []
+            try:
+                for part in parts:
+                    current = os.open(
+                        part,
+                        _SANDBOX["O_PATH"] | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=current,
+                    )
+                    owned.append(current)
+                descriptor = current
+                descriptors.append(descriptor)
+            except BaseException:
+                for opened in owned:
+                    os.close(opened)
+                raise
+            for opened in owned[:-1]:
+                os.close(opened)
+            option = "--ro-bind-fd" if readonly else "--bind-fd"
+            target = workspace / relative
+            argv.extend([option, str(descriptor), str(target)])
+            if destination is not None:
+                argv.extend(["--dir", str(destination), option, str(descriptor), str(destination)])
+            return descriptor
+
+        try:
+            bind_workspace_directory("exchange", _HOST_EXCHANGE_DESTINATION)
         except OSError as exc:
             raise ValueError(
-                f"cannot open {policy.daemon} as a real directory ({exc.strerror}); run 'httk workspace daemon init'"
+                f"cannot open {policy.exchange} as a real directory ({exc.strerror}); "
+                "the daemon serves the workspace's exchange, which 'httk workspace exchange enable' creates"
             ) from exc
-        descriptors.append(daemon_descriptor)
-        argv += ["--dir", _HOST_DAEMON_DESTINATION, "--ro-bind-fd", str(daemon_descriptor), _HOST_DAEMON_DESTINATION]
+        bind_workspace_directory("jobs")
+        # Keep the private daemon tree read-only, then overlay only its broker ledger directory writable below.
+        bind_workspace_directory(".httk-workspace/daemon", _HOST_DAEMON_DESTINATION, readonly=True)
+        control_paths = (
+            ".httk-workspace/owners",
+            ".httk-workspace/requests",
+            ".httk-workspace/tmp",
+            ".httk-workspace/quarantine",
+            ".httk-workspace/exchange-jobs",
+            ".httk-workspace/daemon/broker",
+        )
+        for relative in control_paths:
+            destination = _HOST_STATE_DESTINATION if relative.endswith("/broker") else None
+            bind_workspace_directory(relative, destination)
+
+        writable_paths = [workspace / relative for relative in ("jobs", *control_paths, "exchange")]
+        if any(_overlap(config_home, path) for path in writable_paths):
+            raise ValueError("HTTK_CONFIG_HOME overlaps a daemon writable workspace directory")
+        if config_home == Path("/tmp"):
+            raise ValueError("HTTK_CONFIG_HOME may not be /tmp inside the daemon sandbox")
+        if config_home.is_relative_to(Path("/tmp")) and config_home.exists():
+            if not config_home.is_relative_to(workspace):
+                config_parent = Path("/tmp")
+                for part in config_home.parent.parts[2:]:
+                    config_parent /= part
+                    argv += ["--dir", str(config_parent)]
+                argv += ["--dir", str(config_home)]
+            try:
+                config_fd = _open_directory_nofollow(config_home)
+            except OSError as exc:
+                raise ValueError(f"cannot open HTTK_CONFIG_HOME as a real directory ({exc.strerror})") from exc
+            descriptors.append(config_fd)
+            argv += ["--ro-bind-fd", str(config_fd), str(config_home)]
+
+        if workspace.is_relative_to(Path("/tmp")):
+            project_metadata = next(
+                (
+                    candidate / "httk_project"
+                    for candidate in (workspace.parent, *workspace.parent.parents)
+                    if (candidate / "httk_project").is_dir()
+                ),
+                None,
+            )
+            if project_metadata is not None and not project_metadata.is_relative_to(workspace):
+                argv += ["--dir", str(project_metadata)]
+                try:
+                    project_fd = _open_directory_nofollow(project_metadata)
+                except OSError as exc:
+                    raise ValueError(f"cannot open enclosing httk_project metadata ({exc.strerror})") from exc
+                descriptors.append(project_fd)
+                argv += ["--ro-bind-fd", str(project_fd), str(project_metadata)]
+
         policy_fd = _policy_snapshot(policy_data)
         descriptors.append(policy_fd)
         argv += ["--ro-bind-data", str(policy_fd), _HOST_POLICY_DESTINATION]
+        scope_writer_fd, scope_reader_fd = _execution_scope_snapshot()
+        descriptors.extend((scope_writer_fd, scope_reader_fd))
+        os.set_inheritable(scope_writer_fd, True)
+        os.set_inheritable(scope_reader_fd, True)
+        identity_fd = _host_identity_snapshot()
+        descriptors.append(identity_fd)
+        os.set_inheritable(identity_fd, True)
+        argv += ["--info-fd", str(scope_writer_fd)]
         argv += ["--chdir", "/"]
-        argv += ["--", *_inside_command(arguments, policy, policy_source)]
+        argv += [
+            "--",
+            *_inside_command(arguments, policy, policy_source, scope_fd=scope_reader_fd, host_identity_fd=identity_fd),
+        ]
         return _PreparedSandbox(argv, tuple(descriptors))
     except BaseException:
         for descriptor in descriptors:

@@ -194,10 +194,12 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(
     assert (layout.exchange / "daemon.json").stat().st_mode & 0o777 == 0o644
     assert endpoint == {
         "format": "httk-workspace-daemon",
-        "format_version": 1,
+        "format_version": 2,
+        "protocol_version": 5,
         "workspace_id": layout.workspace.workspace_id,
         "enrollment_id": policy.enrollment_id,
         "daemon_public_key": response_public_key(response_seed_path(policy.daemon)),
+        "configuration_digest": read_active_snapshot(policy.daemon)[1],
         "configurations": {name: policy.configuration_digest(name) for name in ("small", "large")},
         "request_max_age": 3600,
     }
@@ -1122,15 +1124,18 @@ def test_sacct_is_optional_discovered_at_initialize_and_kept_or_configured_later
     layout = _layout(tmp_path)
     policy = load_policy(_initialize(layout, "small"))
     assert policy.sacct is None and "sacct" not in _daemon_policy.policy_document(policy)
-    endpoint = (layout.exchange / "daemon.json").read_bytes()
+    endpoint = json.loads((layout.exchange / "daemon.json").read_bytes())
 
     sacct = _executable(layout.broker / "sacct")
     assert load_policy(_activate(layout)).sacct is None
     _configure(layout, ("set", f"sacct={sacct}"))
     given = load_policy(_activate(layout))
     assert given.sacct == sacct
-    # Reporting only: the approved configuration digests the client pins do not change.
-    assert (layout.exchange / "daemon.json").read_bytes() == endpoint
+    # The launcher catalog stays stable while the active whole-policy digest changes.
+    current_endpoint = json.loads((layout.exchange / "daemon.json").read_bytes())
+    assert current_endpoint["configurations"] == endpoint["configurations"]
+    assert current_endpoint["configuration_digest"] == read_active_snapshot(policy.daemon)[1]
+    assert current_endpoint["configuration_digest"] != endpoint["configuration_digest"]
     with pytest.raises(ValueError, match="sacct"):
         _configure(layout, ("set", f"sacct={tmp_path / 'absent/sacct'}"))
     _configure(layout, ("set", "sacct="))

@@ -7,7 +7,6 @@ import os
 import shutil
 import threading
 import time
-import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -18,9 +17,7 @@ from httk.core.cli import CLIContext
 from conftest import configure_identity, register_ws
 from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, _requests, removal
 from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest
-from httk.workflow._daemon_auth import sign_request
 from httk.workflow._daemon_client import Endpoint, read_passive_status
-from httk.workflow._daemon_protocol import Request, decode_response
 from httk.workflow._exchange import (
     EXCHANGE_SUBDIRECTORIES,
     ExchangeService,
@@ -449,264 +446,19 @@ def test_a_return_that_rolled_back_waits_out_a_doubling_backoff(tmp_path: Path) 
 # -- job control -------------------------------------------------------------------------------------------------------
 
 
-def _job_action(
-    ws: Workspace,
-    operation: str,
-    client_id: object,
-    seed: Path | None,
-    *,
-    now: int | None = None,
-    request_id: str | None = None,
-) -> Request:
-    """Publish a client's job action into ``exchange/requests``; *seed* ``None`` leaves it unsigned."""
-
-    request = Request(
-        request_id or uuid.uuid4().hex,
-        ws.workspace_id,
-        operation,
-        enrollment_id=ENROLLMENT_ID,
-        job=str(client_id),
-    )
-    if seed is not None:
-        request = sign_request(request, seed_path=seed, now=now)
-    from httk.workflow._daemon_protocol import encode_request
-
-    (exchange_directory(ws) / "requests" / f"{request.request_id}.json").write_bytes(encode_request(request))
-    return request
-
-
-def _response(ws: Workspace, request: Request) -> tuple[str, str | None]:
-    response = decode_response((exchange_directory(ws) / "responses" / f"{request.request_id}.json").read_bytes())
-    assert response.signature is None and response.operator_key is None
-    return response.outcome, response.reason
-
-
-@pytest.fixture
-def control(tmp_path: Path) -> tuple[Workspace, list[dict[str, object]], Path]:
+def test_managers_leave_command_mailboxes_and_retired_authorization_setting_alone(tmp_path: Path) -> None:
     ws = _server(tmp_path / "ws")
-    seed = _seed(tmp_path, 1)
-    ws.set_setting(_exchange.AUTHORIZED_KEYS_SETTING, f"{_key(_seed(seed.parent, 3))}, {_key(seed)}")
-    jobs = _send(ws)
-    _pass(ws)
-    return ws, jobs, seed
-
-
-def test_a_signed_cancel_job_cancels_the_job(control: tuple[Workspace, list[dict[str, object]], Path]) -> None:
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    request = _job_action(ws, "cancel_job", jobs[0]["id"], seed)
-    assert _pass(ws) is True
-    assert _response(ws, request) == ("accepted", None)
-    assert not (exchange_directory(ws) / "requests" / f"{request.request_id}.json").exists()
-    translated = ws.control / "requests" / f"{root.job_id}.{uuid.UUID(request.request_id)}.json"
-    document = json.loads(translated.read_bytes())
-    assert (document["action"], document["operator"]) == ("cancel", "exchange")
-    _apply(ws, root)
-    assert _indexed(ws, jobs[0]["id"]).state == "cancelled"
-    assert _kernel.exchange_translation_applied(ws, str(jobs[0]["id"]), str(uuid.UUID(request.request_id)))
-
-
-def test_unsigned_foreign_expired_and_unknown_job_actions_are_refused(
-    tmp_path: Path, control: tuple[Workspace, list[dict[str, object]], Path]
-) -> None:
-    ws, jobs, seed = control
-    unsigned = _job_action(ws, "cancel_job", jobs[0]["id"], None)
-    foreign = _job_action(ws, "cancel_job", jobs[0]["id"], _seed(tmp_path, 2))
-    expired = _job_action(ws, "cancel_job", jobs[0]["id"], seed, now=1_000)
-    unknown = _job_action(ws, "cancel_job", uuid.uuid4(), seed)
-    assert _pass(ws) is True
-    assert _response(ws, unsigned) == ("refused", "request_unauthorized")
-    assert _response(ws, foreign) == ("refused", "request_unauthorized")
-    assert _response(ws, expired) == ("refused", "request_expired")
-    assert _response(ws, unknown) == ("refused", "unknown_job")
-    assert os.listdir(exchange_directory(ws) / "requests") == []
-    assert not list((ws.control / "requests").glob("*.json"))
-    assert _indexed(ws, jobs[0]["id"]).state == "ready"
-
-
-def test_daemon_actions_are_left_to_the_daemon(control: tuple[Workspace, list[dict[str, object]], Path]) -> None:
-    ws, _jobs, seed = control
-    health = sign_request(
-        Request(uuid.uuid4().hex, ws.workspace_id, "health", enrollment_id=ENROLLMENT_ID), seed_path=seed
-    )
-    from httk.workflow._daemon_protocol import encode_request
-
-    path = exchange_directory(ws) / "requests" / f"{health.request_id}.json"
-    path.write_bytes(encode_request(health))
-    (exchange_directory(ws) / "requests" / ("f" * 32 + ".json")).write_bytes(b"not json")
+    ws.set_setting("exchange.authorized_keys", "unused stored value")
+    exchange = exchange_directory(ws)
+    request = exchange / "requests" / ("a" * 32 + ".json")
+    response = exchange / "responses" / ("b" * 32 + ".json")
+    request.write_bytes(b"untrusted command")
+    response.write_bytes(b"signed result")
     assert _pass(ws) is False
-    assert path.exists() and os.listdir(exchange_directory(ws) / "responses") == []
-
-
-def test_two_managers_translating_one_request_apply_it_once(
-    control: tuple[Workspace, list[dict[str, object]], Path],
-) -> None:
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    request = _job_action(ws, "stop_job", jobs[0]["id"], seed)
-    published = (exchange_directory(ws) / "requests" / f"{request.request_id}.json").read_bytes()
-    assert _pass(ws) is True
-    # Another manager read the request before the first deleted it, and translates it again.
-    (exchange_directory(ws) / "requests" / f"{request.request_id}.json").write_bytes(published)
-    (exchange_directory(ws) / "responses" / f"{request.request_id}.json").unlink()
-    assert _pass(ws) is True
-    assert len(list((ws.control / "requests").glob("*.json"))) == 1
-    _apply(ws, root)
-    doc = read_state_unowned(_indexed(ws, jobs[0]["id"]).path / "state.json")[0]
-    assert doc is not None
-    applied = [entry for entry in doc.history_tail if entry.get("event") == "request_applied"]
-    assert [entry.get("action") for entry in applied] == ["pause"]
-    assert _indexed(ws, jobs[0]["id"]).state == "paused"
-
-
-def test_a_lagging_translator_never_reapplies_an_applied_action(
-    control: tuple[Workspace, list[dict[str, object]], Path],
-) -> None:
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    request = _job_action(ws, "stop_job", jobs[0]["id"], seed)
-    published = (exchange_directory(ws) / "requests" / f"{request.request_id}.json").read_bytes()
-    assert _pass(ws) is True
-    _apply(ws, root)
-    assert _indexed(ws, jobs[0]["id"]).state == "paused"
-    # The operator continues the job; that release no longer carries the stop among its applied requests.
-    _requests.post(ws, action="continue", job_id=root.job_id, placement=root.placement or "", operator="t", reason="t")
-    _apply(ws, root)
-    _apply(ws, root)
-    resumed = _indexed(ws, jobs[0]["id"])
-    doc = read_state_unowned(resumed.path / "state.json")[0]
-    assert resumed.state == "ready" and doc is not None
-    assert str(uuid.UUID(request.request_id)) not in doc.applied_requests
-    # A lagging translator re-posts the stop: the owner drops it (the index's translated/ set).
-    (exchange_directory(ws) / "requests" / f"{request.request_id}.json").write_bytes(published)
-    (exchange_directory(ws) / "responses" / f"{request.request_id}.json").unlink()
-    assert _pass(ws) is True
-    assert len(list((ws.control / "requests").glob("*.json"))) == 1
-    _apply(ws, root)
-    assert _indexed(ws, jobs[0]["id"]).state == "ready"
+    assert request.read_bytes() == b"untrusted command"
+    assert response.read_bytes() == b"signed result"
+    assert ws.read_settings()["exchange.authorized_keys"] == "unused stored value"
     assert not list((ws.control / "requests").glob("*.json"))
-
-
-def test_a_client_eject_job_returns_the_tree(control: tuple[Workspace, list[dict[str, object]], Path]) -> None:
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    _finish(ws, "failed")
-    _job_action(ws, "eject_job", jobs[0]["id"], seed)
-    with cli_owner(ws) as owner:
-        service = ExchangeService(ws, owner)
-        service._last["returns"] = float("inf")  # only the client's request, no return of its own
-        assert service.run() is True
-    _apply(ws, root)
-    bundle = exchange_directory(ws) / "outbox" / str(jobs[0]["id"]) / root.job_key
-    assert len(BundleManifest.from_json((bundle / "bundle.json").read_bytes()).members) == 3
-    assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
-
-
-def test_a_replayed_job_action_is_refused_after_the_client_resubmits(
-    control: tuple[Workspace, list[dict[str, object]], Path],
-) -> None:
-    # probe_replay of review D: a captured signed request, replayed once the tree came back and was sent again.
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    request = _job_action(ws, "cancel_job", jobs[0]["id"], seed)
-    published = exchange_directory(ws) / "requests" / f"{request.request_id}.json"
-    captured = published.read_bytes()
-    assert _pass(ws) is True and _response(ws, request) == ("accepted", None)
-    _apply(ws, root)
-    assert _indexed(ws, jobs[0]["id"]).state == "cancelled"
-    _finish(ws, "succeeded")
-    assert _pass(ws) is True  # the return request
-    _apply(ws, _indexed(ws, jobs[0]["id"]))
-    outbox = exchange_directory(ws) / "outbox" / str(jobs[0]["id"])
-    assert _all_jobs(ws) == [] and _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
-    # The client fetches the return and sends the same jobs again: the rekeyed ids are the same.
-    shutil.rmtree(outbox)
-    write_bundle(exchange_directory(ws) / "inbox" / "again", jobs)
-    assert _pass(ws) is True
-    again = _indexed(ws, jobs[0]["id"])
-    assert again.job_id == root.job_id and again.state == "ready"
-    # Anyone who can write the exchange re-plants the captured request and removes its old response.
-    (exchange_directory(ws) / "responses" / f"{request.request_id}.json").unlink()
-    published.write_bytes(captured)
-    assert _pass(ws) is True
-    assert _response(ws, request) == ("refused", "request_replayed")
-    assert not published.exists() and not list((ws.control / "requests").glob("*.json"))
-    assert _indexed(ws, jobs[0]["id"]).state == "ready"
-
-
-def test_a_translator_that_died_after_its_record_posts_on_the_rerun(
-    control: tuple[Workspace, list[dict[str, object]], Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    request = _job_action(ws, "stop_job", jobs[0]["id"], seed)
-
-    def died(*_args: object, **_kwargs: object) -> Path:
-        raise OSError("the translator died before posting")
-
-    monkeypatch.setattr(_requests, "post", died)
-    assert _pass(ws) is False
-    record = ws.control / _exchange.TRANSLATIONS_DIRECTORY / request.request_id
-    indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
-    assert indexed is not None
-    assert json.loads(record.read_bytes()) == {
-        "exchange_name": str(jobs[0]["id"]),
-        "job_id": indexed[0],
-        "adoption_nonce": indexed[2],
-    }
-    assert (exchange_directory(ws) / "requests" / f"{request.request_id}.json").exists()
-    assert not (exchange_directory(ws) / "responses" / f"{request.request_id}.json").exists()
-    monkeypatch.undo()
-    assert _pass(ws) is True and _response(ws, request) == ("accepted", None)
-    _apply(ws, root)
-    assert _indexed(ws, jobs[0]["id"]).state == "paused"
-
-
-def test_old_translation_records_are_collected(control: tuple[Workspace, list[dict[str, object]], Path]) -> None:
-    from httk.workflow.gc import EXCHANGE_TRANSLATION_SECONDS, collect_garbage
-
-    ws, jobs, seed = control
-    request = _job_action(ws, "stop_job", jobs[0]["id"], seed)
-    assert _pass(ws) is True
-    record = ws.control / _exchange.TRANSLATIONS_DIRECTORY / request.request_id
-    now = record.stat().st_mtime
-    collect_garbage(ws, categories=["requests"], now=now + EXCHANGE_TRANSLATION_SECONDS - 60)
-    assert record.exists()
-    report = collect_garbage(ws, categories=["requests"], now=now + EXCHANGE_TRANSLATION_SECONDS + 60)
-    assert not record.exists() and report.category("requests").removed == 1
-
-
-def test_job_control_handles_each_request_on_its_own_in_bounded_passes(
-    control: tuple[Workspace, list[dict[str, object]], Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws, jobs, seed = control
-    responses = exchange_directory(ws) / "responses"
-    requests = exchange_directory(ws) / "requests"
-    actions = {digit: _job_action(ws, "stop_job", jobs[0]["id"], seed, request_id=digit * 32) for digit in "12345"}
-    (responses / f"{'1' * 32}.json").write_bytes(b"answered before a crash")
-    (responses / f"{'2' * 32}.json").mkdir()  # planted where the answer goes
-    real = ExchangeService._translate
-
-    def failing(service: ExchangeService, request: Request, keys: frozenset[str]) -> Any:
-        if request.request_id == "3" * 32:
-            raise OSError("this one fails")
-        return real(service, request, keys)
-
-    monkeypatch.setattr(ExchangeService, "_translate", failing)
-    monkeypatch.setattr(_exchange, "_ACTIONS_PER_PASS", 4)
-    with cli_owner(ws) as owner:
-        service = ExchangeService(ws, owner)
-        assert service.run() is True
-        pending = sorted(path.name[0] for path in requests.iterdir())
-        # 1 and 2 were answered already: only deleted. 3 failed alone. 4 was translated. 5 waits for the bound.
-        assert pending == ["3", "5"]
-        assert (responses / f"{'1' * 32}.json").read_bytes() == b"answered before a crash"
-        assert _response(ws, actions["4"]) == ("accepted", None)
-        assert service.run() is True
-        assert sorted(path.name[0] for path in requests.iterdir()) == ["3"]
-        assert _response(ws, actions["5"]) == ("accepted", None)
-        monkeypatch.setattr(ExchangeService, "_translate", real)
-        assert service.run() is True and list(requests.iterdir()) == []
 
 
 def test_the_pass_sweeps_old_write_temporaries_and_trash(tmp_path: Path) -> None:
@@ -848,19 +600,25 @@ def test_only_unrestricted_managers_serve_the_exchange(tmp_path: Path, sandboxes
     assert len(_all_jobs(ws)) == 3
 
 
-def test_the_translation_guard_covers_only_exchange_derived_requests(
-    control: tuple[Workspace, list[dict[str, object]], Path],
-) -> None:
-    ws, jobs, seed = control
-    root = _indexed(ws, jobs[0]["id"])
-    request = _job_action(ws, "cancel_job", jobs[0]["id"], seed)
+def test_the_translation_guard_covers_only_exchange_derived_requests(tmp_path: Path) -> None:
+    ws = _server(tmp_path / "ws")
+    jobs = _send(ws)
     _pass(ws)
+    root = _indexed(ws, jobs[0]["id"])
     doc = StateDoc.empty(root.job_id).updated(origin="exchange", exchange_name=str(jobs[0]["id"]))
-    parsed = _requests.parse(ws.control / "requests" / f"{root.job_id}.{uuid.UUID(request.request_id)}.json")
+    parsed = _requests.parse(
+        _requests.post(
+            ws,
+            action="cancel",
+            job_id=root.job_id,
+            placement=root.placement or "",
+            operator="exchange",
+            reason="return",
+        )
+    )
     assert not removal.translation_applied(ws, doc, parsed)
-    _kernel.record_exchange_translation(ws, str(jobs[0]["id"]), str(uuid.UUID(request.request_id)))
+    _kernel.record_exchange_translation(ws, str(jobs[0]["id"]), parsed.request_id)
     assert removal.translation_applied(ws, doc, parsed)
-    # A request an operator posts is never guarded by the exchange index.
     local = _requests.parse(
         _requests.post(
             ws, action="cancel", job_id=root.job_id, placement=root.placement or "", operator="t", reason="t"

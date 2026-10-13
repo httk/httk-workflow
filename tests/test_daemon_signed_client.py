@@ -11,17 +11,18 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from httk.core.identity import add_identity, identity_public_key, set_default_identity
+from httk.core.identity import add_identity, identity_key_paths, identity_public_key, set_default_identity
 
 import httk.workflow._daemon_client as client_module
 from httk.workflow._daemon_auth import sign_response
-from httk.workflow._daemon_client import Endpoint, decode_matching_response, prepare_request
+from httk.workflow._daemon_client import Endpoint, decode_matching_response, prepare_job_request, prepare_request
 from httk.workflow._daemon_protocol import Request, Response, encode_request, encode_response, request_digest
 
 REQUEST_ID = "0123456789abcdef0123456789abcdef"
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
 CONFIGURATION_DIGEST = "b" * 64
+ACTIVE_CONFIGURATION_DIGEST = "a" * 64
 
 
 def _seed(path: Path, byte: int) -> Path:
@@ -48,10 +49,12 @@ def endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Endpoint:
 def _write_endpoint(exchange: Path, public_key: str, **changes: object) -> None:
     document: dict[str, object] = {
         "format": "httk-workspace-daemon",
-        "format_version": 1,
+        "format_version": 2,
+        "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
+        "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
         "configurations": {"cpu": CONFIGURATION_DIGEST},
         "request_max_age": 3600,
     }
@@ -70,6 +73,21 @@ def _intent() -> Request:
     )
 
 
+def _job_intent(**changes: object) -> Request:
+    fields: dict[str, object] = {
+        "request_id": "1" * 32,
+        "workspace_id": WORKSPACE_ID,
+        "operation": "job_request",
+        "enrollment_id": ENROLLMENT_ID,
+        "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
+        "selector": "12345678-1234-1234-1234-123456789abc",
+        "action": "cancel",
+        "reason": "operator requested cancellation",
+    }
+    fields.update(changes)
+    return Request(**fields)  # type: ignore[arg-type]
+
+
 def _settings(endpoint: Endpoint) -> dict[str, object]:
     return {
         "exchange": str(endpoint.exchange),
@@ -85,10 +103,10 @@ def test_prepare_request_reuses_exact_signature_without_resigning(
     calls = 0
     original = client_module.sign_request
 
-    def counted(request: Request, *, lifetime: int = 3600) -> Request:
+    def counted(request: Request, *, seed_path: Path | None = None, lifetime: int = 3600) -> Request:
         nonlocal calls
         calls += 1
-        return original(request, now=1_000 + calls * 100, lifetime=lifetime)
+        return original(request, seed_path=seed_path, now=1_000 + calls * 100, lifetime=lifetime)
 
     monkeypatch.setattr(client_module, "sign_request", counted)
     first = prepare_request(endpoint, _intent())
@@ -161,6 +179,15 @@ def test_prepare_request_uses_live_max_age(endpoint: Endpoint) -> None:
     assert signed.expires_at - signed.created_at == 900
 
 
+def test_prepare_request_can_use_selected_operator_seed(endpoint: Endpoint) -> None:
+    add_identity("second", "Second Operator", "second@example.test")
+    seed_path, _ = identity_key_paths("second")
+
+    signed = prepare_request(endpoint, _job_intent(), seed_path=seed_path)
+
+    assert signed.operator_key == identity_public_key(seed_path)
+
+
 def test_new_start_uses_live_configuration_digest(endpoint: Endpoint) -> None:
     changed_digest = "c" * 64
     _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], configurations={"cpu": changed_digest})
@@ -201,6 +228,42 @@ def test_new_start_requires_approved_configuration(endpoint: Endpoint) -> None:
         prepare_request(endpoint, unknown)
 
 
+def test_job_retry_keeps_cached_configuration_snapshot_when_active_changes(endpoint: Endpoint) -> None:
+    saved = prepare_job_request(endpoint, _job_intent())
+    changed_digest = "c" * 64
+    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], configuration_digest=changed_digest)
+
+    retried = prepare_job_request(endpoint, _job_intent(configuration_digest=changed_digest))
+
+    assert encode_request(retried) == encode_request(saved)
+    assert retried.configuration_digest == ACTIVE_CONFIGURATION_DIGEST
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"selector": "12345678-1234-1234-1234-123456789abd"},
+        {"action": "pause"},
+        {"reason": "a different reason"},
+        {"priority": 3, "action": "set_priority"},
+        {"step": "relax", "action": "override_step"},
+        {"destination": "outbox", "action": "eject"},
+    ],
+)
+def test_job_retry_refuses_changed_semantic_intent(endpoint: Endpoint, change: dict[str, object]) -> None:
+    prepare_job_request(endpoint, _job_intent())
+
+    with pytest.raises(ValueError, match="intent conflicts"):
+        prepare_job_request(endpoint, _job_intent(**change))
+
+
+def test_job_request_builder_rejects_explicitly_changed_configuration_pin(endpoint: Endpoint) -> None:
+    prepare_request(endpoint, _job_intent())
+
+    with pytest.raises(ValueError, match="intent conflicts"):
+        prepare_request(endpoint, _job_intent(configuration_digest="c" * 64))
+
+
 def test_prepare_request_refuses_partial_and_corrupt_cache(endpoint: Endpoint) -> None:
     prepare_request(endpoint, _intent())
     cache_root = Path(os.environ["HTTK_DATA_HOME"]) / "daemon-requests" / ENROLLMENT_ID
@@ -222,10 +285,10 @@ def test_failed_publication_leaves_no_cache_and_retry_signs_fresh(
     original_sign = client_module.sign_request
     original_rename = os.rename
 
-    def counted(request: Request, *, lifetime: int = 3600) -> Request:
+    def counted(request: Request, *, seed_path: Path | None = None, lifetime: int = 3600) -> Request:
         nonlocal calls
         calls += 1
-        return original_sign(request, now=3_000 + calls, lifetime=lifetime)
+        return original_sign(request, seed_path=seed_path, now=3_000 + calls, lifetime=lifetime)
 
     def fail_publication(src: object, dst: object, **kwargs: object) -> None:
         if str(dst).endswith(REQUEST_ID):
@@ -251,8 +314,8 @@ def test_fsync_failure_after_install_reuses_exact_request(endpoint: Endpoint, mo
     original_fsync = client_module.os.fsync
     fsync_calls = 0
 
-    def captured(request: Request, *, lifetime: int = 3600) -> Request:
-        result = original_sign(request, now=4_000, lifetime=lifetime)
+    def captured(request: Request, *, seed_path: Path | None = None, lifetime: int = 3600) -> Request:
+        result = original_sign(request, seed_path=seed_path, now=4_000, lifetime=lifetime)
         signed.append(result)
         return result
 
@@ -286,11 +349,11 @@ def test_concurrent_prepare_converges_on_one_cached_request(
     stamp_lock = threading.Lock()
     original = client_module.sign_request
 
-    def delayed(request: Request, *, lifetime: int = 3600) -> Request:
+    def delayed(request: Request, *, seed_path: Path | None = None, lifetime: int = 3600) -> Request:
         barrier.wait(timeout=5)  # every preparer has missed the cache before any installs
         with stamp_lock:
             now = next(stamps)
-        return original(request, now=now, lifetime=lifetime)
+        return original(request, seed_path=seed_path, now=now, lifetime=lifetime)
 
     monkeypatch.setattr(client_module, "sign_request", delayed)
     results: list[Request] = []
@@ -339,3 +402,35 @@ def test_response_authentication_precedes_binding_and_cleanup(endpoint: Endpoint
     assert wrong_key is not None
     with pytest.raises(ValueError, match="pinned"):
         decode_matching_response(encode_response(signed), request, public_key=wrong_key)
+
+
+@pytest.mark.parametrize("operation", ["job_request", "job_request_status"])
+def test_job_response_must_name_the_original_command(endpoint: Endpoint, tmp_path: Path, operation: str) -> None:
+    original_id = "1" * 32
+    request = (
+        _job_intent(request_id=original_id)
+        if operation == "job_request"
+        else Request(
+            "2" * 32,
+            WORKSPACE_ID,
+            "job_request_status",
+            enrollment_id=ENROLLMENT_ID,
+            command_id=original_id,
+        )
+    )
+    response = sign_response(
+        Response(
+            request.request_id,
+            request.workspace_id,
+            request.enrollment_id,
+            request_digest(request),
+            "queued",
+            job_id="12345678-1234-1234-1234-123456789abc",
+            internal_request_id="12345678-1234-1234-1234-123456789abd",
+            command_id="3" * 32,
+        ),
+        seed_path=tmp_path / "response.seed",
+    )
+
+    with pytest.raises(ValueError, match="command_id"):
+        decode_matching_response(encode_response(response), request, public_key=endpoint.require_daemon()[1])

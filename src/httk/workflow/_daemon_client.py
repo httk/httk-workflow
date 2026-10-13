@@ -11,7 +11,7 @@ import stat
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Self, cast
@@ -30,7 +30,8 @@ _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _CONFIGURATION_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _DAEMON_FORMAT = "httk-workspace-daemon"
-_DAEMON_FORMAT_VERSION = 1
+_DAEMON_FORMAT_VERSION = 2
+_DAEMON_PROTOCOL_VERSION = 5
 _DAEMON_FILE = "daemon.json"
 _EXCHANGE_FORMAT = "httk-workspace-exchange"
 _EXCHANGE_FILE = "exchange.json"
@@ -47,6 +48,8 @@ _OUTCOMES = {
     "start_manager": frozenset({"submitted", "uncertain", "refused", "busy"}),
     "manager_status": frozenset({"status", "refused", "busy"}),
     "cancel_manager": frozenset({"cancel_requested", "refused", "busy"}),
+    "job_request": frozenset({"applied", "queued", "refused", "uncertain"}),
+    "job_request_status": frozenset({"applied", "queued", "refused", "uncertain"}),
 }
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 _CACHE_FORMAT = "httk-workspace-daemon-request-cache"
@@ -208,27 +211,38 @@ def read_daemon(exchange: Path) -> dict[str, object]:
     :param exchange: Absolute path of the mounted exchange directory.
     :return: The validated daemon document, with ``configurations`` as an immutable mapping.
     :raises OSError: If the directory or file cannot be opened without following symlinks.
-    :raises ValueError: If the file is not a bounded, strict, valid version 1 daemon document.
+    :raises ValueError: If the file is not a bounded, strict, valid version 2 daemon document for protocol 5.
     """
 
     with MailboxDirectory(exchange) as directory:
         value = _read_json_file(directory, _DAEMON_FILE, _MAX_DOCUMENT_BYTES)
+    if not isinstance(value, dict):
+        raise ValueError("invalid daemon.json fields")
+    if value.get("format") != _DAEMON_FORMAT:
+        raise ValueError("invalid daemon.json format")
+    if type(value.get("format_version")) is not int or value["format_version"] != _DAEMON_FORMAT_VERSION:
+        raise ValueError("unsupported daemon.json version")
+    if type(value.get("protocol_version")) is not int or value["protocol_version"] != _DAEMON_PROTOCOL_VERSION:
+        raise ValueError("unsupported daemon protocol version; update the client and re-enroll the daemon")
     fields = {
         "format",
         "format_version",
+        "protocol_version",
         "workspace_id",
         "enrollment_id",
         "daemon_public_key",
+        "configuration_digest",
         "configurations",
         "request_max_age",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    if set(value) != fields:
         raise ValueError("invalid daemon.json fields")
-    if value["format"] != _DAEMON_FORMAT:
-        raise ValueError("invalid daemon.json format")
-    if type(value["format_version"]) is not int or value["format_version"] != _DAEMON_FORMAT_VERSION:
-        raise ValueError("unsupported daemon.json version")
     _canonical_uuid(value["workspace_id"], "workspace_id")
+    if (
+        type(value["configuration_digest"]) is not str
+        or _DIGEST_PATTERN.fullmatch(value["configuration_digest"]) is None
+    ):
+        raise ValueError("configuration_digest must be lowercase SHA-256")
     if type(value["enrollment_id"]) is not str or _ID_PATTERN.fullmatch(value["enrollment_id"]) is None:
         raise ValueError("enrollment_id must be 32 lower-case hexadecimal characters")
     _canonical_public_key(value["daemon_public_key"], "daemon_public_key")
@@ -611,6 +625,13 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         saved.operation,
         saved.profile,
         saved.handle,
+        saved.selector,
+        saved.action,
+        saved.reason,
+        saved.priority,
+        saved.step,
+        saved.destination,
+        saved.command_id,
         saved.configuration_digest,
     ) == (
         intent.request_id,
@@ -619,11 +640,49 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         intent.operation,
         intent.profile,
         intent.handle,
+        intent.selector,
+        intent.action,
+        intent.reason,
+        intent.priority,
+        intent.step,
+        intent.destination,
+        intent.command_id,
         intent.configuration_digest,
     )
 
 
-def _adopt_cached(endpoint: "Endpoint", cached: bytes, intent: Request) -> Request:
+def prepare_job_request(endpoint: "Endpoint", intent: Request, *, seed_path: Path | None = None) -> Request:
+    """Reuse a cached job command's active snapshot pin after checking every other semantic field.
+
+    :param endpoint: Endpoint whose identities and response pin bind the request.
+    :param intent: Unsigned job request built from the currently published snapshot.
+    :param seed_path: Explicit operator identity seed, or the configured default identity.
+    :return: The exact cached signed request, or a newly signed and cached request.
+    :raises ValueError: If the request, endpoint, cache, or local signer conflicts.
+    :raises OSError: If the private cache cannot be read or written.
+    """
+
+    if type(intent) is not Request or intent.operation != "job_request":
+        raise ValueError("intent must be a job_request")
+    enrollment_id, _ = endpoint.require_daemon()
+    cache_path = _cache_directory(enrollment_id) / intent.request_id / _CACHE_RECORD
+    try:
+        cached = _read_cache_file(cache_path)
+    except FileNotFoundError:
+        return prepare_request(endpoint, intent, seed_path=seed_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cached daemon request is corrupt") from exc
+    try:
+        saved = _decode_cache(cached, endpoint)
+    except ValueError as exc:
+        raise ValueError(f"cached daemon request is corrupt: {exc}") from exc
+    retry = replace(intent, configuration_digest=saved.configuration_digest)
+    if not _same_intent(saved, retry):
+        raise ValueError("cached daemon request intent conflicts")
+    return _adopt_cached(endpoint, cached, retry, seed_path)
+
+
+def _adopt_cached(endpoint: "Endpoint", cached: bytes, intent: Request, seed_path: Path | None) -> Request:
     """Validate a cached signed request against the intent and the local signer, and return it."""
 
     try:
@@ -632,18 +691,19 @@ def _adopt_cached(endpoint: "Endpoint", cached: bytes, intent: Request) -> Reque
         raise ValueError(f"cached daemon request is corrupt: {exc}") from exc
     if not _same_intent(saved, intent):
         raise ValueError("cached daemon request intent conflicts")
-    current_key = identity_public_key()
+    current_key = identity_public_key(seed_path)
     if current_key is None or current_key != saved.operator_key:
         raise ValueError("cached daemon request signer conflicts with the local identity")
     verify_request(saved, [current_key])
     return saved
 
 
-def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
+def prepare_request(endpoint: "Endpoint", intent: Request, *, seed_path: Path | None = None) -> Request:
     """Sign and durably cache one request, or return its exact cached retry.
 
     :param endpoint: Endpoint whose identities and response pin bind the request.
     :param intent: Unsigned request identity and operation fields.
+    :param seed_path: Explicit operator identity seed, or the configured default identity.
     :return: The exact initially signed request, including its original timestamps.
     :raises ValueError: If the intent, endpoint, cache, or local signer conflicts.
     :raises OSError: If the private cache cannot be written durably.
@@ -653,6 +713,8 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
         raise ValueError("endpoint must be an Endpoint")
     if type(intent) is not Request:
         raise ValueError("intent must be a Request")
+    if seed_path is not None and not isinstance(seed_path, Path):
+        raise ValueError("seed_path must be a Path or None")
     enrollment_id, _ = endpoint.require_daemon()
     if intent.workspace_id != endpoint.workspace_id or intent.enrollment_id != endpoint.enrollment_id:
         raise ValueError("request identity does not match daemon endpoint")
@@ -676,7 +738,7 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
     except (OSError, ValueError) as exc:
         raise ValueError("cached daemon request is corrupt") from exc
     if cached is not None:
-        return _adopt_cached(endpoint, cached, intent)
+        return _adopt_cached(endpoint, cached, intent, seed_path)
 
     live = endpoint.live()
     if intent.operation == "start_manager":
@@ -685,8 +747,10 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
             raise ValueError(f"daemon configuration is not approved: {intent.profile!r}")
         if intent.configuration_digest != approved_digest:
             raise ValueError("daemon configuration digest does not match the approved endpoint catalog")
-    signed = sign_request(intent, lifetime=min(3600, cast(int, live["request_max_age"])))
-    current_key = identity_public_key()
+    elif intent.operation == "job_request" and intent.configuration_digest != live["configuration_digest"]:
+        raise ValueError("daemon configuration digest does not match the active endpoint snapshot")
+    signed = sign_request(intent, seed_path=seed_path, lifetime=min(3600, cast(int, live["request_max_age"])))
+    current_key = identity_public_key(seed_path)
     if current_key is None or signed.operator_key != current_key:
         raise ValueError("signed daemon request does not match the local identity")
     try:
@@ -696,7 +760,7 @@ def prepare_request(endpoint: "Endpoint", intent: Request) -> Request:
             cached = _read_cache_file(request_path / _CACHE_RECORD)
         except (OSError, ValueError) as exc:
             raise ValueError("cached daemon request is corrupt") from exc
-        return _adopt_cached(endpoint, cached, intent)
+        return _adopt_cached(endpoint, cached, intent, seed_path)
     return signed
 
 
@@ -868,6 +932,10 @@ def decode_matching_response(data: bytes, request: Request, *, public_key: str) 
             raise ValueError("response handle does not match request")
     elif request.operation == "health" and response.handle is not None:
         raise ValueError("health response must not contain a handle")
+    elif request.operation == "job_request" and response.command_id != request.request_id:
+        raise ValueError("response command_id does not match job request")
+    elif request.operation == "job_request_status" and response.command_id != request.command_id:
+        raise ValueError("response command_id does not match observed job command")
     return response
 
 
@@ -1017,6 +1085,7 @@ __all__ = [
     "Endpoint",
     "decode_matching_response",
     "exchange",
+    "prepare_job_request",
     "prepare_request",
     "read_daemon",
     "read_exchange",

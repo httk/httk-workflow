@@ -136,14 +136,16 @@ def _slots(state: Path) -> dict[str, bytes]:
 def test_initialize_creates_the_directory_layout_exclusively_and_instances_share_it(state: Path) -> None:
     root = state / "ledger"
     assert _visible(root) == [
+        "executions",
         "format",
         "handles",
         "observations",
         "prep",
         "req",
         "slots",
+        "targets",
     ]
-    assert (root / "format").read_bytes() == f"httk-workspace-daemon-ledger 3 {WORKSPACE_ID} {ENROLLMENT_ID}\n".encode()
+    assert (root / "format").read_bytes() == f"httk-workspace-daemon-ledger 4 {WORKSPACE_ID} {ENROLLMENT_ID}\n".encode()
     assert root.stat().st_mode & 0o777 == 0o700
     assert not [path for path in state.iterdir() if path.name.startswith(".")]
     with pytest.raises(FileExistsError):
@@ -189,7 +191,7 @@ def test_missing_wrong_identity_unsupported_and_incomplete_ledgers_fail_closed(t
         Ledger(state, WORKSPACE_ID, "f" * 32)
     format_file = state / "ledger" / "format"
     original = format_file.read_bytes()
-    format_file.write_bytes(original.replace(b" 3 ", b" 2 "))  # the previous (hard-linked file record) format
+    format_file.write_bytes(original.replace(b" 4 ", b" 3 "))  # the previous ledger cannot be migrated
     with pytest.raises(LedgerError, match="unsupported daemon ledger format"):
         _open(state)
     format_file.write_bytes(original)

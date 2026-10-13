@@ -138,7 +138,7 @@ re-reading it and redone (a bounded number of times) when a concurrent writer
 replaced it in between; writers are not serialized, so last writer wins. Managers read the policy
 at attach and re-read settings and extensions while they run. `settings` maps
 dotted names to JSON scalars; the protocol reads `seal.succeeded`, `seal.keys`,
-`exchange.authorized_keys`, `manager.confine`, `confine.*` and
+`manager.confine`, `confine.*` and
 `postprocess.directory`.
 
 ### Job states
@@ -1398,7 +1398,7 @@ WORKSPACE/exchange/
 ├── outbox/<exchange-name>/            workspace → client: a returned tree
 ├── outbox/rejected/<unique>/          {<name>/, reason.json}
 ├── requests/<id>.json                 client: signed daemon and job actions
-├── responses/<id>.json                daemon-signed for daemon actions, unsigned for job actions
+├── responses/<id>.json                daemon-signed command results
 └── daemon.json, managers.json, managers/<handle>.log    the workspace daemon's documents
 ```
 
@@ -1446,45 +1446,32 @@ hour.
 
 ### Job control
 
-Signed `stop_job`, `cancel_job` and `eject_job` requests in
-`exchange/requests/<32 hex>.json` (format `httk-workspace-command`, naming the
-job by its exchange name in `job`) are handled by managers; the daemon ignores
-them. There is no claim step, and several managers may handle one request at
-once. A manager:
+Authenticated job commands use daemon protocol 5, not the internal request
+format. The confined daemon verifies authorized keys, workspace/enrollment,
+freshness and active configuration. `job_request` names one internal UUID or
+unique UUID prefix and one of all ten internal request actions. It refuses
+force, path/glob/tag selectors and destinations outside the exchange outbox;
+eject includes the whole tree. All existing operation guards apply.
 
-1. reads the request (anchored, bounded, non-blocking) and skips it when a
-   response already exists;
-2. verifies the signature against the workspace setting
-   `exchange.authorized_keys`, the time window (`created_at` to `expires_at`,
-   at most one hour, with clock skew), the workspace id, and that the index
-   knows the exchange name;
-3. translates it into the workspace request
-   `requests/<job-uuid>.<request-uuid>.json` with the deterministic request id
-   (the exchange request id as a UUID), `created_at` from the signed request
-   and operator `exchange`: `pause` for a stop, `cancel`, or `eject` of the
-   tree to `outbox/<exchange-name>/`;
-4. before posting, creates the translation record
-   `.httk-workspace/exchange-requests/<id>` holding `{exchange_name, job_id,
-   adoption_nonce}`. A record whose nonce matches the current index entry is a
-   crash rerun, and posting continues; a different nonce or a missing index
-   entry is a replay, refused with `request_replayed`. gc prunes records once
-   the request could no longer verify (the maximum request lifetime plus twice
-   the clock skew), with a margin of one more clock skew and a day;
-5. writes the unsigned `responses/<id>.json` (`accepted`, or `refused` with
-   `request_unauthorized`, `request_expired`, `wrong_workspace` or
-   `unknown_job`), the same bytes from every manager;
-6. deletes the exchange request.
-
-Every step writes the same name with the same content, so a pass that dies
-midway is repeated harmlessly; the owner's exchange guard (§Exactly once)
-keeps a re-posted action from applying twice.
+The quota-bounded protected ledger (version 4) stores the exact signed command,
+a once-written resolved target (job/request IDs, document digest, exchange
+adoption nonce where applicable), one execution decision identifying the
+winning instance and daemon owner, and the execution result. Only a new
+execution winner publishes the deterministic internal request. A restart or
+concurrent loser never reposts it or re-resolves its selector. Definitive
+stored results replay; an exact pending request reports queued; matching
+request-specific state history may establish a result; missing evidence
+reports uncertain. Uncertainty authorizes no takeover or re-execution.
 
 ### Daemon mailbox
 
-`health`, `start_manager`, `manager_status` and `cancel_manager` requests in
-the same mailbox are the workspace daemon's; managers ignore them. The daemon
-answers with signed responses and keeps its ledger outside the workspace, on
-`publish_dir` and `write_file`; see {doc}`workspace_daemon`.
+`health`, `start_manager`, `manager_status`, `cancel_manager`, `job_request`
+and `job_request_status` share `exchange/requests/`; managers leave all these
+commands alone. The daemon signs every result and keeps its protected ledger
+in `.httk-workspace/daemon/broker/ledger/`. `daemon.json` version 2 declares
+protocol version 5 and the active configuration digest. Fresh signed
+`job_request_status` observations bypass permanent admission and cumulative
+quota. See {doc}`workspace_daemon` for confinement and enrollment upgrades.
 
 ### Status and progress
 

@@ -46,10 +46,12 @@ def _seed(path: Path, byte: int) -> Path:
 def _document(public_key: str, **changes: object) -> dict[str, object]:
     document: dict[str, object] = {
         "format": "httk-workspace-daemon",
-        "format_version": 1,
+        "format_version": 2,
+        "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
+        "configuration_digest": CONFIGURATION_DIGEST,
         "configurations": {"cpu": CONFIGURATION_DIGEST},
         "request_max_age": 3600,
     }
@@ -235,7 +237,10 @@ def test_endpoint_check_refuses_exchange_of_another_workspace(tmp_path: Path) ->
         {"request_max_age": 86_401},
         {"request_max_age": "3600"},
         {"format": "other"},
-        {"format_version": 2},
+        {"format_version": 1},
+        {"protocol_version": 4},
+        {"protocol_version": True},
+        {"configuration_digest": "A" * 64},
         {"workspace_id": "not-a-uuid"},
         {"enrollment_id": "A" * 32},
         {"daemon_public_key": "ed25519:AAAA"},
@@ -247,6 +252,14 @@ def test_read_daemon_refuses_invalid_values(tmp_path: Path, change: dict[str, ob
 
     with pytest.raises(ValueError):
         client_module.read_daemon(endpoint.exchange)
+
+
+def test_old_protocol_endpoint_is_refused_before_request_construction(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    _write_endpoint(endpoint.exchange, _document(endpoint.require_daemon()[1], protocol_version=4))
+
+    with pytest.raises(ValueError, match="unsupported daemon protocol version.*update the client and re-enroll"):
+        endpoint.check()
 
 
 @pytest.mark.parametrize("kind", ["extra", "duplicate", "bom", "nonfinite"])

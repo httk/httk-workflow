@@ -502,6 +502,7 @@ def register_owner(
     label: str | None,
     allocation: Mapping[str, object] | None,
     advertised: Mapping[str, object],
+    execution_scope: _death.ProcessIdentity | None = None,
 ) -> "Owner":
     """Create ``owners/<owner-id>/`` and its ``owner.json``, before the owner claims anything.
 
@@ -511,6 +512,7 @@ def register_owner(
     :param allocation: The recorded allocation (``RecordedAllocation.as_json()``), or ``None``.
     :param advertised: Any of ``pools``, ``capabilities``, ``prefixes``, ``resources``, ``end_time`` and
         ``drain_start`` (epoch seconds, or ``None``).
+    :param execution_scope: The identity of this owner's full execution scope, or ``None`` to identify this process.
     :return: The new owner.
     :raises ValueError: For an unknown kind or advertised member.
     """
@@ -519,7 +521,8 @@ def register_owner(
         raise ValueError(f"owner kind must be one of {_OWNER_KINDS}: {kind!r}")
     if unknown := set(advertised) - _ADVERTISED:
         raise ValueError(f"unknown advertised owner members: {sorted(unknown)}")
-    owner_id, identity = uuid.uuid4().hex, _death.process_identity()
+    owner_id = uuid.uuid4().hex
+    identity = _death.process_identity() if execution_scope is None else execution_scope
     record = {
         "format": "httk-workflow-owner",
         "format_version": 1,

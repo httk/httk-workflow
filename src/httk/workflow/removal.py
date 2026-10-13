@@ -21,6 +21,7 @@ from ._job import JobDefinition
 from ._kernel import JobRef, ListingCache, OwnedJob, Release
 from ._state import TERMINAL_STATES, StateDoc, read_state_unowned
 from .errors import FormatError, WorkflowError
+from .models import canonical_uuid
 
 if TYPE_CHECKING:  # pragma: no cover
     from .workspace import Workspace
@@ -165,6 +166,20 @@ def refusal(
     :return: Why the request must not apply, or ``None``.
     """
 
+    operator = request.document["operator"]
+    if isinstance(operator, str) and operator.startswith("daemon:"):
+        attribution = operator.split(":", 2)
+        if len(attribution) != 3 or not attribution[2]:
+            return "the daemon request carries malformed exchange adoption attribution"
+        try:
+            exchange_name = canonical_uuid(attribution[1], "daemon exchange name")
+        except FormatError:
+            return "the daemon request carries malformed exchange adoption attribution"
+        if exchange_name != attribution[1]:
+            return "the daemon request carries malformed exchange adoption attribution"
+        expected = (job.id, job.placement, attribution[2])
+        if _kernel.exchange_index(workspace, exchange_name) != expected:
+            return "the exchange adoption changed after this daemon request was authorized"
     if request.action in ("continue", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
     if request.action == "eject":

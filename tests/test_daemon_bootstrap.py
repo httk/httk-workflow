@@ -18,9 +18,11 @@ SANDBOX = BOOTSTRAP.with_name("_sandbox.py")
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 REQUIRED_BWRAP_OPTIONS = (
     "--assert-userns-disabled",
+    "--as-pid-1",
     "--bind-fd",
     "--clearenv",
     "--disable-userns",
+    "--info-fd",
     "--new-session",
     "--ro-bind-data",
     "--ro-bind-fd",
@@ -45,8 +47,14 @@ def _layout(
     roots["daemon"] = roots["site/workspace"] / ".httk-workspace" / "daemon"
     roots["daemon_broker"] = roots["daemon"] / "broker"
     for directory in (
+        roots["site/workspace"] / "jobs",
         roots["site/workspace"] / "exchange/requests",
         roots["site/workspace"] / "exchange/responses",
+        roots["site/workspace"] / ".httk-workspace/owners",
+        roots["site/workspace"] / ".httk-workspace/requests",
+        roots["site/workspace"] / ".httk-workspace/tmp",
+        roots["site/workspace"] / ".httk-workspace/quarantine",
+        roots["site/workspace"] / ".httk-workspace/exchange-jobs",
         roots["daemon"],
         roots["daemon"] / "snapshots",
         roots["daemon"] / "jobs",
@@ -257,6 +265,7 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "--assert-userns-disabled",
         "--new-session",
         "--die-with-parent",
+        "--as-pid-1",
     ):
         assert option in argv
     assert argv[argv.index("--cap-drop") + 1] == "ALL"
@@ -282,25 +291,42 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     assert not {"/workspace", "/run", "/daemon-root", "/tmp/daemon-root", "/control", "/daemon-policy.json"} & set(argv)
     assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/tmp/daemon-policy.json"]
     readonly = _pairs(argv, "--ro-bind-fd")
-    assert [destination for _, destination in readonly] == ["/tmp/daemon"]
+    assert {destination for _, destination in readonly} == {
+        str(Path(policy["workspace"])),
+        str(Path(policy["workspace"]) / ".httk-workspace/daemon"),
+        environment["HTTK_CONFIG_HOME"],
+        "/tmp/daemon",
+    }
     assert "POISON" not in observed["env"]
     assert str(leak) not in observed["fds"].values()
     writable = _pairs(argv, "--bind-fd")
     assert not {"state", "snapshots"} & set(policy)
-    # Exactly two writable binds: the workspace's exchange and the broker directory.
-    assert sorted(destination for _, destination in writable) == ["/tmp/control", "/tmp/daemon-exchange"]
+    expected_writable = {
+        str(Path(policy["workspace"]) / "exchange"),
+        str(Path(policy["workspace"]) / "jobs"),
+        str(Path(policy["workspace"]) / ".httk-workspace/owners"),
+        str(Path(policy["workspace"]) / ".httk-workspace/requests"),
+        str(Path(policy["workspace"]) / ".httk-workspace/tmp"),
+        str(Path(policy["workspace"]) / ".httk-workspace/quarantine"),
+        str(Path(policy["workspace"]) / ".httk-workspace/exchange-jobs"),
+        str(Path(policy["workspace"]) / ".httk-workspace/daemon/broker"),
+        "/tmp/control",
+        "/tmp/daemon-exchange",
+    }
+    assert {destination for _, destination in writable} == expected_writable
     exchange_fd = next(source for source, destination in writable if destination == "/tmp/daemon-exchange")
     assert observed["fds"][exchange_fd] == str(Path(policy["workspace"]) / "exchange")
-    assert (
-        str(tmp_path / "site") not in observed["fds"].values() and policy["workspace"] not in observed["fds"].values()
-    )
+    workspace_fd = next(source for source, destination in readonly if destination == policy["workspace"])
+    assert observed["fds"][workspace_fd] == policy["workspace"]
+    assert str(tmp_path / "site") not in observed["fds"].values()
     assert "--bind" not in argv
     broker_fd = next(source for source, destination in writable if destination == "/tmp/control")
     assert observed["fds"][broker_fd] == str(Path(policy["workspace"]) / ".httk-workspace/daemon/broker")
-    daemon_fd = readonly[0][0]
+    daemon_fd = next(source for source, destination in readonly if destination == "/tmp/daemon")
     assert observed["fds"][daemon_fd] == str(Path(policy["workspace"]) / ".httk-workspace/daemon")
     separator = argv.index("--")
-    assert argv[separator + 1 :] == [
+    inside = argv[separator + 1 :]
+    assert inside[:8] == [
         policy["python"],
         "-I",
         "-m",
@@ -309,8 +335,57 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         "/tmp/daemon-policy.json",
         "--policy-source",
         str(policy_path),
-        "--once",
     ]
+    scope_fd = argv[argv.index("--info-fd") + 1]
+    reader_fd = inside[inside.index("--execution-scope-fd") + 1]
+    assert reader_fd != scope_fd
+    identity_fd = inside[inside.index("--host-identity-fd") + 1]
+    assert identity_fd != scope_fd
+    assert inside[-1] == "--once"
+
+
+@pytest.mark.parametrize("relation", ["parent", "exact", "descendant"])
+def test_workspace_and_operator_config_cannot_overlap_reserved_sandbox_paths(relation: str) -> None:
+    api: dict[str, Any] = runpy.run_path(str(BOOTSTRAP))
+    for reserved in api["_RESERVED_SANDBOX_PATHS"]:
+        if relation == "parent":
+            candidate = reserved.parent
+        elif relation == "exact":
+            candidate = reserved
+        else:
+            candidate = reserved / "child"
+        with pytest.raises(ValueError, match="reserved daemon sandbox path"):
+            api["_check_reserved_sandbox_paths"](candidate, Path("/operator/config"))
+        with pytest.raises(ValueError, match="reserved daemon sandbox path"):
+            api["_check_reserved_sandbox_paths"](Path("/safe/workspace"), candidate)
+
+
+@pytest.mark.parametrize(
+    ("overlap", "collision_path"),
+    [
+        ("workspace", "/tmp/control/site/workspace"),
+        ("config", "/tmp/daemon-exchange/operator"),
+        ("config", "/tmp"),
+    ],
+)
+def test_reserved_path_startup_refusal_does_not_touch_persistent_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overlap: str, collision_path: str
+) -> None:
+    policy_path, policy, record = _layout(tmp_path)
+    marker = Path(policy["workspace"]) / ".httk-workspace/daemon/broker/persistent-marker"
+    marker.write_text("unchanged", encoding="utf-8")
+    if overlap == "workspace":
+        policy["workspace"] = collision_path
+    else:
+        monkeypatch.setenv("HTTK_CONFIG_HOME", collision_path)
+    _rewrite_policy(policy_path, policy)
+
+    result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"])])
+
+    assert result.returncode == 2
+    assert "reserved daemon sandbox path" in result.stderr
+    assert not record.exists()
+    assert marker.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_bootstrap_has_no_runtime_initialization_route(tmp_path: Path) -> None:

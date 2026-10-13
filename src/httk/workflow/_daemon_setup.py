@@ -46,7 +46,8 @@ from .workspace import Workspace
 
 _DAEMON_DOCUMENT = "daemon.json"
 _DAEMON_FORMAT = "httk-workspace-daemon"
-_DAEMON_VERSION = 1
+_DAEMON_VERSION = 2
+_DAEMON_PROTOCOL_VERSION = 5
 _MAX_WORKSPACE_BYTES = 1024 * 1024
 _MAX_LAUNCHER_BYTES = 64 * 1024
 _MAX_DISCOVERY_BYTES = 64 * 1024
@@ -655,9 +656,11 @@ def _write_daemon_document(policy: Policy) -> None:
     document = {
         "format": _DAEMON_FORMAT,
         "format_version": _DAEMON_VERSION,
+        "protocol_version": _DAEMON_PROTOCOL_VERSION,
         "workspace_id": policy.workspace_id,
         "enrollment_id": policy.enrollment_id,
         "daemon_public_key": response_public_key(policy.response_seed),
+        "configuration_digest": read_active_snapshot(policy.daemon)[1],
         "configurations": {launcher.name: policy.configuration_digest(launcher.name) for launcher in policy.launchers},
         "request_max_age": policy.request_max_age,
     }

@@ -18,7 +18,7 @@ _RESULT_FORMAT = "httk-computer-result"
 _METADATA_FILE = "remote.json"
 _MAX_ADAPTER_DOCUMENT_BYTES = 64 * 1024
 _COMMON_FIELDS = frozenset({"format", "format_version", "operation", "adapter_dir", "remote_settings"})
-_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested"})
+_POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "applied", "queued"})
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
 
@@ -212,9 +212,17 @@ def _render_exchange(endpoint: Endpoint, daemon_request: Request, wait_seconds: 
     """Exchange one request and preserve confirmed negative outcomes."""
 
     response = exchange(endpoint, daemon_request, wait_seconds=wait_seconds)
+    returncode = (
+        1
+        if daemon_request.operation in {"job_request", "job_request_status"}
+        and response.outcome in {"refused", "uncertain"}
+        else 0
+        if response.outcome in _POSITIVE_OUTCOMES
+        else 2
+    )
     _result(
         "daemon",
-        returncode=0 if response.outcome in _POSITIVE_OUTCOMES else 2,
+        returncode=returncode,
         stdout=encode_response(response).decode("ascii"),
         stderr="",
     )

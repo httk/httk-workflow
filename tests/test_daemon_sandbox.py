@@ -4,12 +4,16 @@ import base64
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
 import pytest
+
+from httk.workflow._death import ProcessIdentity, process_gone, process_identity
 
 BOOTSTRAP = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "_daemon_bootstrap.py"
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
@@ -39,7 +43,8 @@ def _write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
     path.chmod(0o755)
 
 
-def test_real_broker_confinement(tmp_path: Path) -> None:
+@pytest.mark.parametrize("termination", ["normal", "startup-error", "term", "kill"])
+def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
     bwrap_text = shutil.which("bwrap")
     if bwrap_text is None:
         if os.environ.get("HTTK_REQUIRE_DAEMON_SANDBOX") == "1":
@@ -48,6 +53,12 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
     bwrap = Path(bwrap_text).resolve()
 
     workspace = tmp_path / "site/workspace"
+    project_metadata = workspace.parent / "httk_project"
+    project_metadata.mkdir(parents=True)
+    (project_metadata / "project.json").write_text('{"format":"httk-project"}', encoding="utf-8")
+    operator_config = tmp_path / "operator-config"
+    (operator_config / "keys").mkdir(parents=True)
+    (operator_config / "keys" / "identity.marker").write_text("present", encoding="utf-8")
     exchange = workspace / "exchange"
     daemon = workspace / ".httk-workspace" / "daemon"
     daemon_broker = daemon / "broker"
@@ -55,6 +66,10 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
     for root in (exchange / "requests", exchange / "responses"):
         root.mkdir(parents=True)
     daemon.mkdir(parents=True)
+    (workspace / "jobs").mkdir()
+    (workspace / "workflows").mkdir()
+    for name in ("owners", "requests", "tmp", "quarantine", "exchange-jobs"):
+        (workspace / ".httk-workspace" / name).mkdir(parents=True)
     for root in (daemon / "snapshots", daemon / "jobs", daemon_broker, broker):
         root.mkdir()
     (daemon / "response.seed").write_bytes(b"test-seed")
@@ -77,7 +92,7 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
     _write_executable(
         service,
         "#!/usr/bin/python3\n"
-        "import json, os, subprocess\n"
+        "import json, os, subprocess, sys, time\n"
         "def attempt(action):\n"
         "    try:\n"
         "        action()\n"
@@ -94,6 +109,19 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
         "    return False\n"
         f"outside = {str(sentinel)!r}\n"
         "report = {}\n"
+        "scope_fd = int(sys.argv[sys.argv.index('--execution-scope-fd') + 1])\n"
+        "host_fd = int(sys.argv[sys.argv.index('--host-identity-fd') + 1])\n"
+        f"sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        "from httk.workflow._daemon_scope import read_execution_scope\n"
+        "identity = read_execution_scope(scope_fd, host_fd)\n"
+        "report['identity'] = {'hostname': identity.hostname, 'boot_id': identity.boot_id,\n"
+        "    'pid': identity.pid, 'start_ticks': identity.start_ticks}\n"
+        f"open({str(daemon_broker / 'scope.json')!r}, 'w').write(json.dumps(report['identity']))\n"
+        f"release = {str(daemon_broker / 'release')!r}\n"
+        "if '--check' in sys.argv:\n"
+        "    while not os.path.exists(release): time.sleep(0.01)\n"
+        "    raise SystemExit(3)\n"
+        "while not os.path.exists(release): time.sleep(0.01)\n"
         "report['outside_read'] = attempt(lambda: open(outside, encoding='utf-8').read())\n"
         "report['outside_write'] = attempt(lambda: open(outside, 'w', encoding='utf-8').write('changed'))\n"
         "report['exchange_write'] = attempt(\n"
@@ -101,8 +129,18 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
         f"report['workspace_write'] = attempt(lambda: open({str(workspace / 'created')!r}, 'w').write('x'))\n"
         f"report['workspace_exchange_host_write'] = attempt(lambda: open({str(exchange / 'host')!r}, 'w').write('x'))\n"
         "report['state_write'] = attempt(lambda: open('/tmp/control/created', 'w', encoding='utf-8').write('state'))\n"
+        f"report['broker_real_write'] = attempt(lambda: open({str(daemon_broker / 'real-canary')!r}, 'w').write('broker'))\n"
+        f"report['owners_write'] = attempt(lambda: open({str(workspace / '.httk-workspace/owners/owner-canary')!r}, 'w').write('owner'))\n"
+        f"report['jobs_write'] = attempt(lambda: open({str(workspace / 'jobs/job-canary')!r}, 'w').write('job'))\n"
+        f"report['workspace_root_write'] = attempt(lambda: open({str(workspace / 'root-canary')!r}, 'w').write('root'))\n"
+        f"report['workflow_config_write'] = attempt(lambda: open({str(workspace / 'workflows/config.toml')!r}, 'w').write('x'))\n"
         "report['daemon_read'] = attempt(lambda: open('/tmp/daemon/response.seed', encoding='utf-8').read())\n"
         "report['daemon_write'] = attempt(lambda: open('/tmp/daemon/x', 'w', encoding='utf-8').write('x'))\n"
+        "report['namespace_pid_one'] = int(open('/proc/1/stat').read().split(' ', 1)[0])\n"
+        f"report['project_metadata_read'] = open({str(project_metadata / 'project.json')!r}).read() == '{{\"format\":\"httk-project\"}}'\n"
+        f"report['project_metadata_write'] = attempt(lambda: open({str(project_metadata / 'generated')!r}, 'w').write('x'))\n"
+        f"report['operator_key_read'] = open({str(operator_config / 'keys/identity.marker')!r}).read() == 'present'\n"
+        f"report['operator_config_write'] = attempt(lambda: open({str(operator_config / 'generated')!r}, 'w').write('x'))\n"
         "report['policy'] = json.load(open('/tmp/daemon-policy.json', encoding='utf-8'))['enrollment_id']\n"
         "report['sentinel_fd_visible'] = descriptor_visible(outside)\n"
         "report['nested_userns'] = subprocess.run(\n"
@@ -132,27 +170,84 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(json.dumps(policy), encoding="utf-8")
     policy_path.chmod(0o600)
+    here = process_identity()
     with sentinel.open("r", encoding="utf-8") as inherited:
         os.set_inheritable(inherited.fileno(), True)
-        result = subprocess.run(
-            [sys.executable, "-I", "-S", str(BOOTSTRAP), "--policy", str(policy_path), "--workspace", str(workspace)],
+        bootstrap_args = [
+            sys.executable,
+            "-I",
+            "-S",
+            str(BOOTSTRAP),
+            "--policy",
+            str(policy_path),
+            "--workspace",
+            str(workspace),
+        ]
+        if termination == "startup-error":
+            bootstrap_args.append("--check")
+        process = subprocess.Popen(
+            bootstrap_args,
             close_fds=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=20,
-            check=False,
+            env={**os.environ, "HTTK_CONFIG_HOME": str(operator_config)},
         )
+        deadline = time.monotonic() + 20
+        scope_path = daemon_broker / "scope.json"
+        while not scope_path.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.01)
+        scope_started = scope_path.exists()
+        if not scope_started:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=10)
+            result = subprocess.CompletedProcess(process.args, process.returncode or 2, stdout, stderr)
+        else:
+            identity_data = json.loads(scope_path.read_text(encoding="utf-8"))
+            identity = ProcessIdentity(**identity_data)
+            host_stat = Path(f"/proc/{identity.pid}/stat").read_text(encoding="ascii")
+            host_ticks = int(host_stat[host_stat.rindex(")") + 2 :].split()[19])
+            assert identity.start_ticks == host_ticks
+            assert process_gone(identity, here=here) is False
+            if termination == "term":
+                process.send_signal(signal.SIGTERM)
+            elif termination == "kill":
+                process.kill()
+            else:
+                (daemon_broker / "release").touch()
+            stdout, stderr = process.communicate(timeout=20)
+            result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            assert process_gone(identity, here=process_identity()) is True
+    if not scope_started:
+        _unsupported_namespace_failure(result)
+    if termination == "startup-error":
+        assert result.returncode == 3
+        return
+    if termination in ("term", "kill"):
+        signal_number = signal.SIGTERM if termination == "term" else signal.SIGKILL
+        assert result.returncode in (-signal_number, 128 + signal_number)
+        return
     if result.returncode != 0:
         _unsupported_namespace_failure(result)
     report = json.loads(result.stdout)
+    identity = report["identity"]
+    assert identity["hostname"] == os.uname().nodename
+    assert identity["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    assert report["namespace_pid_one"] == 1
+    assert report["project_metadata_read"] and report["project_metadata_write"] is False
+    assert report["operator_key_read"] and report["operator_config_write"] is False
     # The broker runs trusted code with a read-only host view: it reads the host but writes only its roots.
     assert report["outside_read"] is True
     assert report["outside_write"] is False
-    # Writable: the bound exchange and the state. Not writable: the rest of the workspace, and the exchange
-    # through the host's read-only view (the bind is the only way in).
+    # Both the real workspace overlays and the service aliases expose their permitted writes.
     assert report["exchange_write"] is True and report["state_write"] is True
+    assert report["owners_write"] is True and report["jobs_write"] is True
+    assert report["broker_real_write"] is True
+    assert report["workspace_root_write"] is False and report["workflow_config_write"] is False
     assert report["daemon_read"] is True and report["daemon_write"] is False
-    assert report["workspace_write"] is False and report["workspace_exchange_host_write"] is False
+    assert report["workspace_write"] is False and report["workspace_exchange_host_write"] is True
     assert report["policy"] == "2" * 32
     assert report["sentinel_fd_visible"] is False
     assert report["nested_userns"] is False
@@ -160,6 +255,12 @@ def test_real_broker_confinement(tmp_path: Path) -> None:
         # Slurm clients need the host network; every other namespace is private.
         assert (report["namespaces"][name] == host_namespace) == (name == "net")
     assert (exchange / "created").read_text(encoding="utf-8") == "inside"
-    assert not (workspace / "created").exists() and not (exchange / "host").exists()
+    assert not (workspace / "created").exists() and (exchange / "host").read_text() == "x"
     assert (daemon_broker / "created").read_text(encoding="utf-8") == "state"
+    assert (workspace / ".httk-workspace" / "owners" / "owner-canary").read_text() == "owner"
+    assert (workspace / "jobs" / "job-canary").read_text() == "job"
+    assert not (workspace / "root-canary").exists()
+    assert not (workspace / "workflows" / "config.toml").exists()
+    assert not (project_metadata / "generated").exists()
+    assert not (operator_config / "generated").exists()
     assert sentinel.read_text(encoding="utf-8") == "host-secret"

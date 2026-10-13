@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from httk.core.cli import CLIContext
+from httk.core.identity import configured_operator_identity
 
 from .._daemon_cli import _anchored
 from .._daemon_client import (
@@ -26,6 +27,7 @@ from .._daemon_protocol import Request, encode_request, encode_response
 from .._util import write_json_atomic
 from ..adapters import metadata_path, read_metadata, remote_settings, resolve_remote, run_adapter
 from ._common import _group, _leaf
+from ._daemon_jobs import job_request_status
 
 _OPERATION_NAMES = {
     "health": "health",
@@ -143,18 +145,6 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     :return: The status derived from the confirmed daemon outcome, or 2 when no result is acknowledged.
     """
 
-    if arguments.daemon_verb == "status" and arguments.handle is None:
-        if arguments.request_id is not None:
-            raise ValueError("--request-id is accepted only with --handle")
-        target = resolve_remote(arguments.remote, project=context.cwd)
-        if read_metadata(target.bundle).get("kind") != "mount-daemon":
-            raise ValueError(f"remote {arguments.remote!r} is not a mount-daemon remote")
-        settings = remote_settings(target.bundle)
-        if not isinstance(settings, Mapping):
-            raise ValueError("mount-daemon remote settings must be an object")
-        print(json.dumps(read_passive_status(Endpoint.from_settings(settings)), indent=2, sort_keys=True))
-        return 0
-
     verb = arguments.daemon_verb
     wait_seconds = arguments.wait_seconds
     if (
@@ -164,6 +154,34 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         or not 0.05 <= wait_seconds <= 120
     ):
         raise ValueError("--wait-seconds must be finite and between 0.05 and 120")
+
+    if verb == "status" and arguments.handle is None and arguments.request_id is None:
+        target = resolve_remote(arguments.remote, project=context.cwd)
+        if read_metadata(target.bundle).get("kind") != "mount-daemon":
+            raise ValueError(f"remote {arguments.remote!r} is not a mount-daemon remote")
+        settings = remote_settings(target.bundle)
+        if not isinstance(settings, Mapping):
+            raise ValueError("mount-daemon remote settings must be an object")
+        print(json.dumps(read_passive_status(Endpoint.from_settings(settings)), indent=2, sort_keys=True))
+        return 0
+
+    if verb == "status" and arguments.request_id is not None:
+        target = resolve_remote(arguments.remote, project=context.cwd)
+        settings = remote_settings(target.bundle)
+        if read_metadata(target.bundle).get("kind") != "mount-daemon" or not isinstance(settings, Mapping):
+            raise ValueError(f"remote {arguments.remote!r} is not a configured mount-daemon remote")
+        identity = configured_operator_identity()
+        if identity is None:
+            raise ValueError("no operator identity is configured; run httk init to establish one")
+        _, response = job_request_status(
+            target.bundle,
+            Endpoint.from_settings(settings),
+            identity,
+            arguments.request_id,
+            wait_seconds=arguments.wait_seconds,
+        )
+        print(encode_response(response).decode("ascii"))
+        return 0 if response.outcome in {"applied", "queued"} else 1
 
     target = resolve_remote(arguments.remote, project=context.cwd)
     metadata = read_metadata(target.bundle)
@@ -320,13 +338,16 @@ def build_daemon_remote_parser(
                 help="32 lowercase hexadecimal request ID (default: generated); reuse one to keep waiting for a request",
             )
         elif verb == "status":
-            parser.add_argument(
+            group = parser.add_mutually_exclusive_group()
+            group.add_argument(
                 "--handle",
                 metavar="HANDLE",
-                help="broker-issued manager handle (signed request); without it, print the passive exchange status files",
+                help="broker-issued manager handle (signed manager-status request)",
             )
-            parser.add_argument(
-                "--request-id", metavar="ID", help="optional (only with --handle) 32 lowercase hexadecimal request ID"
+            group.add_argument(
+                "--request-id",
+                metavar="ID",
+                help="original 32-digit job command ID (send a fresh signed job-status request)",
             )
         else:
             parser.add_argument("--request-id", metavar="ID", help="optional 32 lowercase hexadecimal request ID")

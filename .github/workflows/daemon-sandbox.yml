@@ -5,13 +5,23 @@ on:
     branches: [main, develop]
     paths:
       - "src/httk/workflow/_daemon_*.py"
+      - "src/httk/workflow/_kernel.py"
+      - "src/httk/workflow/_requests.py"
+      - "src/httk/workflow/removal.py"
+      - "src/httk/workflow/_exchange.py"
+      - "src/httk/workflow/_death.py"
       - "src/httk/workflow/_sandbox.py"
       - "src/httk/workflow/_confine*.py"
       - "src/httk/workflow/_launch_*.py"
       - "src/httk/workflow/_manager_launches.py"
       - "tests/test_daemon_bootstrap.py"
+      - "tests/test_daemon_scope.py"
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
+      - "tests/test_daemon_service.py"
+      - "tests/test_daemon_job_control.py"
+      - "tests/kernel/test_owners.py"
+      - "tests/kernel/test_death.py"
       - "tests/test_confine_*.py"
       - "tests/fake_bwrap.py"
       - "tests/test_launch_client.py"
@@ -25,13 +35,23 @@ on:
     branches: [main, develop]
     paths:
       - "src/httk/workflow/_daemon_*.py"
+      - "src/httk/workflow/_kernel.py"
+      - "src/httk/workflow/_requests.py"
+      - "src/httk/workflow/removal.py"
+      - "src/httk/workflow/_exchange.py"
+      - "src/httk/workflow/_death.py"
       - "src/httk/workflow/_sandbox.py"
       - "src/httk/workflow/_confine*.py"
       - "src/httk/workflow/_launch_*.py"
       - "src/httk/workflow/_manager_launches.py"
       - "tests/test_daemon_bootstrap.py"
+      - "tests/test_daemon_scope.py"
       - "tests/test_daemon_policy.py"
       - "tests/test_daemon_sandbox.py"
+      - "tests/test_daemon_service.py"
+      - "tests/test_daemon_job_control.py"
+      - "tests/kernel/test_owners.py"
+      - "tests/kernel/test_death.py"
       - "tests/test_confine_*.py"
       - "tests/fake_bwrap.py"
       - "tests/test_launch_client.py"
@@ -80,7 +100,12 @@ jobs:
           python -m pytest -q -n 0
           tests/test_daemon_policy.py
           tests/test_daemon_bootstrap.py
+          tests/test_daemon_scope.py
           tests/test_daemon_sandbox.py
+          tests/test_daemon_service.py
+          tests/test_daemon_job_control.py
+          tests/kernel/test_owners.py
+          tests/kernel/test_death.py
           tests/test_confine_settings.py
           tests/test_confine_sandbox.py
           tests/test_confine_rank.py

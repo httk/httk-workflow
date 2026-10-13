@@ -12,7 +12,7 @@ has one directory a client may write, ``WORKSPACE/exchange``:
     ├── outbox/<exchange-name>/       workspace -> client: the returned tree of one exchange job
     ├── outbox/rejected/<unique>/     one refused bundle: <name>/ and reason.json
     ├── requests/<id>.json            client: signed daemon actions and job actions
-    ├── responses/<id>.json           daemon-signed for daemon actions, unsigned for job actions
+    ├── responses/<id>.json           daemon-signed command results
     └── daemon.json, managers.json, managers/   the workspace daemon's documents
 
 :func:`enable_exchange` creates it, and the workspace daemon installs
@@ -26,17 +26,9 @@ Every unrestricted manager serving the exchange runs :class:`ExchangeService` in
   UUIDs, the client's UUID kept as ``exchange_name``, ``origin: exchange``, and the root indexed in the trusted
   ``.httk-workspace/exchange-jobs/``. A refused bundle goes to ``outbox/rejected/<unique>/`` with its
   ``reason.json``.
-- **Job control.** A ``stop_job``, ``cancel_job`` or ``eject_job`` request signed by a key of the workspace
-  setting ``exchange.authorized_keys`` and inside its time window is translated into the workspace request
-  ``requests/<job-uuid>.<request-uuid>.json`` (``pause``, ``cancel``, or ``eject`` of the tree to the outbox),
-  answered with an unsigned ``responses/<id>.json`` and deleted. Before the first translation, the translator
-  records ``.httk-workspace/exchange-requests/<id>`` (the exchange name, job and adoption nonce it is for): a
-  request whose record names another adoption than the current index entry, or whose job left the index, is a
-  replay and is refused ``request_replayed``. Every step is idempotent, so several managers may handle one
-  request (an answered request is only deleted); the owner applies a translated request at most once (the
-  index's ``translated/`` set, see :func:`httk.workflow.removal.apply_requests`). Each request is handled on its
-  own, a bounded number per pass, in name order. Daemon actions are left to the daemon. Job actions are
-  protocol-level for now: there is no client command that publishes them yet.
+Job-control authentication and dispatch belong to the confined daemon. Managers leave
+``requests/`` and ``responses/`` command documents alone.
+
 - **Returns.** A finished exchange tree (the indexed root and every member terminal) gets an ``eject`` request
   of the whole tree to ``outbox/<exchange-name>/``; its owner applies it. While the client has not fetched an
   earlier return there, nothing is requested; a request whose eject rolled back anyway is retried after a
@@ -70,21 +62,11 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from . import _fs, _kernel, _moving, _requests
 from ._bundles import BundleError
-from ._daemon_auth import check_request_time, verify_request
-from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_DOCUMENT_BYTES, MAX_SCANNED_ENTRIES
-from ._daemon_protocol import (
-    JOB_OPERATIONS,
-    Request,
-    Response,
-    decode_request,
-    encode_response,
-    request_digest,
-)
+from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_SCANNED_ENTRIES
 from ._kernel import OWNED, TERMINAL_STATES, JobRef
 from ._state import encode_state, read_state_unowned
 from ._util import json_bytes, utc_now
@@ -96,7 +78,6 @@ from .workspace import Workspace
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
-    "AUTHORIZED_KEYS_SETTING",
     "EXCHANGE_DOCUMENT",
     "EXCHANGE_FORMAT",
     "EXCHANGE_SUBDIRECTORIES",
@@ -133,12 +114,9 @@ STEP_INTERVAL = 10.0
 SWEEP_INTERVAL = 3600.0
 #: The directory below ``.httk-workspace`` recording each translated job action, ``<directory>/<request-id>``.
 TRANSLATIONS_DIRECTORY = "exchange-requests"
-#: The workspace setting holding the public keys whose signed job actions the managers accept.
-AUTHORIZED_KEYS_SETTING = "exchange.authorized_keys"
 #: The progress file a job may keep in its payload; its excerpt goes into ``status.json``.
 PROGRESS_DOCUMENT = "progress.json"
 
-_PUBLICATION = re.compile(r"[0-9a-f]{32}\.json")
 #: A job bundle name in the exchange; the reserved names are the exchange's own entries.
 _BUNDLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _RESERVED_NAMES = frozenset(
@@ -158,14 +136,10 @@ _RESERVED_NAMES = frozenset(
 _PROGRESS_LIMIT = 4096
 _PROGRESS_KEYS = 32
 _PROGRESS_TEXT = 256
-_ACTIONS = {"stop_job": "pause", "cancel_job": "cancel", "eject_job": "eject"}
 #: The namespace of return request ids: uuid5(namespace, "<job-id>/<state digest>").
 _RETURN_NAMESPACE = uuid.UUID("5d0c8f2e-8f5e-4a43-9a51-7f2b0c3e9b61")
 #: The longest a job's return is held back after earlier requests that did not return it.
 _RETURN_BACKOFF_LIMIT = 3600.0
-#: The most job actions one pass handles; the rest wait for the next pass.
-_ACTIONS_PER_PASS = 256
-_TRANSLATION_LIMIT = 4096
 #: What a crashed writer leaves: :func:`httk.workflow._fs.write_file` temporaries and discard trash.
 _TEMPORARY = re.compile(r"\..+\.[a-z2-7]{16}\.tmp")
 _TRASH = re.compile(r"trash\.[a-z2-7]{16}")
@@ -408,42 +382,10 @@ def _listing(directory_fd: int) -> list[str]:
         return sorted(entry.name for _count, entry in zip(range(MAX_DIRECTORY_ENTRIES), entries, strict=False))
 
 
-def _publications(directory_fd: int) -> list[str]:
-    """Return every publication name of a mailbox directory, sorted; at most ``MAX_SCANNED_ENTRIES`` are examined."""
-
-    with os.scandir(directory_fd) as entries:
-        listed = zip(range(MAX_SCANNED_ENTRIES), entries, strict=False)
-        return sorted(entry.name for _count, entry in listed if _PUBLICATION.fullmatch(entry.name))
-
-
-def _translation_document(exchange_name: str, indexed: tuple[str, PurePosixPath, str | None]) -> dict[str, object]:
-    """The record of a translated job action: the exchange name, job and adoption it was translated for."""
-
-    return {"exchange_name": exchange_name, "job_id": indexed[0], "adoption_nonce": indexed[2]}
-
-
-def _read_translation(path: _fs.Loc) -> dict[str, object] | None:
-    """Read a translation record; ``None`` when absent, an empty mapping when damaged."""
-
-    try:
-        data = _fs.read_bounded(path, _TRANSLATION_LIMIT)
-        value = None if data is None else json.loads(data)
-    except (ValueError, _fs.UnsafePath):
-        return {}
-    return value if value is None or isinstance(value, dict) else {}
-
-
 def _eligible(name: str) -> bool:
     """Report whether an inbox entry name is one a manager adopts (dot, reserved and scratch names never are)."""
 
     return _BUNDLE_NAME.fullmatch(name) is not None and name not in _RESERVED_NAMES | _moving.RESERVED_NAMES
-
-
-def _authorized_keys(workspace: Workspace) -> frozenset[str]:
-    """Return the keys of the setting ``exchange.authorized_keys``: one string of comma- or space-separated keys."""
-
-    value = workspace.read_settings().get(AUTHORIZED_KEYS_SETTING)
-    return frozenset(value.replace(",", " ").split()) if isinstance(value, str) else frozenset()
 
 
 def _excerpt(data: bytes | None) -> dict[str, object] | None:
@@ -481,7 +423,7 @@ class _ExchangeJob:
 
 
 class ExchangeService:
-    """The exchange pass of one manager: inbox adoption, job control, returns and ``status.json``.
+    """The exchange pass of one manager: inbox adoption, returns and ``status.json``.
 
     Every pass opens the exchange directories anew from the workspace root, each ``O_NOFOLLOW``, so a client
     that replaces one by a symlink stops the pass (it is reported) instead of steering it. Each step reports and
@@ -498,8 +440,6 @@ class ExchangeService:
         self._dirty = True
         # Per job: the monotonic time of the last return request posted, and the wait before the next one.
         self._backoff: dict[str, tuple[float, float]] = {}
-        # Request names found to be daemon actions, which managers leave alone.
-        self._ignored: set[str] = set()
         # The last problem reported per subject, so a persisting one is logged once.
         self._reported: dict[str, str] = {}
 
@@ -522,9 +462,9 @@ class ExchangeService:
         return True
 
     def run(self) -> bool:
-        """Run one pass: adopt one inbox entry, translate job actions, return finished trees, write the status, sweep.
+        """Run one pass: adopt one inbox entry, return finished trees, write the status, sweep.
 
-        :return: Whether the pass changed workflow state (adopted, refused, translated or requested a return).
+        :return: Whether the pass changed workflow state (adopted, refused or requested a return).
         :raises httk.workflow._kernel.OwnerLost: When this manager's owner was recovered (fail-stop).
         """
 
@@ -534,7 +474,6 @@ class ExchangeService:
                 changed = False
                 for name, step in (
                     ("adoption", self._adopt),
-                    ("job control", self._job_control),
                     ("return", self._returns),
                     ("sweep", self._sweep),
                 ):
@@ -596,159 +535,6 @@ class ExchangeService:
                 )
             return True
         return False
-
-    # -- job control ------------------------------------------------------------------------------------------------
-
-    def _job_control(self, directories: _Directories) -> bool:
-        """Translate, answer and delete pending job actions of the request mailbox, in name order, a bounded number.
-
-        Each request is handled on its own: a failure is reported and the pass goes on with the next one.
-        """
-
-        names = _publications(directories.requests)
-        self._ignored &= set(names)
-        keys: frozenset[str] | None = None
-        changed, handled = False, 0
-        for name in names:
-            if handled >= _ACTIONS_PER_PASS:
-                break
-            if name in self._ignored:
-                continue
-            try:
-                request = self._job_action(directories, name)
-                if request is None:
-                    continue
-                handled += 1
-                if keys is None:
-                    keys = _authorized_keys(self.workspace)
-                changed |= self._answer(directories, name, request, keys)
-            except _kernel.OwnerLost:
-                raise
-            except Exception as exc:
-                _LOGGER.debug("exchange job action %s failed", name, exc_info=True)
-                self._report(
-                    f"request:{name}",
-                    f"exchange job action {name} failed: {type(exc).__name__}: {exc}",
-                    event="exchange_job_action_failed",
-                )
-        return changed
-
-    def _job_action(self, directories: _Directories, name: str) -> Request | None:
-        """Read one publication: the job action, or ``None`` (not a valid publication, or a daemon action)."""
-
-        try:
-            data = _fs.read_bounded(_fs.anchored(directories.requests, name), MAX_DOCUMENT_BYTES, nonblock=True)
-            request = None if data is None else decode_request(data)
-        except (_fs.UnsafePath, _fs.TooLarge, ValueError):
-            return None  # not a valid publication: the daemon discards it
-        if request is not None and (request.operation not in JOB_OPERATIONS or name != f"{request.request_id}.json"):
-            self._ignored.add(name)
-            return None
-        return request
-
-    def _answer(self, directories: _Directories, name: str, request: Request, keys: frozenset[str]) -> bool:
-        """Translate one job action, answer it and delete it; whether a translation ran."""
-
-        durable = self.workspace.durable
-        if _fs.exists(_fs.anchored(directories.responses, name)):
-            # Answered already (by another manager, or before a crash): only the request is left to delete.
-            _fs.remove_file(_fs.anchored(directories.requests, name), durable=durable)
-            return False
-        response = self._translate(request, keys)
-        # Unsigned, and the same bytes from every manager; then the request goes.
-        _fs.write_file(_fs.anchored(directories.responses, name), encode_response(response), durable=durable)
-        _fs.remove_file(_fs.anchored(directories.requests, name), durable=durable)
-        _LOGGER.info(
-            "exchange job action %s %s for %s: %s%s",
-            request.request_id,
-            request.operation,
-            request.job,
-            response.outcome,
-            "" if response.reason is None else f" ({response.reason})",
-            extra={"event": "exchange_job_action", "request_id": request.request_id},
-        )
-        return True
-
-    def _translation(
-        self, request: Request
-    ) -> tuple[dict[str, object] | None, tuple[str, PurePosixPath, str | None] | None]:
-        """Return the record of the job action's translation, written now before the first, and the index entry.
-
-        The index entry is read again once the record exists, so a translator that stalled while the job was
-        returned (and perhaps resubmitted) compares the record with the current entry.
-        """
-
-        assert request.job is not None
-        durable = self.workspace.durable
-        directory = self.workspace.control / TRANSLATIONS_DIRECTORY
-        path = _fs.loc(directory / request.request_id)
-        recorded = _read_translation(path)
-        if not recorded:
-            indexed = _kernel.exchange_index(self.workspace, request.job)
-            if indexed is None:
-                return None, None
-            data = json_bytes(_translation_document(request.job, indexed)) + b"\n"
-            _fs.make_dirs(directory, durable=durable)
-            if recorded is None:
-                try:
-                    os.close(_fs.create_exclusive(path, data, durable=durable, mode=0o644))
-                except FileExistsError:
-                    pass  # another translator recorded it first
-            else:
-                # A damaged record: a translator died while creating it, for this same entry.
-                _fs.write_file(path, data, durable=durable)
-            recorded = _read_translation(path)
-        return recorded, _kernel.exchange_index(self.workspace, request.job)
-
-    def _translate(self, request: Request, keys: frozenset[str]) -> Response:
-        """Post the workspace request of one job action, or say why it is refused."""
-
-        def answer(outcome: str, reason: str | None = None) -> Response:
-            return Response(
-                request.request_id,
-                request.workspace_id,
-                request.enrollment_id,
-                request_digest(request),
-                outcome,
-                reason=reason,
-            )
-
-        try:
-            verify_request(request, keys)
-        except ValueError:
-            return answer("refused", "request_unauthorized")
-        try:
-            check_request_time(request)
-        except ValueError:
-            return answer("refused", "request_expired")
-        if request.workspace_id != self.workspace.workspace_id:
-            return answer("refused", "wrong_workspace")
-        assert request.job is not None
-        recorded, indexed = self._translation(request)
-        if recorded is None:
-            return answer("refused", "unknown_job")
-        if indexed is None or recorded != _translation_document(request.job, indexed):
-            # Translated before for an adoption that is gone: the job was returned (and perhaps sent again).
-            return answer("refused", "request_replayed")
-        job_id, placement, _nonce = indexed
-        action = _ACTIONS[request.operation]
-        eject = action == "eject"
-        outbox = exchange_directory(self.workspace) / "outbox" / request.job
-        # Deterministic name and content, so every translating manager writes the same request: the operator
-        # "exchange" marks it exchange-derived for the owner's at-most-once guard.
-        _requests.post(
-            self.workspace,
-            action=action,
-            job_id=job_id,
-            placement=placement,
-            operator="exchange",
-            reason=f"{request.operation} signed by {request.operator_key}",
-            request_id=str(uuid.UUID(request.request_id)),
-            created_at=datetime.fromtimestamp(request.created_at, UTC).isoformat(),
-            destination=str(outbox) if eject else None,
-            tree=eject,
-        )
-        return answer("accepted")
 
     # -- returns and status -----------------------------------------------------------------------------------------
 

@@ -21,7 +21,7 @@ import pytest
 from httk.core.identity import identity_public_key
 
 from httk.workflow import _daemon_service as service_module
-from httk.workflow import _daemon_state
+from httk.workflow import _daemon_state, _kernel
 from httk.workflow._daemon_activation import activation_document
 from httk.workflow._daemon_auth import sign_request, verify_response
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
@@ -31,9 +31,27 @@ from httk.workflow._daemon_protocol import Request, Response, decode_response, e
 from httk.workflow._daemon_service import Broker, ExchangePublisher, _Observation
 from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
 from httk.workflow._daemon_state import Ledger, LedgerError
+from httk.workflow.workspace import Workspace
 
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "0123456789abcdef0123456789abcdef"
+
+
+def _service_arguments(policy: Path, policy_source: Path, *, check: bool, once: bool) -> argparse.Namespace:
+    """Build service arguments with real one-use metadata descriptors."""
+
+    scope_fd = os.memfd_create("daemon-test-scope")
+    host_fd = os.memfd_create("daemon-test-host")
+    os.write(scope_fd, json.dumps({"child-pid": max(2, os.getpid())}).encode())
+    os.write(host_fd, json.dumps({"hostname": "test-host", "boot_id": "a" * 32}).encode())
+    return argparse.Namespace(
+        policy=policy,
+        policy_source=policy_source,
+        execution_scope_fd=scope_fd,
+        host_identity_fd=host_fd,
+        check=check,
+        once=once,
+    )
 
 
 class RecordingGateway(SlurmGateway):
@@ -305,7 +323,7 @@ def test_service_rechecks_protected_activation_after_opening_the_ledger(
     monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
     monkeypatch.setattr(service_module, "SlurmGateway", Gateway)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
-    arguments = argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False)
+    arguments = _service_arguments(selected, selected, check=True, once=False)
     loaded = threading.Event()
     resume = threading.Event()
     errors: list[BaseException] = []
@@ -330,7 +348,7 @@ def test_service_rechecks_protected_activation_after_opening_the_ledger(
     (policy.daemon / "active.json").write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
     (policy.daemon / "active.json").chmod(0o600)
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
-    service_module._run(arguments)
+    service_module._run(_service_arguments(selected, selected, check=True, once=False))
     assert checks == [None]
 
 
@@ -738,13 +756,24 @@ def test_main_reports_state_recovery_guidance_and_scheduler_reasons(
     for error in (
         LedgerError("preserve this state, reconcile outstanding work, and initialize a new enrollment"),
         SchedulerError("squeue timed out: slurm_load_jobs error: Unable to contact slurm controller"),
+        _kernel.OwnerDeclaredDead("daemon owner carries a tombstone"),
     ):
         caplog.clear()
         monkeypatch.setattr(service_module, "_run", lambda _arguments, error=error: (_ for _ in ()).throw(error))
         with caplog.at_level(logging.ERROR):
             assert (
                 service_module.main(
-                    ["--policy", "/tmp/daemon-policy.json", "--policy-source", "/protected-policy.json", "--once"]
+                    [
+                        "--policy",
+                        "/tmp/daemon-policy.json",
+                        "--policy-source",
+                        "/protected-policy.json",
+                        "--execution-scope-fd",
+                        "10",
+                        "--host-identity-fd",
+                        "11",
+                        "--once",
+                    ]
                 )
                 == 1
             )
@@ -753,7 +782,20 @@ def test_main_reports_state_recovery_guidance_and_scheduler_reasons(
 
 def test_service_entry_point_logs_to_stdout() -> None:
     result = subprocess.run(
-        [sys.executable, "-I", "-m", "httk.workflow._daemon_service", "--policy", "/x", "--policy-source", "/y"],
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "httk.workflow._daemon_service",
+            "--policy",
+            "/x",
+            "--policy-source",
+            "/y",
+            "--execution-scope-fd",
+            "10",
+            "--host-identity-fd",
+            "11",
+        ],
         capture_output=True,
         text=True,
         timeout=60,
@@ -766,7 +808,8 @@ def test_service_entry_point_logs_to_stdout() -> None:
 def test_service_logs_check_and_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    policy = _policy(tmp_path)
+    initialized = Workspace.initialize(tmp_path / "site/workspace", durable=False)
+    policy = replace(_policy(tmp_path), workspace_id=initialized.workspace_id)
     for path in (policy.daemon, policy.requests, policy.responses, policy.broker):
         path.mkdir(parents=True)
     initialize_response_seed(policy.daemon)
@@ -782,10 +825,22 @@ def test_service_logs_check_and_startup(
     monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    active_owners: list[dict[str, object]] = []
+
+    def inspect_owner(_broker: Broker, _stop: threading.Event, *, once: bool = False) -> None:
+        assert once is True
+        records = _kernel.list_owners(initialized)
+        assert len(records) == 1 and records[0].record is not None
+        active_owners.append(dict(records[0].record))
+
+    monkeypatch.setattr(Broker, "run", inspect_owner)
     with caplog.at_level(logging.INFO, logger="httk.workflow"):
-        service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=False, once=True))
-    assert f"daemon_check_passed workspace={WORKSPACE_ID} cluster=cluster-1" in caplog.text
-    assert f"daemon_started workspace={WORKSPACE_ID} enrollment={ENROLLMENT_ID} launchers=cpu" in caplog.text
+        service_module._run(_service_arguments(selected, selected, check=False, once=True))
+    assert f"daemon_check_passed workspace={policy.workspace_id} cluster=cluster-1" in caplog.text
+    assert f"daemon_started workspace={policy.workspace_id} enrollment={ENROLLMENT_ID} launchers=cpu" in caplog.text
+    assert active_owners[0]["kind"] == "daemon"
+    assert (active_owners[0]["hostname"], active_owners[0]["pid"]) == ("test-host", max(2, os.getpid()))
+    assert _kernel.list_owners(initialized) == []
 
 
 def test_service_uses_the_host_view_tmp_destinations() -> None:
@@ -895,16 +950,16 @@ def test_service_resolves_mailboxes_under_the_root_bind(tmp_path: Path, monkeypa
     monkeypatch.setattr(MailboxDirectory, "child", classmethod(record))
     monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
-    service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+    service_module._run(_service_arguments(selected, selected, check=True, once=False))
     assert opened == ["requests", "responses"]
     policy.requests.rmdir()
     with pytest.raises(FileNotFoundError):
-        service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+        service_module._run(_service_arguments(selected, selected, check=True, once=False))
     outside = tmp_path / "outside"
     outside.mkdir()
     policy.requests.symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError) as refused:
-        service_module._run(argparse.Namespace(policy=selected, policy_source=selected, check=True, once=False))
+        service_module._run(_service_arguments(selected, selected, check=True, once=False))
     assert refused.value.errno in {errno.ELOOP, errno.ENOTDIR}
 
 

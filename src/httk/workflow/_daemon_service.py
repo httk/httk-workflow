@@ -18,15 +18,19 @@ from pathlib import Path
 from types import FrameType
 from typing import TypedDict, cast
 
-from ._daemon_activation import verify_active_snapshot
+from . import _kernel
+from ._daemon_activation import activation_document, verify_active_snapshot
 from ._daemon_auth import CLOCK_SKEW_SECONDS, check_request_time, sign_response, verify_request
+from ._daemon_jobs import JobExecutor
 from ._daemon_keys import read_response_seed, response_seed_path
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_SCANNED_ENTRIES, MailboxDirectory
 from ._daemon_policy import Policy, _open_directory, load_policy
-from ._daemon_protocol import JOB_OPERATIONS, Request, Response, decode_request, encode_response, request_digest
+from ._daemon_protocol import Request, Response, decode_request, encode_response, request_digest
+from ._daemon_scope import read_execution_scope
 from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger, LedgerError, refusal_response
 from ._exchange import ExchangeUnavailableError, publish_file
+from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 _SNAPSHOT_POLICY = Path("/tmp/daemon-policy.json")
@@ -234,6 +238,7 @@ class Broker:
         client that replaced either directory is followed (or, for a symlink, refused) at the next poll.
         The broker then owns and closes the mailboxes it holds. ``None`` keeps *requests* and *responses*.
     :param jobs: The visible directory holding Slurm output, defaulting to the policy's host path.
+    :param job_executor: Authenticated workspace-job command executor; ``None`` refuses job commands.
     """
 
     def __init__(
@@ -250,6 +255,7 @@ class Broker:
         activation: Callable[[], None] | None = None,
         mailboxes: Callable[[], tuple[MailboxDirectory, MailboxDirectory]] | None = None,
         jobs: Path | None = None,
+        job_executor: JobExecutor | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
             raise ValueError("response_seed must be a Path")
@@ -265,6 +271,7 @@ class Broker:
         self.activation = activation
         self.mailboxes = mailboxes
         self.jobs = policy.jobs if jobs is None else jobs
+        self.job_executor = job_executor
         self._mailbox_problem: str | None = None
         #: Rejected publications that could be neither removed nor set aside, in the directory identified.
         self._stuck: set[str] = set()
@@ -284,6 +291,19 @@ class Broker:
             outcome,
             **fields,
         )
+
+    @classmethod
+    def _request_refusal(cls, request: Request, reason: str, detail: str | None = None) -> Response:
+        """Build a refusal with the command identity required by job operations."""
+
+        fields: dict[str, str | None] = {"reason": reason, "detail": detail}
+        if request.operation == "job_request":
+            fields["command_id"] = request.request_id
+            fields["detail"] = detail or reason.replace("_", " ")
+        elif request.operation == "job_request_status":
+            fields["command_id"] = request.command_id
+            fields["detail"] = detail or reason.replace("_", " ")
+        return cls._response(request, "refused", **fields)
 
     def _fence(self) -> None:
         """Re-read the active snapshot pointer before an admission or a decision."""
@@ -538,9 +558,31 @@ class Broker:
         try:
             check_request_time(request, max_age=self.policy.request_max_age)
         except ValueError:
+            if request.operation == "job_request":
+                return self._finish(
+                    entry,
+                    self._request_refusal(
+                        request,
+                        "request_expired",
+                        "the signed job command is outside its accepted time window",
+                    ),
+                )
             return self._refuse(entry, "request_expired")
         if request.operation == "health":
             return self._finish(entry, self._response(request, "ready"))
+        if request.operation == "job_request":
+            if self.job_executor is None:
+                return self._finish(
+                    entry,
+                    self._response(
+                        request,
+                        "refused",
+                        reason="service_unavailable",
+                        detail="job command execution is unavailable",
+                        command_id=request.request_id,
+                    ),
+                )
+            return self._finish(entry, self.job_executor.execute(entry))
         return self._manager(entry)
 
     def _process(self, publication: str, request: Request) -> None:
@@ -552,29 +594,60 @@ class Broker:
 
         existing = self.ledger.lookup_request(request.request_id)
         if existing is not None and request_digest(existing.request) != request_digest(request):
-            self._publish(publication, request, self._response(request, "refused", reason="request_conflict"))
+            self._publish(publication, request, self._request_refusal(request, "request_conflict"))
             return
         if request.workspace_id != self.policy.workspace_id:
-            self._publish(publication, request, self._response(request, "refused", reason="wrong_workspace"))
+            self._publish(publication, request, self._request_refusal(request, "wrong_workspace"))
             return
         if request.enrollment_id != self.policy.enrollment_id:
-            self._publish(publication, request, self._response(request, "refused", reason="wrong_enrollment"))
+            self._publish(publication, request, self._request_refusal(request, "wrong_enrollment"))
+            return
+        if request.operation == "job_request_status":
+            try:
+                self._fence()
+                check_request_time(request, max_age=self.policy.request_max_age)
+            except ValueError:
+                response = self._response(
+                    request,
+                    "refused",
+                    reason="request_expired",
+                    detail="the signed status observation is outside its accepted time window",
+                    command_id=request.command_id,
+                )
+            else:
+                response = (
+                    self.job_executor.status(request)
+                    if self.job_executor is not None
+                    else self._response(
+                        request,
+                        "refused",
+                        reason="service_unavailable",
+                        detail="job command observation is unavailable",
+                        command_id=request.command_id,
+                    )
+                )
+            self._publish(publication, request, response)
             return
         if existing is None:
             self._fence()
         try:
             entry = self.ledger.admit(request)
         except ConflictError:
-            self._publish(publication, request, self._response(request, "refused", reason="request_conflict"))
+            self._publish(publication, request, self._request_refusal(request, "request_conflict"))
             return
         except CapacityError:
-            self._publish(publication, request, self._response(request, "busy", reason="capacity"))
+            response = (
+                self._request_refusal(request, "capacity", "the daemon command ledger is full")
+                if request.operation == "job_request"
+                else self._response(request, "busy", reason="capacity")
+            )
+            self._publish(publication, request, response)
             return
-        response = self._execute(entry)
-        if response is None:
+        executed = self._execute(entry)
+        if executed is None:
             _LOGGER.debug("daemon_request_pending request_id=%s: another instance submits it", request.request_id)
             return
-        self._publish(publication, request, response)
+        self._publish(publication, request, executed)
 
     def _recover(self, now: float) -> None:
         """Settle starts whose decider crashed: refusals at once, submissions after the longest submission."""
@@ -660,6 +733,8 @@ class Broker:
 
         if self.retired:
             return 0
+        if self.job_executor is not None:
+            self.job_executor.owner.check_alive()
         now = time.time()
         self._recover(now)
         processed = 0
@@ -686,8 +761,6 @@ class Broker:
             except ValueError:
                 self._discard_invalid(publication, "invalid_document")
                 continue
-            if request.operation in JOB_OPERATIONS:
-                continue  # a job action, for the workspace's managers
             if publication != f"{request.request_id}.json":
                 self._discard_invalid(publication, "identifier_mismatch")
                 continue
@@ -905,6 +978,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="httk-workspace-daemon-service")
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--policy-source", type=Path, required=True)
+    parser.add_argument("--execution-scope-fd", type=int, required=True)
+    parser.add_argument("--host-identity-fd", type=int, required=True)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true")
     modes.add_argument("--once", action="store_true")
@@ -917,6 +992,7 @@ def _run(arguments: argparse.Namespace) -> None:
     policy_source: Path = arguments.policy_source
     if not policy_source.is_absolute() or ".." in policy_source.parts:
         raise ValueError("policy source must be an absolute path without '..'")
+    execution_scope = read_execution_scope(arguments.execution_scope_fd, arguments.host_identity_fd)
     policy = load_policy(arguments.policy)
     gateway = SlurmGateway(policy)
 
@@ -975,7 +1051,26 @@ def _run(arguments: argparse.Namespace) -> None:
             stack.callback(requests.close)
             if arguments.check:
                 return
+            workspace = Workspace(policy.workspace)
+            if workspace.workspace_id != policy.workspace_id:
+                raise ValueError("daemon policy workspace identity does not match the workspace")
+            owner = stack.enter_context(
+                _kernel.register_owner(
+                    workspace,
+                    kind="daemon",
+                    label="workspace daemon",
+                    allocation=None,
+                    advertised={},
+                    execution_scope=execution_scope,
+                )
+            )
             publisher = ExchangePublisher(exchange, policy.enrollment_id)
+            jobs = JobExecutor(
+                workspace,
+                ledger,
+                owner,
+                configuration_digest=cast(str, activation_document(policy_source, policy)["digest"]),
+            )
             broker = Broker(
                 policy,
                 gateway,
@@ -988,6 +1083,7 @@ def _run(arguments: argparse.Namespace) -> None:
                 activation=_activation_check(_DAEMON_DIRECTORY, policy_source, policy),
                 mailboxes=mailboxes,
                 jobs=_DAEMON_DIRECTORY / "jobs",
+                job_executor=jobs,
             )
             stack.callback(broker.close)
             _LOGGER.info(
@@ -1012,7 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = _parser().parse_args(argv)
         _run(arguments)
-    except (OSError, ValueError, LedgerError, SchedulerError) as exc:
+    except (OSError, ValueError, LedgerError, SchedulerError, _kernel.OwnerLost) as exc:
         _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
     return 0

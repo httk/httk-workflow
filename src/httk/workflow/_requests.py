@@ -390,9 +390,12 @@ def apply(
     if "operator_key" in document:
         audit["operator_key"] = document["operator_key"]
     reason = _refusal(job, doc, from_state, action)
-    checked = reason is None and action in ("continue", "override_step", "delete", "eject")
+    daemon_pinned = isinstance(document["operator"], str) and document["operator"].startswith("daemon:")
+    checked = daemon_pinned or (reason is None and action in ("continue", "override_step", "delete", "eject"))
     if checked and refusal is not None and (hazard := refusal(request)) is not None:
-        if document.get("force") is not True:
+        if daemon_pinned:
+            reason = hazard
+        elif document.get("force") is not True:
             forceable = action in ("continue", "override_step")
             reason = f"{hazard}; republish with force to accept the hazard" if forceable else hazard
         else:

@@ -21,6 +21,7 @@ from httk.workflow.workflow_cli import build_parser, command
 WORKSPACE_ID = "12345678-1234-4234-8234-123456789abc"
 ENROLLMENT_ID = "a" * 32
 CONFIGURATION_DIGEST = "b" * 64
+ACTIVE_CONFIGURATION_DIGEST = "a" * 64
 
 
 def _write_exchange(exchange: Path, public_key: str, **changes: object) -> Path:
@@ -34,10 +35,12 @@ def _write_exchange(exchange: Path, public_key: str, **changes: object) -> Path:
     )
     document: dict[str, object] = {
         "format": "httk-workspace-daemon",
-        "format_version": 1,
+        "format_version": 2,
+        "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
+        "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
         "configurations": {"serial": CONFIGURATION_DIGEST},
         "request_max_age": 1800,
     }
@@ -631,13 +634,49 @@ def test_status_without_handle_prints_the_passive_files(project: Path, monkeypat
     assert json.loads(stdout) == {"status": status, "managers": None}
 
 
-def test_status_without_handle_refuses_bad_files_and_request_id(project: Path) -> None:
+def test_status_without_handle_refuses_bad_files_and_request_id_is_original_job_command(project: Path) -> None:
     _status, outbox = _passive(project)
     (outbox / "status.json").write_text("{}", encoding="utf-8")
     code, stdout, stderr = _invoke(project, ["status", "cluster"])
     assert (code, stdout) == (2, "") and "status.json" in stderr
-    code, stdout, stderr = _invoke(project, ["status", "cluster", "--request-id", "1" * 32])
-    assert (code, stdout) == (2, "") and "--handle" in stderr
+    code, stdout, stderr = _invoke(project, ["status", "cluster", "--handle", "1" * 32, "--request-id", "2" * 32])
+    assert (code, stdout) == (2, "") and "not allowed with argument" in stderr
+
+
+def test_status_request_id_sends_fresh_signed_observation_of_job_command(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow._daemon_protocol import Request, Response
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    command_id = "1" * 32
+    observed: list[tuple[str, str]] = []
+
+    def status(_bundle: Path, _endpoint: object, _identity: object, original: str, **_kwargs: object):
+        observed.append((original, "2" * 32))
+        response = Response(
+            "2" * 32,
+            WORKSPACE_ID,
+            ENROLLMENT_ID,
+            "f" * 64,
+            "queued",
+            command_id=original,
+            job_id="12345678-1234-1234-1234-123456789abc",
+            internal_request_id="12345678-1234-1234-1234-123456789abd",
+        )
+        request = Request(
+            "2" * 32, WORKSPACE_ID, "job_request_status", enrollment_id=ENROLLMENT_ID, command_id=original
+        )
+        return request, response
+
+    monkeypatch.setattr(cli, "job_request_status", status)
+    code, stdout, stderr = _invoke(project, ["status", "cluster", "--request-id", command_id])
+
+    assert code == 0
+    assert json.loads(stdout)["command_id"] == command_id
+    assert observed == [(command_id, "2" * 32)]
+    assert observed[0][0] != observed[0][1]
+    assert stderr == ""
 
 
 def test_log_prints_the_published_bytes_and_refuses_errors(

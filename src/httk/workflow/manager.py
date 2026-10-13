@@ -715,7 +715,7 @@ class TaskManager:
             changed |= self._recover_dead_owners()
             serving = not self._draining and self._confinement_blocked() is None
             if self._exchange is not None and serving and EXCHANGE_EXTENSION in self.workspace.extensions:
-                # First, so an adopted job is claimed and a translated request applied in this same tick.
+                # First, so an adopted job can be claimed and return requests applied in this same tick.
                 changed |= self._exchange.run()
             self._cache = _kernel.ListingCache()
             changed |= self._requests_pass()

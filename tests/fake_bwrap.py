@@ -37,6 +37,7 @@ _ARITIES = {
     "--disable-userns": 0,
     "--assert-userns-disabled": 0,
     "--die-with-parent": 0,
+    "--as-pid-1": 0,
     "--new-session": 0,
     "--clearenv": 0,
     "--cap-drop": 1,
@@ -110,6 +111,9 @@ def main(argv: list[str]) -> int:
     :return: 2 for an unknown option or a missing command; otherwise the process is replaced.
     """
 
+    if argv == ["--help"]:
+        print(" ".join(_ARITIES))
+        return 0
     namespaces: str | None = None
     if argv[:1] == ["--fake-namespaces"]:
         namespaces, argv = argv[1], argv[2:]

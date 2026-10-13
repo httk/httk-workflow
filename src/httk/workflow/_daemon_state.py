@@ -57,9 +57,9 @@ from ._util import fsync_directory
 _LOGGER = logging.getLogger(__name__)
 
 _FORMAT = "httk-workspace-daemon-ledger"
-_FORMAT_VERSION = 3
+_FORMAT_VERSION = 4
 _ROOT = "ledger"
-_SUBDIRECTORIES = ("prep", "req", "handles", "slots", "observations")
+_SUBDIRECTORIES = ("prep", "req", "handles", "slots", "observations", "targets", "executions")
 #: The files of the SQLite ledger and its instance lock that this ledger replaced.
 _LEGACY = ("ledger.sqlite3", "daemon.lock")
 _ANCHOR_FILES = frozenset({"envelope", "decision", "scheduler", "response"})
@@ -80,6 +80,7 @@ _MAX_ENVELOPE = _MAX_DOCUMENT + 512
 _ENVELOPE_FORMAT = "httk-daemon-anchor"
 _ENVELOPE_VERSION = 1
 _MAX_OBSERVATION = 64 * 1024
+_MAX_JOB_RECORD = 64 * 1024
 #: The absolute bound of every listing of the ledger, whatever the configured quotas.
 _MAX_LISTING = 300_000
 #: Requests can never exceed this many, whatever the configured quota.
@@ -99,6 +100,7 @@ _PERMITTED = {
     "start_manager": frozenset({"submitted", "uncertain", "refused"}),
     "manager_status": frozenset({"status", "refused"}),
     "cancel_manager": frozenset({"cancel_requested", "refused"}),
+    "job_request": frozenset({"applied", "queued", "refused", "uncertain"}),
 }
 
 
@@ -439,9 +441,9 @@ class Ledger:
             if len(fields) == 4 and fields[0] == _FORMAT.encode() and fields[1] == str(_FORMAT_VERSION).encode():
                 raise LedgerError("daemon ledger identity mismatch: it belongs to another workspace or enrollment")
             raise LedgerError(
-                "unsupported daemon ledger format; reconcile outstanding manager jobs with squeue and scancel, "
-                "then remove (or move aside) the workspace's .httk-workspace/daemon directory and run "
-                "'httk workspace daemon init'"
+                "unsupported daemon ledger format; this ledger is not migrated. Reconcile outstanding manager "
+                "jobs with squeue and scancel, then remove (or move aside) the workspace's "
+                ".httk-workspace/daemon directory and run 'httk workspace daemon init' to re-enroll"
             )
         for name in _SUBDIRECTORIES:
             child = _fs.lstat(_fs.loc(self._root / name))
@@ -524,6 +526,10 @@ class Ledger:
             return "response handle mismatch"
         if response.outcome not in _PERMITTED[request.operation]:
             return "response operation mismatch"
+        if request.operation == "job_request":
+            if response.command_id != request.request_id:
+                return "job response command id mismatch"
+            return None
         if request.operation != "start_manager":
             return None
         decision = entry.decision
@@ -756,6 +762,28 @@ class Ledger:
             self._entry(request_id)
         for _start in self._starts():
             pass
+        for request_id in self._listing(self._root / "targets"):
+            if _HEX32.fullmatch(request_id) is None:
+                raise LedgerError(f"unexpected entry {request_id!r} in daemon job targets")
+            entry = self._entry(request_id)
+            if entry is None or entry.request.operation != "job_request":
+                raise LedgerError(f"orphan daemon job target {request_id}")
+            if _read_record(self._root / "targets" / request_id, _MAX_JOB_RECORD) is None:
+                raise LedgerError(f"invalid daemon job target {request_id}")
+        for name in self._listing(self._root / "executions"):
+            match = re.fullmatch(r"([0-9a-f]{32})\.(decision|result)", name)
+            if match is None:
+                raise LedgerError(f"unexpected entry {name!r} in daemon job executions")
+            request_id, kind = match.groups()
+            entry = self._entry(request_id)
+            if entry is None or entry.request.operation != "job_request":
+                raise LedgerError(f"orphan daemon job execution {request_id}")
+            if kind == "decision" and self.read_target(entry) is None:
+                raise LedgerError(f"daemon job execution has no target {request_id}")
+            if kind == "result" and self.execution_decision(entry) is None:
+                raise LedgerError(f"daemon job result has no decision {request_id}")
+            if _read_record(self._root / "executions" / name, _MAX_JOB_RECORD) is None:
+                raise LedgerError(f"invalid daemon job execution record {name}")
         for name in self._listing(self._root / "slots"):
             if _SLOT.fullmatch(name) is None:
                 raise LedgerError(f"unexpected entry {name!r} in the daemon ledger's slots")
@@ -1025,6 +1053,147 @@ class Ledger:
         if stored is None or stored.response is None:
             raise LedgerError(f"the response of request {request_id} was not recorded")
         return stored
+
+    def _job_record(self, directory: str, entry: Entry, name: str) -> bytes | None:
+        self._check_open()
+        if not isinstance(entry, Entry) or entry.request.operation != "job_request":
+            raise ValueError("a job_request ledger entry is required")
+        admitted = self.lookup_request(entry.request.request_id)
+        if admitted is None or admitted.request != entry.request:
+            raise ValueError("job request is not admitted in this ledger")
+        if name not in {"target", "decision", "result"}:
+            raise ValueError("invalid job ledger record")
+        path = self._root / directory
+        key = entry.request.request_id if directory == "targets" else f"{entry.request.request_id}.{name}"
+        return _read_record(path / key, _MAX_JOB_RECORD)
+
+    def read_target(self, entry: Entry) -> bytes | None:
+        """Read the immutable resolved target recorded for one admitted job request.
+
+        :param entry: The admitted job request.
+        :return: The winning target bytes, or ``None`` before publication.
+        :raises ValueError: If *entry* is not a job request.
+        :raises LedgerError: If the record is unsafe or too large.
+        """
+
+        return self._job_record("targets", entry, "target")
+
+    def store_target(self, entry: Entry, data: bytes) -> bytes:
+        """Publish a job request's resolved target once and return the winning bytes.
+
+        :param entry: The admitted job request.
+        :param data: Canonical target document bytes.
+        :return: The bytes stored by this or a concurrent publisher.
+        :raises ValueError: If the entry or data is invalid.
+        :raises LedgerError: If the winning record cannot be read.
+        """
+
+        if type(data) is not bytes or not data or len(data) > _MAX_JOB_RECORD:
+            raise ValueError("invalid job target document")
+        self._job_record("targets", entry, "target")
+        directory = self._root / "targets" / entry.request.request_id
+        if not _publish(directory.parent, directory.name, data):
+            winner = _read_record(directory, _MAX_JOB_RECORD)
+            if winner is None:
+                raise LedgerError("job target record disappeared after publication")
+            return winner
+        return data
+
+    def decide_execution(self, entry: Entry, instance_nonce: str, owner_id: str) -> tuple[bool, bytes]:
+        """Record the first execution decision for one target and return its canonical winner.
+
+        :param entry: The admitted job request with a published target.
+        :param instance_nonce: The deciding daemon instance's nonce.
+        :param owner_id: The daemon owner identifier for this execution.
+        :return: Whether this call won, and the winner's decision bytes.
+        :raises ValueError: If an identifier is invalid or no target exists.
+        :raises LedgerError: If the stored decision is malformed.
+        """
+
+        if type(instance_nonce) is not str or _HEX32.fullmatch(instance_nonce) is None:
+            raise ValueError("invalid instance_nonce")
+        if type(owner_id) is not str or _HEX32.fullmatch(owner_id) is None:
+            raise ValueError("invalid owner_id")
+        if self.read_target(entry) is None:
+            raise ValueError("job target must be published before execution")
+        data = json.dumps(
+            {
+                "format": "httk-daemon-job-execution",
+                "format_version": 1,
+                "instance_nonce": instance_nonce,
+                "owner_id": owner_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        directory = self._root / "executions"
+        name = f"{entry.request.request_id}.decision"
+        won = _publish(directory, name, data)
+        winner = _read_record(directory / name, _MAX_JOB_RECORD)
+        if winner is None:
+            raise LedgerError("job execution decision disappeared after publication")
+        try:
+            decision = json.loads(winner)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise LedgerError("invalid stored job execution decision") from exc
+        if (
+            not isinstance(decision, dict)
+            or set(decision) != {"format", "format_version", "instance_nonce", "owner_id"}
+            or decision["format"] != "httk-daemon-job-execution"
+            or decision["format_version"] != 1
+            or type(decision["instance_nonce"]) is not str
+            or _HEX32.fullmatch(decision["instance_nonce"]) is None
+            or type(decision["owner_id"]) is not str
+            or _HEX32.fullmatch(decision["owner_id"]) is None
+            or json.dumps(decision, sort_keys=True, separators=(",", ":")).encode("ascii") != winner
+        ):
+            raise LedgerError("invalid stored job execution decision")
+        return won, winner
+
+    def execution_decision(self, entry: Entry) -> bytes | None:
+        """Read the immutable winning execution decision for one job request.
+
+        :param entry: The admitted job request.
+        :return: Canonical decision bytes, or ``None`` before publication.
+        :raises ValueError: If *entry* is not a job request.
+        :raises LedgerError: If the record is unsafe or too large.
+        """
+
+        return self._job_record("executions", entry, "decision")
+
+    def execution_result(self, entry: Entry) -> bytes | None:
+        """Read the once-written result of a job execution.
+
+        :param entry: The admitted job request.
+        :return: Result bytes, or ``None`` before publication.
+        :raises ValueError: If *entry* is not a job request.
+        :raises LedgerError: If the record is unsafe or too large.
+        """
+
+        return self._job_record("executions", entry, "result")
+
+    def store_execution_result(self, entry: Entry, data: bytes) -> bytes:
+        """Store an execution result once and return the winner's bytes.
+
+        :param entry: The admitted job request with a winning execution decision.
+        :param data: Canonical result bytes.
+        :return: The bytes stored by this or a concurrent publisher.
+        :raises ValueError: If the entry, data, or ordering is invalid.
+        :raises LedgerError: If the result cannot be read after publication.
+        """
+
+        if type(data) is not bytes or not data or len(data) > _MAX_JOB_RECORD:
+            raise ValueError("invalid job execution result")
+        if self.execution_decision(entry) is None:
+            raise ValueError("job execution decision must precede its result")
+        directory = self._root / "executions"
+        name = f"{entry.request.request_id}.result"
+        if not _publish(directory, name, data):
+            winner = _read_record(directory / name, _MAX_JOB_RECORD)
+            if winner is None:
+                raise LedgerError("job execution result disappeared after publication")
+            return winner
+        return data
 
     # ------------------------------------------------------------------
     # Recovery

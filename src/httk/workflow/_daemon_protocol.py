@@ -7,13 +7,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import cast
 
+from .models import validate_step
+
 _MAX_REQUEST_SIZE = 16 * 1024
 _REQUEST_FORMAT = "httk-workspace-command"
 _RESPONSE_FORMAT = "httk-workspace-response"
-_FORMAT_VERSION = 4
-#: The job actions a client signs for the workspace's managers (the daemon leaves them alone): each names the job
-#: by its exchange name, the client's own job UUID.
-JOB_OPERATIONS = frozenset({"stop_job", "cancel_job", "eject_job"})
+_FORMAT_VERSION = 5
+#: Authenticated job control and fresh status observations handled by the confined daemon.
+JOB_OPERATIONS = frozenset({"job_request", "job_request_status"})
 _OPERATIONS = frozenset({"health", "start_manager", "manager_status", "cancel_manager"}) | JOB_OPERATIONS
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -21,7 +22,26 @@ _PROFILE_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
 _REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
-_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested", "refused", "uncertain", "busy", "accepted"})
+_UUID_TEXT = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+_JOB_STATES = frozenset({"ready", "waiting", "paused", "failed", "succeeded", "cancelled", "running", "owned"})
+_JOB_ACTIONS = frozenset(
+    {"cancel", "pause", "continue", "override_step", "set_priority", "detach", "eject", "delete", "seal", "unseal"}
+)
+_JOB_RESULTS = frozenset({"applied", "queued", "refused", "uncertain"})
+_OUTCOMES = frozenset(
+    {
+        "ready",
+        "submitted",
+        "status",
+        "cancel_requested",
+        "refused",
+        "uncertain",
+        "busy",
+        "accepted",
+        "applied",
+        "queued",
+    }
+)
 _BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf", b"\xfe\xff", b"\xff\xfe")
 
 
@@ -35,7 +55,13 @@ class Request:
     :param profile: Select a configured profile for ``start_manager``.
     :param handle: Identify a broker-issued manager handle.
     :param configuration_digest: Pin the selected approved configuration.
-    :param job: Name the job of a job action by its exchange name (a canonical UUID).
+    :param selector: Name a job by a canonical UUID or hexadecimal UUID prefix.
+    :param action: Select one internal job-request action.
+    :param reason: Explain why the action was requested.
+    :param priority: Set priority for ``set_priority``.
+    :param step: Select the runner step for ``override_step``.
+    :param destination: Select an outbox-relative destination for ``eject``.
+    :param command_id: Identify the original daemon command for ``job_request_status``.
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
 
@@ -50,7 +76,13 @@ class Request:
     operator_key: str | None = field(default=None, kw_only=True)
     signature: str | None = field(default=None, kw_only=True)
     configuration_digest: str | None = field(default=None, kw_only=True)
-    job: str | None = field(default=None, kw_only=True)
+    selector: str | None = field(default=None, kw_only=True)
+    action: str | None = field(default=None, kw_only=True)
+    reason: str | None = field(default=None, kw_only=True)
+    priority: int | None = field(default=None, kw_only=True)
+    step: str | None = field(default=None, kw_only=True)
+    destination: str | None = field(default=None, kw_only=True)
+    command_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
@@ -84,17 +116,66 @@ class Request:
             raise ValueError("invalid profile")
         if self.handle is not None and type(self.handle) is not str:
             raise ValueError("invalid handle")
-        if (self.job is not None) != (self.operation in JOB_OPERATIONS):
-            raise ValueError("a job is named by job actions only")
-
+        if self.operation not in JOB_OPERATIONS and any(
+            item is not None
+            for item in (
+                self.selector,
+                self.action,
+                self.reason,
+                self.priority,
+                self.step,
+                self.destination,
+                self.command_id,
+            )
+        ):
+            raise ValueError("job request fields require a job operation")
         if self.operation in JOB_OPERATIONS:
-            if self.profile is not None or self.handle is not None or self.configuration_digest is not None:
-                raise ValueError("a job action requires job only")
-            try:
-                if type(self.job) is not str or str(uuid.UUID(self.job)) != self.job:
-                    raise ValueError
-            except (ValueError, AttributeError) as exc:
-                raise ValueError("invalid job") from exc
+            if self.profile is not None or self.handle is not None:
+                raise ValueError("job operations forbid manager fields")
+            if self.operation == "job_request":
+                if self.configuration_digest is None:
+                    raise ValueError("job_request requires configuration_digest")
+                if self.command_id is not None:
+                    raise ValueError("job_request forbids command_id")
+                if not _valid_selector(self.selector):
+                    raise ValueError("invalid selector")
+                if type(self.action) is not str or self.action not in _JOB_ACTIONS:
+                    raise ValueError("invalid action")
+                if type(self.reason) is not str or len(self.reason.encode("utf-8")) > 1000:
+                    raise ValueError("invalid reason")
+                if self.priority is not None and (type(self.priority) is not int or not 0 <= self.priority <= 999):
+                    raise ValueError("invalid priority")
+                if (self.action == "set_priority") != (self.priority is not None):
+                    raise ValueError("priority is required only for set_priority")
+                if self.step is not None:
+                    if type(self.step) is not str:
+                        raise ValueError("invalid step")
+                    try:
+                        validate_step(self.step)
+                    except ValueError as exc:
+                        raise ValueError("invalid step") from exc
+                if (self.action == "override_step") != (self.step is not None):
+                    raise ValueError("step is required only for override_step")
+                if self.destination is not None:
+                    if (
+                        type(self.destination) is not str
+                        or "\\" in self.destination
+                        or len(self.destination.encode("utf-8")) > 1024
+                    ):
+                        raise ValueError("invalid destination")
+                    parts = self.destination.split("/")
+                    if any(part in {"", ".", ".."} or len(part.encode("utf-8")) > 255 or ":" in part for part in parts):
+                        raise ValueError("invalid destination")
+                if (self.action == "eject") != (self.destination is not None):
+                    raise ValueError("destination is required only for eject")
+            else:
+                if self.configuration_digest is not None or any(
+                    item is not None
+                    for item in (self.selector, self.action, self.reason, self.priority, self.step, self.destination)
+                ):
+                    raise ValueError("job_request_status requires command_id only")
+                if type(self.command_id) is not str or _ID_PATTERN.fullmatch(self.command_id) is None:
+                    raise ValueError("invalid command_id")
         elif self.operation == "health":
             if self.profile is not None or self.handle is not None or self.configuration_digest is not None:
                 raise ValueError("health forbids operation fields")
@@ -116,9 +197,20 @@ def _version_message(kind: str, version: object) -> str:
     if type(version) is int and version < _FORMAT_VERSION:
         return (
             f"unsupported {kind} version {version}: this daemon speaks protocol {_FORMAT_VERSION}; "
-            "update the client (the old protocol's withdraw operation no longer exists) and re-enroll"
+            "update the client and re-enroll the daemon; old protocol requests are not migrated"
         )
-    return f"unsupported {kind} version {version!r}: this daemon speaks protocol {_FORMAT_VERSION}"
+    return f"unsupported {kind} version {version!r}: this daemon speaks protocol {_FORMAT_VERSION}; update the client"
+
+
+def _valid_selector(value: object) -> bool:
+    """Report whether a selector is a lowercase textual UUID prefix."""
+
+    if type(value) is not str or not value or len(value) > len(_UUID_TEXT):
+        return False
+    return all(
+        character == "-" if _UUID_TEXT[index] == "-" else character in "0123456789abcdef"
+        for index, character in enumerate(value)
+    )
 
 
 def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -196,8 +288,21 @@ def _request_fields(request: Request) -> dict[str, object]:
         fields["configuration_digest"] = request.configuration_digest
     elif request.operation in {"manager_status", "cancel_manager"}:
         fields["handle"] = request.handle
-    elif request.operation in JOB_OPERATIONS:
-        fields["job"] = request.job
+    elif request.operation == "job_request":
+        fields.update(
+            {
+                "configuration_digest": request.configuration_digest,
+                "selector": request.selector,
+                "action": request.action,
+                "reason": request.reason,
+            }
+        )
+        for name in ("priority", "step", "destination"):
+            value = getattr(request, name)
+            if value is not None:
+                fields[name] = value
+    elif request.operation == "job_request_status":
+        fields["command_id"] = request.command_id
     return fields
 
 
@@ -235,8 +340,11 @@ def decode_request(data: bytes) -> Request:
         keys.update({"configuration", "configuration_digest"})
     elif operation in {"manager_status", "cancel_manager"}:
         keys.add("handle")
-    elif operation in JOB_OPERATIONS:
-        keys.add("job")
+    elif operation == "job_request":
+        keys.update({"configuration_digest", "selector", "action", "reason"})
+        keys.update(name for name in ("priority", "step", "destination") if name in value)
+    elif operation == "job_request_status":
+        keys.add("command_id")
     if set(value) != keys:
         raise ValueError("invalid request fields")
     request_id = value["request_id"]
@@ -245,7 +353,6 @@ def decode_request(data: bytes) -> Request:
     profile = value.get("configuration")
     configuration_digest = value.get("configuration_digest")
     handle = value.get("handle")
-    job = value.get("job")
     created_at = value["created_at"]
     expires_at = value["expires_at"]
     operator_key = value["operator_key"]
@@ -257,8 +364,6 @@ def decode_request(data: bytes) -> Request:
     if "configuration_digest" in value and type(configuration_digest) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
-        raise ValueError("invalid request fields")
-    if "job" in value and type(job) is not str:
         raise ValueError("invalid request fields")
     if type(created_at) is not int or type(expires_at) is not int:
         raise ValueError("invalid request fields")
@@ -279,7 +384,13 @@ def decode_request(data: bytes) -> Request:
             operator_key=cast(str | None, operator_key),
             signature=cast(str | None, signature),
             configuration_digest=cast(str | None, configuration_digest),
-            job=cast(str | None, job),
+            selector=cast(str | None, value.get("selector")),
+            action=cast(str | None, value.get("action")),
+            reason=cast(str | None, value.get("reason")),
+            priority=cast(int | None, value.get("priority")),
+            step=cast(str | None, value.get("step")),
+            destination=cast(str | None, value.get("destination")),
+            command_id=cast(str | None, value.get("command_id")),
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
@@ -311,6 +422,10 @@ class Response:
     :param scheduler_state: Give a bounded normalized scheduler state.
     :param reason: Give a bounded normalized reason code.
     :param detail: Explain ``reason`` in at most 1000 printable ASCII characters.
+    :param job_id: Identify the resolved job with its canonical UUID.
+    :param internal_request_id: Identify the filesystem request with its canonical UUID.
+    :param current_state: Report the resolved job's bounded current state when available.
+    :param command_id: Identify the original daemon command with 32 lowercase hexadecimal digits.
     :raises ValueError: If a field is invalid or conflicts with the outcome.
     """
 
@@ -325,6 +440,10 @@ class Response:
     detail: str | None = None
     operator_key: str | None = field(default=None, kw_only=True)
     signature: str | None = field(default=None, kw_only=True)
+    job_id: str | None = field(default=None, kw_only=True)
+    internal_request_id: str | None = field(default=None, kw_only=True)
+    current_state: str | None = field(default=None, kw_only=True)
+    command_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid identifiers and outcome-specific combinations."""
@@ -360,6 +479,22 @@ class Response:
             raise ValueError("invalid operator_key")
         if self.signature is not None and type(self.signature) is not str:
             raise ValueError("invalid signature")
+        for name in ("job_id", "internal_request_id"):
+            value = getattr(self, name)
+            if value is not None:
+                try:
+                    if type(value) is not str or str(uuid.UUID(value)) != value:
+                        raise ValueError
+                except (ValueError, AttributeError) as exc:
+                    raise ValueError(f"invalid {name}") from exc
+        if self.command_id is not None and (
+            type(self.command_id) is not str or _ID_PATTERN.fullmatch(self.command_id) is None
+        ):
+            raise ValueError("invalid command_id")
+        if self.current_state is not None and (
+            type(self.current_state) is not str or self.current_state not in _JOB_STATES
+        ):
+            raise ValueError("invalid current_state")
 
         has_handle = self.handle is not None
         has_state = self.scheduler_state is not None
@@ -373,7 +508,19 @@ class Response:
             "refused": not has_state and has_reason,
             "busy": not has_handle and not has_state and has_reason,
             "accepted": not has_handle and not has_state and not has_reason,
+            "applied": not has_handle and not has_state and not has_reason,
+            "queued": not has_handle and not has_state and not has_reason,
         }[self.outcome]
+        if self.command_id is not None:
+            valid = self.outcome in _JOB_RESULTS and not has_handle and not has_state
+            if (self.job_id is None) != (self.internal_request_id is None):
+                valid = False
+            if self.outcome in {"applied", "queued"} and self.job_id is None:
+                valid = False
+            if self.outcome == "refused" and not has_reason:
+                valid = False
+        elif any(item is not None for item in (self.job_id, self.internal_request_id, self.current_state)):
+            valid = False
         if not valid:
             raise ValueError("invalid outcome fields")
 
@@ -400,6 +547,10 @@ def _response_fields(response: Response) -> dict[str, object]:
         fields["reason"] = response.reason
     if response.detail is not None:
         fields["detail"] = response.detail
+    for name in ("job_id", "internal_request_id", "current_state", "command_id"):
+        value = getattr(response, name)
+        if value is not None:
+            fields[name] = value
     return fields
 
 
@@ -428,7 +579,16 @@ def decode_response(data: bytes) -> Response:
         "operator_key",
         "signature",
     }
-    optional = {"handle", "scheduler_state", "reason", "detail"}
+    optional = {
+        "handle",
+        "scheduler_state",
+        "reason",
+        "detail",
+        "job_id",
+        "internal_request_id",
+        "current_state",
+        "command_id",
+    }
     if not keys <= set(value) or not set(value) <= keys | optional:
         raise ValueError("invalid response fields")
     if any(name in value and value[name] is None for name in optional):
@@ -446,6 +606,10 @@ def decode_response(data: bytes) -> Response:
             detail=value.get("detail"),  # type: ignore[arg-type]
             operator_key=value["operator_key"],  # type: ignore[arg-type]
             signature=value["signature"],  # type: ignore[arg-type]
+            job_id=value.get("job_id"),  # type: ignore[arg-type]
+            internal_request_id=value.get("internal_request_id"),  # type: ignore[arg-type]
+            current_state=value.get("current_state"),  # type: ignore[arg-type]
+            command_id=value.get("command_id"),  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid response fields") from exc

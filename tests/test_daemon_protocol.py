@@ -25,12 +25,14 @@ HANDLE = "abcdef0123456789abcdef0123456789"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
 REQUEST_DIGEST = "a" * 64
 CONFIGURATION_DIGEST = "b" * 64
+JOB_ID = "12345678-1234-1234-1234-123456789abc"
+INTERNAL_REQUEST_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def _document(operation: str, **fields: object) -> bytes:
     value: dict[str, object] = {
         "format": "httk-workspace-command",
-        "format_version": 4,
+        "format_version": 5,
         "request_id": REQUEST_ID,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
@@ -51,6 +53,26 @@ def _document(operation: str, **fields: object) -> bytes:
         ("start_manager", {"configuration": "cpu-1", "configuration_digest": CONFIGURATION_DIGEST}),
         ("manager_status", {"handle": HANDLE}),
         ("cancel_manager", {"handle": HANDLE}),
+        (
+            "job_request",
+            {
+                "configuration_digest": CONFIGURATION_DIGEST,
+                "selector": "abcdef01-2345",
+                "action": "pause",
+                "reason": "operator request",
+            },
+        ),
+        ("job_request_status", {"command_id": REQUEST_ID}),
+        (
+            "job_request",
+            {
+                "configuration_digest": CONFIGURATION_DIGEST,
+                "selector": JOB_ID,
+                "action": "set_priority",
+                "reason": "operator request",
+                "priority": 999,
+            },
+        ),
     ],
 )
 def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> None:
@@ -64,6 +86,13 @@ def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> N
         handle=fields.get("handle"),
         enrollment_id=ENROLLMENT_ID,
         configuration_digest=fields.get("configuration_digest"),
+        selector=fields.get("selector"),
+        action=fields.get("action"),
+        reason=fields.get("reason"),
+        priority=int(fields["priority"]) if "priority" in fields else None,
+        step=fields.get("step"),
+        destination=fields.get("destination"),
+        command_id=fields.get("command_id"),
     )
     encoded = encode_request(request)
     assert encoded.isascii()
@@ -101,7 +130,7 @@ def test_encoding_and_digest_ignore_input_key_order_and_whitespace() -> None:
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
         b'"created_at":0,"expires_at":0,"operator_key":null,"signature":null,'
-        b'"format_version":4,"format":"httk-workspace-command" }'
+        b'"format_version":5,"format":"httk-workspace-command" }'
     )
     first = decode_request(ordered)
     second = decode_request(reordered)
@@ -211,18 +240,18 @@ def test_direct_construction_validates_all_fields(kwargs: dict[str, object]) -> 
     assert len(str(error.value)) < 256
 
 
-@pytest.mark.parametrize("version", ["true", "4.0", "4e0", "2", "null", '"4"'])
-def test_version_must_be_exact_integer_four(version: str) -> None:
-    data = _document("health").replace(b'"format_version": 4', f'"format_version": {version}'.encode())
+@pytest.mark.parametrize("version", ["true", "5.0", "5e0", "2", "null", '"5"'])
+def test_version_must_be_exact_integer_five(version: str) -> None:
+    data = _document("health").replace(b'"format_version": 5', f'"format_version": {version}'.encode())
 
     with pytest.raises(ValueError):
         decode_request(data)
 
 
 def test_a_version_three_request_is_refused_with_a_teaching_message() -> None:
-    data = _document("withdraw").replace(b'"format_version": 4', b'"format_version": 3')
+    data = _document("withdraw").replace(b'"format_version": 5', b'"format_version": 4')
 
-    with pytest.raises(ValueError, match=r"unsupported request version 3.*protocol 4.*update the client"):
+    with pytest.raises(ValueError, match=r"unsupported request version 4.*protocol 5.*update the client"):
         decode_request(data)
 
 
@@ -240,6 +269,57 @@ def test_start_requires_configuration_digest_when_encoded() -> None:
 
     with pytest.raises(ValueError, match="configuration_digest"):
         encode_request(request)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"selector": "/tmp/job"}, "selector"),
+        ({"selector": "tag:urgent"}, "selector"),
+        ({"selector": "../../job"}, "selector"),
+        ({"selector": "abcdefg-"}, "selector"),
+        ({"action": "other"}, "action"),
+        ({"action": "set_priority"}, "priority"),
+        ({"priority": True}, "priority"),
+        ({"priority": 1000}, "priority"),
+        ({"step": "bad/step"}, "step"),
+        ({"step": "next"}, "step"),
+        ({"action": "override_step"}, "step"),
+        ({"destination": "../outside"}, "destination"),
+        ({"action": "eject"}, "destination"),
+        ({"destination": "/absolute"}, "destination"),
+        ({"destination": "bad\\path"}, "destination"),
+    ],
+)
+def test_job_request_rejects_invalid_options(overrides: dict[str, object], message: str) -> None:
+    fields: dict[str, object] = {
+        "request_id": REQUEST_ID,
+        "workspace_id": WORKSPACE_ID,
+        "operation": "job_request",
+        "enrollment_id": ENROLLMENT_ID,
+        "configuration_digest": CONFIGURATION_DIGEST,
+        "selector": "abcdef01",
+        "action": "pause",
+        "reason": "why",
+    }
+    fields.update(overrides)
+    with pytest.raises(ValueError, match=message):
+        Request(**fields)  # type: ignore[arg-type]
+
+
+def test_job_request_destination_is_relative_component_path() -> None:
+    request = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "job_request",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+        selector="abcdef01-2345",
+        action="eject",
+        reason="move it",
+        destination="archive/old/job",
+    )
+    assert decode_request(encode_request(request)) == request
 
 
 def test_profile_length_64_is_valid() -> None:
@@ -261,7 +341,7 @@ def test_wire_request_id_rejects_wrong_length_or_newline(request_id: str) -> Non
 
 def test_duplicate_keys_reject_escaped_equivalent_names() -> None:
     data = (
-        b'{"format":"httk-workspace-command","format_version":4,'
+        b'{"format":"httk-workspace-command","format_version":5,'
         b'"request_id":"0123456789abcdef0123456789abcdef",'
         b'"workspace_id":"12345678-1234-1234-1234-123456789abc",'
         b'"enrollment_id":"fedcba9876543210fedcba9876543210",'
@@ -401,6 +481,28 @@ def test_request_requires_enrollment_on_wire_and_refuses_unknown_fields() -> Non
         ("busy", {"reason": "capacity"}),
         ("uncertain", {"handle": HANDLE, "reason": "submission_unconfirmed", "detail": "sbatch exited 1: no"}),
         ("refused", {"reason": "scheduler_unavailable", "detail": '"\\ ~' * 250}),
+        (
+            "applied",
+            {
+                "job_id": JOB_ID,
+                "internal_request_id": INTERNAL_REQUEST_ID,
+                "current_state": "paused",
+                "command_id": REQUEST_ID,
+            },
+        ),
+        (
+            "refused",
+            {"reason": "job_not_found", "detail": "selector did not resolve", "command_id": REQUEST_ID},
+        ),
+        (
+            "uncertain",
+            {
+                "reason": "job_owner_unavailable",
+                "command_id": REQUEST_ID,
+                "job_id": JOB_ID,
+                "internal_request_id": INTERNAL_REQUEST_ID,
+            },
+        ),
     ],
 )
 def test_response_outcomes_round_trip(outcome: str, fields: dict[str, str]) -> None:
@@ -419,7 +521,7 @@ def test_response_encoding_is_canonical_and_omits_absent_fields() -> None:
         b'{ "outcome":"ready", "request_digest":"' + REQUEST_DIGEST.encode() + b'",'
         b'"enrollment_id":"' + ENROLLMENT_ID.encode() + b'",'
         b'"workspace_id":"' + WORKSPACE_ID.encode() + b'",'
-        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":4,'
+        b'"request_id":"' + REQUEST_ID.encode() + b'", "format_version":5,'
         b'"operator_key":null,"signature":null,'
         b'"format":"httk-workspace-response" }'
     )
@@ -479,7 +581,7 @@ def test_response_decoder_rejects_schema_and_malformed_documents() -> None:
     valid = encode_response(Response(REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST, "ready"))
     invalid_documents = (
         valid.replace(b"httk-workspace-response", b"httk-workspace-command"),
-        valid.replace(b'"format_version":4', b'"format_version":true'),
+        valid.replace(b'"format_version":5', b'"format_version":true'),
         valid[:-1] + b',"old_field":1}',
         valid[:-1] + b',"handle":null}',
         valid[:-1] + b',"detail":"no reason"}',
@@ -510,9 +612,9 @@ def test_response_signature_covers_a_maximal_detail(tmp_path: Path) -> None:
         verify_response(replace(response, detail="'" * 1000), public_key)
 
 
-def test_response_without_detail_keeps_its_version_four_encoding() -> None:
+def test_response_without_detail_keeps_its_version_five_encoding() -> None:
     stored = (
-        b'{"enrollment_id":"' + ENROLLMENT_ID.encode() + b'","format":"httk-workspace-response","format_version":4,'
+        b'{"enrollment_id":"' + ENROLLMENT_ID.encode() + b'","format":"httk-workspace-response","format_version":5,'
         b'"handle":"' + HANDLE.encode() + b'","operator_key":null,"outcome":"uncertain",'
         b'"reason":"submission_unconfirmed","request_digest":"' + REQUEST_DIGEST.encode() + b'",'
         b'"request_id":"' + REQUEST_ID.encode() + b'","signature":null,"workspace_id":"' + WORKSPACE_ID.encode() + b'"}'

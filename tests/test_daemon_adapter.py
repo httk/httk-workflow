@@ -27,6 +27,7 @@ from httk.workflow.adapters import run_adapter
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 ENROLLMENT_ID = "fedcba9876543210fedcba9876543210"
 CONFIGURATION_DIGEST = "b" * 64
+ACTIVE_CONFIGURATION_DIGEST = "a" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -50,10 +51,12 @@ def _endpoint(tmp_path: Path) -> Endpoint:
     assert public_key is not None
     document = {
         "format": "httk-workspace-daemon",
-        "format_version": 1,
+        "format_version": 2,
+        "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
+        "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
         "configurations": {"cpu": CONFIGURATION_DIGEST},
         "request_max_age": 3600,
     }
@@ -127,6 +130,14 @@ def _broker(endpoint: Endpoint, outcome: str, **fields: str) -> tuple[threading.
                     names = requests.names()
                     if names:
                         request = decode_request(requests.read(names[0]))
+                        job_fields: dict[str, str] = {}
+                        if request.operation == "job_request":
+                            job_fields["command_id"] = request.request_id
+                            if outcome in {"applied", "queued"}:
+                                job_fields.update(
+                                    job_id="12345678-1234-1234-1234-123456789abc",
+                                    internal_request_id="12345678-1234-1234-1234-123456789abd",
+                                )
                         response = sign_response(
                             Response(
                                 request.request_id,
@@ -135,6 +146,7 @@ def _broker(endpoint: Endpoint, outcome: str, **fields: str) -> tuple[threading.
                                 request_digest(request),
                                 outcome,
                                 **fields,
+                                **job_fields,
                             ),
                             seed_path=endpoint.exchange.parent / "response.seed",
                         )
@@ -272,6 +284,40 @@ def test_real_adapter_subprocess_preserves_confirmed_refusal(tmp_path: Path) -> 
     assert result["returncode"] == 2
     assert json.loads(result["stdout"])["outcome"] == "refused"
     assert result["stderr"] == ""
+
+
+@pytest.mark.parametrize(("outcome", "returncode"), [("applied", 0), ("queued", 0), ("refused", 1), ("uncertain", 1)])
+def test_adapter_maps_job_command_outcomes(tmp_path: Path, outcome: str, returncode: int) -> None:
+    endpoint = _endpoint(tmp_path)
+    bundle = _bundle(tmp_path, endpoint)
+    request = sign_request(
+        Request(
+            "4" * 32,
+            WORKSPACE_ID,
+            "job_request",
+            enrollment_id=ENROLLMENT_ID,
+            configuration_digest=ACTIVE_CONFIGURATION_DIGEST,
+            selector="12345678-1234-1234-1234-123456789abc",
+            action="cancel",
+            reason="operator requested cancellation",
+        ),
+        now=1_000_000,
+    )
+    thread, errors = _broker(endpoint, outcome, reason="request_" + outcome)
+    try:
+        result = run_adapter(
+            bundle,
+            "daemon",
+            {"daemon_request": json.loads(encode_request(request)), "wait_seconds": 10},
+            timeout=15,
+        )
+    finally:
+        thread.join(timeout=15)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert result["returncode"] == returncode
+    assert json.loads(result["stdout"])["outcome"] == outcome
 
 
 @pytest.mark.parametrize("operation", ["invoke", "status", "push", "pull"])
