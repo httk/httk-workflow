@@ -143,7 +143,7 @@ CLIENT_PUBLIC_KEY='ed25519:<THE PUBLIC KEY FOR YOUR IDENTITY FROM STEP 1>'
 httk workspace daemon init main \
   --add launchers=small \
   --add launchers=large \
-  --add "authorized_keys=$CLIENT_PUBLIC_KEY" \
+  --set "authorized_keys=$CLIENT_PUBLIC_KEY" \
   --set bwrap=/usr/bin/bwrap \
   --set "python=$HOME/sandbox/setup/venv/bin/python3" \
   --set sbatch=/usr/bin/sbatch \
@@ -166,7 +166,7 @@ The deamon process must remain available to answer requests and submit managers.
 To modify a deamon configuration, do e.g.,:
 ```bash
 httk workspace daemon configure main --add launchers=large
-httk workspace daemon configure main --add "authorized_keys=<ANOTHER KEY>"`
+httk workspace daemon configure main --add "authorized_keys=<ANOTHER KEY>"
 ```
 Restart the daemon after configuration changes. As a saftey feature, a deamon has a default quota of running 128 "managers".
 
