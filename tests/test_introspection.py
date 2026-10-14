@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,9 +16,10 @@ from httk.core.cli import CLIContext
 
 import v3_helpers as v3
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, _kernel, job_records
+from httk.workflow import TaskManager, Workspace, _kernel, _requests, job_records
 from httk.workflow._job import JobDefinition
 from httk.workflow._logging import reset_logging
+from httk.workflow._state import encode_state
 from httk.workflow.introspection import (
     DEBUG_EXIT_FAILED,
     DEBUG_EXIT_SUCCEEDED,
@@ -34,6 +36,7 @@ from httk.workflow.introspection import (
     resolve_job_selector,
     resolve_job_selectors,
 )
+from httk.workflow.removal import serve_requests
 from httk.workflow.workflow_cli import command
 
 #: Three activations, each advancing to the next step, then success.
@@ -339,6 +342,73 @@ def test_why_prefers_a_retained_log_path_from_the_failure(
 
     logs = next(check for check in explain_job(ws, ref).checks if check.name == "attempt logs")
     assert "diagnostics/retained-stdio.out" in logs.detail
+
+
+def _failed_at_wait(ws: Workspace, installed: Any, retry_policy: dict[str, int]) -> _kernel.JobRef:
+    """A failed job rewritten into a parent that failed at its wait on two (absent) children."""
+
+    submitted = _submit(ws, installed, {"start": "exit"}, retry_policy=retry_policy)
+    v3.run(ws)
+    ref = resolve_job(ws, submitted.job_id)
+    ghosts = [str(uuid.uuid4()) for _ in range(2)]
+    children = [
+        {"label": f"g{index}", "job_id": ghost, "job_key": f"g{index}--{ghost}", "placement_hint": "project/g"}
+        for index, ghost in enumerate(ghosts)
+    ]
+    observed = {**children[0], "placement": "project/g", "state": "failed", "token": None, "failure": None}
+    doc = (
+        v3.state_of(ref)
+        .with_failure({"code": "dependency_failure", "message": "the join condition all_succeeded fails"})
+        .with_observations([observed])
+        .updated(join={"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": children})
+    )
+    (ref.path / "state.json").write_bytes(encode_state(doc))
+    return ref
+
+
+_WAIT = (
+    "the wait on 2 children can be reopened with `httk job request continue`; "
+    "`restart` reruns step start and spawns new children"
+)
+
+
+def test_why_offers_to_reopen_the_wait_of_a_parent_that_failed_at_it(ws: Workspace, installed: Any) -> None:
+    ref = _failed_at_wait(ws, installed, _RETRY)
+    diagnosis = explain_job(ws, ref)
+    assert diagnosis.summary == (
+        "this job failed with dependency_failure while waiting on its children and stays failed until an operator "
+        "resumes it"
+    )
+    checks = {check.name: check for check in diagnosis.checks}
+    assert checks["wait"].detail == _WAIT
+    assert checks["dependency child"].satisfied is False and "operator continue" not in checks
+    assert checks["operator restart"].satisfied is True
+    # job show lists the kept join and its children.
+    report = describe_job(ws, ref)
+    assert report["join"]["condition"] == "all_succeeded" and len(report["join"]["children"]) == 2
+    assert "all_succeeded then step gather" in render_job(report)
+
+
+def test_why_warns_that_restart_of_a_kept_wait_is_budget_bound(ws: Workspace, installed: Any) -> None:
+    ref = _failed_at_wait(ws, installed, {"maximum_attempts_per_activation": 1})
+    diagnosis = explain_job(ws, ref)
+    checks = {check.name: check for check in diagnosis.checks}
+    assert checks["wait"].detail == _WAIT
+    assert checks["operator restart"].satisfied is False
+    assert checks["operator restart"].detail.startswith(
+        "'restart' would immediately end the job again with retry_exhausted"
+    )
+    assert any("override_step --workspace WORKSPACE --step start " in hint for hint in diagnosis.hints)
+
+    # The budget refuses the restart: the job stays failed, keeps its wait, and no longer failed "while waiting".
+    assert ref.placement is not None
+    path = _requests.post(ws, action="restart", job_id=ref.job_id, placement=ref.placement, operator="op", reason="r")
+    (outcome,) = serve_requests(ws, [(ref, path)])
+    assert (outcome.status, outcome.state) == ("applied", "failed")
+    diagnosis = explain_job(ws, resolve_job(ws, ref.job_id))
+    assert diagnosis.summary == "this job failed with retry_exhausted and stays failed until an operator resumes it"
+    assert {check.name: check for check in diagnosis.checks}["wait"].detail == _WAIT
+    assert any("override_step --workspace WORKSPACE --step start " in hint for hint in diagnosis.hints)
 
 
 def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(ws: Workspace, installed: Any) -> None:

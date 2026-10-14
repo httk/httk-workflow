@@ -237,7 +237,9 @@ def consumed_by_decided_join(
     """The revival guard: describe the parent whose current ``state.json`` records *child* in a decided join.
 
     Advisory and read-only: the parent is probed at its recorded placement and in
-    ``owned/``, never searched for elsewhere.
+    ``owned/``, never searched for elsewhere. A parent whose join still names the
+    child does not consume it: it failed at its wait (``continue`` reopens the
+    wait, so reviving the child first is the intended order) or waits on it again.
 
     :param workspace: The workspace.
     :param child: The child's ``job.json``.
@@ -255,6 +257,13 @@ def consumed_by_decided_join(
         return None
     doc, _ = read_state_unowned(ref.path / "state.json")
     if doc is None or doc.job_id != job_id:
+        return None
+    children = () if doc.join is None else doc.join.get("children")
+    if (
+        ref.state in ("failed", "waiting")
+        and isinstance(children, tuple)
+        and any(isinstance(entry, Mapping) and entry.get("job_id") == child.id for entry in children)
+    ):
         return None
     if any(observation.get("job_id") == child.id for observation in doc.observations):
         return f"{ref.job_key} ({ref.state})"

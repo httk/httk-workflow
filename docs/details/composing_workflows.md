@@ -245,6 +245,12 @@ the child. The calling job's private {py:attr}`~httk.workflow.Attempt.state`
 survives the wait, so a `start` step can record what it needs and read it back
 in the gathering step.
 
+A parent that fails with `dependency_failure` keeps its join. An operator fixes
+the child and `continue`s it, then `continue`s the parent, which reopens the
+wait with the same join and no new attempt. `restart` on the parent instead
+reruns the spawning step, which creates new children. See
+{doc}`/restarting_jobs`.
+
 ## Requirements and limits
 
 - **Installed callees.** Every workflow a job calls, transitively, is

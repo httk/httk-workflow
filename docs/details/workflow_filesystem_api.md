@@ -147,8 +147,8 @@ dotted names to JSON scalars; the protocol reads `seal.succeeded`, `seal.keys`,
 | `ready` | Waiting to be claimed by an eligible manager. |
 | `owned` | Held by exactly one owner; what it is doing is `state.json` `phase`. |
 | `waiting` | A parent waiting for its join to be decided. |
-| `paused` | Stopped until an operator request (`continue`, `override_step`, `delete`, ...). |
-| `failed` | Ended with a failure; `continue` and `override_step` revive it. |
+| `paused` | Stopped until an operator request (`continue`, `restart`, `override_step`, `delete`, ...). |
+| `failed` | Ended with a failure; `continue`, `restart` and `override_step` revive it; a parent failed at its wait keeps `join` and `continue` reopens it. |
 | `succeeded` | Ended successfully; never changed by the protocol until `job unseal`. |
 | `cancelled` | Cancelled by a request. |
 
@@ -670,7 +670,7 @@ and at most 1 MiB.
 | `runner_steps` | list or `null` | Steps an outcome declared; evidence only. |
 | `failure` | failure object or `null` | The current failure (§Outcomes). |
 | `failure_history` | list, at most 16 | The last failures. |
-| `join` | object or `null` | The pending join (§Waiting and joins). |
+| `join` | object or `null` | The pending join (§Waiting and joins). Kept when the parent fails with `dependency_failure` at its wait (impossible without `on_impossible`, or an unresolvable child), so the wait can be reopened. |
 | `observations` | list | The children as the decided join saw them. |
 | `children` | list | Published children: `{job_id, job_key, label, placement, spawn_id, attempt_id}`; for an adopted exchange tree `{job_id, job_key, placement}`. |
 | `commit` | object or `null` | The commit intent (§The commit). |
@@ -1037,10 +1037,18 @@ releases it: satisfied → `ready` with an activation of `next_step` (reason
 `join`); impossible → the `on_impossible` step when it is
 `{"action": "advance", "next_step": ...}`, else `failed`; unresolvable →
 `failed` (`dependency_failure`). The decision records `observations` (`{label,
-job_id, job_key, placement, state, token, failure}`) and clears `join`.
+job_id, job_key, placement, state, token, failure}`) in every case. It clears
+`join` on every outcome except one: `join` is kept when the parent fails with
+`dependency_failure` because the condition became impossible without an
+`on_impossible` advance, or because a child is unresolvable, so the wait can be
+reopened (`continue`). Satisfied, rescue, `budget_exhausted` and a join naming
+an invalid step clear it.
 
-**The revival guard:** `continue` or `override_step` of a child is refused,
-unless forced, while its parent's current `state.json` observations name it.
+**The revival guard:** `continue`, `restart` or `override_step` of a child is
+refused, unless forced, while its parent's current `state.json` observations
+name it. The exception is a child that the parent's `join` still names (the
+parent is `failed` with a retained `join`, or `waiting` on it again): reviving
+the child is then the intended flow and needs no `force`.
 
 ### Damage handling
 
@@ -1073,12 +1081,12 @@ version 3, strict, at most 64 KiB:
 | `format`, `format_version` | yes | `"httk-workflow-request"`, `3` |
 | `request_id`, `job_id` | yes | UUIDs; the file name MUST be `<job_id>.<request_id>.json`. |
 | `placement` | yes | The job's placement, a hint for locating it. |
-| `action` | yes | `cancel`, `pause`, `continue`, `override_step`, `set_priority`, `detach`, `eject`, `delete`, `seal` or `unseal`. |
+| `action` | yes | `cancel`, `pause`, `continue`, `restart`, `override_step`, `set_priority`, `detach`, `eject`, `delete`, `seal` or `unseal`. |
 | `operator`, `reason`, `created_at` | yes | Attribution and ordering. |
 | `priority` | `set_priority` only, required | 0–999. |
 | `step` | `override_step` only, required | The step to restart at. |
 | `destination` | `eject` only, required | An absolute directory, or a missing name in one. |
-| `force` | `continue`, `override_step`; only `true` | Accept the revival hazard. |
+| `force` | `continue`, `restart`, `override_step`; only `true` | Accept the revival hazard. |
 | `tree` | `eject` only; only `true` | Eject the job's descendants with it. |
 | `operator_key`, `signature` | both or neither | An *httk* identity signature, for attribution. An unsigned request applies; one whose signature does not verify is malformed. |
 
@@ -1106,8 +1114,9 @@ at and the request, giving the new document and one effect:
 | --- | --- | --- |
 | `cancel` | not terminal | `Release(cancelled)` |
 | `pause` | not terminal, not `paused`, not `waiting` | `Release(paused)` |
-| `continue` | `failed` or `paused`, revival guard | `Release(ready)`: failure cleared, next attempt `manual_continue` if the last one started; `failed`/`budget_exhausted` past a budget |
-| `override_step` | `failed` or `paused`, revival guard | `Release(ready)` with a new activation of `step`; budgets as `continue` |
+| `continue` | `failed` or `paused`, revival guard | `Release(waiting)` with the retained `join` when the job failed at its wait, no new attempt; else `Release(ready)`: failure cleared, next attempt `manual_continue` if the last one started; `failed`/`budget_exhausted` past a budget |
+| `restart` | `failed` or `paused`, revival guard | `Release(ready)`: failure cleared, `join` dropped, next attempt `manual_continue` if the last one started; `failed`/`budget_exhausted` past a budget |
+| `override_step` | `failed` or `paused`, revival guard | `Release(ready)` with a new activation of `step`, dropping a retained `join`; budgets as `restart` |
 | `set_priority` | always | `Release(<current state>, priority)` |
 | `detach` | the job has a parent link not yet detached | `Release(<current state>)` with `detached: {at, operator}` |
 | `eject` | the destination is usable | `Eject(destination, tree)` (§Eject) |
@@ -1117,7 +1126,7 @@ at and the request, giving the new document and one effect:
 
 A request that does not apply is a `Drop`: its id is recorded, a
 `request_dropped` entry with the reason goes to `history_tail`, and the job is
-released back where it was. A `continue` or `override_step` refused by the
+released back where it was. A `continue`, `restart` or `override_step` refused by the
 revival guard applies when it carries `force`. A request that applies while an
 attempt is live is a `Defer` and waits. At a commit boundary an `eject` is
 skipped; the requests pass ejects the job after its release. An `eject`

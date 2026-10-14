@@ -22,6 +22,8 @@ to a data layer such as *httk-store*.
   and remotes
 - **Running workflows**: {doc}`running`, creating jobs, managers, transfers,
   collecting, and sealing
+- **Restarting and resuming jobs**: {doc}`restarting_jobs`, fixing a failed job
+  or child and resuming it
 - **Writing runners in Python**: {doc}`runtime_helpers`
 - **Runner SDKs in other languages**: {doc}`sdks/index`
 - **Workflow packages and URIs**: {doc}`workflow_packages`
@@ -76,6 +78,7 @@ them without VASP installed.
 quickstart
 workspaces
 running
+restarting_jobs
 runtime_helpers
 sdks/index
 workflow_packages

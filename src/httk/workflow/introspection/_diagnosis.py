@@ -646,27 +646,33 @@ def _owner_checks(workspace: Workspace, ref: JobRef, report: _Diagnosing) -> _de
     return verdict
 
 
-def _continue_checks(job: JobDefinition | None, doc: StateDoc | None, report: _Diagnosing) -> None:
+def _continue_checks(
+    job: JobDefinition | None, doc: StateDoc | None, report: _Diagnosing, *, verb: str = "continue"
+) -> None:
+    # verb is "restart" for a parent that failed at its wait, whose continue reopens the wait instead.
+    name = f"operator {verb}"
     if doc is None or doc.activation is None:
-        report.check("operator continue", False, "this job has no recorded activation, so 'continue' is refused")
+        report.check(name, False, f"this job has no recorded activation, so '{verb}' is refused")
         return
     if job is None:
-        report.check("operator continue", None, "the job definition is unreadable, so its budget is unknown")
+        report.check(name, None, "the job definition is unreadable, so its budget is unknown")
         return
     budgets = budget_status(job, doc)
     if budgets.attempt_budget_exhausted:
         report.check(
-            "operator continue",
+            name,
             False,
-            "'continue' would immediately end the job again with retry_exhausted: " + "; ".join(budgets.describe()),
+            f"'{verb}' would immediately end the job again with retry_exhausted: " + "; ".join(budgets.describe()),
         )
+        step = doc.activation.get("step") or "STEP"
         report.hint(
-            "use 'httk job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB' "
-            "to start a new activation instead"
+            f"use 'httk job request override_step --workspace WORKSPACE --step {step} --operator NAME --reason WHY "
+            "JOB' to start a new activation instead"
         )
         return
-    report.check("operator continue", True, "'continue' repeats this activation: " + "; ".join(budgets.describe()))
-    report.hint("resume it with 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'")
+    report.check(name, True, f"'{verb}' repeats this activation: " + "; ".join(budgets.describe()))
+    if verb == "continue":
+        report.hint("resume it with 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'")
 
 
 def _history_check(ref: JobRef, report: _Diagnosing) -> None:
@@ -860,12 +866,16 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
         manager_checks(claiming=False)
     elif state == "failed":
         failure = None if doc is None else doc.failure
+        join = None if doc is None else doc.join
         if failure is not None:
             report.check("failure", False, f"{failure.get('code')}: {failure.get('message')}")
             details = failure.get("details")
             if isinstance(details, Mapping) and details:
                 report.check("failure details", None, json.dumps(details, sort_keys=True, default=dict))
-            summary = f"this job failed with {failure.get('code')} and stays failed until an operator resumes it"
+            failed = f"this job failed with {failure.get('code')}"
+            if join is not None and failure.get("code") == "dependency_failure":
+                failed += " while waiting on its children"
+            summary = f"{failed} and stays failed until an operator resumes it"
         else:
             summary = "this job failed without a readable failure record"
         for observed in () if doc is None else doc.observations:
@@ -873,7 +883,20 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
                 report.check("dependency child", False, _describe_child(observed, with_failure=True))
         _breadcrumb_check(control, report)
         report.check("attempt logs", None, f"the job wrote {_retained_log_path(ref, doc)}")
-        _continue_checks(job, doc, report)
+        if join is not None:
+            # A kept join makes continue reopen the wait, which no budget binds; restart is budget-bound.
+            children = join.get("children")
+            count = len(children) if isinstance(children, tuple) else 0
+            step = None if doc is None or doc.activation is None else doc.activation.get("step")
+            report.check(
+                "wait",
+                None,
+                f"the wait on {count} children can be reopened with `httk job request continue`; "
+                f"`restart` reruns step {step or '-'} and spawns new children",
+            )
+            _continue_checks(job, doc, report, verb="restart")
+        else:
+            _continue_checks(job, doc, report)
         _history_check(ref, report)
         _flapping_check(job, doc, report)
         _request_checks(workspace, ref, doc, report)

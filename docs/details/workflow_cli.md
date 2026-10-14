@@ -393,14 +393,18 @@ inputs. See {doc}`/details/workflow_compat`.
 ### Requests
 
 `job request ACTION JOB_ID...` posts one request per job and requires
-`--reason`. The actions are `cancel`, `pause`, `continue`, `override_step`
-(with `--step`), `set_priority` (with `--priority`), `detach`, `eject` (with
+`--reason`. The actions are `cancel`, `pause`, `continue`, `restart`,
+`override_step` (with `--step`), `set_priority` (with `--priority`), `detach`, `eject` (with
 `--destination`), `delete`, `seal` and `unseal`. The job's owner applies each
 once, at its next boundary; a manager claims an unowned job to apply it. What
 each action does is tabulated in
 [the task-manager guide](taskmanager.md#requests). `--force` accepts reviving a
-child a decided join already consumed (`continue`, `override_step`) and
-publishes an `override_step` outside the runner's recorded steps.
+child a parent's observations name (`continue`, `restart`, `override_step`) and
+publishes an `override_step` outside the runner's recorded steps. The revival
+guard does not apply to a child that its parent's join still names (the parent
+failed at its wait, or waits on it again). `--tree` (only with `continue`, and only for a local workspace)
+also resumes the failed descendants of the job reachable through retained
+joins, deepest first, before the job itself; see {doc}`/restarting_jobs`.
 
 After publication, the CLI immediately serves the pending requests of each
 unowned job, from a snapshot taken then, oldest first by `created_at` instant

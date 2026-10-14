@@ -17,13 +17,14 @@ from typing import Any
 import pytest
 
 import v3_helpers as h
-from httk.workflow import Attempt, FormatError, Workspace, _kernel, _store
+from httk.workflow import Attempt, FormatError, Workspace, _kernel, _requests, _store
 from httk.workflow.protocol import Failure, validate_failure
+from httk.workflow.removal import serve_requests
 from httk.workflow.runtime_builders import ChildReference
 from test_crash_injection import _all_jobs
 
 #: A scriptable join runner. A job with ``parameters.child`` is a child: it succeeds, or fails with
-#: ``child.broken`` for ``"fail"``. Any other job runs ``parameters.steps[<step>]``: it records the children its
+#: ``child.broken`` for ``"fail"`` (and for ``"flaky"`` on its first attempt only). Any other job runs ``parameters.steps[<step>]``: it records the children its
 #: context names (into ``run/events.json``), spawns ``spawn`` children (``{label, child, placement?}``), and then
 #: waits with ``wait`` (``{condition, count?, next_step, on_impossible?, rejoin?: [labels]}``) over the new
 #: children plus the rejoined ones, or else succeeds.
@@ -39,7 +40,7 @@ outcome.update(format="httk-workflow-outcome", format_version=2, action="succeed
 draft = control / "outcome.tmp.x"
 draft.mkdir()
 if "child" in parameters:
-    if parameters["child"] == "fail":
+    if parameters["child"] == "fail" or (parameters["child"] == "flaky" and context["attempt_ordinal"] == 1):
         outcome.update(action="fail", failure={"code": "child.broken", "message": "the child declared a failure"})
 else:
     plan = parameters["steps"][context["step"]]
@@ -396,8 +397,8 @@ def test_a_join_condition_is_decided_over_a_succeeded_and_a_failed_child(
     h.run(ws)
     ref = h.find(ws, parent.job_id)
     doc = h.state_of(ref)
-    # Either way the children are observed and the join is cleared.
-    assert doc.join is None and len(doc.observations) == 2
+    # Either way the children are observed; a dependency_failure keeps the join for continue to reopen.
+    assert (doc.join is None) == (decided == "satisfied") and len(doc.observations) == 2
     if decided == "satisfied":
         assert ref.state == "succeeded"
         assert [item["step"] for item in _events(ref)] == ["start", "gather"]
@@ -428,6 +429,75 @@ def test_dependency_failure_names_the_failed_child(ws: Workspace, joins: _store.
     assert observation["label"] == "doomed" and observation["state"] == "failed"
     assert _failure_code(observation) == "child.broken"
     assert [entry["event"] for entry in doc.history_tail][-2:] == ["join_decided", "released"]
+
+
+def _serve(ws: Workspace, ref: _kernel.JobRef, action: str) -> str | None:
+    """Post *action* for *ref* and apply it immediately, as `httk job request` does; return the new state."""
+
+    assert ref.placement is not None
+    path = _requests.post(
+        ws, action=action, job_id=ref.job_id, placement=ref.placement, operator="Op <op@example.org>", reason="r"
+    )
+    (outcome,) = serve_requests(ws, [(ref, path)])
+    assert outcome.status == "applied", outcome
+    return outcome.state
+
+
+def _failed_at_wait(ws: Workspace, joins: _store.Installed) -> tuple[_kernel.JobRef, _kernel.JobRef]:
+    steps = {
+        "start": {
+            "spawn": [{"label": "flaky", "child": "flaky"}],
+            "wait": {"condition": "all_succeeded", "next_step": "gather"},
+        },
+        "gather": {},
+    }
+    # The spawned child copies this budget, so both may run a second attempt.
+    parent = _parent(ws, joins, steps, retry_policy={"maximum_attempts_per_activation": 3})
+    h.run(ws)
+    failed = h.find(ws, parent.job_id)
+    doc = h.state_of(failed)
+    assert failed.state == "failed" and doc.failure is not None and doc.failure["code"] == "dependency_failure"
+    # The join is kept: the parent failed at its wait.
+    assert doc.join is not None
+    (observation,) = doc.observations
+    child = h.find(ws, str(observation["job_id"]))
+    assert child.state == "failed"
+    return failed, child
+
+
+@pytest.mark.slow
+def test_continue_reopens_the_wait_of_a_dependency_failure(ws: Workspace, joins: _store.Installed) -> None:
+    parent, child = _failed_at_wait(ws, joins)
+    kept = h.state_of(parent).join
+    assert _serve(ws, parent, "continue") == "waiting"
+    reopened = h.state_of(h.find(ws, parent.job_id))
+    assert reopened.failure is None and reopened.join == kept
+    # The parent waits on the child again, so reviving the child is no hazard.
+    assert _serve(ws, child, "continue") == "ready"
+    h.run(ws)
+    done = h.find(ws, parent.job_id)
+    assert done.state == "succeeded"
+    events = _events(done)
+    # The spawning step ran once; the reopened join woke gather with the now succeeded child.
+    assert [item["step"] for item in events] == ["start", "gather"]
+    assert events[1]["children"] == [{"label": "flaky", "kind": "succeeded"}]
+    assert h.state_of(done).join is None
+
+
+@pytest.mark.slow
+def test_restart_reruns_a_parent_that_failed_at_its_wait(ws: Workspace, joins: _store.Installed) -> None:
+    parent, child = _failed_at_wait(ws, joins)
+    assert _serve(ws, parent, "restart") == "ready"
+    doc = h.state_of(h.find(ws, parent.job_id))
+    assert doc.join is None and doc.failure is None
+    assert doc.attempt is not None and doc.attempt["reason"] == "manual_continue"
+    # The spawning step runs again and spawns a new child (which fails its first attempt too); the old one stays.
+    h.run(ws)
+    rerun = h.find(ws, parent.job_id)
+    assert [item["step"] for item in _events(rerun)] == ["start", "start"]
+    (observation,) = h.state_of(rerun).observations
+    assert observation["job_id"] != child.job_id
+    assert h.find(ws, child.job_id).state == "failed" and len(_all_jobs(ws)) == 3
 
 
 _GHOST_JOIN_RUNNER = """#!/usr/bin/env python3

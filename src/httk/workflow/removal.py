@@ -191,8 +191,8 @@ def refusal(
     request: _requests.Request,
     cache: ListingCache | None = None,
 ) -> str | None:
-    """The revival guard for ``continue``/``override_step``, the waiting-parent check for ``delete``, and the
-    destination check for ``eject`` (an unusable destination is a refusal that moves nothing).
+    """The revival guard for ``continue``/``restart``/``override_step``, the waiting-parent check for ``delete``,
+    and the destination check for ``eject`` (an unusable destination is a refusal that moves nothing).
 
     :param workspace: The workspace.
     :param job: The job the request is for.
@@ -204,7 +204,7 @@ def refusal(
     attribution_refusal = daemon_attribution_refusal(workspace, job.id, job.placement, request)
     if attribution_refusal is not None:
         return attribution_refusal
-    if request.action in ("continue", "override_step"):
+    if request.action in ("continue", "restart", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
     if request.action == "eject":
         return _moving.destination_problem(Path(str(request.document["destination"])), workspace)

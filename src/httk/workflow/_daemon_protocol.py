@@ -25,7 +25,19 @@ _DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
 _UUID_TEXT = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 _JOB_STATES = frozenset({"ready", "waiting", "paused", "failed", "succeeded", "cancelled", "running", "owned"})
 _JOB_ACTIONS = frozenset(
-    {"cancel", "pause", "continue", "override_step", "set_priority", "detach", "eject", "delete", "seal", "unseal"}
+    {
+        "cancel",
+        "pause",
+        "continue",
+        "restart",
+        "override_step",
+        "set_priority",
+        "detach",
+        "eject",
+        "delete",
+        "seal",
+        "unseal",
+    }
 )
 _JOB_RESULTS = frozenset({"applied", "queued", "refused", "uncertain"})
 _OUTCOMES = frozenset(

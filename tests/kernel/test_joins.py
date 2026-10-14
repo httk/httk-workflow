@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from httk.workflow._job import JobDefinition
-from httk.workflow._joins import CONDITIONS, consumed_by_decided_join, evaluate, impossible, satisfied
+from httk.workflow._joins import CONDITIONS, JoinDecision, consumed_by_decided_join, evaluate, impossible, satisfied
 from httk.workflow._kernel import JobRef, ListingCache, Owner, claim, register_owner, submit
+from httk.workflow._manager_commit import decide_join
 from httk.workflow._state import StateDoc, encode_state
 from httk.workflow.errors import FormatError
 
@@ -238,7 +239,7 @@ def test_a_child_with_another_key_at_its_placement_is_refused(world: World) -> N
         world.evaluate(world.put(parent, "waiting", doc))
 
 
-def _consumer(world: World, parent_state: str, *, observed: bool) -> JobDefinition:
+def _consumer(world: World, parent_state: str, *, observed: bool, joined: bool = False) -> JobDefinition:
     parent = JobDefinition.from_mapping(job_mapping(str(uuid.uuid4()), "parent", "proj"))
     child = JobDefinition.from_mapping(
         job_mapping(
@@ -256,13 +257,18 @@ def _consumer(world: World, parent_state: str, *, observed: bool) -> JobDefiniti
         )
     )
     observations = [{"job_id": child.id if observed else str(uuid.uuid4()), "state": "succeeded"}]
+    doc = StateDoc.empty(parent.id).with_observations(observations)
+    if joined:
+        # The join kept by a dependency_failure (or reopened by continue) still names the child.
+        entry = {"label": None, "job_id": child.id, "job_key": child.job_key, "placement_hint": "proj/k0"}
+        doc = doc.updated(join={"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": [entry]})
     ref = world.put(parent, "ready" if parent_state == "owned" else parent_state, StateDoc.empty(parent.id))
     if parent_state == "owned":
         owned = claim(world.ws, world.owner, ref)
         assert owned is not None
-        owned.write_state(StateDoc.empty(parent.id).with_observations(observations))
+        owned.write_state(doc)
     else:
-        (ref.path / "state.json").write_bytes(encode_state(StateDoc.empty(parent.id).with_observations(observations)))
+        (ref.path / "state.json").write_bytes(encode_state(doc))
     return child
 
 
@@ -282,3 +288,30 @@ def test_revival_guard_negatives(world: World) -> None:
     assert child.parent is not None
     elsewhere = JobDefinition.from_mapping({**child.as_mapping(), "parent": {**child.parent, "placement": "other"}})
     assert consumed_by_decided_join(world.ws, elsewhere, cache=ListingCache()) is None
+
+
+@pytest.mark.parametrize("parent_state", ["failed", "waiting"])
+def test_revival_guard_allows_a_kept_wait(world: World, parent_state: str) -> None:
+    # A parent whose join still names the child: continue reopens (or reopened) its wait, so revive the child.
+    assert consumed_by_decided_join(world.ws, _consumer(world, parent_state, observed=True, joined=True)) is None
+
+
+@pytest.mark.parametrize(("parent_state", "joined"), [("failed", False), ("ready", True), ("succeeded", True)])
+def test_revival_guard_still_refuses_a_consumed_child(world: World, parent_state: str, joined: bool) -> None:
+    described = consumed_by_decided_join(world.ws, _consumer(world, parent_state, observed=True, joined=joined))
+    assert described is not None and described.endswith(f"({parent_state})")
+
+
+def test_decide_join_keeps_only_a_failed_wait() -> None:
+    job = JobDefinition.from_mapping(job_mapping(str(uuid.uuid4()), "parent", "proj"))
+    join = {"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": []}
+    doc = StateDoc.empty(job.id).updated(join=join)
+    for kind in ("unresolvable", "impossible"):
+        decided, target = decide_join(job, doc, JoinDecision(kind, (), ("x",)))
+        assert target == "failed" and decided.join == doc.join
+    # A join naming an invalid step can never succeed: nothing to reopen.
+    decided, target = decide_join(
+        job, doc.updated(join={**join, "next_step": "bad/step"}), JoinDecision("satisfied", (), ())
+    )
+    assert target == "failed" and decided.join is None
+    assert decided.failure is not None and "invalid step" in str(decided.failure["message"])

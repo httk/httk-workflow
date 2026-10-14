@@ -370,7 +370,8 @@ when the condition holds. `when` is `all_succeeded` (the default),
 When the condition can no longer be met, the job advances to `on_impossible`
 if one is named and otherwise fails with `dependency_failure`. A named child
 the manager cannot resolve fails the parent with `dependency_failure` once its
-grace expires, rather than waiting forever.
+grace expires, rather than waiting forever. An operator can resume the failed
+child and then reopen the parent's wait; see {doc}`/restarting_jobs`.
 
 ### Data and workdir changes
 

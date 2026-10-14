@@ -57,6 +57,7 @@ ACTIONS = (
     "cancel",
     "pause",
     "continue",
+    "restart",
     "override_step",
     "set_priority",
     "detach",
@@ -74,12 +75,14 @@ _OPTIONS = {
     "priority": ("set_priority",),
     "step": ("override_step",),
     "destination": ("eject",),
-    "force": ("continue", "override_step"),
+    "force": ("continue", "restart", "override_step"),
     "tree": ("eject",),
 }
 #: Optional flags: present only as ``true``.
 _FLAGS = frozenset({"force", "tree"})
 _SIGNATURE = frozenset({"operator_key", "signature"})
+#: The actions that revive a failed or paused job (and may carry ``force``).
+_REVIVALS = ("continue", "restart", "override_step")
 
 
 @dataclass(frozen=True)
@@ -326,9 +329,10 @@ def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) ->
     if action == "pause" and (terminal or from_state == "paused"):
         return f"the job is already {from_state}"
     if action == "pause" and from_state == "waiting":
-        # A later continue would rerun the spawning step and orphan the children the join waits on.
+        # A paused parent has no wait to reopen: its continue, like a restart or override_step, would rerun the
+        # spawning step and orphan the children the join waits on. Only a parent failed at its wait reopens it.
         return "a parent waiting on its children cannot be paused"
-    if action in ("continue", "override_step") and from_state not in ("failed", "paused"):
+    if action in _REVIVALS and from_state not in ("failed", "paused"):
         return f"{action} applies to failed or paused jobs, not {from_state}"
     if action == "detach" and (job.parent is None or doc.detached is not None):
         return "the job has no parent link to detach"
@@ -361,6 +365,9 @@ def apply(
     in ``history_tail``; a :class:`~httk.workflow._state.Release` also carries the id.
     A request that applies while an attempt is live (``phase`` not ``idle``) is
     deferred: for ``cancel`` the manager signals the attempt meanwhile.
+    ``continue`` of a parent that failed at its wait (its join kept) reopens the
+    wait; otherwise it, and always ``restart``, retries the activation, while
+    ``override_step`` opens a new one; both drop a kept join.
     ``seal`` (a repair verb for a succeeded job without a seal) and ``unseal``
     (the operator's release of a succeeded job, after which ``delete`` applies)
     need the payload, so their effects are executed by the owner.
@@ -370,9 +377,9 @@ def apply(
     :param from_state: The unowned state the job was claimed from.
     :param from_priority: The priority it was claimed with.
     :param request: The request, for this job.
-    :param refusal: The caller's check for ``continue``, ``override_step`` (the revival guard), ``delete`` (the
-        waiting-parent check) and ``eject`` (the destination check): why the request must not apply, or ``None``.
-        A reason drops the request, unless a ``continue``/``override_step`` carries ``force``.
+    :param refusal: The caller's check for ``continue``, ``restart``, ``override_step`` (the revival guard),
+        ``delete`` (the waiting-parent check) and ``eject`` (the destination check): why the request must not
+        apply, or ``None``. A reason drops the request, unless a revival carries ``force``.
     :return: The new document and the effect.
     :raises ValueError: If the request, document and definition name different jobs.
     """
@@ -391,12 +398,12 @@ def apply(
         audit["operator_key"] = document["operator_key"]
     reason = _refusal(job, doc, from_state, action)
     daemon_pinned = isinstance(document["operator"], str) and document["operator"].startswith("daemon:")
-    checked = daemon_pinned or (reason is None and action in ("continue", "override_step", "delete", "eject"))
+    checked = daemon_pinned or (reason is None and action in (*_REVIVALS, "delete", "eject"))
     if checked and refusal is not None and (hazard := refusal(request)) is not None:
         if daemon_pinned:
             reason = hazard
         elif document.get("force") is not True:
-            forceable = action in ("continue", "override_step")
+            forceable = action in _REVIVALS
             reason = f"{hazard}; republish with force to accept the hazard" if forceable else hazard
         else:
             _LOGGER.warning("forced revival of %s: %s", job.job_key, hazard)
@@ -416,8 +423,11 @@ def apply(
         priority = require_int(document["priority"], "request priority", maximum=999)
     elif action == "detach":
         new = doc.updated(detached={"at": datetime.now(UTC).isoformat(), "operator": document["operator"]})
-    elif action in ("continue", "override_step"):
-        new, target = doc.with_failure(None), "ready"
+    elif action == "continue" and from_state == "failed" and doc.join is not None:
+        # A parent that failed at its wait (dependency_failure keeps the join): reopen the wait, rerun nothing.
+        new, target = doc.with_failure(None), "waiting"
+    elif action in _REVIVALS:
+        new, target = doc.with_failure(None).updated(join=None), "ready"
         if action == "override_step":
             new = new.next_activation(validate_step(document["step"]), "override_step")
         elif doc.attempt is not None and doc.attempt.get("started_at") is not None:

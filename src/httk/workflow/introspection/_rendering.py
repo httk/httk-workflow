@@ -19,7 +19,7 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
 
     :param workspace: Workspace containing the job.
     :param ref: The job.
-    :param include_children: Include per-child observations for waiting joins.
+    :param include_children: Include per-child observations for waiting or kept joins.
     :return: The job report mapping.
     """
 
@@ -74,8 +74,9 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
                 "retry_on": sorted(job.retry_policy.retry_on),
             }
         )
-    if ref.state == "waiting":
-        join = None if doc is None else doc.join
+    join = None if doc is None else doc.join
+    # A waiting parent's join, or the one a parent that failed at its wait keeps for `continue`.
+    if ref.state == "waiting" or join is not None:
         report["join"] = {
             "condition": None if join is None else join.get("condition"),
             "count": None if join is None else join.get("count"),

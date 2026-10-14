@@ -209,6 +209,14 @@ def test_envelope_is_strict(change: dict[str, object]) -> None:
         validate_envelope({**_document("continue"), **change})
 
 
+def test_restart_envelope_takes_only_force() -> None:
+    validate_envelope(_document("restart"))
+    validate_envelope(_document("restart", force=True))
+    for extra in ({"step": "relax"}, {"priority": 7}, {"destination": "out"}, {"tree": True}):
+        with pytest.raises(FormatError):
+            validate_envelope(_document("restart", **extra))
+
+
 @pytest.mark.parametrize(
     ("action", "missing"), [("set_priority", "priority"), ("override_step", "step"), ("eject", "destination")]
 )
@@ -252,7 +260,7 @@ def _expected(action: str, state: str) -> Effect:
     if action == "pause":
         # A waiting parent is never paused: a later continue would rerun its spawning step.
         return Drop("") if terminal or state in ("paused", "waiting") else Release("paused", 500)
-    if action in ("continue", "override_step"):
+    if action in ("continue", "restart", "override_step"):
         return Release("ready", 500) if state in ("failed", "paused") else Drop("")
     if action == "set_priority":
         return Release(state, 7)
@@ -294,6 +302,8 @@ def test_application_table(action: str, state: str) -> None:
     entry = new.history_tail[-1]
     assert (entry["request_id"], entry["action"], entry["from"]) == (request.request_id, action, state)
     assert entry["event"] == ("request_dropped" if isinstance(effect, Drop) else "request_applied")
+    if isinstance(effect, Drop) and action in ("continue", "restart", "override_step"):
+        assert effect.reason == f"{action} applies to failed or paused jobs, not {state}"
 
 
 @pytest.mark.parametrize("action", ACTIONS)
@@ -324,6 +334,43 @@ def test_continue_and_override_step_revive() -> None:
     assert new.attempt == unstarted.attempt and new.counters == unstarted.counters
 
 
+def _failed_at_wait() -> StateDoc:
+    """A parent that failed at its wait: dependency_failure with the join kept."""
+
+    child = {"label": None, "job_id": PARENT_ID, "job_key": PARENT_ID, "placement_hint": "p"}
+    join = {"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": [child]}
+    return _doc().with_failure({"code": "dependency_failure", "message": "child failed"}).updated(join=join)
+
+
+def test_continue_reopens_a_kept_wait() -> None:
+    doc = _failed_at_wait()
+    # A retry would exhaust the attempt budget: reopening the wait reruns nothing, so no budget binds it.
+    request = _request("continue")
+    new, effect = apply(_job(maximum_attempts=1), doc, "failed", 500, request)
+    assert effect == Release("waiting", 500, (request.request_id,))
+    assert new.failure is None and new.join == doc.join
+    assert (new.attempt, new.activation, new.counters) == (doc.attempt, doc.activation, doc.counters)
+    assert new.history_tail[-1]["to"] == "waiting"
+    # A paused job never carries a join to reopen; continue from paused still retries.
+    _, effect = apply(_job(), _doc(), "paused", 500, _request("continue"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+
+
+def test_restart_and_override_step_drop_a_kept_wait() -> None:
+    doc = _failed_at_wait()
+    assert doc.attempt is not None
+    new, effect = apply(_job(), doc, "failed", 500, _request("restart"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    assert new.join is None and new.failure is None and new.activation == doc.activation
+    assert new.attempt is not None and new.attempt["reason"] == "manual_continue" and new.attempt["ordinal"] == 2
+    new, effect = apply(_job(), doc, "failed", 500, _request("override_step"))
+    assert isinstance(effect, Release) and effect.state == "ready" and new.join is None
+    # restart is bound by the budgets, like the legacy continue.
+    new, effect = apply(_job(maximum_attempts=1), doc, "failed", 500, _request("restart"))
+    assert isinstance(effect, Release) and effect.state == "failed"
+    assert new.failure is not None and new.failure["code"] == "retry_exhausted" and new.attempt == doc.attempt
+
+
 def test_refusal_and_force() -> None:
     seen: list[str] = []
 
@@ -346,7 +393,12 @@ def test_refusal_and_force() -> None:
     # A refused eject (an unusable destination) is dropped too, without a force hint.
     _, effect = apply(_job(), _doc(), "failed", 500, _request("eject"), refusal=refuse)
     assert isinstance(effect, Drop) and effect.reason == "parent p decided its join on this job"
-    # Only continue, override_step, delete and eject consult the check.
+    request = _request("restart", force=True)
+    _, effect = apply(_job(), _doc(), "failed", 500, request, refusal=refuse)
+    assert effect == Release("ready", 500, (request.request_id,))
+    _, effect = apply(_job(), _doc(), "failed", 500, _request("restart"), refusal=refuse)
+    assert isinstance(effect, Drop) and effect.reason.endswith("republish with force to accept the hazard")
+    # Only continue, restart, override_step, delete and eject consult the check.
     seen.clear()
     for action in ("cancel", "pause", "set_priority", "detach", "seal", "unseal"):
         apply(_job(), _doc(), "paused", 500, _request(action), refusal=refuse)

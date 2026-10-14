@@ -18,7 +18,8 @@ from httk.core.identity import (
 
 import v3_helpers as v3
 from httk.workflow import TaskManager, Workspace, _kernel, _store
-from httk.workflow._state import read_state_unowned
+from httk.workflow._job import JobDefinition
+from httk.workflow._state import StateDoc, encode_state, read_state_unowned
 from httk.workflow.registry import create_workspace
 from httk.workflow.removal import serve_requests
 from httk.workflow.workflow_cli import _job as job_cli
@@ -128,6 +129,8 @@ def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
         ("set_priority", [], "--priority is required by"),
         ("eject", [], "--destination is required by"),
         ("pause", ["--force"], "--force applies only to"),
+        ("pause", ["--tree"], "--tree applies only to the continue action"),
+        ("restart", ["--tree"], "--tree applies only to the continue action"),
     ],
 )
 def test_job_request_options_belong_to_their_actions(
@@ -432,3 +435,208 @@ def test_wait_is_rejected_for_non_pause_action(tmp_path: Path, capsys) -> None:
 
     assert command(_request_args(workspace_name, job_id, action="cancel") + ["--wait"], _context(tmp_path)) == 2
     assert "--wait is only valid with the pause action" in capsys.readouterr().err
+
+
+def _mapping(tmp_path: Path, workspace: Workspace, tag: str) -> dict[str, object]:
+    installed = _store.lookup(workspace, "demo") or v3.install(workspace, tmp_path / "package")
+    return v3.job_mapping(installed, {"start": "succeed"}, tag=tag, placement=f"project/{tag}")
+
+
+def _link(mapping: dict[str, object]) -> tuple[str, str, str]:
+    job = JobDefinition.from_mapping(mapping)
+    return job.id, job.job_key, str(job.placement)
+
+
+def _child_of(child: dict[str, object], parent: dict[str, object]) -> None:
+    job_id, key, placement = _link(parent)
+    child["parent"] = {
+        "workspace_id": "2d7f3f6e-6f7a-4a4b-9a43-4c1f0d6c8e03",
+        "job_id": job_id,
+        "job_key": key,
+        "placement": placement,
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
+
+
+def _failed(
+    workspace: Workspace,
+    mapping: dict[str, object],
+    waits_on: tuple[tuple[str, str, str], ...] = (),
+    *,
+    state: str = "failed",
+    started: bool = False,
+) -> _kernel.JobRef:
+    """Place a failed job; with *waits_on* (``(job_id, job_key, placement)`` per child) it failed at its wait.
+
+    *started* records a started attempt, so a revival needs a second one (beyond the default budget of one).
+    """
+
+    job = JobDefinition.from_mapping(mapping)
+    doc = StateDoc.empty(job.id)
+    if started:
+        doc = doc.next_activation("start", "initial").next_attempt("launch", unclean=False)
+        assert doc.attempt is not None
+        doc = doc.with_phase("launching", str(doc.attempt["id"])).with_phase("idle", None)
+    doc = doc.with_failure({"code": "dependency_failure", "message": "a child failed"})
+    if waits_on:
+        children = [
+            {"label": None, "job_id": job_id, "job_key": key, "placement_hint": placement}
+            for job_id, key, placement in waits_on
+        ]
+        doc = doc.updated(join={"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": children})
+    with v3.cli_owner(workspace) as owner:
+        staging = owner.scratch("submit") / "job"
+        staging.mkdir()
+        (staging / "job.json").write_bytes(job.encode())
+        (staging / "state.json").write_bytes(encode_state(doc))
+        return _kernel.submit(workspace, owner, staging, state=state)
+
+
+def test_continue_tree_resumes_failed_descendants_deepest_first(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    tree = [_mapping(tmp_path, workspace, tag) for tag in ("grandchild", "child", "parent")]
+    _child_of(tree[0], tree[1])
+    _child_of(tree[1], tree[2])
+    grandchild = _failed(workspace, tree[0])
+    child = _failed(workspace, tree[1], (_link(tree[0]),))
+    parent = _failed(workspace, tree[2], (_link(tree[1]),))
+
+    assert (
+        command([*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"], _context(tmp_path)) == 0
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split("\t", 1)[0] for line in lines] == [grandchild.job_id, child.job_id, parent.job_id]
+    assert all("\tapplied\t" in line for line in lines)
+    assert [v3.find(workspace, ref.job_id).state for ref in (grandchild, child, parent)] == [
+        "ready",
+        "waiting",
+        "waiting",
+    ]
+    assert not _requests(workspace)
+
+
+def test_continue_notes_the_children_that_would_fail_a_reopened_wait(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    child_mapping, parent_mapping = _mapping(tmp_path, workspace, "child"), _mapping(tmp_path, workspace, "parent")
+    _child_of(child_mapping, parent_mapping)
+    child = _failed(workspace, child_mapping)
+    ghost = str(uuid.uuid4())
+    parent = _failed(workspace, parent_mapping, (_link(child_mapping), (ghost, f"ghost--{ghost}", "project/x")))
+
+    assert command(_request_args(workspace_name, parent.job_id, action="continue"), _context(tmp_path)) == 0
+    err = capsys.readouterr().err
+    assert f"note: {child.job_key} is still failed; the reopened wait of {parent.job_key} fails again" in err
+    assert "continue --tree also resumes failed descendants" in err
+    assert f"note: ghost--{ghost} was not found at its placement" in err
+    assert v3.find(workspace, parent.job_id).state == "waiting"
+    assert v3.find(workspace, child.job_id).state == "failed"
+
+
+def test_restart_is_an_action_and_takes_force(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    child = _mapping(tmp_path, workspace, "child")
+    parent = _failed(workspace, _mapping(tmp_path, workspace, "parent"), (_link(child),))
+
+    assert (
+        command([*_request_args(workspace_name, parent.job_id, action="restart"), "--force"], _context(tmp_path)) == 0
+    )
+    assert "\tapplied\t" in capsys.readouterr().out
+    restarted = v3.find(workspace, parent.job_id)
+    assert restarted.state == "ready" and v3.state_of(restarted).join is None
+
+
+def test_job_request_help_lists_restart_and_tree_only_on_request(tmp_path: Path, capsys) -> None:
+    assert command(["job", "request", "--help"], _context(tmp_path)) == 0
+    out = capsys.readouterr().out
+    assert "continue, restart, override_step" in out and "--tree" in out
+    assert command(["job", "request-envelopes", "--help"], _context(tmp_path)) == 0
+    assert "--tree" not in capsys.readouterr().out
+
+
+def test_continue_tree_stops_at_a_descendant_that_does_not_resume(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    tree = [_mapping(tmp_path, workspace, tag) for tag in ("leaf", "child", "parent")]
+    _child_of(tree[0], tree[1])
+    _child_of(tree[1], tree[2])
+    # The leaf's budget allows one attempt, which it used: its revival lands failed again.
+    leaf = _failed(workspace, tree[0], started=True)
+    child = _failed(workspace, tree[1], (_link(tree[0]),))
+    parent = _failed(workspace, tree[2], (_link(tree[1]),))
+
+    assert (
+        command([*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"], _context(tmp_path)) == 1
+    )
+    captured = capsys.readouterr()
+    (line,) = captured.out.splitlines()
+    assert line.startswith(f"{leaf.job_id}\t") and line.endswith("state=failed")
+    for ref in (child, parent):
+        assert (
+            f"not posted: {ref.job_key} (an earlier request in the tree was applied but left the job failed; "
+            "resolve it and rerun continue --tree)"
+        ) in captured.err
+    assert [v3.find(workspace, ref.job_id).state for ref in (leaf, child, parent)] == ["failed"] * 3
+    assert not _requests(workspace)
+
+
+def test_continue_tree_notes_the_children_it_does_not_resume(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    tree = [_mapping(tmp_path, workspace, tag) for tag in ("failed-child", "cancelled-child", "parent")]
+    _child_of(tree[0], tree[2])
+    _child_of(tree[1], tree[2])
+    failed = _failed(workspace, tree[0])
+    cancelled = _failed(workspace, tree[1], state="cancelled")
+    ghost = str(uuid.uuid4())
+    waits_on = (_link(tree[0]), _link(tree[1]), (ghost, f"ghost--{ghost}", "project/x"))
+    parent = _failed(workspace, tree[2], waits_on)
+
+    assert (
+        command([*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"], _context(tmp_path)) == 0
+    )
+    err = capsys.readouterr().err
+    assert f"note: {cancelled.job_key} is still cancelled; the reopened wait of {parent.job_key} fails again" in err
+    assert f"note: ghost--{ghost} was not found at its placement" in err
+    assert failed.job_key not in err
+    assert v3.find(workspace, failed.job_id).state == "ready"
+    assert v3.find(workspace, parent.job_id).state == "waiting"
+
+
+def test_remote_envelopes_note_a_failed_child_without_suggesting_tree(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    child_mapping, parent_mapping = _mapping(tmp_path, workspace, "child"), _mapping(tmp_path, workspace, "parent")
+    _child_of(child_mapping, parent_mapping)
+    child = _failed(workspace, child_mapping)
+    parent = _failed(workspace, parent_mapping, (_link(child_mapping),))
+    argv = ["job", "request-envelopes", "continue", "--workspace", workspace_name]
+    argv += ["--operator=Test User <tester@example.test>", "--reason=protocol", "--json", parent.job_id]
+    assert command(argv, _context(tmp_path)) == 0
+    err = capsys.readouterr().err
+    assert f"note: {child.job_key} is still failed; the reopened wait of {parent.job_key} fails again" in err
+    assert "--tree" not in err
+
+
+def test_continue_notes_a_held_child_and_tree_does_not_expand_it(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    child_mapping, parent_mapping = _mapping(tmp_path, workspace, "child"), _mapping(tmp_path, workspace, "parent")
+    _child_of(child_mapping, parent_mapping)
+    child = _failed(workspace, child_mapping)
+    parent = _failed(workspace, parent_mapping, (_link(child_mapping),))
+
+    with _kernel.register_owner(workspace, kind="manager", label="held", allocation=None, advertised={}) as owner:
+        owned = _kernel.claim(workspace, owner, child)
+        assert owned is not None
+        argv = [*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"]
+        assert command(argv, _context(tmp_path)) == 0
+        owned.give_back()
+
+    captured = capsys.readouterr()
+    assert (
+        f"note: {child.job_key} is held by an owner right now; the reopened wait of {parent.job_key} fails again if "
+        "it is released still failed or cancelled"
+    ) in captured.err
+    assert "was not found" not in captured.err
+    # Only the parent was posted: the held child is not expanded.
+    (line,) = captured.out.splitlines()
+    assert line.startswith(f"{parent.job_id}\t")
+    assert v3.find(workspace, parent.job_id).state == "waiting"
+    assert v3.find(workspace, child.job_id).state == "failed"

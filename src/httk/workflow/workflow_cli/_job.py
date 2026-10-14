@@ -100,7 +100,7 @@ from ._transfer import _protocol_workspace, adopt_document, build_transfer_parse
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
 #: The option each action requires (and that no other action takes).
 _ACTION_OPTIONS = {"priority": "set_priority", "step": "override_step", "destination": "eject"}
-_FORCE_ACTIONS = ("continue", "override_step")
+_FORCE_ACTIONS = ("continue", "restart", "override_step")
 
 
 def _add_workspace_option(parser: argparse.ArgumentParser, *, help_text: str) -> None:
@@ -476,7 +476,7 @@ def _request_options(
         if (given[name] is None) == (action == owner):
             raise ValueError(f"--{name} is required by, and only valid with, the {owner} action")
     if force and action not in _FORCE_ACTIONS:
-        raise ValueError("--force applies only to the continue and override_step actions")
+        raise ValueError("--force applies only to the continue, restart and override_step actions")
     options: dict[str, object] = {name: value for name, value in given.items() if value is not None}
     if force:
         options["force"] = True
@@ -519,6 +519,107 @@ def _prevalidate(refs: Sequence[JobRef], action: str, step: str | None, *, force
                 "if it does not implement it",
                 file=sys.stderr,
             )
+
+
+def _wait_children(workspace: Workspace, ref: JobRef) -> list[tuple[str, JobRef | None]]:
+    """Return each join child (its key, and its reference or ``None``) of a job that failed at its wait.
+
+    A job that did not fail at its wait (with its join kept) has none.
+    """
+
+    if ref.state != "failed":
+        return []
+    doc, _damage = read_state(ref)
+    children = None if doc is None or doc.join is None else doc.join.get("children")
+    located: list[tuple[str, JobRef | None]] = []
+    for entry in children if isinstance(children, tuple) else ():
+        if isinstance(entry, Mapping):
+            hint = PurePosixPath(str(entry.get("placement_hint")))
+            child = _kernel.locate(workspace, str(entry.get("job_id")), placement_hint=hint, include_owned=True)
+            located.append((str(entry.get("job_key")), child))
+    return located
+
+
+def _with_failed_descendants(workspace: Workspace, refs: Sequence[JobRef]) -> list[JobRef]:
+    """Expand ``continue --tree``: each job's failed join descendants deepest first, then the job, once each."""
+
+    expanded: list[JobRef] = []
+    entered: set[str] = set()
+
+    def visit(ref: JobRef) -> None:
+        if ref.job_id in entered:
+            return
+        entered.add(ref.job_id)
+        for _key, child in _wait_children(workspace, ref):
+            if child is not None and child.state == "failed":
+                visit(child)
+        expanded.append(ref)
+
+    for ref in refs:
+        visit(ref)
+    return expanded
+
+
+def _continue_notes(
+    workspace: Workspace, refs: Sequence[JobRef], action: str, *, tree: bool = False, local: bool = True
+) -> None:
+    """Note, before a ``continue`` reopens a wait, the join children that would fail it again.
+
+    With *tree* the failed children are resumed, so only the others are noted; a remote (not *local*) note does
+    not suggest ``--tree``.
+    """
+
+    if action != "continue":
+        return
+    for ref in refs:
+        for key, child in _wait_children(workspace, ref):
+            if child is None:
+                print(
+                    f"note: {key} was not found at its placement; the reopened wait of {ref.job_key} fails with "
+                    "dependency_failure after the join grace unless it reappears",
+                    file=sys.stderr,
+                )
+            elif child.state == _kernel.OWNED:
+                print(
+                    f"note: {key} is held by an owner right now; the reopened wait of {ref.job_key} fails again if "
+                    "it is released still failed or cancelled",
+                    file=sys.stderr,
+                )
+            elif child.state == "cancelled" or (child.state == "failed" and not tree):
+                suggestion = " (continue --tree also resumes failed descendants)" if local else ""
+                print(
+                    f"note: {key} is still {child.state}; the reopened wait of {ref.job_key} fails again unless it "
+                    f"is resumed first{suggestion}",
+                    file=sys.stderr,
+                )
+
+
+def _continue_tree(
+    workspace: Workspace, refs: Sequence[JobRef], *, reason: str, force: bool, identity: OperatorIdentity
+) -> int:
+    """Post and serve ``continue --tree`` one job at a time, deepest first, stopping at one that does not resume.
+
+    Serving each before posting the next keeps a live manager from reopening an ancestor's wait while a
+    descendant is still failed.
+    """
+
+    for index, ref in enumerate(refs):
+        published = publish_job_requests(
+            workspace, [ref], action="continue", reason=reason, operator=identity.label, force=force, identity=identity
+        )
+        (outcome,) = serve_requests(workspace, published)
+        _print_outcome(outcome)
+        if outcome.status == "applied" and outcome.state != "failed":
+            continue
+        status = "applied but left the job failed" if outcome.status == "applied" else outcome.status
+        for rest in refs[index + 1 :]:
+            print(
+                f"not posted: {rest.job_key} (an earlier request in the tree was {status}; "
+                "resolve it and rerun continue --tree)",
+                file=sys.stderr,
+            )
+        return 1
+    return 0
 
 
 def publish_job_requests(
@@ -581,10 +682,15 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     """Post operator requests against jobs, and optionally wait for pauses to land."""
 
     _check_wait(arguments.wait, arguments.timeout, (arguments.action,))
+    tree = bool(getattr(arguments, "tree", False))
+    if tree and arguments.action != "continue":
+        raise ValueError("--tree applies only to the continue action")
     identity = _resolve_request_identity(arguments.operator)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
+        if tree:
+            raise ValueError("--tree is applied locally and is not available for remote workspaces")
         target = resolve_remote(binding.remote, project=context.cwd)
         if read_metadata(target.bundle).get("kind") == "mount-daemon":
             status, stdout = request_remote_jobs(binding, context, arguments, identity)
@@ -610,9 +716,15 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         raise ValueError("--request-id is supported only for one mount-daemon job request")
     ensure_identity_key(identity)
     workspace = _modifiable(arguments, context, action="post requests in it")
+    refs = resolve_job_selectors(workspace, context.cwd, arguments.job_id)
+    if tree:
+        refs = _with_failed_descendants(workspace, refs)
+    _continue_notes(workspace, refs, arguments.action, tree=tree)
+    if tree:
+        return _continue_tree(workspace, refs, reason=arguments.reason, force=bool(arguments.force), identity=identity)
     published = publish_job_requests(
         workspace,
-        resolve_job_selectors(workspace, context.cwd, arguments.job_id),
+        refs,
         action=arguments.action,
         reason=arguments.reason,
         operator=identity.label,
@@ -659,6 +771,7 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
     )
     refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
     _prevalidate(refs, arguments.action, arguments.step, force=bool(arguments.force))
+    _continue_notes(workspace, refs, arguments.action, local=False)
     document = {
         "format": _ENVELOPES_FORMAT,
         "format_version": 2,
@@ -865,6 +978,11 @@ def _resolve_request_identity(selector: str | None) -> OperatorIdentity:
     return resolve_operator_identity(selector)
 
 
+def _print_outcome(outcome: RequestOutcome) -> None:
+    state = f"; state={outcome.state}" if outcome.state is not None else ""
+    print(f"{outcome.job_id}\t{outcome.request_id}\t{outcome.status}\t{outcome.explanation}{state}")
+
+
 def _complete_job_requests(
     workspace: Workspace, published: list[tuple[JobRef, Path]], *, wait: bool, timeout: float | None
 ) -> int:
@@ -872,8 +990,7 @@ def _complete_job_requests(
 
     outcomes = serve_requests(workspace, published)
     for outcome in outcomes:
-        state = f"; state={outcome.state}" if outcome.state is not None else ""
-        print(f"{outcome.job_id}\t{outcome.request_id}\t{outcome.status}\t{outcome.explanation}{state}")
+        _print_outcome(outcome)
     if any(outcome.status in {"refused", "uncertain"} for outcome in outcomes):
         return 1
     if not wait:
@@ -1453,7 +1570,7 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="accept reviving a job a decided join already consumed (continue, override_step)",
+        help="accept reviving a job a decided join already consumed (continue, restart, override_step)",
     )
 
 
@@ -1583,6 +1700,14 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
     )
     request.add_argument("--reason", metavar="TEXT", required=True, help="why, recorded with the request")
     _add_request_options(request)
+    request.add_argument(
+        "--tree",
+        action="store_true",
+        help=(
+            "with continue: also resume the failed descendants of a job that failed waiting on its children, "
+            "deepest first (local workspaces only)"
+        ),
+    )
     request.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
     request.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS (needs --wait)")
     request.add_argument(

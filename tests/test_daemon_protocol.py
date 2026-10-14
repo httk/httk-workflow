@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from httk.core.identity import identity_public_key
 
+from httk.workflow import _requests
 from httk.workflow._daemon_auth import sign_response, verify_response
 from httk.workflow._daemon_protocol import (
     Request,
@@ -305,6 +306,27 @@ def test_job_request_rejects_invalid_options(overrides: dict[str, object], messa
     fields.update(overrides)
     with pytest.raises(ValueError, match=message):
         Request(**fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("action", _requests.ACTIONS)
+def test_job_request_accepts_every_request_action(action: str) -> None:
+    options: dict[str, dict[str, object]] = {
+        "set_priority": {"priority": 7},
+        "override_step": {"step": "relax"},
+        "eject": {"destination": "archive/job"},
+    }
+    request = Request(
+        REQUEST_ID,
+        WORKSPACE_ID,
+        "job_request",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest=CONFIGURATION_DIGEST,
+        selector="abcdef01",
+        action=action,
+        reason="why",
+        **options.get(action, {}),  # type: ignore[arg-type]
+    )
+    assert decode_request(encode_request(request)) == request
 
 
 def test_job_request_destination_is_relative_component_path() -> None:

@@ -431,7 +431,9 @@ def decide_join(job: JobDefinition, doc: StateDoc, decision: _joins.JoinDecision
     ``satisfied`` opens the activation of the join's ``next_step``; ``impossible``
     opens the ``on_impossible`` step when it is ``{"action": "advance", "next_step": ...}``;
     otherwise, and for ``unresolvable``, the parent fails with ``dependency_failure``.
-    Every case records the observations and clears the join.
+    A join naming an invalid step fails it too. Every case records the observations.
+    A failed wait (``impossible`` without a rescue, or ``unresolvable``) keeps the join,
+    so an operator ``continue`` can reopen it; every other case clears it.
 
     :param job: The parent.
     :param doc: Its state, carrying the join.
@@ -440,7 +442,8 @@ def decide_join(job: JobDefinition, doc: StateDoc, decision: _joins.JoinDecision
     """
 
     join = doc.join or {}
-    doc = doc.with_observations([item.as_mapping() for item in decision.observations]).updated(join=None)
+    observed = doc.with_observations([item.as_mapping() for item in decision.observations])
+    doc = observed.updated(join=None)
     step: object = None
     message = f"join child(ren) {', '.join(decision.unresolved)} cannot be found"
     if decision.kind == "satisfied":
@@ -453,9 +456,11 @@ def decide_join(job: JobDefinition, doc: StateDoc, decision: _joins.JoinDecision
     try:
         step = None if step is None else validate_step(step, "join next_step")
     except FormatError as exc:
-        step, message = None, f"the join names an invalid step: {exc}"
+        # It can never succeed, so there is no wait to reopen.
+        return doc.with_failure(failure("dependency_failure", f"the join names an invalid step: {exc}")), "failed"
     if step is None:
-        return doc.with_failure(failure("dependency_failure", message)), "failed"
+        kept = doc if decision.kind == "satisfied" else observed
+        return kept.with_failure(failure("dependency_failure", message)), "failed"
     maximum = job.retry_policy.maximum_activations
     if maximum is not None and _count(doc.counters, "activations") + 1 > maximum:
         return doc.with_failure(failure("budget_exhausted", "maximum_activations exceeded")), "failed"

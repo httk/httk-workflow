@@ -793,8 +793,9 @@ httk job request set_priority --priority 100 --reason "urgent" JOB
 | --- | --- | --- |
 | `cancel` | any non-terminal job | `cancelled`; a running attempt is stopped first |
 | `pause` | a job not terminal, paused or waiting | `paused`, at the next boundary when running |
-| `continue` | a failed or paused job | `ready`; the failure is cleared and a new attempt counted against the budget |
-| `override_step` | a failed or paused job | `ready` with a new activation of `--step` |
+| `continue` | a failed or paused job | `waiting` with the retained join when the job failed at its wait on children (no new attempt, no budget counted); otherwise `ready`, the failure cleared and a new attempt counted against the budget |
+| `restart` | a failed or paused job | `ready`; the failure is cleared, a retained join is dropped, and a new attempt is counted against the budget |
+| `override_step` | a failed or paused job | `ready` with a new activation of `--step`; a retained join is dropped |
 | `set_priority` | any job | the new `--priority` (0 is highest) |
 | `detach` | a spawned job | independent of its parent, permanently |
 | `eject` | a quiescent job | moved out as a bundle to `--destination` |
@@ -805,9 +806,13 @@ httk job request set_priority --priority 100 --reason "urgent" JOB
 Requests apply once, in posting order. A request that does not apply where the
 job now is is dropped and recorded in the job's `state.json` history with the
 reason; `job why` shows it. A request whose signature fails to verify, or whose
-job cannot be found, is moved to quarantine by `gc` after a day. `continue` and
-`override_step` of a child that a decided join has already consumed are refused
-unless `--force` is given.
+job cannot be found, is moved to quarantine by `gc` after a day. `continue`,
+`restart` and `override_step` of a child that a parent's observations name are
+refused unless `--force` is given. The exception is a child that its parent's
+join still names: the parent failed at its wait with a retained join, or waits
+on the child again. Fixing the child and continuing it needs no `--force`. `continue --tree PARENT` resumes such a parent's failed
+descendants, deepest first, before the parent itself; see
+{doc}`/restarting_jobs`.
 
 `job request` exits `0` once the files are posted, and warns when no live
 manager serves the job. `--wait` (only for `pause`) waits until each job was
