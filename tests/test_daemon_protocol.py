@@ -4,6 +4,7 @@ import base64
 import json
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httk.core.identity import identity_public_key
@@ -74,9 +75,19 @@ def _document(operation: str, **fields: object) -> bytes:
                 "priority": 999,
             },
         ),
+        (
+            "job_request",
+            {
+                "configuration_digest": CONFIGURATION_DIGEST,
+                "selector": JOB_ID,
+                "action": "set_budget",
+                "reason": "operator request",
+                "budget": {"maximum_attempts_per_activation": 3, "maximum_activations": None},
+            },
+        ),
     ],
 )
-def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> None:
+def test_each_operation_round_trips(operation: str, fields: dict[str, Any]) -> None:
     request = decode_request(_document(operation, **fields))
 
     assert request == Request(
@@ -92,6 +103,7 @@ def test_each_operation_round_trips(operation: str, fields: dict[str, str]) -> N
         reason=fields.get("reason"),
         priority=int(fields["priority"]) if "priority" in fields else None,
         step=fields.get("step"),
+        budget=fields.get("budget"),
         destination=fields.get("destination"),
         command_id=fields.get("command_id"),
     )
@@ -283,6 +295,11 @@ def test_start_requires_configuration_digest_when_encoded() -> None:
         ({"action": "set_priority"}, "priority"),
         ({"priority": True}, "priority"),
         ({"priority": 1000}, "priority"),
+        ({"action": "set_budget"}, "budget"),
+        ({"budget": {"maximum_activations": 2}}, "budget"),
+        ({"action": "set_budget", "budget": {}}, "invalid budget"),
+        ({"action": "set_budget", "budget": {"maximum_activations": 0}}, "invalid budget"),
+        ({"action": "set_budget", "budget": {"retry_on": []}}, "invalid budget"),
         ({"step": "bad/step"}, "step"),
         ({"step": "next"}, "step"),
         ({"action": "override_step"}, "step"),
@@ -312,6 +329,7 @@ def test_job_request_rejects_invalid_options(overrides: dict[str, object], messa
 def test_job_request_accepts_every_request_action(action: str) -> None:
     options: dict[str, dict[str, object]] = {
         "set_priority": {"priority": 7},
+        "set_budget": {"budget": {"maximum_total_attempts": None}},
         "override_step": {"step": "relax"},
         "eject": {"destination": "archive/job"},
     }

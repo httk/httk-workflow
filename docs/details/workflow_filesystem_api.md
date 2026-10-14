@@ -653,8 +653,8 @@ read. The first reconcile of a job (its first activation) pins it in
 `state.json` (format `httk-workflow-state`, version 1) is written only by the
 job's owner, through `write_file`, and is absent until an owner first writes it
 (a published child and an adopted exchange job carry one without an
-activation). It is strict except that an absent `job_digest` reads as `null`,
-and at most 1 MiB.
+activation). It is strict except that an absent `job_digest` or `budget_override` reads as
+`null`, and at most 1 MiB.
 
 | Member | Value | Meaning |
 | --- | --- | --- |
@@ -670,7 +670,7 @@ and at most 1 MiB.
 | `runner_steps` | list or `null` | Steps an outcome declared; evidence only. |
 | `failure` | failure object or `null` | The current failure (§Outcomes). |
 | `failure_history` | list, at most 16 | The last failures. |
-| `join` | object or `null` | The pending join (§Waiting and joins). Kept when the parent fails with `dependency_failure` at its wait (impossible without `on_impossible`, or an unresolvable child), so the wait can be reopened. |
+| `join` | object or `null` | The pending join (§Waiting and joins). Kept when the parent fails at its wait with `dependency_failure` (impossible without `on_impossible`, or an unresolvable child) or `budget_exhausted` (the advance would pass the effective `maximum_activations`), so the wait can be reopened. |
 | `observations` | list | The children as the decided join saw them. |
 | `children` | list | Published children: `{job_id, job_key, label, placement, spawn_id, attempt_id}`; for an adopted exchange tree `{job_id, job_key, placement}`. |
 | `commit` | object or `null` | The commit intent (§The commit). |
@@ -683,6 +683,7 @@ and at most 1 MiB.
 | `workflow_pin` | `{id, tree_sha256}` or `null` | The installation the last launch used. |
 | `history_tail` | list, at most 32 | `{at, event, ...}` entries: `released`, `request_applied`, `request_dropped`, `join_decided`, `paused`, `unsealed`. |
 | `job_digest` | 64 hex digits or `null` | The pinned job digest. |
+| `budget_override` | object or `null` | Optional. Set by `set_budget`: keys are a non-empty subset of `maximum_attempts_per_activation`, `maximum_total_attempts` and `maximum_activations`, each an integer of at least 1 or `null` (that limit lifted). Absent keys fall back to `job.json`. The effective policy is the `retry_policy` of `job.json` with these keys replaced. |
 
 An unowned job's `state.json` is stable, because nobody owns the job; readers
 read it non-blocking and bounded and tell an absent file from a damaged one.
@@ -804,8 +805,9 @@ anything else:
 A launch runs only on an owned, reconciled, eligible job, in this order:
 
 1. Choose the attempt: reuse `state.attempt` while its `started_at` is `null`,
-   otherwise record the next attempt. A budget already exceeded fails the job
-   with `budget_exhausted`.
+   otherwise record the next attempt. A budget already exceeded (the effective
+   budgets: `retry_policy` with `budget_override`) fails the job with
+   `budget_exhausted`.
 2. Write `state.json` with `workflow_pin` and `phase: launching(A)`, which
    stamps `started_at`.
 3. Create `attempts/A/` (and `run/`) anchored below the job, refusing a
@@ -884,11 +886,11 @@ the commit makes), `runner_steps`, `resources` (only on `advance` and `wait`),
 
 | Action | Required | Committed target |
 | --- | --- | --- |
-| `advance` | `next_step` | `ready`, new activation (`failed`/`budget_exhausted` past `maximum_activations`) |
+| `advance` | `next_step` | `ready`, new activation (`failed`/`budget_exhausted` past the effective `maximum_activations`) |
 | `wait` | `next_step`, `join` | `waiting` (§Waiting and joins) |
 | `succeed` | none | `succeeded` |
 | `fail` | `failure` | `failed`; `ready` (retry) when `retryable` and the budget allows |
-| `retry` | `retry.reason` | `ready`, next attempt; `failed`/`retry_exhausted` past the budget |
+| `retry` | `retry.reason` | `ready`, next attempt; `failed`/`retry_exhausted` past the effective budget |
 | `pause` | `pause.reason` | `paused` |
 
 **Failure object:** `{code, message, details?, retryable?}`, nothing else.
@@ -902,8 +904,8 @@ failure fails the job with `protocol_error`. Manager failures carry
 An attempt that ends without a valid outcome fails with a reserved code below.
 A cancelled attempt commits as `cancelled` whatever it published. An attempt
 that changed or broke `job.json` has its outcome voided. Manager-detected
-failures are retried only when their code is in `retry_on` and the budgets
-allow.
+failures are retried only when their code is in `retry_on` and the effective
+budgets (`retry_policy` with `budget_override`) allow.
 
 | Code | Meaning |
 | --- | --- |
@@ -911,8 +913,8 @@ allow.
 | `process_failure` | A runner that could not be started, or exited nonzero without an outcome. |
 | `owner_lost` | Unclean: the attempt's owner died, or drained it, before it published. |
 | `timeout` | The manager stopped the attempt at its `maxtime`. |
-| `retry_exhausted` | A retry past the attempt budgets. |
-| `budget_exhausted` | An attempt or activation budget exceeded. |
+| `retry_exhausted` | A retry past the effective attempt budgets. |
+| `budget_exhausted` | An effective attempt or activation budget exceeded. |
 | `dependency_failure` | A join became impossible or a child vanished. |
 | `data_conflict` | A committed transaction met the wrong kind of entry. |
 | `runner_unavailable`, `runner_build_failed`, `runner_not_built` | The installed workflow vanished between eligibility and launch, declares no usable runner, or its platform probe failed. |
@@ -1038,11 +1040,14 @@ releases it: satisfied → `ready` with an activation of `next_step` (reason
 `{"action": "advance", "next_step": ...}`, else `failed`; unresolvable →
 `failed` (`dependency_failure`). The decision records `observations` (`{label,
 job_id, job_key, placement, state, token, failure}`) in every case. It clears
-`join` on every outcome except one: `join` is kept when the parent fails with
-`dependency_failure` because the condition became impossible without an
-`on_impossible` advance, or because a child is unresolvable, so the wait can be
-reopened (`continue`). Satisfied, rescue, `budget_exhausted` and a join naming
-an invalid step clear it.
+`join` on every outcome except one: `join` is kept when the parent fails at its
+wait so the wait can be reopened (`continue`): with `dependency_failure`
+because the condition became impossible without an `on_impossible` advance, or
+because a child is unresolvable; and with `budget_exhausted` because a
+satisfied join, or an `on_impossible` rescue, would advance past the effective
+`maximum_activations`. After `set_budget` raises that limit, `continue`
+re-decides the join and advances. A successful advance and a join naming an
+invalid step clear it.
 
 **The revival guard:** `continue`, `restart` or `override_step` of a child is
 refused, unless forced, while its parent's current `state.json` observations
@@ -1081,9 +1086,10 @@ version 3, strict, at most 64 KiB:
 | `format`, `format_version` | yes | `"httk-workflow-request"`, `3` |
 | `request_id`, `job_id` | yes | UUIDs; the file name MUST be `<job_id>.<request_id>.json`. |
 | `placement` | yes | The job's placement, a hint for locating it. |
-| `action` | yes | `cancel`, `pause`, `continue`, `restart`, `override_step`, `set_priority`, `detach`, `eject`, `delete`, `seal` or `unseal`. |
+| `action` | yes | `cancel`, `pause`, `continue`, `restart`, `override_step`, `set_priority`, `set_budget`, `detach`, `eject`, `delete`, `seal` or `unseal`. |
 | `operator`, `reason`, `created_at` | yes | Attribution and ordering. |
 | `priority` | `set_priority` only, required | 0–999. |
+| `budget` | `set_budget` only, required | An object with the shape of `budget_override`: a non-empty subset of `maximum_attempts_per_activation`, `maximum_total_attempts` and `maximum_activations`, each an integer of at least 1 or `null` (lifted). |
 | `step` | `override_step` only, required | The step to restart at. |
 | `destination` | `eject` only, required | An absolute directory, or a missing name in one. |
 | `force` | `continue`, `restart`, `override_step`; only `true` | Accept the revival hazard. |
@@ -1114,10 +1120,11 @@ at and the request, giving the new document and one effect:
 | --- | --- | --- |
 | `cancel` | not terminal | `Release(cancelled)` |
 | `pause` | not terminal, not `paused`, not `waiting` | `Release(paused)` |
-| `continue` | `failed` or `paused`, revival guard | `Release(waiting)` with the retained `join` when the job failed at its wait, no new attempt; else `Release(ready)`: failure cleared, next attempt `manual_continue` if the last one started; `failed`/`budget_exhausted` past a budget |
-| `restart` | `failed` or `paused`, revival guard | `Release(ready)`: failure cleared, `join` dropped, next attempt `manual_continue` if the last one started; `failed`/`budget_exhausted` past a budget |
-| `override_step` | `failed` or `paused`, revival guard | `Release(ready)` with a new activation of `step`, dropping a retained `join`; budgets as `restart` |
+| `continue` | `failed` or `paused`, revival guard | `Release(waiting)` with the retained `join` when the job failed at its wait, no new attempt; else `Release(ready)`: failure cleared, next attempt `manual_continue` if the last one started; `failed`/`retry_exhausted` past an effective attempt budget, `budget_exhausted` past `maximum_activations` |
+| `restart` | `failed` or `paused`, revival guard | `Release(ready)`: failure cleared, `join` dropped, next attempt `manual_continue` if the last one started; `failed`/`retry_exhausted` past an effective attempt budget, `budget_exhausted` past `maximum_activations` |
+| `override_step` | `failed` or `paused`, revival guard | `Release(ready)` with a new activation of `step`, dropping a retained `join`; `failed`/`retry_exhausted` or `budget_exhausted` past an effective budget, as `restart` |
 | `set_priority` | always | `Release(<current state>, priority)` |
+| `set_budget` | not `succeeded` or `cancelled` | `Release(<current state>, priority)` with `budget` merged into `budget_override` (a later value for a key wins); no new attempt, no revival guard |
 | `detach` | the job has a parent link not yet detached | `Release(<current state>)` with `detached: {at, operator}` |
 | `eject` | the destination is usable | `Eject(destination, tree)` (§Eject) |
 | `delete` | terminal or `paused`; a succeeded job only after `unseal`; no non-terminal parent waits on it | `Discard`: the job directory, its request files and (for an exchange root) its index entry are removed |

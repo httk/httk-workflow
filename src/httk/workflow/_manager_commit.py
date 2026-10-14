@@ -110,10 +110,11 @@ def attempt_budget_failure(job: JobDefinition, doc: StateDoc) -> str | None:
     :return: The exhausted budget, or ``None``.
     """
 
-    per_activation = job.retry_policy.maximum_attempts_per_activation
+    policy = job.retry_policy.overridden(doc.budget_override)
+    per_activation = policy.maximum_attempts_per_activation
     if per_activation is not None and _count(doc.attempt, "ordinal") > per_activation:
         return "maximum_attempts_per_activation exceeded"
-    total = job.retry_policy.maximum_total_attempts
+    total = policy.maximum_total_attempts
     if total is not None and _count(doc.counters, "attempts_total") > total:
         return "maximum_total_attempts exceeded"
     return None
@@ -127,10 +128,11 @@ def retry_budget_available(job: JobDefinition, doc: StateDoc) -> bool:
     :return: Whether a retry fits the budgets.
     """
 
-    per_activation = job.retry_policy.maximum_attempts_per_activation
+    policy = job.retry_policy.overridden(doc.budget_override)
+    per_activation = policy.maximum_attempts_per_activation
     if per_activation is not None and _count(doc.attempt, "ordinal") >= per_activation:
         return False
-    total = job.retry_policy.maximum_total_attempts
+    total = policy.maximum_total_attempts
     return total is None or _count(doc.counters, "attempts_total") < total
 
 
@@ -367,7 +369,7 @@ def _outcome_intent(
         resources = validate_resources(outcome["resources"], "outcome.resources")
     if action == "advance":
         next_step = validate_step(outcome.get("next_step"), "next_step")
-        maximum = job.retry_policy.maximum_activations
+        maximum = job.retry_policy.overridden(doc.budget_override).maximum_activations
         if maximum is not None and _count(doc.counters, "activations") + 1 > maximum:
             exhausted = failure("budget_exhausted", "maximum_activations exceeded")
             return _intent(attempt_id, action, "failed", priority, failure=exhausted, reason="budget_exhausted")
@@ -433,7 +435,9 @@ def decide_join(job: JobDefinition, doc: StateDoc, decision: _joins.JoinDecision
     otherwise, and for ``unresolvable``, the parent fails with ``dependency_failure``.
     A join naming an invalid step fails it too. Every case records the observations.
     A failed wait (``impossible`` without a rescue, or ``unresolvable``) keeps the join,
-    so an operator ``continue`` can reopen it; every other case clears it.
+    so an operator ``continue`` can reopen it, and so does a join whose next activation
+    would exceed ``maximum_activations`` (``budget_exhausted``: raise it with ``set_budget``,
+    then ``continue`` re-decides the join); every other case clears it.
 
     :param job: The parent.
     :param doc: Its state, carrying the join.
@@ -461,7 +465,7 @@ def decide_join(job: JobDefinition, doc: StateDoc, decision: _joins.JoinDecision
     if step is None:
         kept = doc if decision.kind == "satisfied" else observed
         return kept.with_failure(failure("dependency_failure", message)), "failed"
-    maximum = job.retry_policy.maximum_activations
+    maximum = job.retry_policy.overridden(doc.budget_override).maximum_activations
     if maximum is not None and _count(doc.counters, "activations") + 1 > maximum:
-        return doc.with_failure(failure("budget_exhausted", "maximum_activations exceeded")), "failed"
+        return observed.with_failure(failure("budget_exhausted", "maximum_activations exceeded")), "failed"
     return doc.with_failure(None).next_activation(step, "join"), "ready"

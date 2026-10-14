@@ -145,6 +145,8 @@ def render_job(report: Mapping[str, Any]) -> str:
             maximum_total_attempts=budgets["maximum_total_attempts"],
             activations=int(budgets["activations"]),
             maximum_activations=budgets["maximum_activations"],
+            declared=budgets["declared"],
+            budget_override=budgets["budget_override"],
         )
         for index, text in enumerate(status.describe()):
             lines.append(_pair("budgets" if index == 0 else "", text))

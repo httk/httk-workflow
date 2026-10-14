@@ -253,6 +253,8 @@ class JobExecutor:
             document["priority"] = request.priority
         if request.step is not None:
             document["step"] = request.step
+        if request.budget is not None:
+            document["budget"] = dict(request.budget)
         if request.destination is not None:
             document["destination"] = str(self.workspace.root / "exchange" / "outbox" / request.destination)
             document["tree"] = True

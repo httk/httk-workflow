@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from httk.workflow._job import JobDefinition
+from httk.workflow._joins import JoinDecision
+from httk.workflow._manager_commit import _outcome_intent, attempt_budget_failure, decide_join, retry_budget_available
 from httk.workflow._requests import (
     ACTIONS,
     Defer,
@@ -57,10 +59,14 @@ def _seed(tmp_path: Path) -> Path:
     return path
 
 
-def _job(*, parent: bool = True, maximum_attempts: int | None = None) -> JobDefinition:
+def _job(
+    *, parent: bool = True, maximum_attempts: int | None = None, maximum_activations: int | None = None
+) -> JobDefinition:
     retry: dict[str, object] = {"retry_on": []}
     if maximum_attempts is not None:
         retry["maximum_attempts_per_activation"] = maximum_attempts
+    if maximum_activations is not None:
+        retry["maximum_activations"] = maximum_activations
     return JobDefinition.from_mapping(
         {
             "format": "httk-workflow-job",
@@ -107,6 +113,7 @@ def _doc(*, running: bool = False) -> StateDoc:
 def _document(action: str, **extra: object) -> dict[str, object]:
     options: dict[str, dict[str, object]] = {
         "set_priority": {"priority": 7},
+        "set_budget": {"budget": {"maximum_attempts_per_activation": 3}},
         "override_step": {"step": "relax"},
         "eject": {"destination": "out"},
     }
@@ -218,7 +225,8 @@ def test_restart_envelope_takes_only_force() -> None:
 
 
 @pytest.mark.parametrize(
-    ("action", "missing"), [("set_priority", "priority"), ("override_step", "step"), ("eject", "destination")]
+    ("action", "missing"),
+    [("set_priority", "priority"), ("set_budget", "budget"), ("override_step", "step"), ("eject", "destination")],
 )
 def test_action_options_are_required(action: str, missing: str) -> None:
     document = _document(action)
@@ -264,6 +272,8 @@ def _expected(action: str, state: str) -> Effect:
         return Release("ready", 500) if state in ("failed", "paused") else Drop("")
     if action == "set_priority":
         return Release(state, 7)
+    if action == "set_budget":
+        return Drop("") if state in ("succeeded", "cancelled") else Release(state, 500)
     if action == "detach":
         return Release(state, 500)
     if action == "eject":
@@ -400,7 +410,7 @@ def test_refusal_and_force() -> None:
     assert isinstance(effect, Drop) and effect.reason.endswith("republish with force to accept the hazard")
     # Only continue, restart, override_step, delete and eject consult the check.
     seen.clear()
-    for action in ("cancel", "pause", "set_priority", "detach", "seal", "unseal"):
+    for action in ("cancel", "pause", "set_priority", "set_budget", "detach", "seal", "unseal"):
         apply(_job(), _doc(), "paused", 500, _request(action), refusal=refuse)
     assert seen == []
 
@@ -411,6 +421,100 @@ def test_revival_within_exhausted_budget_fails() -> None:
     assert effect == Release("failed", 500, effect.applied_requests)  # type: ignore[union-attr]
     assert new.failure is not None and new.failure["code"] == "retry_exhausted"
     assert new.attempt == doc.attempt
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        None,
+        {},
+        [],
+        {"maximum_attempts": 3},
+        {"maximum_activations": 0},
+        {"maximum_total_attempts": True},
+        {"maximum_total_attempts": "3"},
+    ],
+)
+def test_set_budget_envelope(budget: object) -> None:
+    validate_envelope(_document("set_budget", budget={"maximum_total_attempts": None, "maximum_activations": 2}))
+    with pytest.raises(FormatError):
+        validate_envelope(_document("set_budget", budget=budget))
+    # Only set_budget carries a budget.
+    with pytest.raises(FormatError):
+        validate_envelope(_document("restart", budget={"maximum_activations": 2}))
+
+
+def test_set_budget_merges_and_keeps_state_and_priority() -> None:
+    doc = _doc().updated(budget_override={"maximum_total_attempts": 5, "maximum_activations": 2})
+    request = _request("set_budget", budget={"maximum_activations": None, "maximum_attempts_per_activation": 4})
+    new, effect = apply(_job(), doc, "failed", 321, request)
+    assert effect == Release("failed", 321, (request.request_id,))
+    assert dict(new.budget_override or {}) == {
+        "maximum_total_attempts": 5,
+        "maximum_activations": None,
+        "maximum_attempts_per_activation": 4,
+    }
+    assert new.failure == doc.failure and new.attempt == doc.attempt
+    assert new.history_tail[-1]["budget"] == {"maximum_activations": None, "maximum_attempts_per_activation": 4}
+    for state in ("succeeded", "cancelled"):
+        new, effect = apply(_job(), doc, state, 500, _request("set_budget"))
+        assert effect == Drop(f"the job is already {state}") and new.budget_override == doc.budget_override
+
+
+def test_set_budget_lets_an_exhausted_restart_run() -> None:
+    job = _job(maximum_attempts=1)
+    doc, effect = apply(job, _doc(), "failed", 500, _request("restart"))
+    assert effect == Release("failed", 500, effect.applied_requests)  # type: ignore[union-attr]
+    assert doc.failure is not None and doc.failure["code"] == "retry_exhausted"
+    doc, effect = apply(job, doc, "failed", 500, _request("set_budget"))
+    assert isinstance(effect, Release) and effect.state == "failed"
+    doc, effect = apply(job, doc, "failed", 500, _request("restart"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    assert doc.failure is None and doc.attempt is not None and doc.attempt["ordinal"] == 2
+
+
+def test_manager_budget_checks_honour_the_override() -> None:
+    job, doc = _job(maximum_attempts=1), _doc()
+    assert not retry_budget_available(job, doc)
+    assert attempt_budget_failure(job, doc.next_attempt("retry", unclean=False)) is not None
+    raised = doc.updated(budget_override={"maximum_attempts_per_activation": 2})
+    assert retry_budget_available(job, raised)
+    assert attempt_budget_failure(job, raised.next_attempt("retry", unclean=False)) is None
+    lifted = doc.updated(budget_override={"maximum_attempts_per_activation": None})
+    assert retry_budget_available(job, lifted)
+
+
+def test_activation_budget_sites_honour_the_override() -> None:
+    job, doc = _job(maximum_activations=1), _doc()
+    raised = doc.updated(budget_override={"maximum_activations": 2})
+    assert doc.attempt is not None
+    outcome = {"action": "advance", "attempt_id": doc.attempt["id"], "next_step": "finish"}
+    assert _outcome_intent(job, doc, outcome, 500, (), JOB_ID)["target_state"] == "failed"
+    assert _outcome_intent(job, raised, outcome, 500, (), JOB_ID)["target_state"] == "ready"
+    # override_step opens a second activation: refused by the declared limit, allowed once it is lifted.
+    _, effect = apply(job, doc, "failed", 500, _request("override_step"))
+    assert isinstance(effect, Release) and effect.state == "failed"
+    lifted = doc.updated(budget_override={"maximum_activations": None})
+    new, effect = apply(job, lifted, "failed", 500, _request("override_step"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    assert new.activation is not None and new.activation["ordinal"] == 2
+
+
+def test_set_budget_then_continue_redecides_a_join_kept_by_maximum_activations() -> None:
+    job = _job(maximum_activations=1)
+    join = {"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": []}
+    waiting = _doc().with_failure(None).updated(join=join)
+    doc, target = decide_join(job, waiting, JoinDecision("satisfied", (), ()))
+    assert target == "failed" and doc.join == waiting.join
+    assert doc.failure is not None and doc.failure["code"] == "budget_exhausted"
+    doc, effect = apply(job, doc, "failed", 500, _request("set_budget", budget={"maximum_activations": 2}))
+    assert isinstance(effect, Release) and effect.state == "failed"
+    doc, effect = apply(job, doc, "failed", 500, _request("continue"))
+    assert isinstance(effect, Release) and effect.state == "waiting" and doc.join == waiting.join
+    assert doc.failure is None
+    doc, target = decide_join(job, doc, JoinDecision("satisfied", (), ()))
+    assert target == "ready" and doc.join is None and doc.activation is not None
+    assert (doc.activation["step"], doc.activation["reason"], doc.activation["ordinal"]) == ("gather", "join", 2)
 
 
 def test_detach() -> None:

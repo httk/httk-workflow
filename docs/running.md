@@ -129,6 +129,7 @@ httk job request pause --reason "hold for quota" silicon
 httk job request continue --reason "quota restored" silicon
 httk job request restart --reason "redo this step" silicon
 httk job request cancel --reason "wrong structure" silicon
+httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" silicon
 httk job delete silicon                # terminal or paused jobs only
 ```
 
@@ -138,7 +139,8 @@ apply at once to a job no owner holds, print `queued` (exit `0`) for one an
 owner holds, and `refused` (exit `1`) when the request cannot apply. A
 succeeded job is protected: `httk job unseal` it before `job delete`.
 {doc}`restarting_jobs` covers failed jobs and failed children: what to edit,
-which request to use, and how to resume a parent.
+which request to use, how to raise a retry budget (`set_budget`), and how to
+resume a parent.
 
 A job changes hands only when its owner is proven dead: a manager that is
 killed, or whose node or allocation ended, has its jobs returned to where they

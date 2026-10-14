@@ -4,10 +4,13 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import cast
 
-from .models import validate_step
+from .errors import FormatError
+from .models import validate_budget_override, validate_step
 
 _MAX_REQUEST_SIZE = 16 * 1024
 _REQUEST_FORMAT = "httk-workspace-command"
@@ -32,6 +35,7 @@ _JOB_ACTIONS = frozenset(
         "restart",
         "override_step",
         "set_priority",
+        "set_budget",
         "detach",
         "eject",
         "delete",
@@ -72,6 +76,7 @@ class Request:
     :param reason: Explain why the action was requested.
     :param priority: Set priority for ``set_priority``.
     :param step: Select the runner step for ``override_step``.
+    :param budget: Set retry-policy limits for ``set_budget`` (``None`` values lift a limit); stored read-only.
     :param destination: Select an outbox-relative destination for ``eject``.
     :param command_id: Identify the original daemon command for ``job_request_status``.
     :raises ValueError: If a field is invalid or conflicts with the operation.
@@ -93,6 +98,7 @@ class Request:
     reason: str | None = field(default=None, kw_only=True)
     priority: int | None = field(default=None, kw_only=True)
     step: str | None = field(default=None, kw_only=True)
+    budget: Mapping[str, int | None] | None = field(default=None, kw_only=True)
     destination: str | None = field(default=None, kw_only=True)
     command_id: str | None = field(default=None, kw_only=True)
 
@@ -136,6 +142,7 @@ class Request:
                 self.reason,
                 self.priority,
                 self.step,
+                self.budget,
                 self.destination,
                 self.command_id,
             )
@@ -168,6 +175,14 @@ class Request:
                         raise ValueError("invalid step") from exc
                 if (self.action == "override_step") != (self.step is not None):
                     raise ValueError("step is required only for override_step")
+                if self.budget is not None:
+                    try:
+                        budget = validate_budget_override(self.budget, "budget")
+                    except FormatError as exc:
+                        raise ValueError("invalid budget") from exc
+                    object.__setattr__(self, "budget", MappingProxyType(budget))
+                if (self.action == "set_budget") != (self.budget is not None):
+                    raise ValueError("budget is required only for set_budget")
                 if self.destination is not None:
                     if (
                         type(self.destination) is not str
@@ -183,7 +198,15 @@ class Request:
             else:
                 if self.configuration_digest is not None or any(
                     item is not None
-                    for item in (self.selector, self.action, self.reason, self.priority, self.step, self.destination)
+                    for item in (
+                        self.selector,
+                        self.action,
+                        self.reason,
+                        self.priority,
+                        self.step,
+                        self.budget,
+                        self.destination,
+                    )
                 ):
                     raise ValueError("job_request_status requires command_id only")
                 if type(self.command_id) is not str or _ID_PATTERN.fullmatch(self.command_id) is None:
@@ -309,10 +332,10 @@ def _request_fields(request: Request) -> dict[str, object]:
                 "reason": request.reason,
             }
         )
-        for name in ("priority", "step", "destination"):
+        for name in ("priority", "step", "budget", "destination"):
             value = getattr(request, name)
             if value is not None:
-                fields[name] = value
+                fields[name] = dict(value) if name == "budget" else value
     elif request.operation == "job_request_status":
         fields["command_id"] = request.command_id
     return fields
@@ -354,7 +377,7 @@ def decode_request(data: bytes) -> Request:
         keys.add("handle")
     elif operation == "job_request":
         keys.update({"configuration_digest", "selector", "action", "reason"})
-        keys.update(name for name in ("priority", "step", "destination") if name in value)
+        keys.update(name for name in ("priority", "step", "budget", "destination") if name in value)
     elif operation == "job_request_status":
         keys.add("command_id")
     if set(value) != keys:
@@ -401,6 +424,7 @@ def decode_request(data: bytes) -> Request:
             reason=cast(str | None, value.get("reason")),
             priority=cast(int | None, value.get("priority")),
             step=cast(str | None, value.get("step")),
+            budget=cast(Mapping[str, int | None] | None, value.get("budget")),
             destination=cast(str | None, value.get("destination")),
             command_id=cast(str | None, value.get("command_id")),
         )

@@ -15,6 +15,7 @@ from .._daemon_client import Endpoint, decode_matching_response, prepare_job_req
 from .._daemon_protocol import Request, Response, encode_request
 from ..adapters import read_metadata, remote_settings, resolve_remote, run_adapter
 from ..registry import WorkspaceBinding
+from ._common import _request_budget
 
 #: The bounded mailbox wait for one daemon response.
 _WAIT_SECONDS = 10.0
@@ -165,6 +166,7 @@ def request_remote_jobs(
             reason=str(arguments.reason),
             priority=arguments.priority,
             step=arguments.step,
+            budget=_request_budget(arguments),
             destination=arguments.destination,
         )
         for selector in selectors

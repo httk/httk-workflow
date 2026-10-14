@@ -30,13 +30,21 @@ from httk.core.cli import CLIContext
 
 from ..adapters import resolve_remote, run_adapter
 from ..errors import ResolutionMiss, WorkflowError
-from ..models import WORKSPACE_DIRECTORY
+from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
 from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
 from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _request_budget(arguments: argparse.Namespace) -> dict[str, int | None] | None:
+    """Return the ``set_budget`` limits given on a ``job request`` command line (``None`` is unlimited), if any."""
+
+    # The options default to argparse.SUPPRESS, so an absent attribute is "not given" and None is "unlimited".
+    return {name: getattr(arguments, name) for name in BUDGET_LIMITS if hasattr(arguments, name)} or None
+
 
 #: Everything a handler may raise that is an operator's problem rather than a
 #: defect. Anything here is reported as ``PROGRAM: message`` and exits ``2``.

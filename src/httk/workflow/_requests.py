@@ -24,7 +24,14 @@ from httk.workflow._job import JobDefinition
 from httk.workflow._state import TERMINAL_STATES, Release, StateDoc
 from httk.workflow._util import json_bytes, require_int, require_string
 from httk.workflow.errors import FormatError
-from httk.workflow.models import Failure, canonical_uuid, parse_placement_text, placement_text, validate_step
+from httk.workflow.models import (
+    Failure,
+    canonical_uuid,
+    parse_placement_text,
+    placement_text,
+    validate_budget_override,
+    validate_step,
+)
 
 __all__ = [
     "ACTIONS",
@@ -60,6 +67,7 @@ ACTIONS = (
     "restart",
     "override_step",
     "set_priority",
+    "set_budget",
     "detach",
     "eject",
     "delete",
@@ -70,10 +78,11 @@ ACTIONS = (
 _REQUIRED = frozenset(
     {"format", "format_version", "request_id", "job_id", "placement", "action", "operator", "reason", "created_at"}
 )
-#: Each optional member and the actions that may carry it; the first two must carry theirs.
+#: Each optional member and the actions that may carry it; the first three must carry theirs.
 _OPTIONS = {
     "priority": ("set_priority",),
     "step": ("override_step",),
+    "budget": ("set_budget",),
     "destination": ("eject",),
     "force": ("continue", "restart", "override_step"),
     "tree": ("eject",),
@@ -203,6 +212,8 @@ def validate_envelope(document: Mapping[str, object]) -> None:
         require_int(document["priority"], "request priority", maximum=999)
     if "step" in allowed:
         validate_step(document["step"], "request step")
+    if "budget" in allowed:
+        validate_budget_override(document["budget"], "request budget")
     for flag in sorted(_FLAGS & members):
         if document[flag] is not True:
             raise FormatError(f"request {flag} must be true")
@@ -248,8 +259,8 @@ def post(
     :param operator: The operator label.
     :param reason: The operator's explanation.
     :param seed_path: Sign with this identity seed; ``None`` posts unsigned.
-    :param **extra: ``priority``, ``step``, ``force``, ``destination``, ``tree`` (``None`` or ``False`` are left
-        out), or a deterministic ``request_id`` and ``created_at``.
+    :param **extra: ``priority``, ``step``, ``budget``, ``force``, ``destination``, ``tree`` (``None`` or ``False``
+        are left out), or a deterministic ``request_id`` and ``created_at``.
     :return: The posted request file.
     :raises httk.workflow.errors.FormatError: If the document would be invalid.
     """
@@ -309,8 +320,9 @@ def parse(path: Path) -> Request:
 
 
 def _budget_failure(job: JobDefinition, doc: StateDoc) -> Mapping[str, object] | None:
-    # The budgets of job.json bind manual revival too (legacy retry/advance).
-    policy, attempt, counters, activation = job.retry_policy, doc.attempt or {}, doc.counters, doc.activation or {}
+    # The budgets of job.json (as set_budget overrides them) bind manual revival too (legacy retry/advance).
+    policy = job.retry_policy.overridden(doc.budget_override)
+    attempt, counters, activation = doc.attempt or {}, doc.counters, doc.activation or {}
     checks = (
         ("retry_exhausted", attempt.get("ordinal"), policy.maximum_attempts_per_activation, "attempts per activation"),
         ("retry_exhausted", counters.get("attempts_total"), policy.maximum_total_attempts, "total attempts"),
@@ -324,7 +336,7 @@ def _budget_failure(job: JobDefinition, doc: StateDoc) -> Mapping[str, object] |
 
 def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) -> str | None:
     terminal = from_state in TERMINAL_STATES
-    if action == "cancel" and terminal:
+    if (action == "cancel" and terminal) or (action == "set_budget" and from_state in ("succeeded", "cancelled")):
         return f"the job is already {from_state}"
     if action == "pause" and (terminal or from_state == "paused"):
         return f"the job is already {from_state}"
@@ -368,6 +380,9 @@ def apply(
     ``continue`` of a parent that failed at its wait (its join kept) reopens the
     wait; otherwise it, and always ``restart``, retries the activation, while
     ``override_step`` opens a new one; both drop a kept join.
+    ``set_budget`` merges its limits into ``state.json`` ``budget_override``,
+    which overrides ``job.json``'s ``retry_policy`` at every budget check, and
+    releases the job to the state and priority it was claimed from.
     ``seal`` (a repair verb for a succeeded job without a seal) and ``unseal``
     (the operator's release of a succeeded job, after which ``delete`` applies)
     need the payload, so their effects are executed by the owner.
@@ -421,6 +436,11 @@ def apply(
         target = "paused"
     elif action == "set_priority":
         priority = require_int(document["priority"], "request priority", maximum=999)
+    elif action == "set_budget":
+        # Merged: successive requests on different limits compose; a later value for the same limit wins.
+        budget = validate_budget_override(document["budget"], "request budget")
+        new = doc.updated(budget_override={**(doc.budget_override or {}), **budget})
+        audit["budget"] = budget
     elif action == "detach":
         new = doc.updated(detached={"at": datetime.now(UTC).isoformat(), "operator": document["operator"]})
     elif action == "continue" and from_state == "failed" and doc.join is not None:

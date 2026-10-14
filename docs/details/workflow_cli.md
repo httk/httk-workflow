@@ -274,7 +274,7 @@ manager's platform stays `ready` and unclaimed there.
 | --- | --- | --- |
 | `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
-| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--force`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
 | `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--force` skips the confirmation |
@@ -394,7 +394,10 @@ inputs. See {doc}`/details/workflow_compat`.
 
 `job request ACTION JOB_ID...` posts one request per job and requires
 `--reason`. The actions are `cancel`, `pause`, `continue`, `restart`,
-`override_step` (with `--step`), `set_priority` (with `--priority`), `detach`, `eject` (with
+`override_step` (with `--step`), `set_priority` (with `--priority`),
+`set_budget` (with at least one of `--max-attempts-per-activation N|unlimited`,
+`--max-total-attempts N|unlimited` and `--max-activations N|unlimited`; the
+options are valid only with `set_budget`), `detach`, `eject` (with
 `--destination`), `delete`, `seal` and `unseal`. The job's owner applies each
 once, at its next boundary; a manager claims an unowned job to apply it. What
 each action does is tabulated in
@@ -990,7 +993,7 @@ httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [
 httk job adopt --json --by-path --workspace ROOT TRANSFER_ID [TRANSFER_ID …]   (in the batch landing)
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] WS
 httk transfer status --json WS
-httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--step S] [--destination D] [--force] JOB_ID …
+httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--step S] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] JOB_ID …
 httk job publish-requests --workspace WS --document JSON [--document JSON …] [--wait] [--timeout S]
 httk workspace status --by-path --json PATH
 httk workflow manager run --by-path --workspace PATH

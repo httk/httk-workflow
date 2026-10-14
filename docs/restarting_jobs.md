@@ -53,8 +53,9 @@ it is. The runner's documentation says which files a step regenerates.
 The retry budgets in `job.json` (`maximum_attempts_per_activation`,
 `maximum_total_attempts`, `maximum_activations`; absent means unbounded) bind
 manual revival too. A revival past a budget fails right back with
-`budget_exhausted` or `retry_exhausted`, and a budget cannot be raised
-afterwards because `job.json` cannot be edited.
+`budget_exhausted` or `retry_exhausted`. `job.json` keeps the declared
+budgets; to raise or lift one, post a `set_budget` request (see
+[Raising a budget](#raising-a-budget)).
 
 ## The three verbs
 
@@ -70,17 +71,91 @@ job its owner holds applies it at the next boundary.
 
 | Action | Effect |
 | --- | --- |
-| `continue` | A job that failed at its wait on children (see below) returns to `waiting` with its retained join: no new attempt, no budget counted. Any other `failed` job, and a `paused` job, returns to `ready` and the current step reruns as a new attempt, counted against the budget. |
+| `continue` | A job that failed at its wait on children (see below) returns to `waiting` with its retained join: no new attempt, no attempt budget counted. A wait that failed with `budget_exhausted` needs `maximum_activations` raised first. Any other `failed` job, and a `paused` job, returns to `ready` and the current step reruns as a new attempt, counted against the budget. |
 | `restart` | Always `ready`: the current step reruns as a new attempt, counted against the budget. The failure is cleared and a retained join is dropped. |
 | `override_step --step STEP` | `ready` with a new activation of `STEP`. `STEP` is checked against the steps the runner recorded unless `--force`. A retained join is dropped. |
 
 For a job that did not fail at a wait, `continue` and `restart` are the same.
 The attempt reason is `manual_continue` for both. Every rerun is bound by the
-retry budgets; only reopening a wait is not. `job why` says which applies.
+effective retry budgets (the declared ones, with any `set_budget` override);
+only reopening a wait is not. `job why` says which applies.
 
 `--force` applies to all three. It accepts the revival hazard described next,
 and publishes an `override_step` outside the recorded steps. Cancelled jobs
 cannot be revived by any request.
+
+## Raising a budget
+
+A rerun past a retry budget is refused. With
+`maximum_attempts_per_activation = 1`, the first `restart` of a failed step
+fails right back with `retry_exhausted`. `job.json` cannot be edited, so the
+operator raises the limit with a request instead:
+
+```console
+httk job why silicon
+httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" silicon
+httk job request restart --reason "retry with fixed INCAR" silicon
+```
+
+1. `job why` names the exhausted budget and prints a hint with the
+   `set_budget` command, naming the option for that budget.
+2. Fix the input, as described above.
+3. `set_budget` raises the limit. The job stays where it is, in the state and
+   at the priority it had, and no attempt starts.
+4. `restart` (or `continue`) revives the job. It is now within the budget.
+
+`set_budget` takes at least one of `--max-attempts-per-activation N`,
+`--max-total-attempts N` and `--max-activations N`. Each is an integer of 1 or
+more, or `unlimited` to lift that limit. The options are valid only with
+`set_budget`. The request applies to any job that is not `succeeded` or
+`cancelled`, including a `ready` or running one; on a running attempt it
+applies at the next boundary, like every request. It does not need `--force`.
+
+The values go into `state.json` as `budget_override`. Later requests merge into
+it: a key set again takes the later value, and a key not named keeps its
+earlier value. A limit with no override falls back to `job.json`. The
+**effective** policy is the declared limits with the override applied. The
+manager's launch check, automatic retries, the `maximum_activations` checks and
+the revival checks of `continue`, `restart` and `override_step` all use it.
+`job.json` and the provenance record of the job keep the declared policy.
+
+`job why` and `job show` print the budget counters against the effective
+limit, and the declared one where it differs:
+
+```text
+attempts this activation  1/3 (declared 1)
+```
+
+The JSON output carries the declared values and `budget_override` in its
+`budgets` mapping. Each applied `set_budget` also records the limits it set in
+the job's `state.json` history (the `request_applied` entry carries `budget`).
+
+A parent that failed at its wait keeps its join, and `continue` reopens it
+with no new attempt. Reopening a `dependency_failure` wait needs no budget. A
+parent that failed with `budget_exhausted` (its join would advance past
+`maximum_activations`) needs that limit raised first, then `continue`; the join
+re-decides under the raised budget and advances to its next step, with no new
+children:
+
+```console
+httk job request set_budget --max-activations 5 --reason "one more step" PARENT
+httk job request continue --reason "budget raised" PARENT
+```
+
+`restart` spawns new children and counts an attempt, so it needs the attempt
+budget (see [Restarting the parent instead](#restarting-the-parent-instead)).
+
+A limit can also be lowered. A limit set below what the job has already used
+ends the job at its next budget check: a `ready` job fails with
+`budget_exhausted` at its next claim. That is a way to stop further automatic
+retries.
+
+Do not try the other routes. Editing `job.json` fails the job at the digest
+check. Counters are not reset, since that would lose the record of what the job
+did. `--force` does not skip a budget: the revival request checks the budget
+whether or not `--force` is given (`--force` only accepts the revival hazard),
+and the manager checks it again at launch. `override_step --step STEP` is the alternative to `set_budget`: it
+starts a new activation, bound by `maximum_activations`.
 
 ## Parents and children
 
@@ -93,6 +168,9 @@ saw of each child (`observations`) and, when the gather named no
 wait. The children stay where they failed. A child that runs while its parent
 is `failed` still finds it through `a.parent`, since the parent stays at its
 placement.
+A parent can also fail at its wait with `budget_exhausted`: its join is
+satisfied (or rescued), but the advance would pass `maximum_activations`. It
+keeps its `join` then too; see [Raising a budget](#raising-a-budget).
 
 ### Fix the child, then continue the parent
 
@@ -154,8 +232,10 @@ fail again. `--tree` is valid only with `continue`.
 creates new children. The old children stay where they are. Terminal ones can be
 removed with `httk job delete`. The spawning step's attempt counts against the
 budget: with `maximum_attempts_per_activation = 1`, `restart` fails right back
-with `retry_exhausted`. `httk job request override_step --step <spawning step>`
-reruns that step as a new activation instead, bound by `maximum_activations`.
+with `retry_exhausted`. Raise the limit with `httk job request set_budget
+--max-attempts-per-activation N` first, then `restart`. Alternatively,
+`httk job request override_step --step <spawning step>` reruns that step as a
+new activation, bound by `maximum_activations`.
 The restarted parent no longer waits on them, so
 reviving one of them needs `--force`, and the parent will not notice it.
 
@@ -169,7 +249,8 @@ after the join grace, a manager option that defaults to one hour.
 ### Parents with `on_impossible`
 
 A parent whose gather named an `on_impossible` step advanced to that step
-instead of failing, which consumed the observation and cleared the join. Reviving
+instead of failing, which consumed the observation and cleared the join
+(unless that advance failed with `budget_exhausted`, which keeps it). Reviving
 its child then still needs `--force`, and the parent does not notice the
 revived child. The wait cannot be reopened. To have the parent use the revived
 child, rerun a step that gathers it again (a runner step that calls

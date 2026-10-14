@@ -866,6 +866,7 @@ def test_exchange_rekey_after_publication_is_refused_before_claim_effect(
         ("continue", "paused", {"force": True}),
         ("override_step", "paused", {"step": "start", "force": True}),
         ("set_priority", "ready", {"priority": 7}),
+        ("set_budget", "failed", {"budget": {"maximum_activations": 3}}),
         ("detach", "ready", {}),
         ("eject", "ready", {"destination": "/tmp/unused", "tree": True}),
         ("delete", "paused", {}),
@@ -937,6 +938,7 @@ def test_malformed_daemon_adoption_attribution_is_refused_by_owner(tmp_path: Pat
         ("continue", "paused", {}, "ready"),
         ("override_step", "paused", {"step": "finish"}, "ready"),
         ("set_priority", "ready", {"priority": 7}, "ready"),
+        ("set_budget", "ready", {"budget": {"maximum_total_attempts": None}}, "ready"),
         ("detach", "ready", {}, "ready"),
         ("eject", "ready", {"destination": "eject-target"}, None),
         ("delete", "paused", {}, None),
@@ -1014,6 +1016,8 @@ def test_authenticated_executor_applies_every_internal_action_on_real_jobs(
         assert current is not None and current.state == expected_state
     if action == "set_priority":
         assert current is not None and current.priority == 7
+    elif action == "set_budget":
+        assert current is not None and v3.state_of(current).budget_override == {"maximum_total_attempts": None}
     elif action == "detach":
         assert current is not None and v3.state_of(current).detached is not None
     elif action == "override_step":

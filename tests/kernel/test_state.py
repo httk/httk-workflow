@@ -17,6 +17,7 @@ from httk.workflow._state import (
     read_state_unowned,
 )
 from httk.workflow.errors import FormatError
+from httk.workflow.models import RetryPolicy, validate_budget_override
 
 JOB_ID = "0b6f3f6e-6f7a-4a4b-9a43-4c1f0d6c8e01"
 
@@ -51,6 +52,7 @@ def _full_mapping() -> dict[str, object]:
         seal={"sha256": "00", "signed": True},
         workflow_pin={"id": "local:x", "tree_sha256": "ff"},
         history_tail=[{"at": "t", "event": "claimed"}] * 32,
+        budget_override={"maximum_attempts_per_activation": 3, "maximum_activations": None},
     )
     return mapping
 
@@ -110,6 +112,11 @@ def test_document_is_immutable_all_the_way_down() -> None:
         ("applied_requests", "x"),
         ("origin", "remote"),
         ("exchange_name", "client-1"),
+        ("budget_override", {}),
+        ("budget_override", []),
+        ("budget_override", {"retry_on": ["x"]}),
+        ("budget_override", {"maximum_total_attempts": 0}),
+        ("budget_override", {"maximum_total_attempts": 2.0}),
     ],
 )
 def test_malformed_members_are_refused(member: str, value: object) -> None:
@@ -128,6 +135,21 @@ def test_unknown_and_missing_members_are_refused() -> None:
     del mapping["history_tail"]
     with pytest.raises(FormatError, match="history_tail"):
         StateDoc.from_mapping(mapping)
+
+
+def test_budget_override_is_optional_and_overrides_the_declared_policy() -> None:
+    mapping = StateDoc.empty(JOB_ID).as_mapping()
+    assert mapping["budget_override"] is None
+    del mapping["budget_override"]
+    doc = StateDoc.from_mapping(mapping)
+    assert doc.budget_override is None
+    policy = RetryPolicy(1, 5, 2, frozenset({"lost"}))
+    assert policy.overridden(None) is policy
+    assert policy.overridden({"maximum_attempts_per_activation": 3, "maximum_activations": None}) == RetryPolicy(
+        3, 5, None, frozenset({"lost"})
+    )
+    with pytest.raises(FormatError):
+        validate_budget_override({"maximum_activations": -1}, "budget")
 
 
 def test_non_json_values_are_refused() -> None:

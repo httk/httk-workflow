@@ -10,6 +10,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from .. import _death, _kernel, _moving, _requests, _store
 from .._bundles import read_manifest
@@ -20,7 +21,7 @@ from .._manager_scheduling import unmet_job_requirements
 from .._state import TERMINAL_STATES, StateDoc
 from .._util import timestamp_seconds
 from ..errors import FormatError, RunnerResolutionError, WorkflowError
-from ..models import normalize_placement, placement_text
+from ..models import BUDGET_LIMITS, normalize_placement, placement_text
 from ..workspace import Workspace
 from ._reading import (
     attempt_control,
@@ -295,6 +296,8 @@ class BudgetStatus:
     :param maximum_total_attempts: Its limit, or ``None``.
     :param activations: Activations in total.
     :param maximum_activations: Its limit, or ``None``.
+    :param declared: The three limits as ``job.json`` declares them, by name; the limits above are effective.
+    :param budget_override: The operator's ``set_budget`` override from ``state.json``, or ``None``.
     """
 
     attempts_this_activation: int
@@ -303,6 +306,8 @@ class BudgetStatus:
     maximum_total_attempts: int | None
     activations: int
     maximum_activations: int | None
+    declared: Mapping[str, int | None]
+    budget_override: Mapping[str, int | None] | None
 
     @property
     def attempt_budget_exhausted(self) -> bool:
@@ -322,19 +327,38 @@ class BudgetStatus:
         return maximum is not None and self.activations + 1 > maximum
 
     def describe(self) -> list[str]:
-        """Describe every budget as ``consumed/limit`` for an operator.
+        """Describe every budget as ``consumed/limit`` for an operator, with the declared limit it overrides.
 
         :return: One line per budget.
         """
 
-        def limit(value: int | None) -> str:
-            return "unlimited" if value is None else str(value)
+        def limit(name: str, value: int | None) -> str:
+            text = "unlimited" if value is None else str(value)
+            declared = self.declared.get(name)
+            if declared != value:
+                text += f" (declared {'unlimited' if declared is None else declared})"
+            return text
 
         return [
-            f"attempts this activation {self.attempts_this_activation}/{limit(self.maximum_attempts_per_activation)}",
-            f"total attempts {self.total_attempts}/{limit(self.maximum_total_attempts)}",
-            f"activations {self.activations}/{limit(self.maximum_activations)}",
+            f"attempts this activation {self.attempts_this_activation}/"
+            + limit("maximum_attempts_per_activation", self.maximum_attempts_per_activation),
+            f"total attempts {self.total_attempts}/" + limit("maximum_total_attempts", self.maximum_total_attempts),
+            f"activations {self.activations}/" + limit("maximum_activations", self.maximum_activations),
         ]
+
+    def set_budget_option(self) -> str:
+        """Name the ``job request set_budget`` options that raise the exhausted attempt budgets.
+
+        :return: ``--max-attempts-per-activation N``, ``--max-total-attempts N``, or both when both are exhausted.
+        """
+
+        per_activation, total = self.maximum_attempts_per_activation, self.maximum_total_attempts
+        options = []
+        if per_activation is not None and self.attempts_this_activation + 1 > per_activation:
+            options.append("--max-attempts-per-activation N")
+        if total is not None and self.total_attempts + 1 > total:
+            options.append("--max-total-attempts N")
+        return " ".join(options)
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of these budgets.
@@ -351,6 +375,8 @@ class BudgetStatus:
             "maximum_activations": self.maximum_activations,
             "attempt_budget_exhausted": self.attempt_budget_exhausted,
             "activation_budget_exhausted": self.activation_budget_exhausted,
+            "declared": dict(self.declared),
+            "budget_override": None if self.budget_override is None else dict(self.budget_override),
         }
 
 
@@ -367,7 +393,10 @@ def budget_status(job: JobDefinition, doc: StateDoc | None) -> BudgetStatus:
     :return: The budget status.
     """
 
-    policy = job.retry_policy
+    declared = job.retry_policy
+    # StateDoc validated the override's shape, and overridden() checks it again.
+    override = cast(Mapping[str, int | None] | None, None if doc is None else doc.budget_override)
+    policy = declared.overridden(override)
     return BudgetStatus(
         attempts_this_activation=_count(None if doc is None else doc.attempt, "ordinal"),
         maximum_attempts_per_activation=policy.maximum_attempts_per_activation,
@@ -375,6 +404,8 @@ def budget_status(job: JobDefinition, doc: StateDoc | None) -> BudgetStatus:
         maximum_total_attempts=policy.maximum_total_attempts,
         activations=_count(None if doc is None else doc.counters, "activations"),
         maximum_activations=policy.maximum_activations,
+        declared={name: getattr(declared, name) for name in BUDGET_LIMITS},
+        budget_override=override,
     )
 
 
@@ -612,7 +643,8 @@ def _budget_checks(job: JobDefinition, doc: StateDoc | None, report: _Diagnosing
         report.check("budget", not budgets.attempt_budget_exhausted, text)
     if budgets.attempt_budget_exhausted:
         report.hint(
-            "the next claim of this job will fail it with budget_exhausted; raise retry_policy in a resubmitted job"
+            "the next claim of this job will fail it with budget_exhausted; raise the limit with 'httk job request "
+            f"set_budget --workspace WORKSPACE {budgets.set_budget_option()} --operator NAME --reason WHY JOB'"
         )
 
 
@@ -666,11 +698,19 @@ def _continue_checks(
         )
         step = doc.activation.get("step") or "STEP"
         report.hint(
-            f"use 'httk job request override_step --workspace WORKSPACE --step {step} --operator NAME --reason WHY "
-            "JOB' to start a new activation instead"
+            f"raise the limit with 'httk job request set_budget --workspace WORKSPACE {budgets.set_budget_option()} "
+            f"--operator NAME --reason WHY JOB', then '{verb}' it; or use 'httk job request override_step "
+            f"--workspace WORKSPACE --step {step} --operator NAME --reason WHY JOB' to start a new activation instead"
         )
         return
     report.check(name, True, f"'{verb}' repeats this activation: " + "; ".join(budgets.describe()))
+    failure = doc.failure
+    exhausted = failure is not None and failure.get("code") == "budget_exhausted"
+    if exhausted and doc.join is None and budgets.activation_budget_exhausted:
+        report.hint(
+            "the rerun step's advance would exceed maximum_activations again; raise it with 'httk job request "
+            "set_budget --workspace WORKSPACE --max-activations N --operator NAME --reason WHY JOB' first"
+        )
     if verb == "continue":
         report.hint("resume it with 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'")
 
@@ -883,7 +923,22 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
                 report.check("dependency child", False, _describe_child(observed, with_failure=True))
         _breadcrumb_check(control, report)
         report.check("attempt logs", None, f"the job wrote {_retained_log_path(ref, doc)}")
-        if join is not None:
+        if join is not None and failure is not None and failure.get("code") == "budget_exhausted":
+            # The join was decided, but its next activation exceeds maximum_activations: continue re-decides it.
+            children = join.get("children")
+            count = len(children) if isinstance(children, tuple) else 0
+            report.check(
+                "wait",
+                None,
+                f"the wait on {count} children can be reopened with `httk job request continue` once "
+                "maximum_activations is raised",
+            )
+            report.hint(
+                "raise it with 'httk job request set_budget --workspace WORKSPACE --max-activations N --operator NAME "
+                "--reason WHY JOB', then 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY "
+                "JOB' reopens the wait"
+            )
+        elif join is not None:
             # A kept join makes continue reopen the wait, which no budget binds; restart is budget-bound.
             children = join.get("children")
             count = len(children) if isinstance(children, tuple) else 0

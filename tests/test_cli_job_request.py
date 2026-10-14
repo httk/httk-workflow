@@ -127,6 +127,13 @@ def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
     [
         ("cancel", ["--step", "start"], "--step is required by, and only valid with, the override_step action"),
         ("set_priority", [], "--priority is required by"),
+        (
+            "set_budget",
+            [],
+            "one of --max-attempts-per-activation, --max-total-attempts, --max-activations is required by",
+        ),
+        ("cancel", ["--max-activations", "2"], "only valid with, the set_budget action"),
+        ("set_budget", ["--max-activations", "0"], "an integer of at least 1 or 'unlimited'"),
         ("eject", [], "--destination is required by"),
         ("pause", ["--force"], "--force applies only to"),
         ("pause", ["--tree"], "--tree applies only to the continue action"),
@@ -164,6 +171,74 @@ def test_job_request_carries_the_action_options(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
     assert v3.find(workspace, job_id).priority == 700
     assert not _requests(workspace)
+
+
+def test_set_budget_records_the_given_limits_and_unlimited_as_null(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "budget").job_id
+    argv = [*_request_args(workspace_name, job_id, action="set_budget"), "--max-attempts-per-activation", "unlimited"]
+    assert command([*argv, "--max-activations", "4"], _context(tmp_path)) == 0
+    capsys.readouterr()
+    doc = v3.state_of(v3.find(workspace, job_id))
+    assert doc.budget_override == {"maximum_attempts_per_activation": None, "maximum_activations": 4}
+    assert _applied(workspace, job_id)[-1]["action"] == "set_budget"
+
+
+def test_request_envelopes_carry_the_budget_and_the_far_side_cannot_change_it(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "budget-protocol")
+    argv = ["job", "request-envelopes", "set_budget", "--workspace", workspace_name, "--max-total-attempts=7"]
+    argv += ["--operator=Test User <tester@example.test>", "--reason=protocol", "--json", ref.job_id]
+    assert command(argv, _context(tmp_path)) == 0
+    document = json.loads(capsys.readouterr().out)
+    (envelope,) = document["envelopes"]
+    assert envelope["budget"] == {"maximum_total_attempts": 7}
+    arguments = argparse.Namespace(
+        job_id=[ref.job_id],
+        action="set_budget",
+        reason="protocol",
+        priority=None,
+        step=None,
+        force=False,
+        destination=None,
+        maximum_total_attempts=7,
+    )
+    operator = "Test User <tester@example.test>"
+    assert job_cli._validate_remote_envelopes(document, arguments, operator) == [envelope]
+    changed = {**document, "envelopes": [{**envelope, "budget": {"maximum_total_attempts": None}}]}
+    with pytest.raises(ValueError, match="'budget' disagrees"):
+        job_cli._validate_remote_envelopes(changed, arguments, operator)
+
+
+def test_remote_request_passes_the_budget_options_to_the_far_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_adapter(_bundle: object, _verb: str, payload: dict[str, list[str]], **_options: object) -> dict:
+        calls.append(payload["argv"])
+        return {"returncode": 3, "stderr": "stop"}
+
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: argparse.Namespace(bundle=tmp_path))
+    monkeypatch.setattr(job_cli, "run_adapter", fake_adapter)
+    namespace = argparse.Namespace(
+        action="set_budget",
+        reason="r",
+        job_id=["abc"],
+        priority=None,
+        step=None,
+        destination=None,
+        force=False,
+        adapter_timeout=None,
+        maximum_attempts_per_activation=None,
+        maximum_activations=5,
+    )
+    binding = job_cli.WorkspaceBinding("host:ws", "host", None)
+    identity = job_cli._resolve_request_identity(None)
+    assert job_cli.request_remote_job_result(binding, _context(tmp_path), namespace, identity) == (3, "", "stop")
+    (argv,) = calls
+    assert "--max-attempts-per-activation=unlimited" in argv and "--max-activations=5" in argv
+    assert not any(part.startswith("--max-total-attempts") for part in argv)
 
 
 def test_the_removed_confirm_launches_ended_verb_is_refused(tmp_path: Path, capsys) -> None:

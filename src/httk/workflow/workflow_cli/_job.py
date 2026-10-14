@@ -89,6 +89,7 @@ from ._common import (
     _modifiable,
     _pairs,
     _remote_workspace_read,
+    _request_budget,
     _resolve_binding,
     add_durability_arguments,
     confirm,
@@ -99,7 +100,13 @@ from ._transfer import _protocol_workspace, adopt_document, build_transfer_parse
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
 #: The option each action requires (and that no other action takes).
-_ACTION_OPTIONS = {"priority": "set_priority", "step": "override_step", "destination": "eject"}
+_ACTION_OPTIONS = {"priority": "set_priority", "step": "override_step", "budget": "set_budget", "destination": "eject"}
+#: The ``set_budget`` options, by the retry-policy limit each sets (also their argparse destinations).
+_BUDGET_OPTIONS = {
+    "maximum_attempts_per_activation": "--max-attempts-per-activation",
+    "maximum_total_attempts": "--max-total-attempts",
+    "maximum_activations": "--max-activations",
+}
 _FORCE_ACTIONS = ("continue", "restart", "override_step")
 
 
@@ -467,14 +474,26 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
 
 
 def _request_options(
-    action: str, *, priority: int | None, step: str | None, force: bool, destination: str | None
+    action: str,
+    *,
+    priority: int | None,
+    step: str | None,
+    budget: Mapping[str, int | None] | None,
+    force: bool,
+    destination: str | None,
 ) -> dict[str, object]:
     """Return the optional request members of *action*, refusing an option it does not take or lacks."""
 
-    given = {"priority": priority, "step": step, "destination": destination}
+    given = {
+        "priority": priority,
+        "step": step,
+        "budget": None if budget is None else dict(budget),
+        "destination": destination,
+    }
     for name, owner in _ACTION_OPTIONS.items():
         if (given[name] is None) == (action == owner):
-            raise ValueError(f"--{name} is required by, and only valid with, the {owner} action")
+            label = "one of " + ", ".join(_BUDGET_OPTIONS.values()) if name == "budget" else f"--{name}"
+            raise ValueError(f"{label} is required by, and only valid with, the {owner} action")
     if force and action not in _FORCE_ACTIONS:
         raise ValueError("--force applies only to the continue, restart and override_step actions")
     options: dict[str, object] = {name: value for name, value in given.items() if value is not None}
@@ -634,6 +653,7 @@ def publish_job_requests(
     force: bool = False,
     destination: str | None = None,
     identity: OperatorIdentity | None = None,
+    budget: Mapping[str, int | None] | None = None,
 ) -> list[tuple[JobRef, Path]]:
     """Post one request per already resolved job, signed with the operator's identity when it has a key.
 
@@ -649,6 +669,7 @@ def publish_job_requests(
     :param force: Accept the revival hazard, for ``continue`` and ``override_step``.
     :param destination: Where an ``eject`` sends the job.
     :param identity: Resolved identity used for signing, defaulting to the configured one.
+    :param budget: The retry-policy limits (``None`` lifts one), for ``set_budget``.
     :return: The posted request files paired with their jobs.
     :raises ValueError: For an unknown action, a misplaced option, or an unknown runner step.
     """
@@ -657,7 +678,9 @@ def publish_job_requests(
         raise ValueError(f"unknown job request action: {action}")
     selected = identity or _resolve_request_identity(None)
     ensure_identity_key(selected)
-    options = _request_options(action, priority=priority, step=step, force=force, destination=destination)
+    options = _request_options(
+        action, priority=priority, step=step, budget=budget, force=force, destination=destination
+    )
     _prevalidate(refs, action, step, force=force)
     documents = []
     for ref in refs:
@@ -733,6 +756,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         force=bool(arguments.force),
         destination=arguments.destination,
         identity=identity,
+        budget=_request_budget(arguments),
     )
     return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
@@ -766,6 +790,7 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         arguments.action,
         priority=arguments.priority,
         step=arguments.step,
+        budget=_request_budget(arguments),
         force=bool(arguments.force),
         destination=arguments.destination,
     )
@@ -814,10 +839,11 @@ def _validate_remote_envelopes(
         arguments.action,
         priority=arguments.priority,
         step=arguments.step,
+        budget=_request_budget(arguments),
         force=bool(arguments.force),
         destination=getattr(arguments, "destination", None),
     )
-    expected = {"priority": None, "step": None, "destination": None, "force": None, **options}
+    expected = {"priority": None, "step": None, "budget": None, "destination": None, "force": None, **options}
     expected.update(action=arguments.action, operator=operator, reason=arguments.reason)
     for index, (envelope, key, selector) in enumerate(zip(envelopes, keys, arguments.job_id, strict=True)):
         try:
@@ -876,6 +902,8 @@ def request_remote_job_result(
         value = getattr(arguments, option, None)
         if value is not None:
             argv.append(f"--{option}={value}")
+    for name, limit in (_request_budget(arguments) or {}).items():
+        argv.append(f"{_BUDGET_OPTIONS[name]}={'unlimited' if limit is None else limit}")
     if arguments.force:
         argv.append("--force")
     argv.extend(arguments.job_id)
@@ -1561,12 +1589,31 @@ def _add_job_selector(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _budget_limit(text: str) -> int | None:
+    """Parse one ``set_budget`` limit: an integer of at least 1, or ``unlimited`` (``None``)."""
+
+    if text == "unlimited":
+        return None
+    if not text.isdecimal() or int(text) < 1:
+        raise argparse.ArgumentTypeError(f"expected an integer of at least 1 or 'unlimited', not {text!r}")
+    return int(text)
+
+
 def _add_request_options(parser: argparse.ArgumentParser) -> None:
     """Add the per-action request options shared by ``request`` and ``request-envelopes``."""
 
     parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the new priority, for set_priority")
     parser.add_argument("--step", metavar="STEP", help="the step to resume at, for override_step")
     parser.add_argument("--destination", metavar="DEST", help="where the job goes, for eject")
+    for name, option in _BUDGET_OPTIONS.items():
+        parser.add_argument(
+            option,
+            dest=name,
+            type=_budget_limit,
+            default=argparse.SUPPRESS,
+            metavar="N|unlimited",
+            help="for set_budget: the new limit, or unlimited",
+        )
     parser.add_argument(
         "--force",
         action="store_true",

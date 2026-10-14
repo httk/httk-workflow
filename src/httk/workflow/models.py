@@ -913,6 +913,46 @@ class RetryPolicy:
             retry_on=retry_on,
         )
 
+    def overridden(self, override: Mapping[str, object] | None) -> "RetryPolicy":
+        """Return the effective policy under an operator's ``set_budget`` override (``state.json``).
+
+        :param override: The override, as ``validate_budget_override`` accepts it, or ``None``.
+        :return: This policy with the override's limits replaced (``null`` lifts one); itself without an override.
+        :raises httk.workflow.errors.FormatError: If the override is malformed.
+        """
+
+        if override is None:
+            return self
+        limits = validate_budget_override(override, "budget_override")
+        return RetryPolicy(
+            limits.get("maximum_attempts_per_activation", self.maximum_attempts_per_activation),
+            limits.get("maximum_total_attempts", self.maximum_total_attempts),
+            limits.get("maximum_activations", self.maximum_activations),
+            self.retry_on,
+        )
+
+
+#: The limits of a :class:`RetryPolicy` an operator's ``set_budget`` may override.
+BUDGET_LIMITS = ("maximum_attempts_per_activation", "maximum_total_attempts", "maximum_activations")
+
+
+def validate_budget_override(value: object, label: str) -> dict[str, int | None]:
+    """Validate a budget override: a non-empty subset of the retry-policy limits, each an integer >= 1 or ``null``.
+
+    :param value: The override mapping.
+    :param label: The name used in validation errors.
+    :return: The override as a fresh mapping.
+    :raises httk.workflow.errors.FormatError: If the override is malformed.
+    """
+
+    mapping = require_mapping(value, label)
+    if not mapping or not set(mapping) <= set(BUDGET_LIMITS):
+        raise FormatError(f"{label} must name at least one of {', '.join(BUDGET_LIMITS)} and nothing else")
+    return {
+        name: None if limit is None else require_int(limit, f"{label}.{name}", minimum=1)
+        for name, limit in mapping.items()
+    }
+
 
 @dataclass(frozen=True)
 class Failure:

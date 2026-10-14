@@ -19,7 +19,7 @@ from typing import Any, Self
 
 from httk.workflow import _fs
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import canonical_uuid, validate_step
+from httk.workflow.models import canonical_uuid, validate_budget_override, validate_step
 
 __all__ = [
     "MAX_STATE_BYTES",
@@ -51,7 +51,7 @@ _ACTIVATION_REASONS = ("initial", "advance", "retry", "manual_continue", "overri
 _OWNER_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: Members a document may lack (it was written before they existed); each reads as ``None``.
-_OPTIONAL_MEMBERS = frozenset({"job_digest"})
+_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override"})
 
 type Frozen = None | bool | int | float | str | tuple["Frozen", ...] | Mapping[str, "Frozen"]
 
@@ -180,6 +180,8 @@ class StateDoc:
     :param workflow_pin: The pinned installed workflow, or ``None``.
     :param history_tail: The last transitions (at most 32).
     :param job_digest: The digest of ``job.json`` pinned at the job's first activation, or ``None`` before it.
+    :param budget_override: The operator's ``set_budget`` limits, which replace those of ``job.json``'s
+        ``retry_policy`` (``null`` lifts one), or ``None``.
     """
 
     job_id: str
@@ -206,6 +208,7 @@ class StateDoc:
     workflow_pin: Mapping[str, Frozen] | None
     history_tail: tuple[Mapping[str, Frozen], ...]
     job_digest: str | None = None
+    budget_override: Mapping[str, Frozen] | None = None
 
     @classmethod
     def empty(cls, job_id: str) -> Self:
@@ -243,12 +246,13 @@ class StateDoc:
                 "workflow_pin": None,
                 "history_tail": [],
                 "job_digest": None,
+                "budget_override": None,
             }
         )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> Self:
-        """Validate a decoded ``state.json`` strictly: every member present but ``job_digest``, nothing unknown.
+        """Validate a decoded ``state.json`` strictly: every member present but the optional ones, nothing unknown.
 
         :param value: The decoded document.
         :return: The frozen document.
@@ -288,6 +292,9 @@ class StateDoc:
         job_digest = doc["job_digest"]
         if job_digest is not None and (not isinstance(job_digest, str) or not _DIGEST.fullmatch(job_digest)):
             raise FormatError("state.json job_digest must be 64 lowercase hex digits or null")
+        budget_override = _mapping_or_none(doc["budget_override"], "budget_override")
+        if budget_override is not None:
+            validate_budget_override(budget_override, "state.json budget_override")
         return cls(
             job_id=canonical_uuid(doc["job_id"], "state.json job_id"),
             updated_at=doc["updated_at"],
@@ -313,6 +320,7 @@ class StateDoc:
             workflow_pin=_mapping_or_none(doc["workflow_pin"], "workflow_pin"),
             history_tail=_records(doc["history_tail"], "history_tail", _HISTORY_TAIL_LIMIT),
             job_digest=job_digest,
+            budget_override=budget_override,
         )
 
     def as_mapping(self) -> dict[str, object]:

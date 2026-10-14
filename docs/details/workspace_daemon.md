@@ -530,7 +530,9 @@ same key as the original command. Selectors are internal job UUIDs or unique
 UUID prefixes from `status.json`; paths, globs and tags are refused. `--force`
 is refused. Eject destinations are relative to the mounted exchange outbox,
 resolved by the server, and ejects include the whole tree. State, parent/join,
-runner-step and seal guards still apply. Managers need no client keys; existing
+runner-step and seal guards still apply. `set_budget` is accepted for such a
+root: the typed command carries the action `set_budget` and the field `budget`
+(the `--max-*` options of the CLI). Managers need no client keys; existing
 `exchange.authorized_keys` settings are left stored but unused.
 
 An idle job that the daemon safely claims changes immediately. A held job,

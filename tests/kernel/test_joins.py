@@ -315,3 +315,19 @@ def test_decide_join_keeps_only_a_failed_wait() -> None:
     )
     assert target == "failed" and decided.join is None
     assert decided.failure is not None and "invalid step" in str(decided.failure["message"])
+
+
+def test_decide_join_keeps_a_join_whose_next_activation_exceeds_maximum_activations() -> None:
+    mapping = job_mapping(str(uuid.uuid4()), "parent", "proj")
+    job = JobDefinition.from_mapping({**mapping, "retry_policy": {"maximum_activations": 1}})
+    join = {"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": []}
+    doc = StateDoc.empty(job.id).next_activation("start", "initial").updated(join=join)
+    decided, target = decide_join(job, doc, JoinDecision("satisfied", (), ()))
+    assert target == "failed" and decided.join == doc.join
+    assert decided.failure is not None and decided.failure["code"] == "budget_exhausted"
+    # The set_budget override is the effective limit.
+    decided, target = decide_join(
+        job, doc.updated(budget_override={"maximum_activations": 2}), JoinDecision("satisfied", (), ())
+    )
+    assert target == "ready" and decided.join is None
+    assert decided.activation is not None and decided.activation["step"] == "gather"

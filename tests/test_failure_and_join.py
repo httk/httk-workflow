@@ -431,12 +431,18 @@ def test_dependency_failure_names_the_failed_child(ws: Workspace, joins: _store.
     assert [entry["event"] for entry in doc.history_tail][-2:] == ["join_decided", "released"]
 
 
-def _serve(ws: Workspace, ref: _kernel.JobRef, action: str) -> str | None:
+def _serve(ws: Workspace, ref: _kernel.JobRef, action: str, **extra: Any) -> str | None:
     """Post *action* for *ref* and apply it immediately, as `httk job request` does; return the new state."""
 
     assert ref.placement is not None
     path = _requests.post(
-        ws, action=action, job_id=ref.job_id, placement=ref.placement, operator="Op <op@example.org>", reason="r"
+        ws,
+        action=action,
+        job_id=ref.job_id,
+        placement=ref.placement,
+        operator="Op <op@example.org>",
+        reason="r",
+        **extra,
     )
     (outcome,) = serve_requests(ws, [(ref, path)])
     assert outcome.status == "applied", outcome
@@ -541,3 +547,24 @@ def test_unresolvable_join_child_is_tolerated_within_the_grace(ws: Workspace, tm
     waiting = h.find(ws, submitted.job_id)
     assert waiting.state == "waiting"
     assert h.state_of(waiting).join is not None
+
+
+@pytest.mark.slow
+def test_set_budget_lets_an_exhausted_job_restart(ws: Workspace, tmp_path: Path) -> None:
+    installed = h.install(ws, tmp_path / "demo")
+    # The first attempt asks for a retry that a budget of one attempt per activation refuses.
+    submitted = h.submit(ws, installed, {"start": "retry_once"}, retry_policy={"maximum_attempts_per_activation": 1})
+    h.run(ws)
+    failed = h.find(ws, submitted.job_id)
+    assert failed.state == "failed"
+    assert _serve(ws, failed, "restart") == "failed"
+    failure = h.state_of(h.find(ws, submitted.job_id)).failure
+    assert failure is not None and failure["code"] == "retry_exhausted"
+    budget = {"maximum_attempts_per_activation": 2}
+    assert _serve(ws, h.find(ws, submitted.job_id), "set_budget", budget=budget) == "failed"
+    assert _serve(ws, h.find(ws, submitted.job_id), "restart") == "ready"
+    h.run(ws)
+    done = h.find(ws, submitted.job_id)
+    doc = h.state_of(done)
+    assert done.state == "succeeded" and doc.attempt is not None and doc.attempt["ordinal"] == 2
+    assert doc.budget_override == budget

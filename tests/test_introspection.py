@@ -411,6 +411,29 @@ def test_why_warns_that_restart_of_a_kept_wait_is_budget_bound(ws: Workspace, in
     assert any("override_step --workspace WORKSPACE --step start " in hint for hint in diagnosis.hints)
 
 
+def test_why_steers_a_join_kept_by_maximum_activations_to_set_budget_and_continue(
+    ws: Workspace, installed: Any
+) -> None:
+    ref = _failed_at_wait(ws, installed, {"maximum_activations": 1})
+    doc = v3.state_of(ref).with_failure({"code": "budget_exhausted", "message": "maximum_activations exceeded"})
+    (ref.path / "state.json").write_bytes(encode_state(doc))
+    diagnosis = explain_job(ws, ref)
+    checks = {check.name: check for check in diagnosis.checks}
+    assert checks["wait"].detail == (
+        "the wait on 2 children can be reopened with `httk job request continue` once maximum_activations is raised"
+    )
+    assert "operator restart" not in checks and "operator continue" not in checks
+    (hint,) = [hint for hint in diagnosis.hints if "set_budget" in hint]
+    assert "set_budget --workspace WORKSPACE --max-activations N --operator NAME" in hint
+    assert "'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB' reopens the wait" in hint
+    assert not any("rerun step" in hint or "restart" in hint for hint in diagnosis.hints)
+
+
+def test_budget_hint_names_every_exhausted_attempt_budget() -> None:
+    status = _diagnosis.BudgetStatus(1, 1, 1, 1, 1, None, declared={}, budget_override=None)
+    assert status.set_budget_option() == "--max-attempts-per-activation N --max-total-attempts N"
+
+
 def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(ws: Workspace, installed: Any) -> None:
     headline = {"start": "halfway through relax"}
     submitted = _submit(ws, installed, {"start": "exit"}, parameters={"headline": headline})
@@ -429,15 +452,48 @@ def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(w
     assert "attempt control" in rendered
 
 
-def test_why_reports_an_exhausted_continue_budget(ws: Workspace, installed: Any) -> None:
-    submitted = _submit(ws, installed, {"start": "exit"}, retry_policy={"maximum_attempts_per_activation": 1})
+@pytest.mark.parametrize(
+    ("limit", "option"),
+    [
+        ("maximum_attempts_per_activation", "--max-attempts-per-activation"),
+        ("maximum_total_attempts", "--max-total-attempts"),
+    ],
+)
+def test_why_reports_an_exhausted_continue_budget(ws: Workspace, installed: Any, limit: str, option: str) -> None:
+    submitted = _submit(ws, installed, {"start": "exit"}, retry_policy={limit: 1})
     v3.run(ws)
 
     diagnosis = explain_job(ws, resolve_job(ws, submitted.job_id))
     checks = {check.name: check for check in diagnosis.checks}
     assert checks["operator continue"].satisfied is False
     assert "retry_exhausted" in checks["operator continue"].detail
-    assert any("override_step" in hint for hint in diagnosis.hints)
+    (hint,) = [hint for hint in diagnosis.hints if "set_budget" in hint]
+    assert f"'httk job request set_budget --workspace WORKSPACE {option} N --operator NAME --reason WHY JOB'" in hint
+    assert "then 'continue' it" in hint and "override_step --workspace WORKSPACE --step start " in hint
+
+    # Raised with set_budget, the same job may continue; job why and job show name the declared limit too.
+    ref = resolve_job(ws, submitted.job_id)
+    assert ref.placement is not None
+    path = _requests.post(
+        ws,
+        action="set_budget",
+        job_id=ref.job_id,
+        placement=ref.placement,
+        operator="op",
+        reason="r",
+        budget={limit: 2},
+    )
+    (outcome,) = serve_requests(ws, [(ref, path)])
+    assert (outcome.status, outcome.state) == ("applied", "failed")
+    ref = resolve_job(ws, submitted.job_id)
+    diagnosis = explain_job(ws, ref)
+    checks = {check.name: check for check in diagnosis.checks}
+    assert checks["operator continue"].satisfied is True
+    assert "1/2 (declared 1)" in checks["operator continue"].detail
+    report = describe_job(ws, ref)
+    assert report["budgets"][limit] == 2 and report["budgets"]["declared"][limit] == 1
+    assert report["budgets"]["budget_override"] == {limit: 2}
+    assert "1/2 (declared 1)" in render_job(report)
 
 
 def test_why_lists_the_pending_child_of_a_waiting_parent(ws: Workspace, installed: Any) -> None:
