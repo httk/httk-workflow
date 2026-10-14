@@ -19,7 +19,6 @@ AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
 REQUIRED_BWRAP_OPTIONS = (
     "--assert-userns-disabled",
     "--bind-fd",
-    "--clearenv",
     "--disable-userns",
     "--info-fd",
     "--new-session",
@@ -130,6 +129,9 @@ def _run(
             "NSC_RESOURCE_NAME": "tetralith",
             "SBATCH_ACCOUNT": "other",
             "XDG_RUNTIME_DIR": "/run/user/1",
+            "LD_LIBRARY_PATH": str(tmp_path / "empty-lib"),
+            "BASH_ENV": str(hostile / "bash_env"),
+            "SLURM_JOB_ID": "1",
         }
     )
     result = subprocess.run(
@@ -148,10 +150,6 @@ def _run(
 
 def _pairs(argv: list[str], option: str) -> list[tuple[str, str]]:
     return [(argv[index + 1], argv[index + 2]) for index, item in enumerate(argv) if item == option]
-
-
-def _set_environment(argv: list[str]) -> dict[str, str]:
-    return {argv[index + 1]: argv[index + 2] for index, item in enumerate(argv) if item == "--setenv"}
 
 
 def test_descriptor_cleanup_is_idempotent_and_closes_new_fd_after_close_error(
@@ -208,13 +206,6 @@ def test_operator_environment_drops_submission_interpreter_and_malformed_variabl
     assert operator_environment({**dropped, **kept}) == dict(sorted(kept.items()))
     assert capsys.readouterr().err == ""
 
-    many = {f"V{index:04d}": "x" for index in range(600)}
-    assert list(operator_environment(many)) == sorted(many)[:512]
-    assert capsys.readouterr().err.count("was dropped from V0512") == 1
-    large = {f"V{index}": "x" * 100 * 1024 for index in range(3)}
-    assert list(operator_environment(large)) == ["V0", "V1"]
-    assert "was dropped from V2" in capsys.readouterr().err
-
 
 def test_broker_environment_is_the_fixed_one_plus_the_filtered_operator_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -225,7 +216,7 @@ def test_broker_environment_is_the_fixed_one_plus_the_filtered_operator_environm
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1")
     policy = SimpleNamespace(bwrap=Path("/usr/bin/bwrap"), slurm_conf=tmp_path / "slurm.conf")
     argv = api["_base_bwrap_argv"](policy, block_userns=True)
-    environment = _set_environment(argv)
+    environment = api["_broker_environment"](policy)
     assert api["_FIXED_ENVIRONMENT"] == {
         "PATH": "/usr/bin:/bin",
         "HOME": "/tmp/home",
@@ -235,6 +226,9 @@ def test_broker_environment_is_the_fixed_one_plus_the_filtered_operator_environm
     assert environment["NSC_RESOURCE_NAME"] == "tetralith" and environment["SLURM_CONF"] == str(policy.slurm_conf)
     assert (environment["HOME"], environment["XDG_CACHE_HOME"]) == ("/tmp/home", "/tmp/home/.cache")
     assert not {"SBATCH_ACCOUNT", "XDG_RUNTIME_DIR"} & set(environment)
+    assert environment["HTTK_CONFIG_HOME"] == str(api["_host_config_home"]())
+    assert "--clearenv" not in argv and "--setenv" not in argv
+    assert not any("tetralith" in item for item in argv)
     assert "--unshare-net" not in argv and "/tmp/home/.cache" in argv
 
 
@@ -253,7 +247,8 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     observed = json.loads(record.read_text(encoding="utf-8"))
     argv = observed["argv"]
     assert "--unshare-net" not in argv
-    assert "--clearenv" in argv
+    assert "--clearenv" not in argv and "--setenv" not in argv
+    assert not any("tetralith" in item for item in argv)
     for option in (
         "--unshare-user",
         "--unshare-pid",
@@ -268,11 +263,19 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     assert "--info-fd" in argv
     assert "--as-pid" + "-1" not in argv
     assert argv[argv.index("--cap-drop") + 1] == "ALL"
-    environment = _set_environment(argv)
+    environment = observed["env"]
     assert environment["NSC_RESOURCE_NAME"] == "tetralith" and environment["POISON"] == "yes"
     assert environment["HOME"] == "/tmp/home" and environment["XDG_CACHE_HOME"] == "/tmp/home/.cache"
     assert environment["TMPDIR"] == "/tmp" and environment["PATH"] == os.environ["PATH"]
-    assert not {"SBATCH_ACCOUNT", "XDG_RUNTIME_DIR", "PYTHONPATH", "PYTHONSTARTUP"} & set(environment)
+    assert not {
+        "SBATCH_ACCOUNT",
+        "XDG_RUNTIME_DIR",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "LD_LIBRARY_PATH",
+        "BASH_ENV",
+        "SLURM_JOB_ID",
+    } & set(environment)
     assert not any(name.startswith("SBATCH_") for name in environment)
     assert "/tmp/home/.cache" in [argv[index + 1] for index, item in enumerate(argv) if item == "--dir"]
     # The broker sees the host read-only; every directory it adds lies on its private /tmp.
@@ -296,7 +299,6 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         environment["HTTK_CONFIG_HOME"],
         "/tmp/daemon",
     }
-    assert "POISON" not in observed["env"]
     assert str(leak) not in observed["fds"].values()
     writable = _pairs(argv, "--bind-fd")
     assert not {"state", "snapshots"} & set(policy)
@@ -565,11 +567,11 @@ def test_bootstrap_arguments_are_strict(tmp_path: Path, arguments: list[str]) ->
 def test_missing_bwrap_feature_is_refused(tmp_path: Path) -> None:
     policy_path, policy, record = _layout(tmp_path)
     bwrap = Path(policy["bwrap"])
-    options = " ".join(option for option in REQUIRED_BWRAP_OPTIONS if option not in ("--bind-fd", "--clearenv"))
+    options = " ".join(option for option in REQUIRED_BWRAP_OPTIONS if option not in ("--bind-fd", "--info-fd"))
     _write_executable(bwrap, f"#!/bin/sh\necho 'usage: bwrap [OPTIONS...]' {options}\n")
     result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"])])
     assert result.returncode == 2
-    assert "lacks required confinement features: --bind-fd, --clearenv" in result.stderr
+    assert "lacks required confinement features: --bind-fd, --info-fd" in result.stderr
     assert not record.exists()
 
 
@@ -640,7 +642,7 @@ def test_exec_marks_o_path_descriptors_inheritable_without_os_set_inheritable(
     monkeypatch.setitem(api["_exec_prepared"].__globals__, "_open_descriptor_numbers", lambda: set())
     prepared = api["_PreparedSandbox"](["/bin/true"], (descriptor,))
     with pytest.raises(OSError, match="exec boundary"):
-        api["_exec_prepared"](prepared)
+        api["_exec_prepared"](prepared, {})
     assert observed == [True]
 
 

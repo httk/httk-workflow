@@ -31,8 +31,6 @@ _FIXED_ENVIRONMENT = {
 _OPERATOR_DROPPED_PREFIXES = ("SBATCH_", "SALLOC_", "SRUN_", "SLURM_", "PYTHON")
 _OPERATOR_DROPPED = frozenset({"BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH"})
 _OPERATOR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_OPERATOR_LIMIT = 512
-_OPERATOR_BYTES = 256 * 1024
 # The broker's home and cache lie on its private /tmp: the host view, including the passwd home, is read-only.
 _BROKER_ENVIRONMENT = {"HOME": "/tmp/home", "XDG_CACHE_HOME": "/tmp/home/.cache", "TMPDIR": "/tmp"}
 _BROKER_UNSET = ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HTTK_CONFIG_HOME")
@@ -54,11 +52,10 @@ def _operator_environment(environ: Mapping[str, str]) -> dict[str, str]:
     """Filter the trusted operator environment passed to the broker and its Slurm clients.
 
     :param environ: The operator environment, usually ``os.environ``.
-    :return: The kept variables in name order, bounded in count and size.
+    :return: The kept variables in name order.
     """
 
     kept: dict[str, str] = {}
-    total = 0
     for name in sorted(environ):
         value = environ[name]
         if (
@@ -68,17 +65,24 @@ def _operator_environment(environ: Mapping[str, str]) -> dict[str, str]:
             or "\0" in value
         ):
             continue
-        total += len(os.fsencode(name)) + len(os.fsencode(value)) + 2
-        # ponytail: a full bound drops the alphabetically last variables; rank them if a site ever hits it.
-        if len(kept) == _OPERATOR_LIMIT or total > _OPERATOR_BYTES:
-            print(
-                f"httk workspace daemon: operator environment beyond {_OPERATOR_LIMIT} variables or "
-                f"{_OPERATOR_BYTES} bytes was dropped from {name}",
-                file=sys.stderr,
-            )
-            break
         kept[name] = value
     return kept
+
+
+def _broker_environment(policy: Any) -> dict[str, str]:
+    """Build the environment Bubblewrap starts with and passes through to the broker.
+
+    :param policy: The validated daemon policy.
+    :return: The fixed, filtered operator and broker variables, never part of the Bubblewrap command line.
+    """
+
+    environment = dict(_FIXED_ENVIRONMENT) | _operator_environment(os.environ) | _BROKER_ENVIRONMENT
+    for name in _BROKER_UNSET:
+        environment.pop(name, None)
+    if policy.slurm_conf is not None:
+        environment["SLURM_CONF"] = str(policy.slurm_conf)
+    environment["HTTK_CONFIG_HOME"] = str(_host_config_home())
+    return environment
 
 
 def _source_path() -> Path:
@@ -245,16 +249,7 @@ def _base_bwrap_argv(policy: Any, *, block_userns: bool) -> list[str]:
         "ALL",
         "--new-session",
         "--die-with-parent",
-        "--clearenv",
     ]
-    environment = dict(_FIXED_ENVIRONMENT) | _operator_environment(os.environ) | _BROKER_ENVIRONMENT
-    for name in _BROKER_UNSET:
-        environment.pop(name, None)
-    if policy.slurm_conf is not None:
-        environment["SLURM_CONF"] = str(policy.slurm_conf)
-    environment["HTTK_CONFIG_HOME"] = str(_host_config_home())
-    for name, value in environment.items():
-        argv += ["--setenv", name, value]
     # Recursive, so host submounts (/software, /etc, the munge socket) come in read-only as well.
     argv += ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home"]
     argv += ["--dir", "/tmp/home/.cache"]
@@ -454,7 +449,7 @@ def _open_descriptor_numbers() -> set[int]:
         raise RuntimeError("cannot enumerate inherited descriptors through /proc/self/fd") from exc
 
 
-def _exec_prepared(prepared: _PreparedSandbox) -> None:
+def _exec_prepared(prepared: _PreparedSandbox, environment: Mapping[str, str]) -> None:
     try:
         preserved = {0, 1, 2, *prepared.descriptors}
         for descriptor in _open_descriptor_numbers() - preserved:
@@ -463,7 +458,7 @@ def _exec_prepared(prepared: _PreparedSandbox) -> None:
             except OSError:
                 pass
         _make_inheritable(prepared.descriptors)
-        os.execve(prepared.argv[0], prepared.argv, {})
+        os.execve(prepared.argv[0], prepared.argv, dict(environment))
     except BaseException:
         prepared.close()
         raise
@@ -539,9 +534,10 @@ def main(argv: list[str] | None = None) -> int:
         policy_source = _validate_arguments(arguments, policy)
         prepared = _prepare_sandbox(arguments, policy, policy_data, policy_source)
         try:
+            environment = _broker_environment(policy)
             if not arguments.check:
                 _recover_dead_owners(policy)
-            _exec_prepared(prepared)
+            _exec_prepared(prepared, environment)
         finally:
             prepared.close()
     except (OSError, RuntimeError, ValueError) as exc:

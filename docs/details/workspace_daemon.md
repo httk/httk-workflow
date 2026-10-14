@@ -83,7 +83,7 @@ workspace setting.
 ### Host requirements
 
 - Linux with a Bubblewrap that supports `--bind-fd`, `--ro-bind-fd`,
-  `--ro-bind-data`, `--new-session`, `--clearenv` and `--info-fd`, on the broker
+  `--ro-bind-data`, `--new-session` and `--info-fd`, on the broker
   host and on every compute node. With Bubblewrap 0.8.0 or later the sandboxes also
   block nested user namespaces (`--disable-userns`); where that option is
   absent or refused, the broker's startup and the manager log a warning and
@@ -194,7 +194,9 @@ started in, so site wrappers find their module and site variables; only
 `SBATCH_*`, `SALLOC_*`, `SRUN_*` and `SLURM_*` (except `SLURM_CONF`),
 `PYTHON*`, `BASH_ENV`, `ENV`, `LD_PRELOAD` and `LD_LIBRARY_PATH` are dropped.
 `HOME` and `XDG_CACHE_HOME` point at a writable private `/tmp/home`, and the
-clients whose output the broker parses run in the C locale.
+clients whose output the broker parses run in the C locale. The filtered
+environment is Bubblewrap's own process environment and never part of its
+command line, so it is not visible through `/proc/<pid>/cmdline`.
 
 ### Confined attempts
 
